@@ -45,8 +45,12 @@
 // symbols, or none.
 struct CheckUnitsKept
 {
+    // Mixed-input links retain exactly the ELF object -c would write, including named sections and DWARF.
+    String8 object;
     Link link;
     uint8_t* system;
+    // COMDAT membership by AtomId, the unit's signature SymbolId; allocated only for a unit with groups.
+    SymbolId* comdat_signature;
     ObjectDebug debug;
     // Where the copy goes: its tables and names, and its atoms' and DWARF's bytes (its lane's arenas, which keep every
     // unit's that the lane compiled until the link).
@@ -55,21 +59,35 @@ struct CheckUnitsKept
 };
 
 // A unit of the command: its source file, and its size, and what compiling it gave: its exit status, its diagnostics'
-// text in the order it wrote them (from open_memstream, or null), whether it was compiled, and its kept link. `object`
-// is the object -c writes.
+// text in the order it wrote them (from open_memstream, or null), whether publication reached a fatal, whether it was
+// compiled, and its kept link. `object` is the object -c writes.
 struct CheckUnitsUnit
 {
     const char* path;
+    CheckDriverInputKind kind;
+    bool preprocessed;
     uint64_t bytes;
     const char* object;
     int status;
     char* diagnostics;
     size_t diagnostic_bytes;
     bool unbuffered;
+    bool fatal;
     bool compiled;
     CheckUnitsKept kept;
     DependencyOutput dependency;
 };
+
+static bool check_units_keep_object(CheckUnitsKept* kept, const Object* object)
+{
+    char* bytes = object->error == OBJECT_ERROR_NONE ? arena_push(kept->bytes, object->size, 16) : NULL;
+    if (bytes != NULL)
+    {
+        memcpy(bytes, object->bytes, object->size);
+        kept->object = (String8){ .pointer = bytes, .length = object->size };
+    }
+    return bytes != NULL;
+}
 
 // The memory the units' lanes may hold at once (#1109), against which each unit, once preprocessed, takes an estimate of
 // its peak (check_units_admit): `limit`, what the process may still take when the run starts
@@ -115,7 +133,14 @@ struct CheckUnitsLane
     ArenaPool pool;
     CheckUnitsMemory* memory;
     uint64_t held;
+    // The run whose units the lane takes, which tells its unit's checker whether a unit is left to take
+    // (check_units_discard_huge), and the lane's units whose checker gave its scratch's pages back in whole huge pages,
+    // for one (--shared-parts' report).
+    const struct CheckUnitsRun* run;
+    uint32_t discarded_huge;
 };
+
+#include "c_driver_mixed.c"
 
 // What every lane of the units' run reads, and each unit's result, which the lane that takes it fills.
 typedef struct CheckUnitsRun CheckUnitsRun;
@@ -142,7 +167,22 @@ struct CheckUnitsRun
     // for --shared-parts' and --units-memory's reports.
     uint32_t taking;
     uint32_t kept;
+    // The units the lanes have taken so far (check_units_lane), which reaches `count` once none is left to take
+    // (check_units_discard_huge). A lane counts its unit after taking it, so the count may lag the takes, never lead
+    // them.
+    uint32_t started;
 };
+
+// Whether `lane`'s unit gives its scratch's pages back in whole huge pages (CheckProgramOptions.discard_huge, #777),
+// counted on the lane: when a unit of its run is still to be taken, which a lane that finishes its unit takes next,
+// likely this one, pushing as far into its scratch again. The count may lag a take, which only frees a unit's pages in
+// whole huge pages where none was left to take.
+static bool check_units_discard_huge(CheckUnitsLane* lane)
+{
+    const bool result = lane->run != NULL && __atomic_load_n(&lane->run->started, __ATOMIC_RELAXED) < lane->run->count;
+    lane->discarded_huge += result ? 1 : 0;
+    return result;
+}
 
 // Copies `link`, a unit's whole link (check_driver_object's, its code and data published and link_check passed), into
 // `kept`: its tables, names and atoms' bytes into its arenas, with each record's id as it was; and marks its undefined
@@ -172,6 +212,25 @@ static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const Check
     bool result = link_initialize(copy, kept->arena, kept->arena, capacity);
     kept->system = result ? BUSTER_ARENA_PUSH_ARRAY(kept->arena, uint8_t, symbols) : NULL;
     result = result && kept->system != NULL;
+    const bool grouped = link->groups.count != 0;
+    for (uint32_t g = 1; result && g < link->groups.count; g += 1)
+    {
+        // The C producer uses its selectany definition as the signature. Keep that stable symbol identity; the
+        // object's ordinary and relocation sections are the writer's consumer of the same LinkGroups metadata.
+        const LinkGroup group = link->groups.data[g];
+        const SymbolId signature = group.signature;
+        const AtomId defining = signature != 0 && signature < symbols ? link->symbols.atom[signature] : 0;
+        result = signature != 0 && signature < symbols && defining != 0 && defining < atoms &&
+                 group.flags == BUSTER_LINK_GROUP_COMDAT && (link->symbols.flags[signature] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL &&
+                 link->groups.atom_groups[defining] == g;
+    }
+    kept->comdat_signature = result && grouped ? BUSTER_ARENA_PUSH_ARRAY(kept->arena, SymbolId, atoms) : NULL;
+    result = result && (!grouped || kept->comdat_signature != NULL);
+    for (AtomId a = 0; result && grouped && a < atoms; a += 1)
+    {
+        const uint32_t group = link->groups.atom_groups[a];
+        kept->comdat_signature[a] = group != 0 ? link->groups.data[group].signature : 0;
+    }
     for (NameId n = 1; result && n < names; n += 1)
     {
         // Each name with the NUL after it, as link_add_name keeps it.
@@ -264,7 +323,10 @@ static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const Check
         SymbolId* symbols_copy = BUSTER_ARENA_PUSH_ARRAY(kept->arena, SymbolId, functions + 1);
         uint32_t* addresses = BUSTER_ARENA_PUSH_ARRAY(kept->arena, uint32_t, functions + 1);
         uint32_t* fields = BUSTER_ARENA_PUSH_ARRAY(kept->arena, uint32_t, BUSTER_OBJECT_DEBUG_FIELDS);
-        result = symbols_copy != NULL && addresses != NULL && fields != NULL;
+        NativeDebugField* value_fields = BUSTER_ARENA_PUSH_ARRAY(kept->arena, NativeDebugField, (uint64_t)debug->extra.field_count + 1);
+        NativeDebugAddress* value_addresses = BUSTER_ARENA_PUSH_ARRAY(kept->arena, NativeDebugAddress, (uint64_t)debug->extra.address_count + 1);
+        result = symbols_copy != NULL && addresses != NULL && fields != NULL && value_fields != NULL && value_addresses != NULL &&
+                 functions + debug->extra.address_count < UINT32_MAX;
         for (uint32_t section = 0; result && section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
         {
             const String8 bytes = debug->sections[section];
@@ -272,7 +334,10 @@ static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const Check
             result = copy_bytes != NULL;
             if (result)
             {
-                memcpy(copy_bytes, bytes.pointer, bytes.length);
+                if (bytes.length != 0)
+                {
+                    memcpy(copy_bytes, bytes.pointer, bytes.length);
+                }
                 kept->debug.sections[section] = (String8){ .pointer = copy_bytes, .length = bytes.length };
             }
         }
@@ -285,6 +350,20 @@ static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const Check
             kept->debug.line_addresses = addresses;
             kept->debug.function_count = debug->function_count;
             kept->debug.fields = fields;
+            if (debug->extra.field_count != 0)
+            {
+                memcpy(value_fields, debug->extra.fields, (uint64_t)debug->extra.field_count * sizeof(*value_fields));
+            }
+            if (debug->extra.address_count != 0)
+            {
+                memcpy(value_addresses, debug->extra.addresses, (uint64_t)debug->extra.address_count * sizeof(*value_addresses));
+            }
+            kept->debug.extra = (NativeDebugExtra){
+                .fields = value_fields,
+                .addresses = value_addresses,
+                .field_count = debug->extra.field_count,
+                .address_count = debug->extra.address_count,
+            };
         }
     }
     if (!result)
@@ -293,6 +372,7 @@ static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const Check
         arena_pop_to(kept->bytes, byte_mark);
         kept->link = (Link){ 0 };
         kept->system = NULL;
+        kept->comdat_signature = NULL;
         kept->debug = (ObjectDebug){ 0 };
     }
     return result;
@@ -338,10 +418,13 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
     const uint64_t mark = arena->length;
     uint64_t sizes[BUSTER_OBJECT_DEBUG_SECTIONS] = { 0 };
     uint64_t functions = 0;
+    uint64_t value_fields = 0;
+    uint64_t value_addresses = 0;
     bool valid = true;
     for (uint32_t u = 0; u < count; u += 1)
     {
         const ObjectDebug* own = &units[u].kept.debug;
+        valid = valid && native_debug_extra_valid(own->sections, &own->extra);
         for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
         {
             sizes[section] += own->sections[section].length;
@@ -351,8 +434,10 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
             valid = valid && own->sections[BUSTER_OBJECT_DEBUG_INFO].length >= 4 && own->fields[field] <= own->sections[BUSTER_OBJECT_DEBUG_INFO].length - 4;
         }
         functions += own->function_count;
+        value_fields += own->extra.field_count;
+        value_addresses += own->extra.address_count;
     }
-    valid = valid && functions < UINT32_MAX;
+    valid = valid && functions < UINT32_MAX && value_fields < UINT32_MAX && value_addresses < UINT32_MAX;
     char* sections[BUSTER_OBJECT_DEBUG_SECTIONS] = { 0 };
     for (uint32_t section = 0; valid && section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
     {
@@ -363,7 +448,11 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
     SymbolId* symbols = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, functions + 1) : NULL;
     uint32_t* addresses = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, functions + 1) : NULL;
     uint32_t* unit_functions = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count) : NULL;
-    valid = valid && symbols != NULL && addresses != NULL && unit_functions != NULL;
+    NativeDebugField* extra_fields = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, NativeDebugField, value_fields + 1) : NULL;
+    NativeDebugAddress* extra_addresses = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, NativeDebugAddress, value_addresses + 1) : NULL;
+    valid = valid && symbols != NULL && addresses != NULL && unit_functions != NULL && extra_fields != NULL && extra_addresses != NULL;
+    uint32_t next_field = 0;
+    uint32_t next_address = 0;
     uint64_t bases[BUSTER_OBJECT_DEBUG_SECTIONS] = { 0 };
     uint32_t function = 0;
     for (uint32_t u = 0; valid && u < count; u += 1)
@@ -371,7 +460,10 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
         const ObjectDebug* own = &units[u].kept.debug;
         for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
         {
-            memcpy(sections[section] + bases[section], own->sections[section].pointer, own->sections[section].length);
+            if (own->sections[section].length != 0)
+            {
+                memcpy(sections[section] + bases[section], own->sections[section].pointer, own->sections[section].length);
+            }
         }
         // The header's abbreviation offset, and the DIE's line program, address base and range lists, in that order.
         for (uint32_t field = 0; field < BUSTER_OBJECT_DEBUG_FIELDS; field += 1)
@@ -388,6 +480,34 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
             addresses[function] = (uint32_t)(bases[BUSTER_OBJECT_DEBUG_LINE] + own->line_addresses[f]);
             function += 1;
         }
+        // Additional sec_offset fields move with the unit's range/location contribution. ref4 type references do not.
+        for (uint32_t f = 0; f < own->extra.field_count; f += 1)
+        {
+            NativeDebugField field = own->extra.fields[f];
+            field.offset += (uint32_t)bases[BUSTER_OBJECT_DEBUG_INFO];
+            char* at = sections[BUSTER_OBJECT_DEBUG_INFO] + field.offset;
+            uint32_t value = 0;
+            memcpy(&value, at, 4);
+            value += (uint32_t)bases[field.section];
+            memcpy(at, &value, 4);
+            extra_fields[next_field++] = field;
+        }
+        for (uint32_t a = 0; a < own->extra.address_count; a += 1)
+        {
+            NativeDebugAddress address = own->extra.addresses[a];
+            address.offset += (uint32_t)bases[BUSTER_OBJECT_DEBUG_INFO];
+            address.symbol = described[u][own->function_count + a];
+            if (address.symbol != 0)
+            {
+                extra_addresses[next_address++] = address;
+            }
+            else
+            {
+                // The definition's COMDAT was discarded. Its validated address field becomes a zero tombstone; never
+                // relocate this DIE to an atom that no longer exists or to an unrelated replacement definition.
+                memset(sections[BUSTER_OBJECT_DEBUG_INFO] + address.offset, 0, 8);
+            }
+        }
         unit_functions[u] = own->function_count;
         for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
         {
@@ -402,6 +522,12 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
             .function_count = (uint32_t)functions,
             .unit_functions = unit_functions,
             .unit_count = count,
+            .extra = {
+                .fields = extra_fields,
+                .addresses = extra_addresses,
+                .field_count = next_field,
+                .address_count = next_address,
+            },
         };
         for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
         {
@@ -413,6 +539,18 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
         arena_pop_to(arena, mark);
     }
     return valid;
+}
+
+// Native debug addresses bind to definitions, not interposable names, for variables as well as functions.
+// check_units_keep bounds this sum; fields are not included because they reference sections rather than symbols.
+static uint32_t check_units_debug_symbol_count(const ObjectDebug* debug)
+{
+    return debug->function_count + debug->extra.address_count;
+}
+
+static SymbolId check_units_debug_symbol(const ObjectDebug* debug, uint32_t index)
+{
+    return index < debug->function_count ? debug->functions[index] : debug->extra.addresses[index - debug->function_count].symbol;
 }
 
 // Whether a unit's definition `symbol` of `link` takes a name's place from the earlier one, `earlier` of `earlier_link`,
@@ -440,6 +578,189 @@ static uint8_t check_units_common_alignment(const Link* unit, SymbolId symbol)
 {
     const bool common = (unit->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON && unit->symbols.atom[symbol] != 0;
     return common ? unit->atoms.alignment_log2[unit->symbols.atom[symbol]] : 0;
+}
+
+// The optional COMDAT selection, prepared before symbol resolution. Atom maps hold one-based ordinals of the kept
+// atoms (zero for discarded ones); symbol masks keep definitions and references outside discarded groups. Commands
+// without groups allocate none of these columns and use the ordinary contiguous records unchanged.
+typedef struct CheckUnitsSelection CheckUnitsSelection;
+struct CheckUnitsSelection
+{
+    AtomId** atoms;
+    uint8_t** symbols;
+    LinkCapacity* counts;
+    SymbolId* failed;
+};
+
+static bool check_units_selection_initialize(CheckUnitsSelection* selection, const CheckUnitsUnit* units, uint32_t count, Arena* arena)
+{
+    bool grouped = false;
+    for (uint32_t u = 0; u < count; u += 1)
+    {
+        grouped |= units[u].kept.comdat_signature != NULL;
+    }
+    bool valid = true;
+    if (grouped)
+    {
+        selection->atoms = BUSTER_ARENA_PUSH_ARRAY(arena, AtomId*, count);
+        selection->symbols = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t*, count);
+        selection->counts = BUSTER_ARENA_PUSH_ARRAY(arena, LinkCapacity, count);
+        selection->failed = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, count);
+        valid = selection->atoms != NULL && selection->symbols != NULL && selection->counts != NULL && selection->failed != NULL;
+        for (uint32_t u = 0; valid && u < count; u += 1)
+        {
+            const Link* unit = &units[u].kept.link;
+            const uint32_t atoms = unit->atoms.count;
+            const uint32_t symbols = unit->symbols.count;
+            selection->atoms[u] = BUSTER_ARENA_PUSH_ARRAY(arena, AtomId, atoms);
+            selection->symbols[u] = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, symbols);
+            valid = selection->atoms[u] != NULL && selection->symbols[u] != NULL;
+        }
+    }
+    return valid;
+}
+
+// A group signature is a named nonlocal symbol defined in one of its member atoms, checked when the unit is kept.
+static bool check_units_group_signature(const CheckUnitsKept* kept, SymbolId symbol)
+{
+    const AtomId atom = kept->link.symbols.atom[symbol];
+    return kept->comdat_signature != NULL && atom != 0 && kept->comdat_signature[atom] == symbol;
+}
+
+static bool check_units_selected_symbol(const CheckUnitsSelection* selection, uint32_t unit, SymbolId symbol)
+{
+    return selection->symbols == NULL || selection->symbols[unit][symbol] != 0;
+}
+
+static bool check_units_selected_definition(const CheckUnitsSelection* selection, uint32_t unit, const Link* link, SymbolId symbol)
+{
+    const AtomId atom = link->symbols.atom[symbol];
+    return link->symbols.source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE ||
+           (atom != 0 && (selection->atoms == NULL || selection->atoms[unit][atom] != 0));
+}
+
+static LinkCapacity check_units_selected_counts(const CheckUnitsSelection* selection, uint32_t unit, const Link* link)
+{
+    return selection->counts != NULL ? selection->counts[unit] : (LinkCapacity){
+        .atoms = link->atoms.count - 1,
+        .fixups = link->fixups.count - 1,
+        .wide_addends = link->fixups.wide_count - 1,
+        .priorities = link->priorities.count - 1,
+    };
+}
+
+static AtomId check_units_selected_atom(const CheckUnitsSelection* selection, uint32_t unit, AtomId atom)
+{
+    return selection->atoms != NULL ? selection->atoms[unit][atom] : atom;
+}
+
+// Finish one unit independently after its group selection. Only a reference contributed exclusively by discarded
+// fixups disappears; an unrelated undefined symbol retains the ordinary merge's behavior. A live relocation may
+// name a discarded global through the winning name, but cannot name a discarded local from another group.
+static void check_units_selection_finish(CheckUnitsSelection* selection, const CheckUnitsUnit* units, uint32_t u)
+{
+    const Link* unit = &units[u].kept.link;
+    // Kept unit records are immutable. The selection owns separate output columns, so these counts stay fixed.
+    const uint32_t symbol_count = unit->symbols.count;
+    const uint32_t atom_count = unit->atoms.count;
+    const uint32_t priority_count = unit->priorities.count;
+    AtomId* atoms = selection->atoms[u];
+    uint8_t* symbols = selection->symbols[u];
+    LinkCapacity counts = { 0 };
+    selection->failed[u] = 0;
+    atoms[0] = 0;
+    symbols[0] = 0;
+    for (SymbolId s = 1; s < symbol_count; s += 1)
+    {
+        const AtomId atom = unit->symbols.atom[s];
+        symbols[s] = atom != 0 ? (atoms[atom] != 0 ? 1 : 2) : unit->symbols.source[s] == BUSTER_LINK_SOURCE_ABSOLUTE ? 1 : 0;
+    }
+    for (AtomId a = 1; a < atom_count; a += 1)
+    {
+        const bool kept = atoms[a] != 0;
+        atoms[a] = kept ? ++counts.atoms : 0;
+        const FixupId begin = unit->atoms.fixup_begin[a];
+        const uint32_t fixup_count = unit->atoms.fixup_count[a];
+        for (uint32_t i = 0; i < fixup_count; i += 1)
+        {
+            const FixupId f = begin + i;
+            symbols[unit->fixups.target[f]] |= kept ? 1 : 2;
+            counts.fixups += kept;
+            counts.wide_addends += kept && (unit->fixups.kind[f] & BUSTER_LINK_FIXUP_WIDE) != 0;
+        }
+    }
+    for (SymbolId s = 1; s < symbol_count; s += 1)
+    {
+        const AtomId atom = unit->symbols.atom[s];
+        const bool local = (unit->symbols.flags[s] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;
+        const bool invalid = local && atom != 0 && atoms[atom] == 0 && (symbols[s] & 1) != 0;
+        selection->failed[u] = selection->failed[u] == 0 && invalid ? s : selection->failed[u];
+        symbols[s] = symbols[s] != 2;
+    }
+    for (uint32_t p = 1; p < priority_count; p += 1)
+    {
+        counts.priorities += atoms[unit->priorities.atom[p]] != 0;
+    }
+    selection->counts[u] = counts;
+}
+
+static bool check_units_selection_valid(const CheckUnitsSelection* selection, const CheckUnitsUnit* units, uint32_t count)
+{
+    bool valid = true;
+    for (uint32_t u = 0; valid && selection->failed != NULL && u < count; u += 1)
+    {
+        const SymbolId symbol = selection->failed[u];
+        if (symbol != 0)
+        {
+            const Link* unit = &units[u].kept.link;
+            const NameId name = unit->symbols.name[symbol];
+            fprintf(stderr, "error: relocation in %s refers to discarded local symbol '%.*s'\n", units[u].path,
+                    name != 0 ? (int)unit->names.length[name] : 11, name != 0 ? (const char*)unit->names.bytes[name] : "<anonymous>");
+            valid = false;
+        }
+    }
+    return valid;
+}
+
+// Scalar twin of the name exchange's group phase: each signature selects its earliest group in command order,
+// independently of the ordinary strong/weak symbol resolution. Several member atoms of the same unit stay together.
+static void check_units_select_groups(CheckUnitsSelection* selection, const CheckUnitsUnit* units, uint32_t count, SymbolId* table,
+                                      uint64_t slots, uint32_t* first_unit, SymbolId* first_symbol)
+{
+    memset(table, 0, slots * sizeof(*table));
+    SymbolId next = 1;
+    for (uint32_t u = 0; u < count; u += 1)
+    {
+        const CheckUnitsKept* kept = &units[u].kept;
+        const Link* unit = &kept->link;
+        const uint32_t atom_count = unit->atoms.count;
+        for (AtomId a = 1; a < atom_count; a += 1)
+        {
+            const SymbolId signature = kept->comdat_signature != NULL ? kept->comdat_signature[a] : 0;
+            SymbolId group = 0;
+            const NameId name = signature != 0 ? unit->symbols.name[signature] : 0;
+            uint64_t slot = name != 0 ? unit->names.hash[name] & (slots - 1) : 0;
+            while (signature != 0 && group == 0 && table[slot] != 0)
+            {
+                const SymbolId candidate = table[slot];
+                const Link* other = &units[first_unit[candidate]].kept.link;
+                const NameId other_name = other->symbols.name[first_symbol[candidate]];
+                const bool same = other->names.hash[other_name] == unit->names.hash[name] && other->names.length[other_name] == unit->names.length[name] &&
+                                  memcmp(other->names.bytes[other_name], unit->names.bytes[name], unit->names.length[name]) == 0;
+                group = same ? candidate : 0;
+                slot = same ? slot : (slot + 1) & (slots - 1);
+            }
+            if (signature != 0 && group == 0)
+            {
+                group = next++;
+                table[slot] = group;
+                first_unit[group] = u;
+                first_symbol[group] = signature;
+            }
+            selection->atoms[u][a] = signature == 0 || first_unit[group] == u;
+        }
+        check_units_selection_finish(selection, units, u);
+    }
 }
 
 // The units' kept links joined into `link`, in the units' order, as check_program_emit builds one unit's (#152): every
@@ -498,6 +819,15 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
         maps[u] = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, units[u].kept.link.symbols.count);
         valid = maps[u] != NULL;
     }
+    CheckUnitsSelection selection = { 0 };
+    bool discarded_local = false;
+    valid = valid && check_units_selection_initialize(&selection, units, count, scratch);
+    if (valid && selection.atoms != NULL)
+    {
+        check_units_select_groups(&selection, units, count, table, slots, first_unit, first_symbol);
+        valid = check_units_selection_valid(&selection, units, count);
+        discarded_local = !valid;
+    }
     if (valid)
     {
         memset(table, 0, slots * sizeof(*table));
@@ -511,11 +841,16 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
         maps[u][0] = 0;
         for (SymbolId s = 1; duplicate == 0 && s < unit->symbols.count; s += 1)
         {
+            if (!check_units_selected_symbol(&selection, u, s))
+            {
+                maps[u][s] = 0;
+                continue;
+            }
             const uint8_t flags = unit->symbols.flags[s];
             const uint8_t binding_flags = flags & BUSTER_LINK_SYMBOL_BINDING;
             const NameId name = unit->symbols.name[s];
             const bool global = binding_flags != BUSTER_LINK_SYMBOL_LOCAL && name != 0;
-            const bool defined = unit->symbols.atom[s] != 0 || unit->symbols.source[s] == BUSTER_LINK_SOURCE_ABSOLUTE;
+            const bool defined = check_units_selected_definition(&selection, u, unit, s);
             SymbolId merged = 0;
             uint64_t slot = global ? unit->names.hash[name] & (slots - 1) : 0;
             while (global && merged == 0 && table[slot] != 0)
@@ -588,15 +923,17 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
     for (uint32_t u = 0; described != NULL && valid && u < count; u += 1)
     {
         const ObjectDebug* own = &units[u].kept.debug;
-        described[u] = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, (uint64_t)own->function_count + 1);
+        described[u] = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, (uint64_t)check_units_debug_symbol_count(own) + 1);
         valid = described[u] != NULL;
-        for (uint32_t f = 0; valid && f < own->function_count; f += 1)
+        for (uint32_t f = 0; valid && f < check_units_debug_symbol_count(own); f += 1)
         {
-            const SymbolId s = own->functions[f];
+            const SymbolId s = check_units_debug_symbol(own, f);
             const SymbolId merged = maps[u][s];
-            const bool kept = defining_unit[merged] == u && defining_symbol[merged] == s;
-            described[u][f] = kept ? merged : (SymbolId)(next + replaced);
-            replaced += !kept;
+            const AtomId atom = units[u].kept.link.symbols.atom[s];
+            const bool discarded = f >= own->function_count && atom != 0 && check_units_selected_atom(&selection, u, atom) == 0;
+            const bool kept = !discarded && merged != 0 && defining_unit[merged] == u && defining_symbol[merged] == s;
+            described[u][f] = discarded ? 0 : kept ? merged : (SymbolId)(next + replaced);
+            replaced += !discarded && !kept;
         }
     }
     // The names no unit defines, for the runtime's room in the link (bind_capacity_needed).
@@ -656,11 +993,11 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
     {
         const Link* unit = &units[u].kept.link;
         const ObjectDebug* own = &units[u].kept.debug;
-        for (uint32_t f = 0; valid && f < own->function_count; f += 1)
+        for (uint32_t f = 0; valid && f < check_units_debug_symbol_count(own); f += 1)
         {
-            const SymbolId s = own->functions[f];
+            const SymbolId s = check_units_debug_symbol(own, f);
             const NameId own_name = unit->symbols.name[s];
-            if (described[u][f] != maps[u][s])
+            if (described[u][f] != 0 && described[u][f] != maps[u][s])
             {
                 const NameId name = own_name != 0 ? link_add_name_hashed(link, unit->names.bytes[own_name], unit->names.length[own_name], unit->names.hash[own_name]) : 0;
                 const uint8_t flags = (uint8_t)((unit->symbols.flags[s] & ~(BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_VISIBILITY)) | BUSTER_LINK_SYMBOL_LOCAL |
@@ -689,6 +1026,11 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
         valid = placed != NULL;
         for (AtomId a = 1; valid && a < unit->atoms.count; a += 1)
         {
+            if (selection.atoms != NULL && selection.atoms[u][a] == 0)
+            {
+                placed[a] = 0;
+                continue;
+            }
             placed[a] = link_add_atom(link, unit->atoms.class[a], unit->atoms.alignment_log2[a], unit->atoms.size[a], unit->atoms.bytes[a], u);
             valid = placed[a] != 0 && link_set_atom_section(link, placed[a], unit->atoms.section[a]);
             const FixupId begin = unit->atoms.fixup_begin[a];
@@ -701,12 +1043,13 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
         }
         for (uint32_t p = 1; valid && p < unit->priorities.count; p += 1)
         {
-            valid = link_add_priority(link, placed[unit->priorities.atom[p]], unit->priorities.priority[p]);
+            const AtomId atom = placed[unit->priorities.atom[p]];
+            valid = atom == 0 || link_add_priority(link, atom, unit->priorities.priority[p]);
         }
         for (SymbolId s = 1; valid && s < unit->symbols.count; s += 1)
         {
             const SymbolId merged = maps[u][s];
-            if (unit->symbols.atom[s] != 0 && defining_unit[merged] == u && defining_symbol[merged] == s)
+            if (merged != 0 && unit->symbols.atom[s] != 0 && defining_unit[merged] == u && defining_symbol[merged] == s)
             {
                 valid = link_define_symbol(link, merged, placed[unit->symbols.atom[s]], unit->symbols.value[s], unit->symbols.size[s]);
                 // A kept common takes its name's commons' largest alignment.
@@ -715,10 +1058,10 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
                 link->atoms.alignment_log2[atom] = common && common_alignment[merged] > link->atoms.alignment_log2[atom] ? common_alignment[merged] : link->atoms.alignment_log2[atom];
             }
         }
-        for (uint32_t f = 0; described != NULL && valid && f < units[u].kept.debug.function_count; f += 1)
+        for (uint32_t f = 0; described != NULL && valid && f < check_units_debug_symbol_count(&units[u].kept.debug); f += 1)
         {
-            const SymbolId s = units[u].kept.debug.functions[f];
-            if (described[u][f] != maps[u][s])
+            const SymbolId s = check_units_debug_symbol(&units[u].kept.debug, f);
+            if (described[u][f] != 0 && described[u][f] != maps[u][s])
             {
                 valid = link_define_symbol(link, described[u][f], placed[unit->symbols.atom[s]], unit->symbols.value[s], unit->symbols.size[s]);
             }
@@ -734,7 +1077,7 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
             fprintf(stderr, "error: can't make the debug information: no memory, or sections past DWARF32's\n");
         }
     }
-    if (!atoms_added && duplicate == 0 && (!symbols_added || begun))
+    if (!atoms_added && duplicate == 0 && !discarded_local && (!symbols_added || begun))
     {
         fprintf(stderr, "fatal error: can't link the units: %s (link error %u)\n", sized ? "their records don't fit the link" : "no memory", (uint32_t)link->error);
     }
@@ -828,6 +1171,7 @@ struct CheckUnitsMerge
     SymbolId* record_ids;
     uint32_t* source_unit;
     SymbolId* source_symbol;
+    CheckUnitsSelection selection;
     uint8_t* defined;
     uint8_t* visibility;
     uint8_t* strong;
@@ -853,6 +1197,7 @@ struct CheckUnitsMerge
     uint32_t duplicate_record[BUSTER_LANE_MAX_COUNT];
     bool resolved[BUSTER_LANE_MAX_COUNT];
     bool duplicated;
+    bool discarded_local;
     bool sized;
     bool symbols_added;
     bool begun;
@@ -873,17 +1218,11 @@ static bool check_units_merge_global(const Link* unit, SymbolId symbol)
     return (unit->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL && unit->symbols.name[symbol] != 0;
 }
 
-// Whether a unit's symbol defines its name: at an atom, or absolutely.
-static bool check_units_merge_defines(const Link* unit, SymbolId symbol)
-{
-    return unit->symbols.atom[symbol] != 0 || unit->symbols.source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE;
-}
-
 // Resolves the exchange's records [begin, end), one partition's, in `table` (room for `slots` record indices, a power of
 // two): each record's name's first record, and at each first, the name's resolution, symbol by symbol in the units'
 // order as check_units_merge decides it. Returns the partition's first duplicate's key (unit << 32 | symbol), or
 // UINT64_MAX, and its record in *duplicate.
-static uint64_t check_units_merge_resolve(CheckUnitsMerge* merge, uint64_t begin, uint64_t end, uint32_t* table, uint64_t slots, uint32_t* duplicate)
+static uint64_t check_units_merge_resolve(CheckUnitsMerge* merge, uint64_t begin, uint64_t end, uint32_t* table, uint64_t slots, uint32_t* duplicate, bool groups)
 {
     memset(table, 0xff, slots * sizeof(*table));
     uint64_t first_key = UINT64_MAX;
@@ -891,6 +1230,12 @@ static uint64_t check_units_merge_resolve(CheckUnitsMerge* merge, uint64_t begin
     {
         const CheckUnitsMergeRecord record = merge->records[r];
         const Link* unit = &merge->units[record.unit].kept.link;
+        if (groups ? !check_units_group_signature(&merge->units[record.unit].kept, record.symbol) :
+                     !check_units_selected_symbol(&merge->selection, record.unit, record.symbol))
+        {
+            merge->firsts[r] = UINT32_MAX;
+            continue;
+        }
         const NameId name = unit->symbols.name[record.symbol];
         const uint64_t hash = unit->names.hash[name];
         // The partition took the hash's low bits; the table takes its high ones.
@@ -918,6 +1263,10 @@ static uint64_t check_units_merge_resolve(CheckUnitsMerge* merge, uint64_t begin
             };
         }
         merge->firsts[r] = first;
+        if (groups)
+        {
+            continue;
+        }
         CheckUnitsMergeName* resolution = &merge->names[first];
         if (check_units_visibility_rank(flags) > check_units_visibility_rank(resolution->visibility))
         {
@@ -927,7 +1276,7 @@ static uint64_t check_units_merge_resolve(CheckUnitsMerge* merge, uint64_t begin
         resolution->strong |= !weak;
         const uint8_t aligned = check_units_common_alignment(unit, record.symbol);
         resolution->common_alignment = aligned > resolution->common_alignment ? aligned : resolution->common_alignment;
-        if (check_units_merge_defines(unit, record.symbol))
+        if (check_units_selected_definition(&merge->selection, record.unit, unit, record.symbol))
         {
             const bool earlier = resolution->defining != UINT32_MAX;
             const CheckUnitsMergeRecord definer = earlier ? merge->records[resolution->defining] : (CheckUnitsMergeRecord){ 0 };
@@ -1010,11 +1359,68 @@ static void check_units_merge_lane(void* argument)
         }
     }
     lane_sync();
+    // Select COMDAT groups with the same hash partitions as global names, before their symbols are resolved. Every
+    // unit then marks its own retained references and compacts its atom ordinals, independently of the other units.
+    if (merge->selection.atoms != NULL)
+    {
+        Scratch group_scratch = scratch_begin(0);
+        bool grouped = true;
+        for (uint64_t p = lane_take(merge->partitions); p < merge->partitions; p = lane_take(merge->partitions))
+        {
+            const uint64_t begin = merge->partition_begin[p];
+            const uint64_t end = merge->partition_begin[p + 1];
+            uint64_t slots = 16;
+            while (slots < 2 * (end - begin))
+            {
+                slots *= 2;
+            }
+            const uint64_t mark = group_scratch.arena->length;
+            uint32_t* table = BUSTER_ARENA_PUSH_ARRAY(group_scratch.arena, uint32_t, slots);
+            grouped = grouped && table != NULL;
+            uint32_t unused = UINT32_MAX;
+            if (table != NULL)
+            {
+                check_units_merge_resolve(merge, begin, end, table, slots, &unused, true);
+            }
+            arena_pop_to(group_scratch.arena, mark);
+        }
+        scratch_end(group_scratch);
+        merge->resolved[lane] = grouped;
+        lane_sync();
+        if (lane == 0)
+        {
+            for (uint32_t other = 0; other < lanes; other += 1)
+            {
+                merge->valid = merge->valid && merge->resolved[other];
+            }
+        }
+        if (check_units_merge_proceed(merge))
+        {
+            for (uint64_t u = range.begin; u < range.end; u += 1)
+            {
+                const CheckUnitsKept* kept = &units[u].kept;
+                for (AtomId a = 1; a < kept->link.atoms.count; a += 1)
+                {
+                    const SymbolId signature = kept->comdat_signature != NULL ? kept->comdat_signature[a] : 0;
+                    const uint32_t first = signature != 0 ? merge->firsts[merge->entries[u][signature]] : UINT32_MAX;
+                    merge->selection.atoms[u][a] = signature == 0 || merge->records[first].unit == u;
+                }
+                check_units_selection_finish(&merge->selection, units, (uint32_t)u);
+            }
+        }
+        lane_sync();
+        if (lane == 0 && merge->valid)
+        {
+            merge->valid = check_units_selection_valid(&merge->selection, units, count);
+            merge->discarded_local = !merge->valid;
+        }
+        lane_sync();
+    }
     // Each lane's partitions resolved, in a table of its own scratch's.
     Scratch scratch = scratch_begin(0);
     uint64_t lane_key = UINT64_MAX;
     uint32_t lane_record = UINT32_MAX;
-    bool resolved = true;
+    bool resolved = merge->valid;
     for (uint64_t p = lane_take(merge->partitions); p < merge->partitions; p = lane_take(merge->partitions))
     {
         const uint64_t begin = merge->partition_begin[p];
@@ -1028,7 +1434,7 @@ static void check_units_merge_lane(void* argument)
         uint32_t* table = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, slots);
         resolved = resolved && table != NULL;
         uint32_t record = UINT32_MAX;
-        const uint64_t key = table != NULL ? check_units_merge_resolve(merge, begin, end, table, slots, &record) : UINT64_MAX;
+        const uint64_t key = table != NULL && merge->valid ? check_units_merge_resolve(merge, begin, end, table, slots, &record, false) : UINT64_MAX;
         lane_record = key < lane_key ? record : lane_record;
         lane_key = key < lane_key ? key : lane_key;
         arena_pop_to(scratch.arena, mark);
@@ -1044,9 +1450,10 @@ static void check_units_merge_lane(void* argument)
         const Link* unit = &units[u].kept.link;
         const uint32_t* entries = merge->entries[u];
         uint64_t own = 0;
-        for (SymbolId s = 1; s < unit->symbols.count; s += 1)
+        for (SymbolId s = 1; merge->valid && s < unit->symbols.count; s += 1)
         {
-            own += entries[s] == UINT32_MAX || merge->firsts[entries[s]] == entries[s];
+            own += check_units_selected_symbol(&merge->selection, (uint32_t)u, s) &&
+                   (entries[s] == UINT32_MAX || merge->firsts[entries[s]] == entries[s]);
         }
         merge->unit_ids[u] = own;
     }
@@ -1096,6 +1503,11 @@ static void check_units_merge_lane(void* argument)
             map[0] = 0;
             for (SymbolId s = 1; s < unit->symbols.count; s += 1)
             {
+                if (!check_units_selected_symbol(&merge->selection, (uint32_t)u, s))
+                {
+                    map[s] = 0;
+                    continue;
+                }
                 const uint32_t entry = entries[s];
                 if (entry == UINT32_MAX || merge->firsts[entry] == entry)
                 {
@@ -1106,7 +1518,7 @@ static void check_units_merge_lane(void* argument)
                     uint8_t visibility = unit->symbols.flags[s] & BUSTER_LINK_SYMBOL_VISIBILITY;
                     uint8_t strong = (unit->symbols.flags[s] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_WEAK;
                     uint8_t common_alignment = check_units_common_alignment(unit, s);
-                    bool defined = check_units_merge_defines(unit, s);
+                    bool defined = check_units_selected_definition(&merge->selection, (uint32_t)u, unit, s);
                     if (entry != UINT32_MAX)
                     {
                         const CheckUnitsMergeName* resolution = &merge->names[entry];
@@ -1140,7 +1552,8 @@ static void check_units_merge_lane(void* argument)
             for (SymbolId s = 1; s < unit->symbols.count; s += 1)
             {
                 const uint32_t entry = entries[s];
-                map[s] = entry != UINT32_MAX && merge->firsts[entry] != entry ? merge->record_ids[merge->firsts[entry]] : map[s];
+                map[s] = !check_units_selected_symbol(&merge->selection, (uint32_t)u, s) ? 0 :
+                         entry != UINT32_MAX && merge->firsts[entry] != entry ? merge->record_ids[merge->firsts[entry]] : map[s];
             }
         }
     }
@@ -1152,15 +1565,17 @@ static void check_units_merge_lane(void* argument)
         for (uint32_t u = 0; merge->valid && merge->debug != NULL && u < count; u += 1)
         {
             const ObjectDebug* own = &units[u].kept.debug;
-            merge->described[u] = BUSTER_ARENA_PUSH_ARRAY(merge->scratch, SymbolId, (uint64_t)own->function_count + 1);
+            merge->described[u] = BUSTER_ARENA_PUSH_ARRAY(merge->scratch, SymbolId, (uint64_t)check_units_debug_symbol_count(own) + 1);
             merge->valid = merge->described[u] != NULL;
-            for (uint32_t f = 0; merge->valid && f < own->function_count; f += 1)
+            for (uint32_t f = 0; merge->valid && f < check_units_debug_symbol_count(own); f += 1)
             {
-                const SymbolId s = own->functions[f];
+                const SymbolId s = check_units_debug_symbol(own, f);
                 const SymbolId merged = merge->maps[u][s];
-                const bool kept = merge->source_unit[merged] == u && merge->source_symbol[merged] == s && merge->defined[merged];
-                merge->described[u][f] = kept ? merged : (SymbolId)(next + merge->replaced);
-                merge->replaced += !kept;
+                const AtomId atom = units[u].kept.link.symbols.atom[s];
+                const bool discarded = f >= own->function_count && atom != 0 && check_units_selected_atom(&merge->selection, u, atom) == 0;
+                const bool kept = !discarded && merged != 0 && merge->source_unit[merged] == u && merge->source_symbol[merged] == s && merge->defined[merged];
+                merge->described[u][f] = discarded ? 0 : kept ? merged : (SymbolId)(next + merge->replaced);
+                merge->replaced += !discarded && !kept;
             }
         }
         String8* externals = merge->valid ? BUSTER_ARENA_PUSH_ARRAY(merge->scratch, String8, next) : NULL;
@@ -1183,10 +1598,11 @@ static void check_units_merge_lane(void* argument)
         for (uint32_t u = 0; u < count; u += 1)
         {
             const Link* unit = &units[u].kept.link;
-            atoms += unit->atoms.count - 1;
-            fixups += unit->fixups.count - 1;
-            wides += unit->fixups.wide_count - 1;
-            priorities += unit->priorities.count - 1;
+            const LinkCapacity kept = check_units_selected_counts(&merge->selection, u, unit);
+            atoms += kept.atoms;
+            fixups += kept.fixups;
+            wides += kept.wide_addends;
+            priorities += kept.priorities;
         }
         uint64_t name_bytes = 0;
         uint64_t atom_bytes = 0;
@@ -1293,11 +1709,11 @@ static void check_units_merge_lane(void* argument)
         {
             const Link* unit = &units[u].kept.link;
             const ObjectDebug* own = &units[u].kept.debug;
-            for (uint32_t f = 0; merge->valid && f < own->function_count; f += 1)
+            for (uint32_t f = 0; merge->valid && f < check_units_debug_symbol_count(own); f += 1)
             {
-                const SymbolId s = own->functions[f];
+                const SymbolId s = check_units_debug_symbol(own, f);
                 const NameId own_name = unit->symbols.name[s];
-                if (merge->described[u][f] != merge->maps[u][s])
+                if (merge->described[u][f] != 0 && merge->described[u][f] != merge->maps[u][s])
                 {
                     const NameId name = own_name != 0 ? link_add_name_hashed(link, unit->names.bytes[own_name], unit->names.length[own_name], unit->names.hash[own_name]) : 0;
                     const uint8_t flags = (uint8_t)((unit->symbols.flags[s] & ~(BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_VISIBILITY)) | BUSTER_LINK_SYMBOL_LOCAL |
@@ -1325,14 +1741,15 @@ static void check_units_merge_lane(void* argument)
         for (uint32_t u = 0; u < count; u += 1)
         {
             const Link* unit = &units[u].kept.link;
+            const LinkCapacity kept = check_units_selected_counts(&merge->selection, u, unit);
             merge->atom_base[u] = atom_at;
             merge->fixup_base[u] = fixup_at;
             merge->wide_base[u] = wide_at;
             merge->priority_base[u] = priority_at;
-            atom_at += unit->atoms.count - 1;
-            fixup_at += unit->fixups.count - 1;
-            wide_at += unit->fixups.wide_count - 1;
-            priority_at += unit->priorities.count - 1;
+            atom_at += kept.atoms;
+            fixup_at += kept.fixups;
+            wide_at += kept.wide_addends;
+            priority_at += kept.priorities;
         }
         merge->valid = merge->valid && atom_at <= link->atoms.capacity && fixup_at <= link->fixups.capacity && wide_at <= link->fixups.wide_capacity &&
                        priority_at <= link->priorities.capacity;
@@ -1350,7 +1767,12 @@ static void check_units_merge_lane(void* argument)
             uint32_t wide = (uint32_t)merge->wide_base[u];
             for (AtomId a = 1; a < unit->atoms.count; a += 1)
             {
-                const AtomId placed = atom_base + a - 1;
+                const AtomId selected = check_units_selected_atom(&merge->selection, (uint32_t)u, a);
+                if (selected == 0)
+                {
+                    continue;
+                }
+                const AtomId placed = atom_base + selected - 1;
                 const uint32_t fixup_count = unit->atoms.fixup_count[a];
                 link->atoms.class[placed] = unit->atoms.class[a];
                 link->atoms.alignment_log2[placed] = unit->atoms.alignment_log2[a];
@@ -1380,18 +1802,23 @@ static void check_units_merge_lane(void* argument)
                     fixup += 1;
                 }
             }
+            uint64_t priority = merge->priority_base[u];
             for (uint32_t p = 1; p < unit->priorities.count; p += 1)
             {
-                const uint64_t at = merge->priority_base[u] + p - 1;
-                link->priorities.atom[at] = atom_base + unit->priorities.atom[p] - 1;
-                link->priorities.priority[at] = unit->priorities.priority[p];
+                const AtomId selected = check_units_selected_atom(&merge->selection, (uint32_t)u, unit->priorities.atom[p]);
+                if (selected != 0)
+                {
+                    link->priorities.atom[priority] = atom_base + selected - 1;
+                    link->priorities.priority[priority] = unit->priorities.priority[p];
+                    priority += 1;
+                }
             }
             for (SymbolId s = 1; s < unit->symbols.count; s += 1)
             {
                 const SymbolId merged = map[s];
-                if (unit->symbols.atom[s] != 0 && merge->source_unit[merged] == u && merge->source_symbol[merged] == s && merge->defined[merged])
+                if (merged != 0 && unit->symbols.atom[s] != 0 && merge->source_unit[merged] == u && merge->source_symbol[merged] == s && merge->defined[merged])
                 {
-                    const AtomId atom = atom_base + unit->symbols.atom[s] - 1;
+                    const AtomId atom = atom_base + check_units_selected_atom(&merge->selection, (uint32_t)u, unit->symbols.atom[s]) - 1;
                     const bool common = (unit->symbols.flags[s] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON;
                     link->symbols.atom[merged] = atom;
                     link->symbols.value[merged] = unit->symbols.value[s];
@@ -1401,12 +1828,12 @@ static void check_units_merge_lane(void* argument)
                                                                                                                                    link->atoms.alignment_log2[atom];
                 }
             }
-            for (uint32_t f = 0; merge->described != NULL && merge->described[u] != NULL && f < units[u].kept.debug.function_count; f += 1)
+            for (uint32_t f = 0; merge->described != NULL && merge->described[u] != NULL && f < check_units_debug_symbol_count(&units[u].kept.debug); f += 1)
             {
-                const SymbolId s = units[u].kept.debug.functions[f];
-                if (merge->described[u][f] != map[s])
+                const SymbolId s = check_units_debug_symbol(&units[u].kept.debug, f);
+                if (merge->described[u][f] != 0 && merge->described[u][f] != map[s])
                 {
-                    link->symbols.atom[merge->described[u][f]] = atom_base + unit->symbols.atom[s] - 1;
+                    link->symbols.atom[merge->described[u][f]] = atom_base + check_units_selected_atom(&merge->selection, (uint32_t)u, unit->symbols.atom[s]) - 1;
                     link->symbols.value[merge->described[u][f]] = unit->symbols.value[s];
                     link->symbols.size[merge->described[u][f]] = unit->symbols.size[s];
                 }
@@ -1422,10 +1849,11 @@ static void check_units_merge_lane(void* argument)
     if (lane == 0 && merge->valid)
     {
         const Link* last = &units[count - 1].kept.link;
-        link->atoms.count = (uint32_t)(merge->atom_base[count - 1] + last->atoms.count - 1);
-        link->fixups.count = (uint32_t)(merge->fixup_base[count - 1] + last->fixups.count - 1);
-        link->fixups.wide_count = (uint32_t)(merge->wide_base[count - 1] + last->fixups.wide_count - 1);
-        link->priorities.count = (uint32_t)(merge->priority_base[count - 1] + last->priorities.count - 1);
+        const LinkCapacity kept = check_units_selected_counts(&merge->selection, count - 1, last);
+        link->atoms.count = (uint32_t)(merge->atom_base[count - 1] + kept.atoms);
+        link->fixups.count = (uint32_t)(merge->fixup_base[count - 1] + kept.fixups);
+        link->fixups.wide_count = (uint32_t)(merge->wide_base[count - 1] + kept.wide_addends);
+        link->priorities.count = (uint32_t)(merge->priority_base[count - 1] + kept.priorities);
         if (merge->debug != NULL)
         {
             merge->valid = check_units_merge_debug(merge->debug, units, count, merge->described, merge->output);
@@ -1511,6 +1939,7 @@ static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uin
             merge.described[u] = NULL;
         }
     }
+    reserved = reserved && check_units_selection_initialize(&merge.selection, units, count, scratch);
     merge.valid = merge.valid && reserved;
     bool result = false;
     if (!reserved)
@@ -1526,7 +1955,7 @@ static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uin
         check_units_merge_lane(&merge);
         lane_flow_round_end(&flow->rounds);
         result = merge.valid;
-        if (!merge.atoms_added && !merge.duplicated && (!merge.symbols_added || merge.begun))
+        if (!merge.atoms_added && !merge.duplicated && !merge.discarded_local && (!merge.symbols_added || merge.begun))
         {
             fprintf(stderr, "fatal error: can't link the units: %s (link error %u)\n", merge.sized ? "their records don't fit the link" : "no memory",
                     (uint32_t)link->error);
@@ -1739,10 +2168,11 @@ static bool check_units_lane_ready(CheckUnitsLane* lane, const CheckDriverComman
     return lane->ready;
 }
 
-// A lane's memory that the link doesn't read, its file cache, intern table and three arenas, released when it has
-// compiled its units (#778): into its pool (arena_pool), when its caller set one, whose MADV_DONTNEED frees an arena's
-// pages under the address space's lock for reading, so that the lanes free theirs at once, at the end of their run,
-// where the calling thread would free every lane's after it, one after another. The links it kept stay in their arenas.
+// A lane's memory that the link doesn't read, its file cache, intern table, three arenas and its functions' lane 0's
+// writer's columns, released when it has compiled its units (#778): into its pool (arena_pool), when its caller set
+// one, whose MADV_DONTNEED frees an arena's pages under the address space's lock for reading, so that the lanes free
+// theirs at once, at the end of their run, where the calling thread would free every lane's after it, one after another.
+// The links it kept stay in their arenas.
 // A lane whose setup failed releases what it reserved before the failure, which its table and cache keep as their
 // initializers left them (a lane that took no unit, or released them already, has them zero, which their releases take).
 // Then it gives back what it held of the run's memory (check_units_memory_give).
@@ -1754,15 +2184,17 @@ static void check_units_lane_release(CheckUnitsLane* lane)
     arena_release(&lane->output);
     arena_release(&lane->scratch);
     arena_release(&lane->arena);
+    check_program_lanes_release(&lane->functions);
     check_units_memory_give(lane);
 }
 
 // A unit, on the lane that took it: compiled by check_driver_unit with the lane's intern table and file cache, its
 // functions on the lane alone, its diagnostics into its own stream, and with a link to make, its link kept. The arenas
 // it reserves start with BUSTER_CHECK_UNITS_SMALL_BYTES of base pages unless its source is large. The lane's three
-// arenas are emptied after it, their pages kept for the next unit with the bytes the unit left there: the compile
-// reads nothing in them it didn't write, which --poison-arenas checks (arena_poison: a pattern in place of those bytes;
-// docs/translation-units.md, "Memory", has why and what reserving or clearing them again costs).
+// arenas, and its functions' lane 0's writer's columns (#442), are emptied after it, their pages kept for the next unit
+// with the bytes the unit left there: the compile reads nothing in them it didn't write, which --poison-arenas checks
+// (arena_poison: a pattern in place of those bytes; docs/translation-units.md, "Memory", has why and what reserving or
+// clearing them again costs).
 static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, CheckUnitsUnit* unit)
 {
     const CheckDriverCommand* command = run->command;
@@ -1770,17 +2202,25 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
     unit->unbuffered = errors == NULL;
     unit->status = 1;
     unit->compiled = true;
-    if (errors != NULL && !check_units_lane_ready(lane, command))
+    if (errors != NULL && unit->kind == CHECK_DRIVER_INPUT_LINK)
+    {
+        unit->status = 0;
+    }
+    else if (errors != NULL && !check_units_lane_ready(lane, command))
     {
         fprintf(errors, "fatal error: can't reserve the lane's memory\n");
+        unit->fatal = true;
     }
     else if (errors != NULL)
     {
         PPOptions options = command->options;
         options.files = &lane->cache;
         options.diagnostics = errors;
+        options.preprocessed = unit->preprocessed;
         unit->kept = (CheckUnitsKept){ .arena = &lane->kept, .bytes = &lane->kept_bytes };
-        // On the board, the unit's functions as parts that the lanes without units may take (#777).
+        // On the board, the unit's functions as parts that the lanes without units may take (#777). Lane 0's writer's
+        // columns stay the lane's from one unit to the next, as its three arenas do (check_program_lanes_settle, #442).
+        const Arena columns = lane->functions.arenas[0].scratch;
         lane->functions = (CheckProgramLanes){
             .lanes = run->board != NULL ? run->board->lanes : 1,
             .board = run->board,
@@ -1791,16 +2231,26 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             .tier1_no_rematerialize = command->tier1_no_rematerialize,
             .tier1_gvn = command->tier1_gvn,
             .tier1_no_lifetimes = command->tier1_no_lifetimes,
+            .tier1_no_inline = command->tier1_no_inline,
             .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
             .helper_reporting = command->helper_report != NULL,
             .units_lane = lane,
             .helper_forms = command->helper_forms,
         };
+        lane->functions.arenas[0].scratch = columns;
         lane->memory = run->memory;
+        lane->run = run;
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
         arena_small_floor = unit->bytes < BUSTER_CHECK_UNITS_LARGE_SOURCE ? BUSTER_CHECK_UNITS_SMALL_BYTES : 0;
-        unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch, &lane->output,
-                                         &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true, &unit->dependency, &lane->kept);
+        if (unit->kind == CHECK_DRIVER_INPUT_ASSEMBLY || unit->kind == CHECK_DRIVER_INPUT_ASSEMBLY_CPP)
+        {
+            unit->status = check_driver_assembly(command, &options, unit, lane, errors);
+        }
+        else
+        {
+            unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch, &lane->output,
+                                             &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true, &unit->dependency, &lane->kept, NULL, &unit->fatal);
+        }
         arena_small_floor = 0;
         // The unit's helper plan into the command's report (#1059), which the other lanes' units add to too.
         if (command->helper_report != NULL)
@@ -1857,9 +2307,12 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             __atomic_fetch_add(&report->red_zones, unit_report->red_zones, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->code_certified, unit_report->code_certified, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->code_uncertified, unit_report->code_uncertified, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->machine_rows, unit_report->machine_rows, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->row_moves, unit_report->row_moves, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->inlined_calls, unit_report->inlined_calls, __ATOMIC_RELAXED);
         }
-        check_program_lanes_release(&lane->functions);
-        Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena };
+        check_program_lanes_settle(&lane->functions);
+        Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena, &lane->functions.arenas[0].scratch };
         for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(arenas); a += 1)
         {
             if (command->poison_arenas)
@@ -1904,6 +2357,7 @@ static void check_units_lane(void* argument)
     arena_pool = &lane->pool;
     for (uint64_t taken = lane_take(run->count); taken < run->count; taken = lane_take(run->count))
     {
+        __atomic_add_fetch(&run->started, 1, __ATOMIC_RELAXED);
         const Lane group = lane_alone();
         check_units_compile(run, lane, run->units + run->order[taken]);
         lane_restore(group);
@@ -1960,6 +2414,10 @@ static bool check_units_objects(CheckUnitsUnit* units, uint32_t count, Arena* ar
     }
     for (uint32_t u = 0; reserved && distinct && u < count; u += 1)
     {
+        if (units[u].kind == CHECK_DRIVER_INPUT_LINK)
+        {
+            continue;
+        }
         units[u].object = check_driver_object_name(arena, units[u].path);
         reserved = units[u].object != NULL;
         const uint64_t length = reserved ? strlen(units[u].object) : 0;
@@ -2013,6 +2471,7 @@ static void check_units_follow(CheckUnitsFlow* flow)
                 case CHECK_UNITS_ROUND_MERGE: check_units_merge_lane(argument); break;
                 case CHECK_UNITS_ROUND_CHECK: check_driver_check_main(argument); break;
                 case CHECK_UNITS_ROUND_WRITE: check_driver_write_main(argument); break;
+                case CHECK_UNITS_ROUND_FOREIGN: foreign_driver_flow(argument); break;
                 case CHECK_UNITS_ROUND_END: break;
             }
         }
@@ -2039,7 +2498,7 @@ static void check_units_slots_back(CheckUnitsFlow* flow, WorkerBudgetLease* leas
 // `lanes->lanes` of them, a unit at a time each and past the units as many as their sources pay for, which a GNU make
 // jobserver's budget may reduce; the lanes without a unit left take the units' functions' parts), the units' diagnostics are
 // printed in the command line's order, and then with a link to make, the units' links are merged and linked
-// (check_driver_executable), with -g their DWARF units, one each. -o with -c, a dump and --id-order are refused: their
+// (check_driver_executable), with -g their DWARF units, one each. -o with -c and a dump are refused: their
 // outputs are one unit's.
 // With `stage_clock`, the setup, the lanes' run, the link and the release are its stages. Without `release` (a command
 // whose process exits after it) and without a link, the last lane to stop taking units leaves its memory to the exit.
@@ -2052,13 +2511,14 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
     uint64_t* keys = units != NULL ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, count) : NULL;
     uint64_t* sorting = keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, count) : NULL;
     uint32_t* order = sorting != NULL ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, count) : NULL;
-    if (command->emit_object && command->output != NULL)
+    const uint32_t sources = command->inputs != NULL ? command->source_count : count;
+    if (command->emit_object && command->output != NULL && sources > 1)
     {
         fprintf(stderr, "error: cannot specify -o when generating multiple output files\n");
     }
-    else if (command->dump || command->dump_static || command->id_ordered)
+    else if (command->dump || command->dump_static)
     {
-        fprintf(stderr, "error: --dump-typed, --dump-static and --id-order take one source file\n");
+        fprintf(stderr, "error: --dump-typed and --dump-static take one source file\n");
     }
     else if (order == NULL)
     {
@@ -2075,7 +2535,9 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             const uint64_t size = stat(inputs[u], &status) == 0 && status.st_size > 0 ? (uint64_t)status.st_size : 0;
             const uint32_t cost = size < UINT32_MAX ? (uint32_t)size : UINT32_MAX - 1;
             units[u].path = inputs[u];
-            units[u].bytes = size;
+            units[u].kind = command->inputs != NULL ? command->inputs[u].kind : CHECK_DRIVER_INPUT_C;
+            units[u].preprocessed = command->inputs != NULL && command->inputs[u].preprocessed;
+            units[u].bytes = units[u].kind != CHECK_DRIVER_INPUT_LINK ? size : 0;
             keys[u] = (uint64_t)(UINT32_MAX - cost) << 32 | u;
         }
         const uint64_t* sorted = c_bindings_sort(keys, sorting, count, !command->scalar, UINT32_MAX);
@@ -2083,7 +2545,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             order[i] = (uint32_t)sorted[i];
         }
-        const bool named = !command->emit_object || check_units_objects(units, count, &arena);
+        const bool named = !command->emit_object || command->output != NULL || check_units_objects(units, count, &arena);
         // The tables every unit's code reads, which the first to need them would build: built here, before the lanes,
         // which then only read them. The parser's are the front end's home's (main.c), which parse_initialize builds.
         // The parser starts zeroed: a refusal of the units' objects' names skips its initialization, and its release
@@ -2096,6 +2558,19 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         if (ready && emitting && !tier0_initialized)
         {
             ready = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize();
+        }
+        // And the lowering's runtime functions' names' lengths and hashes (#442), which every unit's lowering reads, before
+        // the lanes start: a lowering that finds them unmade measures and hashes the names itself, as the emission's
+        // backend setup leaves it to.
+        if (ready && emitting && !check_lower_runtime_names_ready)
+        {
+            check_lower_runtime_names_initialize();
+        }
+        // A baked executable starts with the semantics tables built (baked.h, #590), and x86_semantics_initialize rebuilds
+        // them unconditionally, writing the baked pages: only an executable that isn't baked runs it (#1571).
+        if (ready && command->mixed_inputs)
+        {
+            ready = x86_encoder_initialize() && (x86_semantics_initialized || x86_semantics_initialize());
         }
         if (ready && emitting && command->unwind_tables && !unwind_ready)
         {
@@ -2171,6 +2646,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             {
                 if (!units[order[i]].compiled)
                 {
+                    __atomic_add_fetch(&run.started, 1, __ATOMIC_RELAXED);
                     check_units_compile(&run, states, units + order[i]);
                 }
             }
@@ -2183,26 +2659,36 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             lane_restore(caller);
             lanes->active = active;
             check_clock_mark(stage_clock, CHECK_STAGE_LANES);
-            // The units' diagnostics, in the command line's order.
+            // All jobs have finished: publish input order's prefix through its first fatal, including that unit's notes
+            // and summary. A later job's fatal cannot cancel an earlier job. Release every buffer even past the cutoff.
             result = 0;
+            bool stopped = false;
             for (uint32_t u = 0; u < count; u += 1)
             {
-                if (units[u].diagnostic_bytes != 0)
+                if (!stopped && units[u].diagnostic_bytes != 0)
                 {
-                    fwrite(units[u].diagnostics, 1, units[u].diagnostic_bytes, stderr);
+                    result = fwrite(units[u].diagnostics, 1, units[u].diagnostic_bytes, stderr) == units[u].diagnostic_bytes ? result : 1;
                 }
-                if (units[u].unbuffered)
+                if (!stopped && units[u].unbuffered)
                 {
                     fprintf(stderr, "fatal error: %s: can't buffer its diagnostics\n", units[u].path);
                 }
+                stopped |= units[u].fatal || units[u].unbuffered;
                 free(units[u].diagnostics);
                 units[u].diagnostics = NULL;
                 result = units[u].status != 0 ? 1 : result;
             }
             if (command->shared_parts)
             {
+                uint32_t discarded_huge = 0;
+                for (uint32_t l = 0; l < active; l += 1)
+                {
+                    discarded_huge += states[l].discarded_huge;
+                }
                 fprintf(stderr, "shared parts: %llu taken by lanes without units\n", (unsigned long long)(board != NULL ? board->others : 0));
                 fprintf(stderr, "units' lanes: %u left %s memory to the exit\n", run.kept, run.kept != 1 ? "their" : "its");
+                fprintf(stderr, "units' scratch: %u gave %s pages back in whole huge pages, for a unit left to take\n", discarded_huge,
+                        discarded_huge != 1 ? "their" : "its");
             }
             if (command->units_memory != 0)
             {
@@ -2221,9 +2707,10 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 // The executable is written on as many lanes as the units' run took, each of its rounds (the merge, the
                 // link's check and the write) on those the worker budget gives of them.
                 CheckProgramLanes writers = { .lanes = active, .budget = lanes->budget, .units_flow = lanes->units_flow };
-                const bool linked = check_driver_executable(NULL, NULL, NULL, NULL, NULL, command->output != NULL ? command->output : "a.out", command->scalar,
-                                                            command->verify, command->source_rows, command->unwind_tables, command->libraries, &writers, &arena,
-                                                            stage_clock, units, count, command->runtime_kind);
+                const bool linked = command->mixed_inputs ? check_driver_mixed_link(command, units, count, lanes) :
+                    check_driver_executable(NULL, NULL, NULL, NULL, NULL, command->output != NULL ? command->output : "a.out", command->scalar,
+                                            command->verify, command->source_rows, command->unwind_tables, command->libraries, &writers, &arena,
+                                            stage_clock, units, count, command->runtime_kind);
                 result = linked ? 0 : 1;
             }
             for (uint32_t u = 0; result == 0 && u < count; u += 1)

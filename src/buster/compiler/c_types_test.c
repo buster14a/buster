@@ -406,6 +406,9 @@ static bool type_test_validation(void)
         type_test_error(&tally, table, type_test_record(table, BUSTER_TYPE_KIND_STRUCT, members, 1, plain), TYPE_ERROR_NONE, "int : 0");
         members[0] = type_test_member(1, BUSTER_TYPE_INT128, 100);
         type_test_error(&tally, table, type_test_record(table, BUSTER_TYPE_KIND_STRUCT, members, 1, plain), TYPE_ERROR_NONE, "__int128 : 100");
+        members[0] = type_test_member(1, type_bit_int(table, 129, true), 32);
+        type_test_error(&tally, table, type_test_record(table, BUSTER_TYPE_KIND_STRUCT, members, 1, (TypeRecordAttributes){ .ms_struct = true }),
+                        TYPE_ERROR_MS_STRUCT_ALIGNMENT, "ms_struct's non-power-of-two bit-field unit is explicitly unsupported");
         members[0] = type_test_member(1, enumeration, 3);
         type_test_error(&tally, table, type_test_record(table, BUSTER_TYPE_KIND_STRUCT, members, 1, plain), TYPE_ERROR_MEMBER, "bit-field of an incomplete enum");
         const TypeId defined = type_tag(table, BUSTER_TYPE_KIND_UNION, 4);
@@ -1244,7 +1247,7 @@ static bool type_test_batches(uint64_t seed, uint32_t count)
 
 // A fixture: a record's members and the offsets, size and alignment clang 23 gives it (each measured with offsetof, or
 // for a bit-field by setting it in a zeroed object and finding its first bit).
-#define BUSTER_TYPE_TEST_FIXTURE_MEMBERS 4
+#define BUSTER_TYPE_TEST_FIXTURE_MEMBERS 5
 
 typedef struct TypeTestLayoutFixture TypeTestLayoutFixture;
 struct TypeTestLayoutFixture
@@ -1263,6 +1266,10 @@ struct TypeTestLayoutFixture
 #define BUSTER_TYPE_TEST_INT_ARRAY0 1u
 #define BUSTER_TYPE_TEST_DOUBLE_OPEN 2u
 #define BUSTER_TYPE_TEST_ALIGNED16 3u
+#define BUSTER_TYPE_TEST_INT_ALIGNED1 4u
+#define BUSTER_TYPE_TEST_INT_ALIGNED1_ARRAY3 5u
+#define BUSTER_TYPE_TEST_BIT_INT65 6u
+#define BUSTER_TYPE_TEST_PACKED_ENUM 7u
 
 #define BUSTER_TYPE_TEST_PLAIN(name_, type_) { .name = (name_), .type = (type_), .bit_width = BUSTER_TYPE_NOT_BIT_FIELD }
 #define BUSTER_TYPE_TEST_BITS(name_, type_, width_) { .name = (name_), .type = (type_), .bit_width = (width_) }
@@ -1308,6 +1315,82 @@ static const TypeTestLayoutFixture type_test_layout_fixtures[] = {
       { 0, 8 }, 16, 16 },
     { "{ char c; int : 3; char d; }", BUSTER_TYPE_KIND_STRUCT, { 0 }, 3,
       { BUSTER_TYPE_TEST_PLAIN(1, BUSTER_TYPE_CHAR), BUSTER_TYPE_TEST_BITS(0, BUSTER_TYPE_INT, 3), BUSTER_TYPE_TEST_PLAIN(2, BUSTER_TYPE_CHAR) }, { 0, 8, 16 }, 3, 1 },
+    { "ms_struct { char head; unsigned a : 3, b : 5; char tail; }", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 4,
+      { BUSTER_TYPE_TEST_PLAIN(1, BUSTER_TYPE_CHAR), BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_UINT, 3), BUSTER_TYPE_TEST_BITS(3, BUSTER_TYPE_UINT, 5),
+        BUSTER_TYPE_TEST_PLAIN(4, BUSTER_TYPE_CHAR) }, { 0, 32, 35, 64 }, 12, 4 },
+    { "ms_struct { unsigned char a : 3; unsigned b : 5; char tail; }", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 3,
+      { BUSTER_TYPE_TEST_BITS(1, BUSTER_TYPE_UCHAR, 3), BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_UINT, 5), BUSTER_TYPE_TEST_PLAIN(3, BUSTER_TYPE_CHAR) },
+      { 0, 32, 64 }, 12, 4 },
+    { "ms_struct { unsigned a : 31, b : 2; char tail; }", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 3,
+      { BUSTER_TYPE_TEST_BITS(1, BUSTER_TYPE_UINT, 31), BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_UINT, 2), BUSTER_TYPE_TEST_PLAIN(3, BUSTER_TYPE_CHAR) },
+      { 0, 32, 64 }, 12, 4 },
+    { "ms_struct { unsigned : 3, a : 3, b : 5; char tail; }", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 4,
+      { BUSTER_TYPE_TEST_BITS(0, BUSTER_TYPE_UINT, 3), BUSTER_TYPE_TEST_BITS(1, BUSTER_TYPE_UINT, 3), BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_UINT, 5),
+        BUSTER_TYPE_TEST_PLAIN(3, BUSTER_TYPE_CHAR) }, { 0, 3, 6, 32 }, 8, 4 },
+    { "ms_struct { char head; unsigned : 0; char tail; }", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 3,
+      { BUSTER_TYPE_TEST_PLAIN(1, BUSTER_TYPE_CHAR), BUSTER_TYPE_TEST_BITS(0, BUSTER_TYPE_UINT, 0), BUSTER_TYPE_TEST_PLAIN(2, BUSTER_TYPE_CHAR) },
+      { 0, 8, 8 }, 2, 1 },
+    { "ms_struct { unsigned char a : 3; unsigned : 0; unsigned char b : 3; char tail; }", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 4,
+      { BUSTER_TYPE_TEST_BITS(1, BUSTER_TYPE_UCHAR, 3), BUSTER_TYPE_TEST_BITS(0, BUSTER_TYPE_UINT, 0), BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_UCHAR, 3),
+        BUSTER_TYPE_TEST_PLAIN(3, BUSTER_TYPE_CHAR) }, { 0, 32, 32, 40 }, 8, 4 },
+    { "ms_struct consecutive zero-width fields", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 5,
+      { BUSTER_TYPE_TEST_BITS(1, BUSTER_TYPE_UCHAR, 3), BUSTER_TYPE_TEST_BITS(0, BUSTER_TYPE_UINT, 0), BUSTER_TYPE_TEST_BITS(0, BUSTER_TYPE_ULLONG, 0),
+        BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_UCHAR, 3), BUSTER_TYPE_TEST_PLAIN(3, BUSTER_TYPE_CHAR) }, { 0, 32, 32, 32, 40 }, 8, 4 },
+    { "ms_struct { unsigned : 0; }", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 1,
+      { BUSTER_TYPE_TEST_BITS(0, BUSTER_TYPE_UINT, 0) }, { 0 }, 0, 1 },
+    { "ms_struct union { unsigned a : 3, b : 5; char tail; }", BUSTER_TYPE_KIND_UNION, { .ms_struct = true }, 3,
+      { BUSTER_TYPE_TEST_BITS(1, BUSTER_TYPE_UINT, 3), BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_UINT, 5), BUSTER_TYPE_TEST_PLAIN(3, BUSTER_TYPE_CHAR) }, { 0, 0, 0 }, 4, 1 },
+    { "ms_struct union { unsigned : 0; }", BUSTER_TYPE_KIND_UNION, { .ms_struct = true }, 1,
+      { BUSTER_TYPE_TEST_BITS(0, BUSTER_TYPE_UINT, 0) }, { 0 }, 1, 1 },
+    { "ms_struct packed bit-field unit", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true, .packed = true }, 4,
+      { BUSTER_TYPE_TEST_PLAIN(1, BUSTER_TYPE_CHAR), BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_UINT, 3), BUSTER_TYPE_TEST_BITS(3, BUSTER_TYPE_UINT, 5),
+        BUSTER_TYPE_TEST_PLAIN(4, BUSTER_TYPE_CHAR) }, { 0, 8, 11, 40 }, 6, 1 },
+    { "ms_struct pack(1) bit-field unit", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true, .pack_log2 = 1 }, 4,
+      { BUSTER_TYPE_TEST_PLAIN(1, BUSTER_TYPE_CHAR), BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_UINT, 3), BUSTER_TYPE_TEST_BITS(3, BUSTER_TYPE_UINT, 5),
+        BUSTER_TYPE_TEST_PLAIN(4, BUSTER_TYPE_CHAR) }, { 0, 8, 11, 40 }, 6, 1 },
+    { "ms_struct pack(2) mixed units", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true, .pack_log2 = 2 }, 4,
+      { BUSTER_TYPE_TEST_PLAIN(1, BUSTER_TYPE_CHAR), BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_UCHAR, 3), BUSTER_TYPE_TEST_BITS(3, BUSTER_TYPE_UINT, 5),
+        BUSTER_TYPE_TEST_PLAIN(4, BUSTER_TYPE_CHAR) }, { 0, 8, 16, 48 }, 8, 2 },
+    { "ms_struct explicit alignment does not split a unit", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 3,
+      { BUSTER_TYPE_TEST_BITS(1, BUSTER_TYPE_UINT, 3), { .name = 2, .type = BUSTER_TYPE_UINT, .bit_width = 5, .alignment_log2 = 5 },
+        BUSTER_TYPE_TEST_PLAIN(3, BUSTER_TYPE_CHAR) }, { 0, 3, 32 }, 16, 16 },
+    { "ms_struct bit-field typedef with reduced alignment", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 4,
+      { BUSTER_TYPE_TEST_PLAIN(1, BUSTER_TYPE_CHAR), BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_TEST_INT_ALIGNED1, 3),
+        BUSTER_TYPE_TEST_BITS(3, BUSTER_TYPE_TEST_INT_ALIGNED1, 5), BUSTER_TYPE_TEST_PLAIN(4, BUSTER_TYPE_CHAR) }, { 0, 32, 35, 64 }, 12, 4 },
+    { "ms_struct packed enum storage", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 3,
+      { BUSTER_TYPE_TEST_BITS(1, BUSTER_TYPE_TEST_PACKED_ENUM, 2), BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_TEST_PACKED_ENUM, 2), BUSTER_TYPE_TEST_PLAIN(3, BUSTER_TYPE_CHAR) },
+      { 0, 2, 8 }, 2, 1 },
+    { "ms_struct __int128 unit", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 4,
+      { BUSTER_TYPE_TEST_PLAIN(1, BUSTER_TYPE_CHAR), BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_UINT128, 70), BUSTER_TYPE_TEST_BITS(3, BUSTER_TYPE_UINT128, 30),
+        BUSTER_TYPE_TEST_PLAIN(4, BUSTER_TYPE_CHAR) }, { 0, 128, 198, 256 }, 48, 16 },
+    { "ms_struct _BitInt(65) unit", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 4,
+      { BUSTER_TYPE_TEST_PLAIN(1, BUSTER_TYPE_CHAR), BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_TEST_BIT_INT65, 40), BUSTER_TYPE_TEST_BITS(3, BUSTER_TYPE_TEST_BIT_INT65, 20),
+        BUSTER_TYPE_TEST_PLAIN(4, BUSTER_TYPE_CHAR) }, { 0, 128, 168, 256 }, 48, 16 },
+    { "ms_struct empty record", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 0, { { 0 } }, { 0 }, 0, 1 },
+    { "ms_struct packed zero-width field retains natural alignment", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true, .packed = true }, 4,
+      { BUSTER_TYPE_TEST_BITS(1, BUSTER_TYPE_UCHAR, 3), BUSTER_TYPE_TEST_BITS(0, BUSTER_TYPE_UINT, 0), BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_UCHAR, 3),
+        BUSTER_TYPE_TEST_PLAIN(3, BUSTER_TYPE_CHAR) }, { 0, 32, 32, 40 }, 8, 4 },
+    { "ms_struct pack(1) zero-width field retains natural alignment", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true, .pack_log2 = 1 }, 4,
+      { BUSTER_TYPE_TEST_BITS(1, BUSTER_TYPE_UCHAR, 3), BUSTER_TYPE_TEST_BITS(0, BUSTER_TYPE_UINT, 0), BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_UCHAR, 3),
+        BUSTER_TYPE_TEST_PLAIN(3, BUSTER_TYPE_CHAR) }, { 0, 32, 32, 40 }, 8, 4 },
+    { "ms_struct ordinary typedef alignment", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 4,
+      { BUSTER_TYPE_TEST_PLAIN(1, BUSTER_TYPE_CHAR), BUSTER_TYPE_TEST_PLAIN(2, BUSTER_TYPE_TEST_INT_ALIGNED1),
+        BUSTER_TYPE_TEST_PLAIN(3, BUSTER_TYPE_TEST_INT_ALIGNED1), BUSTER_TYPE_TEST_PLAIN(4, BUSTER_TYPE_CHAR) }, { 0, 32, 64, 96 }, 16, 4 },
+    { "ms_struct array element alignment", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 4,
+      { BUSTER_TYPE_TEST_PLAIN(1, BUSTER_TYPE_CHAR), BUSTER_TYPE_TEST_PLAIN(2, BUSTER_TYPE_TEST_INT_ALIGNED1_ARRAY3), BUSTER_TYPE_TEST_BITS(3, BUSTER_TYPE_UINT, 2),
+        BUSTER_TYPE_TEST_PLAIN(4, BUSTER_TYPE_CHAR) }, { 0, 32, 128, 160 }, 24, 4 },
+    { "ms_struct complex alignment", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 4,
+      { BUSTER_TYPE_TEST_PLAIN(1, BUSTER_TYPE_CHAR), BUSTER_TYPE_TEST_PLAIN(2, BUSTER_TYPE_COMPLEX_DOUBLE), BUSTER_TYPE_TEST_BITS(3, BUSTER_TYPE_UINT, 2),
+        BUSTER_TYPE_TEST_PLAIN(4, BUSTER_TYPE_CHAR) }, { 0, 64, 192, 224 }, 32, 8 },
+    { "ms_struct union ignores bit-field alignment attributes", BUSTER_TYPE_KIND_UNION, { .ms_struct = true }, 3,
+      { { .name = 1, .type = BUSTER_TYPE_UINT, .bit_width = 3, .alignment_log2 = 5 }, BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_UINT, 5),
+        BUSTER_TYPE_TEST_PLAIN(3, BUSTER_TYPE_CHAR) }, { 0, 0, 0 }, 4, 1 },
+    { "ms_struct aligned zero-width field", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 4,
+      { BUSTER_TYPE_TEST_BITS(1, BUSTER_TYPE_UINT, 3), { .type = BUSTER_TYPE_UINT, .bit_width = 0, .alignment_log2 = 5 }, BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_UINT, 3),
+        BUSTER_TYPE_TEST_PLAIN(3, BUSTER_TYPE_CHAR) }, { 0, 128, 128, 160 }, 32, 16 },
+    { "ms_struct integer widths cannot share a unit", BUSTER_TYPE_KIND_STRUCT, { .ms_struct = true }, 3,
+      { BUSTER_TYPE_TEST_BITS(1, BUSTER_TYPE_UINT, 3), BUSTER_TYPE_TEST_BITS(2, BUSTER_TYPE_ULLONG, 5), BUSTER_TYPE_TEST_PLAIN(3, BUSTER_TYPE_CHAR) },
+      { 0, 64, 128 }, 24, 8 },
 };
 
 static bool type_test_layout_fixtures_check(void)
@@ -1323,11 +1406,18 @@ static bool type_test_layout_fixtures_check(void)
             .alignment_log2 = 5,
         };
         type_complete_record(table, aligned16, &member, 1, aligned_attribute);
+        const TypeId aligned1 = type_aligned(table, BUSTER_TYPE_UINT, 0);
+        const TypeId packed_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, 10);
+        type_enum_complete(table, packed_enum, BUSTER_TYPE_UCHAR, 0);
         const TypeId resolved[] = {
             0,
             type_array(table, BUSTER_TYPE_INT, 0),
             type_incomplete_array(table, BUSTER_TYPE_DOUBLE),
             aligned16,
+            aligned1,
+            type_array(table, aligned1, 3),
+            type_bit_int(table, 65, true),
+            packed_enum,
         };
         for (uint32_t pass = 0; pass < 2; pass += 1)
         {
@@ -2296,6 +2386,91 @@ static bool type_test_printing(Arena* arena)
         const String8 named = type_print(table, arena, type_pointer(table, type_array(table, BUSTER_TYPE_INT, 3)), BUSTER_S8("p"), 0, 0);
         type_test_expect(&tally, named.length == 11 && memcmp(named.pointer, "int (*p)[3]", 11) == 0, "printing", "a named pointer to an array");
         arena_pop_to(arena, length);
+        // Parentheses are one declarator occurrence's sugar. They do not change its type, expand into an aka spelling,
+        // double the precedence group of an array pointer, or leak into a function parameter of the same base type.
+        const TypeId pointer_pointer = type_pointer(table, int_pointer);
+        const TypeId array = type_array(table, BUSTER_TYPE_INT, 3);
+        const struct
+        {
+            TypeId type;
+            TypeId grouped;
+            uint32_t count;
+            const char* text;
+        } grouped[] = {
+            { int_pointer, BUSTER_TYPE_INT, 1, "int (*)" },
+            { int_pointer, int_pointer, 1, "int *" },
+            { pointer_pointer, BUSTER_TYPE_INT, 1, "int (**)" },
+            { pointer_pointer, int_pointer, 1, "int *(*)" },
+            { type_array(table, int_pointer, 3), BUSTER_TYPE_INT, 1, "int (*[3])" },
+            { type_pointer(table, array), array, 1, "int (*)[3]" },
+            { int_pointer, BUSTER_TYPE_INT, 2, "int ((*))" },
+            { int_pointer | BUSTER_TYPE_CONST, BUSTER_TYPE_INT, 1, "int (*const)" },
+            { type_pointer(table, of_int), of_int, 1, "int (*)(int)" },
+            { type_function(table, int_pointer, &int_pointer, 1, prototype), BUSTER_TYPE_INT, 1, "int (*(int *))" },
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(grouped); i += 1)
+        {
+            const uint64_t mark = arena->length;
+            const TypePrintParen parentheses = { .type = grouped[i].grouped, .count = grouped[i].count };
+            const TypeNames spelling = { .parentheses = &parentheses, .parenthesis_count = 1 };
+            const String8 printed = type_print(table, arena, grouped[i].type, (String8){ 0 }, &spelling, 0);
+            type_test_expect(&tally, printed.length == strlen(grouped[i].text) && memcmp(printed.pointer, grouped[i].text, printed.length) == 0,
+                             "parenthesized printing", grouped[i].text);
+            arena_pop_to(arena, mark);
+        }
+        // Array levels outside a qualified pointer see an empty name in the AFTER pass even when qualifiers make
+        // BEFORE's placeholder nonempty. Their stored groups must not produce unmatched opening parentheses.
+        {
+            const uint64_t mark = arena->length;
+            const TypeId qualified_pointer = int_pointer | BUSTER_TYPE_CONST;
+            const TypeId inner = type_array(table, qualified_pointer, 3);
+            const TypeId outer = type_array(table, inner, 1);
+            const TypePrintParen entries[] = { { outer, 1 }, { inner, 1 } };
+            const TypeNames spelling = { .parentheses = entries, .parenthesis_count = BUSTER_ARRAY_LENGTH(entries) };
+            const String8 printed = type_print(table, arena, outer, (String8){ 0 }, &spelling, 0);
+            const char* expected = "int *const[1][3]";
+            type_test_expect(&tally, printed.length == strlen(expected) && memcmp(printed.pointer, expected, printed.length) == 0,
+                             "parenthesized printing", "qualified array pointer with an empty placeholder");
+            arena_pop_to(arena, mark);
+        }
+        // Exercise the indexed view with unsorted entries, repeated levels and unrelated types. Repeated entries
+        // have the same meaning as their combined count, including when the index crosses the small-view cutoff.
+        {
+            const uint64_t mark = arena->length;
+            const TypePrintParen entries[] = {
+                { BUSTER_TYPE_DOUBLE, 1 }, { BUSTER_TYPE_FLOAT, 1 }, { BUSTER_TYPE_INT, 1 }, { BUSTER_TYPE_CHAR, 1 },
+                { BUSTER_TYPE_BOOL, 1 }, { BUSTER_TYPE_LONG, 1 }, { BUSTER_TYPE_VOID, 1 }, { BUSTER_TYPE_INT, 1 },
+                { BUSTER_TYPE_UINT, 1 }, { BUSTER_TYPE_SHORT, 1 }, { BUSTER_TYPE_LONG_DOUBLE, 1 }, { BUSTER_TYPE_DOUBLE, 1 },
+            };
+            const TypeNames spelling = { .parentheses = entries, .parenthesis_count = BUSTER_ARRAY_LENGTH(entries) };
+            const String8 printed = type_print(table, arena, int_pointer, (String8){ 0 }, &spelling, 0);
+            const char* expected = "int ((*))";
+            type_test_expect(&tally, printed.length == strlen(expected) && memcmp(printed.pointer, expected, printed.length) == 0,
+                             "parenthesized printing", "unsorted indexed groups and repeated types");
+            arena_pop_to(arena, mark);
+        }
+        // A distinct parenthesized level for every pointer formerly rescanned all levels on every printer step.
+        {
+            const uint64_t mark = arena->length;
+            enum { LEVELS = 1024 };
+            TypePrintParen entries[LEVELS];
+            TypeId chain = BUSTER_TYPE_INT;
+            for (uint32_t i = 0; i < LEVELS; i += 1)
+            {
+                entries[LEVELS - 1 - i] = (TypePrintParen){ .type = chain, .count = 1 };
+                chain = type_pointer(table, chain);
+            }
+            const TypeNames spelling = { .parentheses = entries, .parenthesis_count = LEVELS };
+            const String8 printed = type_print(table, arena, chain, (String8){ 0 }, &spelling, 0);
+            bool same = printed.length == 4 + 3 * LEVELS && memcmp(printed.pointer, "int ", 4) == 0;
+            for (uint32_t i = 0; same && i < LEVELS; i += 1)
+            {
+                same = printed.pointer[4 + 2 * i] == '(' && printed.pointer[5 + 2 * i] == '*' &&
+                       printed.pointer[4 + 2 * LEVELS + i] == ')';
+            }
+            type_test_expect(&tally, same, "parenthesized printing", "deep grouped pointer chain");
+            arena_pop_to(arena, mark);
+        }
         type_test_table_close(&test);
     }
     type_test_report("printing", tally);
@@ -2630,6 +2805,7 @@ static TypeRecordAttributes type_test_world_attributes(uint64_t* random)
         .packed = type_test_below(random, 7) == 0,
         .pack_log2 = type_test_below(random, 7) == 0 ? (uint8_t)(1 + type_test_below(random, 5)) : 0,
         .alignment_log2 = type_test_below(random, 10) == 0 ? (uint8_t)(1 + type_test_below(random, 6)) : 0,
+        .ms_struct = type_test_below(random, 5) == 0,
     };
     return result;
 }
@@ -3036,6 +3212,7 @@ static void type_test_write_members(TypeTestWorld* world, TypeTestText* text, ui
         {
             type_test_format(text, "    %s", type_kind(table, type) == BUSTER_TYPE_KIND_STRUCT ? "struct" : "union");
             type_test_format(text, "%s", table->tags.packed[inner] != 0 ? " __attribute__((packed))" : "");
+            type_test_format(text, "%s", table->tags.ms_struct[inner] != 0 ? " __attribute__((ms_struct))" : "");
             if (table->tags.alignment_log2[inner] != 0)
             {
                 type_test_format(text, " __attribute__((aligned(%u)))", 1u << (table->tags.alignment_log2[inner] - 1));
@@ -3099,6 +3276,7 @@ static void type_test_write_tag(TypeTestWorld* world, TypeTestText* text, uint32
             type_test_format(text, "#pragma pack(push, %u)\n", 1u << (pack - 1));
         }
         type_test_format(text, "%s%s", kind == BUSTER_TYPE_KIND_STRUCT ? "struct" : "union", table->tags.packed[tag] != 0 ? " __attribute__((packed))" : "");
+        type_test_format(text, "%s", table->tags.ms_struct[tag] != 0 ? " __attribute__((ms_struct))" : "");
         if (table->tags.alignment_log2[tag] != 0)
         {
             type_test_format(text, " __attribute__((aligned(%u)))", 1u << (table->tags.alignment_log2[tag] - 1));

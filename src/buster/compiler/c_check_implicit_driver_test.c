@@ -317,7 +317,7 @@ static bool check_test_driver_common_output(const char* text, char* filtered, si
 // Each of the common warnings' scratch allocations, failed in turn (BUSTER_TEST_COMMON_WARNING_FAIL_AT), fails the unit
 // with the capacity's fatal error instead of exiting cleanly with fewer warnings; once the index passes every
 // allocation the unit checks as it does unconstrained. The source reaches each pass: switches, the expression
-// walk, dangling else, -Wuninitialized and a conditional format's growing leaf worklist.
+// walk, dangling else, -Wuninitialized, a conditional format's growing leaf worklist and the selections' ranges (#1360).
 static void check_test_driver_common_exhaustion(CheckTest* test, const char* executable, const char* directory)
 {
     static const char source[] =
@@ -327,7 +327,8 @@ static void check_test_driver_common_exhaustion(CheckTest* test, const char* exe
         "    printf(c ? (d ? (c ? (d ? (c ? (d ? (c ? (d ? (c ? (d ? (c ? (d ? (c ? (d ? (c ? (d ? (c ? (d ? \"%d\""
         " : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\")"
         " : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\", 1);\n"
-        "    return c == 0 ? 1 / 0 : (c = c); }\n";
+        "    return c == 0 ? 1 / 0 : (c = c); }\n"
+        "int s(int c) { return _Generic(c, int: 1, default: 0) + __extension__ c; }\n";
     char path[512];
     snprintf(path, sizeof(path), "%s/common-warnings-exhaustion.c", directory);
     const bool written = parse_test_write(path, source, strlen(source));
@@ -364,8 +365,245 @@ static void check_test_driver_common_exhaustion(CheckTest* test, const char* exe
     unlink(path);
 }
 
+// #1349's direct reading of a self-read candidate: an identifier spelled `name` whose previous token is not `.` or `->`.
+static uint32_t check_test_common_candidate_reference(const uint8_t* kinds, const uint32_t* names, uint32_t name, uint32_t begin, uint32_t end)
+{
+    uint32_t result = end;
+    for (uint32_t at = end; at > begin; at -= 1)
+    {
+        const uint32_t token = at - 1;
+        const uint8_t before = token > 0 ? kinds[token - 1] : PARSE_KIND_COMMA;
+        if (kinds[token] == PARSE_KIND_IDENTIFIER && names[token] == name && before != PARSE_KIND_PERIOD && before != PARSE_KIND_ARROW)
+        {
+            result = token;
+        }
+    }
+    return result;
+}
+
+// check_common_self_candidate's AVX-512 blocks against its scalar twin and the direct reading, on random streams that
+// end at a protected page: every start and end near the tail, block edges, members across a block edge, and walks of
+// every candidate the way the brace scan takes them.
+static void check_test_common_self_candidates(CheckTest* test)
+{
+    static const uint8_t alphabet[] = { PARSE_KIND_IDENTIFIER, PARSE_KIND_IDENTIFIER, PARSE_KIND_IDENTIFIER, PARSE_KIND_PERIOD,
+                                        PARSE_KIND_ARROW, PARSE_KIND_COMMA, PARSE_KIND_NUMBER, PARSE_KIND_L_BRACE };
+    enum { capacity = 640 };
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* kind_map = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint8_t* name_map = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool ready = kind_map != MAP_FAILED && name_map != MAP_FAILED && page >= capacity * sizeof(uint32_t);
+    ready = ready && mprotect(kind_map + page, page, PROT_NONE) == 0 && mprotect(name_map + page, page, PROT_NONE) == 0;
+    check_test_expect(test, ready, "self-read candidates have protected kind and name tails");
+    const uint32_t name = 7;
+    bool same = true;
+    bool walked = true;
+    uint64_t found = 0;
+    for (uint32_t trial = 0; ready && trial < 2000; trial += 1)
+    {
+        const uint32_t length = 1 + check_test_random(test) % (trial % 3 == 0 ? 140 : capacity);
+        uint8_t* kinds = kind_map + page - length;
+        uint32_t* names = (uint32_t*)(name_map + page) - length;
+        // Sparse trials leave whole blocks without a candidate; dense ones put several in a block.
+        const uint32_t odds = trial % 4 == 0 ? 96 : 3;
+        for (uint32_t at = 0; at < length; at += 1)
+        {
+            kinds[at] = alphabet[check_test_random(test) % BUSTER_ARRAY_LENGTH(alphabet)];
+            names[at] = kinds[at] != PARSE_KIND_IDENTIFIER ? 0 : check_test_random(test) % odds == 0 ? name : 5 + check_test_random(test) % 2;
+        }
+        for (uint32_t query = 0; same && query < 24; query += 1)
+        {
+            const uint32_t edge = 64 * (check_test_random(test) % (length / 64 + 1));
+            uint32_t begin = query % 3 == 0 ? edge : check_test_random(test) % (length + 1);
+            begin = begin + query % 2 <= length ? begin + query % 2 : begin;
+            const uint32_t end = query % 4 == 0 ? length : begin + check_test_random(test) % (length - begin + 1);
+            const uint32_t expected = check_test_common_candidate_reference(kinds, names, name, begin, end);
+            const uint32_t vector = check_common_self_candidate(kinds, names, name, begin, end, true);
+            const uint32_t scalar = check_common_self_candidate(kinds, names, name, begin, end, false);
+            same = vector == expected && scalar == expected;
+        }
+        uint32_t vector_count = 0;
+        uint32_t scalar_count = 0;
+        uint64_t vector_sum = 0;
+        uint64_t scalar_sum = 0;
+        for (uint32_t at = check_common_self_candidate(kinds, names, name, 0, length, true); at < length;
+             at = check_common_self_candidate(kinds, names, name, at + 1, length, true))
+        {
+            vector_count += 1;
+            vector_sum += (uint64_t)at * 2654435761u + vector_count;
+        }
+        for (uint32_t at = check_common_self_candidate(kinds, names, name, 0, length, false); at < length;
+             at = check_common_self_candidate(kinds, names, name, at + 1, length, false))
+        {
+            scalar_count += 1;
+            scalar_sum += (uint64_t)at * 2654435761u + scalar_count;
+        }
+        walked = walked && vector_count == scalar_count && vector_sum == scalar_sum;
+        found += vector_count;
+    }
+    // A member's name straddling a block edge: `.` is lane 63 of the first block and the name lane 0 of the next.
+    bool carried = ready;
+    if (ready)
+    {
+        uint8_t* kinds = kind_map + page - 130;
+        uint32_t* names = (uint32_t*)(name_map + page) - 130;
+        memset(kinds, PARSE_KIND_COMMA, 130);
+        memset(names, 0, 130 * sizeof(uint32_t));
+        kinds[63] = PARSE_KIND_PERIOD;
+        kinds[64] = PARSE_KIND_IDENTIFIER;
+        names[64] = name;
+        kinds[127] = PARSE_KIND_ARROW;
+        kinds[128] = PARSE_KIND_IDENTIFIER;
+        names[128] = name;
+        kinds[129] = PARSE_KIND_IDENTIFIER;
+        names[129] = name;
+        for (uint32_t begin = 0; carried && begin <= 130; begin += 1)
+        {
+            const uint32_t expected = begin <= 129 ? 129 : 130;
+            carried = check_common_self_candidate(kinds, names, name, begin, 130, true) == expected &&
+                      check_common_self_candidate(kinds, names, name, begin, 130, false) == expected;
+        }
+    }
+    check_test_expect(test, same, "self-read candidates: SIMD blocks, scalar twin and the direct reading agree on every range");
+    check_test_expect(test, walked && found > 1000, "self-read candidates: both walks visit the same candidates");
+    check_test_expect(test, carried, "self-read candidates: a member operator before a block edge carries into the next block");
+    if (kind_map != MAP_FAILED)
+    {
+        munmap(kind_map, page * 2);
+    }
+    if (name_map != MAP_FAILED)
+    {
+        munmap(name_map, page * 2);
+    }
+}
+
+// check_common_sizeof_operand's memoized climbs against the plain climb, on random parent forests (each parent after
+// its token, or a root by itself, by BUSTER_CHECK_NONE or out of range) and on random functional graphs with cycles.
+// The queries share one memo in a random order, as a unit's brace scans do, and every memoized answer is the plain one.
+static void check_test_common_sizeof_memo(CheckTest* test)
+{
+    enum { capacity = 700 };
+    uint8_t roles[capacity];
+    uint32_t parents[capacity];
+    uint8_t known[capacity];
+    bool same = true;
+    bool memoized = true;
+    uint32_t inside = 0;
+    uint32_t outside = 0;
+    for (uint32_t trial = 0; trial < 600; trial += 1)
+    {
+        const uint32_t count = 1 + check_test_random(test) % capacity;
+        const bool cyclic = trial % 5 == 4;
+        const uint32_t reach = trial % 3 == 0 ? 3 : 48;
+        for (uint32_t t = 0; t < count; t += 1)
+        {
+            const uint32_t pick = check_test_random(test) % 24;
+            const uint32_t room = count - t - 1;
+            if (cyclic)
+            {
+                parents[t] = pick == 0 ? t : check_test_random(test) % count;
+            }
+            else if (room == 0 || pick == 0)
+            {
+                parents[t] = t;
+            }
+            else if (pick == 1)
+            {
+                parents[t] = BUSTER_CHECK_NONE;
+            }
+            else if (pick == 2)
+            {
+                parents[t] = count + check_test_random(test) % 4;
+            }
+            else
+            {
+                parents[t] = t + 1 + check_test_random(test) % (room < reach ? room : reach);
+            }
+            const uint32_t role = check_test_random(test) % (trial % 2 == 0 ? 20 : 120);
+            roles[t] = role == 0 ? PARSE_ROLE_OPEN_SIZEOF : role == 1 ? PARSE_ROLE_CLOSE_SIZEOF : (uint8_t)(role % PARSE_ROLE_COUNT);
+        }
+        memset(known, 0, count);
+        for (uint32_t query = 0; same && query < count * 2; query += 1)
+        {
+            const uint32_t token = check_test_random(test) % (count + 2);
+            const bool plain = check_common_sizeof_operand(roles, parents, count, NULL, token);
+            same = check_common_sizeof_operand(roles, parents, count, known, token) == plain;
+            inside += plain;
+            outside += !plain;
+        }
+        for (uint32_t t = 0; memoized && t < count; t += 1)
+        {
+            const bool plain = check_common_sizeof_operand(roles, parents, count, NULL, t);
+            memoized = known[t] == 0 || known[t] == (plain ? 2 : 1);
+        }
+    }
+    check_test_expect(test, same, "sizeof operands: memoized climbs answer as the plain climb on forests and cycles");
+    check_test_expect(test, memoized && inside > 1000 && outside > 1000, "sizeof operands: every memoized answer is the plain climb's");
+}
+
+// Empty-body checking keeps deferred history untouched when no enabled candidate needs a macro's position: a unit
+// without an empty body, a following file-spelled statement with a later macro operand, and -w's macro body (#1339).
+static void check_test_common_empty_history(CheckTest* test)
+{
+    static const char* const sources[] =
+    {
+        "#define VALUE 1\nint f(int x) { return x + VALUE; }\n",
+        "#define VALUE 1\nint f(int x) {\n  while (x--);\n  x += VALUE;\n  return x;\n}\n",
+        "#define BODY(x) ((void)0)\nvoid f(int x) {\n  while (x--);\n    BODY(x);\n}\n",
+    };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(sources); c += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            static InternTable identifiers;
+            static Preprocessor pp;
+            static Parser parser;
+            const PPOptions preprocessing =
+            {
+                .language =
+                {
+                    .standard = 2017,
+                    .gnu = true,
+                },
+                .no_standard_includes = true,
+                .quiet = true,
+                .defer_history = true,
+                .scalar = path != 0,
+                .suppress_warnings = c == 2,
+            };
+            const ParseOptions parsing =
+            {
+                .scalar = path != 0,
+            };
+            const CheckInput input =
+            {
+                0,
+            };
+            Arena scratch = arena_reserve(UINT64_C(1) << 20);
+            const bool ready = scratch.base != NULL && intern_initialize(&identifiers) && pp_initialize(&pp, &preprocessing, &identifiers) &&
+                               parse_initialize(&parser, &parsing, preprocessing.language) &&
+                               pp_run_source(&pp, "empty-history.c", (const uint8_t*)sources[c], (uint32_t)strlen(sources[c])) &&
+                               parse_translation_unit(&parser, &pp);
+            check_test_expect(test, ready && pp.history_deferred, "empty-body source reaches checking with deferred history");
+            if (ready)
+            {
+                check_common_empty_bodies(&parser, &pp, &input, &scratch);
+            }
+            check_test_expect(test, ready && pp.history_deferred && pp.warnings == 0 && !pp.fatal,
+                              "empty-body checking leaves file-spelled positions without a history replay");
+            parse_release(&parser);
+            pp_release(&pp);
+            intern_release(&identifiers);
+            arena_release(&scratch);
+        }
+    }
+}
+
 static void check_test_driver_common_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    check_test_common_self_candidates(test);
+    check_test_common_sizeof_memo(test);
+    check_test_common_empty_history(test);
     static const char defaults[] =
         "#include <stdio.h>\n#include <string.h>\nenum E { A, B, C };\n"
         "int *f(void) { int a = 1; return &a; }\n"
@@ -457,12 +695,62 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
     static const char return_stack[] =
         "int *a(void) { int x[3]; return &x[0]; }\n"
         "struct S { int m; };\n"
-        "int *c(void) { struct S s; return &s.m; }\n";
+        "int *c(void) { struct S s; return &s.m; }\n"
+        // What a returned address goes through: kept by casts and pointer arithmetic, consumed by a dereference, a member
+        // access, a subscript or a comparison.
+        "int d(struct S s) { return (&s)->m; }\n"
+        "int e(void) { int a[2] = { 0 }; return (&a[0])[1] + a[0]; }\n"
+        "int f(int *p) { int x = 0; return &x == p; }\n"
+        "int g(struct S s) { return *(&s.m); }\n"
+        "int *h(void) { int x = 0; return &x + 1; }\n"
+        "long i(void) { int x = 0; return (long)&x; }\n"
+        "int *j(void) { int a[2]; return a; }\n"
+        "int *k(int c) { int x = 0, y = 0; return c ? &x : &y; }\n"
+        // A comma's left operand and a conditional's condition are not what is returned; its right operand and an arm are.
+        "int *l(int *p) { int x; return (&x, p); }\n"
+        "int *m(int *p) { int x; return &x ? p : p; }\n"
+        "int *n(int *p) { int x; return (p, &x); }\n"
+        "int *o(int c, int *p) { int x; return c ? &x : p; }\n"
+        "int *q(int *p) { int x; return &x ?: p; }\n"
+        "int *r(int c, int *p) { int x; return (c ? &x : p) ? p : p; }\n"
+        "int *s(int *p) { int x; return (p, (&x, p)); }\n"
+        "int *t(int c, int *p) { int x; return c ? p : (p, &x); }\n"
+        "int *u(int *p) { int x; return (p, p, &x); }\n"
+        "int *v(int *p) { int x; return (p, &x, p); }\n"
+        "int *w(int *p) { int x; return &x, p; }\n"
+        // A selection returns the arm it selects alone: not its controlling expression, nor an arm it does not select.
+        "int *y(int *p) { int x; return _Generic(0, int: &x, default: p); }\n"
+        "int *z(int *p) { int x; return _Generic(0, int: p, default: &x); }\n"
+        "int *aa(int *p) { int x; return _Generic(&x, int *: p); }\n"
+        "int *ab(int *p) { int x; return _Generic(0, int: (p, &x)); }\n"
+        "int *ac(int *p) { int x; return __builtin_choose_expr(1, &x, p); }\n"
+        "int *ad(int *p) { int x; return __builtin_choose_expr(0, &x, p); }\n"
+        "int *ae(int *p) { int x; return _Generic(0, int: p, default: _Generic(0, int: &x)); }\n"
+        // An __extension__ selects its operand, which it returns; a selection inside one or around one selects as alone.
+        "int *af(int *p) { int x; return __extension__ &x; }\n"
+        "int *ag(int *p) { int x; return _Generic(0, int: __extension__ p, default: __extension__ &x); }\n"
+        "int *ah(int *p) { int x; return __extension__ _Generic(0, int: &x, default: p); }\n"
+        "int *ai(int *p) { int x; return __builtin_choose_expr(1, _Generic(0, long: &x, default: p), &x); }\n";
     static const char generic_selection[] =
         "int a(void) { int x; return _Generic(1, int: x, default: 0); }\n"
         "int b(void) { int x; return _Generic(1, int: 0, default: x); }\n"
         "int c(void) { int x; return __builtin_choose_expr(1, 0, x); }\n"
-        "int d(void) { int x; return __builtin_choose_expr(0, x, 0); }\n";
+        "int d(void) { int x; return __builtin_choose_expr(0, x, 0); }\n"
+        // An __extension__ evaluates its operand (#1360); nested selections evaluate the arms they select alone.
+        "int e(void) { int x; return __extension__ (x + 1); }\n"
+        "int f(void) { int x; return _Generic(1, int: __extension__ 0, default: __extension__ x); }\n"
+        "int g(void) { int x; return _Generic(1, int: _Generic(1L, long: 0, default: x), default: x); }\n"
+        "int h(void) { int x; return __builtin_choose_expr(1, _Generic(1, int: x), x); }\n"
+        "int i(void) { int x, y; return __extension__ _Generic(1, int: y, default: x); }\n"
+        "int j(void) { int x; return __builtin_choose_expr(0, x, _Generic(x, int: 0)); }\n";
+    // A marked K&R definition's parameter declarations take its mark as their context (#147,
+    // check_input_availability_contexts); an unmarked one's keep their uses' warnings.
+    static const char kr_deprecated[] =
+        "typedef int D __attribute__((deprecated(\"old\")));\n"
+        "__attribute__((deprecated)) int f(a) D a; { return a; }\n"
+        "int g(b) D b; { return b; }\n"
+        // A tag's use is diagnosed once for each of a K&R parameter declaration's declarators.
+        "struct __attribute__((deprecated(\"t\"))) S { int m; };\nint h(c, e) struct S c, e; { return 0; }\n";
     static const char self_initialization[] =
         "int a(void) { int x = x; return x; }\n"
         "int b(void) { int x = x + 1; return x; }\n";
@@ -484,6 +772,47 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "int h(int x)\n{\n    while (x) ;\n}\n"
         "int i(int x)\n{\n    while (x) ;\n      if (x) ;\n    return 0;\n}\n"
         "int j(int x)\n{\n    switch (x) {\n    case 1:\n        while (x) ;\n        break;\n    }\n    return 0;\n}\n";
+    // #1339: the statement's invocation starts at the loop's column even when its body is defined farther right.
+    // Keep quiet cases in their own unit: an earlier positive diagnostic would already have replayed the history.
+    static const char empty_macro_bodies[] =
+        "#define BODY(x) ((void)0)\n"
+        "#define OBJECT ((void)0)\n"
+        "#define NEST(x) BODY(x)\n"
+        "#define CALL(x) consume(x)\n"
+        "void consume(int);\n"
+        "void a(int x) {\n  while (x--);\n  BODY(x);\n}\n"
+        "void b(int x) {\n  for (; x; --x);\n  OBJECT;\n}\n"
+        "void c(int x) {\n  while (x--);\n  NEST(x);\n}\n"
+        "void d(int x) {\n  for (; x; --x);\n  CALL(x);\n}\n";
+    // An argument-first expansion begins at the invocation's name, not at the argument's column. Forwarded
+    // arguments and a paste follow the same outer invocation, while a non-macro expression remains a control.
+    static const char empty_macro_arguments[] =
+        "#define ID(x) x\n"
+        "#define FORWARD(x) ID(x)\n"
+        "#define JOIN(a, b) a##b\n"
+        "void consume(int);\n"
+        "void a(int x) {\n  while (x--);\n  ID(consume(x));\n}\n"
+        "void b(int x) {\n  for (; x; --x);\n  FORWARD(consume(x));\n}\n"
+        "void c(int x) {\n  while (x--);\n  JOIN(con, sume)(x);\n}\n"
+        "void d(int x) {\n  while (x--);\n  consume(x);\n}\n";
+    static const char empty_macro_positive[] =
+        "#define BODY(x) ((void)0)\n"
+        "#define OBJECT ((void)0)\n"
+        "#define ID(x) x\n"
+        "void consume(int);\n"
+        "void a(int x) { while (x--); BODY(x); }\n"
+        "void b(int x) { for (; x; --x); OBJECT; }\n"
+        "void c(int x) {\n  while (x--);\n    ID(consume(x));\n}\n"
+        "void d(int x) {\n  for (; x; --x);\n    BODY(x);\n}\n";
+    static const char empty_macro_heads[] =
+        "#define LOOP(x) while (x--)\n"
+        "#define ID(x) x\n"
+        "#define HEAD(x) ID(while (x--))\n"
+        "#define BODY(x) ((void)0)\n"
+        "void a(int x) {\n  LOOP(x);\n  BODY(x);\n}\n"
+        "void b(int x) {\n  HEAD(x);\n  BODY(x);\n}\n"
+        "void c(int x) {\n  LOOP(x);\n    BODY(x);\n}\n"
+        "void d(int x) {\n  HEAD(x);\n    BODY(x);\n}\n";
     static const char for_increments[] =
         "int a(int x) { for (; x; x) return 0; }\n"
         "int b(int x) { for (; x; x) break; }\n"
@@ -526,6 +855,34 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
     static const char enum_scope[] =
         "enum E { A, B };\n"
         "int f(void) { enum E e = A; { enum E { A, B, C }; } switch (e) { case A: return 1; case B: return 2; } return 0; }\n";
+    // Nested enum switches whose cases interleave in the program's case list, case ranges, values outside the enum and
+    // a larger unrelated enum: the switches' per-unit case and enumerator-value indexes (#1348).
+    static const char switch_nested[] =
+        "enum Big { B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11 };\n"
+        "enum Color { RED, GREEN = 4, BLUE };\n"
+        "enum Small { S0 = -1, S1, S2 };\n"
+        "int f(enum Color c, enum Small s) {\n"
+        "    switch (c) {\n"
+        "    case RED:\n"
+        "        switch (s) { case S0: return 1; case S2: return 2; }\n"
+        "        return 3;\n"
+        "    case BLUE:\n"
+        "        switch (s) { case S1: return 4; default: return 5; }\n"
+        "    case 7: return 6;\n"
+        "    }\n"
+        "    return 0;\n"
+        "}\n"
+        "int g(enum Big b, enum Color c) {\n"
+        "    switch (b) {\n"
+        "    case B11: case B0 ... B3: return 1;\n"
+        "    case B5: switch (c) { case GREEN: return 2; case 2: return 9; } return 0;\n"
+        "    case B7 ... B9: return 7;\n"
+        "    }\n"
+        "    return 0;\n"
+        "}\n"
+        "enum Dup { D3 = 3, D1 = 1, DA = 3, D5 = 5, D2 = 2, DB = 1, D0 = 0, D4 = 4 };\n"
+        "int h(enum Dup d) { switch (d) { case D2: return 1; case D5: return 2; } return 0; }\n"
+        "int k(enum Dup d) { switch (d) { case DB: return 1; } return 0; }\n";
     static const char switch_many[] =
         "enum E { E0, E1, E2, E3, E4, E5, E6, E7, E8, E9, E10, E11, E12, E13, E14, E15, E16, E17, E18, E19, E20, E21, E22, E23, E24, E25, E26, E27, E28, E29, E30, E31, E32, E33, E34, E35, E36, E37, E38, E39, E40, E41, E42, E43, E44, E45, E46, E47, E48, E49, E50, E51, E52, E53, E54, E55, E56, E57, E58, E59, E60, E61, E62, E63, E64 };\n"
         "int f(enum E e) { switch (e) { case E0: return 0; case E1: return 0; case E2: return 0; case E3: return 0; case E4: return 0; case E5: return 0; case E6: return 0; case E7: return 0; case E8: return 0; case E9: return 0; case E10: return 0; case E11: return 0; case E12: return 0; case E13: return 0; case E14: return 0; case E15: return 0; case E16: return 0; case E17: return 0; case E18: return 0; case E19: return 0; case E20: return 0; case E21: return 0; case E22: return 0; case E23: return 0; case E24: return 0; case E25: return 0; case E26: return 0; case E27: return 0; case E28: return 0; case E29: return 0; case E30: return 0; case E31: return 0; case E32: return 0; case E33: return 0; case E34: return 0; case E35: return 0; case E36: return 0; case E37: return 0; case E38: return 0; case E39: return 0; case E40: return 0; case E41: return 0; case E42: return 0; case E43: return 0; case E44: return 0; case E45: return 0; case E46: return 0; case E47: return 0; case E48: return 0; case E49: return 0; case E50: return 0; case E51: return 0; case E52: return 0; case E53: return 0; case E54: return 0; case E55: return 0; case E56: return 0; case E57: return 0; case E58: return 0; case E59: return 0; case E60: return 0; case E61: return 0; case E62: return 0; case E63: return 0; } return 0; }\n"
@@ -585,6 +942,14 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "int c(void) { int y; (f(), y); return 0; }\n"
         "int d(int x, int y) { x++, y; return 0; }\n"
         "int e(int x, int y) { x, y; return 0; }\n";
+    // Long comma chains, whose left operands' starts come from the emission's subtree-start column (#1350): effect-free
+    // operands among effectful ones at the chain's start, middle and end, parenthesized and not, and nested chains.
+    static const char comma_chains[] =
+        "int f(int);\n"
+        "int a(int x, int y) { return (x, x += 1, y, x += 2, (y), x += 3, y + 1, x += 4, f(x), y, x += 5, x); }\n"
+        "int b(int x, int y) { x += 1, y, x += 2, y, x += 3, (x, y), x += 4, y; return x; }\n"
+        "int c(int x) { return (x += 1, (x += 2, x, x += 3), x * 2, (x, (x, x += 4)), x); }\n"
+        "int d(int x, int y) { for (x = 0, y; x < 4; x++, y, x++) y += x; return (y, x, y); }\n";
     static const char positional_format_edges[] =
         "#include <stdio.h>\n"
         "void a(void) { printf(\"%2$s\\n\", 1, \"x\"); }\n"
@@ -608,6 +973,13 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "void g(void) { printf(\"%hhd\\n\", 1L); }\n"
         "void h(void) { printf(\"%hd\\n\", 1L); }\n"
         "void i(void) { printf(\"%tu\\n\", 1LL); }\n";
+    static const char format_promoted_arguments[] =
+        "int printf(const char *, ...);\n"
+        "void f(_Bool b, short s, unsigned short us, char c, int i, const char *cs, signed char *p, const int *ci) {\n"
+        "  printf(\"%c\", b); printf(\"%lc\", b); printf(\"%hhd\", s); printf(\"%hhu\", us);\n"
+        "  printf(\"%hhn\", cs); printf(\"%n\", ci);\n"
+        "  printf(\"%c\", i); printf(\"%hhd\", c); printf(\"%hhd\", i); printf(\"%hhn\", p);\n"
+        "}\n";
     static const char format_specifiers[] =
         "#include <stdio.h>\n"
         "void a(void) { printf(\"%D\\n\", 1); }\n"
@@ -699,6 +1071,28 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "int p(void) { int x = { x && 1 }; return x; }\n"
         "int q(void) { int x = (x = x); return x; }\n"
         "int r(void) { int x; x = (x); x; return 0; }\n";
+    // #1349: the brace scan's candidates, at and across its 64-token blocks: sizeof and __alignof__ operands, members
+    // after `.` and `->` (one straddling a block edge), statement expressions, and a later declarator's initializer.
+    static const char self_init_scan[] =
+        "struct P { int x; int y; };\n"
+        "int a(void) { int x = { sizeof(x) + x }; return x; }\n"
+        "int b(void) { int x = { (int)sizeof x }; return x; }\n"
+        "int c(void) { struct P p = { 1, 2 }; int x = { p.x }; return x; }\n"
+        "int d(struct P *q) { int x = { q->x }; return x; }\n"
+        "int e(void) { int x = { ({ int y = { x }; y; }) }; return x; }\n"
+        "int f(void) { int x = { __alignof__(x) + x }; return x; }\n"
+        "int g(void) { int x = { sizeof(int[sizeof(x)]) + 0 }; return x; }\n"
+        "int i(void) { int x = { 0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+x }; return x; }\n"
+        "int j(void) { int x = { 0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+x }; return x; }\n"
+        "int k(void) { int x = { (0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+x) }; return x; }\n"
+        "int l(void) { struct P p = { 1, 2 }; int x = { (0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+p.x) }; return x; }\n"
+        "int m(void) { struct P p = { 1, 2 }; int x = { (0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+p.x+x) }; return x; }\n"
+        "int n(void) { int x = { 0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+x+x }; return x; }\n"
+        "int o(void) { int x = { sizeof(0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+x) + x }; return x; }\n"
+        "int p(void) { struct P x = { .x = 1, .y = x.x }; return x.y; }\n"
+        "int q(void) { int *x = { &x[0] }; return x != 0; }\n"
+        "int r(void) { int x = { 0 }, y = { x }; return x + y; }\n"
+        "int s(void) { int y = { y + sizeof(y) }; return y; }\n";
     static const char format_shadowed[] =
         "void f(void (*printf)(const char *, ...)) { printf(\"%d\", \"x\"); }\n"
         "int printf(const char *, ...);\n"
@@ -791,12 +1185,59 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { unused_chains, { "-Wall", NULL, NULL, NULL } },
         { unused_values, { "-Wall", NULL, NULL, NULL } },
         { statement_expressions, { "-Wall", NULL, NULL, NULL } },
-        { return_stack, { "-Wall", NULL, NULL, NULL } },
+        // buster gives no -Wpointer-bool-conversion, which clang gives for `&x ? p : p`.
+        { return_stack, { "-Wall", "-Wno-pointer-bool-conversion", NULL, NULL } },
         { generic_selection, { "-Wall", NULL, NULL, NULL } },
+        { kr_deprecated, { NULL, NULL, NULL, NULL } },
         { self_initialization, { "-Wall", NULL, NULL, NULL } },
         { unused_but_set_parameters, { "-Wextra", NULL, NULL, NULL } },
         { empty_else_body, { "-Wall", NULL, NULL, NULL } },
         { empty_bodies, { "-Wall", NULL, NULL, NULL } },
+        {
+            empty_macro_bodies,
+            {
+                "-Wall",
+                "-Werror=empty-body",
+                NULL,
+                NULL,
+            },
+        },
+        {
+            empty_macro_arguments,
+            {
+                "-Wall",
+                "-Werror=empty-body",
+                NULL,
+                NULL,
+            },
+        },
+        {
+            empty_macro_positive,
+            {
+                "-Wall",
+                NULL,
+                NULL,
+                NULL,
+            },
+        },
+        {
+            empty_macro_positive,
+            {
+                "-Wall",
+                "-Wno-empty-body",
+                NULL,
+                NULL,
+            },
+        },
+        {
+            empty_macro_heads,
+            {
+                "-Wall",
+                NULL,
+                NULL,
+                NULL,
+            },
+        },
         { for_increments, { "-Wall", "-Wextra", NULL, NULL } },
         { zero_length_array, { "-Wall", NULL, NULL, NULL } },
         { switch_fixed_shadow, { "-Wall", NULL, NULL, NULL } },
@@ -806,6 +1247,7 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { vla_bounds, { "-Wall", NULL, NULL, NULL } },
         { enum_scope, { "-Wall", NULL, NULL, NULL } },
         { switch_many, { "-Wall", NULL, NULL, NULL } },
+        { switch_nested, { "-Wall", NULL, NULL, NULL } },
         { comma_effects, { "-Wall", "-Wextra", NULL, NULL } },
         { typedef_void, { "-Wall", NULL, NULL, NULL } },
         { format_positional, { "-Wall", NULL, NULL, NULL } },
@@ -815,13 +1257,16 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { brace_initializers, { "-Wall", NULL, NULL, NULL } },
         { format_n_unsigned, { "-Wall", NULL, NULL, NULL } },
         { comma_unparenthesized, { "-Wall", "-Wextra", NULL, NULL } },
+        { comma_chains, { "-Wall", "-Wextra", NULL, NULL } },
         { positional_format_edges, { "-Wall", NULL, NULL, NULL } },
         { format_integer_class, { "-Wall", NULL, NULL, NULL } },
+        { format_promoted_arguments, { NULL, NULL, NULL, NULL } },
         { format_specifiers, { "-Wall", NULL, NULL, NULL } },
         { format_modifiers, { "-Wall", NULL, NULL, NULL } },
         { format_argument_order, { "-Wall", NULL, NULL, NULL } },
         { comma_statements, { "-Wall", "-Wextra", NULL, NULL } },
         { self_init_edges, { "-Wall", NULL, NULL, NULL } },
+        { self_init_scan, { "-Wall", NULL, NULL, NULL } },
         { wall, { "-Wall", "-Wno-unused-variable", "-Wno-switch", "-Wno-dangling-else", NULL } },
         { clean, { "-Wall", "-Wextra", "-Werror", NULL } },
         { format_shadowed, { "-Wall", NULL, NULL, NULL } },

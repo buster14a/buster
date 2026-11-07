@@ -104,7 +104,9 @@ static inline __attribute__((always_inline)) bool check_lower_plain(CheckLowerWr
     const CheckGraph* graph = &writer->program->input->graph;
     const CheckOp op = graph->ops[node];
     const bool wrapper = op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE || op == CHECK_OP_SELECT;
-    const bool truth = op == CHECK_OP_NOT || op == CHECK_OP_CONDITION;
+    // A truth test, but a vector's !, which is check_lower_expand's (a vector of bool's complement, #137).
+    const bool truth = (op == CHECK_OP_NOT || op == CHECK_OP_CONDITION) &&
+                       !check_lower_transport_is_vector(writer->program->types, stream->conversions[node].operands[0].type);
     const bool plain = (wrapper || truth) && check_stream_constant_kind(stream, node) == CHECK_CONSTANT_NONE;
     if (plain)
     {
@@ -268,7 +270,7 @@ static inline __attribute__((always_inline)) bool check_lower_batch_expression(C
             const uint32_t a_info = (uint32_t)_mm_cvtsi128_si32(classified);
             const uint32_t b_info = (uint32_t)_mm_extract_epi32(classified, 1);
             const uint32_t root_info = binary ? (uint32_t)_mm_extract_epi32(classified, 2) : b_info;
-            const uint8_t kind = (uint8_t)(root_info >> 16);
+            uint8_t kind = (uint8_t)(root_info >> 16);
             const uint8_t class = (uint8_t)root_info;
             uint8_t a_kind = 0;
             uint8_t b_kind = 0;
@@ -280,8 +282,9 @@ static inline __attribute__((always_inline)) bool check_lower_batch_expression(C
                     (!binary || check_lower_value_payload(writer, b, b_info, false, &b_kind, &b_bits));
             if (valid)
             {
+                const bool power = binary && check_lower_unsigned_power(writer, node, class, &kind, &b_bits);
                 const uint32_t kinds = a_kind | (uint32_t)b_kind << 8 | (uint32_t)(kind == BUSTER_CHECK_LOWER_BATCH_WRAPPER ? 0 : kind) << 16;
-                const uint32_t classes = (uint8_t)a_info | (binary ? (uint32_t)(uint8_t)b_info << 8 : 0) | (uint32_t)class << 16;
+                const uint32_t classes = (uint8_t)a_info | (binary ? (uint32_t)(power ? class : (uint8_t)b_info) << 8 : 0) | (uint32_t)class << 16;
                 const uint8_t occupied = 1 | (binary ? 2 : 0) | (kind != BUSTER_CHECK_LOWER_BATCH_WRAPPER ? 4 : 0);
                 check_lower_batch_write(writer, kinds, classes, a_bits, b_bits, occupied);
                 writer->token = graph->tokens[binary ? b : a];
@@ -292,3 +295,4 @@ static inline __attribute__((always_inline)) bool check_lower_batch_expression(C
     }
     return valid;
 }
+

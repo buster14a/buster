@@ -233,10 +233,10 @@ static void dependency_test_fixtures(void)
     dependency_test_rule(rule, "obj/main.o: src/main.c inc/user.h sys/system.h sys/transitive.h inc/from-command-line.h\n");
     rule.include_system = false;
     rule.phony = true;
-    dependency_test_rule(rule, "obj/main.o: src/main.c inc/user.h inc/from-command-line.h\n\ninc/user.h:\n\ninc/from-command-line.h:\n");
+    dependency_test_rule(rule, "obj/main.o: src/main.c inc/user.h inc/from-command-line.h\ninc/user.h:\ninc/from-command-line.h:\n");
     // Reused from a user context: inclusion is not determined just by its directory.
     files[3].system = false;
-    dependency_test_rule(rule, "obj/main.o: src/main.c inc/user.h sys/transitive.h inc/from-command-line.h\n\ninc/user.h:\n\nsys/transitive.h:\n\ninc/from-command-line.h:\n");
+    dependency_test_rule(rule, "obj/main.o: src/main.c inc/user.h sys/transitive.h inc/from-command-line.h\ninc/user.h:\nsys/transitive.h:\ninc/from-command-line.h:\n");
     DependencyTarget targets[] = {
         { .text = dependency_test_text("$(objdir)/raw.o"), .quote = false },
         { .text = dependency_test_text("obj $ #\\ name.o"), .quote = true },
@@ -279,7 +279,7 @@ static void dependency_test_fixtures(void)
     files[1].path = (String8){ .pointer = NULL, .length = 4 };
     files[1].system = true;
     rule.phony = true;
-    dependency_test_rule(rule, "a.o: a.c first.h\n\nfirst.h:\n");
+    dependency_test_rule(rule, "a.o: a.c first.h\nfirst.h:\n");
     rule.include_system = true;
     dependency_test_invalid(rule);
     rule.file_count = 0;
@@ -288,7 +288,7 @@ static void dependency_test_fixtures(void)
     dependency_test_rule(rule, "a.o:\n");
     rule.files = files;
     rule.file_count = 1;
-    dependency_test_rule(rule, "a.o: first.h\n\nfirst.h:\n");
+    dependency_test_rule(rule, "a.o: first.h\nfirst.h:\n");
     rule.file_count = 0;
     uint64_t needed = 99;
     dependency_test_check(dependency_rule(NULL, NULL, 0, &needed) == DEPENDENCY_INVALID_INPUT && needed == 0, "null rule");

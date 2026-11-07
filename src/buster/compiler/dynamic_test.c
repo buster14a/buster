@@ -4700,6 +4700,7 @@ static void dynamic_test_report_import(RuntimeError error, const Runtime* runtim
 }
 
 #include "buster/compiler/dynamic_libraries_test.c"
+#include "buster/compiler/dynamic_bounds_test.c"
 
 static int run_dynamic_tests(int argc, char** argv)
 {
@@ -4780,6 +4781,7 @@ static int run_dynamic_tests(int argc, char** argv)
         passed = dynamic_test_smalls(&directory, &runtime) && passed;
         passed = dynamic_test_libgcc_s(&directory, &runtime, cross_check) && passed;
         passed = dynamic_test_section_bounds(&directory, &runtime, cross_check) && passed;
+        passed = dynamic_test_image_bounds(&directory, &runtime, cross_check) && passed;
         static const DynamicTestTlsProgram tls_programs[] = {
             // Six general-dynamic accesses and two local-dynamic ones, two of them to errno, an import.
             { "general- and local-dynamic TLS", "tls-accesses", dynamic_test_tls_source, 6, 2, BUSTER_DYNAMIC_TEST_TLS_STATUS },

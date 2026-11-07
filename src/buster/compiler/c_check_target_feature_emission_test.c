@@ -1,11 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #891's remaining emission-entry cases, included after c_driver_compatibility_test.c's process helpers. Clang is
+// #891's remaining emission-entry cases, compiled separately from the production checker. Clang is
 // the independent oracle: compare every error's location, message and order, not just rejection or the first error.
 // The explicit counts and syntax-only runs prevent a shared omission or an unrelated Sema error from passing.
 // These original fixtures run through test-checker-driver and the standalone CC compatibility harness; no native
 // code from the fixtures is executed. The production range-warning walk (#487) is not used as an oracle.
+
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include <stdio.h>
+#include <string.h>
+#include "c_driver_compatibility_test.h"
 
 #define BUSTER_CC_TARGET_FEATURE_DIAGNOSTICS (16u * 1024u)
 
@@ -46,7 +53,7 @@ static bool cc_compat_target_feature_diagnostics(const char* text, char* output,
     return valid;
 }
 
-static void cc_compat_target_feature_emission(CCCompatibilityTest* test)
+void cc_compat_target_feature_emission(CCCompatibilityTest* test, const CCCompatibilityHelpers* helpers)
 {
     static const char preamble[] =
         "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
@@ -208,8 +215,8 @@ static void cc_compat_target_feature_emission(CCCompatibilityTest* test)
     {
         char source[4096];
         const int length = snprintf(source, sizeof(source), "%s%s", preamble, fixtures[f].source);
-        const bool prepared = length >= 0 && (size_t)length < sizeof(source) && cc_compat_write(test, "feature-entry.c", source);
-        cc_compat_expect(test, prepared, fixtures[f].name);
+        const bool prepared = length >= 0 && (size_t)length < sizeof(source) && helpers->write(test, "feature-entry.c", source);
+        helpers->expect(test, prepared, fixtures[f].name);
         for (uint32_t syntax = 0; prepared && syntax < 2; syntax += 1)
         {
             char oracle[BUSTER_CC_TARGET_FEATURE_DIAGNOSTICS] = "";
@@ -234,7 +241,7 @@ static void cc_compat_target_feature_emission(CCCompatibilityTest* test)
                     arguments[count++] = "-o";
                     arguments[count++] = "feature-entry.o";
                 }
-                CCCompatibilityRun run = cc_compat_run(test, mode == 0 ? test->clang : test->compiler, NULL, arguments);
+                CCCompatibilityRun run = helpers->run(test, mode == 0 ? test->clang : test->compiler, NULL, arguments);
                 char actual[BUSTER_CC_TARGET_FEATURE_DIAGNOSTICS];
                 uint32_t errors = 0;
                 const bool parsed = cc_compat_target_feature_diagnostics(run.errors, actual, sizeof(actual), &errors);
@@ -251,13 +258,13 @@ static void cc_compat_target_feature_emission(CCCompatibilityTest* test)
                 const char* names[] = { "clang", "default", "scalar" };
                 char name[256];
                 snprintf(name, sizeof(name), "target emission: %s (%s, %s)", fixtures[f].name, names[mode], syntax != 0 ? "syntax" : "object");
-                cc_compat_expect(test, same, name);
+                helpers->expect(test, same, name);
                 if (!same)
                 {
                     fprintf(stderr, "  expected status %d and %u errors; got status %d and %u errors\n  oracle:\n%s  actual:\n%s\n",
                             expected_status, expected_count, run.status, errors, oracle, run.errors != NULL ? run.errors : "(missing diagnostics)");
                 }
-                cc_compat_release(&run);
+                helpers->release(&run);
             }
         }
     }

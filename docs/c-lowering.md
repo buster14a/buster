@@ -221,9 +221,19 @@ definition. Its flags and edges:
   `if (BUSTER_VECTOR_PATH(vector))` in a baseline build no longer emits the
   AVX-512 kernel it calls. A variable-length array's address is read only after
   its allocation, which the lowering checks at each read: one in an operand that
-  a constant condition never evaluates is never allocated, nor read. A constant
-  `switch`'s cases that clang skips (`CodeGenFunction::EmitSwitchStmt`'s
-  `FindCaseStatementsForValue`) are still written and selected.
+  a constant condition never evaluates is never allocated, nor read. Constant
+  `switch` statements use the same dropped ranges (#1192), before reference
+  selection: a foldable selector keeps the matching case or default and its
+  fallthrough statements through the first direct break, or nothing without a
+  match/default. The nonrecursive collector in `c_check_program_switch.c`
+  retains the whole switch when skipped labels or declarations, an escaping
+  inner break, a partially entered scope's fallthrough declarations, or a case
+  range encountered before the reverse-order match prevent Clang's
+  `FindCaseStatementsForValue` shortcut. Nonconstant/effectful selectors and
+  the outside-constant-context refusals (`__builtin_constant_p(n)`, `(n,1)`)
+  keep normal dispatch. Complete retained blocks keep their scope exits;
+  terminal breaks use the ordinary cleanup, VLA-restore and lifetime machinery.
+  Dropped regions and block-scope statics introduce no selection roots.
 - **Bound sections (#1122):** a `__start_NAME`/`__stop_NAME` reference names a
   section, not a member, so no edge reaches the members nothing else does — a
   static registry entry first — but GNU ld's bounds still cover them. After
@@ -258,7 +268,8 @@ compile takes the fragments (`CheckLowerWriter.fragments`, which only their
 test sets): on the 9700X they cost `sqlite3.c`'s statements more than they
 saved ("The vector path's fast paths" below), and none takes the leaf path
 either ("The leaf path and the runtimes' names"). The wrappers' and truth
-tests' path described here still runs.
+tests' path described here still runs. Larger fragments didn't pay either
+("Nested fragments (#868)" below).
 
 Ordinary unary and binary operations can join their immediately preceding leaf
 operands when their consuming edges need no conversion. Bounded gathers and
@@ -322,6 +333,78 @@ missing optional workspace, addresses, VLA indirection, compound initialization
 and a neighboring body's local map. Guarded pending stacks check mixed tasks,
 labels, every entry-capacity limit, invalid classes and untouched
 output tails. Source fixtures also compare native effects with Clang.
+
+## Nested fragments (#868)
+
+#868 asked whether #624's fragments could take more than a node with adjacent
+leaf operands. On `sqlite3.c` (main at `586c2ae2`), 13,784 of 259,895
+evaluated expression occurrences (5.30%) took them. In `((a + b) + c) + d`,
+only `a + b` did: a parent's operands had to be leaves or constants next to it.
+
+#883 tried closed postorder fragments of up to 16 integer nodes. Each root
+proved its fragment's order, types, conversions and room before one bulk
+write. #624's adjacent path stayed, and the expansion was the oracle. On the
+9700X, against main at `c1c5ed02`, with the checker's code at six placements
+that all gave the same objects
+([the record](https://github.com/buster14a/buster-performance/tree/101a0b1b18f1d4eb0fb68c8c6ba92e575e56689c/docs/measurements/pr883-fragment-placement-2026-10-31)):
+
+- coverage rose from 13,784 to 14,425 occurrences (5.30% to 5.55%);
+- 11,290 roots tried a fragment and 275 closed one (2.4%); 7,978 stopped at
+  an operator outside the table and 1,268 at the order check
+  ([the inventory](https://github.com/buster14a/buster-performance/tree/101a0b1b18f1d4eb0fb68c8c6ba92e575e56689c/docs/measurements/nested-fragments-883-2026-10-30));
+- the records classified rose from 13,885 to 17,442;
+- `sqlite3.c`'s `lower` on one lane rose by 0.196 ms (95% CI +0.165 to
+  +0.233), and by 0.220 ms from fresh copies of the executables;
+- the 8-lane whole compile stayed within its A/A spread, and Lua's `lower`
+  rose by 0.0035 ms.
+
+A second version (`5aebc491`) read the values only for structurally closed
+runs; single-lane emission was still 2.7% higher. #883 was closed without
+merging.
+
+Two later results explain why:
+
+- **Too little to amortize.** #1048's inventory (below) found that a maximal
+  subtree of nodes a template table covers holds 2.83 nodes on `sqlite3.c`,
+  so a proof made root by root has almost nothing to spread its cost over.
+- **The base path stopped paying.** #624's own fragments cost more than they
+  save: #1235 measured `lower` 0.27 ms lower without them, and no compile has
+  taken them since ("The vector path's fast paths").
+
+To see where that stands now, main at `ec5f0f6b` ran on the 9700X against the
+same executable with the fragments forced on: a measurement-only toggle,
+`CheckLowerWriter.fragments` set from the environment, which main doesn't
+have. The method:
+
+- two builds, with the checker's code 2,048 bytes apart in its page
+  (`BUSTER_CHECKER_OFFSET` 0 and 2048);
+- the frozen `sqlite3.c` and Lua 5.4.8's 34 units as inputs;
+- ten rounds, each of `measure-compile --runs 11` for every input, build and
+  variant, pinned to CPU 2, with the variants' order alternating by round.
+
+Every build and variant gave the same objects. Forced on, the fragments took
+14,564 of `sqlite3.c`'s 266,735 evaluated nodes (5.46%) and 3,068 of Lua's
+67,586 (4.54%). Medians of the ten rounds, both builds; each difference pairs
+the variants of one round and build
+([the record](https://github.com/buster14a/buster-performance/tree/1ebd8a1b0dd67749c9f921787afe99c437a1a8b7/docs/measurements/lowering-fragments-868-2026-11-06)):
+
+| row | off (main) | on | on − off, median (range) | pairs above 0 |
+| --- | ---: | ---: | ---: | ---: |
+| `sqlite3.c` `lower` | 10.305 ms | 10.728 ms | +0.431 (+0.352 to +0.513) | 20 of 20 |
+| `sqlite3.c` `lower.statements` | 6.700 ms | 7.119 ms | +0.429 (+0.302 to +0.529) | 20 of 20 |
+| `sqlite3.c` default wall | 140.548 ms | 140.758 ms | +0.390 (−0.228 to +1.113) | 19 of 20 |
+| Lua's units' `lower.statements`, summed | 2.301 ms | 2.407 ms | +0.105 (+0.059 to +0.138) | 20 of 20 |
+
+The fragments added 4.05 M of the compile's 1,636 M user instructions and
+saved no cycles (perf's counters of 11 compiles of each variant). Their cost
+has grown from #1235's 0.27 ms, as the tasks' loop got cheaper per node and
+the fragments' proof didn't.
+
+So a larger fragment would extend a path that already costs more than it
+saves, by a proof that #883 measured slower again. #868 is closed with that
+answer: batching root by root doesn't pay at any fragment size measured. The
+lowering's speed is #1048's question, a pass over a body's nodes as a whole,
+which the sections below measure.
 
 ## Node templates over a body: the inventory (#1048)
 
@@ -670,6 +753,20 @@ The loop is the scalar twin (`check_lower_node_counts_scalar`, which
 fixture of its program tests, among them a vector's libm builtins, an
 `_Atomic` global (the rules) and the atomic builtins on plain objects (the
 masks, whose fixture's table the test requires to have no `_Atomic` kind).
+A unit whose type table has a transport vector type (#137, a vector of `bool`,
+of 1 or 2 bytes or of more than 64 bytes: only a unit with a vector kind is
+scanned for one) takes the rules for every node too: such a node's operation,
+cast or element writes entries a piece, an element or a cleared byte at a
+time past a node's bounds (`check_lower_transport_room`: 48 entries for each
+16 bytes, including logical masks, blends and private operand copies, 8 for
+each of a `bool` vector's bytes, and for an element-wise conversion, shuffle,
+builtin, reduction or logical operation 32 an element, which a `bool` vector's
+maximum or minimum nearly fills). The node also reserves twelve temporaries
+for sources, results and scalar or vector intermediates. Ordinary extended
+vectors' logical operators and vector conditions use these counts too; the
+vector counting pass selects those nodes only in a unit with an extended-vector
+type. The intrinsics' headers have a transport type, AMX's 1024-byte
+`_tile1024i`, whose nodes take the same bounded accounting.
 
 After its statements, each body's branches (`BRANCH_FALSE` to `JUMP_VALUE`)
 take their targets: their labels' entries. The loop compared every entry's
@@ -1229,6 +1326,130 @@ put `lower.statements` at 7.264 ms and 7.298 against the base's 6.909, every
 round above every base round: the push's added lookups and the copy cost more
 than the shorter chain saved.
 
+## Computing with transport vectors (#137)
+
+Tier 0's VECTOR class holds vectors of 4, 8, 16, 32 and 64 bytes. The others,
+the transport vectors (`check_lower_transport_type`: a vector of `bool`, whose
+extended vectors pack a bit per element, one of 1 or 2 bytes, and one of more
+than 64 bytes, AMX's 1024-byte tile among them), are an aggregate's value, their
+object's address, which calls, copies and `va_arg` take by their bytes
+(docs/tier0.md). `c_check_program_transport.c` computes with them as clang -O0's
+code does, each result written into a frame object of its type whose address is
+the result, with the least new machinery: every entry it writes is an entry the
+lowering already writes for scalars or ordinary vectors.
+
+- **Vectors of 1 or 2 bytes** (one or two `char`s, a `short`, a `_Float16` or a
+  `__bf16`): an element at a time (`check_lower_transport_elements`). Each
+  element is loaded, promoted (to `int`, or to `float` for a half-precision one),
+  computed by C's operator and converted back, as LLVM's element-wise
+  operations give it after widening the vector into a register whose other
+  lanes no result reads. Wrapping arithmetic, shifts, division and remainder
+  are so exact. A compare's result is the negated `int` 0 or 1 in the result's
+  signed elements; a half-precision negation flips the sign bit, as `fneg`
+  does, and its arithmetic in `float` rounds once to the element as clang's
+  single operation does. At two elements, a vector row would cost more entries
+  than the elements' own.
+- **Vectors of more than 64 bytes**: a piece at a time, each the width of the
+  target's widest registers (64 bytes with AVX-512F and VL, 32 with AVX, else 16),
+  as LLVM legalizes them, by the ordinary vectors' rows at that width
+  (`check_vector_lower_element_row`, which takes an element and a width rather
+  than a type): `check_lower_transport_pieces` loads each operand's piece at its
+  offset, runs the row and sets the result's piece. A scalar operand is splat
+  once into a register-sized temporary that every piece reads. What the rows
+  refuse at a level (variable shifts without AVX2 or AVX-512BW, 64-bit compares
+  without SSE4.2, integer division, 8-bit multiplication) is refused by the same
+  names as the ordinary vectors'. Bf16 arithmetic uses its ordinary rows too,
+  in pieces of at most 32 bytes under float excess precision, so the widened
+  elements fit one register; native AVX10.2 uses the full register width.
+- **Vectors of `bool`**: their bits as clang's `<N x i1>` keeps them in memory,
+  element i at bit i % 8 of byte i / 8. Their operators are bitwise operations on
+  the bytes (`check_lower_transport_bools`): `&`, `|` and `^` themselves, `~` and
+  `!` a complement, and the compares, false below true as `i1`'s unsigned
+  compares order them, two steps each (`a < b` is `~a & b`, `a == b` is
+  `~(a ^ b)`, ...). Up to 8 bytes they are one integer's (in 32 or 64 bits), past
+  them the unsigned chars' vector rows a piece at a time. The bits past the last
+  element are cleared, as clang's stores of masks clear them where it doesn't
+  keep them in an opmask register: clang's own code leaves them either way (a
+  `<4 x i1>` complement through `knotb` sets them), so the tests fold a padded
+  vector's elements alone. An element is its bit: read by its byte's load, a
+  shift and a mask; written by the byte's other bits kept and its own set to the
+  value's truth.
+- **Casts, splats and constants** (`check_lower_transport_cast`): between
+  vectors of the same bytes, their bits (nothing between two transport vectors;
+  an ordinary vector's loaded from or set into an object); between a GNU C
+  vector and an integer of its bytes, their bits; a scalar's splat into every
+  element, converted to the element's type first (a `bool` vector's elements all
+  its truth). A constant the checker folds is an integer's bits (a cast of an
+  integer constant), stored into the object.
+- **Element-wise conversions, shuffles and reductions**: `__builtin_convertvector`
+  and the implicit conversion of an extended integer vector to a `bool` vector
+  of as many elements (clang's `icmp ne 0`, which the checker now accepts as
+  clang does; an explicit cast stays an error) convert element by element as C
+  converts a scalar (`check_lower_transport_convert`), and
+  `__builtin_shufflevector` gathers elements by its constant indices, either way
+  from or into an ordinary vector through a temporary, and into a `bool` vector a
+  byte of bits at a time (`check_lower_transport_gather`). The integer
+  reductions (`add`, `mul`, `and`, `or`, `xor`, `max`, `min`) fold the elements
+  first to last in their promoted type, a maximum or minimum by a mask without a
+  branch; a `bool` vector's sum is an exclusive or and its product a
+  conjunction, as `i1`'s arithmetic wraps.
+- **Element-wise builtins** use the ordinary rows on disjoint register-sized
+  pieces (`check_lower_transport_elementwise`). The `ldexp` exponent can have
+  another element width: each argument advances by its own width, and the
+  widest one bounds the piece's lane count. Tiny operands are copied into
+  private padded storage, and only the result's actual bytes are stored.
+  Libm functions, `pdep`, `pext` and scalar `clmul` read each element through
+  the same address/value handoff as ordinary vectors. Boolean builtins use
+  packed bit operations (`check_lower_transport_boolean_builtin`): max and
+  saturating add are OR; min, `pdep`, `pext` and `clmul` are AND; saturating
+  subtract is `a & ~b`; popcount and bitreverse keep their operand. A one-bit
+  funnel shift has a count modulo one, so the left funnel keeps the first
+  operand and the right funnel the second. All arguments are still evaluated
+  once, and only defined result bits are retained.
+- **Floating reductions** preserve clang's reduction tree across register
+  boundaries (`check_lower_transport_reduce_floating`): repeatedly combine the
+  low and high halves in register-sized pieces, then use the ordinary
+  legal-width reduction. Maximum and minimum preserve their NaN and signed
+  zero rules; `max` and `min` fold the final legal vector in source order.
+  Associative sums use -0.0 in unused padding lanes and then add the start
+  value. Ordered sums visit the defined lanes first to last.
+- **Logical operators and vector conditions** (`check_lower_vector_logical`)
+  use the same piece-wise compare and selection rows at tiny, ordinary and
+  transport widths. Logical truth is nonzero; an integer vector condition
+  selects by each lane's sign bit, and a boolean condition by its packed bit.
+  Every operand is evaluated once, including both conditional arms. Capturing
+  an address-valued operand copies its value before a later operand can
+  modify the source object. Half-precision logical truth falls back to scalar
+  comparisons where no matching target row exists.
+- **Compound assignments** compute into the result's object with the
+  destination's address as the left operand, then copy the result into the
+  destination (memmove past Tier 0's copy limit, for a tile).
+
+The ordinary rows' element-type and target-feature refusals remain. Floating
+reductions of half-precision and bf16 elements and padded floating extrema
+remain named refusals, as do bf16 comparisons and excess-precision arithmetic
+chains. Clang rejects whole-vector increments and boolean-vector `&&` and `||`;
+the checker diagnoses them. Compound assignments and increments of a `bool`
+vector's elements remain named lowering refusals: clang 23's code is invalid IR (an
+`extractelement` of the vector's `i8`), which crashes clang on some (`^= 1`,
+`*= 2`, `--`) and computes no element's value on others: what clang itself
+doesn't compile. Boolean elementwise `clzg` and `ctzg` also retain a named
+refusal: clang 23.1.4 emits a scalar zero count followed by an invalid
+scalar-to-vector `trunc`, crashing or producing incorrect code depending on
+the vector's width. Element-wise conversions, shuffles, non-boolean builtins,
+reductions and logical operations take at most 1024 elements, bounding their
+expanded entry runs; packed bit operations do not unpack those lanes.
+
+`test-checker --program-vectors` runs a program of all of these against clang
+-O0's build of it at x86-64-v4 (`vector-transport-compute`) and at x86-64,
+x86-64-v2 and x86-64-v3 (`baseline-transport-compute`), on both paths; the
+packed boolean builtins have matching `vector-boolean-builtins` and
+`baseline-boolean-builtins` cases covering 1 through 1024 lanes, padding,
+neighboring-byte guards and argument evaluation. The refusals' fixtures name
+each refusal. The same programs pass by the driver
+with `--scalar`, by default and with `--tier1 --verify` at x86-64, x86-64-v3 and
+x86-64-v4.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an
@@ -1551,3 +1772,49 @@ reuses those rows without a mutable cross-unit cache; derived classifications
 and dependency scheduling remain private to each unit. The historical numbers
 above predate that change and do not measure its effect.
 These are the post-checking path's times, not the whole compiler's, and not what the selection saves against `--lower-all`.
+
+### A small unit's fixed cost after checking (#442)
+
+A rebaseline on 2026-11-06 compiled the same harness into main before #418 (`3bfb4a72`), #418's merge (`54703dcf`) and
+main at `ec5f0f6b`, and ran them on the 9700X under its lock, pinned to CPU 2
+([the record](https://github.com/buster14a/buster-performance/tree/73009c83386222d63bc625b657c4c4a52e8c5240/docs/measurements/lowering-fixed-cost-442-2026-11-06)).
+#418's merge still cost what it did, +1.6% on c-testsuite and −0.3% under 300 tokens. But main's path after checking
+had grown to +54% over main before #418, and to +177% on its 154 programs under 300 tokens: a 9-token unit took 6.8 µs
+where main before #418 took 1.7. #418 didn't add that. Three pieces of every unit's setup did, each the same in every
+unit:
+
+- **Lane 0's writer's columns.** #531 put them in an arena of base pages, which a `CheckProgramLanes` keeps while it has
+  their room. But an emission without lanes reserved one and released it each time, and the C driver released a units'
+  lane's lanes after each unit (`check_driver_object`): an `mmap`, `mprotect`s, a `getrlimit` and an `munmap`, and a
+  fault for each page the columns' starts touch. The calling thread now keeps its own (`check_program_thread_columns`),
+  and a units' lane its lanes' first from one unit to the next (`check_program_lanes_settle`).
+- **The runtime functions' names.** The preparation looks up about 185 of them in the unit's identifiers, so that a
+  call of one takes the symbol of the unit's declaration of its name, and it measured and hashed each spelling for
+  every unit. Their lengths and hashes are baked with the backend's tables (`check_lower_runtime_names_initialize`), so a
+  unit's lookups are its table's probes.
+- **The builtin types' rows.** The 64 builtin types' classes and facts were classified by the rules for every unit.
+  The vector path copies them (`check_lower_builtin_classes` and `check_lower_builtin_facts`, a 64-byte vector each,
+  plain char's class by `TypeTable.char_unsigned`), and `test-checker` compares the copy with its twin's rules with
+  plain char signed and unsigned.
+
+c-testsuite's 220 programs, each file's least run minimum over 4 rounds of 101 passes, summed:
+
+| | Main before #418 (ns) | #418's merge | Main at `ec5f0f6b` | #442 (#1568) |
+| --- | ---: | ---: | ---: | ---: |
+| All 220 | 1,865,081 | +1.6% | +54.4% | −23.1% |
+| The 216 whose output #418 kept | 1,727,545 | +1.5% | +58.8% | −22.2% |
+| The 4 whose output #418 changed | 137,536 | +3.3% | −1.2% | −35.4% |
+| Under 300 tokens (154) | 481,282 | −0.3% | +177.3% | +7.6% |
+| 3,000 tokens or more (60) | 1,306,044 | +2.4% | +10.1% | −34.2% |
+
+Every round's sum agreed (−22.6 to −23.8%), and against main at `ec5f0f6b` the change is −50.2% in all and −61.1% under
+300 tokens, every file faster. Under 300 tokens the kept columns took −52.0% off main's time, the baked names a further
+−11.2% and the copied rows a further −10.6%. What the smallest units keep, about 240 ns a file over main before #418, is
+setup that main added since #418: in the emission (+5.6%) the names' probes and the rest of the lowering's setup, and in
+the object (+36%) the definitions' named sections (#619) among it. The synthetic units of 2,000 definitions, whose few
+tokens leave the per-unit setup little to cost, are 3.4 to 7.8% faster than main at `ec5f0f6b`; their emission is at
+most 2.6% over main before #418's, and their selection, about twice its, is per-definition work main has added since,
+not #418's. The whole compiler gains less: `-c --lanes 1` of all 220 programs at once, through the units' lanes, took 1.51%
+less than main at `ec5f0f6b` (8 of 8 paired runs), as a small unit's compile is mostly its checking. Every object, of
+c-testsuite's programs by `-c`, `-c -g`, `-funsigned-char`, `--scalar` and the units' path, and `main.c`'s, is byte for
+byte main's.

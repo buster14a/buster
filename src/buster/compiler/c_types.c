@@ -208,6 +208,10 @@ typedef uint32_t TypeId;
 
 // Semantic function identity on the supported x86-64 target. This is not a claim that code generation implements
 // every convention. The ordinary constructor and explicit sysv_abi/cdecl have the same default identity.
+// no_caller_saved_registers is clang's function type bit (FunctionType::ExtInfo's NoCallerSavedRegs), beside the
+// convention there; here it is the last of the three bits' values, a System V function's whose callee keeps every
+// register (#147), so that it takes no flag the table hasn't: with another convention than System V's, which clang
+// takes, it is refused by name (check_input_attribute_conventions).
 typedef enum TypeFunctionABI
 {
     TYPE_FUNCTION_ABI_SYSV,
@@ -217,9 +221,11 @@ typedef enum TypeFunctionABI
     TYPE_FUNCTION_ABI_PRESERVE_MOST,
     TYPE_FUNCTION_ABI_PRESERVE_ALL,
     TYPE_FUNCTION_ABI_PRESERVE_NONE,
+    TYPE_FUNCTION_ABI_NO_CALLER_SAVED,
     TYPE_FUNCTION_ABI_COUNT,
     TYPE_FUNCTION_ABI_INVALID = 255,
 } TypeFunctionABI;
+_Static_assert(TYPE_FUNCTION_ABI_COUNT <= (BUSTER_TYPE_FUNCTION_ABI_MASK >> BUSTER_TYPE_FUNCTION_ABI_SHIFT) + 1, "a function's ABI fits its flags' bits");
 
 // A member's flags.
 #define BUSTER_TYPE_MEMBER_PACKED 0x01
@@ -297,6 +303,8 @@ typedef enum TypeError
     TYPE_ERROR_MODE_BASE,
     // A recognized mode has no target type, or requires a type this table cannot represent.
     TYPE_ERROR_MODE_UNSUPPORTED,
+    // Microsoft bit-field storage whose byte size is not a power of two needs an unrepresentable alignment.
+    TYPE_ERROR_MS_STRUCT_ALIGNMENT,
 } TypeError;
 
 // Per type, by index. What base, index and extent hold depends on the kind:
@@ -342,7 +350,7 @@ struct TypeParameters
 
 // Per tag (struct, union or enum), by tag index. A tag is one per declaration: never hash-consed. completion is the
 // order in which tags were completed, from 1 (0 while incomplete), which #113's deferred bodies compare. packed,
-// pack_log2 and alignment_log2 are the layout's inputs (an enum's alignment too); the last two hold log2 + 1, 0 for
+// ms_struct, pack_log2 and alignment_log2 are layout inputs (an enum's alignment too); the last two hold log2 + 1, 0 for
 // none. lookup is how a struct's or union's members are found by name (TypeLookup): 0 for a scan of its members,
 // BUSTER_TYPE_LOOKUP_WALK for a walk, and otherwise its index's first bucket, of 2^lookup_log2. Record 0 is unused.
 typedef struct TypeTags TypeTags;
@@ -354,6 +362,7 @@ struct TypeTags
     uint32_t* member_count;
     uint32_t* completion;
     uint8_t* packed;
+    uint8_t* ms_struct;
     uint8_t* pack_log2;
     uint8_t* alignment_log2;
     uint32_t* lookup;
@@ -486,14 +495,15 @@ struct TypeMember
     uint32_t count_name;
 };
 
-// A struct's or union's layout attributes: GNU's packed, #pragma pack's value (#124 gives it) and the aligned
-// attribute, the last two as log2 + 1 or 0 for none.
+// A struct's or union's layout attributes: GNU's packed, #pragma pack's value (#124 gives it), the aligned attribute
+// (the last two as log2 + 1 or 0 for none), and Microsoft's bit-field storage-unit rules.
 typedef struct TypeRecordAttributes TypeRecordAttributes;
 struct TypeRecordAttributes
 {
     bool packed;
     uint8_t pack_log2;
     uint8_t alignment_log2;
+    bool ms_struct;
 };
 
 // #113's deferred bodies check each function body apart from the top level, and the top level without its bodies,
@@ -606,6 +616,16 @@ struct TypeKeys
     const uint64_t* extents;
 };
 
+// Parentheses belonging to one declarator occurrence, outside the type at this level of its base chain. Canonical
+// TypeIds keep no syntax. A chain has no repeated type, so its type identifies a level without affecting parameters
+// or another occurrence of that type. A caller expands typedef sugar by omitting this view too.
+typedef struct TypePrintParen TypePrintParen;
+struct TypePrintParen
+{
+    TypeId type;
+    uint32_t count;
+};
+
 // The spellings of identifier ids, for the printer: id i's bytes are bytes[i], lengths[i] of them, for i below count.
 typedef struct TypeNames TypeNames;
 struct TypeNames
@@ -620,8 +640,21 @@ struct TypeNames
     const TypeId* alias_types;
     const String8* alias_names;
     uint32_t alias_count;
+    // Optional, per alias: the qualifiers its name covers where it matches a level unqualified, which then print only
+    // the level's others (__builtin_dump_struct's `volatile CI` of a const int's CI, #148); null prints them all.
+    const uint32_t* alias_covered;
+    // Optional: the aliases by place, as a declaration spells its types (__builtin_dump_struct's, #148): entry k the alias
+    // (UINT32_MAX for none) of the k-th specifier the printer prints, a typedef's or a type's own, in the order a C
+    // declaration writes them (the outer specifiers, then each nested parameter's). A level then takes no alias but its
+    // place's, so a typedef names only the occurrence it spells (`int (*)(I)`). The printer writes the specifiers it
+    // printed to `alias_order_printed`, which its caller compares with its count.
+    const uint32_t* alias_order;
+    uint32_t alias_order_count;
+    uint32_t* alias_order_printed;
     const String8* anonymous;
     uint32_t anonymous_count;
+    const TypePrintParen* parentheses;
+    uint32_t parenthesis_count;
 };
 
 // The printer's options: BUSTER_TYPE_PRINT_C23 spells bool as C23 and clang in C23 mode do (bool, not _Bool), and
@@ -1007,14 +1040,17 @@ static const TypeBuiltin type_builtins[BUSTER_TYPE_CODE_COMPLEX] = {
 #define BUSTER_TYPE_COLUMN_ALIGNMENT 64
 #define BUSTER_TYPE_RECORD_BYTES (4 * sizeof(uint8_t) + sizeof(TypeId) + sizeof(uint32_t) + 3 * sizeof(uint64_t))
 #define BUSTER_TYPE_RECORD_COLUMNS 9
-#define BUSTER_TYPE_TAG_BYTES (sizeof(TypeId) + 5 * sizeof(uint32_t) + 4 * sizeof(uint8_t))
-#define BUSTER_TYPE_TAG_COLUMNS 10
+#define BUSTER_TYPE_TAG_BYTES (sizeof(TypeId) + 5 * sizeof(uint32_t) + 5 * sizeof(uint8_t))
+#define BUSTER_TYPE_TAG_COLUMNS 11
 #define BUSTER_TYPE_MEMBER_BYTES (sizeof(uint32_t) + sizeof(TypeId) + sizeof(uint32_t) + 2 * sizeof(uint8_t) + sizeof(uint64_t) + sizeof(uint32_t))
 #define BUSTER_TYPE_MEMBER_COLUMNS 7
 // The index: four slots per 64-byte bucket, at most three quarters full, from 64 buckets (4 KB).
 #define BUSTER_TYPE_BUCKET_SLOTS 4
 #define BUSTER_TYPE_BUCKET_BYTES 64
 #define BUSTER_TYPE_INITIAL_BUCKETS 64
+// The index's bytes that the C driver keeps in base pages (arena_reserve_small): 65,536 buckets, room for 196,608 types,
+// far more than a unit makes (sqlite3.c's 3,434 take 128 KB). A larger unit's index grows past them into huge pages.
+#define BUSTER_TYPE_INDEX_SMALL_BYTES (4ull << 20)
 // The types past a copy's own that its index has room for before it grows (type_copy): at most this many, and at most
 // as many as the source's types, but no fewer than the minimum.
 #define BUSTER_TYPE_COPY_INDEX_SLACK 4096
@@ -1130,6 +1166,7 @@ static bool type_initialize(TypeTable* table, Arena* arena, Arena* index_arena, 
         result.tags.member_count = type_push_column(arena, tags, sizeof(*result.tags.member_count), 1, &fits);
         result.tags.completion = type_push_column(arena, tags, sizeof(*result.tags.completion), 1, &fits);
         result.tags.packed = type_push_column(arena, tags, sizeof(*result.tags.packed), 1, &fits);
+        result.tags.ms_struct = type_push_column(arena, tags, sizeof(*result.tags.ms_struct), 1, &fits);
         result.tags.pack_log2 = type_push_column(arena, tags, sizeof(*result.tags.pack_log2), 1, &fits);
         result.tags.alignment_log2 = type_push_column(arena, tags, sizeof(*result.tags.alignment_log2), 1, &fits);
         result.tags.lookup = type_push_column(arena, tags, sizeof(*result.tags.lookup), 1, &fits);
@@ -1859,6 +1896,12 @@ static uint32_t type_find_or_add(TypeTable* table, uint8_t kind, uint8_t flags, 
     {
         TypeProperties properties;
         TypeError error = type_check_derivation(table, kind, flags, base, extent, parameters, &properties);
+        // A bounded, immutable view may find existing types, but must not grow the shared index before discovering
+        // that its type column is full. Deferred expression lanes use such views; their error word is lane-local.
+        if (error == TYPE_ERROR_NONE && table->types.count == table->types.capacity)
+        {
+            error = TYPE_ERROR_FULL;
+        }
         if (error == TYPE_ERROR_NONE && (uint64_t)table->index.count + 1 > 3ull * table->index.bucket_count)
         {
             if (type_index_grow(table))
@@ -2598,6 +2641,7 @@ static TypeId type_tag(TypeTable* table, uint8_t kind, uint32_t name)
         tags->member_count[tag] = 0;
         tags->completion[tag] = 0;
         tags->packed[tag] = 0;
+        tags->ms_struct[tag] = 0;
         tags->pack_log2[tag] = 0;
         tags->alignment_log2[tag] = 0;
         tags->lookup[tag] = 0;
@@ -2930,6 +2974,11 @@ static bool type_record_define(TypeTable* table, TypeId record, const TypeMember
     {
         bool flexible = false;
         error = type_check_member(table, &members[i], any_flexible || i + 1 == count, &flexible);
+        if (error == TYPE_ERROR_NONE && attributes.ms_struct && members[i].bit_width != BUSTER_TYPE_NOT_BIT_FIELD)
+        {
+            const uint64_t size = type_size(table, members[i].type);
+            error = size != 0 && (size & (size - 1)) == 0 ? TYPE_ERROR_NONE : TYPE_ERROR_MS_STRUCT_ALIGNMENT;
+        }
         flags |= flexible ? BUSTER_TYPE_FLAG_FLEXIBLE : 0;
     }
     if (error == TYPE_ERROR_NONE)
@@ -2954,6 +3003,7 @@ static bool type_record_define(TypeTable* table, TypeId record, const TypeMember
         table->tags.member_begin[tag] = begin;
         table->tags.member_count[tag] = count;
         table->tags.packed[tag] = attributes.packed ? 1 : 0;
+        table->tags.ms_struct[tag] = attributes.ms_struct ? 1 : 0;
         table->tags.pack_log2[tag] = attributes.pack_log2;
         table->tags.alignment_log2[tag] = attributes.alignment_log2;
         type_lookup_build(table, tag);
@@ -3283,7 +3333,7 @@ static TypeId type_builtin_va_list(TypeTable* table, const uint32_t* names)
 // Layout
 
 // The record layout of C on x86-64 Linux, as clang's ItaniumRecordLayoutBuilder computes it (its LayoutField,
-// LayoutBitField and FinishLayout, without what only ms_struct, AIX and C++ records do). In bits, from a data size
+// LayoutBitField and FinishLayout, including ms_struct, without AIX and C++ records). In bits, from a data size
 // (where the next member may start; a multiple of 8), the bits of its last byte that bit-fields left unfilled, and a
 // size; the record's alignment starts at its aligned attribute's, or 1 byte. For each member:
 //   - Any member: packed if the record or the member is. #pragma pack's value P caps alignments (aligned's too),
@@ -3299,6 +3349,9 @@ static TypeId type_builtin_va_list(TypeTable* table, const uint32_t* names)
 //     byte (a union's: its width rounded up, if larger), and the unfilled bits the difference.
 //   - The record's alignment rises to each member's alignment in whole bytes (so a packed bit-field's 1 bit never
 //     raises it), and its size to the data size; at the end the size is rounded up to the alignment.
+//   - ms_struct instead allocates whole bit-field storage units, shared only by adjacent fields of the same size
+//     that fit. Zero-width fields after non-bit-fields are ignored; other zero-width fields align the next unit.
+//     Unnamed fields raise alignment too. A union reserves the entire unit but its bit-fields never raise alignment.
 
 // A member's layout inputs in bits, as the scalar and the vector layout both read them.
 typedef struct TypeLayoutInput TypeLayoutInput;
@@ -3350,8 +3403,26 @@ static TypeLayoutColumns type_layout_columns(const TypeTable* table)
 
 #define BUSTER_INLINE static inline __attribute__((always_inline))
 
+// Microsoft record layout raises a complete builtin field's alignment to its element's size, including through
+// aligned typedefs and fixed arrays. Other types keep their ABI alignment, and flexible arrays keep theirs too.
+static uint32_t type_layout_ms_alignment(const TypeLayoutColumns* columns, uint32_t index)
+{
+    const uint32_t alignment = columns->alignment_log2[index];
+    uint32_t element = index;
+    while (columns->kind[element] == BUSTER_TYPE_KIND_ALIGNED || columns->kind[element] == BUSTER_TYPE_KIND_ARRAY)
+    {
+        element = type_index(columns->base[element]);
+    }
+    const uint8_t kind = columns->kind[element];
+    const uint64_t size = columns->size[element];
+    const bool builtin = kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_NULLPTR;
+    const uint32_t width = builtin && size != 0 && (size & (size - 1)) == 0 ? type_log2(size) : 0;
+    const uint32_t result = width > alignment ? width : alignment;
+    return result;
+}
+
 // A member's inputs: its type's size (an aligned typedef's base's) and alignment, in bits.
-BUSTER_INLINE TypeLayoutInput type_layout_input(const TypeLayoutColumns* columns, uint32_t member)
+BUSTER_INLINE TypeLayoutInput type_layout_input(const TypeLayoutColumns* columns, uint32_t member, bool ms_struct)
 {
     const uint32_t index = columns->member_type[member] >> BUSTER_TYPE_INDEX_SHIFT;
     const uint32_t resolved = columns->kind[index] == BUSTER_TYPE_KIND_ALIGNED ? columns->base[index] >> BUSTER_TYPE_INDEX_SHIFT : index;
@@ -3359,7 +3430,7 @@ BUSTER_INLINE TypeLayoutInput type_layout_input(const TypeLayoutColumns* columns
     const uint8_t flags = columns->member_flags[member];
     TypeLayoutInput result = {
         .size = columns->size[resolved] * 8,
-        .alignment = 8ull << columns->alignment_log2[index],
+        .alignment = 8ull << (ms_struct ? type_layout_ms_alignment(columns, index) : columns->alignment_log2[index]),
         .explicit_alignment = alignment_log2 != 0 ? 8ull << (alignment_log2 - 1) : 0,
         .width = columns->bit_width[member],
         .bit_field = (flags & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0,
@@ -3396,27 +3467,36 @@ static TypeError type_layout_scalar(TypeTable* table, uint32_t tag, uint64_t* si
     const TypeTags* tags = &table->tags;
     const bool is_union = type_kind(table, tags->type[tag]) == BUSTER_TYPE_KIND_UNION;
     const bool record_packed = tags->packed[tag] != 0;
+    const bool ms_struct = tags->ms_struct[tag] != 0;
     const uint64_t pack = tags->pack_log2[tag] != 0 ? 8ull << (tags->pack_log2[tag] - 1) : 0;
     const uint32_t begin = tags->member_begin[tag];
     const uint32_t count = tags->member_count[tag];
     uint64_t alignment = tags->alignment_log2[tag] != 0 ? 1ull << (tags->alignment_log2[tag] - 1) : 1;
     uint64_t data_size = 0;
     uint64_t unfilled = 0;
+    uint64_t previous_unit = 0;
     uint64_t size = 0;
     bool fits = true;
     for (uint32_t i = 0; fits && i < count; i += 1)
     {
         const uint32_t member = begin + i;
-        const TypeLayoutInput input = type_layout_input(&columns, member);
+        const TypeLayoutInput input = type_layout_input(&columns, member, ms_struct);
         const bool packed = record_packed || input.packed;
         uint64_t offset = 0;
         uint64_t raise = 0;
         if (input.bit_field)
         {
             const uint64_t width = input.width;
+            const bool ignored_zero = ms_struct && previous_unit == 0 && width == 0;
+            if (ms_struct && (previous_unit != input.size || unfilled < width))
+            {
+                unfilled = 0;
+                previous_unit = 0;
+            }
             offset = is_union ? 0 : data_size - unfilled;
-            uint64_t field_alignment = packed && width != 0 ? 1 : input.alignment;
-            uint64_t unpacked_alignment = input.alignment;
+            const uint64_t natural_alignment = ms_struct ? (ignored_zero ? 1 : input.size) : input.alignment;
+            uint64_t field_alignment = packed && width != 0 ? 1 : natural_alignment;
+            uint64_t unpacked_alignment = natural_alignment;
             if (input.explicit_alignment != 0)
             {
                 field_alignment = type_maximum(field_alignment, input.explicit_alignment);
@@ -3427,24 +3507,36 @@ static TypeError type_layout_scalar(TypeTable* table, uint32_t tag, uint64_t* si
                 unpacked_alignment = type_minimum(unpacked_alignment, pack);
                 field_alignment = packed ? unpacked_alignment : type_minimum(field_alignment, pack);
             }
-            if (width == 0 || (pack == 0 && (offset & (field_alignment - 1)) + width > input.size))
+            field_alignment = ms_struct && is_union ? 1 : field_alignment;
+            if (width == 0 || (ms_struct ? width > unfilled : (pack == 0 && (offset & (field_alignment - 1)) + width > input.size)))
             {
                 offset = type_align_up(offset, field_alignment);
             }
-            else if (input.explicit_alignment != 0 && (pack == 0 || input.explicit_alignment <= pack))
+            else if (!ms_struct && input.explicit_alignment != 0 && (pack == 0 || input.explicit_alignment <= pack))
             {
                 offset = type_align_up(offset, input.explicit_alignment);
             }
-            raise = input.named ? field_alignment : 1;
+            raise = ms_struct || input.named ? field_alignment : 1;
             if (is_union)
             {
-                data_size = type_maximum(data_size, type_align_up(width, 8));
+                data_size = type_maximum(data_size, ms_struct ? (width != 0 ? input.size : 8) : type_align_up(width, 8));
+            }
+            else if (ms_struct && width != 0)
+            {
+                if (unfilled == 0)
+                {
+                    data_size = offset + input.size;
+                    unfilled = input.size;
+                }
+                unfilled -= width;
+                previous_unit = input.size;
             }
             else
             {
                 const uint64_t end = offset + width;
                 data_size = type_align_up(end, 8);
                 unfilled = data_size - end;
+                previous_unit = 0;
             }
         }
         else
@@ -3459,6 +3551,7 @@ static TypeError type_layout_scalar(TypeTable* table, uint32_t tag, uint64_t* si
             raise = packed ? packed_alignment : unpacked_alignment;
             offset = type_align_up(is_union ? 0 : data_size, raise);
             unfilled = 0;
+            previous_unit = 0;
             uint64_t end = 0;
             fits = !__builtin_add_overflow(offset, input.size, &end) && end <= BUSTER_TYPE_MAX_RECORD_BITS;
             data_size = is_union ? type_maximum(data_size, input.size) : end;
@@ -3675,7 +3768,7 @@ static __attribute__((noinline)) void type_layout_read_types(const TypeTable* ta
             const uint32_t resolved = columns.kind[index] == BUSTER_TYPE_KIND_ALIGNED ? columns.base[index] >> BUSTER_TYPE_INDEX_SHIFT : index;
             const uint64_t size = columns.size[resolved];
             layout_sizes[first + m] = size < (BUSTER_TYPE_LAYOUT_HUGE >> 3) ? (uint32_t)size * 8 : BUSTER_TYPE_LAYOUT_HUGE;
-            layout_log2[first + m] = columns.alignment_log2[index];
+            layout_log2[first + m] = (uint8_t)(table->tags.ms_struct[tag] != 0 ? type_layout_ms_alignment(&columns, index) : columns.alignment_log2[index]);
         }
         first += member_count;
     }
@@ -3697,6 +3790,7 @@ static __attribute__((noinline)) void type_layout_group(const TypeTable* table, 
     uint32_t steps = 0;
     uint32_t unions = 0;
     uint32_t packed = 0;
+    uint32_t microsoft = 0;
     uint32_t too_aligned = 0;
     for (uint32_t lane = 0; lane < BUSTER_TYPE_LAYOUT_LANES; lane += 1)
     {
@@ -3712,6 +3806,7 @@ static __attribute__((noinline)) void type_layout_group(const TypeTable* table, 
             too_aligned |= (tags->alignment_log2[tag] > 28 || tags->pack_log2[tag] > 28 ? 1u : 0u) << lane;
             unions |= (type_kind(table, tags->type[tag]) == BUSTER_TYPE_KIND_UNION ? 1u : 0u) << lane;
             packed |= (tags->packed[tag] != 0 ? 1u : 0u) << lane;
+            microsoft |= (tags->ms_struct[tag] != 0 ? 1u : 0u) << lane;
             steps = counts[lane] > steps ? counts[lane] : steps;
         }
     }
@@ -3722,10 +3817,12 @@ static __attribute__((noinline)) void type_layout_group(const TypeTable* table, 
     const __m512i pack = _mm512_loadu_si512(packs);
     const __mmask16 union_lanes = (__mmask16)unions;
     const __mmask16 packed_lanes = (__mmask16)packed;
+    const __mmask16 ms_lanes = (__mmask16)microsoft;
     const __mmask16 pack_lanes = _mm512_test_epi32_mask(pack, pack);
     __mmask16 overflow = (__mmask16)too_aligned;
     __m512i data_size = zero;
     __m512i unfilled = zero;
+    __m512i previous_unit = zero;
     __m512i size = zero;
     __m512i alignment = _mm512_loadu_si512(record_alignments);
     for (uint32_t block = 0; block < steps; block += BUSTER_TYPE_LAYOUT_LANES)
@@ -3799,9 +3896,38 @@ static __attribute__((noinline)) void type_layout_group(const TypeTable* table, 
             bit_offset = _mm512_mask_mov_epi32(bit_offset, to_explicit, type_align_up_vector(bit_start, explicit_alignment));
             const __m512i bit_end = _mm512_add_epi32(bit_offset, width);
             const __m512i bit_end_bytes = type_align_up_vector(bit_end, byte);
-            const __m512i bit_data = _mm512_mask_max_epu32(bit_end_bytes, union_lanes, data_size, type_align_up_vector(width, byte));
-            const __m512i bit_unfilled = _mm512_mask_mov_epi32(_mm512_sub_epi32(bit_end_bytes, bit_end), union_lanes, unfilled);
-            const __m512i bit_raise = _mm512_mask_mov_epi32(one, named, field_alignment);
+            __m512i bit_data = _mm512_mask_max_epu32(bit_end_bytes, union_lanes, data_size, type_align_up_vector(width, byte));
+            __m512i bit_unfilled = _mm512_mask_mov_epi32(_mm512_sub_epi32(bit_end_bytes, bit_end), union_lanes, unfilled);
+            __m512i bit_raise = _mm512_mask_mov_epi32(one, named, field_alignment);
+            if (ms_lanes != 0)
+            {
+                // An active unit belongs only to adjacent bit-fields of the same size. Full-unit allocation means
+                // a following ordinary field starts after its unused bits, while a same-size field can share them.
+                const __mmask16 continuing = _mm512_cmpeq_epi32_mask(previous_unit, member_size) & _mm512_cmpge_epu32_mask(unfilled, width);
+                const __m512i remaining = _mm512_maskz_mov_epi32(continuing, unfilled);
+                const __mmask16 ignored_zero = zero_width & _mm512_cmpeq_epi32_mask(previous_unit, zero);
+                const __m512i natural = _mm512_mask_mov_epi32(member_size, ignored_zero, one);
+                const __m512i unpacked_ms = _mm512_max_epu32(natural, explicit_alignment);
+                __m512i aligned_ms = _mm512_max_epu32(_mm512_mask_mov_epi32(natural, member_packed & (__mmask16)~zero_width, one), explicit_alignment);
+                aligned_ms = _mm512_mask_min_epu32(aligned_ms, pack_applies, aligned_ms, pack);
+                aligned_ms = _mm512_mask_min_epu32(aligned_ms, pack_applies & member_packed, unpacked_ms, pack);
+                aligned_ms = _mm512_mask_mov_epi32(aligned_ms, union_lanes, one);
+                const __m512i start_ms = _mm512_maskz_sub_epi32((__mmask16)~union_lanes, data_size, remaining);
+                const __mmask16 fresh = _mm512_cmpeq_epi32_mask(remaining, zero);
+                const __mmask16 align_ms = zero_width | _mm512_cmpgt_epu32_mask(width, remaining);
+                const __m512i offset_ms = _mm512_mask_mov_epi32(start_ms, align_ms, type_align_up_vector(start_ms, aligned_ms));
+                const __m512i unit_end = _mm512_mask_add_epi32(data_size, fresh, offset_ms, member_size);
+                __m512i data_ms = _mm512_mask_mov_epi32(unit_end, zero_width, type_align_up_vector(offset_ms, byte));
+                data_ms = _mm512_mask_max_epu32(data_ms, union_lanes, data_size, _mm512_mask_mov_epi32(member_size, zero_width, byte));
+                __m512i left_ms = _mm512_sub_epi32(_mm512_mask_mov_epi32(remaining, fresh, member_size), width);
+                left_ms = _mm512_mask_sub_epi32(left_ms, zero_width, data_ms, offset_ms);
+                left_ms = _mm512_mask_mov_epi32(left_ms, union_lanes, unfilled);
+                bit_offset = _mm512_mask_mov_epi32(bit_offset, ms_lanes, offset_ms);
+                bit_data = _mm512_mask_mov_epi32(bit_data, ms_lanes, data_ms);
+                bit_unfilled = _mm512_mask_mov_epi32(bit_unfilled, ms_lanes, left_ms);
+                bit_raise = _mm512_mask_mov_epi32(bit_raise, ms_lanes, aligned_ms);
+                previous_unit = _mm512_mask_mov_epi32(previous_unit, active, _mm512_maskz_mov_epi32(bit_field & (__mmask16)~zero_width & (__mmask16)~union_lanes, member_size));
+            }
             const __m512i new_data = _mm512_mask_blend_epi32(bit_field, plain_data, bit_data);
             const __m512i raise = _mm512_mask_blend_epi32(bit_field, plain_alignment, bit_raise);
             offset_rows[j] = _mm512_mask_blend_epi32(bit_field, plain_offset, bit_offset);
@@ -5411,6 +5537,7 @@ static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
 #define BUSTER_TYPE_PRINT_EXT_VECTOR_END 10
 #define BUSTER_TYPE_PRINT_NAME 11
 #define BUSTER_TYPE_PRINT_FUNCTION_ABI 12
+#define BUSTER_TYPE_PRINT_PAREN_END 13
 
 typedef struct TypePrintFrame TypePrintFrame;
 struct TypePrintFrame
@@ -5422,6 +5549,10 @@ struct TypePrintFrame
     bool saved;
     // printBefore's: whether the qualifiers go after the specifier.
     bool after;
+    // The outer declarator's occurrence, whose TypeNames.parentheses may name a level; nested TYPE frames have none.
+    bool root_spelling;
+    // Placeholder state at this level in the matching AFTER traversal.
+    bool after_empty;
 };
 
 typedef struct TypePrinter TypePrinter;
@@ -5434,12 +5565,25 @@ struct TypePrinter
     uint32_t options;
     bool empty;
     bool valid;
+    bool root_spelling;
+    bool after_empty;
+    // Sorted, coalesced parenthesis levels for a large occurrence; small ones use names directly.
+    TypePrintParen* parentheses;
+    uint32_t parenthesis_count;
     char* begin;
     uint64_t length;
     void* frames;
     uint64_t capacity;
     uint64_t depth;
     Arena* scratch;
+    // By place (TypeNames.alias_order): the specifiers printed so far, and the levels an alias named, which their
+    // suffixes' frames ask after. A level is its TYPE frame's id (`frames_typed`, in the order they run) << 8 and its
+    // depth below it: its BEFORE, AFTER and POINTER_END frames carry it as their step, `step` the running one's.
+    uint32_t occurrence;
+    uint32_t aliased[32];
+    uint32_t aliased_count;
+    uint32_t frames_typed;
+    uint32_t step;
 };
 
 // The output's bytes, pushed in order so that they stay contiguous.
@@ -5519,6 +5663,8 @@ static void type_print_push(TypePrinter* printer, uint8_t operation, TypeId type
             .operation = operation,
             .saved = saved,
             .after = after,
+            .root_spelling = printer->root_spelling,
+            .after_empty = printer->after_empty,
         };
         printer->depth += 1;
     }
@@ -5552,6 +5698,138 @@ static uint32_t type_print_alias(const TypeNames* names, TypeId type)
     return result;
 }
 
+// The alias a level takes (`whole` where it matches the level with its qualifiers), or UINT32_MAX: by type, or by place
+// (TypeNames.alias_order), the alias of the specifier the printer prints next.
+static uint32_t type_print_sugar(const TypePrinter* printer, TypeId type, uint32_t* whole)
+{
+    const TypeNames* names = printer->names;
+    const TypeId unqualified = type_unqualified(type);
+    uint32_t sugar = UINT32_MAX;
+    *whole = UINT32_MAX;
+    if (names != 0 && names->alias_order != 0)
+    {
+        const uint32_t candidate = printer->occurrence < names->alias_order_count ? names->alias_order[printer->occurrence] : UINT32_MAX;
+        *whole = candidate < names->alias_count && names->alias_types[candidate] == type ? candidate : UINT32_MAX;
+        sugar = candidate < names->alias_count && (names->alias_types[candidate] == type || names->alias_types[candidate] == unqualified) ? candidate : UINT32_MAX;
+    }
+    else
+    {
+        *whole = type_print_alias(names, type);
+        sugar = *whole != UINT32_MAX ? *whole : type_print_alias(names, unqualified);
+    }
+    return sugar;
+}
+
+// Whether an alias named a level, which then has no suffix of its own: by type, or by place, the level `step` whose
+// BEFORE took one (another level of the same type may have taken none).
+static bool type_print_aliased(const TypePrinter* printer, TypeId type, uint32_t step)
+{
+    const TypeNames* names = printer->names;
+    bool result = false;
+    if (names != 0 && names->alias_order != 0)
+    {
+        for (uint32_t a = 0; a < printer->aliased_count; a += 1)
+        {
+            result |= printer->aliased[a] == step;
+        }
+    }
+    else
+    {
+        result = type_print_alias(names, type) != UINT32_MAX || type_print_alias(names, type_unqualified(type)) != UINT32_MAX;
+    }
+    return result;
+}
+
+// printParenBefore/After's groups: an empty placeholder suppresses them at the call site, and a function already
+// supplies the innermost one. An alias at that level is a typedef occurrence rather than a function's own spelling.
+static uint32_t type_print_parentheses(const TypePrinter* printer, TypeId type, bool aliased)
+{
+    uint32_t count = 0;
+    const TypeNames* names = printer->names;
+    if (printer->root_spelling && printer->parentheses != NULL)
+    {
+        uint32_t first = 0;
+        uint32_t end = printer->parenthesis_count;
+        while (first < end)
+        {
+            const uint32_t middle = first + (end - first) / 2;
+            if (printer->parentheses[middle].type < type)
+            {
+                first = middle + 1;
+            }
+            else
+            {
+                end = middle;
+            }
+        }
+        count = first < printer->parenthesis_count && printer->parentheses[first].type == type ? printer->parentheses[first].count : 0;
+    }
+    else
+    {
+        for (uint32_t i = 0; printer->root_spelling && names != NULL && i < names->parenthesis_count; i += 1)
+        {
+            count += names->parentheses[i].type == type ? names->parentheses[i].count : 0;
+        }
+    }
+    const bool function = !aliased && type_kind(printer->table, type) == BUSTER_TYPE_KIND_FUNCTION;
+    return function && count != 0 ? count - 1 : count;
+}
+
+// The syntax view can contain a group at every level of a deeply nested declarator. Sort it once by TypeId,
+// preserving repeated levels by summing their counts, so each print step searches rather than rescans the view.
+// Four byte-wise radix passes give bounded linear setup even when TypeIds arrive in an adversarial order.
+static void type_print_index_parentheses(TypePrinter* printer)
+{
+    const TypeNames* names = printer->names;
+    const uint32_t count = names != NULL ? names->parenthesis_count : 0;
+    if (count > 8 && printer->valid)
+    {
+        TypePrintParen* first = BUSTER_ARENA_PUSH_ARRAY(printer->scratch, TypePrintParen, count);
+        TypePrintParen* second = BUSTER_ARENA_PUSH_ARRAY(printer->scratch, TypePrintParen, count);
+        printer->valid = first != NULL && second != NULL;
+        if (printer->valid)
+        {
+            memcpy(first, names->parentheses, (uint64_t)count * sizeof(TypePrintParen));
+            for (uint32_t shift = 0; shift < 32; shift += 8)
+            {
+                uint32_t offsets[256] = { 0 };
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    offsets[(first[i].type >> shift) & 255] += 1;
+                }
+                uint32_t position = 0;
+                for (uint32_t i = 0; i < 256; i += 1)
+                {
+                    const uint32_t size = offsets[i];
+                    offsets[i] = position;
+                    position += size;
+                }
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    second[offsets[(first[i].type >> shift) & 255]++] = first[i];
+                }
+                TypePrintParen* swap = first;
+                first = second;
+                second = swap;
+            }
+            uint32_t unique = 0;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                if (unique != 0 && first[unique - 1].type == first[i].type)
+                {
+                    first[unique - 1].count += first[i].count;
+                }
+                else
+                {
+                    first[unique++] = first[i];
+                }
+            }
+            printer->parentheses = first;
+            printer->parenthesis_count = unique;
+        }
+    }
+}
+
 // The specifiers, and printBefore of each kind; `type` is unqualified and not ALIGNED.
 static void type_print_before_kind(TypePrinter* printer, TypeId type)
 {
@@ -5564,6 +5842,7 @@ static void type_print_before_kind(TypePrinter* printer, TypeId type)
         const bool c23_bool = type == BUSTER_TYPE_BOOL && (printer->options & BUSTER_TYPE_PRINT_C23) != 0;
         type_print_text(printer, c23_bool ? "bool" : type_builtins[index].name);
         type_print_space(printer);
+        printer->occurrence += 1;
     }
     else if (kind == BUSTER_TYPE_KIND_BIT_INT)
     {
@@ -5571,11 +5850,12 @@ static void type_print_before_kind(TypePrinter* printer, TypeId type)
         type_print_number(printer, table->types.extent[index]);
         type_print_text(printer, ")");
         type_print_space(printer);
+        printer->occurrence += 1;
     }
     else if (kind == BUSTER_TYPE_KIND_COMPLEX)
     {
         type_print_text(printer, "_Complex ");
-        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, printer->step + 1);
     }
     else if (kind == BUSTER_TYPE_KIND_ATOMIC)
     {
@@ -5614,22 +5894,25 @@ static void type_print_before_kind(TypePrinter* printer, TypeId type)
             type_print_text(printer, "(unnamed)");
         }
         type_print_space(printer);
+        printer->occurrence += 1;
     }
     else if (kind == BUSTER_TYPE_KIND_POINTER)
     {
-        type_print_push(printer, BUSTER_TYPE_PRINT_POINTER_END, type, printer->empty, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_POINTER_END, type, printer->empty, false, printer->step);
         printer->empty = false;
-        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, 0);
+        printer->after_empty = false;
+        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, printer->step + 1);
     }
     else if (type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_EXT_VECTOR)
     {
-        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, printer->step + 1);
     }
     else if (kind == BUSTER_TYPE_KIND_FUNCTION)
     {
         type_print_push(printer, BUSTER_TYPE_PRINT_FUNCTION_END, type, printer->empty, false, 0);
         printer->empty = false;
-        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, 0);
+        printer->after_empty = false;
+        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, printer->step + 1);
     }
     else if (kind == BUSTER_TYPE_KIND_VECTOR)
     {
@@ -5650,24 +5933,24 @@ static void type_print_after_kind(TypePrinter* printer, TypeId type)
     const TypeId base = table->types.base[index];
     if (kind == BUSTER_TYPE_KIND_COMPLEX || kind == BUSTER_TYPE_KIND_VECTOR)
     {
-        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, printer->step + 1);
     }
     else if (kind == BUSTER_TYPE_KIND_EXT_VECTOR)
     {
         type_print_push(printer, BUSTER_TYPE_PRINT_EXT_VECTOR_END, type, false, false, 0);
-        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, printer->step + 1);
     }
     else if (kind == BUSTER_TYPE_KIND_POINTER)
     {
         type_print_push(printer, BUSTER_TYPE_PRINT_RESTORE, type, printer->empty, false, 0);
         printer->empty = false;
         const TypeId pointee = type_strip_aligned(table, base);
-        if (type_kind_is_array(type_kind(table, pointee)) && type_print_alias(printer->names, pointee) == UINT32_MAX &&
-            type_print_alias(printer->names, type_unqualified(pointee)) == UINT32_MAX)
+        if (type_kind_is_array(type_kind(table, pointee)) && !type_print_aliased(printer, pointee, printer->step + 1) &&
+            type_print_parentheses(printer, pointee, false) == 0)
         {
             type_print_text(printer, ")");
         }
-        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, printer->step + 1);
     }
     else if (type_kind_is_array(kind))
     {
@@ -5681,7 +5964,7 @@ static void type_print_after_kind(TypePrinter* printer, TypeId type)
         {
             type_print_text(printer, kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY && table->types.extent[index] == 0 ? "[*]" : "[]");
         }
-        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, printer->step + 1);
     }
     else if (kind == BUSTER_TYPE_KIND_FUNCTION)
     {
@@ -5691,7 +5974,7 @@ static void type_print_after_kind(TypePrinter* printer, TypeId type)
         }
         type_print_push(printer, BUSTER_TYPE_PRINT_RESTORE, type, printer->empty, false, 0);
         printer->empty = false;
-        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, printer->step + 1);
         if (type_function_abi_kind(table, type) != TYPE_FUNCTION_ABI_SYSV)
         {
             type_print_push(printer, BUSTER_TYPE_PRINT_FUNCTION_ABI, type, false, false, 0);
@@ -5711,18 +5994,23 @@ static void type_print_after_kind(TypePrinter* printer, TypeId type)
 static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
 {
     const TypeTable* table = printer->table;
+    printer->root_spelling = frame.root_spelling;
+    printer->after_empty = frame.after_empty;
     if (frame.operation == BUSTER_TYPE_PRINT_TYPE)
     {
         // TypePrinter::print: the placeholder is empty but at the top, where it is the name.
         const bool named = frame.after && printer->name.length != 0;
+        printer->root_spelling = frame.after;
         type_print_push(printer, BUSTER_TYPE_PRINT_RESTORE, frame.type, printer->empty, false, 0);
         printer->empty = !named;
-        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, frame.type, false, false, 0);
+        printer->after_empty = !named;
+        const uint32_t level = printer->frames_typed++ << 8;
+        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, frame.type, false, false, level);
         if (named)
         {
             type_print_push(printer, BUSTER_TYPE_PRINT_NAME, frame.type, false, false, 0);
         }
-        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, frame.type, false, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, frame.type, false, false, level);
     }
     else if (frame.operation == BUSTER_TYPE_PRINT_RESTORE)
     {
@@ -5732,15 +6020,33 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
     {
         const TypeId type = type_strip_aligned(table, frame.type);
         const TypeId unqualified = type_unqualified(type);
-        const uint32_t whole = type_print_alias(printer->names, type);
-        const uint32_t sugar = whole != UINT32_MAX ? whole : type_print_alias(printer->names, unqualified);
+        uint32_t whole = UINT32_MAX;
+        const uint32_t sugar = type_print_sugar(printer, type, &whole);
+        // Group exactly the levels whose matching AFTER frame sees a nonempty placeholder.
+        const uint32_t parentheses = !printer->after_empty ? type_print_parentheses(printer, type, sugar != UINT32_MAX) : 0;
+        if (parentheses != 0)
+        {
+            type_print_push(printer, BUSTER_TYPE_PRINT_PAREN_END, type, false, false, parentheses);
+        }
         if (sugar != UINT32_MAX)
         {
+            printer->occurrence += 1;
+            if (printer->aliased_count < 32)
+            {
+                printer->aliased[printer->aliased_count++] = frame.step;
+            }
+            else
+            {
+                // No room to remember the level: the places can't be followed, which the count the caller compares
+                // with says.
+                printer->occurrence = UINT32_MAX / 2;
+            }
             // A typedef's name is the specifier. When it covers the level itself, it covers its qualifiers too;
             // under outside qualifiers (`const P`), clang prints them before it, as for an ordinary specifier (#992).
-            if (whole == UINT32_MAX && type_qualifiers(type) != 0)
+            const uint32_t covered = printer->names->alias_covered != 0 ? printer->names->alias_covered[sugar] : 0;
+            if (whole == UINT32_MAX && (type_qualifiers(type) & ~covered) != 0)
             {
-                type_print_qualifiers(printer, type_qualifiers(type));
+                type_print_qualifiers(printer, type_qualifiers(type) & ~covered);
                 type_print_text(printer, " ");
             }
             const String8 alias = printer->names->alias_names[sugar];
@@ -5762,6 +6068,7 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
             {
                 printer->empty = false;
             }
+            printer->step = frame.step;
             type_print_before_kind(printer, unqualified);
         }
     }
@@ -5783,16 +6090,23 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         // including under another level's qualifiers (#992).
         const TypeId type = type_strip_aligned(table, frame.type);
         const TypeId unqualified = type_unqualified(type);
-        if (type_print_alias(printer->names, type) == UINT32_MAX && type_print_alias(printer->names, unqualified) == UINT32_MAX)
+        const bool aliased = type_print_aliased(printer, type, frame.step);
+        const uint32_t parentheses = !printer->empty ? type_print_parentheses(printer, type, aliased) : 0;
+        for (uint32_t i = 0; i < parentheses; i += 1)
         {
+            type_print_text(printer, ")");
+        }
+        if (!aliased)
+        {
+            printer->step = frame.step;
             type_print_after_kind(printer, unqualified);
         }
     }
     else if (frame.operation == BUSTER_TYPE_PRINT_POINTER_END)
     {
         const TypeId pointee = type_strip_aligned(table, table->types.base[type_index(frame.type)]);
-        const bool wrapped = type_kind_is_array(type_kind(table, pointee)) && type_print_alias(printer->names, pointee) == UINT32_MAX &&
-                             type_print_alias(printer->names, type_unqualified(pointee)) == UINT32_MAX;
+        const bool wrapped = type_kind_is_array(type_kind(table, pointee)) && !type_print_aliased(printer, pointee, frame.step + 1) &&
+                             type_print_parentheses(printer, pointee, false) == 0;
         type_print_text(printer, wrapped ? "(*" : "*");
         printer->empty = frame.saved;
     }
@@ -5803,6 +6117,13 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
             type_print_text(printer, "(");
         }
         printer->empty = frame.saved;
+    }
+    else if (frame.operation == BUSTER_TYPE_PRINT_PAREN_END)
+    {
+        for (uint32_t i = 0; i < frame.step; i += 1)
+        {
+            type_print_text(printer, "(");
+        }
     }
     else if (frame.operation == BUSTER_TYPE_PRINT_PARAMETERS)
     {
@@ -5837,6 +6158,7 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
             "preserve_most",
             "preserve_all",
             "preserve_none",
+            "no_caller_saved_registers",
         };
         const TypeFunctionABI abi = type_function_abi_kind(table, frame.type);
         if ((uint32_t)abi < sizeof(spellings) / sizeof(spellings[0]))
@@ -5881,6 +6203,7 @@ static String8 type_print(const TypeTable* table, Arena* arena, TypeId type, Str
         .valid = type_is_valid(table, type),
         .scratch = scratch.arena,
     };
+    type_print_index_parentheses(&printer);
     // The top frame is the only one whose placeholder is the name (frame.after marks it).
     type_print_push(&printer, BUSTER_TYPE_PRINT_TYPE, type, false, true, 0);
     while (printer.valid && printer.depth != 0)
@@ -5895,6 +6218,10 @@ static String8 type_print(const TypeTable* table, Arena* arena, TypeId type, Str
             .pointer = printer.begin,
             .length = printer.length,
         };
+    }
+    if (names != 0 && names->alias_order_printed != 0)
+    {
+        *names->alias_order_printed = printer.occurrence;
     }
     scratch_end(scratch);
     return result;
@@ -6040,6 +6367,7 @@ static bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, A
         memcpy(table->tags.member_count, source->tags.member_count, tag_count * sizeof(*table->tags.member_count));
         memcpy(table->tags.completion, source->tags.completion, tag_count * sizeof(*table->tags.completion));
         memcpy(table->tags.packed, source->tags.packed, tag_count * sizeof(*table->tags.packed));
+        memcpy(table->tags.ms_struct, source->tags.ms_struct, tag_count * sizeof(*table->tags.ms_struct));
         memcpy(table->tags.pack_log2, source->tags.pack_log2, tag_count * sizeof(*table->tags.pack_log2));
         memcpy(table->tags.alignment_log2, source->tags.alignment_log2, tag_count * sizeof(*table->tags.alignment_log2));
         memcpy(table->tags.lookup, source->tags.lookup, tag_count * sizeof(*table->tags.lookup));
@@ -6180,6 +6508,7 @@ static void type_tag_withdraw(TypeTable* table, uint32_t tag, bool transparency_
         tags->member_count[tag] = 0;
         tags->completion[tag] = 0;
         tags->packed[tag] = 0;
+        tags->ms_struct[tag] = 0;
         tags->pack_log2[tag] = 0;
         tags->alignment_log2[tag] = 0;
         tags->lookup[tag] = 0;
@@ -6201,6 +6530,7 @@ static void type_tag_restore(TypeTable* table, const TypeTable* source, uint32_t
     tags->member_count[tag] = source->tags.member_count[tag];
     tags->completion[tag] = source->tags.completion[tag];
     tags->packed[tag] = source->tags.packed[tag];
+    tags->ms_struct[tag] = source->tags.ms_struct[tag];
     tags->pack_log2[tag] = source->tags.pack_log2[tag];
     tags->alignment_log2[tag] = source->tags.alignment_log2[tag];
     tags->lookup[tag] = source->tags.lookup[tag];

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Shared association validation for the expression and declaration-time _Generic readers. Include after
-// CheckInputReader. A nominal record reached through pointers, arrays or atomics is a necessary compatibility key;
-// every other type shares an ambiguous key. In particular, do not traverse function parameters: transparent unions
-// can make different parameter tags compatible. Exact queries retain the selection's source position.
+// CheckInputReader. Stable leaves reached through pointer/array/atomic wrappers or function returns are necessary
+// compatibility keys. Integers and enums share one key; both vector kinds use their common element/extent shape.
+// Never traverse function parameters: transparent unions can make different parameter tags compatible. Exact queries
+// retain the selection's source position, and hash collisions only add exact comparisons.
 //
 // The scratch-owned key/type columns have a power-of-two capacity, a multiple of 16, and at most half occupancy.
 // Each probe reads exactly 16 owned keys. Insertion into the first empty lane preserves source order among equal
@@ -30,14 +31,23 @@ static TypeId check_generic_key(const TypeTable* types, TypeId type)
 {
     type = type_strip_aligned(types, type);
     uint8_t kind = type_kind(types, type);
-    while (kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_ATOMIC || type_kind_is_array(kind))
+    while (kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_ATOMIC || kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind))
     {
         type = type_strip_aligned(types, types->types.base[type_index(type)]);
         kind = type_kind(types, type);
     }
-    // 1 is not an unqualified TypeId. Enums and their underlying integers, compatible arrays/functions and the
-    // vector kinds deliberately meet in this group rather than mistaking TypeId inequality for incompatibility.
-    return kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ? type_unqualified(type) : 1;
+    // Enum/integer compatibility is not transitive, and an enum may complete after an earlier association was
+    // inserted. Keep their key independent of the current underlying type so completion cannot stale stored keys.
+    uint32_t key = kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM ? 1 : type_unqualified(type);
+    if (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR)
+    {
+        const uint32_t index = type_index(type);
+        const uint64_t extent = types->types.extent[index];
+        // type_merge_shallow compares these exact two fields across both vector kinds. Ignore kind, qualifiers and
+        // alignment here, leaving their semantic checks to the exact query. No new type or index is constructed.
+        key = types->types.base[index] * UINT32_C(0x9e3779b9) ^ (uint32_t)extent ^ (uint32_t)(extent >> 32);
+    }
+    return key != 0 ? key : 1;
 }
 
 static bool check_generic_initialize(CheckInputReader* reader, CheckGenericSet* set, uint32_t token_span, TypeId control, uint32_t source_position)
@@ -141,3 +151,4 @@ static bool check_generic_association(CheckInputReader* reader, CheckGenericSet*
     }
     return valid;
 }
+

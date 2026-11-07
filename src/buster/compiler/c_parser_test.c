@@ -431,6 +431,31 @@ static const ParseTestSnippet parse_test_snippets[] =
 {
     // Valid code.
     { "int x;\nint f(int a, int b) { return a + b * 2; }\n", "", 0 },
+    // Empty array bounds close with `]`; qualifiers and unspecified-size parameters keep that allowance (#1253).
+    { "extern int a[]; void f(int a[], int b[const], int c[*], int d[static 3]);\n", "", 0 },
+    { "void f(int [], int [const], int [*]);\n", "", 0 },
+    // Before any bound, a wrong closer or a semicolon is a missing expression, not a missing `]`.
+    { "int a[);\n", "1:7: expected expression", 0 },
+    { "int a[;\n", "1:7: expected expression", 0 },
+    { "int a[};\n", "1:7: expected expression", 0 },
+    { "void f(int a[);\n", "1:14: expected expression", 0 },
+    { "void f(const x [);\n", "1:17: expected expression", 0 },
+    { "void f(int a[const);\n", "1:19: expected expression", 0 },
+    { "void f(int a[const;\n", "1:19: expected expression", 0 },
+    { "void f(int a[const};\n", "1:19: expected expression", 0 },
+    { "void f(int a[static );\n", "1:21: expected expression", 0 },
+    { "void f(int a[static ;\n", "1:21: expected expression", 0 },
+    // Starting an expression still requires its operand, even at the matching bracket.
+    { "void f(int a[+]);\n", "1:15: expected expression", 0 },
+    { "void f(int a[*);\n", "1:15: expected expression", 0 },
+    // After a bound the missing bracket is still the error; a subscript never admits an empty expression.
+    { "int a[3;\n", "1:8: expected ']'", 0 },
+    { "int a[static 3);\n", "1:15: expected ']'", 0 },
+    { "void f(int a[3);\n", "1:15: expected ']'", 0 },
+    { "int g(int *p) { return p[); }\n", "1:26: expected expression", 0 },
+    { "int g(int *p) { return p[]; }\n", "1:26: expected expression", 0 },
+    // Other empty expression contexts are unchanged.
+    { "void f(void); void g(void) { f(); for (;;) { return; } }\n", "", 0 },
     { "struct S { int a : 3; char *p; } s = { 1, \"x\" };\n", "", 0 },
     { "int x; void g(void) { if (x) x = 1; else { for (int i = 0; i < 3; i++) x += i; } do x--; while (x); switch (x) { case 1: break; default: ; } }\n", "", 0 },
     { "typedef int T; T (x); int f(T (x)); int g(int (x));\n", "", 0 },
@@ -465,6 +490,61 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "struct S { int a; [[deprecated]] *p; };\n", "1:34: type name requires a specifier or qualifier", 0 },
     { "[[deprecated]] *p;\n", "1:17: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     { "void f(void) { __attribute__(()) __attribute__(()) *p; }\n", "1:53: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    // A block item's GNU attributes before a name of no type (#147): clang asks what the name is first (TryAnnotateName),
+    // and a declared object's, function's, enumerator's or parameter's, or one it declares implicitly before a `(`, starts
+    // no declarator, in any standard; an undeclared name is an implicit int's declarator. After a control statement's
+    // head, a label's name or `__extension__`, and in a for's first clause, they are no declaration's.
+    { "int x; void f(void) { __attribute__(()) x = 1; }\n", "1:41: expected identifier or '('", 0 },
+    { "int x; void f(void) { __attribute__((unused)) __attribute__(()) x; }\n", "1:65: expected identifier or '('", 0 },
+    { "void g(void); enum { E }; void f(int p) { __attribute__(()) g(); }\n", "1:61: expected identifier or '('", 0 },
+    { "enum { E }; void f(void) { __attribute__(()) E; }\n", "1:46: expected identifier or '('", 0 },
+    { "void f(int p) { __attribute__(()) p = 1; }\n", "1:35: expected identifier or '('", 0 },
+    { "void f(void) { __attribute__(()) f; }\n", "1:34: expected identifier or '('", 0 },
+    { "void f(void) { int x; { __attribute__((aligned(4))) x[1]; } }\n", "1:53: expected identifier or '('", 0 },
+    { "int x; void f(void) { switch (1) { case 1: __attribute__(()) x = 1; } }\n", "1:62: expected identifier or '('", 0 },
+    { "int x; void f(void) { ({ __attribute__(()) x = 1; }); }\n", "1:44: expected identifier or '('", 0 },
+    { "int x; void f(void) { __attribute__(()) x = 1; }\n", "1:41: expected identifier or '('", "c89" },
+    { "int x; void f(void) { __attribute__(()) x = 1; }\n", "1:41: expected identifier or '('", "c23" },
+    { "void f(void) { __attribute__(()) foo(); }\n", "1:34: expected identifier or '('", "c89" },
+    { "int f(a) int a; { __attribute__(()) a = 1; return a; }\n", "1:37: expected identifier or '('", 0 },
+    { "int x, y; void g(void) { int z = 2; z = 3; } void f(void) { __attribute__(()) x = 1; }\n", "1:79: expected identifier or '('", "c89" },
+    { "void f(void) { __attribute__(()) y = 1; y = 2; }\n", "", "c89" },
+    { "void g(void) { int z = 2; z = 3; } void f(void) { __attribute__(()) w = 1; w = 2; } int w;\n", "", "c89" },
+    { "void f(void) { int x = sizeof(struct { int x; }); __attribute__(()) x = 1; }\n", "1:69: expected identifier or '('", 0 },
+    { "void f(void) { { int x; } __attribute__(()) x = 1; }\n", "1:45: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "void f(void) { for (int x = 0;;) { } __attribute__(()) x; }\n", "1:56: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "int x; void f(void) { int x; { typedef int x; __attribute__(()) x y; } }\n", "", 0 },
+    { "int x; void f(void) { if (1) __attribute__(()) x = 1; L: __attribute__(()) x = 1; __attribute__(()) x: ; }\n", "", 0 },
+    { "int x; void f(void) { __extension__ __attribute__(()) x = 1; }\n", "1:55: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "int x; void f(void) { for (__attribute__(()) x = 1;;) ; }\n", "1:46: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "int x; void f(void) { __attribute__(()) static x = 1; __attribute__(()) *x; }\n", "1:48: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    // A name of no ordinary binding that a tag in scope has, clang's Sema's error first (isTagTypeWithMissingTag), the tag
+    // in scope as its scope keeps it (the parser's ParseScalar.tags): an ordinary binding first, a tag of a block that
+    // ended none, and a file-scope tag before the fallback's declaration through the whole unit. Before C23 a `(` makes
+    // the name an implicit function's; C23 has none.
+    { "struct x { int v; }; void f(void) { __attribute__(()) x = 1; }\n", "1:55: must use 'struct' tag to refer to type 'x'", "gnu89", true },
+    { "struct x { int v; }; void f(void) { __attribute__((unused)) x; }\n", "1:61: must use 'struct' tag to refer to type 'x'", 0, true },
+    { "union u { int v; }; void f(void) { __attribute__(()) u; }\n", "1:54: must use 'union' tag to refer to type 'u'", "c89", true },
+    { "enum e { A }; void f(void) { __attribute__(()) e = 1; }\n", "1:48: must use 'enum' tag to refer to type 'e'", "gnu89", true },
+    { "struct x; void f(void) { { __attribute__(()) x = 1; } }\n", "1:46: must use 'struct' tag to refer to type 'x'", "gnu89", true },
+    { "void g(void) { struct x { int v; }; } void f(void) { __attribute__(()) x = 1; x = 2; }\n", "", "gnu89" },
+    { "struct x { int v; }; void f(void) { int x; __attribute__(()) x = 1; }\n", "1:62: expected identifier or '('", "gnu89" },
+    { "int y; void g(void) { y = 1; } struct x { int v; }; void h(void) { y = 2; } void f(void) { __attribute__(()) x = 1; }\n",
+      "1:110: must use 'struct' tag to refer to type 'x'", "gnu89", true },
+    { "struct x { int v; }; void f(void) { __attribute__(()) x(1); }\n", "1:55: must use 'struct' tag to refer to type 'x'", "c23", true },
+    // A tag a definition's parameter list declares is in scope in its body (C17 6.2.1p4; #1556's review), a block in it
+    // too, behind a parameter of its name none; a prototype's (a declaration's, or a parameter's in the list) ends with
+    // its list, a K&R definition's declarations' with them (clang's), and the body's with the body.
+    { "void f(struct S *p) { __attribute__(()) S = 1; }\n", "1:41: must use 'struct' tag to refer to type 'S'", "gnu89", true },
+    { "void f(struct S { int a; } p) { { __attribute__(()) S = 1; } }\n", "1:53: must use 'struct' tag to refer to type 'S'", 0, true },
+    { "void f(union U *p) { __attribute__(()) U; }\n", "1:40: must use 'union' tag to refer to type 'U'", "c89", true },
+    { "void f(enum E { A } e) { __attribute__(()) E = 1; }\n", "1:44: must use 'enum' tag to refer to type 'E'", "gnu89", true },
+    { "void f(struct S *S) { __attribute__(()) S = 1; }\n", "1:41: expected identifier or '('", "gnu89" },
+    { "int f(a) struct S *a; { __attribute__(()) S = 1; return 0; }\n", "", "c89" },
+    { "void g(struct S *p); void f(void) { __attribute__(()) S = 1; }\n", "", "c89" },
+    { "int f(void (*q)(struct S *r)) { __attribute__(()) S = 1; return 0; }\n", "", "c89" },
+    { "void f(struct S *p) { } void g(void) { __attribute__(()) S = 1; }\n", "", "c89" },
+    { "void f(void) { __attribute__(()) x(1); }\n", "1:36: expected parameter declarator", "c23" },
     { "void f(__attribute__((aligned(8))) *p);\n", "1:37: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     { "enum E : int { A }; enum F : unsigned char;\n", "", 0 },
     // A typedef's first declarator after an enum's underlying type and body is a type name (K3 skips the base).
@@ -879,6 +959,9 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "int x __attribute__ (( (unused)));\n", "1:23: expected ')'", 0 },
     { "int x __attribute__ ((aligned(4 4)));\n", "1:32: expected ')'", 0 },
     { "int x __attribute__ ((aligned(;)));\n", "1:31: expected expression", 0 },
+    // Clang classifies the required string's diagnostic as semantic, including an empty or malformed argument.
+    { "int x __attribute__((section(,)));\n", "1:30: expected string literal as argument of 'section' attribute", 0, true },
+    { "int x __attribute__((section(1,)));\n", "1:30: expected string literal as argument of 'section' attribute", 0, true },
     { "int x __attribute__ ( unused));\n", "1:22: expected '(' after '('", 0 },
     // A for-statement's missing `;` is at the token clang finds instead.
     { "void f(int n) { for (int i = 0; i n < ; i++) { } }\n", "1:35: expected ';' in 'for' statement specifier", 0 },
@@ -937,7 +1020,7 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "int x = (const)1;\n", "1:15: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     { "struct S { const : 3; };\n", "1:18: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     // A declarator ends at its attributes and asm label: no suffix after them, nor attributes after its name in its
-    // parentheses; a declaration's `(` there is clang's C++-style direct initializer, which the checker refuses.
+    // parentheses; a declaration's `(` there is clang's C++-style direct initializer (#1252).
     { "int x __attribute__((unused)) [3];\n", "1:30: expected ';' after top level declarator", 0 },
     { "struct S { int x __attribute__((unused)) [3]; };\n", "1:41: expected ';' at end of declaration list", 0 },
     { "void g(int x __attribute__((unused)) [3]);\n", "1:38: expected ')'", 0 },
@@ -1131,6 +1214,80 @@ static uint32_t parse_test_check_fixtures(const char* directory)
         remove(path);
     }
     printf("fixtures: %u trees checked by hand, %u failures\n", count, failures);
+    return failures;
+}
+
+// clang's recovery after a declaration's missing `;` before a declaration specifier (#147, ParseDiagnostic.resumed): it
+// reads the specifier as the next declaration's, so that a file-scope declaration's errors after it are its own; a
+// `#pragma pack` between, `_Static_assert` and a name that is no type leave the rest skipped. Every diagnostic, its place
+// and whether it resumed, by both paths, as clang 23 places them (test-parser --clang compares the first lines).
+static uint32_t parse_test_check_resumed(const char* directory)
+{
+    static const struct
+    {
+        const char* source;
+        const char* diagnostics;
+    } cases[] = {
+        { "int x _Alignas(3);\nint y;\n", "1:6 resumed expected ';' after top level declarator\n" },
+        { "int x const y z;\nint w;\n", "1:6 resumed expected ';' after top level declarator\n1:13 unknown type name 'y'\n" },
+        { "int x const int y z;\n", "1:6 resumed expected ';' after top level declarator\n1:18 expected ';' after top level declarator\n" },
+        { "int x const int y static;\n", "1:6 resumed expected ';' after top level declarator\n1:18 resumed expected ';' after top level declarator\n" },
+        { "int x\n#pragma pack(1)\nconst;\n", "1:6 expected ';' after top level declarator\n" },
+        { "void f(void) { int x const; int y static; }\n", "1:21 resumed expected ';' at end of declaration\n" },
+        { "int x y;\nint z const;\n", "1:6 expected ';' after top level declarator\n2:6 resumed expected ';' after top level declarator\n" },
+        { "int x _Static_assert(1, \"\");\n", "1:6 expected ';' after top level declarator\n" },
+        { "typedef int T;\nint x T;\n", "2:6 resumed expected ';' after top level declarator\n" },
+        { "void f(const p);\n", "1:14 parameter type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]\n" },
+        { "const p;\n", "1:7 type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]\n" },
+        { "void f(Unknown p);\n", "1:8 parameter unknown type name 'Unknown'\n" },
+    };
+    uint32_t failures = 0;
+    char path[4096];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/resumed_%u.c", directory, i);
+        const bool written = parse_test_write(path, cases[i].source, strlen(cases[i].source));
+        const ParseTestSnippet snippet = { .source = cases[i].source, .error = "", .std = 0 };
+        const PPOptions options = parse_test_snippet_options(&snippet);
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            static InternTable table;
+            static Preprocessor pp;
+            static Parser parser;
+            const ParseOptions parse_options = { .scalar = scalar != 0 };
+            const bool ran = written && intern_initialize(&table) && pp_initialize(&pp, &options, &table) && parse_initialize(&parser, &parse_options, options.language) &&
+                             pp_run(&pp, path);
+            if (ran)
+            {
+                parse_translation_unit(&parser, &pp);
+            }
+            char text[1024] = "";
+            uint32_t length = 0;
+            for (uint32_t d = 0; ran && d < parser.diagnostic_count; d += 1)
+            {
+                const ParseDiagnostic* diagnostic = &parser.diagnostics[d];
+                const uint32_t location = parse_diagnostic_location(&parser, &pp, diagnostic);
+                const uint32_t range = pp_find_range(&pp, location);
+                uint32_t column = 0;
+                const uint32_t line = range != BUSTER_PP_NONE ? pp_line_of(&pp, range, location, &column) : 0;
+                char message[256];
+                parse_diagnostic_message(&parser, &pp, diagnostic, message, sizeof(message));
+                const int printed = snprintf(text + length, sizeof(text) - length, "%u:%u %s%s%s\n", line, column, diagnostic->resumed ? "resumed " : "",
+                                             diagnostic->parameter_type ? "parameter " : "", message);
+                length += printed > 0 && (uint32_t)printed < sizeof(text) - length ? (uint32_t)printed : 0;
+            }
+            if (!ran || strcmp(text, cases[i].diagnostics) != 0)
+            {
+                failures += 1;
+                printf("resumed %u (%s path): diagnostics\n%s  not\n%s    %s", i, scalar ? "scalar" : "vector", text, cases[i].diagnostics, cases[i].source);
+            }
+            parse_release(&parser);
+            pp_release(&pp);
+            intern_release(&table);
+        }
+        remove(path);
+    }
+    printf("resumed declarations: %u cases, %u failures\n", (uint32_t)BUSTER_ARRAY_LENGTH(cases), failures);
     return failures;
 }
 
@@ -2202,6 +2359,7 @@ static uint32_t parse_test_tree_only(const Parser* full, Preprocessor* pp, const
     {
         const bool parsed = parse_translation_unit(&tree, pp);
         same = parsed == (full->errors == 0) && tree.errors == full->errors && tree.fatal == full->fatal &&
+               tree.recovered_parameter_types == full->recovered_parameter_types &&
                tree.diagnostic_count == full->diagnostic_count && parse_test_compare_tokens(&tree.tokens, &full->tokens) == BUSTER_PARSE_NONE &&
                tree.postorder == 0 && tree.sizes == 0 && tree.positions == 0 && tree.ends == 0 && tree.first_children == 0 && tree.next_siblings == 0;
         for (uint32_t column = 11; column < BUSTER_ARRAY_LENGTH(tree.columns); column += 1)
@@ -2212,7 +2370,8 @@ static uint32_t parse_test_tree_only(const Parser* full, Preprocessor* pp, const
         {
             const ParseDiagnostic* a = &full->diagnostics[d];
             const ParseDiagnostic* b = &tree.diagnostics[d];
-            same = a->token == b->token && a->argument == b->argument && a->message == b->message && a->place == b->place && a->error == b->error;
+            same = a->token == b->token && a->argument == b->argument && a->message == b->message && a->place == b->place && a->error == b->error &&
+                   a->note == b->note && a->resumed == b->resumed && a->parameter_type == b->parameter_type && a->resume_delete == b->resume_delete && a->resume_end == b->resume_end;
         }
         if (same && parsed)
         {
@@ -3240,6 +3399,7 @@ static const char* parse_test_parse_difference(const Parser* a, const Parser* b)
     const uint32_t count = a->tokens.count;
     const char* result = count != b->tokens.count ? "token count" :
                          a->errors != b->errors || a->fatal != b->fatal ? "errors" :
+                         a->recovered_parameter_types != b->recovered_parameter_types ? "parameter recovery" :
                          a->diagnostic_count != b->diagnostic_count ? "diagnostics' count" :
                          a->statistics.fallback_items != b->statistics.fallback_items || a->statistics.fallback_tokens != b->statistics.fallback_tokens ||
                          a->statistics.flagged_tokens != b->statistics.flagged_tokens || a->statistics.whole != b->statistics.whole ? "statistics" :
@@ -3258,7 +3418,8 @@ static const char* parse_test_parse_difference(const Parser* a, const Parser* b)
     {
         const ParseDiagnostic* x = &a->diagnostics[d];
         const ParseDiagnostic* y = &b->diagnostics[d];
-        result = x->token != y->token || x->argument != y->argument || x->message != y->message || x->place != y->place || x->error != y->error ? "diagnostics" : 0;
+        result = x->token != y->token || x->argument != y->argument || x->message != y->message || x->place != y->place || x->error != y->error ||
+                 x->note != y->note || x->resumed != y->resumed || x->parameter_type != y->parameter_type || x->resume_delete != y->resume_delete || x->resume_end != y->resume_end ? "diagnostics" : 0;
     }
     return result;
 }
@@ -3718,6 +3879,175 @@ static __attribute__((unused)) uint32_t parse_test_check_probe(const ParseTestPr
 // a run stops at the first that fails, so in a child whose address space may grow a page less than a run reached, the
 // last fails, and the child's peak is what the run had before it; a page less than that, the one before fails; and so
 // on, a run each, down to the first.
+// Whether `pointer` is in the bytes `arena` has room for, compared as integers: the arena is another mapping, which C's
+// relational operators don't relate to the pointer's.
+static bool parse_test_in_arena(const void* pointer, const Arena* arena)
+{
+    const uintptr_t address = (uintptr_t)pointer;
+    const uintptr_t base = (uintptr_t)arena->base;
+    return pointer != 0 && base != 0 && address >= base && address - base < arena->capacity;
+}
+
+// The diagnostics' place: as the address space says, wrong, or not checked (the host's hard RLIMIT_AS leaves no room for
+// the limited run).
+typedef enum ParseTestPlace
+{
+    PARSE_TEST_PLACE_RIGHT,
+    PARSE_TEST_PLACE_WRONG,
+    PARSE_TEST_PLACE_SKIPPED,
+} ParseTestPlace;
+
+// The least address space past the process's own that the limited run takes: under a finite RLIMIT_AS each arena admits
+// a 128th of it (arena_address_share), here 512 MB, more than the large unit's columns take.
+#define BUSTER_PARSE_TEST_PLACE_BYTES (64ull << 30)
+
+// Whether a parse of `declarations` declarations puts its diagnostics where the address space says (#1279's review): in
+// the tokens' arena where it is unbounded, and under a finite RLIMIT_AS in an arena of their own sized by the tokens
+// converted, not by the tokens' bound, twice the output's, which would map 12 bytes more for each token of a large unit
+// than it can use. Its meanings are in the tokens' arena either way. Run in a child, which sets its soft limit: none, where
+// the hard limit allows that, for the unbounded run; for the limited one, 1 TiB past its address space, or the hard
+// limit where that is lower but leaves BUSTER_PARSE_TEST_PLACE_BYTES. Where the hard limit allows neither, the run isn't
+// checked.
+static __attribute__((unused)) ParseTestPlace parse_test_diagnostic_place(uint32_t declarations, bool limited)
+{
+    // Zero where /proc or getrlimit fails, so that what follows reads defined values and the run reports a wrong place.
+    struct rlimit space = {
+        .rlim_cur = 0,
+        .rlim_max = 0,
+    };
+    const uint64_t base = parse_test_status_bytes("VmSize:");
+    bool result = base != 0 && getrlimit(RLIMIT_AS, &space) == 0;
+    const uint64_t hard = space.rlim_max == RLIM_INFINITY ? UINT64_MAX : (uint64_t)space.rlim_max;
+    const uint64_t wanted = base + (1ull << 40);
+    // The run without a limit lifts the soft one, which a finite hard one forbids.
+    const bool skipped = result && (limited ? hard < base + BUSTER_PARSE_TEST_PLACE_BYTES : space.rlim_max != RLIM_INFINITY);
+    space.rlim_cur = !limited ? RLIM_INFINITY : wanted < hard ? wanted : hard;
+    result = result && !skipped && setrlimit(RLIMIT_AS, &space) == 0;
+    const uint64_t bytes = (uint64_t)declarations * 8 + 1;
+    char* source = result ? malloc(bytes) : 0;
+    for (uint32_t i = 0; source != 0 && i < declarations; i += 1)
+    {
+        memcpy(source + (uint64_t)i * 8, "int x;\n ", 8);
+    }
+    InternTable table = { 0 };
+    Preprocessor pp = { 0 };
+    Parser parser = { 0 };
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const ParseOptions parsing = { 0 };
+    result = source != 0 && intern_initialize(&table) && pp_initialize(&pp, &options, &table) && parse_initialize(&parser, &parsing, options.language) &&
+             pp_run_source(&pp, "diagnostic-place.c", (const uint8_t*)source, (uint32_t)(bytes - 1));
+    // Repeated `int x;` is valid C (tentative definitions), so the parse succeeds without a diagnostic.
+    result = result && parse_translation_unit(&parser, &pp) && parser.diagnostic_count == 0 && parser.tokens.count == 3 * declarations;
+    const Arena* own = &parser.columns[8];
+    const Arena* tokens = &parser.columns[0];
+    const bool in_tokens = parse_test_in_arena(parser.diagnostics, tokens);
+    const bool in_own = parse_test_in_arena(parser.diagnostics, own);
+    const uint64_t needed = ((uint64_t)parser.tokens.count + 16 + 2 * BUSTER_PARSE_TOKEN_PADDING) * sizeof(ParseDiagnostic) + 64;
+    result = result && parse_test_in_arena(parser.meanings.meanings, tokens) && parser.diagnostic_capacity == parser.tokens.count + 16 &&
+             (limited ? in_own && !in_tokens && own->requested_capacity == needed : in_tokens && !in_own);
+    parse_release(&parser);
+    pp_release(&pp);
+    intern_release(&table);
+    free(source);
+    return skipped ? PARSE_TEST_PLACE_SKIPPED : result ? PARSE_TEST_PLACE_RIGHT : PARSE_TEST_PLACE_WRONG;
+}
+
+// parse_test_diagnostic_place in a child each, unbounded and limited: a small unit and a large one (786,432 tokens).
+static uint32_t parse_test_diagnostic_places(void)
+{
+    uint32_t failures = 0;
+#if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer) || __has_feature(memory_sanitizer)
+    printf("parser: the diagnostics' place under RLIMIT_AS isn't checked under a sanitizer, whose shadow takes the address space\n");
+#else
+    static const uint32_t sizes[] = { 1, 1u << 18 };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sizes); i += 1)
+    {
+        for (uint32_t limited = 0; limited < 2; limited += 1)
+        {
+            const pid_t child = fork();
+            if (child == 0)
+            {
+                _exit((int)parse_test_diagnostic_place(sizes[i], limited != 0));
+            }
+            int status = 0;
+            pid_t waited = child;
+            while (child > 0 && (waited = waitpid(child, &status, 0)) < 0 && errno == EINTR)
+            {
+            }
+            const int place = child > 0 && waited == child && WIFEXITED(status) ? WEXITSTATUS(status) : PARSE_TEST_PLACE_WRONG;
+            const bool passed = place == PARSE_TEST_PLACE_RIGHT || place == PARSE_TEST_PLACE_SKIPPED;
+            if (place == PARSE_TEST_PLACE_SKIPPED)
+            {
+                printf("parser: %u declarations %s: not checked, the hard RLIMIT_AS %s\n", sizes[i], limited != 0 ? "under a finite RLIMIT_AS" : "without a limit",
+                       limited != 0 ? "leaves less than 64 GiB past the address space" : "is finite");
+            }
+            if (!passed)
+            {
+                parse_test_report("parser: %u declarations %s: the diagnostics aren't where the address space puts them\n", sizes[i],
+                                  limited != 0 ? "under a finite RLIMIT_AS" : "without a limit");
+            }
+            failures += !passed;
+        }
+    }
+#endif
+    return failures;
+}
+
+// The places of __clang__'s _Clang reading (parse_clang_scope_numbers) and the expansion history they ask for (#628): with
+// the history deferred, as the drivers have it, a unit whose macros' numbers follow commas in calls' arguments and that has
+// no `[[` keeps it deferred, by both paths, where every such unit replayed its preprocessing for it; one with a `[[` before
+// such a comma asks for it, as an attribute list's comma may be one.
+static uint32_t parse_test_clang_places_history(void)
+{
+    // Each source and whether its history stays deferred: a macro's number after a comma is a place only past the unit's
+    // first `[[`, as the vector path's mask has it within a block of 64 tokens and the scalar path's flag at each token.
+    static const char* const sources[] =
+    {
+        "#define N 1\n#define M 2\nint f(int, int);\nint g(void) { return f(M, N) + f(2, N); }\n",
+        "#define N 1\n[[deprecated]] int a;\nint f(int, int);\nint g(void) { return f(2, N); }\n",
+        "#define N 1\nint f(int, int);\nint g(void) { return f(2, N); }\n[[deprecated]] int a;\n",
+        "#define N 1\nint f(int, int);\nint g(void) { return f(2, N); }\n[[deprecated]] int a;\nint h(void) { return f(3, N); }\n",
+    };
+    static const bool deferred_sources[] = { true, false, true, false };
+    uint32_t failures = 0;
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+    {
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            const PPOptions options =
+            {
+                .language = { .standard = 2023, .gnu = true },
+                .scalar = scalar != 0,
+                .defer_history = true,
+                .quiet = true,
+                .no_standard_includes = true,
+            };
+            const ParseOptions parse_options = { .scalar = scalar != 0 };
+            static InternTable table;
+            static Preprocessor pp;
+            static Parser parser;
+            table = (InternTable){ 0 };
+            pp = (Preprocessor){ 0 };
+            parser = (Parser){ 0 };
+            const bool ready = intern_initialize(&table) && pp_initialize(&pp, &options, &table) && parse_initialize(&parser, &parse_options, options.language) &&
+                               pp_run_source(&pp, "places.c", (const uint8_t*)sources[s], strlen(sources[s])) && pp.history_deferred &&
+                               parse_translation_unit(&parser, &pp);
+            const bool deferred = deferred_sources[s];
+            const bool passed = ready && pp.history_deferred == deferred && (pp.history_replay == NULL) == deferred;
+            if (!passed)
+            {
+                parse_test_report("parser: __clang__'s places, source %u%s: the history is %s, not %s\n", s, scalar != 0 ? " (scalar)" : "",
+                                  pp.history_deferred ? "deferred" : "recorded", deferred ? "deferred" : "recorded");
+            }
+            failures += !passed;
+            parse_release(&parser);
+            pp_release(&pp);
+            intern_release(&table);
+        }
+    }
+    return failures;
+}
+
 static uint32_t parse_test_driver_limits(char** arguments, int count, int capture, ParseTestProbe* shared, const char* name, bool preprocess)
 {
     uint32_t failures = 0;
@@ -4061,11 +4391,14 @@ static int run_parser_tests(int argument_count, char** arguments)
         {
             failures += parse_test_check_postorder_self(&arena);
             failures += parse_test_workspace_budget();
+            failures += parse_test_diagnostic_places();
+            failures += parse_test_clang_places_history();
             failures += parse_test_check_k6_tables();
             failures += parse_test_check_handoff(options.language, seed);
             failures += parse_test_check_snippets(directory, clang);
             failures += clang != 0 ? parse_test_check_oracle(directory, clang) : 0;
             failures += parse_test_check_fixtures(directory);
+            failures += parse_test_check_resumed(directory);
         }
         if (input_count == 0)
         {

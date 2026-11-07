@@ -60,6 +60,31 @@ static bool check_input_overload_active(const CheckInputReader* reader, uint32_t
     return active;
 }
 
+// The latest matching signature in one visible overload scope, or in the translation unit (UINT32_MAX).
+// Both linkage and ABI inheritance must distinguish size wrappers from ordinary functions of the same C type.
+static const CheckOverloadCandidate* check_input_overload_prior(CheckInputReader* reader, uint32_t token, TypeId type, uint32_t scope)
+{
+    const uint32_t name = reader->parser->tokens.names[token];
+    const CheckInputAttributes* attributes = check_input_attributes_at(reader->output, token);
+    const bool object_size = attributes != NULL && attributes->object_sizes != NULL;
+    uint64_t signature_hash = 0;
+    const bool hashed = check_overload_signature_hash(&reader->overload_index, reader->types, type, reader->scratch, &signature_hash);
+    signature_hash = object_size ? type_hash_mix(signature_hash, 1) : signature_hash;
+    reader->output->resource |= !hashed;
+    const uint64_t key = check_overload_index_key(signature_hash, name, scope);
+    const uint32_t slot = hashed ? check_overload_index_find(&reader->overload_index, key, name, scope, reader->parser->options.scalar) : UINT32_MAX;
+    const uint32_t* next = scope == UINT32_MAX ? reader->overload_index.linked_next : reader->overload_index.lexical_next;
+    const CheckOverloadCandidate* prior = NULL;
+    for (uint32_t linked = check_overload_index_head(&reader->overload_index, slot); prior == NULL && linked != UINT32_MAX; linked = next[linked])
+    {
+        const CheckOverloadCandidate* candidate = reader->overload_candidates + linked;
+        const TypeAnswer signature = (candidate->object_sizes != NULL) == object_size ? check_overload_signature(reader->types, candidate->type, type) : TYPE_ANSWER_NO;
+        reader->output->resource |= signature == TYPE_ANSWER_FULL;
+        prior = signature == TYPE_ANSWER_YES ? candidate : NULL;
+    }
+    return prior;
+}
+
 static void check_input_overload_declare(CheckInputReader* reader, uint32_t token, uint32_t point, uint32_t old, bool active)
 {
     CheckInput* input = reader->output;
@@ -80,12 +105,16 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
             .position = point,
             .flags = check_input_overload_flags(check_input_attributes_at(input, token)) | (check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) ? BUSTER_CHECK_OVERLOAD_DEFINED : 0),
         };
+        const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
+        candidate.object_sizes = attributes != NULL ? attributes->object_sizes : NULL;
+        candidate.object_size_count = attributes != NULL ? attributes->object_size_count : 0;
         const CheckOverloadContext context = {
             .semantic = check_input_context(reader, point, token, false),
         };
         CheckOverloadIndex* index = &reader->overload_index;
         uint64_t signature_hash = 0;
         const bool hashed = check_overload_signature_hash(index, reader->types, candidate.type, reader->scratch, &signature_hash);
+        signature_hash = candidate.object_sizes != NULL ? type_hash_mix(signature_hash, 1) : signature_hash;
         const uint64_t lexical_key = check_overload_index_key(signature_hash, name, scope);
         const uint64_t linked_key = check_overload_index_key(signature_hash, name, UINT32_MAX);
         const uint32_t lexical_slot = hashed ? check_overload_index_find(index, lexical_key, name, scope, reader->parser->options.scalar) : UINT32_MAX;
@@ -98,10 +127,11 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
         if (active && !input->resource)
         {
             const uint32_t linked = reader->linked_declarations[name];
-            const uint32_t previous = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
+            // Linkage belongs to each signature, not the source name's whole overload set. glibc's ordinary
+            // external open64 and its private unavailable variadic overload have different signatures.
+            // The linked-signature walk below still rejects different linkage for the same function.
             if ((old != 0 && reader->bindings.depth[old - 1] == reader->scope_count && reader->bindings.kind[old - 1] != C_BINDING_FUNCTION) ||
-                (linked != 0 && reader->declaration_kinds[linked - 1] != C_BINDING_FUNCTION) ||
-                (old != 0 && check_input_linkage(reader->declaration_bits, previous) != 0 && check_input_linkage(reader->declaration_bits, previous) != check_input_linkage(reader->declaration_bits, token)))
+                (linked != 0 && reader->declaration_kinds[linked - 1] != C_BINDING_FUNCTION))
             {
                 declared.status = CHECK_OVERLOAD_CONFLICT;
             }
@@ -117,7 +147,7 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
             for (uint32_t linked = linked_head; !complete && declared.status == CHECK_OVERLOAD_OK && linked != UINT32_MAX; linked = index->linked_next[linked])
             {
                 const CheckOverloadCandidate* prior = reader->overload_candidates + linked;
-                const TypeAnswer signature = check_overload_signature(reader->types, prior->type, candidate.type);
+                const TypeAnswer signature = check_overload_candidate_signature(reader->types, prior, &candidate);
                 if (signature == TYPE_ANSWER_FULL)
                 {
                     declared.status = CHECK_OVERLOAD_FULL;
@@ -126,7 +156,7 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
                 {
                     const TypeAnswer compatible = check_overload_compatible(reader->types, prior->type, candidate.type, &context);
                     if (compatible != TYPE_ANSWER_YES || check_input_linkage(reader->declaration_bits, prior->declaration) != check_input_linkage(reader->declaration_bits, token) ||
-                        ((prior->flags ^ candidate.flags) & BUSTER_CHECK_OVERLOADABLE) != 0)
+                        ((prior->flags ^ candidate.flags) & BUSTER_CHECK_OVERLOADABLE) != 0 || !check_overload_object_sizes_same(prior, &candidate))
                     {
                         declared.status = compatible == TYPE_ANSWER_FULL ? CHECK_OVERLOAD_FULL : CHECK_OVERLOAD_CONFLICT;
                     }
@@ -167,8 +197,8 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
             input->overload_heads[token] = current + 1;
             reader->objects[token] = candidate.object;
             reader->definition_origins[token] = definition_origin;
-            index->lexical_next[current] = active ? check_overload_index_previous(reader->overload_candidates, candidate.type, lexical_head, index->lexical_next) : lexical_head;
-            index->linked_next[current] = active ? check_overload_index_previous(reader->overload_candidates, candidate.type, linked_head, index->linked_next) : linked_head;
+            index->lexical_next[current] = active ? check_overload_index_previous(reader->overload_candidates, candidate.type, candidate.object_sizes != NULL, lexical_head, index->lexical_next) : lexical_head;
+            index->linked_next[current] = active ? check_overload_index_previous(reader->overload_candidates, candidate.type, candidate.object_sizes != NULL, linked_head, index->linked_next) : linked_head;
             index->checked[current] = active;
             index->unmarked[current] = unmarked != BUSTER_CHECK_NONE ? unmarked :
                                        (candidate.flags & BUSTER_CHECK_OVERLOADABLE) == 0 ? candidate.canonical : BUSTER_CHECK_NONE;

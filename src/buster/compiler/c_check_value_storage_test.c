@@ -62,12 +62,19 @@ static void check_test_value_storage(CheckTest* test)
         UINT64_C(0x8000000000000123),
     };
     const uint16_t exponents[] = { 0, 0x8000, 0x3fff, 0, 0x7ffe, 0x7fff, 0x7fff, 0x7fff };
+    // libm's environment functions, from test_libm (#652).
+    int (*const get_environment)(fenv_t*) = (int (*)(fenv_t*))test_libm("fegetenv");
+    int (*const set_environment)(const fenv_t*) = (int (*)(const fenv_t*))test_libm("fesetenv");
+    int (*const clear_exceptions)(int) = (int (*)(int))test_libm("feclearexcept");
+    int (*const test_exceptions)(int) = (int (*)(int))test_libm("fetestexcept");
+    const bool libm = get_environment != NULL && set_environment != NULL && clear_exceptions != NULL && test_exceptions != NULL;
+    check_test_expect(test, libm, "find libm's floating environment functions");
     fenv_t saved;
-    const bool saved_environment = fegetenv(&saved) == 0;
+    const bool saved_environment = libm && get_environment(&saved) == 0;
     check_test_expect(test, saved_environment, "capture floating environment before representation-only handoff");
     if (saved_environment)
     {
-        check_test_expect(test, feclearexcept(FE_ALL_EXCEPT) == 0, "clear exceptions before representation-only handoff");
+        check_test_expect(test, clear_exceptions(FE_ALL_EXCEPT) == 0, "clear exceptions before representation-only handoff");
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(significands); i += 1)
         {
             for (uint32_t imaginary = 0; imaginary < 2; imaginary += 1)
@@ -91,8 +98,8 @@ static void check_test_value_storage(CheckTest* test)
                     "literal handoff preserves every meaningful bit and zeroes inactive components and padding");
             }
         }
-        check_test_expect(test, fetestexcept(FE_ALL_EXCEPT) == 0, "literal handoff does not evaluate signaling NaNs or raise floating exceptions");
-        check_test_expect(test, fesetenv(&saved) == 0, "restore floating environment after representation fixtures");
+        check_test_expect(test, test_exceptions(FE_ALL_EXCEPT) == 0, "literal handoff does not evaluate signaling NaNs or raise floating exceptions");
+        check_test_expect(test, set_environment(&saved) == 0, "restore floating environment after representation fixtures");
     }
 
     // A constexpr identifier's copy (#879) takes the same ten meaningful bytes as the literal handoff, never an x87
@@ -106,14 +113,14 @@ static void check_test_value_storage(CheckTest* test)
     memset(&destination, 0xa5, sizeof(destination));
     if (saved_environment)
     {
-        check_test_expect(test, feclearexcept(FE_ALL_EXCEPT) == 0, "clear exceptions before the constexpr payload copy");
+        check_test_expect(test, clear_exceptions(FE_ALL_EXCEPT) == 0, "clear exceptions before the constexpr payload copy");
         check_value_copy_floating(&destination, &source);
         check_test_expect(test, destination.floating_storage[0] == source.floating_storage[0] &&
             destination.floating_storage[1] == (source.floating_storage[1] & UINT64_C(0xffff)) &&
             destination.imaginary_storage[0] == source.imaginary_storage[0] &&
             destination.imaginary_storage[1] == (source.imaginary_storage[1] & UINT64_C(0xffff)),
             "constexpr payload copy preserves the ten meaningful bytes and zeroes poison padding in both values");
-        check_test_expect(test, fetestexcept(FE_ALL_EXCEPT) == 0, "constexpr payload copy raises no floating exception");
-        check_test_expect(test, fesetenv(&saved) == 0, "restore the floating environment after the constexpr payload copy");
+        check_test_expect(test, test_exceptions(FE_ALL_EXCEPT) == 0, "constexpr payload copy raises no floating exception");
+        check_test_expect(test, set_environment(&saved) == 0, "restore the floating environment after the constexpr payload copy");
     }
 }

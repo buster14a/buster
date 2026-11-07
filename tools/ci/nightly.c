@@ -4,14 +4,15 @@
 // .github/workflows/9700x.yml's `evidence` and `record` jobs and its 9700X job's window step, and
 // .github/workflows/nightly-backfill.yml's coordinator (tools/ci/nightly.sh is the API and git glue around it).
 //
-//   nightly window --now EPOCH --bound SECONDS [--override REASON]   04:00-07:00 Europe/Madrid admission
+//   nightly window --now EPOCH --bound SECONDS [--override REASON]   02:00-08:00 Europe/Madrid admission
 //   nightly window-times --now EPOCH                                  the cycle's date, window start and deadline
+//   nightly worker-window < SOURCE                                   immutable worker's declared window, or unknown
 //   nightly hosted --commit SHA [--exclude RUN] < FACTS               reusable plain-row hosted qualification
 //   nightly record --output FILE                                      a run's coverage record, from the environment
 //   nightly harvest --ledger FILE --facts FILE --states FILE (--records DIR | --list)
 //                                                                     completed runs' rows the ledger lacks (or which)
 //   nightly plan --states FILE --ledger FILE --facts FILE --now EPOCH --main SHA --mode run|dry-run
-//                --coordinator RUN [--pending FILE] [--refs FILE] --report FILE
+//                --coordinator RUN [--pending FILE] [--refs FILE] [--refused FILE] --report FILE
 //   nightly --self-test [--root DIR]
 //
 // FACTS are tab-separated lines that tools/ci/nightly.sh extracts from the Actions API with jq: `run`, `job` and `pr`
@@ -48,6 +49,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define BUSTER_NIGHTLY_LINE 2048
 #define BUSTER_NIGHTLY_FIELDS 16
@@ -63,6 +65,7 @@
 #define BUSTER_NIGHTLY_PATHS 262144
 #define BUSTER_NIGHTLY_ROWS 65536
 #define BUSTER_NIGHTLY_CYCLES 1024
+// Dispatches still hidden by the API, not the job's lifetime dispatch count.
 #define BUSTER_NIGHTLY_PENDING 64
 #define BUSTER_NIGHTLY_REFS 8192
 #define BUSTER_NIGHTLY_FILE (64u << 20)
@@ -72,9 +75,12 @@
 #define BUSTER_NIGHTLY_HARDWARE_JOB "Native tests and benchmarks on Benchpress (Ryzen 7 9700X)"
 #define BUSTER_NIGHTLY_RECORD_FORMAT "buster-coverage-record-1"
 #define BUSTER_NIGHTLY_LEDGER_FORMAT "# buster-nightly-ledger 1"
-// The window, in Europe/Madrid local time: hardware work starts at or after 04:00 and ends by 07:00.
-#define BUSTER_NIGHTLY_WINDOW_START_HOUR 4
-#define BUSTER_NIGHTLY_WINDOW_END_HOUR 7
+// The window, in Europe/Madrid local time: hardware work starts at or after 02:00 and ends by 08:00 (the owner's choice
+// on 2026-11-05, widened from 04:00-07:00). Spain changes its clocks at 02:00 local time, so the window opens at the
+// first instant the local time reaches 02:00 (nightly_madrid_first): 03:00 CEST when the clocks go forward, the first
+// 02:00 when they go back.
+#define BUSTER_NIGHTLY_WINDOW_START_HOUR 2
+#define BUSTER_NIGHTLY_WINDOW_END_HOUR 8
 // A cycle's snapshot is pinned no earlier than this hour of the evening before its window, Europe/Madrid local time
 // whatever the clocks do that night, so that the coordinator's earlier schedules, there for GitHub's hours-late
 // scheduled starts, pin nothing hours ahead.
@@ -423,8 +429,8 @@ static bool nightly_madrid(int64_t utc, NightlyLocal* local)
     return valid;
 }
 
-// The instant of a Madrid local date and time, which must exist (04:00 and 07:00 always do: Spain changes its clocks at
-// 02:00 and 03:00); day may overflow the month, as mktime normalizes it. False when the zone isn't Madrid's.
+// The instant of a Madrid local date and time, which must exist (00:00, 08:00, 12:00 and 22:00 always do: Spain changes
+// its clocks at 02:00 and 03:00); day may overflow the month, as mktime normalizes it. False when the zone isn't Madrid's.
 static bool nightly_madrid_instant(int year, int month, int day, int hour, int64_t* instant)
 {
     struct tm parts = {
@@ -438,6 +444,26 @@ static bool nightly_madrid_instant(int year, int month, int day, int hour, int64
     NightlyLocal check;
     *instant = (int64_t)result;
     return result != (time_t)-1 && nightly_madrid(*instant, &check) && check.hour == hour && check.minute == 0;
+}
+
+// The first instant of a Madrid local date whose local time is at or after hour:00, which exists every day: hour:00 itself
+// on an ordinary day, the hour after the gap when the clocks go forward, and the first of the two when they go back. The
+// date's midnight always exists, and its clock changes fall within an hour of hour:00, so a minute's scan of the three
+// hours around it finds it.
+static bool nightly_madrid_first(int year, int month, int day, int hour, int64_t* instant)
+{
+    int64_t midnight = 0;
+    NightlyLocal date;
+    bool valid = nightly_madrid_instant(year, month, day, 0, &midnight) && nightly_madrid(midnight, &date);
+    bool found = false;
+    for (int64_t t = midnight + (int64_t)(hour - 1) * 3600; valid && !found && t <= midnight + (int64_t)(hour + 1) * 3600; t += 60)
+    {
+        NightlyLocal local;
+        valid = nightly_madrid(t, &local);
+        found = valid && local.year == date.year && local.month == date.month && local.day == date.day && local.hour >= hour;
+        *instant = found ? t : *instant;
+    }
+    return valid && found;
 }
 
 typedef struct NightlyWindow NightlyWindow;
@@ -455,7 +481,7 @@ struct NightlyWindow
     const char* reason;
 };
 
-// Whether work that may take `bound` seconds can start at `now` and end by the cycle's 07:00.
+// Whether work that may take `bound` seconds can start at `now` and end by the cycle's 08:00.
 static NightlyWindow nightly_window(int64_t now, int64_t bound)
 {
     NightlyWindow window = { 0 };
@@ -467,19 +493,68 @@ static NightlyWindow nightly_window(int64_t now, int64_t bound)
         window.valid = nightly_madrid_instant(window.local.year, window.local.month, window.local.day + 1, 12, &tomorrow) && nightly_madrid(tomorrow, &cycle);
     }
     window.valid = window.valid && nightly_madrid_instant(cycle.year, cycle.month, cycle.day - 1, BUSTER_NIGHTLY_PIN_HOUR, &window.pin);
-    window.valid = window.valid && nightly_madrid_instant(cycle.year, cycle.month, cycle.day, BUSTER_NIGHTLY_WINDOW_START_HOUR, &window.start);
+    window.valid = window.valid && nightly_madrid_first(cycle.year, cycle.month, cycle.day, BUSTER_NIGHTLY_WINDOW_START_HOUR, &window.start);
     window.valid = window.valid && nightly_madrid_instant(cycle.year, cycle.month, cycle.day, BUSTER_NIGHTLY_WINDOW_END_HOUR, &window.deadline);
     if (window.valid)
     {
         snprintf(window.cycle, sizeof(window.cycle), "%04d-%02d-%02d", cycle.year, cycle.month, cycle.day);
         window.open = now >= window.start && now < window.deadline && now + bound <= window.deadline;
-        window.reason = now < window.start ? "before 04:00 Europe/Madrid" : now >= window.deadline ? "at or after 07:00 Europe/Madrid" : !window.open ? "too late to finish by 07:00 Europe/Madrid" : "inside 04:00-07:00 Europe/Madrid";
+        window.reason = now < window.start ? "before 02:00 Europe/Madrid" : now >= window.deadline ? "at or after 08:00 Europe/Madrid" : !window.open ? "too late to finish by 08:00 Europe/Madrid" : "inside 02:00-08:00 Europe/Madrid";
     }
     else
     {
         window.reason = "Europe/Madrid time unavailable (no tz database?)";
     }
     return window;
+}
+
+// The two worker contracts in main's history. Read their literal declarations as data, never compile or run a
+// historical tool merely to discover its policy. An absent, repeated or changed declaration is unknown, not today's
+// window: the coordinator reports that state and keeps it pending until its contract is understood.
+static bool nightly_worker_hours(uint64_t start, uint64_t end)
+{
+    return (start == 4 && end == 7) || (start == 2 && end == 8);
+}
+
+static bool nightly_worker_source(NightlyText text, uint32_t* start, uint32_t* end)
+{
+    static const char* const prefixes[] = {
+        "#define BUSTER_NIGHTLY_WINDOW_START_HOUR",
+        "#define BUSTER_NIGHTLY_WINDOW_END_HOUR",
+    };
+    uint64_t hours[2] = { 0 };
+    bool seen[2] = { false };
+    bool valid = true;
+    size_t offset = 0;
+    while (valid && offset < text.length)
+    {
+        const char* line = text.data + offset;
+        const char* newline = memchr(line, '\n', text.length - offset);
+        const size_t length = newline != NULL ? (size_t)(newline - line) : text.length - offset;
+        valid = newline != NULL && memchr(line, 0, length) == NULL;
+        for (uint32_t i = 0; valid && i < 2; i += 1)
+        {
+            const size_t prefix = strlen(prefixes[i]);
+            if (length >= prefix && memcmp(line, prefixes[i], prefix) == 0)
+            {
+                // Only the known literal form; expressions, comments and duplicate definitions need review.
+                const size_t digits = length > prefix ? length - prefix - 1 : 0;
+                char number[3] = { 0 };
+                valid = !seen[i] && length > prefix && line[prefix] == ' ' && digits > 0 && digits < sizeof(number);
+                if (valid)
+                {
+                    memcpy(number, line + prefix + 1, digits);
+                    valid = nightly_number(number, 23, &hours[i]);
+                    seen[i] = true;
+                }
+            }
+        }
+        offset += length + (newline != NULL ? 1 : 0);
+    }
+    valid = valid && seen[0] && seen[1] && nightly_worker_hours(hours[0], hours[1]);
+    *start = valid ? (uint32_t)hours[0] : 0;
+    *end = valid ? (uint32_t)hours[1] : 0;
+    return valid;
 }
 
 // The civil date of a day count since 1970-01-01 (H. Hinnant's algorithm), for the self-test's independent rule.
@@ -1573,6 +1648,14 @@ struct NightlyState
     int64_t committed;
     // The first-parent change touches more than documentation (push's paths-ignore: docs/** and **.md).
     bool code;
+    // From this state's immutable nightly.c, not the coordinator's version. No metadata means no hardware admission.
+    bool worker_window_recorded;
+    uint32_t worker_start_hour;
+    uint32_t worker_end_hour;
+    // Resolved anew for the cycle, including Madrid's clock changes.
+    bool worker_window_valid;
+    int64_t worker_start;
+    int64_t worker_deadline;
     // Folded from the ledger, the runs in flight and the pending dispatches.
     bool targeted;
     bool full;
@@ -1597,6 +1680,10 @@ struct NightlyState
     NightlyStatus status;
     // This plan dispatched it: its nightly/SHA ref is in use now, whatever its status was before the plan.
     bool dispatched;
+    // This job can't have its nightly/SHA branch (the workflow token's refusal, or a branch at another commit): nothing
+    // is dispatched for it again in this job, so that it neither holds a preparation slot nor stays the oldest ready
+    // state all night.
+    bool refused;
 };
 
 typedef struct NightlyStates NightlyStates;
@@ -1606,7 +1693,8 @@ struct NightlyStates
     uint32_t count;
 };
 
-// `state SHA PARENT EPOCH` lines, oldest first, each followed by its first-parent change's `path PATH` lines.
+// `state SHA PARENT EPOCH` lines, oldest first, each followed by `worker-window START END` (hours, or - - for unknown)
+// and its first-parent change's `path PATH` lines. Older input without the window remains readable, but can't admit.
 static bool nightly_states_parse(NightlyStates* states, NightlyText text)
 {
     size_t offset = 0;
@@ -1633,6 +1721,21 @@ static bool nightly_states_parse(NightlyStates* states, NightlyText text)
                 nightly_copy(state.parent, sizeof(state.parent), strcmp(fields[2], "-") == 0 ? "" : fields[2]);
                 states->items[states->count] = state;
                 states->count += 1;
+            }
+        }
+        else if (valid && strcmp(fields[0], "worker-window") == 0)
+        {
+            uint64_t start = 0;
+            uint64_t end = 0;
+            const bool unknown = count == 3 && strcmp(fields[1], "-") == 0 && strcmp(fields[2], "-") == 0;
+            valid = count == 3 && states->count != 0 && !states->items[states->count - 1].worker_window_recorded;
+            valid = valid && (unknown || (nightly_number(fields[1], 23, &start) && nightly_number(fields[2], 23, &end) && nightly_worker_hours(start, end)));
+            if (valid)
+            {
+                NightlyState* state = &states->items[states->count - 1];
+                state->worker_window_recorded = true;
+                state->worker_start_hour = (uint32_t)start;
+                state->worker_end_hour = (uint32_t)end;
             }
         }
         else if (valid && strcmp(fields[0], "path") == 0)
@@ -1692,6 +1795,96 @@ struct NightlyPending
     int64_t dispatched;
 };
 
+// Facts take over once a request is visible, whether queued, running or completed. Until then the existing
+// visibility grace keeps it in flight. Future timestamps stay pending too, rather than permitting a duplicate.
+static bool nightly_pending_active(const NightlyPending* pending, const NightlyFacts* facts, int64_t now)
+{
+    bool active = now - pending->dispatched < BUSTER_NIGHTLY_PENDING_AGE;
+    const uint32_t count = facts->run_count;
+    const NightlyRun* runs = facts->runs;
+    for (uint32_t i = 0; active && i < count; i += 1)
+    {
+        active = !(runs[i].workflow && runs[i].nightly && strcmp(runs[i].request, pending->request) == 0);
+    }
+    return active;
+}
+
+// Validate every row before discarding observed or expired requests: a malformed historical row still rejects the
+// input. Only unseen, unexpired requests consume the bounded active set. The file is replaced only after all of the
+// plan's inputs and options validate, so a late malformed row or active overflow cannot erase the handoff.
+static bool nightly_pending_parse(NightlyText text, const NightlyFacts* facts, int64_t now, NightlyPending* pending, uint32_t* pending_count)
+{
+    size_t offset = 0;
+    char line[BUSTER_NIGHTLY_LINE];
+    bool valid = true;
+    *pending_count = 0;
+    while (valid && nightly_next_line(text, &offset, line, &valid))
+    {
+        char* fields[BUSTER_NIGHTLY_FIELDS];
+        const size_t count = valid ? nightly_split(line, fields, BUSTER_NIGHTLY_FIELDS) : 0;
+        NightlyPending item = { 0 };
+        const size_t purpose = count == 6 ? nightly_find(fields[2], nightly_purpose_names, NIGHTLY_PURPOSE_COUNT) : NIGHTLY_PURPOSE_COUNT;
+        valid = valid && count == 6 && strcmp(fields[0], "pending") == 0 && nightly_token(fields[1], sizeof(item.request)) && purpose < NIGHTLY_PURPOSE_COUNT;
+        valid = valid && (strcmp(fields[3], "admit") == 0 || strcmp(fields[3], "defer") == 0) && nightly_sha(fields[4]) && nightly_epoch(fields[5], &item.dispatched);
+        if (valid)
+        {
+            nightly_copy(item.request, sizeof(item.request), fields[1]);
+            item.purpose = (NightlyPurpose)purpose;
+            item.admit = strcmp(fields[3], "admit") == 0;
+            nightly_copy(item.sha, sizeof(item.sha), fields[4]);
+            if (nightly_pending_active(&item, facts, now))
+            {
+                valid = *pending_count < BUSTER_NIGHTLY_PENDING;
+                if (valid)
+                {
+                    pending[*pending_count] = item;
+                    *pending_count += 1;
+                }
+            }
+        }
+    }
+    return valid;
+}
+
+// The coordinator owns this ephemeral file. Publish compaction atomically so interrupted writes cannot turn an
+// unseen admission into an empty or partial handoff, including when the next job must recover without a ledger.
+static void nightly_pending_write(const char* path, const NightlyPending* pending, uint32_t count)
+{
+    const size_t capacity = strlen(path) + sizeof(".tmp.XXXXXX");
+    char* temporary = nightly_allocate(capacity, 1);
+    snprintf(temporary, capacity, "%s.tmp.XXXXXX", path);
+    const int descriptor = mkstemp(temporary);
+    FILE* output = descriptor >= 0 ? fdopen(descriptor, "wb") : NULL;
+    bool valid = output != NULL;
+    if (output != NULL)
+    {
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const NightlyPending* item = &pending[i];
+            fprintf(output, "pending\t%s\t%s\t%s\t%s\t%lld\n", item->request, nightly_purpose_names[item->purpose], item->admit ? "admit" : "defer", item->sha, (long long)item->dispatched);
+        }
+        valid = !ferror(output);
+        valid = fclose(output) == 0 && valid;
+    }
+    else if (descriptor >= 0)
+    {
+        close(descriptor);
+    }
+    if (valid)
+    {
+        valid = rename(temporary, path) == 0;
+    }
+    if (!valid && descriptor >= 0)
+    {
+        remove(temporary);
+    }
+    free(temporary);
+    if (!valid)
+    {
+        nightly_fatal("cannot replace pending dispatches", path);
+    }
+}
+
 typedef struct NightlyPlanInput NightlyPlanInput;
 struct NightlyPlanInput
 {
@@ -1703,6 +1896,9 @@ struct NightlyPlanInput
     // nightly/SHA branches that exist.
     char (*refs)[41];
     uint32_t ref_count;
+    // States whose nightly/SHA branch this job can't have.
+    char (*refused)[41];
+    uint32_t refused_count;
     int64_t now;
     const char* main;
     bool run;
@@ -1716,12 +1912,12 @@ struct NightlyPlanInput
     int64_t lease;
     int64_t backlog_bound;
     int64_t snapshot_bound;
-    // A manual run's reason to admit hardware outside 04:00-07:00 Europe/Madrid (sanitized), or empty.
+    // A manual run's reason to admit hardware outside 02:00-08:00 Europe/Madrid (sanitized), or empty.
     const char* override;
     // First-parent states of the last fortnight before the epoch: out of scope, reported.
     uint32_t earlier;
     // The prepare job's steps: hosted preparations alone, never a hardware admission, which is the window job's, so that
-    // a step at or after 04:00 (or under an override) can't dispatch one the window job doesn't know of.
+    // a step at or after 02:00 (or under an override) can't dispatch one the window job doesn't know of.
     bool prepare_only;
 };
 
@@ -1747,6 +1943,8 @@ struct NightlyCycleState
     uint32_t completed;
     uint32_t failed;
     uint32_t deferred;
+    // States in scope whose nightly/SHA branch this job can't have, and so skips.
+    uint32_t refused;
 };
 
 static bool nightly_request_this_cycle(const char* request, const char* date, bool* admit)
@@ -1839,12 +2037,7 @@ static void nightly_fold(const NightlyPlanInput* input, NightlyCycleState* cycle
         const bool is_run = i < facts->run_count;
         const NightlyRun* run = is_run ? &facts->runs[i] : NULL;
         const NightlyPending* pending = is_run ? NULL : &input->pending[i - facts->run_count];
-        bool visible = false;
-        for (uint32_t j = 0; !is_run && j < facts->run_count && !visible; j += 1)
-        {
-            visible = facts->runs[j].nightly && strcmp(facts->runs[j].request, pending->request) == 0;
-        }
-        const bool flying = is_run ? run->workflow && run->nightly && !run->completed : !visible && input->now - pending->dispatched < BUSTER_NIGHTLY_PENDING_AGE;
+        const bool flying = is_run ? run->workflow && run->nightly && !run->completed : nightly_pending_active(pending, facts, input->now);
         if (!flying)
         {
             continue;
@@ -1953,6 +2146,7 @@ static void nightly_report(const NightlyPlanInput* input, const NightlyCycleStat
     const int64_t scope = cycle->snapshot;
     uint32_t counts[NIGHTLY_STATUS_COUNT] = { 0 };
     uint32_t reused = 0;
+    uint32_t unknown_windows = 0;
     int64_t oldest = -1;
     for (int64_t i = 0; i <= scope; i += 1)
     {
@@ -1960,6 +2154,7 @@ static void nightly_report(const NightlyPlanInput* input, const NightlyCycleStat
         counts[state->status] += 1;
         reused += state->status == NIGHTLY_STATUS_COMPLETE && state->source != 0;
         oldest = oldest < 0 && nightly_pending_status(state->status) ? i : oldest;
+        unknown_windows += nightly_pending_status(state->status) && !state->worker_window_valid;
     }
     uint32_t pending = counts[NIGHTLY_STATUS_IN_FLIGHT] + counts[NIGHTLY_STATUS_READY] + counts[NIGHTLY_STATUS_PREPARING] + counts[NIGHTLY_STATUS_NEEDS_PREPARATION];
     // Capacity: code states per day over the last week (or the shorter span the states cover, at least a day) against
@@ -2008,10 +2203,10 @@ static void nightly_report(const NightlyPlanInput* input, const NightlyCycleStat
 
     const char* phase = input->now < cycle->window.start ? "before the window" : input->now < cycle->window.deadline ? "inside the window" : "after the window";
     fprintf(report, "## Nightly main measurements: cycle %s\n\n", cycle->date);
-    fprintf(report, "Mode: **%s**. Europe/Madrid time %02d:%02d %s, %s (04:00 to 07:00).\n\n", input->run ? "run" : "dry run (nothing dispatched)", cycle->window.local.hour, cycle->window.local.minute, cycle->window.local.zone, phase);
+    fprintf(report, "Mode: **%s**. Europe/Madrid time %02d:%02d %s, %s (02:00 to 08:00).\n\n", input->run ? "run" : "dry run (nothing dispatched)", cycle->window.local.hour, cycle->window.local.minute, cycle->window.local.zone, phase);
     if (input->run && input->override != NULL && input->override[0] != 0)
     {
-        fprintf(report, "**Override**: hardware is admitted outside 04:00 to 07:00 Europe/Madrid, for: %s.\n\n", input->override);
+        fprintf(report, "**Override**: hardware is admitted outside 02:00 to 08:00 Europe/Madrid, for: %s.\n\n", input->override);
     }
     fprintf(report, "Snapshot: `%s`%s, the newest of %lld first-parent states in scope, from `%.12s`, the epoch: the main commit that added the nightly worker.", states->items[scope].sha, cycle->pinned_now ? ", pinned now" : ", pinned earlier this cycle", (long long)scope + 1, states->items[0].sha);
     fprintf(report, " The %u first-parent states of the last fortnight before it are out of scope: their workflow can't run as a nightly worker, and their coverage is what their pushes and the old daily run measured.\n", input->earlier);
@@ -2042,6 +2237,24 @@ static void nightly_report(const NightlyPlanInput* input, const NightlyCycleStat
         fprintf(report, "Carried over: nothing.\n");
     }
     fprintf(report, "Capacity: %.1f code states a day arrived over the last %.1f days; %.1f completed per cycle over %u cycles.\n", arrival_rate, span, completion_rate, date_count);
+    if (unknown_windows != 0)
+    {
+        fprintf(report, "\n**Worker window unknown**: %u pending states have no supported window declaration. Their hardware is not admitted; later eligible states can still run.\n", unknown_windows);
+        fprintf(output, "alert\t%u states pending: their worker window is unknown\n", unknown_windows);
+    }
+    if (cycle->refused != 0)
+    {
+        fprintf(report, "\n**Branch refused**: this job could not create or use the nightly branch of %u states, so it skips them and moves on to later states (docs/ci.md, \"Nightly main measurements\"):", cycle->refused);
+        for (int64_t i = 0; i <= scope; i += 1)
+        {
+            if (states->items[i].refused)
+            {
+                fprintf(report, " `%.12s`", states->items[i].sha);
+            }
+        }
+        fprintf(report, ".\n");
+        fprintf(output, "alert\t%u states skipped: their nightly branch could not be created or used\n", cycle->refused);
+    }
     if (alert)
     {
         fprintf(report, "\n**The backlog cannot drain at this rate**: arrivals exceed the observed nightly capacity, or the oldest pending state is over three days old.\n");
@@ -2067,7 +2280,17 @@ static void nightly_report(const NightlyPlanInput* input, const NightlyCycleStat
     {
         if (nightly_pending_status(states->items[i].status))
         {
-            fprintf(report, "- `%.12s` %s\n", states->items[i].sha, nightly_status_names[states->items[i].status]);
+            const NightlyState* state = &states->items[i];
+            fprintf(report, "- `%.12s` %s%s", state->sha, nightly_status_names[state->status], state->refused ? " (branch refused)" : "");
+            if (!state->worker_window_valid)
+            {
+                fprintf(report, " (worker window unknown; hardware not admitted)");
+            }
+            else if (state->worker_start_hour != BUSTER_NIGHTLY_WINDOW_START_HOUR || state->worker_end_hour != BUSTER_NIGHTLY_WINDOW_END_HOUR)
+            {
+                fprintf(report, " (worker window %02u:00-%02u:00 Europe/Madrid)", state->worker_start_hour, state->worker_end_hour);
+            }
+            fprintf(report, "\n");
             listed += 1;
         }
     }
@@ -2081,11 +2304,30 @@ static bool nightly_fits(const NightlyPlanInput* input, const NightlyCycleState*
     return overridden || (now >= cycle->window.start && now + bound <= cycle->window.deadline);
 }
 
+// Intersect today's coordinator policy with the worker at the measured SHA. The existing manual override still
+// applies to known workers, but it never turns missing or unsupported metadata into permission to run.
+static bool nightly_worker_fits(const NightlyPlanInput* input, const NightlyCycleState* cycle, const NightlyState* state, int64_t now, int64_t bound)
+{
+    const bool overridden = input->run && input->override != NULL && input->override[0] != 0;
+    return state->worker_window_valid && nightly_fits(input, cycle, now, bound) && (overridden || (now >= state->worker_start && now + bound <= state->worker_deadline));
+}
+
+// Whether this worker can still run this cycle, waiting for its opening if necessary. It must remain pending while
+// it is too early, rather than ending the window job before old 04:00 workers can start.
+static bool nightly_worker_later(const NightlyPlanInput* input, const NightlyCycleState* cycle, const NightlyState* state, int64_t now, int64_t bound)
+{
+    const bool overridden = input->run && input->override != NULL && input->override[0] != 0;
+    const int64_t start = !overridden && now < state->worker_start ? state->worker_start : now;
+    return nightly_worker_fits(input, cycle, state, start, bound);
+}
+
 // One step of the coordinator: the actions on stdout, one a line (pin, dispatch or would-dispatch, cancel or
 // would-cancel, prune or would-prune, alert), then exactly one `wait` or `done` line; the report to `report`. Before
 // the window it prepares (the snapshot's daily hosted run, the hosted rows of the states without them); inside it, it
 // admits one hardware run at a time: the snapshot's comprehensive run while it fits, then the oldest ready state,
-// keeping room for the snapshot while its hosted qualification is in flight. Nothing waits for a slot past 07:00.
+// keeping room for the snapshot while its hosted qualification is in flight. Nothing waits for a slot past 08:00, and
+// a step with a hardware run in flight ends the job once no backlog run could follow it before 08:00: the window job
+// then fits GitHub's six hours, and the run in flight ends by 08:00 under its own bound.
 static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* report)
 {
     NightlyCycleState cycle = {
@@ -2137,7 +2379,27 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
     }
     else
     {
+        NightlyLocal date;
+        const bool dated = nightly_madrid(cycle.window.deadline, &date);
+        for (uint32_t i = 0; i < states->count; i += 1)
+        {
+            NightlyState* state = &states->items[i];
+            state->worker_window_valid = dated && nightly_worker_hours(state->worker_start_hour, state->worker_end_hour);
+            state->worker_window_valid = state->worker_window_valid && nightly_madrid_first(date.year, date.month, date.day, (int)state->worker_start_hour, &state->worker_start);
+            state->worker_window_valid = state->worker_window_valid && nightly_madrid_instant(date.year, date.month, date.day, (int)state->worker_end_hour, &state->worker_deadline);
+        }
         nightly_fold(input, &cycle);
+        uint32_t refused = 0;
+        for (uint32_t i = 0; i < input->refused_count; i += 1)
+        {
+            const int64_t index = nightly_state_index(states, input->refused[i]);
+            if (index >= 0 && index <= cycle.snapshot && !states->items[index].refused)
+            {
+                states->items[index].refused = true;
+                refused += 1;
+            }
+        }
+        cycle.refused = refused;
         const int64_t now = input->now;
         const bool overridden = input->run && input->override != NULL && input->override[0] != 0;
         // An override admits hardware as inside the window would, whatever the time; it is reported.
@@ -2157,7 +2419,7 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
                     fprintf(output, "%s\t%llu\tlease-expired\n", input->run ? "cancel" : "would-cancel", (unsigned long long)state->admit_run);
                 }
             }
-            if (!cycle.snapshot_prepared)
+            if (!cycle.snapshot_prepared && !snapshot->refused)
             {
                 // The daily diagnostic run: every hosted row and the fuzz campaigns of the snapshot, before measuring.
                 nightly_dispatch(output, input, &cycle, &sequence, NIGHTLY_PURPOSE_SNAPSHOT, false, snapshot);
@@ -2168,7 +2430,7 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
             for (int64_t i = 0; i <= cycle.snapshot; i += 1)
             {
                 NightlyState* state = &states->items[i];
-                if (state->status == NIGHTLY_STATUS_NEEDS_PREPARATION && cycle.preparations_in_flight < input->preparations && cycle.preparations_this_cycle < input->preparations_per_cycle)
+                if (state->status == NIGHTLY_STATUS_NEEDS_PREPARATION && !state->refused && cycle.preparations_in_flight < input->preparations && cycle.preparations_this_cycle < input->preparations_per_cycle)
                 {
                     nightly_dispatch(output, input, &cycle, &sequence, NIGHTLY_PURPOSE_BACKLOG, false, state);
                     state->status = NIGHTLY_STATUS_PREPARING;
@@ -2183,6 +2445,11 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
             verdict = "prepared; the window job admits hardware";
             done = true;
         }
+        else if (inside && cycle.admit_in_flight && !nightly_fits(input, &cycle, now, input->backlog_bound))
+        {
+            verdict = "a hardware run is in flight, and no more hardware work fits before 08:00";
+            done = true;
+        }
         else if (inside && cycle.admit_in_flight)
         {
             verdict = "a hardware run is in flight";
@@ -2192,21 +2459,33 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
             bool snapshot_pending = !snapshot->full_this_cycle && !cycle.snapshot_attempted;
             int64_t target = -1;
             bool waiting = false;
+            bool waiting_window = false;
             if (snapshot_pending)
             {
-                const bool blocked = snapshot->plain == NIGHTLY_PLAIN_FAILED || snapshot->blocked_native || snapshot->status == NIGHTLY_STATUS_FAILED;
+                const bool blocked_window = !nightly_worker_later(input, &cycle, snapshot, now, input->snapshot_bound);
+                const bool blocked = snapshot->plain == NIGHTLY_PLAIN_FAILED || snapshot->blocked_native || snapshot->status == NIGHTLY_STATUS_FAILED || snapshot->refused || blocked_window;
                 if (snapshot->plain == NIGHTLY_PLAIN_OK && !blocked)
                 {
                     target = cycle.snapshot;
                 }
                 else if (blocked)
                 {
-                    cycle.substitute_reason = snapshot->plain == NIGHTLY_PLAIN_FAILED ? "its plain hosted rows failed" : snapshot->blocked_native ? "its native correctness failed on the 9700X" : "its measurements failed repeatedly";
+                    cycle.substitute_reason = snapshot->refused ? "its nightly branch could not be created or used" : snapshot->plain == NIGHTLY_PLAIN_FAILED ? "its plain hosted rows failed" : snapshot->blocked_native ? "its native correctness failed on the 9700X" : snapshot->status == NIGHTLY_STATUS_FAILED ? "its measurements failed repeatedly" : !snapshot->worker_window_valid ? "its worker window is unknown" : "its comprehensive run no longer fits its worker window";
+                    int64_t later = -1;
                     for (int64_t i = cycle.snapshot - 1; i >= 0 && target < 0; i -= 1)
                     {
                         const NightlyState* state = &states->items[i];
-                        target = state->plain == NIGHTLY_PLAIN_OK && !state->blocked_native && state->status != NIGHTLY_STATUS_FAILED ? i : -1;
+                        const bool qualified = state->plain == NIGHTLY_PLAIN_OK && !state->blocked_native && state->status != NIGHTLY_STATUS_FAILED && !state->refused;
+                        if (qualified && nightly_worker_fits(input, &cycle, state, now, input->snapshot_bound))
+                        {
+                            target = i;
+                        }
+                        else if (qualified && later < 0 && nightly_worker_later(input, &cycle, state, now, input->snapshot_bound))
+                        {
+                            later = i;
+                        }
                     }
+                    target = target >= 0 ? target : later;
                     cycle.substitute = target;
                     snapshot_pending = target >= 0;
                     cycle.substitute_reason = target >= 0 ? cycle.substitute_reason : "the snapshot and every earlier state are ineligible";
@@ -2218,7 +2497,7 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
                     cycle.substitute_reason = waiting ? NULL : "the snapshot has no plain hosted rows, and none are in flight";
                 }
             }
-            if (target >= 0 && nightly_fits(input, &cycle, now, input->snapshot_bound))
+            if (target >= 0 && nightly_worker_fits(input, &cycle, &states->items[target], now, input->snapshot_bound))
             {
                 nightly_dispatch(output, input, &cycle, &sequence, NIGHTLY_PURPOSE_SNAPSHOT, true, &states->items[target]);
                 cycle.selected += 1;
@@ -2229,38 +2508,58 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
             {
                 if (target >= 0)
                 {
-                    cycle.substitute_reason = "the comprehensive run no longer fits before 07:00";
+                    waiting_window = nightly_worker_later(input, &cycle, &states->items[target], now, input->snapshot_bound);
+                    waiting = waiting_window;
+                    cycle.substitute_reason = waiting_window ? "the selected worker's window has not opened; its comprehensive run remains pending" : "the comprehensive run no longer fits before 08:00";
                     cycle.substitute = -1;
-                    snapshot_pending = false;
+                    snapshot_pending = waiting;
                 }
-                const int64_t reserve = snapshot_pending && waiting ? input->snapshot_bound : 0;
+                const int64_t reserved = snapshot_pending && waiting ? (target >= 0 ? target : cycle.snapshot) : -1;
+                const bool room_after = reserved < 0 || nightly_worker_later(input, &cycle, &states->items[reserved], now + input->backlog_bound, input->snapshot_bound);
                 int64_t next = -1;
-                for (int64_t i = 0; i <= cycle.snapshot && next < 0; i += 1)
-                {
-                    next = states->items[i].status == NIGHTLY_STATUS_READY && !(snapshot_pending && i == cycle.snapshot) ? i : -1;
-                }
+                bool ready = false;
                 bool preparing = false;
+                bool ready_later = false;
+                bool preparing_later = false;
                 for (int64_t i = 0; i <= cycle.snapshot; i += 1)
                 {
-                    preparing = preparing || states->items[i].status == NIGHTLY_STATUS_PREPARING;
+                    const NightlyState* state = &states->items[i];
+                    const bool is_ready = state->status == NIGHTLY_STATUS_READY && !state->refused && i != reserved;
+                    const bool is_preparing = state->status == NIGHTLY_STATUS_PREPARING && !state->refused;
+                    ready |= is_ready;
+                    preparing |= is_preparing;
+                    if (is_ready || is_preparing)
+                    {
+                        const bool later = nightly_worker_later(input, &cycle, state, now, input->backlog_bound);
+                        ready_later |= is_ready && later;
+                        preparing_later |= is_preparing && later;
+                    }
+                    if (next < 0 && is_ready && room_after && nightly_worker_fits(input, &cycle, state, now, input->backlog_bound))
+                    {
+                        next = i;
+                    }
                 }
-                if (next >= 0 && nightly_fits(input, &cycle, now, input->backlog_bound + reserve))
+                if (next >= 0)
                 {
                     nightly_dispatch(output, input, &cycle, &sequence, NIGHTLY_PURPOSE_BACKLOG, true, &states->items[next]);
                     cycle.selected += 1;
                     verdict = "the oldest ready state is dispatched";
                 }
-                else if (waiting && nightly_fits(input, &cycle, now, input->snapshot_bound))
+                else if (reserved >= 0 && nightly_worker_later(input, &cycle, &states->items[reserved], now, input->snapshot_bound))
                 {
-                    verdict = "the snapshot's hosted qualification is in flight";
+                    verdict = waiting_window ? "the comprehensive run awaits its worker window" : "the snapshot's hosted qualification is in flight";
                 }
-                else if (preparing && nightly_fits(input, &cycle, now, input->backlog_bound))
+                else if (ready_later)
+                {
+                    verdict = "ready states await their worker windows";
+                }
+                else if (preparing_later)
                 {
                     verdict = "hosted qualifications are in flight";
                 }
                 else
                 {
-                    verdict = next >= 0 || preparing || waiting ? "no more hardware work fits before 07:00" : "no admissible work remains";
+                    verdict = ready || preparing || waiting ? "no more hardware work fits before 08:00" : "no admissible work remains";
                     done = true;
                 }
             }
@@ -2336,6 +2635,24 @@ static int64_t nightly_test_madrid(int year, int month, int day, int hour, int m
 
 static void nightly_test_window(NightlyTest* test)
 {
+    uint32_t worker_start = 0;
+    uint32_t worker_end = 0;
+    nightly_expect(test, nightly_worker_source(nightly_test_text("#define BUSTER_NIGHTLY_WINDOW_START_HOUR 4\n#define BUSTER_NIGHTLY_WINDOW_END_HOUR 7\n"), &worker_start, &worker_end) && worker_start == 4 && worker_end == 7, "an old worker's literal window is 04:00-07:00");
+    nightly_expect(test, nightly_worker_source(nightly_test_text("// project source\n#define BUSTER_NIGHTLY_WINDOW_START_HOUR 2\n#define BUSTER_NIGHTLY_WINDOW_END_HOUR 8\n"), &worker_start, &worker_end) && worker_start == 2 && worker_end == 8, "a new worker's literal window is 02:00-08:00");
+    static const char* const unknown_workers[] = {
+        "",
+        "#define BUSTER_NIGHTLY_WINDOW_START_HOUR 4\n",
+        "#define BUSTER_NIGHTLY_WINDOW_START_HOUR 4\n#define BUSTER_NIGHTLY_WINDOW_END_HOUR 7",
+        "#define BUSTER_NIGHTLY_WINDOW_START_HOUR 4\n#define BUSTER_NIGHTLY_WINDOW_END_HOUR 7\n#define BUSTER_NIGHTLY_WINDOW_END_HOUR 8\n",
+        "#define BUSTER_NIGHTLY_WINDOW_START_HOUR 4\n#define BUSTER_NIGHTLY_WINDOW_END_HOUR\t7\n",
+        "#define BUSTER_NIGHTLY_WINDOW_START_HOUR (4)\n#define BUSTER_NIGHTLY_WINDOW_END_HOUR 7\n",
+        "#define BUSTER_NIGHTLY_WINDOW_START_HOUR 3\n#define BUSTER_NIGHTLY_WINDOW_END_HOUR 8\n",
+        "#define BUSTER_NIGHTLY_WINDOW_START_HOUR 2\n#define BUSTER_NIGHTLY_WINDOW_END_HOUR 8 // changed\n",
+    };
+    for (uint32_t i = 0; i < BUSTER_NIGHTLY_COUNT(unknown_workers); i += 1)
+    {
+        nightly_expect(test, !nightly_worker_source(nightly_test_text(unknown_workers[i]), &worker_start, &worker_end) && worker_start == 0 && worker_end == 0, "an unknown worker declaration never inherits the coordinator's hours");
+    }
     // The tz database against the EU rule, every hour of five years: a disagreement means one of them changed.
     const int64_t first = 1767225600;
     uint32_t disagreements = 0;
@@ -2346,39 +2663,42 @@ static void nightly_test_window(NightlyTest* test)
         disagreements += nightly_madrid(t + 1799, &local) ? local.offset != nightly_eu_offset(t + 1799) : 1;
     }
     nightly_expect(test, disagreements == 0, "Europe/Madrid follows the EU rule from 2026 to 2030");
-    // Summer: 04:00 CEST is 02:00 UTC; winter: 04:00 CET is 03:00 UTC.
-    const int64_t summer = 1784080800;
-    nightly_expect(test, nightly_window(summer, 0).open, "04:00 CEST (02:00 UTC, 2026-07-15) is inside");
-    nightly_expect(test, !nightly_window(summer - 60, 0).open, "03:59 CEST is before the window");
-    nightly_expect(test, nightly_window(summer + 3 * 3600 - 1, 0).open, "06:59:59 CEST is inside with no bound");
-    nightly_expect(test, nightly_window(summer + 3 * 3600 - 1, 1).open && !nightly_window(summer + 3 * 3600 - 1, 2).open, "06:59:59 CEST has one second left");
-    nightly_expect(test, !nightly_window(summer + 3 * 3600, 0).open, "07:00 CEST is after the window");
-    const int64_t winter = 1768446000;
-    nightly_expect(test, nightly_window(winter, 0).open, "04:00 CET (03:00 UTC, 2026-01-15) is inside");
-    nightly_expect(test, !nightly_window(winter - 3600, 0).open, "02:00 UTC in winter is 03:00 CET, before the window");
-    // The days the clocks change, at 01:00 UTC: the window's hours are local ones either side.
-    nightly_expect(test, nightly_window(1774749600, 0).open && !nightly_window(1774749600 - 60, 0).open, "2026-03-29: 04:00 CEST is 02:00 UTC");
-    nightly_expect(test, nightly_window(1792897200, 0).open && !nightly_window(1792897200 - 60, 0).open, "2026-10-25: 04:00 CET is 03:00 UTC");
-    nightly_expect(test, nightly_test_madrid(2026, 3, 29, 4, 0) == 1774749600 && nightly_test_madrid(2026, 10, 25, 4, 0) == 1792897200, "local 04:00 on the change days");
+    // Summer: 02:00 CEST is 00:00 UTC; winter: 02:00 CET is 01:00 UTC.
+    const int64_t summer = 1784073600;
+    nightly_expect(test, nightly_window(summer, 0).open, "02:00 CEST (00:00 UTC, 2026-07-15) is inside");
+    nightly_expect(test, !nightly_window(summer - 60, 0).open, "01:59 CEST is before the window");
+    nightly_expect(test, nightly_window(summer + 6 * 3600 - 1, 0).open, "07:59:59 CEST is inside with no bound");
+    nightly_expect(test, nightly_window(summer + 6 * 3600 - 1, 1).open && !nightly_window(summer + 6 * 3600 - 1, 2).open, "07:59:59 CEST has one second left");
+    nightly_expect(test, !nightly_window(summer + 6 * 3600, 0).open, "08:00 CEST is after the window");
+    const int64_t winter = 1768438800;
+    nightly_expect(test, nightly_window(winter, 0).open, "02:00 CET (01:00 UTC, 2026-01-15) is inside");
+    nightly_expect(test, !nightly_window(winter - 3600, 0).open, "00:00 UTC in winter is 01:00 CET, before the window");
+    // The nights the clocks change at 01:00 UTC, at 02:00 local time: when they go forward (2026-03-29), 02:00 doesn't
+    // exist and the window opens at 03:00 CEST; when they go back (2026-10-25), it opens at the first of the two
+    // 02:00s, 02:00 CEST, and the second, 02:00 CET, is inside. Six hours, five and seven.
+    nightly_expect(test, nightly_window(1774746000, 0).open && !nightly_window(1774746000 - 60, 0).open, "2026-03-29: the window opens at 03:00 CEST, 01:00 UTC; 01:59 CET is before it");
+    nightly_expect(test, nightly_window(1774746000, 0).start == 1774746000 && nightly_window(1774746000, 0).deadline == nightly_test_madrid(2026, 3, 29, 8, 0) && nightly_window(1774746000, 0).deadline - 1774746000 == 5 * 3600, "2026-03-29: five hours, to 08:00 CEST");
+    nightly_expect(test, nightly_window(1792886400, 0).open && !nightly_window(1792886400 - 60, 0).open, "2026-10-25: the window opens at the first 02:00, 02:00 CEST, 00:00 UTC; 01:59 CEST is before it");
+    nightly_expect(test, nightly_window(1792886400 + 3600, 0).open && nightly_window(1792886400, 0).deadline - 1792886400 == 7 * 3600, "2026-10-25: the second 02:00, 02:00 CET, is inside; seven hours, to 08:00 CET");
     // A run whose bound doesn't fit is refused: a late or delayed start, and a lock wait that crossed the deadline.
-    const int64_t morning = nightly_test_madrid(2026, 11, 4, 6, 30);
-    nightly_expect(test, nightly_window(morning, 25 * 60).open, "06:30 with 25 minutes ends by 07:00");
-    nightly_expect(test, !nightly_window(morning + 10 * 60, 25 * 60).open, "06:40 with 25 minutes doesn't");
+    const int64_t morning = nightly_test_madrid(2026, 11, 4, 7, 30);
+    nightly_expect(test, nightly_window(morning, 25 * 60).open, "07:30 with 25 minutes ends by 08:00");
+    nightly_expect(test, !nightly_window(morning + 10 * 60, 25 * 60).open, "07:40 with 25 minutes doesn't");
     nightly_expect(test, !nightly_window(nightly_test_madrid(2026, 11, 4, 9, 23), 0).open, "a scheduled run delayed to 09:23 is refused");
     // The cycle: from noon, the next night's; before noon, this morning's.
     NightlyWindow evening = nightly_window(nightly_test_madrid(2026, 11, 3, 22, 7), 0);
-    nightly_expect(test, evening.valid && strcmp(evening.cycle, "2026-11-04") == 0 && evening.start == nightly_test_madrid(2026, 11, 4, 4, 0), "22:07 prepares for the next morning");
-    NightlyWindow after = nightly_window(nightly_test_madrid(2026, 11, 4, 7, 17), 0);
-    nightly_expect(test, after.valid && strcmp(after.cycle, "2026-11-04") == 0 && !after.open && after.deadline < nightly_test_madrid(2026, 11, 4, 7, 17), "07:17 reports the morning's cycle");
+    nightly_expect(test, evening.valid && strcmp(evening.cycle, "2026-11-04") == 0 && evening.start == nightly_test_madrid(2026, 11, 4, 2, 0), "22:07 prepares for the next morning");
+    NightlyWindow after = nightly_window(nightly_test_madrid(2026, 11, 4, 8, 17), 0);
+    nightly_expect(test, after.valid && strcmp(after.cycle, "2026-11-04") == 0 && !after.open && after.deadline < nightly_test_madrid(2026, 11, 4, 8, 17), "08:17 reports the morning's cycle");
     NightlyWindow year_end = nightly_window(nightly_test_madrid(2026, 12, 31, 23, 0), 0);
     nightly_expect(test, year_end.valid && strcmp(year_end.cycle, "2027-01-01") == 0, "the cycle rolls over the year");
-    // The pin is the evening before at 22:00 local time, whatever the clocks do that night: 6 hours before the window
-    // on an ordinary night, 5 when the clocks go forward, 7 when they go back.
-    nightly_expect(test, evening.pin == nightly_test_madrid(2026, 11, 3, 22, 0) && evening.start - evening.pin == 6 * 3600, "an ordinary night pins from 22:00, 6 hours ahead");
+    // The pin is the evening before at 22:00 local time, whatever the clocks do that night: 4 hours before the window
+    // every night, since the window opens after the clocks change (03:00 CEST, or the first 02:00).
+    nightly_expect(test, evening.pin == nightly_test_madrid(2026, 11, 3, 22, 0) && evening.start - evening.pin == 4 * 3600, "an ordinary night pins from 22:00, 4 hours ahead");
     NightlyWindow spring = nightly_window(nightly_test_madrid(2027, 3, 27, 21, 30), 0);
-    nightly_expect(test, spring.valid && strcmp(spring.cycle, "2027-03-28") == 0 && spring.pin == nightly_test_madrid(2027, 3, 27, 22, 0) && spring.start - spring.pin == 5 * 3600, "2027-03-27 pins from 22:00 CET, 5 hours before 04:00 CEST");
+    nightly_expect(test, spring.valid && strcmp(spring.cycle, "2027-03-28") == 0 && spring.pin == nightly_test_madrid(2027, 3, 27, 22, 0) && spring.start - spring.pin == 4 * 3600, "2027-03-27 pins from 22:00 CET, 4 hours before 03:00 CEST");
     NightlyWindow autumn = nightly_window(nightly_test_madrid(2026, 10, 24, 22, 7), 0);
-    nightly_expect(test, autumn.valid && strcmp(autumn.cycle, "2026-10-25") == 0 && autumn.pin == nightly_test_madrid(2026, 10, 24, 22, 0) && autumn.start - autumn.pin == 7 * 3600, "2026-10-24 pins from 22:00 CEST, 7 hours before 04:00 CET");
+    nightly_expect(test, autumn.valid && strcmp(autumn.cycle, "2026-10-25") == 0 && autumn.pin == nightly_test_madrid(2026, 10, 24, 22, 0) && autumn.start - autumn.pin == 4 * 3600, "2026-10-24 pins from 22:00 CEST, 4 hours before the first 02:00");
     NightlyWindow month_start = nightly_window(nightly_test_madrid(2026, 11, 30, 23, 0), 0);
     nightly_expect(test, month_start.valid && strcmp(month_start.cycle, "2026-12-01") == 0 && month_start.pin == nightly_test_madrid(2026, 11, 30, 22, 0), "a cycle on the first of a month pins from the last day's 22:00");
 }
@@ -2916,20 +3236,35 @@ static void nightly_test_states(NightlyTest* test)
     nightly_test_sha(2, b);
     nightly_test_sha(3, c);
     NightlyBuffer* buffer = nightly_allocate(1, sizeof(NightlyBuffer));
-    nightly_append(buffer, "state\t%s\t-\t1\npath\tsrc/buster/compiler/main.c\n", a);
-    nightly_append(buffer, "state\t%s\t%s\t2\npath\tdocs/ci.md\npath\tREADME.md\npath\tdocs/performance/schema.json\n", b, a);
+    nightly_append(buffer, "state\t%s\t-\t1\nworker-window\t4\t7\npath\tsrc/buster/compiler/main.c\n", a);
+    nightly_append(buffer, "state\t%s\t%s\t2\nworker-window\t2\t8\npath\tdocs/ci.md\npath\tREADME.md\npath\tdocs/performance/schema.json\n", b, a);
     nightly_append(buffer, "state\t%s\t%s\t3\n", c, b);
     NightlyStates states = {
         .items = nightly_allocate(BUSTER_NIGHTLY_STATES, sizeof(NightlyState)),
     };
     nightly_expect(test, nightly_states_parse(&states, nightly_buffer_text(buffer)) && states.count == 3, "states parse");
     nightly_expect(test, states.items[0].code && !states.items[1].code && !states.items[2].code, "documentation alone (as push's paths-ignore) and an empty change need no measurement");
+    nightly_expect(test, states.items[0].worker_start_hour == 4 && states.items[0].worker_end_hour == 7 && states.items[1].worker_start_hour == 2 && states.items[1].worker_end_hour == 8 && !states.items[2].worker_window_recorded, "state windows remain distinct; an omitted window stays unknown");
     states.count = 0;
     nightly_expect(test, !nightly_states_parse(&states, nightly_test_text("path\tsrc/x.c\n")), "a path before any state is refused");
     states.count = 0;
     buffer->length = 0;
     nightly_append(buffer, "state\t%s\t-\t1\nstate\t%s\t-\t1\n", a, a);
     nightly_expect(test, !nightly_states_parse(&states, nightly_buffer_text(buffer)), "a repeated state is refused");
+    static const char* const invalid_windows[] = { "worker-window\t4\t7\nworker-window\t4\t7\n", "worker-window\t4\t8\n", "worker-window\t-\t7\n", "worker-window\t2\t8\textra\n" };
+    for (uint32_t i = 0; i < BUSTER_NIGHTLY_COUNT(invalid_windows); i += 1)
+    {
+        states.count = 0;
+        buffer->length = 0;
+        nightly_append(buffer, "state\t%s\t-\t1\n%s", a, invalid_windows[i]);
+        nightly_expect(test, !nightly_states_parse(&states, nightly_buffer_text(buffer)), "malformed or repeated worker metadata is refused");
+    }
+    states.count = 0;
+    buffer->length = 0;
+    nightly_append(buffer, "state\t%s\t-\t1\nworker-window\t-\t-\n", a);
+    nightly_expect(test, nightly_states_parse(&states, nightly_buffer_text(buffer)) && states.items[0].worker_window_recorded && states.items[0].worker_end_hour == 0, "an explicitly unknown window is retained as unknown");
+    states.count = 0;
+    nightly_expect(test, !nightly_states_parse(&states, nightly_test_text("worker-window\t2\t8\n")), "window metadata before a state is refused");
     free(states.items);
     free(buffer);
 }
@@ -2944,6 +3279,8 @@ struct NightlyScenario
     uint32_t pending_count;
     char refs[8][41];
     uint32_t ref_count;
+    char refused[8][41];
+    uint32_t refused_count;
     bool dry_run;
     bool prepare_only;
     const char* override;
@@ -2963,6 +3300,9 @@ static NightlyScenario* nightly_scenario(uint32_t count, int64_t committed)
         nightly_test_sha(1000 + i, state->sha);
         state->committed = committed + (int64_t)i * 3600;
         state->code = true;
+        state->worker_window_recorded = true;
+        state->worker_start_hour = BUSTER_NIGHTLY_WINDOW_START_HOUR;
+        state->worker_end_hour = BUSTER_NIGHTLY_WINDOW_END_HOUR;
     }
     scenario->states.count = count;
     return scenario;
@@ -3033,6 +3373,8 @@ static void nightly_scenario_plan(NightlyScenario* scenario, int64_t now)
         .pending_count = scenario->pending_count,
         .refs = scenario->refs,
         .ref_count = scenario->ref_count,
+        .refused = scenario->refused,
+        .refused_count = scenario->refused_count,
         .now = now,
         .main = scenario->states.items[scenario->states.count - 1].sha,
         .run = !scenario->dry_run,
@@ -3056,6 +3398,9 @@ static void nightly_scenario_plan(NightlyScenario* scenario, int64_t now)
         memcpy(state->sha, kept.sha, sizeof(state->sha));
         state->committed = kept.committed;
         state->code = kept.code;
+        state->worker_window_recorded = kept.worker_window_recorded;
+        state->worker_start_hour = kept.worker_start_hour;
+        state->worker_end_hour = kept.worker_end_hour;
     }
     FILE* output = fmemopen(scenario->output, sizeof(scenario->output) - 1, "w");
     FILE* report = fmemopen(scenario->report, sizeof(scenario->report) - 1, "w");
@@ -3102,7 +3447,7 @@ static void nightly_test_plan(NightlyTest* test)
     nightly_expect(test, nightly_has(scenario, line), "the snapshot's daily hosted run is prepared first");
     snprintf(line, sizeof(line), "dispatch\tbacklog\tdefer\t%s\t20261104.900.2.defer\t%s\n", scenario->states.items[0].sha, scenario->states.items[5].sha);
     nightly_expect(test, nightly_has(scenario, line) && nightly_count(scenario, "dispatch\tbacklog\tdefer") == 3, "the oldest states' hosted rows are prepared, three at a time");
-    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 4 && nightly_count(scenario, "dispatch\tbacklog\tadmit") == 0 && nightly_has(scenario, "done\tprepared"), "nothing is admitted before 04:00");
+    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 4 && nightly_count(scenario, "dispatch\tbacklog\tadmit") == 0 && nightly_has(scenario, "done\tprepared"), "nothing is admitted before 02:00");
     nightly_scenario_free(scenario);
 
     // The earlier schedules' steps, there for hours-late scheduled starts: before 22:00 the cycle pins and dispatches
@@ -3149,6 +3494,10 @@ static void nightly_test_plan(NightlyTest* test)
     nightly_scenario_flying(scenario, 300, "snapshot", "admit", 5, "20261104.900.1.admit", opening);
     nightly_scenario_plan(scenario, opening + 60);
     nightly_expect(test, nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "wait\ta hardware run is in flight"), "one hardware run at a time");
+    // Once no backlog run could follow the one in flight before 08:00, the job ends instead of waiting (GitHub's six
+    // hours for the window job); the run in flight ends by 08:00 under its own bound.
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 7, 40));
+    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "done\ta hardware run is in flight, and no more hardware work fits before 08:00"), "a run in flight with no room after it ends the job");
     // A lost lease is cancelled.
     nightly_scenario_plan(scenario, opening + 7300);
     nightly_expect(test, nightly_has(scenario, "cancel\t300\tlease-expired"), "an admitted run past its lease is cancelled");
@@ -3162,12 +3511,12 @@ static void nightly_test_plan(NightlyTest* test)
     snprintf(line, sizeof(line), "dispatch\tbacklog\tadmit\t%s\t", scenario->states.items[1].sha);
     nightly_expect(test, nightly_has(scenario, line), "a blocked state doesn't starve the next; a later completion doesn't skip an earlier gap");
     nightly_expect(test, strstr(scenario->report, "| blocked-hosted | 1 |") != NULL && strstr(scenario->report, "| complete | 2 |") != NULL, "the report counts blocks and completions");
-    // Late: nothing fits before 07:00.
-    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 6, 50));
-    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "done\tno more hardware work fits before 07:00"), "nothing is admitted that can't finish by 07:00");
+    // Late: nothing fits before 08:00.
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 7, 50));
+    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "done\tno more hardware work fits before 08:00"), "nothing is admitted that can't finish by 08:00");
     // After the window: report alone.
-    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 7, 17));
-    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "done\tthe window has closed"), "after 07:00 nothing is dispatched");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 8, 17));
+    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "done\tthe window has closed"), "after 08:00 nothing is dispatched");
     // A dry run dispatches nothing.
     scenario->dry_run = true;
     nightly_scenario_plan(scenario, opening + 1800);
@@ -3340,13 +3689,53 @@ static void nightly_test_plan(NightlyTest* test)
     nightly_scenario_row(scenario, 100, 0, NIGHTLY_PURPOSE_PUSH, "", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_PLAIN, NIGHTLY_OUTCOME_COMPLETE);
     nightly_scenario_cycle(scenario, "2026-11-04", 3);
     nightly_scenario_flying(scenario, 400, "snapshot", "defer", 3, "20261104.900.1.defer", opening - 600);
-    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 6, 20));
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 7, 20));
     nightly_expect(test, nightly_count(scenario, "dispatch\tbacklog\tadmit") == 0 && nightly_has(scenario, "wait\tthe snapshot's hosted qualification is in flight"), "a backlog run doesn't take the waiting snapshot's room");
     nightly_scenario_plan(scenario, opening);
     snprintf(line, sizeof(line), "dispatch\tbacklog\tadmit\t%s\t", scenario->states.items[0].sha);
     nightly_expect(test, nightly_has(scenario, line) && nightly_count(scenario, "dispatch\tbacklog\tdefer") == 1, "with room left, the ready state runs while the snapshot prepares");
     snprintf(line, sizeof(line), "dispatch\tbacklog\tdefer\t%s\t", scenario->states.items[2].sha);
     nightly_expect(test, nightly_has(scenario, line) && strstr(scenario->report, "| not-required | 1 |") != NULL, "a documentation-only state is never dispatched");
+    nightly_scenario_free(scenario);
+
+    // A state whose nightly/SHA branch the workflow token couldn't create (on 2026-11-05, every merge whose pull
+    // request's head lacked main's workflow changes) is skipped for the rest of the job, reported: it neither keeps a
+    // preparation slot nor stays the oldest ready state while later states wait.
+    scenario = nightly_scenario(6, committed);
+    nightly_scenario_cycle(scenario, "2026-11-04", 5);
+    nightly_scenario_flying(scenario, 400, "snapshot", "defer", 5, "20261104.900.1.defer", evening - 60);
+    nightly_copy(scenario->refused[0], 41, scenario->states.items[0].sha);
+    nightly_copy(scenario->refused[1], 41, scenario->states.items[1].sha);
+    nightly_copy(scenario->refused[2], 41, scenario->states.items[1].sha);
+    scenario->refused_count = 3;
+    nightly_scenario_plan(scenario, evening);
+    snprintf(line, sizeof(line), "dispatch\tbacklog\tdefer\t%s\t", scenario->states.items[0].sha);
+    const bool first = nightly_has(scenario, line);
+    snprintf(line, sizeof(line), "dispatch\tbacklog\tdefer\t%s\t", scenario->states.items[4].sha);
+    nightly_expect(test, !first && nightly_has(scenario, line) && nightly_count(scenario, "dispatch\tbacklog\tdefer") == 3, "a refused state's preparation slot goes to the next states");
+    nightly_expect(test, nightly_has(scenario, "alert\t2 states skipped: their nightly branch could not be created or used\n") && strstr(scenario->report, "**Branch refused**: this job could not create or use the nightly branch of 2 states") != NULL && strstr(scenario->report, "ready (branch refused)") == NULL && strstr(scenario->report, "needs-preparation (branch refused)") != NULL, "refused states are counted once and reported");
+    nightly_scenario_free(scenario);
+    scenario = nightly_scenario(4, committed);
+    nightly_scenario_pushes(scenario);
+    nightly_scenario_cycle(scenario, "2026-11-04", 3);
+    nightly_scenario_row(scenario, 200, 3, NIGHTLY_PURPOSE_SNAPSHOT, "20261104.900.1.defer", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_SKIP, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_DEFERRED);
+    nightly_scenario_row(scenario, 201, 3, NIGHTLY_PURPOSE_SNAPSHOT, "20261104.900.2.admit", NIGHTLY_PLAIN_NONE, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_COMPLETE);
+    nightly_copy(scenario->refused[0], 41, scenario->states.items[0].sha);
+    scenario->refused_count = 1;
+    nightly_scenario_plan(scenario, opening + 1800);
+    snprintf(line, sizeof(line), "dispatch\tbacklog\tadmit\t%s\t", scenario->states.items[1].sha);
+    nightly_expect(test, nightly_has(scenario, line) && nightly_count(scenario, "dispatch\t") == 1, "a refused oldest ready state doesn't starve the next");
+    nightly_scenario_free(scenario);
+    // A refused snapshot: the newest eligible earlier state takes its comprehensive run, reported.
+    scenario = nightly_scenario(4, committed);
+    nightly_scenario_pushes(scenario);
+    nightly_scenario_cycle(scenario, "2026-11-04", 3);
+    nightly_copy(scenario->refused[0], 41, scenario->states.items[3].sha);
+    nightly_copy(scenario->refused[1], 41, scenario->states.items[2].sha);
+    scenario->refused_count = 2;
+    nightly_scenario_plan(scenario, opening);
+    snprintf(line, sizeof(line), "dispatch\tsnapshot\tadmit\t%s\t", scenario->states.items[1].sha);
+    nightly_expect(test, nightly_has(scenario, line) && nightly_count(scenario, "dispatch\tsnapshot\tdefer") == 0 && strstr(scenario->report, "ineligible (its nightly branch could not be created or used)") != NULL, "a refused snapshot is replaced by the newest eligible state that isn't refused");
     nightly_scenario_free(scenario);
 
     // Branches: a finished state's is pruned, one in flight is kept; the alert when arrivals outpace completions
@@ -3363,6 +3752,99 @@ static void nightly_test_plan(NightlyTest* test)
     snprintf(line, sizeof(line), "prune\t%s\n", scenario->states.items[0].sha);
     nightly_expect(test, nightly_has(scenario, line) && nightly_count(scenario, "prune\t") == 1, "a finished state's branch is pruned, one in flight kept");
     nightly_expect(test, nightly_has(scenario, "alert\t") && strstr(scenario->report, "cannot drain") != NULL, "arrivals beyond the observed capacity alert");
+    nightly_scenario_free(scenario);
+}
+
+static void nightly_test_worker_plan(NightlyTest* test)
+{
+    const int64_t committed = nightly_test_madrid(2026, 11, 1, 9, 0);
+    const int64_t early = nightly_test_madrid(2026, 11, 4, 2, 10);
+    char old[256];
+    char current[256];
+    char pruned[80];
+    NightlyScenario* scenario = nightly_scenario(4, committed);
+    nightly_scenario_pushes(scenario);
+    nightly_scenario_cycle(scenario, "2026-11-04", 3);
+    nightly_scenario_row(scenario, 200, 3, NIGHTLY_PURPOSE_SNAPSHOT, "20261104.900.1.defer", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_SKIP, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_DEFERRED);
+    nightly_scenario_row(scenario, 201, 3, NIGHTLY_PURPOSE_SNAPSHOT, "20261104.900.2.admit", NIGHTLY_PLAIN_NONE, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_COMPLETE);
+    scenario->states.items[0].worker_start_hour = 4;
+    scenario->states.items[0].worker_end_hour = 7;
+    scenario->states.items[2].worker_start_hour = 0;
+    scenario->states.items[2].worker_end_hour = 0;
+    nightly_copy(scenario->refs[0], 41, scenario->states.items[0].sha);
+    scenario->ref_count = 1;
+    snprintf(old, sizeof(old), "dispatch\tbacklog\tadmit\t%s\t", scenario->states.items[0].sha);
+    snprintf(current, sizeof(current), "dispatch\tbacklog\tadmit\t%s\t", scenario->states.items[1].sha);
+    snprintf(pruned, sizeof(pruned), "prune\t%s\n", scenario->states.items[0].sha);
+    nightly_scenario_plan(scenario, early);
+    nightly_expect(test, !nightly_has(scenario, old) && nightly_has(scenario, current) && nightly_count(scenario, "dispatch\t") == 1, "before 04:00 an old ready worker doesn't starve a later current worker");
+    nightly_expect(test, strstr(scenario->report, "worker window 04:00-07:00 Europe/Madrid") != NULL && strstr(scenario->report, "**Worker window unknown**: 1 pending") != NULL && scenario->states.items[2].status == NIGHTLY_STATUS_READY, "old and unknown windows are reported; unknown is pending, not complete or failed");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 4, 0));
+    nightly_expect(test, nightly_has(scenario, old) && !nightly_has(scenario, current), "a fresh plan at 04:00 admits the older state; the constraint survives planning again");
+    const int64_t last_old = nightly_test_madrid(2026, 11, 4, 6, 35);
+    nightly_scenario_plan(scenario, last_old);
+    nightly_expect(test, nightly_has(scenario, old), "the old worker can start exactly its backlog bound before 07:00");
+    nightly_scenario_plan(scenario, last_old + 1);
+    nightly_expect(test, !nightly_has(scenario, old) && nightly_has(scenario, current), "one second later, the old worker is skipped and a later worker still runs");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 7, 30));
+    nightly_expect(test, !nightly_has(scenario, old) && nightly_has(scenario, current), "after the old window closes a current worker still uses the expanded window");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 7, 35) + 1);
+    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "done\tno more hardware work fits"), "the current hard cutoff still includes the whole backlog bound");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 8, 0));
+    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "done\tthe window has closed"), "no worker is admitted at the global cutoff");
+    // Only the old and unknown workers remain. Early: wait for 04:00. Late: carry them over, keeping their refs.
+    nightly_scenario_row(scenario, 202, 1, NIGHTLY_PURPOSE_BACKLOG, "20261104.900.3.admit", NIGHTLY_PLAIN_NONE, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_TARGETED, NIGHTLY_OUTCOME_COMPLETE);
+    nightly_scenario_plan(scenario, early);
+    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "wait\tready states await their worker windows"), "a night with only older ready workers waits for their opening instead of ending early");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 7, 10));
+    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 0 && !nightly_has(scenario, pruned) && scenario->states.items[0].status == NIGHTLY_STATUS_READY && !scenario->states.items[0].targeted && strstr(scenario->report, "Carried over: 2 states") != NULL, "closed and unknown workers remain pending for later cycles and are not pruned");
+    nightly_scenario_free(scenario);
+
+    // The comprehensive run also has its worker's own window, whether it is the snapshot or a substitute.
+    scenario = nightly_scenario(4, committed);
+    nightly_scenario_pushes(scenario);
+    nightly_scenario_cycle(scenario, "2026-11-04", 3);
+    nightly_scenario_row(scenario, 200, 3, NIGHTLY_PURPOSE_SNAPSHOT, "20261104.900.1.defer", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_SKIP, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_DEFERRED);
+    for (uint32_t i = 0; i < 4; i += 1)
+    {
+        if (i != 1)
+        {
+            scenario->states.items[i].worker_start_hour = 4;
+            scenario->states.items[i].worker_end_hour = 7;
+        }
+    }
+    snprintf(old, sizeof(old), "dispatch\tsnapshot\tadmit\t%s\t", scenario->states.items[3].sha);
+    snprintf(current, sizeof(current), "dispatch\tbacklog\tadmit\t%s\t", scenario->states.items[1].sha);
+    nightly_scenario_plan(scenario, early);
+    nightly_expect(test, !nightly_has(scenario, old) && nightly_has(scenario, current), "a snapshot whose worker opens later lets eligible backlog work run while keeping its room");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 4, 0));
+    nightly_expect(test, nightly_has(scenario, old) && nightly_count(scenario, "dispatch\t") == 1, "the snapshot takes priority as soon as its own window opens");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 7, 10));
+    snprintf(current, sizeof(current), "dispatch\tsnapshot\tadmit\t%s\t", scenario->states.items[1].sha);
+    nightly_expect(test, !nightly_has(scenario, old) && nightly_has(scenario, current) && strstr(scenario->report, "ineligible (its comprehensive run no longer fits its worker window)") != NULL, "a late snapshot's substitute must itself fit; a closed newer candidate doesn't starve it");
+    scenario->ledger.rows[3].plain = NIGHTLY_PLAIN_NONE;
+    scenario->ledger.rows[4].plain = NIGHTLY_PLAIN_NONE;
+    nightly_scenario_flying(scenario, 300, "snapshot", "defer", 3, "20261104.900.8.defer", nightly_test_madrid(2026, 11, 4, 6, 0));
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 6, 10));
+    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "wait\tthe snapshot's hosted qualification is in flight"), "backlog work cannot consume a waiting old snapshot's room before its 07:00 deadline");
+    scenario->runs.length = 0;
+    scenario->ledger.rows[3].plain = NIGHTLY_PLAIN_OK;
+    scenario->states.items[3].worker_start_hour = 0;
+    scenario->states.items[3].worker_end_hour = 0;
+    nightly_scenario_plan(scenario, early);
+    nightly_expect(test, nightly_has(scenario, current) && !nightly_has(scenario, old) && strstr(scenario->report, "ineligible (its worker window is unknown)") != NULL, "an unknown snapshot worker cannot starve a known eligible substitute");
+    nightly_scenario_free(scenario);
+
+    // The hours are Madrid civil hours, not UTC offsets copied from the day the worker was committed.
+    scenario = nightly_scenario(2, nightly_test_madrid(2026, 1, 1, 9, 0));
+    nightly_scenario_pushes(scenario);
+    scenario->states.items[0].worker_start_hour = 4;
+    scenario->states.items[0].worker_end_hour = 7;
+    scenario->dry_run = true;
+    nightly_scenario_plan(scenario, 1774746000);
+    nightly_expect(test, scenario->states.items[0].worker_start == nightly_test_madrid(2026, 3, 29, 4, 0) && scenario->states.items[0].worker_deadline == nightly_test_madrid(2026, 3, 29, 7, 0) && scenario->states.items[1].worker_start == 1774746000, "spring-forward: old workers start at 04:00 CEST, current workers at 03:00 CEST");
+    nightly_scenario_plan(scenario, 1792886400 + 3600);
+    nightly_expect(test, scenario->states.items[0].worker_start == nightly_test_madrid(2026, 10, 25, 4, 0) && scenario->states.items[0].worker_deadline == nightly_test_madrid(2026, 10, 25, 7, 0) && scenario->states.items[1].worker_start == 1792886400, "fall-back: old workers start at 04:00 CET, current workers at the first 02:00");
     nightly_scenario_free(scenario);
 }
 
@@ -3463,6 +3945,7 @@ static int nightly_self_test(const char* root)
     nightly_test_ledger(&test);
     nightly_test_states(&test);
     nightly_test_plan(&test);
+    nightly_test_worker_plan(&test);
     nightly_test_metadata(&test, root);
     nightly_test_workflow(&test, root);
     printf("nightly --self-test: %u checks, %u failures\n", test.checks, test.failures);
@@ -3557,6 +4040,7 @@ static int nightly_command_plan(int argc, char** argv)
     NightlyFacts facts = nightly_load_facts(nightly_required(argc, argv, "--facts"));
     const char* mode = nightly_required(argc, argv, "--mode");
     const char* main_head = nightly_required(argc, argv, "--main");
+    const int64_t now = nightly_option_epoch(argc, argv, "--now");
     uint64_t coordinator = 0;
     if ((strcmp(mode, "run") != 0 && strcmp(mode, "dry-run") != 0) || !nightly_sha(main_head) || !nightly_id(nightly_required(argc, argv, "--coordinator"), &coordinator))
     {
@@ -3568,29 +4052,16 @@ static int nightly_command_plan(int argc, char** argv)
     uint32_t ref_count = 0;
     const char* pending_path = nightly_option(argc, argv, "--pending");
     const char* refs_path = nightly_option(argc, argv, "--refs");
+    char (*refused)[41] = nightly_allocate(BUSTER_NIGHTLY_REFS, sizeof(*refused));
+    uint32_t refused_count = 0;
+    const char* refused_path = nightly_option(argc, argv, "--refused");
     char line[BUSTER_NIGHTLY_LINE];
     bool valid = true;
     size_t offset = 0;
     if (pending_path != NULL)
     {
         NightlyText text = nightly_read(pending_path);
-        while (valid && nightly_next_line(text, &offset, line, &valid))
-        {
-            char* fields[BUSTER_NIGHTLY_FIELDS];
-            const size_t count = valid ? nightly_split(line, fields, BUSTER_NIGHTLY_FIELDS) : 0;
-            NightlyPending* item = &pending[pending_count];
-            const size_t purpose = count == 6 ? nightly_find(fields[2], nightly_purpose_names, NIGHTLY_PURPOSE_COUNT) : NIGHTLY_PURPOSE_COUNT;
-            valid = valid && count == 6 && pending_count < BUSTER_NIGHTLY_PENDING && strcmp(fields[0], "pending") == 0 && nightly_token(fields[1], sizeof(item->request)) && purpose < NIGHTLY_PURPOSE_COUNT;
-            valid = valid && (strcmp(fields[3], "admit") == 0 || strcmp(fields[3], "defer") == 0) && nightly_sha(fields[4]) && nightly_epoch(fields[5], &item->dispatched);
-            if (valid)
-            {
-                nightly_copy(item->request, sizeof(item->request), fields[1]);
-                item->purpose = (NightlyPurpose)purpose;
-                item->admit = strcmp(fields[3], "admit") == 0;
-                nightly_copy(item->sha, sizeof(item->sha), fields[4]);
-                pending_count += 1;
-            }
-        }
+        valid = nightly_pending_parse(text, &facts, now, pending, &pending_count);
         free(text.data);
     }
     offset = 0;
@@ -3608,9 +4079,24 @@ static int nightly_command_plan(int argc, char** argv)
         }
         free(text.data);
     }
+    offset = 0;
+    if (valid && refused_path != NULL)
+    {
+        NightlyText text = nightly_read(refused_path);
+        while (valid && nightly_next_line(text, &offset, line, &valid))
+        {
+            valid = valid && refused_count < BUSTER_NIGHTLY_REFS && nightly_sha(line);
+            if (valid)
+            {
+                nightly_copy(refused[refused_count], 41, line);
+                refused_count += 1;
+            }
+        }
+        free(text.data);
+    }
     if (!valid)
     {
-        nightly_fatal("invalid pending dispatches or branches", NULL);
+        nightly_fatal("invalid pending dispatches, branches or refused branches", NULL);
     }
     char override[BUSTER_NIGHTLY_REASON];
     nightly_sanitize(nightly_option(argc, argv, "--override"), override, sizeof(override));
@@ -3622,7 +4108,9 @@ static int nightly_command_plan(int argc, char** argv)
         .pending_count = pending_count,
         .refs = refs,
         .ref_count = ref_count,
-        .now = nightly_option_epoch(argc, argv, "--now"),
+        .refused = refused,
+        .refused_count = refused_count,
+        .now = now,
         .main = main_head,
         .run = strcmp(mode, "run") == 0,
         .coordinator = coordinator,
@@ -3642,10 +4130,15 @@ static int nightly_command_plan(int argc, char** argv)
     {
         nightly_fatal("cannot write the report", NULL);
     }
+    if (pending_path != NULL)
+    {
+        nightly_pending_write(pending_path, pending, pending_count);
+    }
     nightly_plan(&input, stdout, report);
     fclose(report);
     free(pending);
     free(refs);
+    free(refused);
     free(states.items);
     nightly_ledger_free(&ledger);
     nightly_facts_free(&facts);
@@ -3680,6 +4173,22 @@ int main(int argc, char** argv)
             printf("cycle\t%s\nstart\t%lld\ndeadline\t%lld\nlocal\t%02d:%02d %s\n", window.cycle, (long long)window.start, (long long)window.deadline, window.local.hour, window.local.minute, window.local.zone);
         }
         status = window.valid ? 0 : 2;
+    }
+    else if (strcmp(command, "worker-window") == 0)
+    {
+        NightlyText source = nightly_read("-");
+        uint32_t start = 0;
+        uint32_t end = 0;
+        if (nightly_worker_source(source, &start, &end))
+        {
+            printf("worker-window\t%u\t%u\n", start, end);
+        }
+        else
+        {
+            printf("worker-window\t-\t-\n");
+        }
+        free(source.data);
+        status = 0;
     }
     else if (strcmp(command, "hosted") == 0)
     {
@@ -3738,7 +4247,7 @@ int main(int argc, char** argv)
     }
     else
     {
-        fputs("usage: nightly --self-test [--root DIR] | window | window-times | hosted | record | harvest | plan (see tools/ci/nightly.c)\n", stderr);
+        fputs("usage: nightly --self-test [--root DIR] | window | window-times | worker-window | hosted | record | harvest | plan (see tools/ci/nightly.c)\n", stderr);
     }
     return status;
 }

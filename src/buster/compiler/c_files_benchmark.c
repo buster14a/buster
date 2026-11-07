@@ -129,6 +129,9 @@ struct FilesBenchmarkCounts
     uint64_t opens;
     uint64_t maps;
     uint64_t reads;
+    // Directories listed, and the candidates their listings ruled out without an open (FileCacheDirectory).
+    uint64_t listings;
+    uint64_t listed;
 };
 
 // A run's times: its ticks and those until its roots were prepared, each phase's on the slowest lane, and the busiest and
@@ -221,6 +224,8 @@ static bool files_benchmark_run(const PPOptions* options, const char* const* roo
         counts->opens += lane->counts.opens;
         counts->maps += lane->counts.maps;
         counts->reads += lane->counts.reads;
+        counts->listings += lane->counts.listings;
+        counts->listed += lane->counts.listed;
     }
     if (benchmark.run.lanes != 0)
     {
@@ -684,10 +689,11 @@ int run_files_benchmark(int argc, char** argv)
     }
     if (result)
     {
-        printf("a run: %u rounds, %u waves; %lu files, %lu bytes, %lu tokens; %u shared ids; %lu candidates exchanged, %lu opens, %lu mappings and %lu reads (on %u "
-               "lanes)\n",
+        printf("a run: %u rounds, %u waves; %lu files, %lu bytes, %lu tokens; %u shared ids; %lu candidates exchanged, %lu opens, %lu mappings and %lu reads, "
+               "%lu directories listed and %lu candidates they ruled out (on %u lanes)\n",
                counts.rounds, counts.waves, (unsigned long)counts.files, (unsigned long)counts.bytes, (unsigned long)counts.tokens, counts.ids,
-               (unsigned long)counts.candidates, (unsigned long)counts.opens, (unsigned long)counts.maps, (unsigned long)counts.reads, lanes[lane_count - 1]);
+               (unsigned long)counts.candidates, (unsigned long)counts.opens, (unsigned long)counts.maps, (unsigned long)counts.reads, (unsigned long)counts.listings,
+               (unsigned long)counts.listed, lanes[lane_count - 1]);
     }
     if (result && !flat)
     {

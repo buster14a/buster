@@ -163,7 +163,7 @@ where a slot confirms the whole key in the line it is found in.
 A tag (struct, union or enum) is one per declaration, never hash-consed. It
 has its members (identifier id, type, bit-field width, explicit alignment,
 packed, and the offset in bits that layout writes), its layout inputs (packed,
-`#pragma pack`'s value and its `aligned` attribute) and its completion number,
+`#pragma pack`'s value, its `aligned` attribute and Microsoft layout selection) and its completion number,
 the order in which tags are completed, from 1, for #113's deferred bodies. An
 enum gets its underlying type when complete: fixed, or as clang chooses it from
 the enumerators' values (`type_enum_value_bits` and `type_enum_underlying`,
@@ -215,6 +215,20 @@ including atomic-alignment helpers, keep the vector wrapper. The index is built 
 insertion a name: it is the lookups that every access runs. The checker keeps
 each access's offset in its stream (`CheckStream.member_offsets`), which the
 lowering reads instead of looking the member up again.
+
+Designated initializer names (#1498) consume the same index one record at a
+time (`check_init_member` in `c_check_initializer.c`). The result is that
+record's immediate member, including an anonymous member on the path to the
+name, rather than the final named leaf. The initializer cursor enters each
+anonymous record so its union history, brace elision and following positional
+values retain their existing meaning. A scalar parser selects the scalar
+scan/probe twins; baseline hosts do likewise. No new index, per-designator
+allocation or path representation is produced. Exhausted lookup capacity
+retains the prior direct-member scan and anonymous-member search. The original
+`c_check_designator_lookup_test.c` fixtures cover scan/index boundaries, wide
+records, exhausted capacity, missing names and anonymous-union continuation;
+the source fixtures compare independent bytes with emitted ELF and Clang.
+This change has not yet been measured end to end on the 9700X.
 
 **Measured together with the consumers.** On the locked 9700X, CPU 2, main
 `92c025e7` against `7a0597bf`, eight alternating `perf stat -r 3` rounds of
@@ -268,6 +282,35 @@ The layout is clang's `ItaniumRecordLayoutBuilder` for C on x86-64
 
 The scalar layout (`type_layout_scalar`) is this one record at a time, used by
 `type_record_layout`, and the twin and fallback of the vector layout.
+
+`TypeRecordAttributes.ms_struct` selects Clang's Microsoft record rules on the
+same Linux target. Adjacent bit-fields share a complete storage unit only when
+their types have the same byte size and the next field fits. A following
+ordinary member starts after the complete unit. Bit-field alignment follows
+the unit's size, including through a typedef that reduces its ordinary
+alignment. Unnamed fields raise the record's alignment too. A zero-width field
+after an ordinary field or another zero-width field has no natural alignment
+effect; after a nonzero bit-field it aligns the next unit. Packed records and
+`#pragma pack` retain that zero-width alignment rule. Within an active unit,
+explicit alignment does not move a field, though it can raise record alignment.
+
+Microsoft unions reserve a complete bit-field storage unit, or one byte for a
+zero-width field, while bit-fields contribute no alignment even with an explicit
+field alignment. Ordinary builtin members recover their element's natural width
+alignment through aligned typedefs and fixed arrays; complex values and other
+derived types retain their ordinary ABI alignment. Record-level alignment still
+applies. Units with a non-power-of-two byte size, such as `_BitInt(129)`'s 24
+bytes, return `TYPE_ERROR_MS_STRUCT_ALIGNMENT`: the table's log2 alignment
+representation cannot describe Clang's resulting alignment.
+
+Both scalar and vector layouts use these rules. The vector kernel retains a
+per-lane storage-unit size and blends Microsoft offsets, sizes and alignments
+only into the selected lanes. Groups containing no Microsoft records skip the
+extra rule block. The new flag is preserved by type copies and deferred replay.
+Fixed oracle fixtures cover 27 Microsoft layouts; the random Clang layout
+oracle also mixes ordinary and Microsoft records. The historical measurements
+below describe the ordinary layout before this addition; no new throughput
+claim is made here.
 
 ### The vector layout
 
@@ -536,3 +579,4 @@ columns and exact twins. `test-types` checks legal batch partitions, layout,
 compatibility and Clang rules; [#133](https://github.com/buster14a/buster/issues/133)/[#137](https://github.com/buster14a/buster/issues/137) require actual source request streams,
 small/large combined costs, memory and conditioned occupancy before changing
 these interfaces.
+

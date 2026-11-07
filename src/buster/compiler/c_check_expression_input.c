@@ -10,7 +10,9 @@
 // of values passed on, or nothing. The class's action tests what the class can't say (the values the children have, the
 // columns the walk writes as it goes, the unit's rare features) and leaves every other case to the walk's visit
 // (check_input_expression_visit), so that the graph, its leaves, the reports and the reader's columns are the walk's, node
-// for node. Included by c_check_input.c after the walk's action.
+// for node. The class actions number their nodes into a batch before the graph has any of them, and the batch's columns are
+// written to the graph 16 nodes at a time (check_input_expression_flush, #1038's stages 2 and 4). Included by
+// c_check_input.c after the walk's action.
 
 // The postorder positions the coded walk compacts at a time: the tokens the walk acts at among them and their classes, in
 // two arrays on the stack that stay in the first-level cache.
@@ -69,46 +71,283 @@ struct CheckInputValues
 static inline CheckInputValues check_input_expression_values(CheckInputReader* reader, uint32_t token)
 {
     CheckInputValues values = { .first = BUSTER_CHECK_NONE, .last = BUSTER_CHECK_NONE, .count = 0 };
+    // Without a branch on whether a child has values, which the children of the walk's tokens mispredict (#529): a
+    // child's last value and count are read whether it has values or not and taken only where it has, and the link
+    // from the chain so far is stored into `unlinked` where there is no chain or the child has no values.
+    uint32_t unlinked = 0;
     for (uint32_t child = reader->first_child[token]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
     {
         const uint32_t begin = reader->first_value[child];
-        if (begin != BUSTER_CHECK_NONE)
-        {
-            if (values.last != BUSTER_CHECK_NONE)
-            {
-                reader->value_next[values.last] = begin;
-            }
-            else
-            {
-                values.first = begin;
-            }
-            values.last = reader->last_value[child];
-            values.count += reader->value_counts[child];
-        }
+        const uint32_t last = reader->last_value[child];
+        const uint32_t counted = reader->value_counts[child];
+        const bool has = begin != BUSTER_CHECK_NONE;
+        const bool chained = has & (values.last != BUSTER_CHECK_NONE);
+        uint32_t* const link = chained ? &reader->value_next[chained ? values.last : 0] : &unlinked;
+        *link = begin;
+        values.first = (has & (values.last == BUSTER_CHECK_NONE)) ? begin : values.first;
+        values.last = has ? last : values.last;
+        values.count += has ? counted : 0;
     }
     return values;
 }
 
-// An operator's node, with what the walk's action gives every operator's: the type the token's query asked for, a static
-// initializer's context, and in a unit with overload tables the token's overload head, which an address of an operand
-// (ADDRESS) and __extension__ (SELECT) take from their operand's token and every other operator clears, so that a call
-// finds its callee's set through them (the walk's action's last step).
-// Always inlined (#880), as profile-guided builds do; hot caller: the expression reader, once per operator.
-static inline __attribute__((always_inline)) uint32_t check_input_expression_operator(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
+// The graph by passes (#1038's stages 2 and 4): the class actions number their nodes into a batch before any is written
+// to the graph, and the batch's columns are written at once (check_input_expression_flush), 16 nodes at a time where the
+// walk wrote each node's 17 columns as it made it. A class action appends its node's operator, token, operands and form
+// to the batch, an array a column on the scratch that stays in the first- and second-level caches, and takes its id, the
+// graph's count before the batch plus its place in it; the flush then writes the columns, the token columns every node
+// reads (the type the token's query asked for, a static initializer's context, where its expression ends, its warnings'
+// suppression and floating-point environment) gathered 16 tokens at a time, and records the nodes. The walk's visit, which
+// reads and writes the graph itself, takes the batch's nodes into the graph first, and so does a token that the batch has
+// no room for. A batch's node is the graph's node it will be: the actions read its token, its operator and its first
+// operand through the batch (check_input_batch_token and the like), and write the columns their node takes after it is
+// made (a member's name, a call's arguments, a list's value context) into the batch.
+#define BUSTER_CHECK_EXPRESSION_BATCH 1024u
+
+// How a batch's node takes its type and context columns: an operator's from its token's query and static initializer
+// (check_input_expression_operator), a leaf's none (check_input_batch_add's VALUE), a discard's void type
+// (check_input_expression_terminator), and an initializer's from its token's query, with a static initializer's value
+// context (check_input_expression_initialize).
+typedef enum CheckInputNodeForm
 {
-    const uint32_t node = check_input_add_node(reader, op, token, a, b, c);
-    if (node != BUSTER_CHECK_NONE)
+    CHECK_INPUT_FORM_OPERATOR,
+    CHECK_INPUT_FORM_LEAF,
+    CHECK_INPUT_FORM_DISCARD,
+    CHECK_INPUT_FORM_INITIALIZER,
+} CheckInputNodeForm;
+
+typedef struct CheckInputBatch CheckInputBatch;
+struct CheckInputBatch
+{
+    // The graph's count and leaf count before the batch: its node k is node base + k, and its leaf j leaf leaf_base + j.
+    uint32_t base;
+    uint32_t leaf_base;
+    uint32_t count;
+    uint32_t leaves;
+    // The batch's nodes' columns, as check_graph_add and the actions write them; the flush gathers the rest.
+    uint32_t ops[BUSTER_CHECK_EXPRESSION_BATCH];
+    uint32_t tokens[BUSTER_CHECK_EXPRESSION_BATCH];
+    uint32_t operand0[BUSTER_CHECK_EXPRESSION_BATCH];
+    uint32_t operand1[BUSTER_CHECK_EXPRESSION_BATCH];
+    uint32_t operand2[BUSTER_CHECK_EXPRESSION_BATCH];
+    uint32_t leaf_slots[BUSTER_CHECK_EXPRESSION_BATCH];
+    uint32_t members[BUSTER_CHECK_EXPRESSION_BATCH];
+    uint32_t argument_offsets[BUSTER_CHECK_EXPRESSION_BATCH];
+    uint32_t argument_counts[BUSTER_CHECK_EXPRESSION_BATCH];
+    uint8_t forms[BUSTER_CHECK_EXPRESSION_BATCH];
+    // The contexts the actions add to a node after it is made: a static list's element's BUSTER_CHECK_CONTEXT_VALUE.
+    uint8_t contexts[BUSTER_CHECK_EXPRESSION_BATCH];
+};
+
+_Static_assert(sizeof(CheckOp) == sizeof(uint32_t) && sizeof(TypeId) == sizeof(uint32_t), "the batch copies operators and types as 32-bit words");
+
+// The batch's place of `node`, or BUSTER_CHECK_NONE for a node the graph already holds (or none).
+static inline uint32_t check_input_batch_place(const CheckInputBatch* batch, uint32_t node)
+{
+    return node - batch->base < batch->count ? node - batch->base : BUSTER_CHECK_NONE;
+}
+
+// `node`'s token, operator and first operand, from the batch while it holds the node and the graph after.
+static inline uint32_t check_input_batch_token(const CheckInputReader* reader, const CheckInputBatch* batch, uint32_t node)
+{
+    const uint32_t place = check_input_batch_place(batch, node);
+    return place != BUSTER_CHECK_NONE ? batch->tokens[place] : reader->output->graph.tokens[node];
+}
+
+static inline CheckOp check_input_batch_op(const CheckInputReader* reader, const CheckInputBatch* batch, uint32_t node)
+{
+    const uint32_t place = check_input_batch_place(batch, node);
+    return place != BUSTER_CHECK_NONE ? (CheckOp)batch->ops[place] : reader->output->graph.ops[node];
+}
+
+static inline uint32_t check_input_batch_operand0(const CheckInputReader* reader, const CheckInputBatch* batch, uint32_t node)
+{
+    const uint32_t place = check_input_batch_place(batch, node);
+    return place != BUSTER_CHECK_NONE ? batch->operand0[place] : reader->output->graph.operand0[node];
+}
+
+// A node of `op` at `token` with operands a, b and c, numbered into the batch: check_input_add_node's node, whose
+// columns the flush writes, but its value chain's end (CheckInputReader.value_next), which the batch's later actions
+// extend. Where the graph has no room for it (check_graph_add's checks), none, and the unit is a resource failure, as
+// check_input_add_node makes it. The caller made room in the batch (check_input_expression_room). A VALUE node takes the
+// next leaf, which its maker writes whole: no leaf is cleared first.
+// Always inlined (#880), as profile-guided builds do; hot callers: the class actions, once per node.
+static inline __attribute__((always_inline)) uint32_t check_input_batch_add(CheckInputReader* reader, CheckInputBatch* batch, CheckOp op, uint32_t token, uint32_t a,
+                                                                            uint32_t b, uint32_t c, CheckInputNodeForm form)
+{
+    const uint32_t place = batch->count;
+    const uint32_t node = batch->base + place;
+    uint32_t result = BUSTER_CHECK_NONE;
+    if (node < reader->output->graph.capacity && op < CHECK_OP_COUNT && (a == BUSTER_CHECK_NONE || a < node) && (b == BUSTER_CHECK_NONE || b < node) &&
+        (c == BUSTER_CHECK_NONE || c < node))
     {
-        CheckInput* input = reader->output;
-        CheckGraph* graph = &input->graph;
-        graph->types[node] = reader->query_types[token];
-        graph->contexts[node] = reader->static_initializers[token] ? BUSTER_CHECK_CONTEXT_STATIC : 0;
-        if (input->overload_heads != NULL)
+        const bool leaf = op == CHECK_OP_VALUE;
+        batch->ops[place] = op;
+        batch->tokens[place] = token;
+        batch->operand0[place] = a;
+        batch->operand1[place] = b;
+        batch->operand2[place] = c;
+        batch->leaf_slots[place] = leaf ? batch->leaf_base + batch->leaves : BUSTER_CHECK_NONE;
+        batch->members[place] = 0;
+        batch->argument_offsets[place] = 0;
+        batch->argument_counts[place] = 0;
+        batch->forms[place] = (uint8_t)form;
+        batch->contexts[place] = 0;
+        batch->leaves += leaf;
+        batch->count = place + 1;
+        reader->value_next[node] = BUSTER_CHECK_NONE;
+        result = node;
+    }
+    else
+    {
+        reader->output->resource = true;
+    }
+    return result;
+}
+
+// Writes the leaf of the batch's VALUE node `node`, which its maker writes whole, once (check_graph_set_leaf_at).
+static inline __attribute__((always_inline)) void check_input_batch_set_leaf(CheckInputReader* reader, const CheckInputBatch* batch, uint32_t node, const CheckValue* value)
+{
+    check_graph_set_leaf_at(&reader->output->graph, batch->leaf_slots[node - batch->base], value);
+}
+
+static inline __m512i check_input_gather_bytes(__mmask16 lanes, __m512i indices, const uint8_t* column);
+
+// The batch's nodes written to the graph's columns, then recorded with the nodes a visit made before them
+// (check_graph_record_nodes, in node order), and the batch emptied after them. The vector path writes 16 nodes at a time:
+// the columns the batch holds as they are, and the types, contexts, expression ends, warnings' suppression and
+// floating-point environments from the nodes' tokens' columns, gathered (a byte column through check_input_gather_bytes);
+// the scalar path, its twin, a node at a time, as check_input_add_node and the actions write them.
+static void check_input_expression_flush(CheckInputReader* reader, CheckInputBatch* batch, bool scalar)
+{
+    CheckInput* input = reader->output;
+    CheckGraph* graph = &input->graph;
+    const uint32_t count = batch->count;
+    if (count != 0)
+    {
+        const Parser* parser = reader->parser;
+        const uint32_t base = batch->base;
+        // Gathers index by signed 32-bit offsets.
+        const bool indexed = parser->tokens.count <= (uint32_t)INT32_MAX - 4;
+        const uint8_t* suppressed = reader->warning_suppressed;
+        uint32_t k = 0;
+        for (; !BUSTER_SCALAR_PATH(scalar) && indexed && k < count; k += 16)
         {
-            const uint32_t count = reader->parser->tokens.count;
-            const uint32_t operand = (op == CHECK_OP_ADDRESS || op == CHECK_OP_SELECT) && a != BUSTER_CHECK_NONE ? graph->tokens[a] : count;
-            input->overload_heads[token] = operand < count ? input->overload_heads[operand] : 0;
+            const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, count - k < 16 ? count - k : 16);
+            const uint32_t node = base + k;
+            const __m512i zero = _mm512_setzero_si512();
+            const __m512i token = _mm512_maskz_loadu_epi32(lanes, batch->tokens + k);
+            _mm512_mask_storeu_epi32(graph->ops + node, lanes, _mm512_maskz_loadu_epi32(lanes, batch->ops + k));
+            _mm512_mask_storeu_epi32(graph->tokens + node, lanes, token);
+            _mm512_mask_storeu_epi32(graph->operand0 + node, lanes, _mm512_maskz_loadu_epi32(lanes, batch->operand0 + k));
+            _mm512_mask_storeu_epi32(graph->operand1 + node, lanes, _mm512_maskz_loadu_epi32(lanes, batch->operand1 + k));
+            _mm512_mask_storeu_epi32(graph->operand2 + node, lanes, _mm512_maskz_loadu_epi32(lanes, batch->operand2 + k));
+            _mm512_mask_storeu_epi32(graph->leaf_slots + node, lanes, _mm512_maskz_loadu_epi32(lanes, batch->leaf_slots + k));
+            _mm512_mask_storeu_epi32(graph->members + node, lanes, _mm512_maskz_loadu_epi32(lanes, batch->members + k));
+            _mm512_mask_storeu_epi32(graph->argument_offsets + node, lanes, _mm512_maskz_loadu_epi32(lanes, batch->argument_offsets + k));
+            _mm512_mask_storeu_epi32(graph->argument_counts + node, lanes, _mm512_maskz_loadu_epi32(lanes, batch->argument_counts + k));
+            const __m512i forms = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, batch->forms + k));
+            const __mmask16 operators = _mm512_mask_cmpeq_epi32_mask(lanes, forms, _mm512_set1_epi32(CHECK_INPUT_FORM_OPERATOR));
+            const __mmask16 discards = _mm512_mask_cmpeq_epi32_mask(lanes, forms, _mm512_set1_epi32(CHECK_INPUT_FORM_DISCARD));
+            const __mmask16 initializers = _mm512_mask_cmpeq_epi32_mask(lanes, forms, _mm512_set1_epi32(CHECK_INPUT_FORM_INITIALIZER));
+            const __m512i queried = _mm512_mask_i32gather_epi32(zero, operators | initializers, token, reader->query_types, 4);
+            _mm512_mask_storeu_epi32(graph->types + node, lanes, _mm512_mask_mov_epi32(queried, discards, _mm512_set1_epi32((int32_t)BUSTER_TYPE_VOID)));
+            const __m512i statics = check_input_gather_bytes(operators | initializers, token, reader->static_initializers);
+            const __mmask16 initialized = _mm512_test_epi32_mask(statics, statics);
+            const __m512i added = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, batch->contexts + k));
+            const __m512i contexts = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi32(initialized & operators, _mm512_set1_epi32(BUSTER_CHECK_CONTEXT_STATIC)),
+                                                                     _mm512_maskz_mov_epi32(initialized & initializers, _mm512_set1_epi32(BUSTER_CHECK_CONTEXT_VALUE))),
+                                                     added);
+            _mm_mask_storeu_epi8(graph->contexts + node, lanes, _mm512_cvtepi32_epi8(contexts));
+            // check_input_expression_end's: a condition's or a case label's closing ends at the token after it, every
+            // other token where its subtree does.
+            const __m512i roles = check_input_gather_bytes(lanes, token, parser->tree.roles);
+            const __mmask16 closing = _mm512_cmpeq_epi32_mask(roles, _mm512_set1_epi32(PARSE_ROLE_CLOSE_CONDITION)) |
+                                      _mm512_cmpeq_epi32_mask(roles, _mm512_set1_epi32(PARSE_ROLE_CLOSE_CASE));
+            const __m512i ends = _mm512_mask_i32gather_epi32(zero, lanes & (__mmask16)~closing, token, reader->ends, 4);
+            _mm512_mask_storeu_epi32(graph->source_positions + node, lanes, _mm512_add_epi32(_mm512_mask_mov_epi32(ends, closing, token), _mm512_set1_epi32(1)));
+            if (graph->warning_suppressed != NULL)
+            {
+                const __m512i warnings = suppressed != NULL ? check_input_gather_bytes(lanes, token, suppressed) : zero;
+                _mm_mask_storeu_epi8(graph->warning_suppressed + node, lanes, _mm512_cvtepi32_epi8(warnings));
+            }
+            if (__builtin_expect(graph->fp_environments != NULL, 0))
+            {
+                const __m512i constant = check_input_gather_bytes(lanes, token, reader->constant_contexts);
+                const __mmask16 runtime = _mm512_mask_testn_epi32_mask(lanes, constant, constant);
+                const __m512i environments = check_input_gather_bytes(lanes, token, input->fp_environments);
+                const __m512i access = _mm512_maskz_mov_epi32(runtime, _mm512_set1_epi32(BUSTER_CHECK_FP_ENV_ACCESS));
+                const __m512i mask = _mm512_or_si512(_mm512_set1_epi32(BUSTER_CHECK_FP_EVAL_MASK), access);
+                _mm_mask_storeu_epi8(graph->fp_environments + node, lanes, _mm512_cvtepi32_epi8(_mm512_and_si512(environments, mask)));
+            }
         }
+        for (; k < count; k += 1)
+        {
+            const uint32_t node = base + k;
+            const uint32_t token = batch->tokens[k];
+            const CheckInputNodeForm form = (CheckInputNodeForm)batch->forms[k];
+            const bool operator = form == CHECK_INPUT_FORM_OPERATOR;
+            const bool initializer = form == CHECK_INPUT_FORM_INITIALIZER;
+            graph->ops[node] = (CheckOp)batch->ops[k];
+            graph->tokens[node] = token;
+            graph->operand0[node] = batch->operand0[k];
+            graph->operand1[node] = batch->operand1[k];
+            graph->operand2[node] = batch->operand2[k];
+            graph->leaf_slots[node] = batch->leaf_slots[k];
+            graph->members[node] = batch->members[k];
+            graph->argument_offsets[node] = batch->argument_offsets[k];
+            graph->argument_counts[node] = batch->argument_counts[k];
+            graph->types[node] = operator || initializer ? reader->query_types[token] : form == CHECK_INPUT_FORM_DISCARD ? BUSTER_TYPE_VOID : 0;
+            const bool initialized = (operator || initializer) && reader->static_initializers[token];
+            graph->contexts[node] = (uint8_t)((initialized && operator ? BUSTER_CHECK_CONTEXT_STATIC : 0) | (initialized && initializer ? BUSTER_CHECK_CONTEXT_VALUE : 0) |
+                                              batch->contexts[k]);
+            graph->source_positions[node] = check_input_expression_end(reader, token);
+            if (graph->warning_suppressed != NULL)
+            {
+                graph->warning_suppressed[node] = suppressed != NULL ? suppressed[token] : 0;
+            }
+            if (graph->fp_environments != NULL)
+            {
+                const uint8_t mask = BUSTER_CHECK_FP_EVAL_MASK | (reader->constant_contexts[token] == 0 ? BUSTER_CHECK_FP_ENV_ACCESS : 0);
+                graph->fp_environments[node] = input->fp_environments[token] & mask;
+            }
+        }
+        graph->count = base + count;
+        graph->leaf_count = batch->leaf_base + batch->leaves;
+        graph->recorded_ready = false;
+        check_graph_record_nodes(graph);
+    }
+    batch->base = graph->count;
+    batch->leaf_base = graph->leaf_count;
+    batch->count = 0;
+    batch->leaves = 0;
+}
+
+// Room in the batch for `need` more nodes: the batch flushed where it hasn't it. Returns whether it has it then.
+static inline bool check_input_expression_room(CheckInputReader* reader, CheckInputBatch* batch, uint32_t need)
+{
+    if (batch->count + need > BUSTER_CHECK_EXPRESSION_BATCH)
+    {
+        check_input_expression_flush(reader, batch, false);
+    }
+    return need <= BUSTER_CHECK_EXPRESSION_BATCH;
+}
+
+// An operator's node, with what the walk's action gives every operator's: the type the token's query asked for, a static
+// initializer's context (both the flush's, by the node's form), and in a unit with overload tables the token's overload
+// head, which an address of an operand (ADDRESS) and __extension__ (SELECT) take from their operand's token and every
+// other operator clears, so that a call finds its callee's set through them (the walk's action's last step).
+// Always inlined (#880), as profile-guided builds do; hot caller: the expression reader, once per operator.
+static inline __attribute__((always_inline)) uint32_t check_input_expression_operator(CheckInputReader* reader, CheckInputBatch* batch, CheckOp op, uint32_t token,
+                                                                                      uint32_t a, uint32_t b, uint32_t c)
+{
+    const uint32_t node = check_input_batch_add(reader, batch, op, token, a, b, c, CHECK_INPUT_FORM_OPERATOR);
+    CheckInput* input = reader->output;
+    if (node != BUSTER_CHECK_NONE && input->overload_heads != NULL)
+    {
+        const uint32_t count = reader->parser->tokens.count;
+        const uint32_t operand = (op == CHECK_OP_ADDRESS || op == CHECK_OP_SELECT) && a != BUSTER_CHECK_NONE ? check_input_batch_token(reader, batch, a) : count;
+        input->overload_heads[token] = operand < count ? input->overload_heads[operand] : 0;
     }
     return node;
 }
@@ -126,7 +365,7 @@ static void check_input_expression_value(CheckInputReader* reader, uint32_t toke
 }
 
 // The token's values are its children's.
-static void check_input_expression_list(CheckInputReader* reader, uint32_t token, CheckInputValues values)
+static void check_input_expression_list(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
 {
     reader->output->token_nodes[token] = values.count == 1 ? values.first : BUSTER_CHECK_NONE;
     reader->first_value[token] = values.first;
@@ -138,7 +377,15 @@ static void check_input_expression_list(CheckInputReader* reader, uint32_t token
         // the same constant evaluation its scalar form's INITIALIZE gets (check_input_expression_act's list).
         for (uint32_t value = values.first; value != BUSTER_CHECK_NONE; value = reader->value_next[value])
         {
-            reader->output->graph.contexts[value] |= BUSTER_CHECK_CONTEXT_VALUE;
+            const uint32_t place = check_input_batch_place(batch, value);
+            if (place != BUSTER_CHECK_NONE)
+            {
+                batch->contexts[place] |= BUSTER_CHECK_CONTEXT_VALUE;
+            }
+            else
+            {
+                reader->output->graph.contexts[value] |= BUSTER_CHECK_CONTEXT_VALUE;
+            }
         }
     }
 }
@@ -151,9 +398,9 @@ static void check_input_expression_list(CheckInputReader* reader, uint32_t token
 typedef struct CheckInputIdentifiers CheckInputIdentifiers;
 struct CheckInputIdentifiers
 {
-    // Per identifier of the chunk, in its order: the leaf's first two words (type and category; flags and constant kind),
-    // its ninth (object and overload head), the declaration, whose enumerator's value an enumeration's leaf holds, and
-    // the identifier's status (BUSTER_CHECK_IDENTIFIER_*).
+    // Per identifier of the chunk, in its order: its leaf's fields in pairs, each pair a word as the value lays them out (type
+    // and category; flags and constant kind; object and overload head), the declaration, whose enumerator's value an
+    // enumeration's leaf holds, and the identifier's status (BUSTER_CHECK_IDENTIFIER_*).
     uint64_t types[BUSTER_CHECK_EXPRESSION_CHUNK];
     uint64_t flags[BUSTER_CHECK_EXPRESSION_CHUNK];
     uint64_t objects[BUSTER_CHECK_EXPRESSION_CHUNK];
@@ -172,7 +419,7 @@ _Static_assert(sizeof(CheckValue) == 96 && offsetof(CheckValue, category) == 4 &
                offsetof(CheckValue, imaginary_storage) == 48 && offsetof(CheckValue, object) == 64 && offsetof(CheckValue, overload_head) == 68 &&
                offsetof(CheckValue, offset) == 72 && offsetof(CheckValue, object_bit_offset) == 92 && sizeof(CheckCategory) == 4 &&
                sizeof(CheckConstantKind) == 4 && BUSTER_CHECK_ICE < 256 && BUSTER_CHECK_STATIC_OBJECT < 256 && BUSTER_CHECK_REGISTER < 256,
-               "an identifier's leaf is written as twelve words, of which three vary but for an enumerator's value");
+               "an identifier's entry holds its leaf's fields as three of the value's words, which vary but for an enumerator's value");
 
 // The identifier `token`'s entry `at` in `identifiers`, as the walk's action makes its leaf: the scalar twin of
 // check_input_expression_identifiers' vector path.
@@ -186,7 +433,8 @@ static void check_input_identifier_entry(const CheckInputReader* reader, uint32_
     const uint64_t category = enumeration ? CHECK_RVALUE : type != 0 && type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE;
     const uint64_t flags = (enumeration ? BUSTER_CHECK_ICE : 0) |
                            (type != 0 && check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) |
-                           (type != 0 && check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0);
+                           (type != 0 && check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0) |
+                           (type != 0 ? check_input_nonnull_flag(reader, declaration, token, enumeration, reader->objects[declaration]) : 0);
     const uint64_t kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS;
     const uint64_t head = input->overload_heads != NULL ? input->overload_heads[token] : 0;
     identifiers->types[at] = (uint64_t)type | category << 32;
@@ -253,9 +501,12 @@ static uint32_t check_input_expression_identifiers(const CheckInputReader* reade
         const __mmask16 static_object = _mm512_mask_test_epi32_mask(typed, bits, _mm512_set1_epi32(BUSTER_CHECK_BITS_STATIC)) &
                                         _mm512_mask_testn_epi32_mask(typed, bits, _mm512_set1_epi32(BUSTER_CHECK_BITS_THREAD_LOCAL));
         const __mmask16 in_register = _mm512_mask_test_epi32_mask(typed, bits, _mm512_set1_epi32(BUSTER_CHECK_BITS_REGISTER));
+        const __mmask16 has_object = _mm512_mask_test_epi32_mask(typed, objects, objects);
+        const __mmask16 nonnull = has_object & ~enumeration;
         const __m512i flags = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi32(enumeration, _mm512_set1_epi32(BUSTER_CHECK_ICE)),
                                                               _mm512_maskz_mov_epi32(static_object, _mm512_set1_epi32(BUSTER_CHECK_STATIC_OBJECT))),
-                                              _mm512_maskz_mov_epi32(in_register, _mm512_set1_epi32(BUSTER_CHECK_REGISTER)));
+                                              _mm512_or_si512(_mm512_maskz_mov_epi32(in_register, _mm512_set1_epi32(BUSTER_CHECK_REGISTER)),
+                                                              _mm512_maskz_mov_epi32(nonnull, _mm512_set1_epi32(BUSTER_CHECK_NONNULL_ADDRESS))));
         const __m512i constant = _mm512_mask_mov_epi32(_mm512_set1_epi32(CHECK_CONSTANT_ADDRESS), enumeration, _mm512_set1_epi32(CHECK_CONSTANT_INTEGER));
         const __m512i status = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi32(acted, _mm512_set1_epi32(BUSTER_CHECK_IDENTIFIER_ACTED)),
                                                                _mm512_maskz_mov_epi32(acted & typed, _mm512_set1_epi32(BUSTER_CHECK_IDENTIFIER_NODE))),
@@ -284,6 +535,17 @@ static uint32_t check_input_expression_identifiers(const CheckInputReader* reade
         }
         _mm512_mask_storeu_epi32(identifiers->declarations + at, lanes, declaration);
         _mm512_mask_storeu_epi32(identifiers->status + at, lanes, status);
+    }
+    // Weak addresses are rare. The gather marks every object non-null; this clears a weak attribute or `#pragma weak`.
+    if (reader->weak_name_count != 0 || (input->symbol_pragmas != NULL && input->symbol_pragmas->count != 0))
+    {
+        for (uint32_t at = 0; at < count; at += 1)
+        {
+            if (check_input_address_is_weak(reader, identifiers->declarations[at], found[at]))
+            {
+                identifiers->flags[at] &= ~(uint64_t)BUSTER_CHECK_NONNULL_ADDRESS;
+            }
+        }
     }
     for (; position < acting; position += 1)
     {
@@ -557,32 +819,28 @@ static uint32_t check_input_expression_literals(const CheckInputReader* reader, 
 // without a declared type. In a unit with overload tables the leaf holds the use's overload head, which the reader's run
 // wrote at the token, and which the walk's action writes back there unchanged. A K&R unit's identifiers, whose types a
 // K&R function's designator interns, and a constexpr object's, which reads its value, are the walk's.
-static bool check_input_expression_identifier(CheckInputReader* reader, uint32_t token, const CheckInputIdentifiers* identifiers, uint32_t at)
+static bool check_input_expression_identifier(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, const CheckInputIdentifiers* identifiers, uint32_t at)
 {
     const uint32_t status = identifiers->status[at];
     if ((status & BUSTER_CHECK_IDENTIFIER_NODE) != 0)
     {
-        const uint32_t node = check_input_add_leaf(reader, token);
+        const uint32_t node = check_input_batch_add(reader, batch, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, CHECK_INPUT_FORM_LEAF);
         if (node != BUSTER_CHECK_NONE)
         {
             const unsigned __int128 integer = (status & BUSTER_CHECK_IDENTIFIER_ENUMERATOR) != 0 ? reader->enum_values[identifiers->declarations[at]] : 0;
-            // The twelve words, all else zero (no x87 store of the zero floating parts).
-            const uint64_t words[12] =
+            // Its three words and its enumerator's value, all else zero (no x87 store of the zero floating parts): its leaf's
+            // record, and a row only for an enumerator's value past 64 bits.
+            const CheckValue value =
             {
-                identifiers->types[at],
-                identifiers->flags[at],
-                (uint64_t)integer,
-                (uint64_t)(integer >> 64),
-                0,
-                0,
-                0,
-                0,
-                identifiers->objects[at],
-                0,
-                0,
-                0,
+                .type = (TypeId)identifiers->types[at],
+                .category = (CheckCategory)(identifiers->types[at] >> 32),
+                .flags = (uint32_t)identifiers->flags[at],
+                .constant_kind = (CheckConstantKind)(identifiers->flags[at] >> 32),
+                .integer = integer,
+                .object = (uint32_t)identifiers->objects[at],
+                .overload_head = (uint32_t)(identifiers->objects[at] >> 32),
             };
-            memcpy(check_graph_leaf_of(&reader->output->graph, node), words, sizeof(words));
+            check_input_batch_set_leaf(reader, batch, node, &value);
             check_input_expression_value(reader, token, node);
         }
     }
@@ -593,7 +851,7 @@ static bool check_input_expression_identifier(CheckInputReader* reader, uint32_t
 // a unit with overload tables, its token's head is its leaf's, none. A plain decimal's value the chunk's literals hold
 // (CheckInputLiterals); every other literal is parsed here. A function's name is the walk's, as its tests take it after
 // the literals.
-static bool check_input_expression_literal(CheckInputReader* reader, uint32_t token, const CheckInputLiterals* literals, uint32_t at)
+static bool check_input_expression_literal(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, const CheckInputLiterals* literals, uint32_t at)
 {
     const bool acted = !check_input_function_name_token(reader->parser, token);
     if (acted)
@@ -609,14 +867,14 @@ static bool check_input_expression_literal(CheckInputReader* reader, uint32_t to
         }
         else
         {
-            const uint32_t node = check_input_add_leaf(reader, token);
+            const uint32_t node = check_input_batch_add(reader, batch, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, CHECK_INPUT_FORM_LEAF);
             if (node != BUSTER_CHECK_NONE)
             {
-                CheckValue* leaf = check_graph_leaf_of(&reader->output->graph, node);
-                *leaf = check_input_literal_value(reader, token, literal);
+                const CheckValue value = check_input_literal_value(reader, token, literal);
+                check_input_batch_set_leaf(reader, batch, node, &value);
                 if (reader->output->overload_heads != NULL)
                 {
-                    reader->output->overload_heads[token] = leaf->overload_head;
+                    reader->output->overload_heads[token] = value.overload_head;
                 }
                 check_input_expression_value(reader, token, node);
             }
@@ -626,7 +884,7 @@ static bool check_input_expression_literal(CheckInputReader* reader, uint32_t to
 }
 
 // A prefix operator of one operand, but the address of a label, sizeof and alignof, and __real__ and __imag__.
-static bool check_input_expression_prefix(CheckInputReader* reader, uint32_t token, CheckInputValues values)
+static bool check_input_expression_prefix(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
 {
     CheckOp op = CHECK_OP_COUNT;
     switch (reader->parser->tokens.kinds[token])
@@ -645,28 +903,58 @@ static bool check_input_expression_prefix(CheckInputReader* reader, uint32_t tok
     const bool acted = op != CHECK_OP_COUNT && values.count == 1;
     if (acted)
     {
-        check_input_expression_value(reader, token, check_input_expression_operator(reader, op, token, values.first, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE));
+        check_input_expression_value(reader, token, check_input_expression_operator(reader, batch, op, token, values.first, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE));
     }
     return acted;
 }
 
-// A binary operator, or a comma operator: two values. An initializer's assignment is the walk's class.
+// A binary operator, or a comma operator: two values. An initializer's assignment is a class of its own (INITIALIZE).
 // Always inlined (#880), as profile-guided builds do; hot caller: check_input_expression_coded, once per binary
 // operator.
-static inline __attribute__((always_inline)) bool check_input_expression_binary(CheckInputReader* reader, uint32_t token, CheckInputValues values)
+static inline __attribute__((always_inline)) bool check_input_expression_binary(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
 {
     const CheckOp op = check_input_binary(reader->parser->tokens.kinds[token]);
     const bool acted = op != CHECK_OP_COUNT && values.count == 2;
     if (acted)
     {
         const uint32_t second = reader->value_next[values.first];
-        check_input_expression_value(reader, token, check_input_expression_operator(reader, op, token, values.first, second, BUSTER_CHECK_NONE));
+        check_input_expression_value(reader, token, check_input_expression_operator(reader, batch, op, token, values.first, second, BUSTER_CHECK_NONE));
+    }
+    return acted;
+}
+
+// An initializer's assignment (CheckInputReader.initializers): the INITIALIZE of its one value, whose node is the declaration's
+// initializer (CheckInput.initializer_nodes) and takes its token's query type and, in a static initializer, the value
+// context, as the walk's action gives it; or a braced initializer's values, passed on as a list. An INITIALIZE of more
+// values or none is the walk's, which refuses it.
+static bool check_input_expression_initialize(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
+{
+    const bool listed = reader->initializers[token] == 2;
+    const bool acted = listed || values.count == 1;
+    if (listed)
+    {
+        check_input_expression_list(reader, batch, token, values);
+    }
+    else if (acted)
+    {
+        CheckInput* input = reader->output;
+        const uint32_t node = check_input_batch_add(reader, batch, CHECK_OP_INITIALIZE, token, values.first, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE,
+                                                    CHECK_INPUT_FORM_INITIALIZER);
+        if (node != BUSTER_CHECK_NONE)
+        {
+            check_sparse_set(input->sparse_pool, input->initializer_nodes, reader->initializer_declarations[token], node);
+            if (input->overload_heads != NULL)
+            {
+                input->overload_heads[token] = 0;
+            }
+        }
+        check_input_expression_value(reader, token, node);
     }
     return acted;
 }
 
 // A conditional operator of three values, or of two with the middle one omitted (x ?: y), whose first is both.
-static bool check_input_expression_ternary(CheckInputReader* reader, uint32_t token, CheckInputValues values)
+static bool check_input_expression_ternary(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
 {
     const bool acted = values.count == 3 || values.count == 2;
     if (acted)
@@ -674,24 +962,24 @@ static bool check_input_expression_ternary(CheckInputReader* reader, uint32_t to
         const bool omitted = values.count == 2;
         const uint32_t second = reader->value_next[values.first];
         const uint32_t third = omitted ? BUSTER_CHECK_NONE : reader->value_next[second];
-        check_input_expression_value(reader, token, check_input_expression_operator(reader, CHECK_OP_CONDITIONAL, token, values.first, omitted ? values.first : second,
+        check_input_expression_value(reader, token, check_input_expression_operator(reader, batch, CHECK_OP_CONDITIONAL, token, values.first, omitted ? values.first : second,
                                                                                     omitted ? second : third));
     }
     return acted;
 }
 
 // A member access: one value and the member's name after the operator, a vector's member for `.`.
-static bool check_input_expression_member(CheckInputReader* reader, uint32_t token, CheckInputValues values)
+static bool check_input_expression_member(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
 {
     const Parser* parser = reader->parser;
     const bool acted = values.count == 1 && token + 1 < parser->tokens.count && parser->tree.roles[token + 1] == PARSE_ROLE_MEMBER;
     if (acted)
     {
         const bool arrow = parser->tokens.kinds[token] == PARSE_KIND_ARROW;
-        const uint32_t node = check_input_expression_operator(reader, arrow ? CHECK_OP_ARROW : CHECK_OP_MEMBER, token, values.first, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        const uint32_t node = check_input_expression_operator(reader, batch, arrow ? CHECK_OP_ARROW : CHECK_OP_MEMBER, token, values.first, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         if (node != BUSTER_CHECK_NONE)
         {
-            reader->output->graph.members[node] = parser->tokens.names[token + 1];
+            batch->members[node - batch->base] = parser->tokens.names[token + 1];
             if (!arrow)
             {
                 check_input_vector_member(reader, node, token + 1);
@@ -703,39 +991,39 @@ static bool check_input_expression_member(CheckInputReader* reader, uint32_t tok
 }
 
 // An operator of `values.count` values (one, or two for a subscript), where the class asks for `wanted`.
-static bool check_input_expression_fixed(CheckInputReader* reader, uint32_t token, CheckInputValues values, CheckOp op, uint32_t wanted)
+static bool check_input_expression_fixed(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values, CheckOp op, uint32_t wanted)
 {
     const bool acted = values.count == wanted;
     if (acted)
     {
         const uint32_t second = wanted == 2 ? reader->value_next[values.first] : BUSTER_CHECK_NONE;
-        check_input_expression_value(reader, token, check_input_expression_operator(reader, op, token, values.first, second, BUSTER_CHECK_NONE));
+        check_input_expression_value(reader, token, check_input_expression_operator(reader, batch, op, token, values.first, second, BUSTER_CHECK_NONE));
     }
     return acted;
 }
 
 // A string literal operand: a VALUE node of its string's object (check_input_string, which makes the object the first time
 // a string is met), or nothing where it has none; in a unit with overload tables, its token's head is its leaf's, none.
-static bool check_input_expression_string(CheckInputReader* reader, uint32_t token)
+static bool check_input_expression_string(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token)
 {
     const CheckInitString* string = check_input_string(reader, token);
     if (string != 0)
     {
-        const uint32_t node = check_input_add_leaf(reader, token);
+        const uint32_t node = check_input_batch_add(reader, batch, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, CHECK_INPUT_FORM_LEAF);
         if (node != BUSTER_CHECK_NONE)
         {
-            CheckValue* leaf = check_graph_leaf_of(&reader->output->graph, node);
-            *leaf = (CheckValue)
+            const CheckValue value =
             {
                 .type = string->type,
                 .category = CHECK_LVALUE,
-                .flags = BUSTER_CHECK_STATIC_OBJECT,
+                .flags = BUSTER_CHECK_STATIC_OBJECT | (string->object != 0 ? BUSTER_CHECK_NONNULL_ADDRESS : 0),
                 .constant_kind = CHECK_CONSTANT_ADDRESS,
                 .object = string->object,
             };
+            check_input_batch_set_leaf(reader, batch, node, &value);
             if (reader->output->overload_heads != NULL)
             {
-                reader->output->overload_heads[token] = leaf->overload_head;
+                reader->output->overload_heads[token] = value.overload_head;
             }
             check_input_expression_value(reader, token, node);
         }
@@ -746,14 +1034,14 @@ static bool check_input_expression_string(CheckInputReader* reader, uint32_t tok
 // A return statement: its one value converted to the function's return type (a CONVERT node, the token's node but no value
 // of an operand's), or without one a report where the function's type isn't void, but in a system header, as clang
 // warns (-Wreturn-mismatch). A return outside a function's body, or of more values, is the walk's.
-static bool check_input_expression_return(CheckInputReader* reader, uint32_t token, CheckInputValues values)
+static bool check_input_expression_return(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
 {
     const TypeId type = reader->return_types[token];
     const bool acted = type != 0 && values.count <= 1;
     if (acted && values.count == 1)
     {
         reader->query_types[token] = type;
-        const uint32_t node = check_input_expression_operator(reader, CHECK_OP_CONVERT, token, values.first, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        const uint32_t node = check_input_expression_operator(reader, batch, CHECK_OP_CONVERT, token, values.first, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         if (node != BUSTER_CHECK_NONE)
         {
             reader->output->token_nodes[token] = node;
@@ -772,7 +1060,7 @@ static bool check_input_expression_return(CheckInputReader* reader, uint32_t tok
 // region its one value as its result, and the discards are chained from the token for the region's walk
 // (CheckInputReader.region_roots): what the walk's action does, in the same order. A region's last statement without
 // exactly one value is the walk's, which refuses it.
-static bool check_input_expression_terminator(CheckInputReader* reader, uint32_t token, CheckInputValues values)
+static bool check_input_expression_terminator(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
 {
     CheckInput* input = reader->output;
     const bool condition = reader->conditions[token] != 0;
@@ -796,10 +1084,10 @@ static bool check_input_expression_terminator(CheckInputReader* reader, uint32_t
     uint32_t last = BUSTER_CHECK_NONE;
     for (uint32_t value = acted ? values.first : BUSTER_CHECK_NONE; value != BUSTER_CHECK_NONE; value = reader->value_next[value])
     {
-        const uint32_t discard = check_input_add_node(reader, condition ? CHECK_OP_CONDITION : CHECK_OP_CAST, token, value, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        const uint32_t discard = check_input_batch_add(reader, batch, condition ? CHECK_OP_CONDITION : CHECK_OP_CAST, token, value, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE,
+                                                       CHECK_INPUT_FORM_DISCARD);
         if (discard != BUSTER_CHECK_NONE)
         {
-            input->graph.types[discard] = BUSTER_TYPE_VOID;
             if (reader->region_roots != NULL)
             {
                 if (last == BUSTER_CHECK_NONE)
@@ -819,7 +1107,7 @@ static bool check_input_expression_terminator(CheckInputReader* reader, uint32_t
 
 // An if's, a while's or a switch's condition: its one value tested (CONDITION), or a switch's promoted (POSITIVE). The
 // condition's node is the token's, but no value of an operand's.
-static bool check_input_expression_condition(CheckInputReader* reader, uint32_t token, CheckInputValues values)
+static bool check_input_expression_condition(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
 {
     const Parser* parser = reader->parser;
     const bool acted = values.count == 1;
@@ -828,7 +1116,7 @@ static bool check_input_expression_condition(CheckInputReader* reader, uint32_t 
         const uint32_t keyword = reader->first_child[token];
         const bool switched = keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH;
         const uint32_t second = switched ? reader->value_next[values.first] : BUSTER_CHECK_NONE;
-        const uint32_t node = check_input_expression_operator(reader, switched ? CHECK_OP_POSITIVE : CHECK_OP_CONDITION, token, values.first, second, BUSTER_CHECK_NONE);
+        const uint32_t node = check_input_expression_operator(reader, batch, switched ? CHECK_OP_POSITIVE : CHECK_OP_CONDITION, token, values.first, second, BUSTER_CHECK_NONE);
         if (node != BUSTER_CHECK_NONE)
         {
             reader->output->token_nodes[token] = node;
@@ -842,7 +1130,7 @@ static bool check_input_expression_condition(CheckInputReader* reader, uint32_t 
 // (check_input_library_call, #148); and in a unit with overload tables, a call whose callee's token names an overload set
 // recorded with the set's head (CheckGraph.overload_calls), in node order as the walk records them. A K&R unit's calls are
 // the walk's, and so are a builtin's and an intrinsic's, by their class (check_input_expression_fold).
-static bool check_input_expression_call(CheckInputReader* reader, uint32_t token, CheckInputValues values)
+static bool check_input_expression_call(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
 {
     CheckInput* input = reader->output;
     const bool acted = values.count != 0 && input->kr_parameter_count == 0;
@@ -851,17 +1139,20 @@ static bool check_input_expression_call(CheckInputReader* reader, uint32_t token
         CheckGraph* graph = &input->graph;
         const uint32_t callee = values.first;
         const uint32_t first_argument = reader->value_next[callee];
-        const uint32_t node = check_input_expression_operator(reader, CHECK_OP_CALL, token, callee, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        const uint32_t node = check_input_expression_operator(reader, batch, CHECK_OP_CALL, token, callee, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         if (node != BUSTER_CHECK_NONE)
         {
-            if (graph->ops[callee] == CHECK_OP_VALUE || graph->ops[callee] == CHECK_OP_ADDRESS)
+            const uint32_t place = node - batch->base;
+            const CheckOp callee_op = check_input_batch_op(reader, batch, callee);
+            if (callee_op == CHECK_OP_VALUE || callee_op == CHECK_OP_ADDRESS)
             {
-                const uint32_t designator = graph->ops[callee] == CHECK_OP_ADDRESS ? graph->operand0[callee] : callee;
-                const uint32_t use = designator < node && graph->ops[designator] == CHECK_OP_VALUE ? graph->tokens[designator] : BUSTER_CHECK_NONE;
+                const uint32_t designator = callee_op == CHECK_OP_ADDRESS ? check_input_batch_operand0(reader, batch, callee) : callee;
+                const uint32_t use = designator < node && check_input_batch_op(reader, batch, designator) == CHECK_OP_VALUE ? check_input_batch_token(reader, batch, designator) :
+                                                                                                                             BUSTER_CHECK_NONE;
                 const uint32_t library = use != BUSTER_CHECK_NONE ? check_input_library_call(reader, use) : 0;
-                graph->members[node] = library != 0 ? library : graph->members[node];
+                batch->members[place] = library != 0 ? library : batch->members[place];
             }
-            const uint32_t callee_token = input->overload_heads != NULL ? graph->tokens[callee] : reader->parser->tokens.count;
+            const uint32_t callee_token = input->overload_heads != NULL ? check_input_batch_token(reader, batch, callee) : reader->parser->tokens.count;
             const uint32_t head = callee_token < reader->parser->tokens.count ? input->overload_heads[callee_token] : 0;
             if (head != 0)
             {
@@ -874,13 +1165,13 @@ static bool check_input_expression_call(CheckInputReader* reader, uint32_t token
                     input->resource = true;
                 }
             }
-            graph->argument_offsets[node] = graph->argument_count;
-            graph->argument_counts[node] = values.count - 1;
+            batch->argument_offsets[place] = graph->argument_count;
+            batch->argument_counts[place] = values.count - 1;
             for (uint32_t argument = first_argument; argument != BUSTER_CHECK_NONE; argument = reader->value_next[argument])
             {
                 if (graph->argument_count < graph->argument_capacity)
                 {
-                    graph->argument_tokens[graph->argument_count] = check_input_first_token(reader, graph->tokens[argument]);
+                    graph->argument_tokens[graph->argument_count] = check_input_first_token(reader, check_input_batch_token(reader, batch, argument));
                     graph->argument_nodes[graph->argument_count++] = argument;
                 }
                 else
@@ -897,10 +1188,13 @@ static bool check_input_expression_call(CheckInputReader* reader, uint32_t token
 // The coded walk's action at `token` of visits byte `classes`, by its class where `coded` (the unit has none of the
 // features every class leaves to the walk), else and where the class's action doesn't take it, the walk's visit. A
 // class's action that leaves the token has written only its first value, NONE, and its children's chains (value_next),
-// both of which the walk's visit writes again as they were. In a coded unit, the visit's ticks are added to `*visited`
+// both of which the walk's visit writes again as they were. The class's action numbers its nodes into `batch`, which has
+// room for them first: a terminator's discards, one a value, and every other class's one node at most (a terminator of
+// more values than the batch holds is the walk's). In a coded unit, the visit's ticks are added to `*visited`
 // (BUSTER_CHECK_EXPRESSION_PART_VISITS) unless it is null; in another, the caller times its whole chunk as visits.
-static void check_input_expression_coded(CheckInputReader* reader, uint32_t token, uint8_t classes, bool coded, const CheckInputIdentifiers* identifiers,
-                                         uint32_t* identifier, const CheckInputLiterals* literals, uint32_t* literal, uint64_t* visited)
+static void check_input_expression_coded(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, uint8_t classes, bool coded,
+                                         const CheckInputIdentifiers* identifiers, uint32_t* identifier, const CheckInputLiterals* literals, uint32_t* literal,
+                                         uint64_t* visited)
 {
     const uint32_t code = (classes & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
     bool acted = coded && code != CHECK_INPUT_CODE_SCALAR;
@@ -908,69 +1202,73 @@ static void check_input_expression_coded(CheckInputReader* reader, uint32_t toke
     {
         reader->first_value[token] = BUSTER_CHECK_NONE;
         const CheckInputValues values = check_input_expression_values(reader, token);
-        switch (code)
+        acted = check_input_expression_room(reader, batch, code == CHECK_INPUT_CODE_TERMINATOR ? values.count : 1);
+        switch (acted ? code : CHECK_INPUT_CODE_SCALAR)
         {
             case CHECK_INPUT_CODE_LIST:
-                check_input_expression_list(reader, token, values);
+                check_input_expression_list(reader, batch, token, values);
                 break;
             case CHECK_INPUT_CODE_DROP:
                 break;
             case CHECK_INPUT_CODE_IDENTIFIER:
-                acted = check_input_expression_identifier(reader, token, identifiers, *identifier);
+                acted = check_input_expression_identifier(reader, batch, token, identifiers, *identifier);
                 *identifier += 1;
                 break;
             case CHECK_INPUT_CODE_LITERAL:
-                acted = check_input_expression_literal(reader, token, literals, *literal);
+                acted = check_input_expression_literal(reader, batch, token, literals, *literal);
                 *literal += 1;
                 break;
             case CHECK_INPUT_CODE_PREFIX:
-                acted = check_input_expression_prefix(reader, token, values);
+                acted = check_input_expression_prefix(reader, batch, token, values);
                 break;
             case CHECK_INPUT_CODE_BINARY:
-                acted = check_input_expression_binary(reader, token, values);
+                acted = check_input_expression_binary(reader, batch, token, values);
                 break;
             case CHECK_INPUT_CODE_SEPARATOR:
-                check_input_expression_list(reader, token, values);
+                check_input_expression_list(reader, batch, token, values);
                 break;
             case CHECK_INPUT_CODE_GROUP:
                 acted = values.count == 1;
                 if (acted)
                 {
-                    check_input_expression_list(reader, token, values);
+                    check_input_expression_list(reader, batch, token, values);
                 }
                 break;
             case CHECK_INPUT_CODE_CAST:
-                acted = reader->query_types[token] != 0 && check_input_expression_fixed(reader, token, values, CHECK_OP_CAST, 1);
+                acted = reader->query_types[token] != 0 && check_input_expression_fixed(reader, batch, token, values, CHECK_OP_CAST, 1);
                 break;
             case CHECK_INPUT_CODE_TERNARY:
-                acted = check_input_expression_ternary(reader, token, values);
+                acted = check_input_expression_ternary(reader, batch, token, values);
                 break;
             case CHECK_INPUT_CODE_SUBSCRIPT:
-                acted = check_input_expression_fixed(reader, token, values, CHECK_OP_SUBSCRIPT, 2);
+                acted = check_input_expression_fixed(reader, batch, token, values, CHECK_OP_SUBSCRIPT, 2);
                 break;
             case CHECK_INPUT_CODE_MEMBER:
-                acted = check_input_expression_member(reader, token, values);
+                acted = check_input_expression_member(reader, batch, token, values);
                 break;
             case CHECK_INPUT_CODE_TERMINATOR:
-                acted = check_input_expression_terminator(reader, token, values);
+                acted = check_input_expression_terminator(reader, batch, token, values);
                 break;
             case CHECK_INPUT_CODE_CONDITION:
-                acted = check_input_expression_condition(reader, token, values);
+                acted = check_input_expression_condition(reader, batch, token, values);
                 break;
             case CHECK_INPUT_CODE_CALL:
-                acted = check_input_expression_call(reader, token, values);
+                acted = check_input_expression_call(reader, batch, token, values);
                 break;
             case CHECK_INPUT_CODE_STRING:
-                acted = check_input_expression_string(reader, token);
+                acted = check_input_expression_string(reader, batch, token);
                 break;
             case CHECK_INPUT_CODE_RETURN:
-                acted = check_input_expression_return(reader, token, values);
+                acted = check_input_expression_return(reader, batch, token, values);
+                break;
+            case CHECK_INPUT_CODE_INITIALIZE:
+                acted = check_input_expression_initialize(reader, batch, token, values);
                 break;
             case CHECK_INPUT_CODE_POSTFIX:
             {
                 const uint8_t kind = reader->parser->tokens.kinds[token];
                 acted = (kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS) &&
-                        check_input_expression_fixed(reader, token, values, kind == PARSE_KIND_PLUSPLUS ? CHECK_OP_POST_INCREMENT : CHECK_OP_POST_DECREMENT, 1);
+                        check_input_expression_fixed(reader, batch, token, values, kind == PARSE_KIND_PLUSPLUS ? CHECK_OP_POST_INCREMENT : CHECK_OP_POST_DECREMENT, 1);
                 break;
             }
             default:
@@ -989,9 +1287,14 @@ static void check_input_expression_coded(CheckInputReader* reader, uint32_t toke
         {
             reader->expression_declined[token] = 1;
         }
+        // The visit reads and writes the graph: the batch's nodes go to it first (the actions' time, not the visit's),
+        // and the batch's next node is the next after the visit's.
+        check_input_expression_flush(reader, batch, false);
         const bool clocked = coded && visited != NULL;
         const uint64_t start = clocked ? __rdtsc() : 0;
         check_input_expression_visit(reader, token, classes);
+        batch->base = reader->output->graph.count;
+        batch->leaf_base = reader->output->graph.leaf_count;
         if (clocked)
         {
             *visited += __rdtsc() - start;
@@ -999,12 +1302,13 @@ static void check_input_expression_coded(CheckInputReader* reader, uint32_t toke
     }
 }
 
-// Whether `token` passes its children's values on to its parent in the graph by passes' numbering: a LIST, a GROUP or a
-// SEPARATOR the walk's visit didn't take.
+// Whether `token` passes its children's values on to its parent in the graph by passes' numbering: a LIST, a GROUP, a
+// SEPARATOR or a braced initializer's INITIALIZE the walk's visit didn't take.
 static bool check_input_numbering_passes(const CheckInputReader* reader, uint32_t token)
 {
     const uint32_t code = (reader->visits[token] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
-    return (code == CHECK_INPUT_CODE_LIST || code == CHECK_INPUT_CODE_GROUP || code == CHECK_INPUT_CODE_SEPARATOR) && reader->expression_declined[token] == 0;
+    const bool listed = code == CHECK_INPUT_CODE_INITIALIZE && reader->initializers[token] == 2;
+    return (code == CHECK_INPUT_CODE_LIST || code == CHECK_INPUT_CODE_GROUP || code == CHECK_INPUT_CODE_SEPARATOR || listed) && reader->expression_declined[token] == 0;
 }
 
 // Appends node `value` to the list of `consumer`'s values in the graph by passes' numbering.
@@ -1153,7 +1457,7 @@ static void check_input_expression_numbering(CheckInputReader* reader, uint32_t 
 // is acted at by the walk's visit throughout, though still compacted. A unit with overload tables (CheckInput.
 // overload_heads: one that names the overloadable attribute in an attribute list, whose every function declaration is a
 // candidate) is coded too: the class actions carry the heads through their nodes to their calls as the walk's does.
-static void check_input_expressions_coded(CheckInputReader* reader)
+static void check_input_expressions_coded_range(CheckInputReader* reader, uint32_t begin, uint32_t stop)
 {
     const CheckInput* input = reader->output;
     const uint32_t count = reader->parser->tokens.count;
@@ -1168,10 +1472,20 @@ static void check_input_expressions_coded(CheckInputReader* reader)
     // tokens the classes' actions leave, which it takes as the walk's visits.
     const uint32_t base = reader->output->graph.count;
     const uint64_t scratch_mark = reader->scratch->length;
-    reader->expression_declined = coded && reader->pp->options.expression_numbering ? arena_push_array(reader->scratch, (uint64_t)count + 1, 1, 1) : NULL;
+    reader->expression_declined = coded && begin == 0 && stop == count && reader->pp->options.expression_numbering ? arena_push_array(reader->scratch, (uint64_t)count + 1, 1, 1) : NULL;
     if (reader->expression_declined != NULL)
     {
         memset(reader->expression_declined, 0, (uint64_t)count + 1);
+    }
+    // The nodes the class actions number before the graph has them (check_input_expression_flush).
+    CheckInputBatch* batch = arena_push_array(reader->scratch, 1, sizeof(CheckInputBatch), 64);
+    reader->output->resource |= batch == NULL;
+    if (batch != NULL)
+    {
+        batch->base = reader->output->graph.count;
+        batch->leaf_base = reader->output->graph.leaf_count;
+        batch->count = 0;
+        batch->leaves = 0;
     }
     // The parts' ticks (CheckInput.expression_part_ticks): three TSC reads a chunk, and two a visit of a coded unit's,
     // which are the actions' less their visits'. And the tokens of each class the actions reached, in four histograms
@@ -1183,10 +1497,10 @@ static void check_input_expressions_coded(CheckInputReader* reader)
     // A coded unit's actions timed by class where the options ask (CheckInput.expression_class_ticks).
     const bool timed = coded && reader->pp->options.expression_timing;
     uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
-    for (uint32_t first = 0; first < count && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
+    for (uint32_t first = begin; first < stop && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
     {
         const uint64_t start = __rdtsc();
-        const uint32_t end = count - first < BUSTER_CHECK_EXPRESSION_CHUNK ? count : first + BUSTER_CHECK_EXPRESSION_CHUNK;
+        const uint32_t end = stop - first < BUSTER_CHECK_EXPRESSION_CHUNK ? stop : first + BUSTER_CHECK_EXPRESSION_CHUNK;
         const uint32_t acting = check_input_expression_compact(reader, first, end, tokens, classes, coded ? dropped : UINT32_MAX, false);
         if (coded)
         {
@@ -1201,7 +1515,7 @@ static void check_input_expressions_coded(CheckInputReader* reader)
         {
             for (; i < acting && !reader->output->resource; i += 1)
             {
-                check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &literals, &literal, &visited);
+                check_input_expression_coded(reader, batch, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &literals, &literal, &visited);
             }
         }
         else
@@ -1211,7 +1525,7 @@ static void check_input_expressions_coded(CheckInputReader* reader)
             for (; i < acting && !reader->output->resource; i += 1)
             {
                 const uint64_t before = __rdtsc();
-                check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &literals, &literal, NULL);
+                check_input_expression_coded(reader, batch, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &literals, &literal, NULL);
                 const uint64_t after = __rdtsc();
                 reader->output->expression_class_ticks[(classes[i] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT] += after - before;
                 reader->output->expression_class_overhead += __rdtsc() - after;
@@ -1224,6 +1538,13 @@ static void check_input_expressions_coded(CheckInputReader* reader)
         const uint64_t done = __rdtsc();
         prepared += ready - start;
         acted += done - ready;
+    }
+    // The last batch's nodes, written as the actions' (and its time theirs).
+    if (batch != NULL)
+    {
+        const uint64_t start = __rdtsc();
+        check_input_expression_flush(reader, batch, false);
+        acted += __rdtsc() - start;
     }
     // A coded unit's visits lie within its chunks' actions; another's actions are all visits.
     visited = coded ? (visited < acted ? visited : acted) : acted;
@@ -1241,6 +1562,11 @@ static void check_input_expressions_coded(CheckInputReader* reader)
     }
     reader->expression_declined = NULL;
     arena_pop_to(reader->scratch, scratch_mark);
+}
+
+static void check_input_expressions_coded(CheckInputReader* reader)
+{
+    check_input_expressions_coded_range(reader, 0, reader->parser->tokens.count);
 }
 
 // The tokens the coded walk acted at by their classes' own actions: CheckInput.expression_acted's sum over the classes.

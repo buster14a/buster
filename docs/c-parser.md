@@ -198,7 +198,17 @@ memory, not by the native stack: 100,000 levels of every kind of group parse.
 
 It rejects what C's grammar rejects, at the token clang names, with clang's
 message (76 messages, `BUSTER_PARSE_MESSAGES`), and after an error skips to the
-end of the top-level declaration and goes on. It reports one syntax error per
+end of the top-level declaration and goes on. A declaration's missing `;`
+before what clang's `isDeclarationSpecifier` takes for a declaration specifier
+(a type's, a storage class, a function specifier, `typedef`, `_Alignas`, a
+calling convention; not `_Static_assert`, `__extension__` or `[[`), with no
+`#pragma pack` between, is `ParseDiagnostic.resumed` (#147): clang's
+`ParseDeclGroup` reads the specifier as the next declaration's, as if the `;`
+were there. At file scope the parse goes on at the specifier, so that the next
+declaration's errors are clang's too; in a body it skips the rest as any error,
+and the checker's view parses past it again (`check_prefix_resume`,
+`docs/c-checker.md`). `test-parser` checks every diagnostic's place and mark
+on both paths (`parse_test_check_resumed`). It reports one syntax error per
 top-level declaration, the first, after the errors clang gives without
 changing how it parses (a missing type specifier, an unknown type name); clang
 may report more. Its places follow
@@ -335,7 +345,14 @@ before it visible, and its tree joins the vector path's. The whole unit goes to
 the scalar parser instead when the brackets don't balance, K5 can't decide its
 statements, the nesting is too deep, or a fallback declaration has an error,
 runs out of memory or declares a file-scope typedef name again as an ordinary
-identifier, which changes how the rest of the unit parses.
+identifier, which changes how the rest of the unit parses. So it does when a
+fallback declaration's block item has GNU attributes before a name the
+declaration never bound (`ParseScalarResult.undecided`): whether that name is
+an earlier file-scope declaration's or tag's decides between clang's
+"expected identifier or '('" or "must use 'struct' tag" and an implicit int's
+declarator
+(`parse_scalar_attribute_name`, #147), and only the whole unit's parse has
+those declarations. Valid code meets it only as C89's implicit int.
 
 On the corpora, the fallback takes these declarations, all valid code (the
 benchmark's counts; `test-parser --explain` says why for each):
@@ -641,11 +658,14 @@ the digit) as clang does (`c_check_declspec.c`,
 `c_check_literal_diagnostic.c`); a constant before a unit's first syntax
 error, which only the parse reached, is checked before the parse's errors are
 printed, so that its error is clang's first. The checker takes what clang
-takes there: C2y's `0o17` (in `#if` too), and GNU's designator without its `=`,
-with the values clang gives, whatever begins the value. What stays out:
-`1.5q`, as every `__float128` constant (`__float128 z = 1.5;` is "not a
-constant expression" to the checker), and GNU's `member: value` designator,
-which the checker doesn't support yet.
+takes there: C2y's `0o17` (in `#if` too), GNU's array designator without its `=`,
+and its old-style `member: value` field designator (#1251), with the values clang
+gives, whatever begins the value. The old field spelling uses the same member
+selection, positional continuation, constant evaluation and override history as
+`.member = value`; an unknown field names the selected record in its diagnostic.
+Quad-precision `q`/`Q` literals are accepted on supported glibc hosts only when
+their binary128 values are exactly representable by the checker's x87 storage;
+wider values and unsupported hosts remain refused (#1250).
 
 The kernels' checks put every array in an arena followed by 4 GB and its own
 size of address space that may not be touched, so that a load past an array, or
@@ -844,6 +864,15 @@ the three passes, in pages the parse's temporaries already touched.
 - The parser's diagnostics don't show the preprocessor's expansion notes yet
   ("expanded from macro"): #229's `pp_diagnose_output` renders them for an
   output token, which each diagnostic's token gives.
+- An expected closer's error at a token has clang's note "to match this '('"
+  (`[`, `{`) at the innermost open frame of its kind (#147,
+  `ParseDiagnostic.note`, set where the first error is recorded,
+  `parse_scalar_error_argument`), as clang's balanced delimiter tracker gives
+  it; the builtins clang reads without one (`__builtin_va_arg`) and a GNU
+  attribute's list have none. At the unit's end, where the error has no token,
+  the note comes with the location's diagnostic (`pp_diagnose_note`).
+  `test-checker-driver` compares each kind of group with clang's whole output
+  (`c_check_parse_note_driver_test.c`).
 - Ordinary declarations that shadow typedef names still use the scalar
   fallback; K3 now handles unshadowed block-scope aliases directly (#128).
 - Multicore (#149, #151): top-level declarations start with empty stacks at
@@ -873,7 +902,18 @@ Parser token columns allocate for up to twice the PP token count before
 conversion, plus **128 initialized entries before and after** the logical
 range. Kinds use END sentinels and other padding is zero. Token, parent and key
 limits are bounded by `BUSTER_PARSE_MAX_TOKENS` (1 << 30). Do not extend this
-padding guarantee to every unrelated scratch/side array. Parser-owned arenas
+padding guarantee to every unrelated scratch/side array. The names' meanings
+(one for each name the intern table has, the predeclared typedef names and
+`_Clang` it may add) are a table of the tokens' arena rather than an arena of
+their own (#652); meanings that outgrow that room take an arena of their own as
+before. So are the diagnostics (one for each token and 16 more) where the
+address space is unbounded. Sized before conversion, that table takes room for
+the tokens' bound, twice the output's, so under a finite `RLIMIT_AS` (or compact
+reservations) the diagnostics keep an arena of their own sized by the tokens
+converted, rather than map 12 bytes more for each token of a large unit than it
+can use. `test-parser` checks both placements in a child, a small unit and one
+of 786,432 tokens.
+Parser-owned arenas
 outlive checker adaptation; PP/intern/cache storage outlives spelling and
 error rendering. A parse with diagnostics/fatal status is not valid semantic
 input even if some tree columns were filled.

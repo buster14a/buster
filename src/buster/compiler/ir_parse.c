@@ -269,6 +269,40 @@ static uint8_t ir_parse_named(IrParseState* state, const char* const* names, uin
     return (uint8_t)found;
 }
 
+// An instruction's type (#141's element types): a type's name, or a vector operation's lanes' (ir_lane_type_names), its
+// vector type with *lane its lanes (IrSimdLane, 0 for a type's own name).
+static uint8_t ir_parse_lane_type(IrParseState* state, uint8_t* lane)
+{
+    ir_parse_space(state);
+    const uint64_t first = state->cursor;
+    while (state->cursor < state->end && ((state->source.pointer[state->cursor] >= 'a' && state->source.pointer[state->cursor] <= 'z') ||
+                                          (state->source.pointer[state->cursor] >= '0' && state->source.pointer[state->cursor] <= '9')))
+    {
+        state->cursor += 1;
+    }
+    const uint64_t length = state->cursor - first;
+    uint32_t type = IR_TYPE_COUNT;
+    uint32_t lanes = 0;
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t kind = 1; kind < IR_SIMD_LANE_COUNT; kind += 1)
+        {
+            if (strlen(ir_lane_type_names[width][kind]) == length && memcmp(state->source.pointer + first, ir_lane_type_names[width][kind], length) == 0)
+            {
+                type = IR_V4I32 + width;
+                lanes = kind;
+            }
+        }
+    }
+    if (type == IR_TYPE_COUNT)
+    {
+        state->cursor = first;
+        type = ir_parse_named(state, ir_type_names, IR_TYPE_COUNT);
+    }
+    *lane = (uint8_t)lanes;
+    return (uint8_t)type;
+}
+
 static IrConstant ir_parse_constant(IrParseState* state)
 {
     IrConstant value = { 0 };
@@ -781,7 +815,12 @@ static void ir_parse_instruction(IrParseState* state)
     ir_parse_expect(state, '=');
     row.op = ir_parse_named(state, ir_op_names, IR_OP_COUNT);
     ir_parse_expect(state, '.');
-    row.type = ir_parse_named(state, ir_type_names, IR_TYPE_COUNT);
+    row.type = ir_parse_lane_type(state, &row.flags);
+    // Lanes name a vector operation's elements alone, never a transport's (a load's flags are its access's).
+    if (state->result.error == IR_PARSE_OK && row.flags != 0 && (row.op >= IR_OP_COUNT || ir_lane_operation(row.op) == IR_SIMD_OPERATION_COUNT || row.op == IR_VCMP))
+    {
+        ir_parse_fail(state, IR_PARSE_SYNTAX);
+    }
     if (state->result.error == IR_PARSE_OK)
     {
         switch (row.op)
@@ -904,10 +943,19 @@ static void ir_parse_instruction(IrParseState* state)
                         "uge",
                     };
                     row.c = ir_parse_named(state, names, IR_PREDICATE_COUNT);
+                    // A vector comparison's lanes (#141's element types), whose type is its mask's.
+                    if (row.op == IR_VCMP && ir_parse_word(state, "lanes="))
+                    {
+                        row.flags = ir_parse_named(state, ir_lane_names, IR_SIMD_LANE_COUNT);
+                    }
                 }
                 // An intrinsic's operation (#141), after its operands as a comparison's predicate is.
                 if (row.op == IR_INTRINSIC)
                 {
+                    if (ir_parse_take(state, ','))
+                    {
+                        row.b = ir_parse_id(state, '%');
+                    }
                     row.c = ir_parse_named(state, ir_intrinsic_names, BUSTER_IR_INTRINSIC_COUNT);
                 }
                 if (row.op == IR_LOAD || row.op == IR_STORE || row.op == IR_ATOMIC_RMW)

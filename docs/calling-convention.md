@@ -1552,7 +1552,10 @@ bit-fields, packing and member alignments. Vectors of 1 and 2 bytes and of
 producer passes, returns, copies and stores them by their bytes, as an
 aggregate's value (#137, `check_lower_transport_type`), at the locations the
 module gives them (`bool`'s eight to 64 as an integer or an SSE eightbyte; the
-signatures pass none the module refuses, which records hold). They leave out
+signatures pass none the module refuses, which records hold), and computes
+with them into frame objects of their types (`c_check_program_transport.c`,
+docs/c-lowering.md's "Computing with transport vectors"), which
+`test-checker --program-vectors` runs against clang at every level. They leave out
 what the producer refuses by name: a complex `_BitInt` past 128 bits of an odd number of limbs,
 which clang lays out wrong (above); and the record
 runs' directed records, whose bit-fields span more than 8 bytes, but a directed record
@@ -1831,19 +1834,60 @@ compiles each of the six. `ms_abi`, `vectorcall`, `regcall` and
 `preserve_all` pass System V's arguments in System V's registers, and their
 callee keeps more registers than System V's callee does.
 
-The producer refuses each convention by name
-(`check_lower_convention`):
+The producer refuses each of the first four by name
+(`check_lower_convention`): a definition, and a call through a function type
+of one, directly or through a pointer.
 
-- a definition of any of the six;
-- a call through a function type of any of the first four, directly or
-  through a pointer.
+A call of a `preserve_most` or `preserve_all` function, or of a
+`no_caller_saved_registers` one, compiles as a System V call, since its callee
+keeps everything a System V caller expects. A definition of one compiles with
+Tier 0's preserving frame (#147, #1447,
+[the Tier 0 guide](tier0.md#preserving-frames-147)). The producer passes the
+registers LLVM's frames of the three keep (`check_lower_preserve`):
 
-A call of a `preserve_most` or `preserve_all` function compiles as a System V
-call, since its callee keeps everything a System V caller expects.
+- `preserve_most`: rax, rcx, rdx, rsi, rdi and r8 to r10, past System V's
+  callee-saved ones (LLVM's `CSR_64_RT_MostRegs`). r11 is the callee's to use.
+- `preserve_all`: those and xmm0 to xmm15, whole YMMs where the function's
+  instruction set has AVX (`CSR_64_RT_AllRegs` and its `_AVX`). AVX-512 keeps
+  the YMMs alone, not the ZMMs' upper halves, zmm16 to zmm31 or the masks.
+- `no_caller_saved_registers`: every register (`CSR_64_AllRegs` and its `_AVX`
+  and `_AVX512`). That is preserve_most's and r11, xmm0 to xmm15 or whole YMMs
+  with AVX, and with AVX-512F whole ZMMs, zmm0 to zmm31, and k0 to k7: a
+  `kmovq`'s 8 bytes with BW, a `kmovw`'s 16 bits without. LLVM's `_NoSSE` set,
+  for `-mgeneral-regs-only`, never applies: the checker takes no target
+  without SSE.
+
+`no_caller_saved_registers` is clang's function type bit beside the calling
+convention. Here it is `TYPE_FUNCTION_ABI_NO_CALLER_SAVED`, the last value of
+the function type's three ABI bits: a System V function whose callee keeps
+every register. With `sysv_abi` or `cdecl` it is that type. With another
+convention (`ms_abi`, `vectorcall`, `preserve_all` and the others, which clang
+takes), it is refused by name, since the type has no room for both.
+
+Tier 0 leaves out the result's registers, which the caller reads (LLVM's
+return lowering takes them out of the set). A definition whose frame Tier 0's
+preserving frame doesn't take is refused by name: one that makes a musttail
+call, calls `__builtin_eh_return` or calls `__builtin_setjmp`. Tier 1 leaves
+such a function to Tier 0.
+
 `test-checker-driver` checks each refusal against clang, which compiles every
 one of them. It also runs both paths' calls of clang's `preserve_most` and
 `preserve_all` callees against clang's build, with values live across the
-calls.
+calls. And `check_test_driver_preserving_frames` runs both paths' definitions
+from a harness clang builds, which sets every general register and vector
+register, calls the function and reads them all back. It also recovers the
+caller's general registers through the frame's unwind rules. It runs on
+x86-64, with probes, frame pointers and `-g`, on x86-64-v3 where the host has
+AVX2, and on x86-64-v4 where it has AVX-512's F, BW, DQ and VL. There the
+harness also sets and checks zmm0 to zmm31 and k0 to k7 around the
+`no_caller_saved_registers` definitions, and r11, which holds the called
+function.
+
+clang 23's own -O0 frames differ from these contracts in two places this
+work found, so the harness checks the contract rather than clang's code. In
+clang's build of the test's AVX `preserve_all` function that calls
+`snprintf`, ymm14 and ymm15 come back changed. And clang's -O0 code for a
+`no_caller_saved_registers` function restores rax or xmm0 over its result.
 
 ## Next steps
 

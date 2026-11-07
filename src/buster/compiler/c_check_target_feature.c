@@ -363,9 +363,10 @@ static uint32_t check_target_feature_noreturn_object(const CheckProgram* program
     }
     const CheckValue value = operand < graph->count ? check_stream_value(program->stream, operand) : (CheckValue){ 0 };
     *name = operand < graph->count ? graph->tokens[operand] : 0;
-    return operand < graph->count && graph->ops[operand] == CHECK_OP_VALUE && value.category == CHECK_FUNCTION && value.object < program->object_count ?
-               value.object :
-               0;
+    const uint32_t overload = check_program_builtin_index(program->stream->overloads, program->stream->overload_count, sizeof(CheckOverloadEffect), node);
+    const uint32_t object = overload != BUSTER_CHECK_NONE ? program->stream->overloads[overload].selected.object :
+                            operand < graph->count && graph->ops[operand] == CHECK_OP_VALUE && value.category == CHECK_FUNCTION ? value.object : 0;
+    return object < program->object_count ? object : 0;
 }
 
 // Whether a call of `object` doesn't return by the function's name alone: one of the C library's functions clang's

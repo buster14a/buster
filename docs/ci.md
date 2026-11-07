@@ -13,8 +13,10 @@ cancellation. Hardware jobs still take the shared host lock. Hardware admission
 and the nightly measurement window do not reduce main's hosted suite:
 push evidence always reports `scope=full`, `hosted=run` and no hosted source.
 The selector's main-policy mutants and the nightly glue fixtures pin this
-contract; nightly benchmark scheduling is otherwise unchanged. Pushes run their
-own native correctness under #1272 rather than reusing PR native evidence.
+contract. A push reuses no PR native evidence (#1272). In the nightly mode it
+runs no 9700X job at all (the owner's choice on 2026-11-05): its native
+correctness and targeted measurements run in the 02:00-08:00 window as its
+first-parent state's (see "Nightly main measurements").
 Both selector push modes force correctness for every file class. The
 qualification self-test rejects a main push with an all-skipped suite: only
 pre-merge PRs can use the no-code exemption.
@@ -181,8 +183,11 @@ its coverage record and has no such context, and neither does a scheduled run
 the nightly mode retired.
 
 A push no longer reuses its pull request's native qualification: that run has
-none, so every push to main runs native correctness on the landed commit, and
-the `host-identity` job is gone.
+none, and the `host-identity` job is gone. Before the nightly mode, every push
+to main runs native correctness on the landed commit. In the nightly mode it
+runs none in the daytime, and has no `Build and execute on Ryzen 7 9700X`
+context: its state's nightly run qualifies it on the 9700X, recorded in the
+ledger.
 
 Draft PRs still run hosted correctness, but do not queue the 9700X. Both
 `ready_for_review` and `converted_to_draft` trigger the workflow, using the
@@ -223,7 +228,7 @@ Benchpress.
 
 ## CI latency baseline
 
-`.github/workflows/ci-timings.yml` runs entirely on hosted runners, at 07:07
+`.github/workflows/ci-timings.yml` runs entirely on hosted runners, at 08:37
 Europe/Madrid or on manual dispatch. It reads at most the latest 100 runs of
 `9700x.yml`, fully paginates each run's latest-attempt jobs, and reports the
 median and nearest-rank 95th percentile of successful hardware jobs' queue,
@@ -283,8 +288,9 @@ cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualificatio
 
 ## Nightly main measurements
 
-Main's first-parent states (#1207) are measured on the 9700X between 04:00 and
-07:00 Europe/Madrid. A branch's internal commits are not states; a merge of
+Main's first-parent states (#1207) are measured on the 9700X between 02:00 and
+08:00 Europe/Madrid, the window the owner widened from 04:00-07:00 on
+2026-11-05. A branch's internal commits are not states; a merge of
 them is. Each state needs **targeted** coverage: the selector's choice against
 its own first parent, with native correctness first in the same job. A state
 whose first-parent change is documentation alone needs no targeted measurements,
@@ -304,8 +310,13 @@ reported, but they don't block measurement, which was the owner's choice on
 Every `9700x.yml` run has an `evidence` job, which must succeed:
 
 - **Pull request:** its draft state alone.
-- **Push:** admitted: its 9700X job runs native correctness and the
-  measurements on the landed commit. Since #1272 a pull request's 9700X job
+- **Push:** in the nightly mode, deferred (`hardware=skip`, reason
+  `deferred`, outcome `deferred`): the push runs its full hosted rows, and
+  the window runs its native correctness and targeted measurements as its
+  state's backlog run. Its plain hosted rows are the state's, so the state
+  is ready without a preparation. Before the nightly mode, admitted: its 9700X
+  job runs native correctness and the measurements on the landed commit.
+  Since #1272 a pull request's 9700X job
   skips native correctness, so a push reuses nothing from it; records from
   before then that say a push reused its pull request's run
   (`native-reused`, outcome `pending`) are still read by the harvest.
@@ -365,7 +376,7 @@ that state's own. Its run name, `Nightly PURPOSE (admit|defer) of SHA
    the oldest states that have none, three at a time and forty a cycle. A
    prepare job that waits for the window plans again every five minutes until
    it opens, so each completed preparation frees its slot for the next. It
-   never admits hardware, even when a step lands at 04:00 or carries an
+   never admits hardware, even when a step lands at 02:00 or carries an
    override: admission is the window job's alone. The window job starts from
    the prepare job's ledger and its pending dispatches, so a dispatch the API
    doesn't show yet isn't repeated. The pending dispatches come as a job
@@ -375,13 +386,35 @@ that state's own. Its run name, `Nightly PURPOSE (admit|defer) of SHA
    ledger's own fallbacks are safe: harvest reads its rows from the records
    again, and the pin comes as an output too.
 4. **Measure.** Inside the window it admits one 9700X run at a time: the
-   snapshot's comprehensive run first, then the oldest ready state. While the
+   snapshot's comprehensive run first, then the oldest ready state whose own
+   worker window is open and has room for the run. While the
    snapshot's hosted rows are in flight, it keeps room for the snapshot. If
    the snapshot is ineligible, it measures the newest eligible earlier state
    and says so. The comprehensive run is a daily requirement: only one
    completed in this cycle meets it. An unchanged main still gets its daily
    full run and oracle audit, though an earlier cycle measured the same
    commit.
+
+**Historical worker windows.** A `nightly/SHA` dispatch runs that state's own
+workflow and tool. States before the window expansion still admit only
+04:00-07:00 Europe/Madrid. The coordinator reads each state's literal
+`BUSTER_NIGHTLY_WINDOW_START_HOUR` and `BUSTER_NIGHTLY_WINDOW_END_HOUR`
+declarations from its immutable `tools/ci/nightly.c` blob, once per distinct
+blob in a job. `nightly worker-window` reads those bytes as data; it does not
+build or execute historical code. The supported contracts are 04:00-07:00 and
+02:00-08:00. Missing, malformed or unsupported declarations are reported as
+unknown, and the state's hardware remains pending until reviewed.
+
+The planner intersects the worker's civil-time window with the current
+02:00-08:00 limit and reserves the whole dispatch-to-completion bound. It skips
+an old worker before 04:00 or too late to finish by 07:00, considering later
+eligible states immediately. If only workers whose opening is still ahead
+remain, the window job waits for them. The same rule applies to the snapshot
+and its substitute, and a waiting snapshot reserves room before its own
+deadline. A state that cannot fit stays in the backlog; it is never marked
+complete or pruned for this reason. Each job rebuilds the metadata from Git,
+including after a prepare/window/continuation handoff. The worker still checks
+its window independently after taking the shared lock.
 
 States move between `not-required`, `complete`, `in-flight`, `ready`,
 `preparing` and `needs-preparation`; `blocked-hosted`, `blocked-native` and
@@ -397,14 +430,46 @@ duplicates. A step whose run listing fails, even partly, plans nothing until a
 full listing succeeds; otherwise a run in flight it hid would be dispatched
 again. An admitted run older than two hours is cancelled.
 
+**Refused branches.** GitHub refuses (HTTP 403, "Resource not accessible by
+integration") to let the workflow token create some states' `nightly/SHA`
+branches. In the 2026-11-05 cycle it refused all four merges it was asked for
+whose pull request's head lacked a workflow change main already had, and none
+of the three other states (two merges whose heads had main's workflow files, one
+commit with a single parent). By that pattern, 27 of the cycle's 49 states would
+be refused. The token can't take the `workflows` permission that GitHub asks
+for to create such refs. A refused branch warns, the state is skipped for the
+rest of that coordinator job, and the job plans again at once: nothing was
+launched, so it doesn't wait as for a run in flight. The state neither keeps a
+preparation slot nor stays the oldest ready state while later states wait. Each
+job tries it once again. Any other failure to create a branch (a timeout, a 429
+or 5xx, a failed lookup) is not a refusal: it warns, and a later step tries
+again. A branch that another step made meanwhile is used. A `nightly/SHA`
+branch that already points at another commit is never dispatched; it is an
+error, and the state is skipped for the job as a refused one is, since it stays
+wrong until a person fixes it. The report counts
+and names the skipped states, with an alert. A refused snapshot is replaced by
+the newest eligible earlier state, as an ineligible one is. With the `nightly-ledger` environment's `BUSTER_NIGHTLY_BRANCH_TOKEN`, the
+coordinator creates and deletes the `nightly/SHA` branches with it instead. That
+token is a fine-grained token with only `Contents: Read and write` and
+`Workflows: Read and write` on this repository. Dispatches, cancellations
+and reads keep the workflow's token. Without the secret, the refused states are
+skipped as above. A token GitHub rejects as a credential (expired, revoked, or
+without access to this repository) is warned about once and dropped for the
+rest of the job, which then makes the branches with the workflow token, as
+without one. A 404 alone doesn't reject it: a branch someone else deleted
+before the prune is a 404 to a valid token too. The token is rejected only if
+it can't read the repository itself either. Branches created with it trigger workflows,
+unlike the workflow token's, but every workflow's `push` trigger is limited to
+`main`.
+
 **Time.** The tz database's Europe/Madrid is checked at three points:
 
 - at dispatch, by the coordinator's planner;
 - at admission, by the `evidence` job;
 - after the 9700X job's hook took the lock, by its first step after the host's
   own check. That check reads only the operating system, the architecture and
-  the CPU model. The window step compares the clock with the cycle's 04:00 and
-  07:00, which the `evidence` job computed as instants. It runs before the host
+  the CPU model. The window step compares the clock with the cycle's 02:00 and
+  08:00, which the `evidence` job computed as instants. It runs before the host
   identity's package queries and hashing, and before the checkout, the cache
   and the toolchain's staging. So a job that took the lock too late does
   nothing but refuse. The self-test pins that order, and the glue test runs
@@ -412,8 +477,13 @@ again. An admitted run older than two hours is cancelled.
   package is queried and nothing is hashed.
 
 If the database is unavailable, nothing is admitted. The self-test checks the
-database against the EU's rule every hour from 2026 to 2030. A run is admitted
-only if its whole bound still ends by 07:00: the job's timeout (20 minutes for
+database against the EU's rule every hour from 2026 to 2030. Spain changes its
+clocks at 02:00 local time, so the window opens at the first instant the local
+time reaches 02:00. When the clocks go forward, 02:00 doesn't exist, and the
+window opens at 03:00 CEST, five hours before 08:00. When they go back, it
+opens at the first of the two 02:00s, seven hours before 08:00. The pin at
+22:00 is four hours ahead either way. A run is admitted
+only if its whole bound still ends by 08:00: the job's timeout (20 minutes for
 backlog runs, 25 for the snapshot) plus 5 minutes, and the coordinator adds
 the hosted jobs' time. A refusal after the lock fails the job before any work,
 which the record reads as a deferral. The job's timeout ends anything that
@@ -421,17 +491,28 @@ runs over, and the hook then releases the lock. The lock's protocol and its
 fairness to agent sessions are unchanged; nightly work is kept out of the day
 rather than given priority.
 
+The window job starts when the window opens and must end within GitHub's six
+hours. So it stops once no backlog run could still end by 08:00, about 07:35,
+even with a hardware run in flight. That run ends by 08:00 under its own bound,
+and the next coordinator run harvests its record. The night the clocks go back,
+the window is 7 hours, longer than one job. A window job that has run 345
+minutes while it still waits inside the window hands over to `window-continued`,
+the same way the prepare job hands over to it: the pin and its pending
+dispatches go as job outputs, and the ledger comes from its artifact. The
+continuation numbers its requests from 20001, so none repeats the window job's.
+Two jobs hold any window.
+
 **Late schedules.** GitHub starts this repository's scheduled runs hours late.
-In the week of 2026-10-28, the daily run's `23 7 * * *` started 6h22m to
+In the week of 2026-10-28, the former daily run's `23 7 * * *` started 6h22m to
 9h53m late, and `selfhost.yml`'s `47 5 * * *` started 7h13m late. So the
 coordinator has nine schedules:
 
 - every two hours from 16:07 to 04:07;
-- then 05:37 and 07:17.
+- then 05:37 and 08:17, after the window.
 
 A run that prepares before the window waits for it when it opens within 5 hours
-55 minutes of the job's start. For any common delay up to about 14 hours, some
-run starts between 22:05 and 06:35, close enough to wait or still inside the
+55 minutes of the job's start. For any common delay up to about 15 hours, some
+run starts between 20:05 and 07:35, close enough to wait or still inside the
 window. Unless delayed, the earlier schedules start before 22:00: they harvest
 and report, and pin nothing (step 2). Any other run waits in the concurrency
 group, or reports.
@@ -475,11 +556,13 @@ where pushes measure most states during the day. The report's alert
 shows when they don't.
 
 **Rollout.** The switch is `vars.BUSTER_NIGHTLY`. Until it is `on`, scheduled
-coordinator runs are dry runs: they harvest, plan and report. Pushes measure
-every plain run, and the daily `23 7 * * *` run of `9700x.yml` runs as before.
-A dispatch with `mode: run` can try the coordinator first. With the switch on,
-pushes measure targeted, the coordinator dispatches, and the daily run's
-`evidence` job retires it.
+coordinator runs are dry runs: they harvest, plan and report, and pushes measure
+every plain run. A dispatch with `mode: run` can try the coordinator first. With
+the switch on, pushes run hosted rows alone and keep off the 9700X, and the
+coordinator dispatches their native correctness and targeted measurements into
+the window. `9700x.yml`'s daily `23 7 * * *` run is removed (2026-11-05): the
+snapshot's comprehensive run is the daily run, so with the switch off there is
+none, and a person dispatches `purpose: full` instead.
 
 **Open items** this repository can't close:
 
@@ -528,13 +611,15 @@ The source call-graph capture omits bootstrap sanitizer/coverage instrumentation
 whose runtime calls and generated globals are outside the source graph; its
 analyzer still runs inside the instrumented compiler.
 The other resource-exhaustion fixtures retain their cases and output/fallback comparisons.
-ASan, MSan and TSan builds inject compiler-owned arena-reservation and lane-start
-failures in place of process-wide address-space/process limits, which can prevent
-the detector from allocating shadow/fake-stack memory or starting its own threads.
-Ordinary builds and standalone UBSan retain the actual OS-limit tests. No detector
-is disabled for these cases; the injection controls are absent from normal builds.
-The injected limits are process-wide, since lanes reserve their arenas and start
-on their own threads.
+ASan, UBSan, MSan and TSan builds inject compiler-owned arena-reservation and
+lane-start failures in place of process-wide address-space/process limits. ASan,
+MSan and TSan need room for shadow/fake-stack memory and runtime threads; even
+standalone UBSan needs address space to report allocation failures. In particular,
+`RLIMIT_AS=0` caused the UBSan runtime to overflow its stack and fail to mmap its
+diagnostic buffer instead of reporting the compiler's intended reservation failure.
+Ordinary builds retain the actual OS-limit tests. No detector is disabled for these
+cases; injection controls are absent from normal builds. The injected limits are
+process-wide, since lanes reserve arenas and start on their own threads.
 A few fixtures run generated programs with FS pointing at the program's own TLS
 block. The detectors reach their per-thread state through FS, so the code that runs
 in that window (the link tests' libc stand-ins and C-runtime startup, and Tier 0's
@@ -545,9 +630,10 @@ Under ASan, MSan and TSan, the units driver's walk that fails each reservation i
 turn is not run: each detector maps shadow of its own, whose high-water mark the
 parent's `VmPeak` keeps above its `VmSize`, so a probe inherits a peak that hides
 the growth a limit would fail at, and a limit below the shadow stops the detector
-at its start. The parser driver's reservation check still runs in those builds,
-with their injected arena limit in place of `RLIMIT_AS`; UBSan and ordinary
-builds, whose peak is the run's own, still run the units walk with the OS limit.
+at its start. UBSan also skips that OS-limit walk, since its diagnostic runtime
+cannot safely run under an artificially exhausted address space. The parser
+driver's reservation check still runs under all sanitizers using injected arena
+limits; ordinary builds retain the OS-limit walk.
 TSan also kills a child that starts a thread after a fork from a process of
 several threads, so under it `test-lanes`' child forked from a session's lane 0
 (#905) runs a group of one.

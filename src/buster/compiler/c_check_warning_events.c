@@ -70,6 +70,10 @@ enum
     CHECK_WARNING_ID_NSOBJECT_ATTRIBUTE = 78,
     CHECK_WARNING_ID_INDEPENDENT_CLASS = 79,
     CHECK_WARNING_ID_ASSUME = 80,
+    CHECK_WARNING_ID_WEAK_UNDECLARED = 81,
+    CHECK_WARNING_ID_REDEFINE_EXTNAME = 82,
+    CHECK_WARNING_ID_THREAD_SAFETY_ATTRIBUTES = 83,
+    CHECK_WARNING_ID_NODEREF = 84,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -94,7 +98,8 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_INITIALIZER_OVERRIDES,
     CHECK_WARNING_EVENT_UNDEFINED_INTERNAL,
     CHECK_WARNING_EVENT_C23_PARAMETER,
-    // A retained directive is lexical, including at parser EOF; source and payload.token are PP coordinates.
+    // A retained directive, including at parser EOF; source and payload.token are PP coordinates. With
+    // BUSTER_CHECK_WARNING_SYMBOL_PRAGMA, payload.data names its symbol-pragma history record plus one.
     CHECK_WARNING_EVENT_PRAGMA,
     CHECK_WARNING_EVENT_LIBRARY_REDECLARATION,
     CHECK_WARNING_EVENT_BUILTIN_HEADER,
@@ -110,8 +115,10 @@ typedef enum CheckWarningEventKind
     // An attribute on a declaration of none of its subjects (#147, check_input_attribute_subjects): its payload as
     // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's, -Wignored-attributes' warning.
     CHECK_WARNING_EVENT_ATTRIBUTE_SUBJECT,
-    // A function type's attribute on a declarator of no function type (#147, check_input_attribute_function_types):
-    // payload.name the attribute's name, payload.first_type the declarator's type, payload.data its typedef spelling.
+    // A function type's attribute on a declarator of no function type (#147, check_input_attribute_type_warnings):
+    // payload.name the attribute's name, payload.first_type the type there, payload.data its typedef spelling;
+    // payload.token its declarator name (an abstract declarator's position) and second_type its full type retain
+    // occurrence-specific parentheses.
     CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE,
     CHECK_WARNING_EVENT_NONSTRING_TYPE,
     CHECK_WARNING_EVENT_TRANSPARENT_UNION,
@@ -229,6 +236,21 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_PRECEDENCE_ALWAYS_INLINE,
     CHECK_WARNING_EVENT_PRECEDENCE_FLATTEN,
     CHECK_WARNING_EVENT_PRECEDENCE_NOINLINE,
+    // An initializer's use of a member an unavailable attribute marks (#147, check_init_member_use): clang's error, which
+    // no warning option maps, staged with the walk's warnings (check_driver_initializer_warning_events gives it). The
+    // member's name in the payload's name, the attribute's message's string token in its token (or none); its note,
+    // CHECK_WARNING_NOTE_UNAVAILABLE_HERE, at the member's name.
+    CHECK_WARNING_EVENT_UNAVAILABLE_USE,
+    CHECK_WARNING_EVENT_THREAD_CAPABILITY,
+    CHECK_WARNING_EVENT_THREAD_ARGUMENT,
+    CHECK_WARNING_EVENT_THREAD_METHOD,
+    CHECK_WARNING_EVENT_THREAD_POINTER,
+    CHECK_WARNING_EVENT_THREAD_CONTEXT,
+    CHECK_WARNING_EVENT_THREAD_FUNCTION_POINTER,
+    CHECK_WARNING_EVENT_THREAD_PARAMETER,
+    CHECK_WARNING_EVENT_NODEREF_PLACEMENT,
+    CHECK_WARNING_EVENT_NODEREF_DEREFERENCE,
+    CHECK_WARNING_EVENT_NODEREF_CONVERSION,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -251,6 +273,8 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_DEPRECATED_HERE,
     // Why malloc_span's function returns no span-like structure (check_input_span_reason's data).
     CHECK_WARNING_NOTE_SPAN_REASON,
+    CHECK_WARNING_NOTE_UNAVAILABLE_HERE,
+    CHECK_WARNING_NOTE_NODEREF_DECLARATION,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 
@@ -271,6 +295,10 @@ typedef enum CheckWarningCompletion
 #define BUSTER_CHECK_WARNING_DEFAULT_IGNORED 0x01u
 // A semantic proof prevents publication, independently of every requested warning policy (for example sizeof).
 #define BUSTER_CHECK_WARNING_SUPPRESSED 0x02u
+// CHECK_WARNING_EVENT_PRAGMA's payload.data indexes CheckInputSymbolPragmas only with this discriminator.
+#define BUSTER_CHECK_WARNING_SYMBOL_PRAGMA 0x04u
+// CHECK_WARNING_EVENT_PRAGMA's payload.data indexes CheckInputMsPragmas only with this discriminator.
+#define BUSTER_CHECK_WARNING_MS_PRAGMA 0x08u
 #define BUSTER_CHECK_WARNING_NO_SOURCE UINT32_MAX
 // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's payload.data bit of a C23 attribute's spelling, past its scope's identifier.
 #define BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE 0x80000000u
@@ -302,6 +330,8 @@ struct CheckWarningEvent
     uint32_t completion_kind;
     // Parser token for AT_TOKEN/AFTER_DELIMITER; NO_SOURCE for TU_END. Attached notes inherit this completion.
     uint32_t completion;
+    // Optional order inside a completed construct, independent of its source location and publication boundary.
+    uint64_t suborder;
     CheckWarningPayload payload;
     uint32_t note_first;
     uint32_t note_count;
@@ -348,6 +378,16 @@ static __attribute__((unused)) CheckWarningEvents check_warning_view(const Check
     return result;
 }
 
+// Carrier publication and diagnostic rendering share the same flag contract. History discriminators describe a
+// pragma's payload without affecting its warning policy, and are invalid on every other event kind.
+static bool check_warning_flags_valid(uint32_t kind, uint32_t flags)
+{
+    const uint32_t histories = BUSTER_CHECK_WARNING_SYMBOL_PRAGMA | BUSTER_CHECK_WARNING_MS_PRAGMA;
+    const uint32_t payload = flags & histories;
+    return (flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED | histories)) == 0 &&
+           (payload == 0 || kind == CHECK_WARNING_EVENT_PRAGMA) && payload != histories;
+}
+
 static uint32_t check_warning_capacity(uint32_t capacity, uint32_t needed)
 {
     uint32_t result = capacity != 0 ? capacity : 16;
@@ -365,7 +405,8 @@ static __attribute__((unused)) bool check_warning_append(CheckWarningBuffer* buf
 {
     bool valid = buffer != NULL && buffer->arena != NULL && event != NULL && event->id < CHECK_WARNING_ID_COUNT &&
                  event->kind < CHECK_WARNING_EVENT_KIND_COUNT && event->token != UINT32_MAX &&
-                 (event->flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED)) == 0 && event->completion_kind < CHECK_WARNING_COMPLETION_COUNT &&
+                 check_warning_flags_valid(event->kind, event->flags) &&
+                 event->completion_kind < CHECK_WARNING_COMPLETION_COUNT &&
                  ((event->completion_kind == CHECK_WARNING_COMPLETE_TU_END) == (event->completion == UINT32_MAX)) &&
                  buffer->count <= buffer->capacity && (buffer->count == 0 || buffer->events != NULL) &&
                  buffer->note_count <= buffer->note_capacity && (buffer->note_count == 0 || buffer->notes != NULL) &&

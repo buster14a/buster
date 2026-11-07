@@ -157,6 +157,20 @@ typedef enum CBuiltinX86HelperKind
     CBUILTIN_X86_HELPER_MM_PREFETCH,
     CBUILTIN_X86_HELPER_SETJMP,
     CBUILTIN_X86_HELPER_LONGJMP,
+    CBUILTIN_X86_HELPER_PCMPESTRI,
+    CBUILTIN_X86_HELPER_PCMPESTRIA,
+    CBUILTIN_X86_HELPER_PCMPESTRIC,
+    CBUILTIN_X86_HELPER_PCMPESTRIO,
+    CBUILTIN_X86_HELPER_PCMPESTRIS,
+    CBUILTIN_X86_HELPER_PCMPESTRIZ,
+    CBUILTIN_X86_HELPER_PCMPESTRM,
+    CBUILTIN_X86_HELPER_PCMPISTRI,
+    CBUILTIN_X86_HELPER_PCMPISTRIA,
+    CBUILTIN_X86_HELPER_PCMPISTRIC,
+    CBUILTIN_X86_HELPER_PCMPISTRIO,
+    CBUILTIN_X86_HELPER_PCMPISTRIS,
+    CBUILTIN_X86_HELPER_PCMPISTRIZ,
+    CBUILTIN_X86_HELPER_PCMPISTRM,
     CBUILTIN_X86_HELPER_TILEZERO,
     CBUILTIN_X86_HELPER_TILELOADD,
     CBUILTIN_X86_HELPER_TILELOADDT1,
@@ -183,6 +197,10 @@ typedef enum CBuiltinX86HelperKind
     CBUILTIN_X86_HELPER_TILEMOVROW,
     CBUILTIN_X86_HELPER_COUNT,
 } CBuiltinX86HelperKind;
+
+#define BUSTER_CBUILTIN_X86_IMMEDIATE_FIRST CBUILTIN_X86_HELPER_PCMPESTRI
+#define BUSTER_CBUILTIN_X86_IMMEDIATE_COUNT (CBUILTIN_X86_HELPER_PCMPISTRM - CBUILTIN_X86_HELPER_PCMPESTRI + 1u)
+#define BUSTER_CBUILTIN_X86_IMMEDIATE_VALUES 256u
 
 typedef struct CBuiltinX86Helper CBuiltinX86Helper;
 struct CBuiltinX86Helper
@@ -723,6 +741,77 @@ static const X86Instruction cbuiltin_x86_helper_xbegin[] = {
     { .form = X86_FORM_RET },
 };
 
+// The string comparisons read their vectors in xmm0/xmm1 and their explicit lengths in eax/edx. The leaf's SysV
+// lengths arrive in rdi/rsi; its final integer argument is the checked immediate, retained in the call's ABI but
+// encoded into this unit's specialized leaf. No caller value lives in the instruction's implicit result registers
+// across the call. PCMPESTRM/PCMPISTRM return xmm0; the index and flag forms return a zero-extended integer in rax.
+#define BUSTER_CBUILTIN_X86_STRING_LENGTHS \
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDI, .form = X86_FORM_MOV_R32_RM32 }, \
+    { .reg = X86_REGISTER_RDX, .rm = X86_REGISTER_RSI, .form = X86_FORM_MOV_R32_RM32 },
+#define BUSTER_CBUILTIN_X86_STRING_INDEX(instruction) \
+    { .reg = 0, .rm = 1, .form = X86_FORM_##instruction }, \
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .form = X86_FORM_MOV_R32_RM32 }, \
+    { .form = X86_FORM_RET },
+#define BUSTER_CBUILTIN_X86_STRING_FLAG(instruction, condition) \
+    { .reg = 0, .rm = 1, .form = X86_FORM_##instruction }, \
+    { .rm = X86_REGISTER_RAX, .form = X86_FORM_SET##condition##_RM8 }, \
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX, .form = X86_FORM_MOVZX_R32_RM8 }, \
+    { .form = X86_FORM_RET },
+static const X86Instruction cbuiltin_x86_helper_pcmpestri[] = {
+    BUSTER_CBUILTIN_X86_STRING_LENGTHS
+    BUSTER_CBUILTIN_X86_STRING_INDEX(PCMPESTRI_X_XM128_IMM8)
+};
+static const X86Instruction cbuiltin_x86_helper_pcmpestria[] = {
+    BUSTER_CBUILTIN_X86_STRING_LENGTHS
+    BUSTER_CBUILTIN_X86_STRING_FLAG(PCMPESTRI_X_XM128_IMM8, A)
+};
+static const X86Instruction cbuiltin_x86_helper_pcmpestric[] = {
+    BUSTER_CBUILTIN_X86_STRING_LENGTHS
+    BUSTER_CBUILTIN_X86_STRING_FLAG(PCMPESTRI_X_XM128_IMM8, B)
+};
+static const X86Instruction cbuiltin_x86_helper_pcmpestrio[] = {
+    BUSTER_CBUILTIN_X86_STRING_LENGTHS
+    BUSTER_CBUILTIN_X86_STRING_FLAG(PCMPESTRI_X_XM128_IMM8, O)
+};
+static const X86Instruction cbuiltin_x86_helper_pcmpestris[] = {
+    BUSTER_CBUILTIN_X86_STRING_LENGTHS
+    BUSTER_CBUILTIN_X86_STRING_FLAG(PCMPESTRI_X_XM128_IMM8, S)
+};
+static const X86Instruction cbuiltin_x86_helper_pcmpestriz[] = {
+    BUSTER_CBUILTIN_X86_STRING_LENGTHS
+    BUSTER_CBUILTIN_X86_STRING_FLAG(PCMPESTRI_X_XM128_IMM8, E)
+};
+static const X86Instruction cbuiltin_x86_helper_pcmpestrm[] = {
+    BUSTER_CBUILTIN_X86_STRING_LENGTHS
+    { .reg = 0, .rm = 1, .form = X86_FORM_PCMPESTRM_X_XM128_IMM8 },
+    { .form = X86_FORM_RET },
+};
+static const X86Instruction cbuiltin_x86_helper_pcmpistri[] = {
+    BUSTER_CBUILTIN_X86_STRING_INDEX(PCMPISTRI_X_XM128_IMM8)
+};
+static const X86Instruction cbuiltin_x86_helper_pcmpistria[] = {
+    BUSTER_CBUILTIN_X86_STRING_FLAG(PCMPISTRI_X_XM128_IMM8, A)
+};
+static const X86Instruction cbuiltin_x86_helper_pcmpistric[] = {
+    BUSTER_CBUILTIN_X86_STRING_FLAG(PCMPISTRI_X_XM128_IMM8, B)
+};
+static const X86Instruction cbuiltin_x86_helper_pcmpistrio[] = {
+    BUSTER_CBUILTIN_X86_STRING_FLAG(PCMPISTRI_X_XM128_IMM8, O)
+};
+static const X86Instruction cbuiltin_x86_helper_pcmpistris[] = {
+    BUSTER_CBUILTIN_X86_STRING_FLAG(PCMPISTRI_X_XM128_IMM8, S)
+};
+static const X86Instruction cbuiltin_x86_helper_pcmpistriz[] = {
+    BUSTER_CBUILTIN_X86_STRING_FLAG(PCMPISTRI_X_XM128_IMM8, E)
+};
+static const X86Instruction cbuiltin_x86_helper_pcmpistrm[] = {
+    { .reg = 0, .rm = 1, .form = X86_FORM_PCMPISTRM_X_XM128_IMM8 },
+    { .form = X86_FORM_RET },
+};
+#undef BUSTER_CBUILTIN_X86_STRING_FLAG
+#undef BUSTER_CBUILTIN_X86_STRING_INDEX
+#undef BUSTER_CBUILTIN_X86_STRING_LENGTHS
+
 // Each kind's builtin's name, its parameters, whether it has a result, its records, the target's features it takes and
 // the refusal on a target without them, its frame (the callee-saved registers it pushes, Tier0Frame.saved's, and whether
 // it keeps rbp's frame), which of its parameters and whether its result are its builtin's 16-byte vectors, which a call
@@ -763,6 +852,9 @@ struct CBuiltinX86HelperInfo
     uint8_t amx;
     uint16_t amx_form;
     uint16_t output_bytes;
+    // A specialized imm8's argument index plus one, or zero; the record whose immediate takes it.
+    uint8_t immediate_argument;
+    uint8_t immediate_record;
 };
 #define BUSTER_CBUILTIN_X86_VECTOR_RESULT 0x80u
 
@@ -796,7 +888,7 @@ static CBuiltinX86HelperKind cbuiltin_x86_helper_kind(const char* name, uint32_t
     return result;
 }
 
-static CBuiltinX86Helper cbuiltin_x86_helper(CBuiltinX86HelperKind kind, Arena* output)
+static CBuiltinX86Helper cbuiltin_x86_helper(CBuiltinX86HelperKind kind, uint8_t immediate, Arena* output)
 {
     CBuiltinX86Helper result = { 0 };
     if (kind <= CBUILTIN_X86_HELPER_NONE || kind >= CBUILTIN_X86_HELPER_COUNT)
@@ -828,6 +920,10 @@ static CBuiltinX86Helper cbuiltin_x86_helper(CBuiltinX86HelperKind kind, Arena* 
             else
             {
                 memcpy(records, info->records, (uint64_t)info->record_count * sizeof(*records));
+                if (info->immediate_argument != 0)
+                {
+                    records[info->immediate_record].immediate = immediate;
+                }
                 result.code.records = records;
                 result.code.count = info->record_count;
                 if (columns != NULL)

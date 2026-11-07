@@ -83,6 +83,7 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include "buster/compiler/runtime_paths.h"
 
 // CPU architecture dependent includes
 #include "host_isa.h"
@@ -367,6 +368,9 @@ BUSTER_LINKER_ENTRY __attribute__((unused)) RuntimeError runtime_import_static_p
 BUSTER_LINKER_ENTRY __attribute__((unused)) RuntimeError runtime_import_shared(Runtime* runtime);
 // runtime_import, runtime_import_static, runtime_import_static_pie or runtime_import_shared, by `kind`.
 static __attribute__((unused)) RuntimeError runtime_import_kind(Runtime* runtime, RuntimeKind kind);
+// Discovers startup objects and runtime library paths for the C driver's mixed-input foreign link, without importing
+// their symbols. The paths and probes remain owned by runtime until runtime_release.
+BUSTER_LINKER_ENTRY __attribute__((unused)) RuntimeError runtime_discover_inputs(Runtime* runtime, RuntimeKind kind);
 // Finds the default interpreter through libc.so's script without importing CRT objects, archives or library symbols.
 // The path and probe records belong to runtime->files until runtime_release. This is path discovery, not ELF validation.
 static __attribute__((unused)) RuntimeError runtime_discover_interpreter(Runtime* runtime);
@@ -693,16 +697,6 @@ static const char* const runtime_triples[] = {
     "x86_64-unknown-linux-gnu",
 };
 
-// glibc's directories, in the order GCC's driver searches them on these systems.
-static const char* const runtime_library_directories[] = {
-    "/usr/lib/x86_64-linux-gnu",
-    "/lib/x86_64-linux-gnu",
-    "/usr/lib64",
-    "/lib64",
-    "/usr/lib",
-    "/lib",
-};
-
 // Whether version `a` (dotted decimal numbers, "16" or "12.2.0") is greater than `b`: compared number by number, a
 // missing number being smaller. A name that isn't a version is smaller than any version.
 static bool runtime_version_greater(const char* a, const char* b)
@@ -996,6 +990,15 @@ static RuntimeError runtime_search(Runtime* runtime)
     return result;
 }
 
+BUSTER_LINKER_ENTRY RuntimeError runtime_discover_inputs(Runtime* runtime, RuntimeKind kind)
+{
+    const bool reserved = runtime_begin(runtime);
+    runtime->kind = kind;
+    RuntimeError result = reserved ? runtime_search(runtime) : RUNTIME_ERROR_MEMORY;
+    result = result == RUNTIME_ERROR_NONE && runtime->probes_full ? RUNTIME_ERROR_MEMORY : result;
+    return result;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Importing and binding
 
@@ -1132,15 +1135,15 @@ static String8 runtime_section(String8 bytes, const char* name)
 }
 
 // The names the direct path's linker defines (BUSTER_LINK_SOURCE_LINKER) when something refers to one, as lld does when
-// no object defines it, each with the kinds whose linker defines it (a bit per RuntimeKind), as GNU ld's and lld's
-// define them there:
+// no object defines it, each with its supported output kinds (a bit per RuntimeKind). The executable image bounds
+// follow GNU ld, including its __etext alias and empty preinit bounds; shared-library admission is unchanged:
 //   - every kind: the bounds of the init and fini arrays, which step 4's executables define, and the GOT's
 //     _GLOBAL_OFFSET_TABLE_, which GNU as names in an object with a GOT reference;
 //   - the PIEs and a shared library: .dynamic's address (_DYNAMIC, through which libc.a's member that relocates a static
 //     PIE finds it);
-//   - a static executable and a static PIE: the ELF header's address (__ehdr_start, through which libc.a's startup finds
-//     the program headers) and the image's start; the preinit array's bounds; and the ends of the text, the data and
-//     the image;
+//   - every executable (dynamic PIE, static executable and static PIE): the ELF header's address (__ehdr_start,
+//     through which libc.a's startup finds the program headers) and the image's start; the preinit array's bounds;
+//     the ends of the text and the file-backed data; the start of .bss; and the end of the image;
 //   - a static executable alone: its IRELATIVE relocations' bounds (__rela_iplt_start and __rela_iplt_end, which
 //     libc.a's startup applies for its IFUNCs). A static PIE's are in .rela.dyn, which its startup applies with the
 //     others, and libc.a's weak references to the bounds bind to nothing, as GNU ld and lld leave them.
@@ -1148,6 +1151,7 @@ static String8 runtime_section(String8 bytes, const char* name)
 #define BUSTER_RUNTIME_EVERY_KIND ((1u << RUNTIME_KINDS) - 1)
 #define BUSTER_RUNTIME_DYNAMIC_SECTION_KINDS (BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_DYNAMIC) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC_PIE) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_SHARED))
 #define BUSTER_RUNTIME_STATIC_KINDS (BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC_PIE))
+#define BUSTER_RUNTIME_EXECUTABLE_KINDS (BUSTER_RUNTIME_STATIC_KINDS | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_DYNAMIC))
 
 typedef struct RuntimeLinkerName RuntimeLinkerName;
 struct RuntimeLinkerName
@@ -1163,20 +1167,20 @@ static const RuntimeLinkerName runtime_linker_names[] = {
     { "__fini_array_start", BUSTER_RUNTIME_EVERY_KIND },
     { "__fini_array_end", BUSTER_RUNTIME_EVERY_KIND },
     { "_DYNAMIC", BUSTER_RUNTIME_DYNAMIC_SECTION_KINDS },
-    { "__ehdr_start", BUSTER_RUNTIME_STATIC_KINDS },
-    { "__executable_start", BUSTER_RUNTIME_STATIC_KINDS },
-    { "__preinit_array_start", BUSTER_RUNTIME_STATIC_KINDS },
-    { "__preinit_array_end", BUSTER_RUNTIME_STATIC_KINDS },
+    { "__ehdr_start", BUSTER_RUNTIME_EXECUTABLE_KINDS },
+    { "__executable_start", BUSTER_RUNTIME_EXECUTABLE_KINDS },
+    { "__preinit_array_start", BUSTER_RUNTIME_EXECUTABLE_KINDS },
+    { "__preinit_array_end", BUSTER_RUNTIME_EXECUTABLE_KINDS },
     { "__rela_iplt_start", BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC) },
     { "__rela_iplt_end", BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC) },
-    { "_etext", BUSTER_RUNTIME_STATIC_KINDS },
-    { "etext", BUSTER_RUNTIME_STATIC_KINDS },
-    { "__etext", BUSTER_RUNTIME_STATIC_KINDS },
-    { "_edata", BUSTER_RUNTIME_STATIC_KINDS },
-    { "edata", BUSTER_RUNTIME_STATIC_KINDS },
-    { "__bss_start", BUSTER_RUNTIME_STATIC_KINDS },
-    { "_end", BUSTER_RUNTIME_STATIC_KINDS },
-    { "end", BUSTER_RUNTIME_STATIC_KINDS },
+    { "_etext", BUSTER_RUNTIME_EXECUTABLE_KINDS },
+    { "etext", BUSTER_RUNTIME_EXECUTABLE_KINDS },
+    { "__etext", BUSTER_RUNTIME_EXECUTABLE_KINDS },
+    { "_edata", BUSTER_RUNTIME_EXECUTABLE_KINDS },
+    { "edata", BUSTER_RUNTIME_EXECUTABLE_KINDS },
+    { "__bss_start", BUSTER_RUNTIME_EXECUTABLE_KINDS },
+    { "_end", BUSTER_RUNTIME_EXECUTABLE_KINDS },
+    { "end", BUSTER_RUNTIME_EXECUTABLE_KINDS },
 };
 
 // Whether the name is one of the names the linker of a runtime of `kind` defines.

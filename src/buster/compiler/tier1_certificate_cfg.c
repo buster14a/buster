@@ -190,7 +190,7 @@ static bool tier1_cert_cfg_operand(Tier1CertCfgBuild* build, uint32_t block, uin
 {
     uint32_t where = 0;
     uint8_t kind = 0;
-    bool valid = tier1_cfg_location(build->result, value, position, &where, &kind);
+    bool valid = tier1_cfg_location_oracle(build->result, value, position, &where, &kind);
     *location = BUSTER_CERT_NONE;
     if (valid && kind != BUSTER_TIER1_ALLOCATE_REMATERIALIZE)
     {
@@ -607,7 +607,7 @@ static Tier1CertError tier1_certificate_cfg(const Tier1CfgInput* input, const Ti
                     {
                         uint32_t where = 0;
                         uint8_t kind = 0;
-                        const bool found = tier1_cfg_entry_location(result, v, entry, &where, &kind);
+                        const bool found = tier1_cfg_entry_location_oracle(result, v, entry, &where, &kind);
                         const uint32_t location = kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE ? BUSTER_CERT_NONE : tier1_cert_cfg_storage(&build, where);
                         error = found && (kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE || location != BUSTER_CERT_NONE) ? error : TIER1_CERT_TRANSITION;
                         if (error != TIER1_CERT_OK)

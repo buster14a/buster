@@ -240,11 +240,11 @@ static void unwind_sleb(UnwindWriter* writer, int64_t value)
     }
 }
 
-static void unwind_uleb(UnwindWriter* writer, uint32_t value)
+static void unwind_uleb(UnwindWriter* writer, uint64_t value)
 {
     do
     {
-        const uint32_t byte = (value & 0x7f) | (value > 0x7f ? 0x80 : 0);
+        const uint32_t byte = (uint32_t)(value & 0x7f) | (value > 0x7f ? 0x80 : 0);
         unwind_integer(writer, byte, 1);
         value >>= 7;
     } while (value != 0);
@@ -514,6 +514,9 @@ static UnwindError unwind_rows_check(const UnwindFunction* function)
         const EmissionFrameRow row = rows[i];
         result = row.offset >= previous && row.offset < function->size && row.reserved == 0 ? UNWIND_OK : UNWIND_ERROR_INVALID;
         const bool rule = row.reg < BUSTER_EMISSION_X86_REGISTERS && row.reg != BUSTER_EMISSION_X86_RSP && row.reg != BUSTER_EMISSION_X86_RETURN;
+        // A vector or mask register's slot or caller's value (#147, a preserving frame's); DW_CFA_restore's one byte names
+        // registers below 64 alone, and no rule copies one register into another here.
+        const bool vector = emission_x86_saved_vector(row.reg);
         switch (row.kind)
         {
             case EMISSION_FRAME_CFA:
@@ -526,17 +529,20 @@ static UnwindError unwind_rows_check(const UnwindFunction* function)
             } break;
             case EMISSION_FRAME_OFFSET:
             {
-                result = rule && (row.value & 7) == 0 ? result : UNWIND_ERROR_UNSUPPORTED;
+                result = (rule || vector) && (row.value & 7) == 0 ? result : UNWIND_ERROR_UNSUPPORTED;
             } break;
             case EMISSION_FRAME_REGISTER:
             {
                 result = rule && row.value >= 0 && row.value < 16 ? result : UNWIND_ERROR_UNSUPPORTED;
             } break;
             case EMISSION_FRAME_RESTORE:
+            {
+                result = rule && row.value == 0 ? result : UNWIND_ERROR_UNSUPPORTED;
+            } break;
             case EMISSION_FRAME_SAME_VALUE:
             case EMISSION_FRAME_UNDEFINED:
             {
-                result = rule && row.value == 0 ? result : UNWIND_ERROR_UNSUPPORTED;
+                result = (rule || vector) && row.value == 0 ? result : UNWIND_ERROR_UNSUPPORTED;
             } break;
             case EMISSION_FRAME_REMEMBER_STATE:
             {
@@ -573,9 +579,9 @@ static void unwind_rows_scalar(UnwindWriter* writer, const UnwindFunction* funct
     unwind_uleb(writer, 0);
     uint32_t previous = 0;
     uint32_t cfa_register = BUSTER_EMISSION_X86_RSP;
-    int32_t cfa_offset = 8;
+    int64_t cfa_offset = 8;
     uint32_t saved_registers[BUSTER_UNWIND_ROW_STATES];
-    int32_t saved_offsets[BUSTER_UNWIND_ROW_STATES];
+    int64_t saved_offsets[BUSTER_UNWIND_ROW_STATES];
     uint32_t depth = 0;
     // The rows are the writer's input, apart from its output (unwind_write's contract): read once, not after each store.
     const EmissionFrameRow* rows = function->rows;
@@ -594,7 +600,7 @@ static void unwind_rows_scalar(UnwindWriter* writer, const UnwindFunction* funct
                 if (row.reg == cfa_register && row.value != cfa_offset)
                 {
                     unwind_integer(writer, 0x0e, 1); // DW_CFA_def_cfa_offset
-                    unwind_uleb(writer, (uint32_t)row.value);
+                    unwind_uleb(writer, (uint64_t)row.value);
                 }
                 else if (row.reg != cfa_register && row.value == cfa_offset)
                 {
@@ -605,7 +611,7 @@ static void unwind_rows_scalar(UnwindWriter* writer, const UnwindFunction* funct
                 {
                     unwind_integer(writer, 0x0c, 1); // DW_CFA_def_cfa
                     unwind_uleb(writer, row.reg);
-                    unwind_uleb(writer, (uint32_t)row.value);
+                    unwind_uleb(writer, (uint64_t)row.value);
                 }
                 cfa_register = row.reg;
                 cfa_offset = row.value;
@@ -613,17 +619,17 @@ static void unwind_rows_scalar(UnwindWriter* writer, const UnwindFunction* funct
             case EMISSION_FRAME_CFA_OFFSET:
             {
                 unwind_integer(writer, 0x0e, 1);
-                unwind_uleb(writer, (uint32_t)row.value);
+                unwind_uleb(writer, (uint64_t)row.value);
                 cfa_offset = row.value;
             } break;
             case EMISSION_FRAME_OFFSET:
             {
                 // The CIE's data alignment is -8: a slot at CFA - 8n is n.
-                const int32_t factored = -(row.value / 8);
+                const int64_t factored = -(row.value / 8);
                 if (factored >= 0 && row.reg < 64)
                 {
                     unwind_integer(writer, 0x80 | row.reg, 1); // DW_CFA_offset
-                    unwind_uleb(writer, (uint32_t)factored);
+                    unwind_uleb(writer, (uint64_t)factored);
                 }
                 else
                 {
@@ -636,7 +642,7 @@ static void unwind_rows_scalar(UnwindWriter* writer, const UnwindFunction* funct
             {
                 unwind_integer(writer, 0x09, 1); // DW_CFA_register
                 unwind_uleb(writer, row.reg);
-                unwind_uleb(writer, (uint32_t)row.value);
+                unwind_uleb(writer, (uint64_t)row.value);
             } break;
             case EMISSION_FRAME_RESTORE:
             {
@@ -687,7 +693,7 @@ static uint64_t unwind_rows_bytes(const UnwindFunction* function)
     return writer.size;
 }
 
-static void unwind_row(EmissionFrameRow* rows, uint32_t* count, uint32_t capacity, uint32_t offset, uint32_t kind, uint32_t reg, int32_t value)
+static void unwind_row(EmissionFrameRow* rows, uint32_t* count, uint32_t capacity, uint32_t offset, uint32_t kind, uint32_t reg, int64_t value)
 {
     if (*count < capacity)
     {
@@ -706,7 +712,7 @@ static uint32_t unwind_function_rows(const UnwindFunction* function, EmissionFra
     uint32_t event = 0;
     const uint32_t pushes = (uint32_t)__builtin_popcount(function->saved);
     const uint32_t per = unwind_tail_events(function);
-    int32_t cfa = 8;
+    int64_t cfa = 8;
     if (function->pointer != 0)
     {
         unwind_row(rows, &count, capacity, function->offsets[event], EMISSION_FRAME_CFA_OFFSET, 0, 16);
@@ -737,7 +743,7 @@ static uint32_t unwind_function_rows(const UnwindFunction* function, EmissionFra
     }
     if (function->pointer == 0 && function->frame_size != 0)
     {
-        unwind_row(rows, &count, capacity, function->offsets[event], EMISSION_FRAME_CFA_OFFSET, 0, cfa + (int32_t)function->frame_size);
+        unwind_row(rows, &count, capacity, function->offsets[event], EMISSION_FRAME_CFA_OFFSET, 0, cfa + function->frame_size);
         event += 1;
     }
     // The tail calls' and the epilogue's teardowns: the same transitions at their own ends.
@@ -863,13 +869,14 @@ static UnwindError unwind_rows_function(const EmissionFrameRow* rows, uint32_t c
     if (candidate)
     {
         // The allocation: the largest CFA offset past the pushes'.
-        int32_t largest = 8;
+        int64_t largest = 8;
         for (uint32_t i = 0; i < count; i += 1)
         {
             largest = rows[i].kind == EMISSION_FRAME_CFA_OFFSET && rows[i].value > largest ? rows[i].value : largest;
         }
-        const int32_t pushed = 8 + 8 * __builtin_popcount(simple.saved);
-        candidate = largest >= pushed;
+        const int64_t pushed = 8 + 8 * __builtin_popcount(simple.saved);
+        // Rows can express more than the fixed imm32 allocation: check before narrowing.
+        candidate = largest >= pushed && largest - pushed <= INT32_MAX;
         simple.frame_size = candidate ? (uint32_t)(largest - pushed) : 0;
         simple.event_count = (uint8_t)events;
         candidate = candidate && events == unwind_events(&simple) && unwind_check(&simple, 1) == UNWIND_OK;

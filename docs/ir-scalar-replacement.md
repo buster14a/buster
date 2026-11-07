@@ -107,3 +107,30 @@ The implementation is original. LLVM's [pass documentation](
 https://llvm.org/docs/Passes.html#sroa-scalar-replacement-of-aggregates) was
 consulted for the field-splitting followed by scalar-promotion model. No
 implementation source was imported.
+
+## #1282's options
+
+`IrSroaOptions.simd` takes a function with vectors, masks or machine rows (its
+vector field's slot is promoted whole by `ssa_ir_promote`, which promotes vector
+slots), and `IrSroaOptions.flagged` takes the by-value aggregates the typed
+stream leaves of vectors: it refuses an address-taken slot by its uses alone
+(only its `STACK_ADDR` reaches a slot, and every use is classified), keeping the
+volatile slots' and the incoming frame's anchors' refusals. With `flagged`, the
+provenance also follows the typed stream's integer addresses, a slot's address
+through `ptrtoint` to `i64` and `inttoptr` back, and an `ADDRESS` whose index is
+an `i64` constant; any other use of the integer escapes the slot, on both escape
+paths (the vector packets' opcode masks have the two conversions). Only a `ptr`
+of a field's offset becomes the field's `STACK_ADDR`; the integers go with the
+dead code.
+
+A store is dead (`flagged` alone) where later stores of the same slot in its
+block cover its bytes with no load of the slot between: the backward walk keeps
+one covered interval a slot, the latest stores' joined while they touch, and a
+load empties it. A slot SROA takes escapes nowhere, so nothing else reads its
+bytes; nothing is assumed across blocks. A dead store becomes a lifetime start
+of a one-byte sink slot that no access reaches, which promotion then drops with
+it, and isn't a field: a zeroed object's `i64` stores don't overlap the vector
+that overwrites them. Without the options SROA keeps its #139 contract,
+refusing SIMD functions and address-taken slots; `test-ir-sroa`'s escape-mask
+oracle has the two forwarding conversions too.
+

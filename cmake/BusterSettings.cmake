@@ -76,7 +76,8 @@ set(BUSTER_SOURCES
     src/buster/compiler/tier1_schedule_benchmark.c
     src/buster/compiler/tier1_select_benchmark.c
     src/buster/compiler/tier1_model_measure.c
-    src/buster/compiler/emission_metadata_test.c)
+    src/buster/compiler/emission_metadata_test.c
+    src/buster/compiler/c_check_target_feature_emission_test.c)
 
 # The order a clean build starts the compiles in, each source's file name once, the longest first by their times on
 # the 9700X (#270): one compile per core at a time (build.sh's --jobs), so a long one that started late would make the
@@ -92,7 +93,8 @@ set(BUSTER_COMPILE_ORDER
     c_lexer_benchmark.c branch_sizing_benchmark.c object_writer_benchmark.c x86_64_disassembler_benchmark.c
     calling_convention_benchmark.c tier1_schedule_benchmark.c x86_semantics_benchmark.c tier1_model_measure.c
     c_types_benchmark.c dominators_benchmark.c tier1_frame_benchmark.c tier1_allocate_benchmark.c lane_benchmark.c
-    floors_benchmark.c dataflow_benchmark.c c_builtin_benchmark.c emission_metadata_test.c)
+    floors_benchmark.c dataflow_benchmark.c c_builtin_benchmark.c emission_metadata_test.c
+    c_check_target_feature_emission_test.c)
 
 # The sources' indices in BUSTER_SOURCES, in BUSTER_COMPILE_ORDER's order, into `output`. Fails, naming it, for two
 # sources of one file name, which the order couldn't tell apart, for a file that the order names twice or that isn't a
@@ -282,7 +284,7 @@ endfunction()
 #   buster_debug            the Release configuration's debug information (-g, none, or -gline-tables-only)
 #   buster_optimization     the Release configuration's optimization (-O3, or the sanitizers' level)
 #   buster_sanitizer_flags  what a sanitizer build adds to every unit and to the link
-#   buster_link_mode        -no-pie, or -pie for the sanitizers
+#   buster_link_mode        -no-pie (with -static from buster_settings_linker), or -pie for the sanitizers
 #   buster_fuzz_libraries   what a fuzzing build links after the objects
 #   buster_host_vector      1 when the host has the complete vector feature set, else 0
 # buster_settings_normalize must have run.
@@ -388,6 +390,17 @@ function(buster_settings_tools clang)
         set(fuzz_libraries "${runtime}" -lstdc++ -pthread)
     endif()
 
+    # A static link (#652) where nothing needs the loader: the sanitizers' runtimes need a PIE, libFuzzer's runtime
+    # C++'s shared libraries, and BUSTER_HOST_RUNTIME links an old runtime's shared libraries explicitly
+    # (CMakeLists.txt's buster_link). The dynamic loader took 8% to 12% of a small compile's task-clock on the 9700X
+    # (an empty file's -fsyntax-only, -E -P and a one-line -c, buster-performance's small-unit-start-652-2026-11-05).
+    # buster_settings_linker decides it with the linker, which must not be wild.
+    set(static_candidate FALSE)
+    if(buster_sanitizer STREQUAL "none" AND NOT buster_fuzz AND "${BUSTER_HOST_RUNTIME}" STREQUAL "")
+        set(static_candidate TRUE)
+    endif()
+
+    set(buster_static_candidate ${static_candidate} PARENT_SCOPE)
     set(buster_flags ${flags} PARENT_SCOPE)
     set(buster_debug ${debug} PARENT_SCOPE)
     set(buster_optimization ${optimization} PARENT_SCOPE)
@@ -413,7 +426,12 @@ function(buster_settings_linker)
         set(linker "${BUSTER_LINKER}")
     endif()
     set(names "")
-    if(linker STREQUAL "auto")
+    if(linker STREQUAL "auto" AND buster_static_candidate)
+        # wild 0.10.0 links a static executable whose startup faults in glibc's __ctype_init, at its first TLS access,
+        # against Ubuntu's glibc 2.39 and the hosted runners' (#652); mold, lld and GNU ld link it correctly. lld first,
+        # for its -O0 (below).
+        set(names ld.lld mold)
+    elseif(linker STREQUAL "auto")
         set(names wild mold)
     elseif(linker STREQUAL "system")
     elseif(linker STREQUAL "lld" OR linker STREQUAL "bfd")
@@ -449,6 +467,38 @@ function(buster_settings_linker)
     else()
         set(path "system default")
     endif()
-    set(buster_linker_flags ${flags} PARENT_SCOPE)
     set(buster_linker "${path}" PARENT_SCOPE)
+    # The static link, with any linker but wild (above): an explicit wild links dynamically, whatever its file is
+    # called (ld.wild, a symlink, a path), as its --version names it ("Wild 0.10.0 ..."). BUSTER_HOST_STATIC tells the
+    # code (test_libm.c): a static executable's dlsym(RTLD_DEFAULT, ...) finds nothing.
+    set(wild FALSE)
+    set(lld FALSE)
+    if(NOT path STREQUAL "system default")
+        execute_process(COMMAND "${path}" --version OUTPUT_VARIABLE version ERROR_VARIABLE version_errors
+            RESULT_VARIABLE status TIMEOUT 30)
+        get_filename_component(linker_name "${path}" NAME)
+        if(linker_name STREQUAL "wild" OR "${version}\n${version_errors}" MATCHES "(^|\n)Wild ")
+            set(wild TRUE)
+        endif()
+        if("${version}\n${version_errors}" MATCHES "(^|\n)LLD ")
+            set(lld TRUE)
+        endif()
+    endif()
+    # lld at -O0 keeps each object's strings where the object has them, rather than merging every object's identical
+    # strings and laying the pool out in their hashes' order (#652). A compile's comparisons of its options and
+    # commands against their names then read a few pages of the pool rather than pages all over it: on the 9700X, an
+    # empty file's -fsyntax-only faulted 28 pages of read-only data rather than mold's 67, and took 14% less time from
+    # a cold start than mold's link of the same objects (7% for a one-line -c; sqlite3.c's the same). The strings that
+    # several objects repeat take 1.8 MB more of the executable. mold takes -O but ignores it.
+    if(lld)
+        list(APPEND flags -Wl,-O0)
+    endif()
+    set(buster_linker_flags ${flags} PARENT_SCOPE)
+    if(buster_static_candidate AND NOT wild)
+        set(buster_link_mode ${buster_link_mode} -static -Wl,--wrap=__register_frame_info,--wrap=__deregister_frame_info PARENT_SCOPE)
+        set(buster_flags ${buster_flags} -DBUSTER_HOST_STATIC=1 PARENT_SCOPE)
+        set(buster_static TRUE PARENT_SCOPE)
+    else()
+        set(buster_static FALSE PARENT_SCOPE)
+    endif()
 endfunction()

@@ -78,6 +78,59 @@ static void check_test_attribute_storage(CheckTest* test)
     arena_release(&storage);
 }
 
+// A large object.member[0][0]... tree exercises the location walk with no parser-derived columns: the only edges
+// are parent links. Its syntax names member, but a checked outer subscript converts its base and names object.
+static void check_test_attribute_expression_location(CheckTest* test)
+{
+    enum { DEPTH = 32768, TOKENS = 3 + DEPTH * 3 };
+    Arena storage = arena_reserve(UINT64_C(1) << 20);
+    Parser parser = { 0 };
+    parser.tokens.count = TOKENS;
+    parser.tree.parents = BUSTER_ARENA_PUSH_ARRAY(&storage, uint32_t, TOKENS);
+    parser.tree.roles = BUSTER_ARENA_PUSH_ARRAY(&storage, uint8_t, TOKENS);
+    const bool ready = parser.tree.parents != NULL && parser.tree.roles != NULL;
+    check_test_expect(test, ready, "deep expression location fixture storage");
+    if (ready)
+    {
+        parser.tree.parents[0] = 1;
+        parser.tree.parents[1] = 5;
+        parser.tree.parents[2] = 1;
+        parser.tree.roles[0] = PARSE_ROLE_OPERAND;
+        parser.tree.roles[1] = PARSE_ROLE_MEMBER_OPERATOR;
+        parser.tree.roles[2] = PARSE_ROLE_MEMBER;
+        for (uint32_t i = 0; i < DEPTH; i += 1)
+        {
+            const uint32_t open = 3 + i * 3;
+            const uint32_t close = open + 2;
+            parser.tree.parents[open] = close;
+            parser.tree.parents[open + 1] = close;
+            parser.tree.parents[close] = i + 1 < DEPTH ? close + 3 : BUSTER_PARSE_ROOT;
+            parser.tree.roles[open] = PARSE_ROLE_OPEN_SUBSCRIPT;
+            parser.tree.roles[open + 1] = PARSE_ROLE_OPERAND;
+            parser.tree.roles[close] = PARSE_ROLE_CLOSE_SUBSCRIPT;
+        }
+        check_test_expect(test, check_input_expression_location(&parser, 0, TOKENS) == 2,
+                          "deep subscript syntax finds the member base's location using parent links");
+        CheckTestTypes types = { 0 };
+        const bool opened = check_test_types_open(&types);
+        check_test_expect(test, opened, "deep expression location fixture types");
+        if (opened)
+        {
+            const TypeId pointer = type_pointer(&types.table, BUSTER_TYPE_INT);
+            CheckOp ops[] = { CHECK_OP_VALUE, CHECK_OP_VALUE, CHECK_OP_SUBSCRIPT };
+            uint32_t operand0[] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, 0 };
+            uint32_t operand1[] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, 1 };
+            CheckGraph graph = { .count = 3, .ops = ops, .operand0 = operand0, .operand1 = operand1 };
+            CheckValue values[] = { { .type = pointer, .category = CHECK_LVALUE }, { .type = BUSTER_TYPE_INT }, { .type = BUSTER_TYPE_INT } };
+            CheckStream stream = { .graph = &graph, .count = 3, .dense_values = values };
+            check_test_expect(test, pointer != 0 && check_warning_expression_location(&parser, &types.table, &stream, 2, 0, TOKENS) == 0,
+                              "deep checked subscripts report the converted base's beginning with one parent walk");
+        }
+        check_test_types_close(&types);
+    }
+    arena_release(&storage);
+}
+
 static void check_test_attribute_arguments(CheckTest* test)
 {
     enum { ARGUMENTS = 8192, TOKENS_PER_ARGUMENT = 8 };
@@ -182,7 +235,7 @@ static void check_test_attribute_abis(CheckTest* test)
     {
         const CheckInputCallingConvention conventions[] = {
             CHECK_CALL_SYSV, CHECK_CALL_MICROSOFT, CHECK_CALL_VECTOR, CHECK_CALL_REG,
-            CHECK_CALL_PRESERVE_MOST, CHECK_CALL_PRESERVE_ALL, CHECK_CALL_PRESERVE_NONE,
+            CHECK_CALL_PRESERVE_MOST, CHECK_CALL_PRESERVE_ALL, CHECK_CALL_PRESERVE_NONE, CHECK_CALL_NO_CALLER_SAVED,
         };
         const TypeId integer = BUSTER_TYPE_INT;
         const TypeId function = type_function(&types.table, integer, &integer, 1, BUSTER_TYPE_FLAG_PROTOTYPE);
@@ -218,10 +271,15 @@ static void check_test_attribute_abis(CheckTest* test)
                 const uint32_t type_count = types.table.types.count;
                 const uint8_t actual = check_input_attribute_abi_origin(&reader, &attributes, origin);
                 const bool matches = origin == 0 || origin == abi + 1;
-                check_test_expect(test, actual == (matches ? abi + 1 : origin) &&
-                                       attributes.error == (matches ? CHECK_ATTRIBUTE_ERROR_NONE : CHECK_ATTRIBUTE_ERROR_CONFLICT) &&
-                                       input.report_count == (matches ? 0 : 1) &&
-                                       (matches || (attributes.error_first == 70 && attributes.error_end == 74 && reports[0].token == 70)) &&
+                // no_caller_saved_registers with System V's convention is one type; with another, refused by name (#147).
+                const uint8_t every = TYPE_FUNCTION_ABI_NO_CALLER_SAVED + 1;
+                const bool bit = origin != 0 && (origin == every) != (abi == TYPE_FUNCTION_ABI_NO_CALLER_SAVED);
+                const bool paired = bit && (origin == TYPE_FUNCTION_ABI_SYSV + 1 || abi == TYPE_FUNCTION_ABI_SYSV);
+                const bool kept = matches || paired;
+                check_test_expect(test, actual == (paired ? every : matches ? abi + 1 : origin) &&
+                                       attributes.error == (kept ? CHECK_ATTRIBUTE_ERROR_NONE : bit ? CHECK_ATTRIBUTE_ERROR_UNKNOWN : CHECK_ATTRIBUTE_ERROR_CONFLICT) &&
+                                       input.report_count == (kept ? 0 : 1) &&
+                                       (kept || (attributes.error_first == 70 && attributes.error_end == 74 && reports[0].token == 70)) &&
                                        types.table.types.count == type_count && scratch.length == 31,
                                   "spelling ABI provenance distinguishes explicit SysV from implicit default without changing canonical types");
             }
@@ -643,6 +701,7 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
 {
     check_test_attribute_storage(test);
     check_test_attribute_vocabulary(test);
+    check_test_attribute_expression_location(test);
     check_test_attribute_arguments(test);
     check_test_attribute_abis(test);
     const CheckAttributeFixture fixtures[] =
@@ -961,10 +1020,12 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
             .last_kind = CHECK_ATTRIBUTE_NODEBUG,
         },
         {
-            .name = "nodebug rejects arguments",
+            // Its count's error is its subject's check's, after the subject (#147, check_input_attribute_subjects): kept as
+            // a generic attribute, which its handler doesn't apply.
+            .name = "nodebug keeps its argument count for its subject",
             .source = "void f(void) __attribute__((nodebug(1)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
-            .error_word = "nodebug",
+            .count = 1,
+            .last_kind = CHECK_ATTRIBUTE_UNKNOWN,
             .rejected = true,
         },
         {
@@ -980,10 +1041,12 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
             .last_kind = CHECK_ATTRIBUTE_OVERLOADABLE,
         },
         {
-            .name = "overloadable rejects arguments",
+            // Its count's error is its subject's check's, after the subject (#147, check_input_attribute_subjects): kept as
+            // a generic attribute, which its handler doesn't apply.
+            .name = "overloadable keeps its argument count for its subject",
             .source = "int f(int) __attribute__((overloadable(1)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
-            .error_word = "overloadable",
+            .count = 1,
+            .last_kind = CHECK_ATTRIBUTE_UNKNOWN,
             .rejected = true,
         },
         {
@@ -1157,10 +1220,11 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
             .rejected = true,
         },
         {
-            .name = "invalid aligned argument count",
+            // An argument count other than clang's waits for the subject's check too (#147), its arguments unread.
+            .name = "aligned keeps its argument count for its subject",
             .source = "int x __attribute__((aligned(2,4)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
-            .error_word = "aligned",
+            .count = 1,
+            .last_kind = CHECK_ATTRIBUTE_UNKNOWN,
             .rejected = true,
         },
         {

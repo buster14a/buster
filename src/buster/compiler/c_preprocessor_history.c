@@ -707,9 +707,21 @@ static void pp_diagnostic_take(Preprocessor* pp, Preprocessor* replay)
     pp->diagnostic_collection_failed |= replay->diagnostic_collection_failed;
 }
 
+// Retain a completed construct's own ordering across producers that render its warnings and errors separately.
+// Only the new records are visited; notes remain attached to their primary, and ordinary diagnostics pass zero.
+static __attribute__((unused)) void pp_diagnostic_suborder(Preprocessor* pp, const PPDiagnosticRecord* previous, uint64_t suborder)
+{
+    for (PPDiagnosticRecord* record = suborder != 0 ? (previous != NULL ? previous->next : pp->diagnostic_first) : NULL;
+         record != NULL; record = record->next)
+    {
+        record->suborder = suborder;
+    }
+}
+
 // Stable bottom-up merging needs no second allocation on the rejected-unit path. The order key is the expansion
-// output boundary for preprocessing and the exact output token for parser/checker groups. Equal keys retain the
-// discovery order, including several directive reports before the next source token.
+// output boundary for preprocessing and the exact output token for parser/checker groups. A completed construct may
+// refine that boundary by its own nonzero suborder; ordinary records follow it. Equal keys retain discovery order,
+// including several directive reports before the next source token.
 static PPDiagnosticRecord* pp_diagnostic_order(PPDiagnosticRecord* first)
 {
     uint64_t width = 1;
@@ -733,7 +745,10 @@ static PPDiagnosticRecord* pp_diagnostic_order(PPDiagnosticRecord* first)
             uint64_t right_count = width;
             while (left_count != 0 || (right_count != 0 && right != NULL))
             {
-                const bool take_left = left_count != 0 && (right_count == 0 || right == NULL || left->position <= right->position);
+                const uint64_t left_order = left != NULL && left->suborder != 0 ? left->suborder : UINT64_MAX;
+                const uint64_t right_order = right != NULL && right->suborder != 0 ? right->suborder : UINT64_MAX;
+                const bool take_left = left_count != 0 && (right_count == 0 || right == NULL || left->position < right->position ||
+                                                         (left->position == right->position && left_order <= right_order));
                 PPDiagnosticRecord* next = take_left ? left : right;
                 left = take_left ? left->next : left;
                 right = !take_left ? right->next : right;
@@ -838,7 +853,7 @@ static __attribute__((format(printf, 5, 6))) void pp_diagnose_note(Preprocessor*
         const uint32_t position = pp->diagnostic_position != BUSTER_PP_NONE ? pp->diagnostic_position : pp->output.count;
         if (pp->options.collect_diagnostics)
         {
-            pp_collect_diagnostic(pp, requested, (uint64_t)position * 4 + PP_DIAGNOSTIC_LEXICAL, location, location != 0 ? pp->diagnostic_origin : 0, note, NULL, 0, format, arguments);
+            pp_collect_diagnostic(pp, requested, (uint64_t)position * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_LEXICAL, location, location != 0 ? pp->diagnostic_origin : 0, note, NULL, 0, format, arguments);
         }
         else
         {
@@ -856,12 +871,11 @@ static void pp_diagnose_output_arguments(Preprocessor* pp, PPSeverity severity, 
     pp_diagnose_output_location(pp, severity, token, token < pp->output.count ? pp->output.locations[token] : 0, position, phase, notes, note_count, format, arguments);
 }
 
-// pp_diagnose_output_arguments at `location`, a place in the spelling of output token `token` (with its history).
-static void pp_diagnose_output_location(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t location, uint32_t position, PPDiagnosticPhase phase,
+// Explicit source coordinates can name a consumed preprocessing token. The caller has ensured history, so both
+// its origin and every output note's origin belong to the same replay. They publish as one diagnostic group.
+static void pp_diagnose_source_location(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, uint32_t position, PPDiagnosticPhase phase,
                                         const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, va_list arguments)
 {
-    pp_history_ensure(pp);
-    const uint32_t origin = pp_history_at(pp, token);
     const bool always = severity == PP_SEVERITY_WARNING_ALWAYS;
     severity = always ? PP_SEVERITY_WARNING : severity;
     const PPSeverity requested = severity;
@@ -876,11 +890,11 @@ static void pp_diagnose_output_location(Preprocessor* pp, PPSeverity severity, u
     {
         if (pp->options.collect_diagnostics)
         {
-            pp_collect_diagnostic(pp, requested, (uint64_t)position * 4 + phase, location, pp_history_at(pp, token), NULL, notes, note_count, format, arguments);
+            pp_collect_diagnostic(pp, requested, (uint64_t)position * PP_DIAGNOSTIC_PHASE_COUNT + phase, location, origin, NULL, notes, note_count, format, arguments);
         }
         else
         {
-            pp_render_diagnostic(pp, severity, location, pp_history_at(pp, token), NULL, format, arguments);
+            pp_render_diagnostic(pp, severity, location, origin, NULL, format, arguments);
             for (uint32_t i = 0; notes != NULL && i < note_count; i += 1)
             {
                 const uint32_t at = notes[i].token;
@@ -888,6 +902,24 @@ static void pp_diagnose_output_location(Preprocessor* pp, PPSeverity severity, u
             }
         }
     }
+}
+
+// pp_diagnose_output_arguments at `location`, a place in the spelling of output token `token` (with its history).
+static void pp_diagnose_output_location(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t location, uint32_t position, PPDiagnosticPhase phase,
+                                        const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, va_list arguments)
+{
+    pp_history_ensure(pp);
+    pp_diagnose_source_location(pp, severity, location, pp_history_at(pp, token), position, phase, notes, note_count, format, arguments);
+}
+
+static __attribute__((format(printf, 9, 10))) void pp_diagnose_source_notes_phase(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin,
+                                                                                uint32_t position, PPDiagnosticPhase phase, const PPOutputDiagnosticNote* notes,
+                                                                                uint32_t note_count, const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    pp_diagnose_source_location(pp, severity, location, origin, position, phase, notes, note_count, format, arguments);
+    va_end(arguments);
 }
 
 // The diagnostic location and its publication boundary can differ. A runtime warning, for example, completes
@@ -911,19 +943,20 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 5, 6))) void pp_
     va_end(arguments);
 }
 
-// pp_diagnose_output_at at the `offset`th character of the token's spelling after translation phases 1 and 2 (as
-// pp_spelling gives it), as clang's AdvanceToTokenCharacter places a diagnostic inside a numeric constant: a line splice
-// in the spelling moves the place past it.
-BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_diagnose_output_offset_at(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t offset,
-                                                                                                           uint32_t position, const char* format, ...)
+// The `offset`th character of a spelling after translation phases 1 and 2 (pp_spelling), in its source range.
+// Both #if's temporary tokens and the checker's output tokens use this mapping; neither counts a splice as a byte.
+static uint32_t pp_spelling_offset_location(Preprocessor* pp, uint32_t location, uint32_t offset)
 {
-    uint32_t location = token < pp->output.count ? pp->output.locations[token] : 0;
-    const uint32_t range = token < pp->output.count ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    const uint32_t range = pp_find_range(pp, location);
     if (range != BUSTER_PP_NONE)
     {
-        const PPRange* bytes = &pp->ranges[range];
-        uint32_t at = location - bytes->base;
-        for (uint32_t left = offset; left != 0 && at < bytes->length; left -= 1)
+        // The range is immutable throughout this scan; no helper can append or replace its storage here.
+        const PPRange* range_bytes = &pp->ranges[range];
+        const uint8_t* bytes = range_bytes->bytes;
+        const uint32_t length = range_bytes->length;
+        const uint32_t base = range_bytes->base;
+        uint32_t at = location - base;
+        for (uint32_t left = offset; left != 0 && at < length; left -= 1)
         {
             // Past the character, then past any splices after it: a backslash, perhaps spaces, and a line break.
             at += 1;
@@ -931,19 +964,27 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_
             while (spliced)
             {
                 uint32_t after = at;
-                spliced = at < bytes->length && bytes->bytes[at] == '\\';
+                spliced = at < length && bytes[at] == '\\';
                 after += spliced;
-                while (spliced && after < bytes->length && (bytes->bytes[after] == ' ' || bytes->bytes[after] == '\t'))
+                while (spliced && after < length && (bytes[after] == ' ' || bytes[after] == '\t'))
                 {
                     after += 1;
                 }
-                const uint32_t line = after < bytes->length && bytes->bytes[after] == '\r' ? 1 : 0;
-                spliced &= after + line < bytes->length && bytes->bytes[after + line] == '\n';
+                const uint32_t line = after < length && bytes[after] == '\r' ? 1 : 0;
+                spliced &= after + line < length && bytes[after + line] == '\n';
                 at = spliced ? after + line + 1 : at;
             }
         }
-        location = bytes->base + (at < bytes->length ? at : bytes->length);
+        location = base + (at < length ? at : length);
     }
+    return location;
+}
+
+// pp_diagnose_output_at at a character of the token's spelling, retaining its output origin and publication order.
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_diagnose_output_offset_at(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t offset,
+                                                                                                           uint32_t position, const char* format, ...)
+{
+    const uint32_t location = token < pp->output.count ? pp_spelling_offset_location(pp, pp->output.locations[token], offset) : 0;
     va_list arguments;
     va_start(arguments, format);
     pp_diagnose_output_location(pp, severity, token, location, position, PP_DIAGNOSTIC_SEMANTIC, NULL, 0, format, arguments);

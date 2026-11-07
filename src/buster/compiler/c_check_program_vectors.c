@@ -141,12 +141,12 @@ static X86Instruction check_vector_lower_record(uint32_t form, uint8_t reg, uint
 // target hasn't AVX512-FP16: check_lower_vector_half_chain), a negation of them is clang's in float, which quiets their
 // signaling NaNs: the sign bits flipped, then each half converted to a float and back (VCVTPH2PS and VCVTPS2PH, exact
 // but for those NaNs), the 64-byte vector's in two halves of 32 bytes.
-static const char* check_vector_lower_evex_row(const TypeTable* types, const X86Target* target, bool excess, uint32_t op, TypeId vector, uint8_t scalar_class,
-                                          Tier0Operation* row)
+// The row's element and bytes are `element`'s and `bytes`' (check_vector_lower_evex_row's of a vector type, or a piece's
+// of a transport vector's: check_lower_transport_rows, #137).
+static const char* check_vector_lower_evex_piece(const X86Target* target, bool excess, uint32_t op, CheckVectorElement element, uint64_t bytes,
+                                                 uint8_t scalar_class, Tier0Operation* row)
 {
-    const CheckVectorElement element = check_vector_lower_element(types, vector);
     const bool half = element.floating && element.bytes == 2;
-    const uint64_t bytes = type_size(types, type_unqualified(type_strip_aligned(types, vector)));
     // A vector of 4 or 8 bytes takes the 16-byte forms, in an XMM register whose bytes past it Tier 0 zeroes.
     const uint32_t width = bytes <= 16 ? 0 : bytes == 32 ? 1 : 2;
     const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
@@ -321,7 +321,24 @@ static const char* check_vector_lower_evex_row(const TypeTable* types, const X86
     return reason;
 }
 
+static const char* check_vector_lower_evex_row(const TypeTable* types, const X86Target* target, bool excess, uint32_t op, TypeId vector, uint8_t scalar_class,
+                                               Tier0Operation* row)
+{
+    const uint64_t bytes = type_size(types, type_unqualified(type_strip_aligned(types, vector)));
+    return check_vector_lower_evex_piece(target, excess, op, check_vector_lower_element(types, vector), bytes, scalar_class, row);
+}
+
 #include "c_check_program_vectors_baseline.c"
+
+// The row of an operator on `bytes` bytes of `element`s (check_vector_lower_row's, of a vector type's), whatever type
+// holds them: a piece of a transport vector's (check_lower_transport_rows, #137).
+static const char* check_vector_lower_element_row(const X86Target* target, bool excess, uint32_t op, CheckVectorElement element, uint32_t bytes,
+                                                  uint8_t scalar_class, Tier0Operation* row)
+{
+    const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    return (target->features & evex) == evex ? check_vector_lower_evex_piece(target, excess, op, element, bytes, scalar_class, row) :
+                                             check_vector_lower_baseline_element(target, op, element, bytes, scalar_class, row);
+}
 
 static const char* check_vector_lower_row(const TypeTable* types, const X86Target* target, bool excess, uint32_t op, TypeId vector, uint8_t scalar_class,
                                          Tier0Operation* row)

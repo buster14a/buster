@@ -27,9 +27,13 @@ requirements. [Command index](README.md).
   [--print] [--file IR]` runs hand-written and random 128-bit IR, and Tier 0's
   random 128-bit programs, through the split by both paths, the optimizer and
   both of Tier 1's paths natively, against the IR's interpreter on the unsplit
-  function and the programs' stack machine; and Tier 0's random long double
+  function and the programs' stack machine; Tier 0's random long double
   programs, whose values the CFG consumer keeps in frame objects and computes on
-  the x87 stack (`TIER1_RULE_X87`, #141), natively against their stack machine.
+  the x87 stack (`TIER1_RULE_X87`, #141), natively against their stack machine;
+  and vectors wider than the target's registers (`ir_vector_split.c`, #1624),
+  hand-written IR through the split into 16- and 32-byte pieces by both paths,
+  the interpreter and the optimizer, natively at x86-64's pieces, with its
+  refusals and its scan's two paths (`tier1_wide_vectors_test.c`).
   The convention's rarer aggregate shapes are taken; those of vectors still
   refuse explicitly ([the Tier 1 guide](../../docs/tier1.md)'s list). AVX-512's
   masks (#179) are selected (`kmov`, `kand`, `kor`, `kxor`, `knot`, and loads,
@@ -37,11 +41,13 @@ requirements. [Command index](README.md).
   allocated in the opmask class by the CFG consumer, which moves and spills them
   at their widths and saves them around calls; and vectors (#141), in the vector
   class at their widths, passed and returned by value as aggregates in a vector
-  register whole. Run
+  register whole; at a target without AVX512VL (x86-64-v3), by VEX forms in xmm0 to
+  xmm15, machine rows' roles below 16 too (#1281). Run
   `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit`,
   `test-tier1-pipeline --cross-check` and `test-tier1-masks` (hand-written mask and vector IR
-  natively against the IR's interpreter; Tier 0's mask programs and every `_k*`
-  builtin's row through the IR, SSA and the optimizer to Tier 1's native code) for bounded typed-stream/native
+  natively against the IR's interpreter; Tier 0's mask programs, every `_k*`
+  builtin's row and every comparison into a mask (#1623) through the IR, SSA and
+  the optimizer to Tier 1's native code) for bounded typed-stream/native
   validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
   pipeline's fixtures by Tier 1, Tier 0 and clang `-O0`/`-O2` (bounded kernels,
   not programs; under the 9700X's lock, CPU 2), and `benchmark-tier1-select-source
@@ -88,3 +94,86 @@ requirements. [Command index](README.md).
   one run per build. `correctness.tests` checks its dispatch on every run: an
   incomplete command prints its usage, and one without its inputs fails its
   first build.
+- `measure-tier1-rows --clang PATH [--base COMPILER] [--src DIR] [--lexer
+  FILE]... [--march ARCH] [--rounds N] [--passes N] [--runs N] [--warmups N]
+  [--directory DIR] [--keep] [--uncounted]` (`tier1_rows_measure.c`, #1283)
+  times vector code that machine rows run, by this compiler's Tier 0 and
+  `--tier1`, clang -O2 and, with `--base`, another compiler's `--tier1` (the
+  pull request's base's): `test-checker-driver`'s machine rows' unit (its other
+  unit's rounds, `--rounds` of them), a lexer's byte classes over a 1 MiB
+  C-like text by byte vectors and compares into masks (`--passes` times), and,
+  with `--lexer`, the compiler's own lexer (`--src`'s
+  `buster/compiler/c_lexer_benchmark.c`, linked with a main by clang) running
+  `benchmark-lexer` on those files. Each unit is built by the build's compiler
+  and each main by clang -O2, at `-march` (native by default). Tier 1's builds'
+  `--tier1-report` gives each unit's records, machine rows and the moves around
+  them (`row_moves`; `none` from a compiler before #1283). Every program's output
+  must be the same by every build (the lexer's corpus check and tokens, and its
+  exit status, which says its vector lexer agreed with its scalar one), and the
+  lexer's `c_tokenize` median is printed; then the runs, as
+  `measure-tier1-programs` times its own (`tier1-rows-run` lines), each pair's
+  medians, the counts' table and the medians' table with `--tier1` against Tier
+  0 and the base. The 9700X job runs it under the `tier1_programs` gate, with a
+  pull request's base built in a worktree; `correctness.tests` checks its
+  dispatch on every run.
+
+
+## Integer truth round trips (#1218)
+
+The C driver's Tier 1 path runs `ir_truth_simplify` after wide-integer splitting
+and before optimizer preparation. It rewrites an integer comparison's result,
+possibly copied or sign/zero-extended, tested equal or unequal to zero into the
+original comparison or its integer complement. Copies and extensions of the
+zero operand are recognized too. The bounded walks stop at truncations,
+nonzero constants and other producers; they never complement floating-point
+predicates. The pass changes only comparison operands and predicates in the
+lane-owned IR, before use lists and verified-analysis revisions exist. The
+optimizer then removes dead chains and verifies the resulting SSA. Its
+64-byte opcode/type candidate scan has an exact scalar twin and masked tails.
+
+`tests/driver/tier1_truth.c` is the standalone native regression, also run by
+`tools/ci/correctness.tests`. From the repository root with a built compiler:
+
+```sh
+clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_truth.c -o build/test-driver-tier1-truth && ./build/test-driver-tier1-truth build/compiler "$(command -v clang)"
+```
+
+The supervisor compiles the subject with `--tier1-strict --verify`, by the
+default and scalar host paths. Clang compiles a separate execution oracle.
+All ten integer predicates and their negations, nested and shared truth
+values, truncation, nonzero tests, volatile side effects and unordered floating
+comparisons are checked. GNU `objdump` must find all 21 branch-only functions,
+each with one `cmp`/`test` and no `setcc`; missing functions fail the test.
+Failed commands and execution are fatal, and failure artifacts are retained.
+CI builds the supervisor with its configured sanitizer flags as well.
+
+This regression is not #1218's program-performance acceptance. Folding memory
+operands and changing block layout are separate work; the speedtest1/Lua
+compare-and-branch counts and 9700X runtime evidence remain necessary before
+closing the issue. No runtime improvement is inferred from the peephole alone.
+
+## Address-arithmetic selection regressions
+
+`test-tier1-select` includes `tier1_address_arithmetic_test.c` (#1217) on
+both the scalar and bottom-up paths. It checks every power-of-two multiply
+in 32 and 64 bits (both operand orders and separate/coalesced destinations),
+signed byte/word/dword loads at sign boundaries and a protected page end,
+memory-order and shared-load counterexamples, and full-width pointer-integer
+addition folded into a memory operand. `test-x86-target-selection` also
+reaches these fixtures through the existing memory-plan tests.
+
+The immediate-multiply candidate and both corresponding BURS productions
+have cost 3, versus 2 for a copy and shift and 1 for a 3/5/9 multiply's lea.
+This is a latency-biased selection heuristic, not a measured runtime result
+or an instruction-count bound. Signed loads retain their exact access width
+in the selected pattern's `source_width`; its `width` is the 32- or 64-bit
+result. Their existing single-use, same-block and memory-barrier checks
+remain mandatory. I8-to-I16 sign extensions keep their canonicalization,
+and narrow arithmetic is never widened by the address walk.
+
+These local rules do not establish #1217's corpus-wide acceptance targets.
+Repeated frame/symbol-address rematerialization and table-base hoisting
+still need separate allocation/IR evidence. Record speedtest1/Lua dynamic
+counts and approved-host runtime results in `buster14a/buster-performance`,
+not in this source repository; use `measure-tier1-programs` for the runtime
+comparison described above.

@@ -14,10 +14,334 @@ struct CheckDriverDefaultWarningFixture
     uint32_t errors;
     uint32_t notes;
     bool c23;
+    bool compare_warning_text;
 };
+
+static const char check_driver_format_plain_source[] =
+    "typedef struct _IO_FILE FILE;\n"
+    "int printf(const char*,...);\nint fprintf(FILE*,const char*,...);\n"
+    "int sprintf(char*,const char*,...);\nint snprintf(char*,unsigned long,const char*,...);\n"
+    "void f(FILE*p,char*b){printf(\"%d\",\"str\");fprintf(p,\"%d\",\"str\");"
+    "sprintf(b,\"%d\",\"str\");snprintf(b,16,\"%d\",\"str\");snprintf(b,16,\"%s.mo\\0\",\"x\");}\n";
+
+// The first attribute survives a bare redeclaration; the second is attached after a bare declaration.
+// A non-library name with a different format index keeps its source contract under the same options.
+static const char check_driver_format_attributed_source[] =
+    "int printf(const char*,...)__attribute__((format(printf,1,2)));\nint printf(const char*,...);\n"
+    "int snprintf(char*,unsigned long,const char*,...);\n"
+    "int snprintf(char*,unsigned long,const char*,...)__attribute__((format(printf,3,4)));\n"
+    "int trace(int,const char*,...)__attribute__((format(printf,2,3)));\n"
+    "void f(char*b){printf(\"%d\",\"str\");snprintf(b,16,\"%d\",\"str\");trace(0,\"%d\",\"str\");}\n";
 
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
+    {
+        .name = "first block annotation survives its own later bare declaration",
+        .source = "void declare(void){extern int printf(const char*,...)__attribute__((format(printf,1,2)));"
+                  "extern int printf(const char*,...);}\nint printf(const char*,...);\n"
+                  "void call(void){printf(\"%d\",\"str\");}\n",
+        .options = { "-fno-builtin" },
+        .warnings = 1,
+    },
+    {
+        .name = "first bare block extern does not export a later block annotation",
+        .source = "void declare(void){extern int printf(const char*,...);"
+                  "extern int printf(const char*,...)__attribute__((format(printf,1,2)));"
+                  "extern int printf(const char*,...);}\nint printf(const char*,...);\n"
+                  "void call(void){printf(\"%d\",\"str\");}\n",
+        .options = { "-fno-builtin" },
+    },
+    {
+        .name = "all supported explicit format builtins keep their source argument indexes",
+        .source = "typedef struct _IO_FILE FILE;\nvoid f(FILE*p,char*b){"
+                  "__builtin_printf(\"%d\",\"str\");__builtin_fprintf(p,\"%d\",\"str\");"
+                  "__builtin_sprintf(b,\"%d\",\"str\");__builtin_snprintf(b,16,\"%d\",\"str\");"
+                  "__builtin_snprintf(b,16,\"%s.mo\\0\",\"x\");}\n",
+        .options = { "-ffreestanding", "-fno-builtin" },
+        .warnings = 5,
+    },
+    {
+        .name = "explicit format receipts follow interleaved unrelated intrinsic calls",
+        .source = "void f(const char*s){(void)__builtin_strlen(s);__builtin_printf(\"%d\",\"str\");(void)__builtin_strlen(s);}\n",
+        .options = { "-fno-builtin" },
+        .warnings = 1,
+    },
+    {
+        .name = "first block extern format contract reaches the first file declaration",
+        .source = "void declare(void){extern int printf(const char*,...)__attribute__((format(printf,1,2)));}\n"
+                  "int printf(const char*,...);\nvoid call(void){printf(\"%d\",\"str\");}\n",
+        .options = { "-fno-builtin" },
+        .warnings = 1,
+    },
+    {
+        .name = "later file declaration does not import a nested outer redeclaration annotation",
+        .source = "int printf(const char*,...);\n"
+                  "void declare(void){extern int printf(const char*,...)__attribute__((format(printf,1,2)));}\n"
+                  "int printf(const char*,...);\nvoid call(void){printf(\"%d\",\"str\");}\n",
+        .options = { "-fno-builtin" },
+    },
+    {
+        .name = "middle format annotation survives a final bare declaration",
+        .source = "int printf(const char*,...);\nint printf(const char*,...)__attribute__((format(printf,1,2)));\n"
+                  "int printf(const char*,...);\nvoid f(void){printf(\"%d\",\"str\");}\n",
+        .options = { "-fno-builtin" },
+        .warnings = 1,
+    },
+    {
+        .name = "later format annotation does not change an earlier call",
+        .source = "int report(const char*,...);\nvoid before(void){report(\"%d\",\"str\");}\n"
+                  "int report(const char*,...)__attribute__((format(printf,1,2)));\nint report(const char*,...);\n"
+                  "void after(void){report(\"%d\",\"str\");}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "block format inheritance follows the visible declaration",
+        .source = "int report(const char*,...);\nvoid f(void){{"
+                  "int report(const char*,...)__attribute__((format(printf,1,2)));"
+                  "int report(const char*,...);report(\"%d\",\"str\");}"
+                  "report(\"%d\",\"str\");}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "bare format inheritance preserves unrelated declaration attributes",
+        .source = "int report(const char*,...)__attribute__((format(printf,1,2)));\n"
+                  "int report(const char*,...)__attribute__((noinline));\nvoid f(void){report(\"%d\",\"str\");}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "hosted plain format names retain inferred checks",
+        .source = check_driver_format_plain_source,
+        .warnings = 5,
+    },
+    {
+        .name = "freestanding plain format names have no inferred contract",
+        .source = check_driver_format_plain_source,
+        .options = { "-ffreestanding" },
+    },
+    {
+        .name = "global no builtin disables plain format inference",
+        .source = check_driver_format_plain_source,
+        .options = { "-fno-builtin" },
+    },
+    {
+        .name = "per name exclusions disable all four supported format names",
+        .source = check_driver_format_plain_source,
+        .options = { "-fno-builtin-printf", "-fno-builtin-fprintf", "-fno-builtin-sprintf", "-fno-builtin-snprintf" },
+    },
+    {
+        .name = "printf exclusion preserves the other names",
+        .source = check_driver_format_plain_source,
+        .options = { "-fno-builtin-printf" },
+        .warnings = 4,
+    },
+    {
+        .name = "snprintf exclusion disables its embedded NUL check too",
+        .source = check_driver_format_plain_source,
+        .options = { "-fno-builtin-snprintf" },
+        .warnings = 3,
+    },
+    {
+        .name = "builtin exclusions match the whole name",
+        .source = check_driver_format_plain_source,
+        .options = { "-fno-builtin-print" },
+        .warnings = 5,
+    },
+    {
+        .name = "later builtin option restores plain format inference",
+        .source = check_driver_format_plain_source,
+        .options = { "-fno-builtin", "-fbuiltin" },
+        .warnings = 5,
+    },
+    {
+        .name = "later no builtin option disables plain format inference",
+        .source = check_driver_format_plain_source,
+        .options = { "-fbuiltin", "-fno-builtin" },
+    },
+    {
+        .name = "freestanding preserves explicit and redeclared format contracts",
+        .source = check_driver_format_attributed_source,
+        .options = { "-ffreestanding" },
+        .warnings = 3,
+    },
+    {
+        .name = "global no builtin preserves explicit and redeclared format contracts",
+        .source = check_driver_format_attributed_source,
+        .options = { "-fno-builtin" },
+        .warnings = 3,
+    },
+    {
+        .name = "per name exclusions preserve explicit and redeclared format contracts",
+        .source = check_driver_format_attributed_source,
+        .options = { "-fno-builtin-printf", "-fno-builtin-snprintf" },
+        .warnings = 3,
+    },
+    {
+        .name = "plain dprintf needs an explicit format contract",
+        .source = "int dprintf(int,const char*,...);\nvoid f(void){dprintf(1,\"%d\",\"str\");}\n",
+    },
+    {
+        .name = "attributed dprintf remains checked when builtins are disabled",
+        .source = "int dprintf(int,const char*,...)__attribute__((format(printf,2,3)));\nvoid f(void){dprintf(1,\"%d\",\"str\");}\n",
+        .options = { "-ffreestanding", "-fno-builtin", "-fno-builtin-dprintf" },
+        .warnings = 1,
+    },
+    {
+        .name = "explicit builtin printf remains checked when builtins are disabled",
+        .source = "void f(void){__builtin_printf(\"%d\",\"str\");}\n",
+        .options = { "-ffreestanding", "-fno-builtin", "-fno-builtin-printf" },
+        .warnings = 1,
+    },
+    {
+        .name = "local printf function pointer has no inferred format contract",
+        .source = "void f(void(*printf)(const char*,...)){printf(\"%d\",\"str\");}\n",
+    },
+    {
+        .name = "valid plain format calls retain a quiet twin",
+        .source = "int printf(const char*,...);\nint snprintf(char*,unsigned long,const char*,...);\nvoid f(char*b){printf(\"%d\",7);snprintf(b,16,\"%s.mo\",\"x\");}\n",
+    },
+    {
+        .name = "one parenthesized comparison does not hide the other warning",
+        .source = "int f(int a,int b,int c,int d){return ((a<b) & c<d)+(a==b ^ (c!=d));}\n",
+        .warnings = 2,
+        .notes = 4,
+    },
+    {
+        .name = "parenthesized eager chain leaves outer precedence visible",
+        .source = "int f(int a,int b,int c,int d,int e,int g){return (a<b & c<d) ^ e<g;}\n",
+        .warnings = 1,
+        .notes = 2,
+    },
+    {
+        .name = "constant initializer comparison pairs",
+        .source = "int a=1<2 & 3<4; static int b=1==2 ^ 3!=4; int f(void){return a+b;}\n",
+    },
+    {
+        .name = "constant initializer single comparisons",
+        .source = "int a=1<2 & 3; static int b=1 ^ 2!=3; int f(void){return a+b;}\n",
+        .warnings = 2,
+        .notes = 4,
+    },
+    {
+        .name = "enum comparison pairs",
+        .source = "enum E{A=1<2 & 3<4,B=1==2 ^ 3!=4};int f(void){return A+B;}\n",
+    },
+    {
+        .name = "enum single comparisons",
+        .source = "enum E{A=1<2 & 3,B=1 ^ 2!=3};int f(void){return A+B;}\n",
+        .warnings = 2,
+        .notes = 4,
+    },
+    {
+        .name = "unevaluated comparison pairs",
+        .source = "unsigned long f(int a,int b,int c,int d){return sizeof(a<b & c<d);}\n",
+    },
+    {
+        .name = "unevaluated single comparison",
+        .source = "unsigned long f(int a,int b,int c){return sizeof(a<b & c);}\n",
+        .warnings = 1,
+        .notes = 2,
+    },
+    {
+        .name = "unselected generic comparison pair",
+        .source = "int f(int a,int b,int c,int d){return _Generic(0,int:1,default:a<b ^ c<d);}\n",
+    },
+    {
+        .name = "unselected generic single comparison",
+        .source = "int f(int a,int b,int c){return _Generic(0,int:1,default:a<b ^ c);}\n",
+        .warnings = 1,
+        .notes = 2,
+    },
+    {
+        .name = "two relational operands of each bitwise operator",
+        .source = "int f(int a,int b,int c,int d){return (a<b & c<d)+(a>b | c>d)+(a<=b ^ c>=d);}\n",
+    },
+    {
+        .name = "two equality operands of each bitwise operator",
+        .source = "int f(int a,int b,int c,int d){return (a==b & c!=d)+(a!=b | c==d)+(a==b ^ c!=d);}\n",
+    },
+    {
+        .name = "mixed equality and relational operands",
+        .source = "int f(int a,int b,int c,int d){return (a==b & c<d)+(a>=b | c!=d)+(a!=b ^ c<=d);}\n",
+    },
+    {
+        .name = "eager chains of three comparisons",
+        .source = "int f(int a,int b,int c,int d,int e,int g){return (a<b ^ c<d ^ e<g)+(a==b & c==d & e==g)+(a!=b | c!=d | e!=g);}\n",
+    },
+    {
+        .name = "mixed eager bitwise chains",
+        .source = "int f(int a,int b,int c,int d,int e,int g){return (a<b & c<d ^ e<g)+(a==b ^ c==d | e==g);}\n",
+    },
+    {
+        .name = "bare bitwise operand suppresses comparison precedence",
+        .source = "int f(int a,int b,int c,int d){return (a&b ^ c<d)+(a<b | c^d);}\n",
+    },
+    {
+        .name = "parenthesized comparisons are explicit",
+        .source = "int f(int a,int b,int c,int d){return ((a<b) & (c<d))+((a==b)^c)+(a|(b!=c));}\n",
+    },
+    {
+        .name = "relational left operand still warns once per operator",
+        .source = "int f(int a,int b,int c){return (a<b & c)+(a<=b | c)+(a>b ^ c);}\n",
+        .warnings = 3,
+        .notes = 6,
+    },
+    {
+        .name = "relational right operand still warns once per operator",
+        .source = "int f(int a,int b,int c){return (a & b>=c)+(a | b<c)+(a ^ b<=c);}\n",
+        .warnings = 3,
+        .notes = 6,
+    },
+    {
+        .name = "equality left operand still warns once per operator",
+        .source = "int f(int a,int b,int c){return (a==b & c)+(a!=b | c)+(a==b ^ c);}\n",
+        .warnings = 3,
+        .notes = 6,
+    },
+    {
+        .name = "equality right operand still warns once per operator",
+        .source = "int f(int a,int b,int c){return (a & b!=c)+(a | b==c)+(a ^ b!=c);}\n",
+        .warnings = 3,
+        .notes = 6,
+    },
+    {
+        .name = "parenthesized bitwise operand does not suppress warning",
+        .source = "int f(int a,int b,int c,int d){return ((a&b) ^ c<d)+(a<b | (c^d));}\n",
+        .warnings = 2,
+        .notes = 4,
+    },
+    {
+        .name = "nondecimal literal conversion bit patterns and lossy controls",
+        .source = "#define X 0xe2\n"
+                  "signed char take(signed char x) { return x; }\n"
+                  "signed char small(void) { return (0xff); }\n"
+                  "signed char large(void) { return 0x100; }\n"
+                  "signed char single=0xff, overflow=0x1ff;\n"
+                  "signed char values[8]; short s;\n"
+                  "void f(void) { values[0]=0xe2; values[1]=(0342); values[2]=0b11100010; values[3]=X; s=0xffff; take(0x80); }\n"
+                  "void hex_loss(void) { values[4]=0x100; }\n"
+                  "void dec_loss(void) { values[5]=226; }\n"
+                  "void calc_loss(void) { values[6]=0xe2+0; }\n"
+                  "void unary_loss(void) { values[7]=+0xe2; }\n"
+                  "void short_loss(void) { s=65535; }\n"
+                  "void call_loss(void) { take(0x180); }\n",
+        .warnings = 8,
+        .c23 = true,
+    },
+    {
+        .name = "nondecimal conversion with unsigned plain char",
+        .source = "char c; signed char s; short h; void f(void) { c=0xe2; s=(0Xff); h=0177777; s=0x100; }\n",
+        .options = { "-funsigned-char" },
+        .warnings = 1,
+    },
+    {
+        // Clang points at the cast, while the existing checker points at its literal. Compare the complete
+        // warning text and severity, apart from that independent location discrepancy.
+        .name = "explicit cast does not receive literal exemption",
+        .source = "signed char s; void f(void) { s=(int)0xff; }\n",
+        .options = { "-funsigned-char" },
+        .warnings = 1,
+        .compare_warning_text = true,
+    },
     {
         .name = "nonliteral integer zero pointer conversion",
         .source = "int*p=1-1;\n",
@@ -307,7 +631,8 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
     },
 };
 
-static void check_test_driver_default_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_warning_fixtures(CheckTest* test, const char* clang, const char* executable, const char* directory,
+                                               const CheckDriverDefaultWarningFixture* fixtures, uint32_t fixture_count)
 {
     static const char* const policies[] = { NULL, "-Werror", "-w" };
     static const char* const lanes[] = { "1", "3" };
@@ -318,9 +643,9 @@ static void check_test_driver_default_warnings(CheckTest* test, const char* clan
     {
         snprintf(objects[route], sizeof(objects[route]), "%s/default-warning-%u.o", directory, route);
     }
-    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(check_driver_default_warning_fixtures); f += 1)
+    for (uint32_t f = 0; f < fixture_count; f += 1)
     {
-        const CheckDriverDefaultWarningFixture* fixture = check_driver_default_warning_fixtures + f;
+        const CheckDriverDefaultWarningFixture* fixture = fixtures + f;
         const bool written = parse_test_write(source, fixture->source, strlen(fixture->source));
         check_test_expect(test, written, "original default-warning fixture is written");
         for (uint32_t policy = 0; written && policy < BUSTER_ARRAY_LENGTH(policies); policy += 1)
@@ -369,7 +694,13 @@ static void check_test_driver_default_warnings(CheckTest* test, const char* clan
                         const int status = check_test_driver_spawn(arguments, &actual);
                         snprintf(description, sizeof(description), "%s policy=%u mode=%u lanes=%s %s: complete Clang diagnostics",
                                  fixture->name, policy, mode, lanes[lane], scalar != 0 ? "scalar" : "vector");
-                        check_test_expect(test, status == oracle && actual != NULL && strcmp(actual, expected) == 0, description);
+                        const char* expected_text = fixture->compare_warning_text ? strstr(expected, "warning: ") : NULL;
+                        expected_text = fixture->compare_warning_text && expected_text == NULL ? strstr(expected, "error: ") : expected_text;
+                        const char* actual_text = fixture->compare_warning_text && expected_text != NULL ?
+                                                  strstr(actual != NULL ? actual : "", policy == 1 ? "error: " : "warning: ") : NULL;
+                        const bool diagnostics_match = expected_text != NULL ? actual_text != NULL && strcmp(actual_text, expected_text) == 0 :
+                                                       actual != NULL && strcmp(actual, expected) == 0;
+                        check_test_expect(test, status == oracle && diagnostics_match, description);
                         if (preserve)
                         {
                             FILE* retained = fopen(objects[scalar], "rb");
@@ -413,6 +744,11 @@ static void check_test_driver_default_warnings(CheckTest* test, const char* clan
         }
     }
     unlink(source);
+}
+
+static void check_test_driver_default_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_default_warning_fixtures, BUSTER_ARRAY_LENGTH(check_driver_default_warning_fixtures));
 }
 
 // -flazy-system-headers defers only system-header bodies. A unit with no deferred body must still publish its

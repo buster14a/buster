@@ -8,6 +8,7 @@
 
 #include <errno.h>
 #include <fenv.h>
+#include "host_math.h"
 #include <math.h>
 #include <stdlib.h>
 
@@ -284,26 +285,28 @@ static long double check_literal_half(const char* spelling, char** end)
     if (isfinite(nearest) && nearest != 0)
     {
         // Steps of _Float16's precision at this magnitude: 2^-10 of its binade, and 2^-24 below the normals.
-        const int binade = ilogb(nearest) > -14 ? ilogb(nearest) : -14;
-        const double scaled = ldexp(nearest, 10 - binade);
+        const int binade = host_ilogb(nearest) > -14 ? host_ilogb(nearest) : -14;
+        const double scaled = host_ldexp(nearest, 10 - binade);
         const uint64_t steps = (uint64_t)scaled;
         const double fraction = scaled - (double)steps;
         bool up = fraction > 0.5 || (fraction == 0.5 && (steps & 1) != 0);
         if (fraction == 0.5)
         {
-            const int mode = fegetround();
-            fesetround(FE_DOWNWARD);
+            const int mode = host_fegetround();
+            host_fesetround(FE_DOWNWARD);
             const double below = strtod(spelling, 0);
-            fesetround(FE_UPWARD);
+            host_fesetround(FE_UPWARD);
             const double above = strtod(spelling, 0);
-            fesetround(mode);
+            host_fesetround(mode);
             up = below != nearest ? false : above != nearest ? true : up;
         }
-        result = ldexp((double)(steps + up), binade - 10);
+        result = host_ldexp((double)(steps + up), binade - 10);
         result = result > 65504.0 ? INFINITY : result;
     }
     return result;
 }
+
+#include "c_check_literal_quad.c"
 
 // A number without an imaginary suffix, into `result`, which the caller zeroed.
 static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Arena* scratch, CheckLiteral* result)
@@ -358,10 +361,16 @@ static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Ar
                 type = BUSTER_TYPE_LONG_DOUBLE;
                 written -= 1;
             }
+            else if (written != 0 && (spelling[written - 1] == 'q' || spelling[written - 1] == 'Q'))
+            {
+                type = BUSTER_TYPE_FLOAT128;
+                written -= 1;
+            }
             spelling[written] = 0;
             char* end = spelling;
             errno = 0;
-            long double value;
+            long double value = 0;
+            bool represented = true;
             if (type == BUSTER_TYPE_FLOAT16)
             {
                 value = check_literal_half(spelling, &end);
@@ -374,6 +383,10 @@ static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Ar
             {
                 value = strtod(spelling, &end);
             }
+            else if (type == BUSTER_TYPE_FLOAT128)
+            {
+                represented = check_literal_quad(spelling, &end, &value);
+            }
             else
             {
                 value = strtold(spelling, &end);
@@ -382,7 +395,7 @@ static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Ar
             result->type = type;
             result->floating = value;
             result->real = true;
-            result->valid = separators && end != spelling && end == spelling + written;
+            result->valid = represented && separators && end != spelling && end == spelling + written;
             if (result->valid && isinf(value))
             {
                 result->range = CHECK_LITERAL_RANGE_OVERFLOW;
@@ -428,7 +441,7 @@ static void check_literal_number(const uint8_t* bytes, uint32_t length, Arena* s
             suffix -= 1;
             break;
         }
-        if (c != 'f' && c != 'l' && c != 'u')
+        if (c != 'f' && c != 'l' && c != 'u' && c != 'q')
         {
             break;
         }
@@ -724,46 +737,289 @@ static inline __attribute__((always_inline)) bool check_literal_string_unit(uint
     return valid;
 }
 
-static bool check_literal_string_part(const CheckStringPart* part, CheckStringEncoding encoding, bool c23, uint8_t* output, uint64_t* length)
+// One unit of a part's characters at `*position` (span.begin <= *position < span.end): a character, an escape sequence
+// or, in a raw string literal, a byte, appended to `output` (when not NULL) at `*length`. The scalar loop's body, which
+// check_literal_string_part_scalar runs for every unit and check_literal_string_part for the units its blocks leave.
+static inline __attribute__((always_inline)) bool check_literal_string_step(const CheckStringPart* part, const CheckStringSpan* span, CheckStringEncoding encoding, bool c23, uint32_t* position, uint8_t* output, uint64_t* length)
+{
+    const uint32_t begin = *position;
+    const uint8_t first = part->bytes[begin];
+    uint32_t value = first;
+    bool numeric = false;
+    bool valid;
+    if (span->raw)
+    {
+        const uint32_t delimiter_length = part->length - span->end - 2;
+        const bool closes = first == ')' && span->end - begin >= delimiter_length + 2 &&
+                            memcmp(part->bytes + begin + 1, part->bytes + span->end + 1, delimiter_length) == 0 && part->bytes[begin + delimiter_length + 1] == '"';
+        valid = !closes && first != 0;
+        if (valid && first >= 0x80)
+        {
+            valid = check_literal_character_unit(part->bytes, span->end, position, &value, c23);
+        }
+        else
+        {
+            *position += 1;
+        }
+    }
+    else if (first == '\'')
+    {
+        valid = true;
+        *position += 1;
+    }
+    else
+    {
+        valid = first != '"' && check_literal_character_unit(part->bytes, span->end, position, &value, c23);
+        numeric = first == '\\' && begin + 1 < span->end && (part->bytes[begin + 1] == 'x' || (part->bytes[begin + 1] >= '0' && part->bytes[begin + 1] <= '7'));
+    }
+    if (valid)
+    {
+        valid = check_literal_string_unit(value, numeric, encoding, output, length);
+    }
+    return valid;
+}
+
+// The scalar decoder of one part: the twin and oracle of check_literal_string_part's blocks (--scalar).
+static bool check_literal_string_part_scalar(const CheckStringPart* part, CheckStringEncoding encoding, bool c23, uint8_t* output, uint64_t* length)
 {
     const CheckStringSpan span = check_literal_string_span(part);
     bool valid = span.valid;
     uint32_t position = span.begin;
     while (valid && position < span.end)
     {
-        const uint32_t begin = position;
-        const uint8_t first = part->bytes[position];
-        uint32_t value = first;
-        bool numeric = false;
-        if (span.raw)
+        valid = check_literal_string_step(part, &span, encoding, c23, &position, output, length);
+    }
+    return valid;
+}
+
+#if BUSTER_HOST_VECTOR
+// #1388: a part's characters 64 bytes at a time, for the 1-byte encodings (ordinary and u8) outside raw string literals,
+// where every unit is a byte of its own or a few bytes that decode to one, and every valid UTF-8 character is the bytes
+// it is written with. A block starts at a unit and holds `avail` bytes of the part (masked loads: never past its end).
+// Its masks give each unit's place:
+//
+// - Escape sequences start at the backslashes that open one: in a run of them, the first, the third and so on (the
+//   block's first byte starts a unit). code = (((bs << 1) | odd) - bs) ^ odd, simdjson's escape scan without a carry
+//   in, holds the escaping backslashes and the characters they escape.
+// - Simple escapes (\n, \", \\ and the others) give their table value at the escaped character; \xh and \xhh give their
+//   digits' value at the last digit, and \o, \oo and \ooo theirs at the last digit, the octal value modulo 256 (an
+//   escape whose value is past 255 is a hard unit). Digit values come from a 128-byte table (vpermi2b), and a digit's
+//   predecessors from vpermb.
+// - Every other byte is a unit of its own (or, from 0x80, part of a UTF-8 character, which copies through), unless it
+//   is '"', '\n', '\r' or NUL, which no string literal holds as written.
+//
+// A hard unit is one the masks don't decide: an invalid or UCN escape, a \x of no digit or more than two, an octal
+// value past 255, a byte a literal can't hold, or a UTF-8 character the validation (Keiser and Lemire's three
+// nibble tables, as in simdjson) finds an error at or right after. The block stores the units before the first hard
+// one or, if there is none, the units that start below 60 (every committed unit is at most 4 bytes, so all of its
+// bytes and the one after are in the block) or below its end: the values at the units' kept places, compressed in the
+// register (vpcompressb, 2 uops on Zen 5) and stored under a mask of their count. The next block starts at the next
+// unit. It returns the position where it stopped: the part's end, or a hard unit, which the caller's
+// check_literal_string_step reads as the scalar loop does, so that the bytes and the validity are the scalar loop's.
+static uint32_t check_literal_string_blocks(const uint8_t* bytes, uint32_t position, uint32_t end, uint8_t* output, uint64_t* length)
+{
+    _Alignas(64) static const uint8_t digits[128] = {
+        ['0'] = 0, ['1'] = 1, ['2'] = 2, ['3'] = 3, ['4'] = 4, ['5'] = 5, ['6'] = 6, ['7'] = 7, ['8'] = 8, ['9'] = 9,
+        ['a'] = 10, ['b'] = 11, ['c'] = 12, ['d'] = 13, ['e'] = 14, ['f'] = 15,
+        ['A'] = 10, ['B'] = 11, ['C'] = 12, ['D'] = 13, ['E'] = 14, ['F'] = 15,
+    };
+    _Alignas(64) static const uint8_t digit_flags[128] = {
+        ['0'] = 1, ['1'] = 1, ['2'] = 1, ['3'] = 1, ['4'] = 1, ['5'] = 1, ['6'] = 1, ['7'] = 1, ['8'] = 1, ['9'] = 1,
+        ['a'] = 1, ['b'] = 1, ['c'] = 1, ['d'] = 1, ['e'] = 1, ['f'] = 1,
+        ['A'] = 1, ['B'] = 1, ['C'] = 1, ['D'] = 1, ['E'] = 1, ['F'] = 1,
+    };
+    _Alignas(64) static const uint8_t escapes[128] = {
+        ['a'] = 7, ['b'] = 8, ['e'] = 27, ['f'] = 12, ['n'] = 10, ['r'] = 13, ['t'] = 9, ['v'] = 11,
+        ['\\'] = '\\', ['\''] = '\'', ['"'] = '"', ['?'] = '?',
+    };
+    _Alignas(64) static const uint8_t lanes[64] = {
+        0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+        31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62,
+    };
+    // Keiser and Lemire's tables ("Validating UTF-8 In Less Than One Instruction Per Byte", 2021), as simdjson has them:
+    // the error classes of a byte's high nibble, its low nibble, and the next byte's high nibble.
+    enum
+    {
+        TOO_SHORT = 1 << 0,
+        TOO_LONG = 1 << 1,
+        OVERLONG_3 = 1 << 2,
+        TOO_LARGE = 1 << 3,
+        SURROGATE = 1 << 4,
+        OVERLONG_2 = 1 << 5,
+        TOO_LARGE_1000 = 1 << 6,
+        OVERLONG_4 = 1 << 6,
+        TWO_CONTS = 1 << 7,
+        CARRY = TOO_SHORT | TOO_LONG | TWO_CONTS,
+    };
+    _Alignas(16) static const uint8_t byte_1_high[16] = {
+        TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG,
+        TWO_CONTS, TWO_CONTS, TWO_CONTS, TWO_CONTS,
+        TOO_SHORT | OVERLONG_2,
+        TOO_SHORT,
+        TOO_SHORT | OVERLONG_3 | SURROGATE,
+        TOO_SHORT | TOO_LARGE | TOO_LARGE_1000 | OVERLONG_4,
+    };
+    _Alignas(16) static const uint8_t byte_1_low[16] = {
+        CARRY | OVERLONG_3 | OVERLONG_2 | OVERLONG_4,
+        CARRY | OVERLONG_2,
+        CARRY,
+        CARRY,
+        CARRY | TOO_LARGE,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+        CARRY | TOO_LARGE | TOO_LARGE_1000 | SURROGATE,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+    };
+    _Alignas(16) static const uint8_t byte_2_high[16] = {
+        TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT,
+        TOO_LONG | OVERLONG_2 | TWO_CONTS | OVERLONG_3 | TOO_LARGE_1000 | OVERLONG_4,
+        TOO_LONG | OVERLONG_2 | TWO_CONTS | OVERLONG_3 | TOO_LARGE,
+        TOO_LONG | OVERLONG_2 | TWO_CONTS | SURROGATE | TOO_LARGE,
+        TOO_LONG | OVERLONG_2 | TWO_CONTS | SURROGATE | TOO_LARGE,
+        TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT,
+    };
+    const __m512i digit_low = _mm512_load_si512(digits);
+    const __m512i digit_high = _mm512_load_si512(digits + 64);
+    const __m512i flag_low = _mm512_load_si512(digit_flags);
+    const __m512i flag_high = _mm512_load_si512(digit_flags + 64);
+    const __m512i escape_low = _mm512_load_si512(escapes);
+    const __m512i escape_high = _mm512_load_si512(escapes + 64);
+    const __m512i previous = _mm512_load_si512(lanes);
+    const __m512i nibble = _mm512_set1_epi8(15);
+    const uint64_t odd = 0xAAAAAAAAAAAAAAAAull;
+    uint64_t written = *length;
+    bool more = position < end;
+    while (more)
+    {
+        const uint32_t avail = end - position;
+        const uint64_t live = avail >= 64 ? ~0ull : _bzhi_u64(~0ull, avail);
+        // Inactive lanes are 0: no digit, no escape, the end of the part.
+        const __m512i v = _mm512_maskz_loadu_epi8(live, bytes + position);
+        const uint64_t high = _mm512_movepi8_mask(v);
+        const uint64_t bs = _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('\\'));
+        const uint64_t code = (((bs << 1) | odd) - bs) ^ odd;
+        const uint64_t starts = code & bs;
+        const uint64_t escaped = starts << 1;
+        const __m512i flag = _mm512_permutex2var_epi8(flag_low, v, flag_high);
+        const __m512i digit = _mm512_permutex2var_epi8(digit_low, v, digit_high);
+        const __m512i escape = _mm512_permutex2var_epi8(escape_low, v, escape_high);
+        const uint64_t hex = _mm512_mask_test_epi8_mask(~high, flag, flag);
+        const uint64_t octal = _mm512_mask_cmplt_epu8_mask(hex, digit, _mm512_set1_epi8(8));
+        const uint64_t large = _mm512_mask_cmpge_epu8_mask(octal, digit, _mm512_set1_epi8(4));
+        const uint64_t simple = _mm512_mask_test_epi8_mask(~high, escape, escape);
+        const uint64_t x = escaped & _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('x'));
+        const uint64_t bad = _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('"')) | _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('\n')) |
+                             _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('\r')) | _mm512_mask_testn_epi8_mask(live, v, v);
+        const uint64_t next_hex = hex >> 1;
+        const uint64_t next_octal = octal >> 1;
+        const uint64_t x1 = (x << 1) & hex;
+        const uint64_t x2 = (x1 << 1) & hex;
+        const uint64_t o1 = escaped & octal;
+        const uint64_t o2 = (o1 << 1) & octal;
+        const uint64_t o3 = (o2 << 1) & octal;
+        const uint64_t named = escaped & simple;
+        const uint64_t consumed = escaped | x1 | x2 | o2 | o3;
+        const uint64_t plain = live & ~starts & ~consumed;
+        const uint64_t keep = (plain | named | o3) | (x1 & ~next_hex) | (x2 & ~next_hex) | (o1 & ~next_octal) | (o2 & ~next_octal);
+        // The escapes the masks can't decode, at their backslashes: UCNs and invalid ones, \x with no digit or more
+        // than two, octal values past 255; and the bytes no literal holds as written.
+        uint64_t hard = ((escaped & ~(named | x | o1)) >> 1) | ((x & ~next_hex) >> 1) | ((x2 & next_hex) >> 3) | (((o3 >> 2) & large) >> 1) |
+                        (bad & plain);
+        uint64_t units = starts | plain | 1;
+        if (high != 0)
         {
-            const uint32_t delimiter_length = part->length - span.end - 2;
-            const bool closes = first == ')' && span.end - position >= delimiter_length + 2 &&
-                                memcmp(part->bytes + position + 1, part->bytes + span.end + 1, delimiter_length) == 0 && part->bytes[position + delimiter_length + 1] == '"';
-            valid = !closes && first != 0;
-            if (valid && first >= 0x80)
+            const __m512i previous_1 = _mm512_maskz_permutexvar_epi8(~1ull, previous, v);
+            const __m512i previous_2 = _mm512_maskz_permutexvar_epi8(~1ull, previous, previous_1);
+            const __m512i previous_3 = _mm512_maskz_permutexvar_epi8(~1ull, previous, previous_2);
+            const __m512i high_1 = _mm512_and_si512(_mm512_srli_epi16(previous_1, 4), nibble);
+            const __m512i low_1 = _mm512_and_si512(previous_1, nibble);
+            const __m512i high_2 = _mm512_and_si512(_mm512_srli_epi16(v, 4), nibble);
+            const __m512i classes = _mm512_ternarylogic_epi64(_mm512_shuffle_epi8(_mm512_broadcast_i32x4(_mm_load_si128((const __m128i*)byte_1_high)), high_1),
+                                                              _mm512_shuffle_epi8(_mm512_broadcast_i32x4(_mm_load_si128((const __m128i*)byte_1_low)), low_1),
+                                                              _mm512_shuffle_epi8(_mm512_broadcast_i32x4(_mm_load_si128((const __m128i*)byte_2_high)), high_2), 0x80);
+            const __m512i third = _mm512_subs_epu8(previous_2, _mm512_set1_epi8((char)(0xE0 - 0x80)));
+            const __m512i fourth = _mm512_subs_epu8(previous_3, _mm512_set1_epi8((char)(0xF0 - 0x80)));
+            const __m512i must = _mm512_and_si512(_mm512_or_si512(third, fourth), _mm512_set1_epi8((char)0x80));
+            const uint64_t errors = _mm512_test_epi8_mask(_mm512_xor_si512(classes, must), _mm512_xor_si512(classes, must));
+            // Continuation bytes start no unit; a stray one is an error at itself, which the hard unit before it
+            // reaches.
+            units &= ~_mm512_cmpeq_epi8_mask(_mm512_and_si512(v, _mm512_set1_epi8((char)0xC0)), _mm512_set1_epi8((char)0x80)) | 1;
+            // An error at e belongs to the unit that holds e or ends right before it: the last unit start below e,
+            // or the block's first. Every unit that starts before that one is valid.
+            const uint64_t before = errors != 0 ? (units & _bzhi_u64(~0ull, (uint32_t)_tzcnt_u64(errors))) | 1 : 0;
+            hard |= before != 0 ? 1ull << (63 - _lzcnt_u64(before)) : 0;
+        }
+        const uint32_t window = avail < 64 ? avail : 60;
+        const uint32_t first_hard = hard != 0 ? (uint32_t)_tzcnt_u64(hard) : 64;
+        const uint32_t stop = first_hard < window ? first_hard : window;
+        units |= avail < 64 ? 1ull << avail : 0;
+        const uint32_t advance = stop + (uint32_t)_tzcnt_u64(units >> stop);
+        const uint64_t kept = keep & (advance >= 64 ? ~0ull : _bzhi_u64(~0ull, advance));
+        const uint32_t count = (uint32_t)_mm_popcnt_u64(kept);
+        if (output != NULL)
+        {
+            const __m512i previous_digit = _mm512_maskz_permutexvar_epi8(~1ull, previous, digit);
+            const __m512i second_digit = _mm512_maskz_permutexvar_epi8(~1ull, previous, previous_digit);
+            // Digits are below 16 where they are kept, so each shifted byte's low bits, which the masks clear, are
+            // all that a 16-bit shift brings from its neighbor.
+            const __m512i hex_2 = _mm512_ternarylogic_epi64(_mm512_slli_epi16(previous_digit, 4), _mm512_set1_epi8((char)0xF0), digit, 0xEA);
+            const __m512i octal_2 = _mm512_ternarylogic_epi64(_mm512_slli_epi16(previous_digit, 3), _mm512_set1_epi8((char)0xF8), digit, 0xEA);
+            const __m512i octal_3 = _mm512_ternarylogic_epi64(_mm512_slli_epi16(second_digit, 6), _mm512_set1_epi8((char)0xC0), octal_2, 0xEA);
+            __m512i value = _mm512_mask_mov_epi8(v, named, escape);
+            value = _mm512_mask_mov_epi8(value, x1 | o1, digit);
+            value = _mm512_mask_mov_epi8(value, x2, hex_2);
+            value = _mm512_mask_mov_epi8(value, o2, octal_2);
+            value = _mm512_mask_mov_epi8(value, o3, octal_3);
+            _mm512_mask_storeu_epi8(output + written, _bzhi_u64(~0ull, count), _mm512_maskz_compress_epi8(kept, value));
+        }
+        written += count;
+        position += advance;
+        more = stop == window && avail >= 64;
+    }
+    *length = written;
+    return position;
+}
+#endif
+
+// A part's characters in units (check_literal_string_step), appended to `output` (when not NULL) at `*length`. With a
+// vector host and a 1-byte encoding outside a raw string literal, check_literal_string_blocks reads as many units as
+// it decides at a time, and the scalar step only those it leaves (#1388); --scalar, and every other part, read every
+// unit by the step (check_literal_string_part_scalar).
+static bool check_literal_string_part(const CheckStringPart* part, CheckStringEncoding encoding, bool c23, bool scalar, uint8_t* output, uint64_t* length)
+{
+    bool valid;
+#if BUSTER_HOST_VECTOR
+    const CheckStringSpan span = check_literal_string_span(part);
+    const bool blocks = !scalar && !span.raw && (encoding == CHECK_STRING_ORDINARY || encoding == CHECK_STRING_UTF8);
+    if (blocks)
+    {
+        valid = span.valid;
+        uint32_t position = span.begin;
+        while (valid && position < span.end)
+        {
+            // A string's length can't near UINT64_MAX; the step checks it, as the scalar loop does, where it might.
+            position = *length <= UINT64_MAX - 64 ? check_literal_string_blocks(part->bytes, position, span.end, output, length) : position;
+            if (position < span.end)
             {
-                valid = check_literal_character_unit(part->bytes, span.end, &position, &value, c23);
+                valid = check_literal_string_step(part, &span, encoding, c23, &position, output, length);
             }
-            else
-            {
-                position += 1;
-            }
-        }
-        else if (first == '\'')
-        {
-            position += 1;
-        }
-        else
-        {
-            valid = first != '"' && check_literal_character_unit(part->bytes, span.end, &position, &value, c23);
-            numeric = first == '\\' && begin + 1 < span.end && (part->bytes[begin + 1] == 'x' || (part->bytes[begin + 1] >= '0' && part->bytes[begin + 1] <= '7'));
-        }
-        if (valid)
-        {
-            valid = check_literal_string_unit(value, numeric, encoding, output, length);
         }
     }
+    else
+    {
+        valid = check_literal_string_part_scalar(part, encoding, c23, output, length);
+    }
+#else
+    (void)scalar;
+    valid = check_literal_string_part_scalar(part, encoding, c23, output, length);
+#endif
     return valid;
 }
 
@@ -772,7 +1028,7 @@ static bool check_literal_string_part(const CheckStringPart* part, CheckStringEn
 // allocation, so invalid input or insufficient output capacity leaves the caller's arena unchanged. The caller
 // interns the completed array type and owns first-use string identities; this decoder does no interning. Input
 // slices may reside in the arena's existing used prefix, but must not overlap the storage appended by this call.
-static CheckStringLiteral check_literal_strings(const CheckStringPart* parts, uint32_t count, bool c23, Arena* output)
+static CheckStringLiteral check_literal_strings_by(const CheckStringPart* parts, uint32_t count, bool c23, bool scalar, Arena* output)
 {
     CheckStringLiteral result = { .failed_part = UINT32_MAX };
     CheckStringEncoding encoding = CHECK_STRING_ORDINARY;
@@ -793,7 +1049,7 @@ static CheckStringLiteral check_literal_strings(const CheckStringPart* parts, ui
     uint64_t length = 0;
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
-        valid = check_literal_string_part(&parts[i], encoding, c23, NULL, &length);
+        valid = check_literal_string_part(&parts[i], encoding, c23, scalar, NULL, &length);
         if (!valid)
         {
             result.failed_part = i;
@@ -811,7 +1067,7 @@ static CheckStringLiteral check_literal_strings(const CheckStringPart* parts, ui
             uint64_t written = 0;
             for (uint32_t i = 0; valid && i < count; i += 1)
             {
-                valid = check_literal_string_part(&parts[i], encoding, c23, bytes, &written);
+                valid = check_literal_string_part(&parts[i], encoding, c23, scalar, bytes, &written);
             }
             valid = valid && check_literal_string_unit(0, true, encoding, bytes, &written) && written == length;
             if (valid)
@@ -830,4 +1086,10 @@ static CheckStringLiteral check_literal_strings(const CheckStringPart* parts, ui
         }
     }
     return result;
+}
+
+// check_literal_strings_by with the host's decoder: its blocks on a vector host (#1388).
+static CheckStringLiteral check_literal_strings(const CheckStringPart* parts, uint32_t count, bool c23, Arena* output)
+{
+    return check_literal_strings_by(parts, count, c23, false, output);
 }

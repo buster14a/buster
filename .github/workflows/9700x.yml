@@ -11,7 +11,7 @@ on:
     branches: [main]
   # `full` is the on-demand run of everything on the dispatched branch's head, as before. `backlog` and `snapshot`
   # are the nightly coordinator's (docs/ci.md, "Nightly main measurements"): a first-parent state of main measured
-  # against its first parent, or comprehensively, inside 04:00-07:00 Europe/Madrid unless `override` gives a reason.
+  # against its first parent, or comprehensively, inside 02:00-08:00 Europe/Madrid unless `override` gives a reason.
   workflow_dispatch:
     inputs:
       purpose:
@@ -33,14 +33,12 @@ on:
         type: string
         default: manual
       override:
-        description: 'backlog/snapshot with admit: why to measure outside 04:00-07:00 Europe/Madrid (reported); empty enforces the window'
+        description: 'backlog/snapshot with admit: why to measure outside 02:00-08:00 Europe/Madrid (reported); empty enforces the window'
         type: string
         default: ''
-  # Once a day, the measurements a push to main leaves out (`changes`), until the nightly mode (vars.BUSTER_NIGHTLY
-  # set to `on`) moves them to nightly-backfill.yml's comprehensive snapshot run: the `evidence` job then retires this
-  # schedule's runs, which run nothing.
-  schedule:
-    - cron: '23 7 * * *'
+  # No schedule: the daily `23 7 * * *` run is removed (the owner's choice on 2026-11-05). nightly-backfill.yml's
+  # comprehensive snapshot run is the daily run now, every hosted row, the fuzz campaigns and the full measurements;
+  # the `schedule` handling below stays for a run GitHub may still deliver, which the nightly mode retires.
   # Every pull request runs the workflow, since its job is a required check: a pull request that changes only
   # documentation gets the job skipped by `changes`, which counts as passed, rather than no check at all, which blocks
   # the merge.
@@ -169,7 +167,7 @@ jobs:
   # correctness, which its hosted rows cover and which runs after the merge (#1272). A push: admitted, its own native
   # correctness and measurements on the landed commit. A nightly
   # dispatch: that its commit is on the pinned snapshot's first-parent history (else it fails, and nothing runs), the
-  # plain hosted rows of the commit's own earlier run, and the 04:00-07:00 Europe/Madrid window. Missing, ambiguous or
+  # plain hosted rows of the commit's own earlier run, and the 02:00-08:00 Europe/Madrid window. Missing, ambiguous or
   # mismatched evidence runs the work; an API failure is missing evidence. Read-only API access.
   evidence:
     name: Reuse evidence and hardware admission
@@ -189,7 +187,7 @@ jobs:
       hardware: ${{ steps.decide.outputs.hardware }}
       hardware_reason: ${{ steps.decide.outputs.hardware_reason }}
       retired: ${{ steps.decide.outputs.retired }}
-      # A nightly dispatch's window as instants (the cycle's 04:00 and 07:00 Europe/Madrid), and whether an override
+      # A nightly dispatch's window as instants (the cycle's 02:00 and 08:00 Europe/Madrid), and whether an override
       # admits it anyway: the 9700X job compares them with its clock before any setup.
       window_start: ${{ steps.decide.outputs.window_start }}
       window_deadline: ${{ steps.decide.outputs.window_deadline }}
@@ -487,6 +485,23 @@ jobs:
               find "$oracle" -mindepth 1 -type d -empty -delete
           fi
 
+      - name: Preserve failed source SSA comparison inputs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ssa-source-${{ matrix.host_arch }}-${{ matrix.sanitizer }}-O${{ matrix.optimization }}-shard${{ matrix.shard }}-${{ github.run_attempt }}
+          path: |
+            /tmp/ssa-source-*/**/*.c
+            /tmp/ssa-source-*/**/*.log
+            /tmp/ssa-source-*/**/*.out
+            /tmp/ssa-source-*/**/output
+            ${{ runner.temp }}/ssa-source-*/**/*.c
+            ${{ runner.temp }}/ssa-source-*/**/*.log
+            ${{ runner.temp }}/ssa-source-*/**/*.out
+            ${{ runner.temp }}/ssa-source-*/**/output
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Compile main.c alone under TSan or MSan
         # The parallel list's main.c -c heading leaves its three compiles to this step under TSan and MSan: they peak
         # at 10.2 GiB and 6.6 GiB, too much beside the suite but within the runner alone. docs/ci.md records the
@@ -700,7 +715,7 @@ jobs:
         # The runner's hook took the shared lock before this job's first step, and a nightly run admitted while queued
         # may have waited past its window for it: right after the host's own check, before the host identity's package
         # queries and hashing and before any setup, the job's whole bound (its timeout and 5 minutes to clean up) must
-        # still end by 07:00 Europe/Madrid, the evidence job's instants for the cycle, unless the dispatch gave an
+        # still end by 08:00 Europe/Madrid, the evidence job's instants for the cycle, unless the dispatch gave an
         # override's reason. A refusal fails the job here, having done nothing else, which the record reads as a
         # deferral, not a failure; the job's timeout bounds the rest.
         id: window
@@ -1495,7 +1510,8 @@ jobs:
         # #1050's measure: sqlite3.c's -c by the base and by this tree, each over four placements of its checker unit
         # (./build.sh shifts) from two fresh copies apiece, with the base's executables again as the comparison's floor
         # (main-again); then each build's stages, counters (with store-to-load forwarding's failures) and checker
-        # functions' samples. The objects must be the same bytes.
+        # functions' samples. Where this tree changes what -c writes (the lowering's code, #1376), the step says so and
+        # gives both objects' sizes, and the comparison includes that work.
         if: github.event_name == 'pull_request' && needs.changes.outputs.checker != 'false'
         timeout-minutes: 6
         env:
@@ -1522,7 +1538,10 @@ jobs:
           taskset -c 0-7 ./build.sh shifts --config Release "$ab/head" main_unit_checker.c "${shifts[@]}"
           "$ab/main/compiler-0" "${options[@]}" -o "$ab/main.o"
           "$ab/head/compiler-0" "${options[@]}" -o "$ab/head.o"
-          cmp "$ab/main.o" "$ab/head.o"
+          if ! cmp -s "$ab/main.o" "$ab/head.o"; then
+              echo "== the objects differ: this tree changes sqlite3.c's code"
+              size "$ab/main.o" "$ab/head.o"
+          fi
           builds=()
           for build in main:main head:head main-again:main; do
               for shift in "${shifts[@]}"; do
@@ -1927,11 +1946,11 @@ jobs:
           # SQLite 3.53.2's test/speedtest1.c (#136's) and Lua 5.4.8's release, by their hashes.
           inputs="$RUNNER_TEMP/tier1-programs"
           mkdir -p "$inputs"
-          curl --fail --location --retry 3 --output "$inputs/speedtest1.c" \
-            https://raw.githubusercontent.com/sqlite/sqlite/ccc132c5be20ab5c755c97a08d06b1b592fef330/test/speedtest1.c
-          curl --fail --location --retry 3 --output "$inputs/lua-5.4.8.tar.gz" https://www.lua.org/ftp/lua-5.4.8.tar.gz
-          printf '%s  %s\n' b5eaf4bbcbb320fd8eb3f3e6c4cd5f51a64dd0cd70efe969634d1785e3419675 "$inputs/speedtest1.c" \
-            4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae "$inputs/lua-5.4.8.tar.gz" | sha256sum --check
+          bash tools/ci/cached-download.sh \
+            https://raw.githubusercontent.com/sqlite/sqlite/ccc132c5be20ab5c755c97a08d06b1b592fef330/test/speedtest1.c \
+            b5eaf4bbcbb320fd8eb3f3e6c4cd5f51a64dd0cd70efe969634d1785e3419675 "$inputs/speedtest1.c"
+          bash tools/ci/cached-download.sh https://www.lua.org/ftp/lua-5.4.8.tar.gz \
+            4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae "$inputs/lua-5.4.8.tar.gz"
           tar -xzf "$inputs/lua-5.4.8.tar.gz" -C "$inputs"
           # tcc as measure-compile's step pins it.
           tcc="$(command -v tcc)"
@@ -1940,6 +1959,39 @@ jobs:
           clang --version | head -1
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler measure-tier1-programs --runs 11 --clang clang --tcc "$tcc" --sqlite "$sqlite" --speedtest "$inputs" --lua "$inputs/lua-5.4.8/src" --scripts "$scripts" --directory /tmp
+
+      - name: Time vector code by both tiers and the base's Tier 1, with the moves around Tier 1's machine rows
+        # #1283: test-checker-driver's machine rows' unit, a lexer's byte scan and the compiler's own lexer (on
+        # c_lexer.c), each built by this compiler's Tier 0 and --tier1, clang -O2 and, on a pull request, its base's
+        # --tier1, with each Tier 1 build's records, machine rows and moves around them. Their outputs must agree; then
+        # every build runs every program in each of 11 rounds, in an order that rotates by round, as whole processes on
+        # one CPU with their user cycles and instructions (measure-tier1-rows). Where `changes` doesn't rule it out (Tier
+        # 1's input and pipeline and the measurement: `tier1_programs`), and on the daily and dispatched runs.
+        if: needs.changes.outputs.tier1_programs != 'false'
+        timeout-minutes: 6
+        env:
+          AB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          base=()
+          if [ -n "$AB_BASE_SHA" ]; then
+              [[ "$AB_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+              ab="$RUNNER_TEMP/tier1-rows-ab"
+              rm -rf "$ab"
+              mkdir -p "$ab"
+              # The shallow checkout may lack the base: fetch that public commit alone, without credentials, into a
+              # worktree of its own, which leaves this checkout as it is.
+              if ! git cat-file -e "${AB_BASE_SHA}^{commit}" 2>/dev/null; then
+                  GIT_TERMINAL_PROMPT=0 timeout 60s git -c credential.helper= -c http.extraHeader= fetch \
+                      --no-tags --no-recurse-submodules --depth=1 https://github.com/buster14a/buster.git "$AB_BASE_SHA"
+              fi
+              git worktree add --detach "$ab/base" "$AB_BASE_SHA"
+              trap 'git worktree remove --force "$ab/base"' EXIT
+              (cd "$ab/base" && taskset -c 0-7 ./build.sh --config Release)
+              base=(--base "$ab/base/build/compiler")
+          fi
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler measure-tier1-rows --runs 11 --clang clang "${base[@]}" --march znver5 --lexer src/buster/compiler/c_lexer.c --directory /tmp
 
       - name: Time the direct forms against their helpers by both tiers
         # #1059's paired measurements: the primitives' kernels (reference counts, a spin lock, a sequence lock, flags, a
@@ -2069,6 +2121,9 @@ jobs:
           persist-credentials: false
       - name: Exercise Git hooks in isolated repositories
         run: sh .githooks/test-sign-off.sh
+      # The sessions' tailnet hook may stop a daemon: its fixtures check which ones, with stand-ins for the daemon.
+      - name: Exercise the tailnet session hook with stand-in daemons
+        run: bash .claude/hooks/test-join-tailnet.sh
 
   dco-audit:
     # Informational: the pull request's own commits' sign-off trailers, pinned to its head, in the job summary
@@ -2102,13 +2157,15 @@ jobs:
     # Preserve the existing required context: both hosted variants and the gated
     # 9700X job must pass on the same revision. On a ready pull request that job
     # measures without its native correctness step (#1272), and the context
-    # says so; on a push to main and on the daily and dispatched runs it runs
-    # native correctness before the measurements. A nightly dispatch reports
-    # through its coverage record instead, and a retired scheduled run (the
-    # nightly mode's) runs nothing, so neither has this context.
+    # says so; on the daily and dispatched runs, and on a push to main before
+    # the nightly mode, it runs native correctness before the measurements. A
+    # nightly dispatch reports through its coverage record instead; a retired
+    # scheduled run (the nightly mode's) runs nothing; and a push in the
+    # nightly mode defers its 9700X work to the window. None of the three has
+    # this context, so none can show a 9700X qualification that didn't run.
     name: Build and execute on Ryzen 7 9700X
     needs: [changes, evidence, agent-guide-size, dco-hooks, test, fuzz, benchmarks]
-    if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) }}
+    if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:

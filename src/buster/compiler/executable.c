@@ -283,7 +283,9 @@ typedef enum ExecutableSection
     EXECUTABLE_SECTION_COUNT,
 } ExecutableSection;
 
-#define BUSTER_EXECUTABLE_DEBUG_SECTIONS 5
+#include "native_debug.h"
+
+#define BUSTER_EXECUTABLE_DEBUG_SECTIONS BUSTER_NATIVE_DEBUG_SECTIONS
 // The DWARF sections, debug.c's five and the others, EXECUTABLE_SECTION_DEBUG_INFO onwards in that order: an
 // ExecutableDebugSections's kinds.
 #define BUSTER_EXECUTABLE_DEBUG_KINDS (EXECUTABLE_SECTION_SYMTAB - EXECUTABLE_SECTION_DEBUG_INFO)
@@ -302,6 +304,7 @@ typedef struct ExecutableDebug ExecutableDebug;
 struct ExecutableDebug
 {
     String8 sections[BUSTER_EXECUTABLE_DEBUG_SECTIONS];
+    NativeDebugExtra extra;
     const SymbolId* functions;
     const uint32_t* line_addresses;
     uint32_t function_count;
@@ -3454,9 +3457,9 @@ static bool executable_is_tls(const Link* link, SymbolId symbol)
 }
 
 // The names the linker defines (BUSTER_LINK_SOURCE_LINKER), each one's image offset in `values` (by its index here),
-// as GNU ld and lld define them: the init and fini arrays' bounds and the GOT's _GLOBAL_OFFSET_TABLE_ (step 4's
+// as GNU ld defines them: the init and fini arrays' bounds and the GOT's _GLOBAL_OFFSET_TABLE_ (step 4's
 // executables have them, and a dynamic PIE); .dynamic's address (_DYNAMIC), which binding gives the PIEs; and, which
-// binding gives a static executable with the C runtime and a static PIE (runtime_linker_names), the ELF header's
+// binding gives every executable with the C runtime (runtime_linker_names), including a dynamic PIE, the ELF header's
 // address and the image's start, the preinit array's bounds (where .init_array starts: there is no .preinit_array), the
 // text's end (the RX segment's), the end of the sections with bytes in the file (lld's _edata) and .bss's start, and
 // the image's end; and a static executable alone, .rela.iplt's IRELATIVE relocations' bounds.
@@ -7273,7 +7276,8 @@ static bool executable_debug_valid(const Link* link, const ExecutableDebug* debu
     {
         for (uint32_t section = 0; section < BUSTER_EXECUTABLE_DEBUG_SECTIONS; section += 1)
         {
-            valid &= debug->sections[section].pointer != 0 && debug->sections[section].length != 0 && debug->sections[section].length < 0xfffffff0u;
+            valid &= (section >= BUSTER_NATIVE_DEBUG_CORE_SECTIONS && debug->sections[section].length == 0) ||
+                     (debug->sections[section].pointer != 0 && debug->sections[section].length != 0 && debug->sections[section].length < 0xfffffff0u);
         }
         const uint32_t units = debug->unit_count != 0 ? debug->unit_count : 1;
         valid &= (debug->function_count == 0 || (debug->functions != 0 && debug->line_addresses != 0)) && (debug->unit_count == 0 || debug->unit_functions != 0);
@@ -7296,6 +7300,15 @@ static bool executable_debug_valid(const Link* link, const ExecutableDebug* debu
             addr += 8 + 8 * count;
         }
         valid &= functions == debug->function_count && addr == addresses.length;
+        valid = valid && native_debug_extra_valid(debug->sections, &debug->extra);
+        for (uint32_t a = 0; valid && a < debug->extra.address_count; a += 1)
+        {
+            const NativeDebugAddress address = debug->extra.addresses[a];
+            valid = address.symbol < link->symbols.count;
+            const AtomId atom = valid ? link->symbols.atom[address.symbol] : 0;
+            valid = valid && atom != 0 && atom < link->atoms.count && (link->symbols.flags[address.symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_OBJECT &&
+                    link->symbols.value[address.symbol] <= link->atoms.size[atom] && address.addend <= link->atoms.size[atom] - link->symbols.value[address.symbol];
+        }
         uint64_t previous_end = 0;
         uint64_t names = 1;
         for (uint32_t function = 0; valid && function < debug->function_count; function += 1)
@@ -7626,11 +7639,25 @@ static void executable_debug_relocations(const Link* link, const ExecutableShare
 // Lane 0 after placement: copy caller bytes before patching, preserving them for another output or another layout.
 // .debug_addr and line sequence addresses are the only final-address operands in these bounded contributions: each
 // unit's addresses after its .debug_addr contribution's header, its functions' from where the units before it end.
+static uint32_t executable_native_debug_section(uint32_t section)
+{
+    return section == BUSTER_NATIVE_DEBUG_LOCLISTS ? EXECUTABLE_SECTION_DEBUG_LOCLISTS : EXECUTABLE_SECTION_DEBUG_INFO + section;
+}
+
 static void executable_debug_sections(const Link* link, const ExecutableLayout* layout, ExecutableShared* shared, const ExecutableDebug* debug)
 {
     for (uint32_t section = 0; section < BUSTER_EXECUTABLE_DEBUG_SECTIONS; section += 1)
     {
-        memcpy(shared->section_bytes[EXECUTABLE_SECTION_DEBUG_INFO + section], debug->sections[section].pointer, debug->sections[section].length);
+        if (debug->sections[section].length != 0)
+        {
+            memcpy(shared->section_bytes[executable_native_debug_section(section)], debug->sections[section].pointer, debug->sections[section].length);
+        }
+    }
+    for (uint32_t a = 0; a < debug->extra.address_count; a += 1)
+    {
+        const NativeDebugAddress entry = debug->extra.addresses[a];
+        const uint64_t value = layout->base + link->atoms.address[link->symbols.atom[entry.symbol]] + link->symbols.value[entry.symbol] + entry.addend;
+        memcpy(shared->section_bytes[EXECUTABLE_SECTION_DEBUG_INFO] + entry.offset, &value, 8);
     }
     uint8_t* addr = shared->section_bytes[EXECUTABLE_SECTION_DEBUG_ADDR];
     uint8_t* line = shared->section_bytes[EXECUTABLE_SECTION_DEBUG_LINE];
@@ -7844,7 +7871,7 @@ BUSTER_LINKER_ENTRY bool executable_write(Link* link, const ExecutableOptions* o
     totals.linker_bytes[EXECUTABLE_SECTION_EH_FRAME_HDR] = unwind ? BUSTER_EXECUTABLE_EH_FRAME_HDR_BYTES + 8 * fdes : 0;
     for (uint32_t section = 0; ok && options->debug != 0 && section < BUSTER_EXECUTABLE_DEBUG_SECTIONS; section += 1)
     {
-        totals.linker_bytes[EXECUTABLE_SECTION_DEBUG_INFO + section] = options->debug->sections[section].length;
+        totals.linker_bytes[executable_native_debug_section(section)] = options->debug->sections[section].length;
     }
     for (uint32_t kind = 0; ok && options->debug_sections != 0 && kind < BUSTER_EXECUTABLE_DEBUG_KINDS; kind += 1)
     {

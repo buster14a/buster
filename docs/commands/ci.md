@@ -33,6 +33,9 @@ take about 4 to 5. The steps a row needs once (the baseline fallback, QEMU and
 arena checks, the parser smoke test, the performance readers and the TSan/MSan
 `main.c` compiles) run in its shard 1. Refresh the costs from a hosted run's
 report when the shards' times drift apart ([the runner guide](parallel.md)).
+The repository syntax check retains each build's sanitizer feature flags and
+predefines, while excluding its exact host-only detector and frame controls
+(#1423). The compiler executing the check remains instrumented.
 On pushes to main and the daily and dispatched runs (not on pull requests, which
 they would hold up for over an hour), each host architecture also runs the
 inventory under `BUSTER_SANITIZER=address|undefined|thread|memory`, but the
@@ -136,7 +139,9 @@ there at a time, so everything takes one lock:
   - the checker's functions' samples;
   - the forwarding failures by function.
 
-  The objects must be the same bytes. It takes about 90 s
+  Where the tree changes what `-c` writes (the lowering's code), the step says
+  so and gives both objects' sizes, and the comparison includes that work
+  (#1376). It takes about 90 s
   (`docs/c-checker.md`, "The per-node machinery").
 - The `changes` job's selector is `tools/ci/changes.c`, with those tables:
   the job builds it with the hosted runner's `cc`, then `--self-test` checks it
@@ -182,7 +187,7 @@ the policy. In short:
   from its pull request, whose 9700X job skips native correctness (#1272).
   A nightly dispatch's `evidence` job checks that the commit is a first-parent state of
   main, may reuse the commit's own earlier plain hosted rows, and enforces
-  04:00-07:00 Europe/Madrid. The 9700X job checks the window again after it
+  02:00-08:00 Europe/Madrid. The 9700X job checks the window again after it
   takes the lock, right after the host's OS and CPU-model check. That is
   before the host identity's package queries and hashing, and before any
   setup.
@@ -191,15 +196,34 @@ the policy. In short:
   records into its ledger. It pins the cycle's snapshot, prepares hosted
   qualifications before the window, and dispatches `9700x.yml` on
   `nightly/SHA` branches with `purpose` `backlog` or `snapshot`. It runs one
-  9700X run at a time, and only work that fits before 07:00, unless a manual
+  9700X run at a time, and only work that fits before 08:00, unless a manual
   `mode: run` gives an `override` reason. The snapshot's comprehensive run is
   required every cycle. States start at the epoch (the merge that added
   `tools/ci/nightly.c`); earlier ones predate the worker and are reported as
-  out of scope.
+  out of scope. A state whose branch GitHub refuses to create is skipped for
+  the rest of the job and reported (docs/ci.md, "Refused branches").
+- The coordinator reads each state's immutable `nightly.c` window declarations
+  with `nightly worker-window`, cached by source blob and rebuilt for every
+  job. Historical 04:00-07:00 workers run only in that interval; later
+  02:00-08:00 workers can use the added hours. The planner skips temporarily
+  ineligible workers, waits for future openings when needed, and reserves a
+  waiting snapshot's own deadline. Unknown declarations are reported and stay
+  pending. Every admission must fit both the worker and current windows; the
+  worker's own lock-time check still applies.
+- The planner's optional `--pending FILE` is the coordinator's ephemeral
+  dispatch handoff, not a dispatch history. After validating every input and
+  option, `plan` atomically compacts it to requests not yet visible in the run
+  facts and still within the 600-second API visibility grace. The 64-request
+  limit applies to that active set; expired or observed requests do not end
+  a long night's work. Malformed input or too many active requests fails
+  without replacing the file. This local housekeeping also occurs in dry-run
+  mode; it never dispatches anything.
 - `vars.BUSTER_NIGHTLY` set to `on` is the switch. Before it, the coordinator
-  only harvests, plans and reports; pushes and the daily `23 7 * * *` run work
-  as before. With it, pushes measure targeted, the coordinator dispatches, and
-  the old daily run retires.
+  only harvests, plans and reports, and pushes work as before. With it, pushes
+  run hosted rows alone and keep off the 9700X, and the coordinator measures
+  each state (native correctness, then its targeted measurements) in the
+  02:00-08:00 window. `9700x.yml` has no daily schedule since 2026-11-05: the
+  snapshot's comprehensive run is the daily run.
 - Tests: `bash tests/ci/nightly.sh` (the self-test, also under ASan and UBSan,
   and the glue against a fake `gh` and a merge history) and
   `bash tests/ci/caches.sh` (the 9700X's caches). Pull requests run both in
@@ -209,8 +233,8 @@ the policy. In short:
 
 ## Queue and execution timing
 
-The hosted-only `CI latency report` workflow runs at 07:07 Europe/Madrid and on
-manual dispatch. It samples the latest 100 main CI workflow runs and reports the
+The hosted-only `CI latency report` workflow runs at 08:37 Europe/Madrid, after
+the nightly window, and on manual dispatch. It samples the latest 100 main CI workflow runs and reports the
 median and nearest-rank p95 separately for PR, main-push, nightly targeted and
 full (daily, dispatched, snapshot) runs, a nightly backlog run told apart by its
 run name. Besides queue and execution, it reports the host's occupation, from

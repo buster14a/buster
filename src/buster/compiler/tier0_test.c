@@ -716,7 +716,8 @@ static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
     bool same = a->error == b->error && a->count == b->count && a->branch_count == b->branch_count && a->reference_count == b->reference_count &&
                 a->deferred == b->deferred && a->label_count == b->label_count && a->deep == b->deep && a->entry_count == b->entry_count &&
                 (a->entry_records == 0) == (b->entry_records == 0) && a->frame_saved == b->frame_saved && a->frame_size == b->frame_size &&
-                a->frame_pointer == b->frame_pointer && a->frame_alignment_log2 == b->frame_alignment_log2 && a->frame_base == b->frame_base;
+                a->frame_pointer == b->frame_pointer && a->frame_alignment_log2 == b->frame_alignment_log2 && a->frame_base == b->frame_base &&
+                a->frame_probe == b->frame_probe && a->frame_moves == b->frame_moves;
     same = same && (a->error != TIER0_OK || a->entry_records == 0 || memcmp(a->entry_records, b->entry_records, ((uint64_t)a->entry_count + 1) * sizeof(uint32_t)) == 0);
     same = same && (a->count == 0 || memcmp(a->records, b->records, a->count * sizeof(X86Instruction)) == 0);
     same = same && (a->branch_count == 0 || memcmp(a->branches, b->branches, a->branch_count * sizeof(uint32_t)) == 0);
@@ -988,6 +989,14 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         result = result && tier0_test_expect(tally, scalar.error == TIER0_OK, "compile", "seed %" PRIu64 " function %u: error %d at entry %u", seed, f, scalar.error,
                                              scalar.node);
         result = result && tier0_test_expect(tally, tier0_test_same_code(&scalar, &vector), "twins", "seed %" PRIu64 " function %u: the paths differ", seed, f);
+        // A frame pointer the options keep (#177): every function's, or with the leaf rule every one's that calls.
+        bool calls = false;
+        for (uint32_t i = 0; i < function->count; i += 1)
+        {
+            calls |= function->kinds[i] == BUSTER_TYPED_CALL;
+        }
+        const bool kept = function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_ALL || (function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_NON_LEAF && calls);
+        result = result && tier0_test_expect(tally, !kept || scalar.frame_pointer, "frame pointer", "seed %" PRIu64 " function %u: the frame pointer the options keep is missing", seed, f);
         result = result && tier0_test_expect(tally, plain.error == TIER0_OK && plain.entry_records == 0 && plain.entry_count == 0 && plain.count == vector.count &&
                                                     memcmp(plain.records, vector.records, (uint64_t)plain.count * sizeof(X86Instruction)) == 0,
                                              "entries", "seed %" PRIu64 " function %u: a compile without the entries' first records differs or makes them", seed, f);
@@ -1314,6 +1323,18 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             ok = tier0_test_expect(tally, ok, "programs", "seed %" PRIu64 ": the generator ran out of room", program_seed);
             ok = ok && tier0_test_expect(tally, tier0_program_functions(program, tables, &arena, functions), "programs", "seed %" PRIu64 ": no room for the signatures",
                                          program_seed);
+            // A quarter of the programs keep a frame pointer in every function, and a quarter in every one that calls
+            // (#177: -fno-omit-frame-pointer, and -momit-leaf-frame-pointer's leaf rule), run against the same oracle.
+            const uint8_t frame_pointer = program_seed % 4 == 2 ? BUSTER_TIER0_FRAME_POINTER_ALL : program_seed % 4 == 3 ? BUSTER_TIER0_FRAME_POINTER_NON_LEAF : BUSTER_TIER0_FRAME_POINTER_NONE;
+            // Half the programs, in each of those quarters, probe their frames and allocations (#177,
+            // -fstack-clash-protection): ALLOCA's loop runs natively against the same oracle, and its branches and the
+            // prologue's are both paths' twins.
+            const bool probe_stack = (program_seed / 4) % 2 == 1;
+            for (uint32_t f = 0; ok && f < functions->count; f += 1)
+            {
+                functions->functions[f].frame_pointer = frame_pointer;
+                functions->functions[f].probe_stack = probe_stack;
+            }
             code->records = 0;
             code->entries = 0;
             code->deferred = 0;
@@ -2212,25 +2233,23 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
             function.count = 3;
             break;
         case 7:
-            local_sizes[0] = BUSTER_TIER0_MAX_OBJECT_BYTES / 2;
-            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES / 2 + 1;
+            local_sizes[0] = (BUSTER_TIER0_MAX_OBJECT_BYTES / 2) & ~15u;
+            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES - local_sizes[0] + 1;
             break;
         case 8:
-            local_sizes[0] = BUSTER_TIER0_MAX_OBJECT_BYTES / 2;
-            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES / 2;
+            local_sizes[0] = (BUSTER_TIER0_MAX_OBJECT_BYTES / 2) & ~15u;
+            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES - local_sizes[0];
             break;
         case 9:
-            // Its size rounded up to 16, and its alignment less 16: the limit, exactly. (Not compiled: its frame is 1 GB.)
+            // Its rounded size and alignment slack plus the second object reach the limit. Do not execute it.
             local_sizes[0] = 16;
             local_alignments[0] = BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2;
-            local_sizes[1] = 0;
-            function.local_count = 1;
+            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES - (1u << BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2);
             break;
         case 10:
             local_sizes[0] = 17;
             local_alignments[0] = BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2;
-            local_sizes[1] = 0;
-            function.local_count = 1;
+            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES - (1u << BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2);
             break;
         default:
             break;
@@ -4972,7 +4991,7 @@ struct Tier0TestBreak
     const char* rule;
 };
 
-#define BUSTER_TIER0_TEST_METADATA "invalid incoming variadic metadata, address-only local role, call or parameter location, or aggregate metadata"
+#define BUSTER_TIER0_TEST_METADATA "invalid incoming variadic metadata, address-only local role, call or parameter location, aggregate metadata or preserved registers"
 
 static const Tier0TestBreak tier0_test_breaks[] = {
     { "an aggregate past the most bytes", 2, false, BUSTER_TIER0_TEST_METADATA },
@@ -5045,6 +5064,13 @@ static const Tier0TestBreak tier0_test_breaks[] = {
     { "a split vector of 24-byte parts", 14, true, BUSTER_TIER0_TEST_METADATA },
     { "a call's split vector with HIGH", 14, false, BUSTER_TIER0_TEST_METADATA },
     { "a call's split vector object too small for its registers", 15, false, BUSTER_TIER0_TEST_METADATA },
+    // A preserving frame's registers (#147, Tier0Function.preserve_general and the rest): caller-saved general ones, whole
+    // vector registers of a width their count allows, the masks' widths, and no eh_return.
+    { "a callee-saved register preserved", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "vector registers preserved 8 bytes each", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "32 vector registers preserved 32 bytes each", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "mask registers preserved 4 bytes each", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "a preserving frame with __builtin_eh_return", 3, true, BUSTER_TIER0_TEST_METADATA },
 };
 
 // Applies break `b` to a caller or a function built from its fixture.
@@ -5298,6 +5324,24 @@ static void tier0_test_aggregate_break(uint32_t b, Tier0TestCaller* caller, Tier
             break;
         case 66:
             caller->local_sizes[0] = 48;
+            break;
+        case 67:
+            callee->function.preserve_general = 1u << X86_REGISTER_RBX;
+            break;
+        case 68:
+            callee->function.preserve_vectors = 16;
+            callee->function.preserve_vector_bytes = 8;
+            break;
+        case 69:
+            callee->function.preserve_vectors = 32;
+            callee->function.preserve_vector_bytes = 32;
+            break;
+        case 70:
+            callee->function.preserve_mask_bytes = 4;
+            break;
+        case 71:
+            callee->function.preserve_general = 1u << X86_REGISTER_RCX;
+            callee->function.eh_return = true;
             break;
         default:
             break;
@@ -5723,6 +5767,57 @@ static const Tier0TestEntry tier0_test_frame_entry[] = {
 
 // The frame's address: a function of it alone, compiled by both paths alike with a frame pointer and its record (mov
 // from rbp at its depth), then the program above, both of its functions with frame pointers, run natively on 8 inputs.
+// Stack-clash protection's records (#177): the counts the vector path's positions take from formulas
+// (tier0_reservation_records, tier0_realignment_records, tier0_prologue_branches and BUSTER_TIER0_PROBED_ALLOCA_RECORDS)
+// are the records and branches the emitters write, which the scalar path counts by running them. A host without the
+// vector path runs only the scalar one, whose twins can't differ: this holds there too.
+static void tier0_test_probes(Tier0TestTally* tally)
+{
+    static const uint32_t sizes[] = { 0, 16, 100, 4095, 4096, 4097, 5000, 8192, 12288, 100000, 1u << 20 };
+    static const uint8_t alignments[] = { 0, 5, 6, 12, 13, 16 };
+    for (uint32_t probe = 0; probe < 4; probe += 1)
+    {
+        for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sizes); s += 1)
+        {
+            for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(alignments); a += 1)
+            {
+                Tier0Frame frame;
+                memset(&frame, 0, sizeof(frame));
+                frame.probe = (probe & 1) != 0;
+                // A body that moves rsp (#177 and #1450: probed whatever its size), which has a frame pointer as a
+                // realigned frame does.
+                frame.moves = (probe & 2) != 0;
+                frame.pointer = frame.moves || alignments[a] != 0;
+                frame.size = sizes[s];
+                frame.alignment_log2 = alignments[a];
+                Tier0Writer reservation = { 0 };
+                if (tier0_probes_reservation(frame.probe, frame.size, frame.alignment_log2, frame.moves))
+                {
+                    tier0_emit_probed_reservation(frame.size, &reservation);
+                }
+                else
+                {
+                    reservation.count = frame.size != 0 ? 1 : 0;
+                }
+                Tier0Writer realignment = { 0 };
+                if (frame.alignment_log2 != 0)
+                {
+                    tier0_emit_realignment(&frame, &realignment);
+                }
+                tier0_test_expect(tally, reservation.count == tier0_reservation_records(frame.probe, frame.size, frame.alignment_log2, frame.moves) &&
+                                             realignment.count == tier0_realignment_records(frame.probe, frame.alignment_log2) &&
+                                             reservation.branch_count + realignment.branch_count == tier0_prologue_branches(&frame),
+                                  "probes", "probe %u size %u alignment %u moves %u: %u and %u records, %u branches", probe & 1, frame.size, frame.alignment_log2, frame.moves,
+                                  reservation.count, realignment.count, reservation.branch_count + realignment.branch_count);
+            }
+        }
+    }
+    Tier0Writer allocation = { 0 };
+    tier0_emit_probed_allocation(X86_REGISTER_RAX, &allocation);
+    tier0_test_expect(tally, allocation.count == BUSTER_TIER0_PROBED_ALLOCATION_RECORDS && allocation.branch_count == BUSTER_TIER0_PROBED_ALLOCA_BRANCHES, "probes",
+                      "a probed ALLOCA's loop: %u records and %u branches", allocation.count, allocation.branch_count);
+}
+
 static void tier0_test_frame_address(Tier0TestTally* tally, Tier0Tables* tables)
 {
     static const uint8_t local_classes[1] = { BUSTER_TYPED_CLASS_U64 };
@@ -6066,6 +6161,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_frame_address(&tally, &tables);
                 tier0_test_report("frame address", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_probes(&tally);
+                tier0_test_report("probes", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

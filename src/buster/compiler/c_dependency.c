@@ -266,6 +266,8 @@ static void dependency_emit(DependencySink* sink, const DependencyRule* rule)
         }
     }
     dependency_append(sink, "\n", 1);
+    // The main rule already ends a line. Clang and gcc put each phony header on the next line, with no blank line
+    // between the rule and the phonies or between the phonies.
     if (rule->phony)
     {
         for (uint32_t i = 0; i < file_count && sink->status == DEPENDENCY_OK; i += 1)
@@ -273,7 +275,6 @@ static void dependency_emit(DependencySink* sink, const DependencyRule* rule)
             const DependencyFile file = files[i];
             if (file.used && (include_system || !file.system) && !dependency_same_path(file.path, source))
             {
-                dependency_append(sink, "\n", 1);
                 dependency_text(sink, file.path, true, scalar, false);
                 dependency_append(sink, ":\n", 2);
             }

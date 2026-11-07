@@ -5,11 +5,45 @@ deferred reader. `check_input_deferred` checks a translation unit as
 `check_input` does, with the same `CheckInput` and `TypeTable` out, but reads
 each file-scope function body apart from the top level, out of order and on
 any number of lanes. It then merges the bodies into the reader state that
-source order's walk leaves, and `check_input_run`'s later phases run on that
-state as they run after a walk in source order. The result is source order's,
+source order's walk leaves. The per-body controls, binding answers, constant
+contexts, expression construction and graph records also use those lanes
+([#1404](https://github.com/buster14a/buster/issues/1404)) where the bodies
+take four or more (#447); their ordered publication preserves graph numbering
+and warning order. The result is source order's,
 column for column, diagnostics among them: the tests below compare every
 column. A unit the reader can't merge yet is checked by `check_input` from
 nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
+
+## The post-merge rounds
+
+The four rounds take the bodies' lanes only where those are
+`BUSTER_CHECK_DEFERRED_POST_LANES` (4) or more (`check_deferred_post_lanes`);
+on fewer, each runs on the calling thread, as a one-lane reading's do ("The
+post-merge rounds' lanes (#447)", below).
+
+Controls use private label tables and fallthrough suffixes, then complete the
+unit's indirect-goto checks after joining. Binding answers write only their
+body's token span; file-scope answers, global unused-declaration analysis and
+diagnostic recovery stay ordered. Constant contexts write disjoint body spans.
+
+Expressions start after binding recovery, selections, complete uses, region
+setup and `sizeof` preparation. Complete roots of the parser forest form
+bounded parts, grouping adjacent roots with the same eligibility. The caller
+takes the largest independent part first. Each independent part owns graph
+counters, append metadata, warning buffers and value chains, and borrows an
+immutable type-table view. Its nodes, leaves and arguments occupy disjoint
+reservations in the final graph's storage. Purity and graph summaries are
+computed there, then contiguous columns are compacted in source order with
+masked vector relocation (and `CheckDeferred.scalar_merge`'s twin).
+
+Actions that need runtime VLA/region state, evaluation or new types retain
+ordered execution directly at their final graph identities. Token roots,
+sparse receipts and warning events are published with each part. A failed
+round, allocation, type lookup or diagnostic discards the complete attempted
+reading and repeats source order, including its recovery limits. A successful
+driver reading keeps its worker-budget lease through the last round and
+returns it immediately after that round joins, before ordered publication and
+serial finishing. Success and retry return it exactly once.
 
 ## The reader
 
@@ -25,14 +59,16 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
    [the environment guide](c-environments.md)) indexes the top level's
    file-scope declarations by name and activation position.
 3. **The lanes.** The reader runs one lane, and one more per
-   `BUSTER_CHECK_DEFERRED_LANE_TOKENS` (1,024), and one more per
-   `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` (4) of the top level's
+   `BUSTER_CHECK_DEFERRED_LANE_TOKENS` (3,072), and one more per
+   `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` (3) of the top level's
    tokens, of the bodies' tokens beyond their critical path: the larger of the
    largest body, which the first lane reads itself, and twice the second
    largest, which a woken lane reads at about half the first lane's speed. It
    runs no more lanes than it is given or than bodies. A lane costs its copy of
    the reader, which grows with the top level, and its wake-up, which its share
-   of the walks must pay for ("How many lanes", below).
+   of the walks must pay for. The post-merge rounds join the bodies' lanes only
+   from four of them ("How many lanes", below, and "The post-merge rounds'
+   lanes (#447)").
    `CheckDeferred.every_lane` runs every lane the bodies can take, as the tests
    and `test-checker-corpus` do.
 
@@ -512,7 +548,8 @@ c-testsuite, SQLite and Lua.
 ## Measurements
 
 `./build/compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus
-LIST] [--every-lane] [--warm] [--cold] [preprocessor options] file...` preprocesses each
+LIST] [--every-lane] [--warm] [--cold] [--base-page-tokens N] [--raw] [--rss]
+[preprocessor options] file...` preprocesses each
 file once, then per pass parses it and checks it by source order's `check_input`
 and by the deferred reader on one lane and on up to `--lanes` (8), in their six
 orders, one a pass in turn: in any six passes in a row, each reading comes
@@ -554,6 +591,18 @@ out. `--cpus` pins the command to the
 first CPU, where the parse, source order and the top level run, and its lanes
 to the list. The measurements before "How many lanes" were made with the three
 rotating orders.
+
+Since #447 it also reports each reading's absolute median in whole
+nanoseconds (`absolute:`: the parse, source order and both deferred readings).
+With `--raw` it adds every pass's unrounded samples, with the readings' order
+in that pass and the lanes the second deferred reading ran on and copied the
+reader on. With `--rss` it adds each reading's peak resident set and its growth
+over the reading's start (`resident:`). These come from `/proc/self/status`'s
+`VmHWM` and `VmRSS`, with the peak reset through `/proc/self/clear_refs`
+before the reading, outside its time. Without `--cold`, a reading's growth is
+what it faulted in beyond the pages earlier readings left in the caller's
+arenas. With `--cold`, every reading starts from fresh caller arenas, and the
+growth is all it touched.
 
 One active lane uses the existing `lane_run_cold(1, ..., NULL)` utility. It
 starts no worker, makes no affinity calls, and saves/resets/restores the
@@ -665,7 +714,8 @@ different sizes ([the corrected record](https://github.com/buster14a/buster-perf
   faster; the first lane read the largest body in 0 to 24 of 72 passes, and
   then in all of them.
 
-The reader runs one lane, and one more per `BUSTER_CHECK_DEFERRED_LANE_TOKENS`
+Until #447 (below, "The rule after the post-merge rounds"), the reader ran one
+lane, and one more per `BUSTER_CHECK_DEFERRED_LANE_TOKENS`
 (1,024; 1,280 from #764 to #847) and one per
 `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` (4; 3 from #764 to #847) of the top
 level's tokens (`CheckDeferred.lane_tokens`), of
@@ -683,7 +733,7 @@ lane in the same process, by rule (lane counts between 4 and 8 interpolated):
 | 8,192 tokens beyond the largest body's | +5.5% | 24 | 59.3 |
 | 8,192 tokens beyond the larger of the largest's and twice the second's | +0.0% | 28 | 48.6 |
 | the same, 6,144 tokens | +0.9% | 35 | 29.3 |
-| 1,024 tokens and a quarter of the top level's, beyond the same (the rule) | +0.0% | 42 | 9.2 |
+| 1,024 tokens and a quarter of the top level's, beyond the same (#683's rule, until #447) | +0.0% | 42 | 9.2 |
 
 Campaign A2, the same grid on this change merged with main (`54a3b6da`, beside
 that main, `cd9c5c9b`), agrees: a lane's copy takes 69 and 100 µs on two and
@@ -697,7 +747,10 @@ a third of the top level's ("The rare columns' huge pages (#764)", below).
 Campaign A7, after #847 kept the huge pages of a unit below
 `BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS`, which its lanes claim, fits A4's
 constants again ("The rare columns' pages by the unit's size (#847)",
-below).
+below). #447 fits the rule again after #1404's post-merge rounds, with a new
+form ("The rule after the post-merge rounds (#447)", below), then keeps the
+post-merge rounds off fewer than four lanes and returns to this form with
+those constants ("The post-merge rounds' lanes (#447)").
 
 A count of one size for every unit can't fit both ends: sixteen bodies of 265
 tokens with no headers read 9.6% faster on four lanes than on one, and sixteen
@@ -839,6 +892,223 @@ reads every one of them on one lane, so its two readings are the same work:
 they came within 0.9% of each other on the 62 programs of 1,000 tokens or
 more, and within the noise of readings of tens of microseconds on the others
 (a standard deviation of 2.9% under 100 tokens).
+
+### The rule after the post-merge rounds (#447)
+
+In this section "the rule" is #1567's: one lane per 3,072 tokens and a third
+of the top level's beyond the critical path, and at least one, with the
+post-merge rounds on every lane the bodies took. "The post-merge rounds'
+lanes (#447)", below, replaces it.
+
+#1404 put four post-merge rounds (the controls, binding answers, constant
+contexts and expression parts) on the bodies' lanes, beside the merge's pass
+(#697), by the same rule. A reading on more than one lane now pays six lane
+rounds' dispatch and wake-ups, besides each lane's copy of the reader. The
+rule's constants, last fitted by campaign A7 (#847), came before those rounds.
+On the 9700X,
+[the record](https://github.com/buster14a/buster-performance/tree/7085eb00d853c882781f12ab13eff245da8c9682/docs/measurements/deferred-lane-rule-447-2026-11-06)
+measures main `ec5f0f6b` with this change's benchmark output (`7997476e`).
+Each unit and configuration runs in a process of its own, with `--cpus
+2,0,1,3,4,5,6,7`, 24 passes (12 for SQLite) and the frozen corpus's options
+(musl's build's own for musl):
+
+- **The grid**, five rounds: six of c-testsuite's programs, the frozen
+  `sqlite3.c` and 15 units of the frozen musl's `src`, by the rule on 8, 3 and
+  2 permitted lanes, and on 2, 3, 4 and 8 forced lanes (`--every-lane`).
+- **The fit**, three rounds: the same forced counts on the 38 synthetic units
+  of #683's record (the same bytes, from its generator) and 17 more musl units.
+
+Every process also reads its unit in source order and on one lane. Below are
+the medians of those two readings' absolute times, then each forced count's
+change against one lane in the same process, and each rule's lanes and change,
+all medians over the grid's rounds:
+
+| Unit (bodies, tokens) | Source order | One lane | 2 lanes | 3 | 4 | 8 | #683's rule | The rule |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `00213.c` (5, 460) | 49.5 µs | 113.4 µs | +23.7% | +45.7% | +59.5% | +75.8% (5) | 1 | 1 |
+| `00204.c` (108, 7,653) | 489.2 µs | 684.9 µs | +2.1% | +1.7% | +3.4% | +21.6% | 2: +3.2% | 1 |
+| `00200.c` (2, 23,466) | 890.4 µs | 1,069.4 µs | +13.2% | | | | 1 | 1 |
+| `sqlite3.c` (2,608, 706,237) | 56.0 ms | 66.3 ms | −12.9% | −19.7% | −23.0% | −26.4% | 8: −26.2% | 8 |
+| musl `regex/regcomp.c` (41, 19,745) | 1,006.3 µs | 1,268.4 µs | −0.7% | −6.3% | −5.5% | +1.0% | 6: −3.4% | 2 |
+| musl `stdio/vfprintf.c` (36, 16,184) | 958.3 µs | 1,191.8 µs | +1.3% | +1.3% | +3.2% | +15.9% | 2: +2.2% | 1 |
+| musl `malloc/mallocng/malloc.c` (62, 14,324) | 979.1 µs | 1,247.3 µs | +1.7% | +5.6% | +7.9% | +23.5% | 2: +4.1% | 1 |
+| musl `internal/floatscan.c` (30, 10,822) | 607.2 µs | 792.3 µs | −0.4% | −0.6% | +1.8% | +19.6% | 3: +0.8% | 1 |
+| musl `math/fmal.c` (33, 6,158) | 342.2 µs | 468.5 µs | +6.0% | +6.3% | +9.5% | +26.5% | 2: +6.3% | 1 |
+| musl `math/exp2l.c` (29, 5,866) | 310.4 µs | 427.0 µs | +7.3% | +7.8% | +9.4% | +29.6% | 2: +6.6% | 1 |
+| musl `locale/iconv.c` (46, 149,607) | 15.1 ms | 16.6 ms | +0.3% | −0.9% | −0.7% | +1.0% | 1 | 1 |
+
+Over the 76 units' forced counts, with lane counts between 4 and 8
+interpolated as campaign A2's were, on a grid of 1,144 rules: a lane's tokens
+`a` and the top level's share `b`, and a threshold the first extra lane must
+clear. The last column scores each rule as the C driver applies it: a unit the
+rule gives fewer than `BUSTER_CHECK_DEFERRED_COMPILE_LANES` (4) lanes reads in
+source order. It sums each unit's distance from the best of source order, one
+lane and every forced count.
+
+| Rule | Worst unit against one lane | Units within one point of their best | More than a point slower than one lane | Gains forgone, summed | The driver's, summed |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| #683's: one lane, and one more per 1,024 tokens and a quarter of the top level's | +7.3% | 46 of 76 | 15 | 120.3 points | 147.1 points |
+| the same form, 6,144 tokens and half the top level's | +1.0% | 59 | 0 | 52.1 | 19.0 |
+| one lane per 3,072 tokens and a third of the top level's, at least one (the rule) | +1.0% | 65 | 0 | 34.0 | 2.7 |
+
+The rule is the best of the grid. The thresholds of three constants did no
+better (35.5 points at best), and its neighbours forgo 35.5 to 38.3. A second
+lane needs two shares of the work beyond the critical path, one for its copy
+and one for the rounds a reading on lanes adds; every further lane needs one
+more. Fitted on the synthetic units, c-testsuite and SQLite alone, it is still
+the best rule there (26.7 points forgone). It puts 30 of the 31 musl units held
+out of that fit within a point of their best and reads none slower than one
+lane, where #683's rule reads 7 of them more than a point slower (+7.3% the
+worst). The unit it reads slowest against one lane is sixteen bodies of 993
+tokens after three headers, on 2 lanes (+1.0%); #683's took 5 there (−1.2%,
+interpolated).
+
+Then #683's rule against the rule, each by its build (`7997476e` and this
+change's `a2f11bd8`) on 8 permitted lanes against one lane in the same process,
+in processes whose order alternates by round, five rounds, on the 35 units of
+the grid and the fit whose lanes the two rules give differently and four they
+give alike. The medians of the rounds, and of each round's difference:
+
+| Unit | #683's rule | The rule | The rule against #683's |
+| --- | ---: | ---: | ---: |
+| `00204.c` | 2 lanes: +2.3% | 1: −0.2% | −2.8 points |
+| musl `math/fmal.c` | 2: +7.3% | 1: −0.3% | −8.1 |
+| musl `math/exp2l.c` | 2: +6.3% | 1: −0.2% | −6.5 |
+| musl `math/j0.c` | 2: +5.7% | 1: −0.1% | −5.6 |
+| musl `malloc/mallocng/malloc.c` | 2: +2.5% | 1: +0.1% | −2.2 |
+| musl `stdio/vfprintf.c` | 2: +0.9% | 1: −0.2% | −1.1 |
+| musl `internal/floatscan.c` | 3: −0.9% | 1: −0.0% | +0.9 |
+| musl `regex/regcomp.c` | 6: −2.6% | 2: −1.2% | +0.1 |
+| sixteen bodies of 993 tokens, no headers | 8: −8.1% | 4: −19.8% | −11.4 |
+| one of 19,973 tokens beside fifteen of 1,981 | 8: −7.8% | 4: −13.8% | −6.0 |
+| sixteen of 993 after three headers | 5: −2.2% | 2: +0.7% | +3.0 |
+| one of 9,989 beside fifteen of 993 | 5: −5.5% | 2: −2.6% | +3.0 |
+| `sqlite3.c` | 8: −26.4% | 8: −26.8% | −0.4 |
+
+Of the 35, the rule reads 22 more than a point faster than #683's against
+one lane, 8 within a point and 5 more than a point slower. Those 5 are
+synthetic units on which #683's 2 to 5 lanes read 2.2 to 5.5% faster than one
+lane, and the rule's 1 or 2 lanes within +0.7% of it. Summed over the 35, the
+rule gains 78.0 points. No unit reads more than 0.7% slower than one lane by
+the rule (sixteen bodies of 993 tokens after three headers), where #683's
+rule read musl's `fmal.c` 7.3% slower. On the ten musl units, the rule's
+readings take 6,616 µs where #683's took 7,046 (−6.1%). The four controls,
+read alike by both rules, came within −1.0 to +0.3 points of each other.
+
+On c-testsuite's 220 programs (one round, each program in a process of its own
+by each build), the rule reads every program on one lane; #683's read
+`00204.c` on two, +5.1% against one lane in that process.
+
+The memory, by `--rss --cold` (two rounds of 6 passes): each reading's growth
+of the resident set over its start, from fresh caller arenas, the median of
+its processes (a configuration's two rounds differ by at most 0.2 MiB).
+`sqlite3.c` grows by 195.6 MiB in source order, 237.0 MiB on one lane and
+257.5 MiB on 8; `regcomp.c` by 12.2 MiB, 16.8 MiB, 17.4 MiB on the rule's 2
+lanes and 18.7 MiB on #683's 6; `00204.c` by 7.9 MiB, 8.9 MiB and 9.4 MiB on
+#683's 2 lanes. A reading's peak includes the process's
+own pages, which differ by about 3 MiB between the two builds on small units,
+so the record compares growth.
+
+With `--deferred-bodies`, the driver read `regcomp.c` apart on #683's 6
+lanes: 3.4% faster than its one-lane reading, and 22% slower than source
+order. The rule gives it 2, so the driver reads it in source order. Of the 76
+units, the driver reads 11 apart rather than 21: SQLite and ten synthetic
+units whose bodies hold 15,888 tokens or more.
+
+### The post-merge rounds' lanes (#447)
+
+#1567's rule left 25 of the 76 units more than a point from the best reading
+below. The phases after the merge explain most of it. On all 51 units below
+40,000 tokens that take 2 lanes, they took 11 to 120 µs longer on 2 lanes than
+on one, while the bodies' span and the merge's pass took less; with the rounds
+on the calling thread, 2 to 13 µs longer. The four post-merge rounds
+ran on every lane the bodies took. Each round on lanes costs its dispatch, its
+wake-ups and its parts' ordered publication, which on one lane the calling
+thread's original walks don't pay.
+
+[The record](https://github.com/buster14a/buster-performance/tree/bdc1b0204efded13a4bde0d2eb5104d7a12636cf/docs/measurements/deferred-post-lanes-447-2026-11-07) measures it on the 9700X with main `53854a7c2`
+against the same tree with the four rounds on the calling thread alone. Both
+read all 76 units on 2, 3, 4 and 8 forced lanes against one lane in the same
+process, three rounds. One lane runs the same code in both builds. The medians,
+in µs against one lane:
+
+| Unit | Lanes | Whole: on lanes / on the calling thread | The bodies' span | The merge | The phases after it: on lanes / on the calling thread |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `00204.c` | 2 | +16.4 / −19.6 | −19.9 | −10.0 | +46.1 / +9.6 |
+| musl `stdio/vfprintf.c` | 2 | +14.2 / −32.9 | −29.3 | −9.1 | +60.2 / +9.7 |
+| musl `regex/regcomp.c` | 2 | −18.8 / −72.5 | −62.8 | −17.8 | +73.6 / +12.0 |
+| musl `regex/regcomp.c` | 4 | −72.3 / −81.5 | −61.0 | −31.4 | +28.8 / +18.6 |
+| sixteen bodies of 993 tokens, no headers | 4 | −143.8 / −114.8 | −118.2 | −13.0 | −9.2 / +15.8 |
+| `sqlite3.c` | 4 | −15,424 / −13,136 | −10,869 | −2,091 | −2,126 / −49 |
+
+The rounds on lanes pay on large units: at each unit's best lane count,
+`sqlite3.c` reads 32.5% faster than one lane with them and 27.3% without, and
+sixteen bodies of 8,013 tokens 34.3% and 25.7%. On mid-sized units they cost
+more than the lanes save: `00204.c` reads 3.3% faster on 2 lanes without them
+and no faster with them; musl `internal/floatscan.c` 3.9%, `stdio/vfprintf.c`
+3.0% and `regex/regcomp.c` 8.0%, against 6.4% with them.
+
+The post-merge rounds' groups are whole bodies, so they pay where the bodies'
+work spreads over many lanes, which the bodies' rule measures. So
+`check_deferred_post_lanes` gives the rounds the bodies' lanes only where those
+are `BUSTER_CHECK_DEFERRED_POST_LANES` (4) or more, and otherwise one. A second
+lane then costs its copy and wake-up alone, so the bodies' rule returns to #683's
+form: one lane, and one more per 3,072 tokens and a third of the top level's
+beyond the critical path. Each unit's best is the least change of either build
+on any lane count; a policy reads a unit on its rule's lanes, as the first build
+from the gate on and as the second below it (`post` in the record):
+
+| Policy | Worst unit against one lane | Units within a point of their best | Gains forgone, summed |
+| --- | ---: | ---: | ---: |
+| #1567's: the rounds on every lane, `max(1, excess / (3,072 + top/3))` | +2.6% | 51 of 76 | 96.4 points |
+| the rounds never on lanes, the best rule | +0.0% | 52 | 95.8 |
+| the rounds from 3 lanes, the best rule (`1 + excess / (3,072 + top/3)`) | +0.0% | 55 | 57.6 |
+| the rounds from 4 lanes, `1 + excess / (3,072 + top/3)` (the policy) | +0.0% | 60 | 43.5 |
+| the rounds from 5 lanes, the same rule | +0.0% | 60 | 44.3 |
+| the rounds from 6 lanes, the best rule (`1 + excess / (2,560 + top/4)`) | +0.0% | 61 | 50.0 |
+
+A term for all of the unit's tokens, the merge's pass's share, forgoes 36.5
+points with a third constant. It changes only synthetic units' lanes, so it isn't
+taken.
+
+Then #1567's policy against this one, each by its build (`53854a7c2` and this
+change's `96a8d57ea`) on 8 permitted lanes against one lane in the same process,
+in processes whose order alternates by round, five rounds, on all 76 units. The
+medians of the rounds, and of each round's difference:
+
+| Unit | #1567's | This one's | Difference |
+| --- | ---: | ---: | ---: |
+| musl `regex/regcomp.c` | 2 lanes: −0.8% | 3: −7.5% | −6.6 points |
+| musl `internal/floatscan.c` | 1: −0.0% | 2: −3.0% | −2.9 |
+| sixteen bodies of 993 tokens after three headers | 2: +2.9% | 3: −3.6% | −6.0 |
+| one of 19,973 tokens beside fifteen of 525 | 1: +0.2% | 2: −5.5% | −5.4 |
+| one of 9,989 tokens beside fifteen of 993 | 2: −2.7% | 3: −6.9% | −4.3 |
+| sixteen bodies of 993 tokens, no headers | 4: −22.6% | 5: −20.3% | +2.4 |
+| one of 19,973 tokens beside fifteen of 1,981 | 4: −14.9% | 5: −12.3% | +2.5 |
+| `sqlite3.c` | 8: −32.8% | 8: −32.4% | +0.6 |
+
+Of the 23 units whose lanes change, this policy reads 14 more than a point
+faster than #1567's against one lane, 5 within a point and 4 more than a point
+slower. Those four are units it gives one lane more than #1567's, at 4 or 5
+lanes, which still read 8 to 20% faster than one lane. Summed over the 23, it
+gains 44.2 points. The 53 units both read on the same lanes came within −0.8 to
++2.0 points of each other. No unit reads more than 1.0% slower than one lane (a
+program of 9 tokens both read on one lane); #1567's read sixteen bodies of 993
+tokens after three headers 2.9% slower.
+
+On c-testsuite's 220 programs, both read every program on one lane. The memory
+(`--rss --cold`, two rounds) is #1567's but where a unit takes one lane more:
+`regcomp.c`'s reading grows by 17.5 MiB on 3 lanes against 17.4 on 2, and
+`floatscan.c`'s by 13.2 against 12.8 on one lane.
+
+Against each unit's best of either build on any lane count, 16 units stay more
+than a point behind, where #1567's policy left 25. The real units among them
+are three that 2 lanes without the rounds read about 3% faster than one lane,
+which the rule leaves on one: `00204.c`, musl `regex/regexec.c` and
+`stdio/vfprintf.c`. The largest gaps, 3.6 to 4.0 points, are synthetic: two
+equal bodies of 16,645 and of 24,965 tokens read on one lane, and one of 9,989
+beside fifteen of 993 on 3 lanes. That best counts readings no gate on the
+bodies' lanes can choose, such as 4 lanes without the rounds.
 
 ### The merge's serial work (#697)
 
@@ -1242,9 +1512,21 @@ is retained.
 
 ## What is left
 
-The top level, the merge's replay and layouts, and the phases after it are
-sequential, so the lanes shorten only the bodies' walks and the merge's pass,
-which on `sqlite3.c` are about a quarter of one lane's reading. On eight lanes
+The top level, the merge's replay and layouts, shared post-merge preparation
+and ordered publication remain sequential. #1404 adds lane rounds for the
+independent post-merge controls, binding answers, constant contexts and
+expression/graph construction described above. Runtime VLA/region work and
+other exceptional expression actions retain source-order execution.
+
+The C driver uses these rounds with `--deferred-bodies` (#151). The
+[post-merge measurements](function-lanes.md#the-post-merge-measurements-and-decision-1404)
+compare default and explicit 2–8 lanes and balanced concurrent builds on the
+locked 9700X. At the default eight lanes the isolated `-c sqlite3.c -w` compile
+saves 2.37% wall time for 30.27% more user cycles, with no concurrent throughput
+gain. The option stays off by default. These supersede the pre-#1404 default
+decision's 2.4% wall saving for 12.8% more cycles.
+
+On eight lanes
 the pass shares the memory's bandwidth: it reads each of its columns at every
 token, mostly zeros, and the lanes' scans of their shares run at about a third
 of one lane's speed per token (on `sqlite3.c`, 0.8 ms a lane for 88,000

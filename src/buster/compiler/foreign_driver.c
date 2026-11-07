@@ -877,8 +877,9 @@ static int foreign_driver_link(ForeignDriverRun* run)
             if (foreign.failure.input < foreign.input_count)
             {
                 const ForeignInput* input = &foreign.inputs[foreign.failure.input];
-                const String8 path = input->path;
-                fprintf(stderr, " in %.*s", (int)path.length, path.pointer);
+                const String8 path = input->path.length != 0 ? input->path : input->name;
+                const bool searched = input->path.length == 0 && (input->flags & BUSTER_FOREIGN_INPUT_LIBRARY) != 0;
+                fprintf(stderr, " in %s%.*s", searched ? "-l" : "", (int)path.length, path.pointer);
                 if (foreign.failure.member != 0 && input->kind == FOREIGN_KIND_ARCHIVE && input->item < foreign.archive_count)
                 {
                     const ForeignArchive* archive = &foreign.archives[input->item];

@@ -544,6 +544,10 @@ keyword spellings, including a mixed attribute list and shared declarators.
 
 The nested-entry fixtures in `c_check_target_feature_emission_test.c` run
 through the same driver's CC compatibility harness and its standalone entry.
+The normal compiler build links this test as a separate translation unit after
+the existing units, keeping its strings out of the production checker's string
+pool. Its small callback interface uses the harness's existing process helpers,
+private directory and counters; the standalone build includes the same test.
 For Clang, default Buster and scalar Buster, they require syntax-only
 acceptance and compare object-emission status, explicit error counts, and
 every error's line, column, complete message and order. They cover selected

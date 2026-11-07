@@ -1624,7 +1624,10 @@ The last of them, catalog codes 0x3fd to 0x3ff and 0x440 to 0x44e
   `__builtin_ptrauth_strip`) need a target x86 isn't: every call is an error, as
   clang's is ("is only available in C++", "this target does not support pointer
   authentication"), the latter's after their arity. `__has_builtin` answers 1
-  for them, as clang's does, and `__has_constexpr_builtin` as clang's.
+  for the ten, and `201802L` for `__builtin_operator_new` and
+  `__builtin_operator_delete` in every language, as clang's does (the date of
+  the change that let them call any usual allocation function, which libc++
+  asks about); `__has_constexpr_builtin` answers as clang's.
 
 `__builtin_preserve_access_index` and `__builtin_hlsl_resource_getpointer_typed`
 (0x452 and 0x453, #148) are checked as clang's Sema checks them in C, and `-c`
@@ -1697,15 +1700,10 @@ compile them for x86-64 either: `__builtin_preserve_access_index` (BPF
 alone) and `__builtin_hlsl_resource_getpointer_typed`. Others clang does
 compile, and this compiler doesn't yet:
 
-- `__builtin_eh_return`, whose unwinding to a handler;
-- `__builtin___CFStringMakeConstantString` and
-  `__builtin___NSStringMakeConstantString`, whose `cfstring` object;
+- `__builtin___NSStringMakeConstantString` of no string literal, whose
+  object clang's code makes from what isn't one;
 - `__builtin_zos_va_start` and `__builtin_zos_va_copy`, whose code clang
   writes over a `char *` that its 24-byte list overruns;
-- `__builtin_call_with_static_chain`, whose chain register (`r10`);
-- `__builtin_os_log_format` of data its items take out of order, or of
-  more than 8 bytes;
-- `__builtin_dump_struct`, whose generated calls.
 
 `__builtin_available` with an empty version (`0.0.0`) is refused too, as
 clang's code generation refuses it, and so is `__builtin_counted_by_ref` of a
@@ -1716,10 +1714,97 @@ that compiles one gets the refusal's message, at the call.
 
 `__builtin_eh_return(offset, handler)` (0x456, #148) is `void(size_t,
 void *)` and doesn't return, as clang's Sema takes it: each argument converts
-as a prototype's parameter. Clang's code generation unwinds the stack by the
-offset and jumps to the handler; this compiler's refuses it by name
-("unsupported: __builtin_eh_return, whose unwinding to a handler this
-compiler doesn't make").
+as a prototype's parameter. Its code unwinds to the handler as LLVM's
+`EH_RETURN` does, for libgcc's unwinder (`uw_install_context`):
+
+- **The frame.** A function that calls it (`Tier0Function.eh_return`) has a
+  frame pointer. It saves every callee-saved register, then rdx and rax,
+  LLVM's `CSR_64EHRet` set. Its CFI says where each is: rdx at the CFA less
+  64 and rax less 72 with five callee-saved pushes, as clang's frame has
+  them after `__builtin_unwind_init`. The fixed descriptor can't say it, so
+  the frame is a row program (`emitted_tier0_eh_rows`).
+- **The unwinding.** The call is a TAIL_CALL of a row of its own
+  (`BUSTER_TIER0_TAIL_EH`). The row is indirect, its callee the handler in
+  `r11`, and the offset is its one argument, in `rcx`. Its teardown:
+  - `lea rcx, [rbp + rcx + 16]`, the CFA plus the offset;
+  - the release, then pops of rax, rdx, the callee-saved registers and rbp;
+  - `mov rsp, rcx` and `jmp r11`.
+
+  The handler runs with the stack LLVM's `ret` from `rcx - 8` gives it. The
+  offset is evaluated first, then the handler, as clang's arguments are.
+- **Ordinary returns** step over rax's and rdx's slots and keep the result.
+  LLVM's pop the saved rax over it (`movl $42, %eax; popq %rax`), as GCC's
+  epilogue doesn't.
+- **Where it may be:**
+  - **A variadic function.** Its register save area is stored after the
+    pushes, so rax's and rdx's slots stay where the CFI says, as in clang's
+    frame. The unwinding passes none of the function's arguments on
+    (`tier0_tail_call_valid`).
+  - **Beside musttail calls.** Each TAIL_CALL row has its own kind in
+    `Tier0Function.call_tails`. The lowering tells an eh_return's row by its
+    argument's ABI type, a `const void`. A musttail call's teardown steps
+    over rax's and rdx's slots, as an ordinary return does
+    (`tier0_count_tail_finish` and `tier0_emit_tail`, per row).
+    `unwind_tier0_frame_tails` reads each tail by its kind: an eh_return's
+    jump comes right after `mov rsp, rcx`. `emitted_tier0_eh_rows` restores
+    rax's and rdx's rules after a musttail call's release, as it does after
+    the epilogue's.
+  - **Within an expression** (`c + (__builtin_eh_return(o, h), 1)`). The
+    offset and the handler go into temporaries, the expression's pending
+    values are discarded, and the TAIL_CALL then has nothing under its
+    operands (`check_lower_eh_unwind`). The rest of the expression is dead.
+    Dead stand-ins of the discarded values' classes take their places, as for
+    a terminal helper's call (`check_lower_terminate`), both by
+    `check_lower_dead_value`:
+    - a vector's is a zero constant of its bytes;
+    - a mask's is an integer's zero converted to its bytes;
+    - any other's is a constant of its class.
+
+    The tracked stack keeps each vector's and mask's bytes
+    (`check_lower_track_bytes`): an X86 row's result's, a constant's, a local
+    object's, or the entry's own. Before #1436's review this was missing, and a
+    terminal helper's call under a pending vector
+    (`v * (__builtin_trap(), w)`) broke Tier 0's rule on vector constants.
+
+    The tracked emitter's adjacency filler makes its constants the same way
+    (`check_lower_emit_tracked`, #1438's review). That filler is the
+    cancelling pair it writes where a pending value's class must precede its
+    consumer. Before, it wrote `CONST MASK`, which no mask entry takes, under
+    a pending mask (`__builtin_ia32_kandhi(k, (__builtin_trap(), k))`).
+    `test-checker-driver`'s dead vectors' program builds such masks and 64-
+    and 32-byte vectors for x86-64-v4 with `--verify`, under the trap and
+    under `__builtin_eh_return`.
+    A unit that calls `__builtin_eh_return` tracks its typed stacks for this
+    (`CheckLowerShared.terminal`). The pending values are evaluated before
+    the offset and the handler, as clang evaluates them.
+- **Its consumers:**
+  - `unwind_tier0_frame_tails` reads the frame.
+  - `emitted_verify_frames` proves its rows up to the `mov rsp, rcx`. At the
+    jump, the handler's stack is one no rule describes, and LLVM's CFI
+    doesn't describe it either.
+  - Tier 1 falls back to Tier 0 for the function, as for
+    `__builtin_unwind_init`'s frame.
+- **Tests.** `test-checker-driver`'s eh_return program writes rax's and
+  rdx's slots, then unwinds at offsets 0, 16 and 32 into a handler that
+  records the registers and rsp. It runs six functions:
+  - one with two unwinding sites;
+  - a variadic one that reads its variadic argument first;
+  - one that unwinds within expressions after a call;
+  - one that unwinds within a `?:`, an `&&`, a statement expression and a
+    comma, with a `double`, a `long double`, a struct's member and a vector
+    pending;
+  - one that makes a musttail call where it doesn't unwind;
+  - one whose musttail call copies a 32-byte struct to the stack's incoming
+    area.
+
+  For the musttail calls the runner also records the callee's result, the
+  callee-saved registers and rsp. A vector function holds a value under
+  `__builtin_trap`. The program is built on both paths at Tier 0 and with
+  `--tier1`, all with `--verify`, and prints what clang `-O0`'s build prints.
+- **A clang bug.** Clang can't be the oracle for a musttail call with a third
+  integer argument in such a function. LLVM's teardown of a `CSR_64EHRet`
+  frame pops the saved rdx over the argument already loaded into rdx, so its
+  callee gets the slot's value. This compiler passes the argument.
 
 `__builtin___CFStringMakeConstantString(s)` and
 `__builtin___NSStringMakeConstantString(s)` (0x457 and 0x458, #148) are
@@ -1739,16 +1824,45 @@ scope `sizeof`'s).
   `pp_utf8_sequence`) is clang's `-WCFString-literal`, "input conversion
   stopped due to an input byte that does not belong to the input codeset
   UTF-8", at the literal (`check_input_cfstring_literal`).
-- **Code.** Clang makes a `cfstring` section object pointing at
-  `__CFConstantStringClassReference` and the literal; this compiler refuses
-  either call by name ("unsupported: a constant CFString or NSString, whose
-  object this compiler doesn't make").
-- **Difference.** Clang's evaluator takes either call as an address constant
-  (`IsOpaqueConstantCall`), so a static initializer of one (`static const void
-  *p = __builtin___CFStringMakeConstantString("x");`, cast to `long` or
-  `_Bool` too, or plus an offset) is accepted. This checker's isn't, and
-  refuses it as "initializer is not a constant expression": it has no object
-  to give the address of, as its code generation doesn't.
+- **The value.** Of a literal, either call is an address constant, as clang's
+  evaluator takes it (`IsOpaqueConstantCall`): the address of its call's own
+  object (its `)`'s token plus one, `CheckBuiltinMiscAction.cfstring_object`),
+  a static one. So a static initializer of one (`static const void *p =
+  __builtin___CFStringMakeConstantString("x");`, cast to `long` or plus an
+  offset) is accepted, and its code is the object's address: no operand runs.
+- **The objects.** `check_data_cfstring_keys` (`c_check_data_input.c`) makes what
+  clang's `GetAddrOfConstantCFString` makes:
+  - **The record:** one `__NSConstantString` record of 32 bytes of each
+    literal's characters, writable data in the section `cfstring`, 8-aligned.
+    Its fields are `__CFConstantStringClassReference`'s address, its flags
+    (`0x7c8`, or `0x7d0` for UTF-16), its characters' address and their
+    length.
+  - **Its characters:** an ASCII literal's (no byte past `0x7f` and no NUL) are
+    its own string literal. Any other's are the UTF-16 units of LLVM's strict
+    conversion, which stops at the first byte that begins no sequence, then a
+    NUL unit. They go in a constant array of their own, 2-aligned (at the
+    call's `(`), and the length counts the units.
+  - **One per literal:** each call's object takes the symbol of the lowest
+    object of its characters, as weakrefs take their targets' at numbering
+    (`check_program_alias_number`). So two calls of one literal, a CFString's
+    and an NSString's among them, have one address, as clang's.
+  - **The class:** the unit's file-scope declaration of
+    `__CFConstantStringClassReference` (`check_input_cfstring_class`), or else
+    an undefined global of that name, the program's own.
+- **Code of no literal.** An NSString of what isn't a literal stays a value:
+  clang's code makes its object from the literal its argument isn't (a
+  `cast<StringLiteral>` of another expression), and `-c` refuses it by name
+  ("unsupported: an NSString of no string literal, whose object clang's code
+  makes from the literal its argument isn't").
+- **Differences.**
+  - Clang's evaluator takes an NSString of no literal as an address constant
+    too, and accepts a static initializer of one; this checker refuses it as
+    "initializer is not a constant expression".
+  - A static `_Bool` of one is refused, as one of any address is
+    (`static _Bool b = &x;`).
+  - Clang's ELF object also has an `objc_imageinfo` section where it makes a
+    CFString, and keeps the characters in `.rodata`, which this compiler's
+    string pool (`.rodata.str1.1`) holds.
 
 A miscellaneous builtin's argument of the other signedness of a `char`
 pointer (`__builtin_strlen(u8"x")` in C23) gets the pointer-sign warning, as
@@ -1764,11 +1878,53 @@ value, as clang's `BuiltinCallWithStaticChain` checks it.
   declared), found through the callee's parentheses, as `getBuiltinCallee`
   finds it.
 - **The chain.** The second argument is a pointer, of any type.
-- **Code.** clang's code evaluates the callee, then the chain, then the
-  arguments, and passes the chain in `r10`. This compiler's calls have no
-  static chain register, so `-c` refuses the call by name. Adding one would
-  touch every consumer of a call's record: Tier 0, Tier 1, the interpreter
-  and the SSA lowering.
+- **Code.** As clang's code does, `-c` evaluates the callee, then the
+  chain, then the arguments, and passes the chain in `r10`, SysV's static
+  chain register (LLVM's `nest`). The call's own arguments and result stay
+  as they were.
+- **A musttail return of it.** Clang's Sema gives the builtin the type
+  `R(R, C)`, where R is the call's result and C the chain's type after the
+  usual unary conversions (`BuiltinCallWithStaticChain`), and checks the
+  return's musttail against that type.
+  - So the caller must be prototyped, not variadic and of the default
+    convention, return R and take exactly R and C, as similar types. The
+    messages name `__builtin_call_with_static_chain`
+    (`check_musttail_static_chain_rule`).
+  - Its code is the call, then the return. Clang's code generation emits no
+    musttail for a builtin's call, so the return is no tail call
+    (`check_control_static_chain`).
+- **The call's record.** The chain is the call's argument 0, of class `U64`.
+  Its ABI type is `void`, which no other argument has and `abi_assign`
+  ignores, so it takes no register of the convention's. After the batch,
+  `check_lower_chain_location` puts it in `r10`. Its consumers take it as
+  follows:
+  - **Tier 0.** `r10` is one of the argument registers that its locations
+    may name (`BUSTER_TIER0_ARGUMENT_REGISTERS`), and every call emitter's
+    moves take it as any register argument's. An indirect callee still goes
+    through `r11`.
+  - **The typed IR.** A call with an argument in `r10` keeps its ABI records
+    (`ir_typed_aggregate_call`).
+  - **Tier 1.** A record in `r10` is general place 6, past the six argument
+    registers (`tier1_select_parameter_registers`). A chained indirect call
+    calls through `rax` (`tier1_select_callee_register`), since its chain
+    takes `r10` and the moves' scratch `r11`. The code certificate checks the
+    same sequence. A chained indirect variadic call, whose `al` takes `rax`,
+    falls back to Tier 0 (`ir_lower`'s `IR_ERROR_UNSUPPORTED`).
+  - **The interpreters.** Both take the call without its chain
+    (`tier0_call_chain`, `ir_interpreter_unchained`). A native callee gets
+    the chain in `r10` from the bridge; an interpreted one, whose C
+    parameters don't include it, doesn't. The IR interpreter keeps the other
+    arguments' ABI records past the chain's (their sizes, places and extension
+    flags) and checks the chain's definedness as an argument's.
+  - **SSA promotion** sees calls as opaque values and needs nothing.
+- **Tests.** `test-checker-driver`'s static chain program runs naked
+  callees that read `r10`, direct and indirect, of aggregate, floating and
+  variadic calls, past six arguments, in a loop and as a musttail return's
+  value. Its musttail error fixtures compare each rule's message with
+  clang's. It is built on both
+  paths at Tier 0 and with `--tier1 --verify`, and each build prints what
+  clang `-O0`'s does. `test-interpreter` and `test-ir-lowering` pass a chain
+  to native and interpreted callees.
 - **Identities.** The miscellaneous builtins past 0x45f start at 0x4b0, past
   the `<stdbit.h>` library builtins' identities (0x460 to 0x4a5). A static
   assertion keeps them apart.
@@ -1789,12 +1945,22 @@ clang's os_log buffers, as `BuiltinOSLogFormat`, `OSLog.cpp` and
   - Length modifiers include C23's `H`, `D`, `DD`, `wN` and `wfN`.
 - **The layout.** The layout pass stops where clang's handler stops: at a
   value without its data, or after a `%P` without its length. Each
-  specifier gives up to five items, in this order: its mask (8 bytes of its
-  name), its field width and precision when they are arguments, a string's
-  or pointer's count (from the precision's argument, or its constant as 4
-  bytes), and its value (none for `%m`). A data argument's size is its
-  promoted type's: arrays and functions as pointers, float and half as
-  double.
+  specifier gives up to four items, in this order: its mask (8 bytes of its
+  name), its field width when it is an argument, a string's or pointer's
+  count (from the precision's argument, or its constant as 4 bytes) or any
+  other's precision when it is an argument, and its value (none for `%m`).
+  A data argument's size is its promoted type's: arrays and functions as
+  pointers, float and `__fp16` as double. `_Float16` and `__bf16` aren't
+  promoted, and take 2 bytes.
+  - The pass pushes each item on the checker's arena as it finds it, 16
+    bytes each and nothing else (`check_os_log_format`, #1329). Escaped
+    `%%`, bytes past the format's NUL and specifiers of fewer items take no
+    room. An arena that can't hold the items is a resource failure, and the
+    arena is left as it was.
+  - `test-check-builtins-misc` checks the items of fixed formats of each
+    kind, 64 KiB formats of escaped percent signs and of percent signs past
+    a NUL in arenas of no room, and generated formats. Each runs in arenas
+    exactly as large as its items and a byte short of them.
 - **The checks.** The checking pass goes on past a `%P` without its length,
   as clang's `CheckFormatArguments` does. Each data argument is under 256
   bytes, promoted ("argument N is too big"). For `__builtin_os_log_format`,
@@ -1810,10 +1976,21 @@ clang's os_log buffers, as `BuiltinOSLogFormat`, `OSLog.cpp` and
   - It writes the summary byte (0x1 for private items, 0x2 for items other
     than scalars), the items' count, then each item's descriptor
     (`kind << 4 | privacy`), its size and its data.
-  - clang evaluates the data in its items' order, once each. A format whose
-    items take the data other than once each in order (positions, a repeat,
-    an unused argument) is refused by name, and so is data of other than 1,
-    2, 4 or 8 bytes (a `long double`, an `__int128`).
+  - As clang's `emitBuiltinOSLogFormat`, each item's data is evaluated when
+    the item is collected, in the items' order, into a temporary of the
+    item's: an argument that several items take is evaluated again for each,
+    so positions reorder and repeat the data's side effects, and data no item
+    takes isn't evaluated. The stores follow, after every item's data.
+  - Each item's data is an unsigned integer of its size, as clang's helper
+    takes it. A signed `_BitInt` narrower than its class is zero-extended
+    from its width, and a `long double`'s 10 bytes are followed by 6 zeros.
+    Data of 16 bytes (a `long double`, an `__int128`, a `_BitInt(65)` to
+    `_BitInt(128)`, a 16-byte vector, a `__float128`) and of 2 (`_Float16`,
+    `__bf16`, a 2-byte vector) is stored. A `__float128`'s and a 2-byte
+    vector's value is its object's address here, whose bytes are read into
+    the item's temporaries as it is evaluated.
+  - A 32- or 64-byte vector and a `_BitInt` past 128 bits are refused by
+    name: clang's code generation crashes on them.
 - **Limits.** At most 31 arguments are taken, and clang takes up to the
   format's plus 255.
 
@@ -1828,9 +2005,76 @@ record dump, as `BuiltinDumpStruct` checks it.
   call. It is variadic, with no more parameters than the rest and the
   format, and the rest and the format (a `char *`) convert to those
   parameters. An unprototyped printer takes any calls.
-- **Code.** clang's code is those calls, with each field's value or address
-  and type names it prints. This compiler doesn't make them, so `-c` refuses
-  the call by name.
+- **Bit-fields no format prints.** A named bit-field of a `_BitInt` or a
+  128-bit integer type, which clang's dump would print by its address, is
+  refused as clang's Sema refuses it ("address of bit-field requested").
+- **Code.** The calls are planned before the function lanes run
+  (`c_check_program_dump.c`, `check_lower_dump_prepare`), as clang's
+  `BuiltinDumpStructGenerator` builds them, and made by `check_lower_dump_struct`:
+  - the record's canonical name (`"%s"`), then `" {\n"`; an unnamed record's
+    is `struct (unnamed)`, its typedef's name, or with the records whose
+    member's type it is, its scope (`struct O::(unnamed)`,
+    `(unnamed struct)::`, `(anonymous struct)::`);
+  - a line per field, `"%s%s %s "` of its indent (two spaces a level), its
+    type's name and its name, `": %zu "` and its width for a bit-field, then
+    `"="`; a struct or union field's fields follow one level deeper, between
+    `" {\n"` and `"%s}\n"` of its indent, and any other's value: `" "`, its
+    format and `"\n"`, or `" *%p\n"` of its address where no format fits;
+  - unnamed bit-fields are skipped, anonymous members' fields flattened, and
+    the record's last line is `"}\n"`.
+- **Type names.** A field's type prints as its declaration spells it: the
+  type table has no typedef sugar, so the plan finds each member's declarator
+  in its record's body (`check_lower_dump_member`), from the token past the
+  body's `}` (`CheckGraph.tag_completions`, which the deferred reader's merge
+  maps for records its lanes complete), and its typedef specifier
+  (`check_input_typedef_spelling`) gives the alias `type_print` prints. A
+  typedef's name covers its own qualifiers but those its declaration writes
+  with it, which print before it as clang prints them (`CI`, `const CI`,
+  `volatile CI` of a `const int`'s `CI`: `TypeNames.alias_covered`,
+  `check_lower_dump_alias`). Each typedef names the place it is written
+  alone: the declaration's specifier sequences, its own then each nested
+  parameter's, are listed in source order with the typedef among each
+  (`check_lower_dump_places`), the order `type_print` prints its specifiers
+  in, which takes the k-th one's alias for the k-th it prints
+  (`TypeNames.alias_order`), so `int (*)(I)` keeps its `int`; a level an
+  alias names has no suffix of its own, which its AFTER and POINTER_END frames
+  ask of that level alone (`TypePrinter.aliased`, by each TYPE frame's id and
+  depth), so `int (*(*)(FP))(int)` keeps its return's `(int)`. Where the
+  counts differ (a declaration its walk doesn't model), the typedefs apply by
+  type, as before. An
+  unnamed record's canonical name has its scope, as clang's
+  `printNestedNameSpecifier` prints it: the unnamed records whose bodies hold
+  it, whatever declarator it is part of (an array's, a pointer's, a
+  function's: `check_lower_dump_parent`), up to a named one (C's named tags belong to no record), then the
+  function whose body holds the outermost, with its parameters' types where
+  it has a written prototype, each as its declaration spells it
+  (`check_lower_dump_parameter`: its declarator's declared type, qualifiers
+  kept, the first identifier outside a record body its specifiers define that
+  declares itself, with every typedef its tokens name; an array's or a
+  function's adjusted type, which keeps none) (`struct main()::L::(unnamed)`,
+  `struct old_style()::O::(unnamed)`); an unnamed record whose own scope is a
+  function has none.
+- **Formats.** `PrintfSpecifier::fixType`'s, after clang's own cases: bool
+  `%d`, plain char `%hhd` (`%hhu` with `-funsigned-char`), signed char
+  `%hhd`, unsigned char `%hhu`; a pointer to a character type
+  `"\"%.32s\""`, any other pointer `%p`; an enum its underlying type's; the
+  integer and floating types with their length modifiers, a `size_t`,
+  `ssize_t`, `ptrdiff_t`, `intmax_t` or `uintmax_t` typedef of file scope
+  `z`, `t` or `j` from C99; a vector of a builtin type with its count
+  (`%v4d`, `%v4hlf`, `%v16c`). `__int128`, the half-precision types,
+  `__float128`, `_BitInt`, arrays, complex and `_Atomic` types have none.
+- **Operands.** The printer and the rest of the arguments are evaluated
+  again for each call, as clang's are, the rest converted to the printer's
+  parameters or promoted; the pointer is evaluated once, after the first
+  call. The strings are a read-only pool of the call's
+  (`CheckLowerInitializers.dumps`), each string once. A field's value is
+  read through the record's address (a bit-field's from its first byte) and
+  promoted as a variadic argument; a vector passes as a call's does. A
+  call's result is discarded.
+- **Refusals.** A printer that returns an aggregate, a 128-bit or a
+  half-precision value, or takes such values, rest arguments with a
+  statement expression or more than 4096 nodes, and records of more than
+  4096 lines, 1 MiB of strings or 64 levels are refused by name.
 
 `__builtin_available(spec, ...)` (0x4b4, #148) is clang's availability check,
 a keyword whose specs are no expressions: each a `*`, or a platform's name and
@@ -1985,8 +2229,9 @@ folds.
 
 `__builtin_stdarg_start` is the old name of `__builtin_va_start`, which clang's
 Sema checks as that: the catalogue resolves it to `va_start`'s entry
-(`cbuiltin_alias_entry`). In C23 it takes its second argument still, where
-`va_start` takes one alone; that difference is pending.
+(`cbuiltin_alias_entry`). Both take two arguments in every standard, as clang
+23's do. C23's `va_start` with one argument is `<stdarg.h>`'s, by
+`__builtin_c23_va_start`.
 
 Sixteen others are leaves, per-unit helpers of clang -O0's instructions
 (`c_builtin_x86_leaves.inc`), named in the supplementary scope with no
@@ -2048,9 +2293,9 @@ features. Their prototypes are clang's metadata's:
   clang's two errors at the call (`check_input_longjmp_argument`).
 
 A call's size of `memcpy_inline` and `memset_inline` must be an integer
-constant expression (the prototype's `I`). A non-constant one is refused at the
-argument, as the x86 builtins' are; clang's message ("argument to ... must be
-a constant integer", at the call) is pending for both.
+constant expression (the prototype's `I`). A non-constant one is clang's error
+"argument to '__builtin_memcpy_inline' must be a constant integer", at the call,
+as for the x86 builtins (`test-checker-driver`'s generic builtins' fixtures).
 
 `verbose_trap`'s two arguments must each be a constant string without a `$`,
 as clang's Sema reads them (`check_input_verbose_trap_arguments`, in the source
@@ -2202,11 +2447,11 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds 559 audited SemaX86 constraint facts for 531
+`c_check_builtin_x86.c` adds 562 audited SemaX86 constraint facts for 534
 affected names in the frozen 1,492-name own-main target-builtin scope and the
 supplementary scope: 127
 rounding sets, 91 SAE sets, 64 gather/scatter scale sets (1, 2, 4 or 8, a hard
-error as clang's `CheckBuiltinGatherScatterScale` has it) and 277 direct ranges,
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 280 direct ranges,
 `_mm_prefetch`'s hint (0 to 7) the last of them.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
@@ -2426,6 +2671,62 @@ supplementary fact's edges with clang (`check_builtin_x86_test_clang_supplementa
 a function per value of the constrained argument, the others at values their
 facts accept, declared at the prototype's types as clang spells them. Clang
 must refuse exactly the values the fact refuses, with the fact's bounds.
+
+#1029 adds the remaining 21 x86 names from the znver5 `__has_builtin` gap to
+the supplementary scope, with their existing Clang 23.1.1 catalogue
+prototypes and target-feature expressions. The implementation and fixtures
+are original. The additional semantic facts are audited from
+[`llvmorg-23.1.1`'s `SemaX86.cpp`](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/Sema/SemaX86.cpp):
+
+- The fourteen `pcmpestr*128` and `pcmpistr*128` names use SSE4.2 leaves
+  specialized by the converted immediate byte. Explicit lengths move from
+  the helper ABI's `edi`/`esi` into `eax`/`edx`; index results move `ecx` to
+  `eax`, masks return in `xmm0`, and A/C/O/S/Z flag results use `setcc` and
+  zero extension. The planner deduplicates by name and immediate, with a
+  separate bounded key table allocated only for units using these leaves.
+  The ordinary call boundary accounts for every implicit register clobber.
+  Their prototype's `I` marker requires an integer constant expression;
+  SemaX86 adds no direct range check for these names. Controls outside the
+  byte are converted to the prototype's `char` before specialization.
+- SSE4a's `extrqi` and `insertqi` use their two-immediate instruction forms.
+  The row retains each operand's separate ICE check and packs the converted
+  length and index bytes into the encoder's two-immediate field. These
+  names likewise have no extra SemaX86 range rule. Native fixtures compare
+  the defined low quadword, with lengths and indices whose sum is at most
+  64 after the instruction's six-bit truncation; they do not inspect
+  EXTRQ's unspecified upper quadword.
+- `vcvtps2ph_mask`, `vcvtps2ph256_mask` and `vcvtps2ph512_mask` use masked
+  narrowing rows with source in ModRM.reg and destination in r/m. The
+  128/256-bit forms require AVX-512VL and the 512-bit form AVX-512F.
+  SemaX86's cases at lines 761, 763 and 764 constrain argument 1 to 0–255.
+  The 512-bit form selects its SAE encoding only for controls 8–12 and
+  encodes them as 0–4. Other controls, including 13–15 and 255, keep their
+  ordinary encoding; there is no extra rounding operand or separate
+  SAE-set check. A pinned Clang 23.1.4 assembly oracle confirms this
+  distinction, and the native fixture resets MXCSR between controls and
+  width groups so that exception status cannot conceal it.
+- `readeflags_u32` and `writeeflags_u32` are recognized by `__has_builtin`
+  even on x86-64. Calls receive `this builtin is only available on 32-bit
+  targets`, following `isX86_32Builtin` and its early check at lines
+  523–540. This is a semantic error in dead and unevaluated code too, before
+  lowering. Prototype errors still take precedence, and a failed call has
+  no valid expression type, preventing cascading operator diagnostics.
+
+`test-checker` adds native Clang comparisons for all fourteen string results,
+both SSE4a forms, and all three masked conversions. They exercise repeated
+and distinct controls in one unit, signed and saturated lengths, live input
+vectors across fixed-register calls, both mask formats, zero/sparse/full
+conversion masks, the full low rounding nibble, all MXCSR rounding modes,
+ties and exceptional floating values. The MXCSR is restored after each
+fixture. Independent byte checks cover all 256 controls of each string
+leaf through both encoders, including its fixed-register ABI and bounded
+output failure. Diagnostic fixtures compare both SSE4a ICE positions,
+string controls and the 32-bit-only errors against Clang. The existing
+supplementary-range oracle covers the three new range facts; catalogue and
+preprocessor tests cover exact names, bounded slices and target features.
+The lowering-to-prototype coverage check also requires both SSE4a immediate
+arguments to be ICEs, and checks VCVTPS2PH512's shared immediate/SAE control
+at its actual parameter index while leaving the runtime mask unrestricted.
 
 Direct range failures are deferred diagnostic events of warning class with
 default error severity. Source constant-evaluated context skips only these

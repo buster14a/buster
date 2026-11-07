@@ -8,7 +8,7 @@
 // vectorized kernels and with their scalar twins, and reports per token what each costs.
 //
 // Usage: build/compiler benchmark-preprocessor [--clang] [--markers] [--history-cost | --guard-cost | --spelling-cost]
-//        [--only vectorized|scalar] [--read-limit N,...] [-E's options] file...
+//        [--only vectorized|scalar] [--read-limit N,...] [--listing-misses N,...] [-E's options] file...
 //        build/compiler benchmark-preprocessor --embed bytes
 //
 // Each pass preprocesses every file once with each implementation in turn, each run from nothing: a new intern table
@@ -37,7 +37,9 @@
 // entered files move the locations the markers print), and not --clang, which times `clang -E -P`. --only
 // runs one implementation (for profiles). --read-limit takes a list of the largest files a run reads into an arena
 // rather than maps (its cache's read limit: BUSTER_FILE_CACHE_READ_LIMIT unless given; 0 maps every file), and each
-// pass runs each implementation with each of them in turn, which must all give the same output. It also reports the
+// pass runs each implementation with each of them in turn, which must all give the same output. --listing-misses does
+// the same for the failed probes after which a search directory's names are read (FileCache.listing_misses:
+// BUSTER_FILE_CACHE_LISTING_MISSES unless given; 0 never reads them), each with each read limit. It also reports the
 // median time of releasing a run's memory (pp_release and intern_release), which the run's time leaves out: the files'
 // mappings among it. --embed measures the text printed for an embed resource (pp_benchmark_embed). Run it pinned to one CPU (taskset -c 2 ...). The exit status is 1 if the arguments are invalid or
 // a run fails.
@@ -160,8 +162,8 @@ static void pp_benchmark_sort(uint64_t* values, uint64_t count)
 // One pass of one implementation (its options) over the files: each preprocessed from nothing, its cache reading files
 // of up to `read_limit` bytes, then printed (with line markers if `markers`), and with `print_digest` printed again into
 // memory for the text's digest. Adds the files' input and output tokens to `tokens` (the first time).
-static bool pp_benchmark_pass(const PPOptions* run, uint32_t read_limit, char** files, int file_count, int cycles_fd, int instructions_fd, bool markers,
-                              bool print_digest, PPBenchmarkSample* sample, uint64_t* input_tokens, uint64_t* output_tokens)
+static bool pp_benchmark_pass(const PPOptions* run, uint32_t read_limit, uint32_t listing_misses, char** files, int file_count, int cycles_fd, int instructions_fd,
+                              bool markers, bool print_digest, PPBenchmarkSample* sample, uint64_t* input_tokens, uint64_t* output_tokens)
 {
     static InternTable table;
     static Preprocessor pp;
@@ -182,6 +184,7 @@ static bool pp_benchmark_pass(const PPOptions* run, uint32_t read_limit, char** 
         {
             // The unit's own cache, which no lookup has used yet.
             pp.cache->read_limit = read_limit;
+            pp.cache->listing_misses = listing_misses;
         }
         result = result && pp_run(&pp, files[f]);
         sample->ticks[PP_PHASE_COUNT] += __rdtsc() - ticks;
@@ -192,6 +195,8 @@ static bool pp_benchmark_pass(const PPOptions* run, uint32_t read_limit, char** 
         sample->probes.fstats += pp.probes.fstats;
         sample->probes.maps += pp.probes.maps;
         sample->probes.reads += pp.probes.reads;
+        sample->probes.listings += pp.probes.listings;
+        sample->probes.listed += pp.probes.listed;
         for (uint32_t phase = 0; phase < PP_PHASE_COUNT; phase += 1)
         {
             sample->ticks[phase] += pp.ticks[phase];
@@ -822,6 +827,11 @@ int run_preprocessor_benchmark(int argc, char** argv)
     uint32_t read_limits[BUSTER_PP_BENCHMARK_READ_LIMITS] = { BUSTER_FILE_CACHE_READ_LIMIT };
     uint32_t read_limit_count = 1;
     bool read_limits_given = false;
+    // Each read limit's directory listing threshold (FileCache.listing_misses), as --listing-misses pairs them.
+    uint32_t listing_misses[BUSTER_PP_BENCHMARK_READ_LIMITS] = { BUSTER_FILE_CACHE_LISTING_MISSES };
+    uint32_t listings[BUSTER_PP_BENCHMARK_READ_LIMITS] = { BUSTER_FILE_CACHE_LISTING_MISSES };
+    uint32_t listing_count = 1;
+    bool listings_given = false;
     bool valid = true;
     char** passed = calloc((size_t)argc + 1, sizeof(char*));
     char** clang_passed = calloc((size_t)argc + 1, sizeof(char*));
@@ -894,6 +904,25 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 next = end + more;
             }
         }
+        else if (strcmp(argument, "--listing-misses") == 0 && i + 1 < argc)
+        {
+            // A list of failed-probe counts, separated by commas.
+            i += 1;
+            listing_count = 0;
+            listings_given = true;
+            const char* next = argv[i];
+            bool more = true;
+            while (valid && more)
+            {
+                char* end = 0;
+                const unsigned long long value = strtoull(next, &end, 10);
+                valid = next[0] >= '0' && next[0] <= '9' && (*end == 0 || *end == ',') && value <= UINT32_MAX && listing_count < BUSTER_PP_BENCHMARK_READ_LIMITS;
+                listings[valid ? listing_count : 0] = (uint32_t)value;
+                listing_count += valid ? 1 : 0;
+                more = valid && *end == ',';
+                next = end + more;
+            }
+        }
         else if (argument[0] == '-')
         {
             passed[passed_count++] = argv[i];
@@ -915,6 +944,22 @@ int run_preprocessor_benchmark(int argc, char** argv)
         {
             files[file_count++] = argv[i];
         }
+    }
+    // Every read limit with every listing threshold: their pairs are the runs of a pass.
+    valid = valid && read_limit_count * listing_count <= BUSTER_PP_BENCHMARK_READ_LIMITS;
+    if (valid)
+    {
+        uint32_t limits[BUSTER_PP_BENCHMARK_READ_LIMITS];
+        memcpy(limits, read_limits, sizeof(limits));
+        for (uint32_t r = 0; r < read_limit_count; r += 1)
+        {
+            for (uint32_t l = 0; l < listing_count; l += 1)
+            {
+                read_limits[r * listing_count + l] = limits[r];
+                listing_misses[r * listing_count + l] = listings[l];
+            }
+        }
+        read_limit_count *= listing_count;
     }
     if (tables && file_count != 0 && only != 0)
     {
@@ -963,7 +1008,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
     }
     else if (!parsed || (with_clang && clang_arguments == 0))
     {
-        fprintf(stderr, "usage: %s [--clang] [--markers] [--history-cost | --guard-cost | --spelling-cost] [--only vectorized|scalar] [--read-limit N] "
+        fprintf(stderr, "usage: %s [--clang] [--markers] [--history-cost | --guard-cost | --spelling-cost] [--only vectorized|scalar] [--read-limit N,...] [--listing-misses N,...] "
                         "[-E's options] file...\n"
                         "       %s --tables|--defines [--only vectorized|scalar] path... | --embed bytes\n", argv[0], argv[0]);
     }
@@ -1015,8 +1060,8 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 run.expansion_starts = with_markers;
                 run.no_guard_skip = guard_cost && implementation == 1;
                 run.print_per_token = spelling_cost && implementation == 1;
-                ran = pp_benchmark_pass(&run, read_limits[limit], files, file_count, cycles_fd, instructions_fd, with_markers, pass == 0, &sample,
-                                        &input_tokens, &output_tokens);
+                ran = pp_benchmark_pass(&run, read_limits[limit], listing_misses[limit], files, file_count, cycles_fd, instructions_fd, with_markers, pass == 0,
+                                        &sample, &input_tokens, &output_tokens);
                 const uint32_t compared = history_cost ? 0 : implementation;
                 if (!have_digest[compared])
                 {
@@ -1118,9 +1163,10 @@ int run_preprocessor_benchmark(int argc, char** argv)
                                    : guard_cost    ? (implementation == 0 ? "guards" : "no-guards")
                                    : spelling_cost ? (implementation == 0 ? "spellings" : "per-token")
                                                    : names[implementation];
-                if (read_limits_given)
+                if (read_limits_given || listings_given)
                 {
-                    printf("  %s, files of up to %u bytes read:\n", name, read_limits[limit]);
+                    printf("  %s, files of up to %u bytes read, directories listed at %u failed probes (0: never):\n", name, read_limits[limit],
+                           listing_misses[limit]);
                 }
                 printf("  %-10s %8.3f ms  %6.2f cycles/input token  %6.2f cycles/output token  %6.2f instructions/input token  IPC %.2f\n", name,
                        (double)nanoseconds[BUSTER_PP_BENCHMARK_PASSES / 2] / 1e6, median_cycles / (double)input_tokens, median_cycles / (double)output_tokens,
@@ -1158,9 +1204,10 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 printf("             inclusive lookup medians (overlap phases above): includes %.3f ms (read + main loop), embeds %.3f ms (main loop)\n",
                        (double)include_ticks[BUSTER_PP_BENCHMARK_PASSES / 2] * milliseconds_per_tick,
                        (double)embed_ticks[BUSTER_PP_BENCHMARK_PASSES / 2] * milliseconds_per_tick);
-                printf("             direct file calls/pass: %lu open, %lu fstat; stat: %lu embed, %lu directory setup (not process-wide syscall totals)\n",
+                printf("             direct file calls/pass: %lu open, %lu fstat; stat: %lu embed, %lu directory setup (not process-wide syscall totals); "
+                       "%lu directories listed, %lu opens they saved\n",
                        (unsigned long)memory->probes.opens, (unsigned long)memory->probes.fstats, (unsigned long)lookups->embed_stats,
-                       (unsigned long)lookups->directory_stats);
+                       (unsigned long)lookups->directory_stats, (unsigned long)memory->probes.listings, (unsigned long)memory->probes.listed);
                 printf("             includes/pass: %lu searches, %lu found, %lu open, %lu fstat (subset of direct file calls); embeds: %lu searches, %lu found\n",
                        (unsigned long)lookups->include_searches, (unsigned long)lookups->include_found, (unsigned long)lookups->include_opens,
                        (unsigned long)lookups->include_fstats, (unsigned long)lookups->embed_searches, (unsigned long)lookups->embed_found);

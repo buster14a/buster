@@ -23,6 +23,9 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **Variable-length arrays:** allocations on the stack (`ALLOCA`) and the stack's position saved and restored
   (`STACK_SAVE`, `STACK_RESTORE`), in a function with a frame pointer, or in a realigned frame with a base (r15); and
   the frame's address (`FRAME_ADDRESS`, #148's `__builtin_frame_address(0)`), its frame pointer.
+- **Stack-clash protection** (#177's `-fstack-clash-protection`, `Tier0Function.probe_stack`): a reservation of a page
+  or more, a realigned frame's and each `ALLOCA` touch every page below rsp before rsp passes it, with Tier 1's records
+  ([the frame guide](tier1-frame.md)'s "Stack-clash protection on request").
 - **Tail calls** (#147's musttail): a `TAIL_CALL` calls its row as the function's return, its arguments where the
   function's own arrived, the frame released before a jump ("Tail calls", below).
 - **Symbols reached otherwise than directly** (#136's item 4): through their GOT slots (a shared library's data, and a
@@ -118,8 +121,9 @@ Beside them are three tables, and optional parts for aggregates and for the symb
     class may name one too, of at least the class's bytes (a memory class's slot's 16: `tier0_value_object`), whose
     first bytes they read or write, its home a memory operand as a slot's is: a front end's value that must live in
     memory, which it then reads and writes as it would a value's local;
-  - with the others, takes at most `BUSTER_TIER0_MAX_OBJECT_BYTES` (1 GB), each counted as its size rounded up to 16
-    and, aligned past 16, its alignment less 16, so that every frame displacement fits a disp32.
+  - with the others, takes at most `BUSTER_TIER0_MAX_OBJECT_BYTES` (`INT32_MAX - 15` bytes, #1149), each counted as its size rounded up to 16
+    and, aligned past 16, its alignment less 16. Frame layout still checks the complete allocation and every
+    displacement before emission; a large object combined with other slots can therefore remain unsupported.
 
   A function without objects leaves both columns 0.
 - **The parameters' locations** at entry, and the result's.
@@ -136,8 +140,8 @@ The ABI's locations come from `abi_assign`, which the front end runs once per un
 vectorized across the unit that way, and Tier 0 needs no type table. They name the convention's registers alone, and
 Tier 0 takes no others: a call's arguments and a function's parameters in rdi, rsi, rdx, rcx, r8, r9 and xmm0 to xmm7,
 none in a register another argument of the call or another parameter takes, and results in rax, rdx, xmm0 and xmm1.
-The emitters rely on it: the prologue sets a frame pointer's rbp and copies through rax and xmm15 before the parameters
-move, and doesn't save a register a parameter stays in; a call sets al and calls through r11; the epilogue loads the
+The emitters rely on it: the prologue sets a frame pointer's rbp, probes through r11 (#177), and copies through rax and
+xmm15 before the parameters move, and doesn't save a register a parameter stays in; a call sets al and calls through r11; the epilogue loads the
 result before it pops the callee-saved registers.
 
 **Expressions** are in postorder, so each entry's last operand is the entry before it, and both paths read that
@@ -498,9 +502,11 @@ A vector of other bytes has no VECTOR value (#137): one of 1 or 2 bytes, one of 
 them) and an extended vector of `bool`, whose elements pack a bit each. The producer gives such a type an aggregate's value,
 its object's address (`check_lower_transport_type`), which Tier 0 copies, stores, passes and returns by its bytes as it
 does a struct's, at the locations the convention gives the type (an integer's or an SSE eightbyte's register, or memory),
-and an element of one whose elements are bytes is read and written through that address. What would compute with one
-(arithmetic and comparisons, conversions and splats, constant expressions, a `bool` vector's elements and the vector
-builtins) is refused by name (`check_lower_transport_refusal`). An atomic vector of 1, 2, 4 or 8 bytes aligned to them is
+and an element of one whose elements are bytes is read and written through that address. What computes with one writes
+its result into a frame object of its type, whose address is the result (`c_check_program_transport.c`, docs/c-lowering.md's
+"Computing with transport vectors"): ordinary entries an element at a time for a vector of 1 or 2 bytes, the ordinary
+vectors' `X86` rows a register's width at a time for one of more than 64 bytes, and integer or vector-row bitwise
+operations on a `bool` vector's bytes. What that doesn't take is refused by name (`check_lower_transport_refusal`). An atomic vector of 1, 2, 4 or 8 bytes aligned to them is
 lock-free, an integer's load and store of its bytes, as clang's code makes it (`check_builtin_atomic_c11_native`); C11's
 builtins on vectors, as on structs, call libatomic's generic functions.
 
@@ -931,6 +937,83 @@ is compiled by both paths, encoded by both encoders and run from a driver, and t
   released the whole frame leaves.
 
 What the probe returns must reach the driver, through the hidden pointer too.
+
+## Preserving frames (#147)
+
+A function that keeps registers for its caller past System V's callee-saved ones (clang's `preserve_most` and
+`preserve_all`, [the calling convention guide](calling-convention.md#other-calling-conventions)) names them in its
+`Tier0Function`. Without them, nothing in the frame changes:
+
+- `preserve_general` has a bit per caller-saved general register to keep;
+- `preserve_vectors` keeps vector registers 0 to it less 1 (0, 16 or 32), `preserve_vector_bytes` of each (16, 32 or 64);
+- `preserve_mask_bytes` keeps k0 to k7 (0, 2 or 8 bytes each).
+
+Tier 0 leaves out the result's registers (`tier0_result_set`): rax for a hidden pointer's result, and each register
+part's. The frame (`tier0_kept_pointer` keeps a frame pointer for it):
+
+1. **The prologue** pushes rbp and points it at the push, then the callee-saved registers, then the kept general registers
+   in their numbers' order (`Tier0Frame.preserved`, counted in `pushes`). Right below the pushes it reserves the
+   preserve block (`Tier0Frame.preserve_bytes`, `tier0_preserve_block_bytes`). It then stores each kept vector register
+   whole, in their numbers' order, then k0 to k7, 8 bytes each, from rbp (`tier0_emit_preserve`). This happens before
+   the frame's own reservation, any realignment and the parameters' moves. Every slot is a stored register's, and the
+   block is at most 2,112 bytes, so a probed frame's stores touch all of it, under a page.
+   The moves are movups, vmovdqu or vmovdqu64, and kmovw or kmovq, which take any address. The block counts with the
+   pushes in the frame's alignment, its bias and its incoming area (`above` in `tier0_layout_frame`). Each slot is at a
+   fixed offset from the CFA in every frame shape, a realigned one's and one whose body moves rsp included.
+2. **The epilogue** loads the result's registers, then the kept vector and mask registers back from rbp. The teardown's
+   release steps over the block. It then pops the kept general registers first, then the callee-saved ones and rbp.
+
+The set is the convention's whole set, not the registers the body touches. Tier 0's register set covers the general
+registers and xmm0 to xmm15 alone, and nothing has checked a template's scratch caller-saved registers against
+`Tier0Frame.clobbers`. These conventions are rare. A leaf `preserve_most` function pays seven pushes and pops.
+
+`tier0_preserve_valid` refuses a callee-saved register, a vector width the count doesn't allow (32 registers only as
+ZMMs), a mask width other than 2 or 8, and a preserving frame with `eh_return`, tail calls or `returns_twice`. Their
+teardowns and saves know nothing of the kept registers, and the producer refuses such functions by name. `test-tier0`'s
+"aggregate errors" break each rule once, and both compile paths must refuse the metadata. Tier 1 leaves the function to
+Tier 0 (`ir_lower_typed_target_path`).
+
+**The unwind tables.** With the frame pointer, none of the kept registers' moves is a transition.
+`unwind_tier0_frame_tails` checks the pushes, the block's sub, stores and loads, and the pops in place, from
+`Tier0Code.frame_preserved`, `frame_preserve_vectors`, `frame_preserve_vector_bytes` and `frame_preserve_mask_bytes`.
+It compares each store and load whole with the record `tier0_emit_preserve` writes (`tier0_preserve_move`). A move under
+an opmask, or with any other operand, saves or reloads only part of the register, and leaves the frame undescribed.
+The emission describes every kept register at every boundary (`emitted_tier0_preserve_rows`), since the CIE's
+`same_value` rules cover the callee-saved registers alone:
+
+- its caller's value (`DW_CFA_same_value`) from the entry;
+- its slot (`DW_CFA_offset`) from the end of its push or store; a vector register's names its low 128 bits by DWARF's XMM
+  numbers (17 to 32, 67 to 82), and a mask register's is 118 to 125;
+- its own value again from the end of its reload.
+
+LLVM describes its spills the same way. libgcc's unwinder and GDB read no vector register's rule. The general registers'
+rules are proved by the frame verifier's fixpoint (`--verify`, `emitted_verify_frames`), and the vector and mask
+registers' by `emitted_verify_saved_vectors`: each slot's rule right after the store of that register into that slot
+from rbp, with the CFA at rbp plus 16, and each caller's value at the entry or right after the load back. Each move
+must be whole (`emitted_saved_vector_move`): one of the emitter's forms, without a segment override, opmask, zeroing,
+index, vvvv or immediate.
+
+**Tests.**
+
+- `test-emitted-code`:
+  - every register set (`preserve_most`'s, `preserve_all`'s with 16 and 32 bytes, and every register with 64 bytes and
+    the masks) in frames of each size, alignment (a realigned frame's) and probing;
+  - the rules' completeness at every boundary, the verifier's proof, and the mutants it refutes;
+  - each frame's first and last block stores and loads changed: under an opmask (merging or zeroing), with a vvvv, an
+    index or an immediate, through FS, or 8 bytes off (`emitted_test_preserve_moves`). The reader refuses each, the
+    adapter leaves it undescribed, and the verifier refutes the frame's rules over it;
+  - a hand-written frame whose wrong vector rules are refuted, and its zmm twin's masked stores and loads.
+- `test-checker-driver`'s `check_test_driver_preserving_frames` runs both paths' code, built with `--verify`, from a
+  harness clang builds. Every register the convention keeps but the result's must come back, and so must rsp. A callee's
+  `_Unwind_Backtrace` must recover the caller's general registers through the frame with `_Unwind_GetGR`. The runs cover:
+  - results in a register, in two, in xmm0 and none;
+  - calls;
+  - a variable-length array, which moves rsp;
+  - an object aligned to 64 (a realigned frame);
+  - variadic arguments;
+  - a backtrace from a callee.
+
+  They run on x86-64, with probes, frame pointers and `-g`, and on x86-64-v3, where `preserve_all` keeps whole YMMs.
 
 ## Symbols outside the image
 

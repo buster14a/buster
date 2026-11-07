@@ -434,7 +434,9 @@ static void rss_compiler_tests(const char* compiler)
         rss_expect(written, "original compiler fixture written");
         RssReport reports[2] = { 0 };
         size_t padding = 0;
-        bool good = written;
+        // Both launches in base pages: without BUSTER_HUGE_PAGES, a compile takes base pages where it finds the host busy
+        // when it starts (#672), which one launch might and the other not, as on a host whose other jobs come and go.
+        bool good = written && setenv("BUSTER_HUGE_PAGES", "0", 1) == 0;
         for (uint32_t p = 0; good && p < 2; p += 1)
         {
             char* const arguments[] = { (char*)compiler, "--time-stages", "--lanes", "1", "-c", source, "-o", objects[p], NULL };

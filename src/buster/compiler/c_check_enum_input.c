@@ -251,7 +251,8 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
             valid = old == 0 || reader->bindings.depth[old - 1] != depth;
             if (!valid)
             {
-                check_input_report(reader, name, CHECK_INPUT_REDECLARATION);
+                const CheckInputMessage message = reader->bindings.kind[old - 1] == C_BINDING_ENUMERATOR ? CHECK_INPUT_ENUMERATOR_REDEFINITION : CHECK_INPUT_REDECLARATION;
+                check_input_report_subject(reader, name, message, reader->bindings.declaration[old - 1]);
             }
             else
             {

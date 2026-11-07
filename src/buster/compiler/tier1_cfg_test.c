@@ -412,6 +412,41 @@ static void tier1_cfg_test_shape(Tier1CfgTestTally* tally, const Tier1CfgInput* 
     tally->shape_mutants += 1;
 }
 
+// The block column answers the same intervals and locations as the binary search, at every position and every block entry.
+static bool tier1_cfg_test_lookup(const Tier1CfgInput* input, const Tier1CfgAllocation* result)
+{
+    const bool expect = result->position_blocks != 0 && input->value_count != 0 && input->block_count != 0 && input->value_count <= BUSTER_TIER1_CFG_BLOCK_INTERVALS / input->block_count;
+    bool ok = !expect || result->value_block_base != 0;
+    for (uint32_t v = 0; ok && result->value_block_base != 0 && v < input->value_count; v += 1)
+    {
+        if (result->value_block_base[v] != BUSTER_TIER1_CFG_NONE)
+        {
+            for (uint32_t q = 0; ok && q < input->position_count; q += 1)
+            {
+                uint32_t fast = 0;
+                uint32_t slow = 0;
+                uint8_t fast_kind = 0;
+                uint8_t slow_kind = 0;
+                const bool fast_found = tier1_cfg_location(result, v, q, &fast, &fast_kind);
+                const bool slow_found = tier1_cfg_location_oracle(result, v, q, &slow, &slow_kind);
+                ok = ok && tier1_cfg_interval_at(result, v, q) == tier1_cfg_interval_oracle(result, v, q);
+                ok = ok && fast_found == slow_found && (!fast_found || (fast == slow && fast_kind == slow_kind));
+            }
+            for (uint32_t b = 0; ok && b < input->block_count; b += 1)
+            {
+                uint32_t fast = 0;
+                uint32_t slow = 0;
+                uint8_t fast_kind = 0;
+                uint8_t slow_kind = 0;
+                const bool fast_found = tier1_cfg_entry_location(result, v, input->block_starts[b], &fast, &fast_kind);
+                const bool slow_found = tier1_cfg_entry_location_oracle(result, v, input->block_starts[b], &slow, &slow_kind);
+                ok = ok && fast_found == slow_found && (!fast_found || (fast == slow && fast_kind == slow_kind));
+            }
+        }
+    }
+    return ok;
+}
+
 // Allocates one case by both entry points and checks each result. Mutants of the first result with moves: every
 // edge move's destination redirected to an unused register, and one interval fragment's register swapped.
 // `temp_slots` are the classes whose temporary slot the case must use, `split_moves` the fewest moves at splits it must
@@ -448,6 +483,7 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                 printf("test-tier1-cfg: %s, %s path: %s (block %u value %u position %u)\n", name, path == 0 ? "vector" : "scalar", check.reason, check.block, check.value, check.position);
             }
             tier1_cfg_test_expect(tally, verified, "the CFG checker accepts the allocation");
+            tier1_cfg_test_expect(tally, tier1_cfg_test_lookup(input, &result), "block intervals match the binary search");
             tier1_cfg_test_expect(tally, tier1_cfg_test_certify(tally, input, &result, output, scratch, true), "the certificate checker proves the allocation");
             if (result.intervals.count <= 600)
             {
@@ -1389,6 +1425,9 @@ static void tier1_cfg_test_fixtures(Tier1CfgTestTally* tally, Arena* output, Are
     (void)mask_memory_b;
 }
 
+#include "tier1_cfg_spill_test.c"
+#include "tier1_cfg_edges_test.c"
+
 static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
 {
     uint64_t seed = 140;
@@ -1435,6 +1474,9 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
             tally.oracle_mutants = true;
             tier1_cfg_test_fixtures(&tally, &output, &scratch);
             tier1_cfg_test_undefined(&tally, &output, &scratch);
+            tier1_cfg_test_current_slots(&tally, &output, &scratch);
+            tier1_cfg_test_edge_views(&tally, &scratch);
+            tier1_cfg_test_wide_edges(&tally, &output, &scratch);
             Tier1CfgTestBuilder* builder = arena_push(&work, sizeof(Tier1CfgTestBuilder), _Alignof(Tier1CfgTestBuilder));
             tier1_cfg_test_expect(&tally, builder != 0, "builder memory");
             for (uint64_t sample = 0; builder != 0 && sample < count; sample += 1)
@@ -1483,3 +1525,4 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
     }
     return result;
 }
+

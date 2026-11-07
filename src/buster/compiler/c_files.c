@@ -215,7 +215,12 @@ struct FilesPath
 {
     const char* path;
     uint32_t length;
+    // The length of the directory the search looks in (file_cache_lookup_path's `directory_length`), or BUSTER_PP_NONE.
+    uint32_t directory_length;
     uint64_t hash;
+    // A path its directory's listing rules out (file_cache_listed_absent): not probed, but added to the cache with the
+    // entry a failed probe gives it, as a unit's lookup adds it (file_cache_lookup_path).
+    bool listed;
 };
 
 // What a lane keeps through a run: its intern table, what it knows of each of its spellings and their shared ids (0
@@ -1087,27 +1092,40 @@ static uint32_t files_search_key(const FilesRun* run, const FilesRequest* reques
     return length;
 }
 
+// The open-addressed table's slot count for `total` items: at least twice as many slots, a power of two.
+// False when that count does not fit in a 32-bit index. Each lane's cap is BUSTER_FILES_MAX_REQUESTS and a run
+// may have BUSTER_LANE_MAX_COUNT lanes, so the sum is 2^32 and a uint32_t total wraps to an empty table.
+static bool files_table_slots(uint64_t total, uint32_t* slots)
+{
+    bool result = total <= UINT32_MAX / 2;
+    uint32_t count = 16;
+    while (result && (uint64_t)count < total * 2)
+    {
+        result = count <= UINT32_MAX / 2;
+        count = result ? count * 2 : count;
+    }
+    *slots = count;
+    return result;
+}
+
 // On one lane: the lanes' requests in order (lane by lane, each in its items' order, so the walk's order), each with the
 // search of its key, new keys getting new searches.
 static void files_search_requests(FilesRun* run)
 {
     Arena* round = &run->round;
-    uint32_t total = 0;
+    uint64_t total = 0;
     for (uint32_t l = 0; l < run->lane_count; l += 1)
     {
         total += run->lanes[l].request_count;
     }
-    run->requests = arena_push_array(round, (uint64_t)total + 1, sizeof(FilesRequest*), 8);
-    run->request_search = arena_push_array(round, (uint64_t)total + 1, sizeof(uint32_t), 8);
-    run->searches = arena_push_array(round, (uint64_t)total + 1, sizeof(FilesSearch), 8);
-    uint32_t slots = 16;
-    while (slots < 2 * total)
-    {
-        slots *= 2;
-    }
-    run->search_slots = arena_push_array(round, slots, sizeof(uint32_t), 64);
-    run->search_slot_mask = slots - 1;
-    uint64_t* hashes = arena_push_array(round, (uint64_t)total + 1, sizeof(uint64_t), 8);
+    uint32_t slots = 0;
+    const bool counted = files_table_slots(total, &slots);
+    run->requests = counted ? arena_push_array(round, total + 1, sizeof(FilesRequest*), 8) : 0;
+    run->request_search = counted ? arena_push_array(round, total + 1, sizeof(uint32_t), 8) : 0;
+    run->searches = counted ? arena_push_array(round, total + 1, sizeof(FilesSearch), 8) : 0;
+    run->search_slots = counted ? arena_push_array(round, slots, sizeof(uint32_t), 64) : 0;
+    run->search_slot_mask = counted ? slots - 1 : 0;
+    uint64_t* hashes = counted ? arena_push_array(round, total + 1, sizeof(uint64_t), 8) : 0;
     // Room for two keys, the request's and one it is compared with, of the round's longest.
     uint64_t bound = 0;
     for (uint32_t l = 0; l < run->lane_count; l += 1)
@@ -1119,13 +1137,13 @@ static void files_search_requests(FilesRun* run)
         }
     }
     uint8_t* keys = arena_push(round, 2 * bound + 1, 1);
-    const bool room = run->requests != 0 && run->request_search != 0 && run->searches != 0 && run->search_slots != 0 && hashes != 0 && keys != 0;
+    const bool room = counted && run->requests != 0 && run->request_search != 0 && run->searches != 0 && run->search_slots != 0 && hashes != 0 && keys != 0;
     files_fail(run, !room);
     run->request_count = 0;
     run->search_count = 0;
     if (room)
     {
-        memset(run->search_slots, 0, slots * sizeof(uint32_t));
+        memset(run->search_slots, 0, (uint64_t)slots * sizeof(uint32_t));
     }
     for (uint32_t l = 0; room && l < run->lane_count; l += 1)
     {
@@ -1163,11 +1181,15 @@ static void files_search_requests(FilesRun* run)
 }
 
 // Candidate `index` of a search, as pp_include_candidate gives it for its first request: a root's is its path alone.
-static PPCandidate files_candidate(const FilesRun* run, const FilesSearch* search, uint32_t index, char* path, uint32_t* path_length, uint32_t* directory)
+// `*directory_length` gets the length of the directory it looks in, as pp_find_include passes it to the cache: the search
+// directory's or the includer's, or BUSTER_PP_NONE for a root or an absolute name.
+static PPCandidate files_candidate(const FilesRun* run, const FilesSearch* search, uint32_t index, char* path, uint32_t* path_length, uint32_t* directory,
+                                   uint32_t* directory_length)
 {
     const FilesRequest* request = search->request;
     PPCandidate result = PP_CANDIDATE_END;
     *directory = BUSTER_PP_NONE;
+    *directory_length = BUSTER_PP_NONE;
     if (request->item == BUSTER_PP_NONE)
     {
         if (index == 0 && request->length < PATH_MAX)
@@ -1183,15 +1205,19 @@ static PPCandidate files_candidate(const FilesRun* run, const FilesSearch* searc
         uint8_t system = 0;
         result = pp_include_candidate(run->search, request->name, request->length, request->angled, request->next, &includer, run->items[request->item].search,
                                       index, path, path_length, &system, directory);
+        const bool absolute = request->length != 0 && request->name[0] == '/';
+        const uint32_t own = includer.directory_length != BUSTER_PP_NONE ? includer.directory_length : 1;
+        *directory_length = absolute ? BUSTER_PP_NONE : *directory != BUSTER_PP_NONE ? run->search->directory_lengths[*directory] : own;
     }
     return result;
 }
 
 // This lane's range of the round's searches goes through its candidates in order: a path the cache knows answers at
-// once (a file there ends the search; none, the next candidate), until the last candidate or a path the cache never
-// looked up, which the lane lists for this wave's probes (its bytes in the lane's names). A place the preprocessor's
-// search can't look in (a path too long for one, or one that couldn't be opened for another reason than there being no
-// file there) ends the search too, as it ends the preprocessor's with a fatal error (pp_find_include).
+// once (a file there ends the search; none, the next candidate), and so does a path its directory's listing rules out
+// (file_cache_listed_absent: none there), until the last candidate or a path the cache never looked up, which the lane
+// lists for this wave's probes (its bytes in the lane's names). A place the preprocessor's search can't look in (a path
+// too long for one, or one that couldn't be opened for another reason than there being no file there) ends the search
+// too, as it ends the preprocessor's with a fatal error (pp_find_include).
 static void files_advance(FilesRun* run, FilesLane* mine)
 {
     FileCache* cache = run->cache;
@@ -1208,12 +1234,34 @@ static void files_advance(FilesRun* run, FilesLane* mine)
             char path[PATH_MAX];
             uint32_t path_length = 0;
             uint32_t directory = BUSTER_PP_NONE;
-            const PPCandidate candidate = files_candidate(run, search, search->candidate, path, &path_length, &directory);
+            uint32_t directory_length = BUSTER_PP_NONE;
+            const PPCandidate candidate = files_candidate(run, search, search->candidate, path, &path_length, &directory, &directory_length);
             const uint64_t hash = candidate == PP_CANDIDATE_PATH ? intern_hash_bytes((const uint8_t*)path, path_length) : 0;
             const FileCachePath* entry = candidate == PP_CANDIDATE_PATH ? file_cache_find_path(cache, path, path_length, hash) : 0;
+            const bool listed = candidate == PP_CANDIDATE_PATH && entry == 0 && cache->listed_directories != 0 &&
+                                file_cache_in_directory(path, path_length, directory_length);
+            const FileCacheDirectory* place =
+                listed ? file_cache_find_directory(cache, path, directory_length, intern_hash_bytes((const uint8_t*)path, directory_length)) : 0;
+            const bool absent = place != 0 && file_cache_listed_absent(place, path, path_length);
+            mine->counts.listed += absent;
             if (candidate == PP_CANDIDATE_END || __atomic_load_n(&run->failed, __ATOMIC_RELAXED))
             {
                 search->done = true;
+            }
+            else if (absent)
+            {
+                // Listed for this wave's additions, as a unit's lookup would add its entry, without waiting for them.
+                char* copy = arena_push(&mine->names, (uint64_t)path_length + 1, 1);
+                FilesPath* listed_path = copy != 0 ? arena_push_array(&mine->path_list, 1, sizeof(FilesPath), _Alignof(FilesPath)) : 0;
+                files_fail(run, listed_path == 0);
+                if (listed_path != 0)
+                {
+                    memcpy(copy, path, path_length);
+                    copy[path_length] = 0;
+                    *listed_path = (FilesPath){ .path = copy, .length = path_length, .directory_length = directory_length, .hash = hash, .listed = true };
+                    mine->path_count += 1;
+                }
+                search->candidate += 1;
             }
             else if (candidate == PP_CANDIDATE_PATH && entry == 0)
             {
@@ -1224,7 +1272,7 @@ static void files_advance(FilesRun* run, FilesLane* mine)
                 {
                     memcpy(copy, path, path_length);
                     copy[path_length] = 0;
-                    *probe = (FilesPath){ .path = copy, .length = path_length, .hash = hash };
+                    *probe = (FilesPath){ .path = copy, .length = path_length, .directory_length = directory_length, .hash = hash };
                     mine->path_count += 1;
                     waiting = true;
                 }
@@ -1247,30 +1295,27 @@ static void files_advance(FilesRun* run, FilesLane* mine)
     }
 }
 
-// On one lane: the paths the lanes' searches wait for, each once, in order (lane by lane, each in its searches' order),
-// with room for what each probe finds.
+// On one lane: the paths the lanes' searches wait for, and those their directories' listings ruled out, each once, in
+// order (lane by lane, each in its searches' order), with room for what each probe finds.
 static void files_collect_probes(FilesRun* run)
 {
-    uint32_t total = 0;
+    uint64_t total = 0;
     for (uint32_t l = 0; l < run->lane_count; l += 1)
     {
         total += run->lanes[l].path_count;
     }
-    uint32_t slots = 16;
-    while (slots < 2 * total)
-    {
-        slots *= 2;
-    }
-    run->probes = arena_push_array(&run->round, (uint64_t)total + 1, sizeof(FilesPath), 8);
-    run->found = arena_push_array(&run->round, (uint64_t)total + 1, sizeof(FileProbe), 8);
-    run->probe_slots = arena_push_array(&run->round, slots, sizeof(uint32_t), 64);
+    uint32_t slots = 0;
+    const bool counted = files_table_slots(total, &slots);
+    run->probes = counted ? arena_push_array(&run->round, total + 1, sizeof(FilesPath), 8) : 0;
+    run->found = counted ? arena_push_array(&run->round, total + 1, sizeof(FileProbe), 8) : 0;
+    run->probe_slots = counted ? arena_push_array(&run->round, slots, sizeof(uint32_t), 64) : 0;
     run->probe_slot_mask = slots - 1;
     run->probe_count = 0;
-    const bool room = run->probes != 0 && run->found != 0 && run->probe_slots != 0;
+    const bool room = counted && run->probes != 0 && run->found != 0 && run->probe_slots != 0;
     files_fail(run, !room);
     if (room)
     {
-        memset(run->probe_slots, 0, slots * sizeof(uint32_t));
+        memset(run->probe_slots, 0, (uint64_t)slots * sizeof(uint32_t));
     }
     for (uint32_t l = 0; room && l < run->lane_count; l += 1)
     {
@@ -1296,13 +1341,19 @@ static void files_collect_probes(FilesRun* run)
     }
 }
 
-// On one lane: the wave's probed paths added to the cache, in order, each with its file's record (file_cache_identify).
-static void files_add_probes(FilesRun* run)
+// On one lane: the wave's probed paths added to the cache, in order, each with its file's record (file_cache_identify),
+// and those a listing ruled out with ENOENT. A probe that found no file there counts towards its directory's listing
+// (file_cache_count_miss), which the next waves' searches read: added in the probes' order, the listings are those of
+// any lane count.
+static void files_add_probes(FilesRun* run, FileCacheCounts* counts)
 {
     FileCache* cache = run->cache;
     for (uint32_t p = 0; p < run->probe_count; p += 1)
     {
         const FilesPath* path = &run->probes[p];
+        const bool missed = !path->listed && run->found[p].error == ENOENT && file_cache_in_directory(path->path, path->length, path->directory_length);
+        FileCacheDirectory* directory = missed ? file_cache_directory(cache, path->path, path->directory_length) : 0;
+        file_cache_count_miss(cache, directory, &run->found[p], counts);
         FileCachePath* entry = file_cache_add_path(cache, path->path, path->length, path->hash, &run->found[p]);
         if (entry != 0)
         {
@@ -1342,12 +1393,19 @@ static void files_search(FilesRun* run)
         const FileCacheBytes how = run->lane_count > 1 ? run->bytes : FILE_CACHE_MAP_POPULATED;
         for (uint64_t p = range.begin; p < range.end; p += 1)
         {
-            file_cache_probe(run->cache, run->probes[p].path, how, run->read_limit, &run->cache->lanes[lane].bytes, &run->found[p], &mine->counts);
+            if (run->probes[p].listed)
+            {
+                run->found[p] = (FileProbe){ .record = BUSTER_PP_NONE, .error = ENOENT };
+            }
+            else
+            {
+                file_cache_probe(run->cache, run->probes[p].path, how, run->read_limit, &run->cache->lanes[lane].bytes, &run->found[p], &mine->counts);
+            }
         }
         files_sync(mine, FILES_PHASE_SEARCH);
         if (lane == 0 && probes != 0)
         {
-            files_add_probes(run);
+            files_add_probes(run, &mine->counts);
             files_tick(mine, FILES_PHASE_ALONE);
         }
         files_sync(mine, FILES_PHASE_SEARCH);
@@ -1809,11 +1867,19 @@ static __attribute__((unused)) bool files_list_sources(FilesSources* sources, co
             else if (entry->d_name[0] != '.')
             {
                 char child[PATH_MAX];
-                snprintf(child, sizeof(child), "%s/%s", names[depth - 1], entry->d_name);
+                const int written = snprintf(child, sizeof(child), "%s/%s", names[depth - 1], entry->d_name);
                 struct stat child_stats;
                 const uint64_t length = strlen(entry->d_name);
                 const bool source = length > 2 && entry->d_name[length - 2] == '.' && (entry->d_name[length - 1] == 'c' || entry->d_name[length - 1] == 'h');
-                if (lstat(child, &child_stats) == 0 && S_ISDIR(child_stats.st_mode) && depth < BUSTER_FILES_MAX_DEPTH)
+                // A name that does not fit is not a path we can list. lstat's failure leaves child_stats
+                // untouched: an entry removed between readdir and lstat is absent, not a regular file.
+                const bool named = written > 0 && (size_t)written < sizeof(child);
+                const bool listed = named && lstat(child, &child_stats) == 0;
+                if (!named)
+                {
+                    result = false;
+                }
+                else if (listed && S_ISDIR(child_stats.st_mode) && depth < BUSTER_FILES_MAX_DEPTH)
                 {
                     directories[depth] = opendir(child);
                     if (directories[depth] != 0)
@@ -1822,7 +1888,7 @@ static __attribute__((unused)) bool files_list_sources(FilesSources* sources, co
                         depth += 1;
                     }
                 }
-                else if (S_ISREG(child_stats.st_mode) && source)
+                else if (listed && S_ISREG(child_stats.st_mode) && source)
                 {
                     result = files_add_source(sources, child);
                 }

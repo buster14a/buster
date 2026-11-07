@@ -29,7 +29,7 @@
 // lane, which must wait for no other, also inside a running pinned team with an unfinished take and impossible pin
 // target, and on 8. The caller's context and running state, its installed team and worker identities, and its affinity
 // must survive; the entry's dispatch and the wake-up must fall within the lanes' span. Then
-// benchmark-checker-deferred's --cpus parser, the difference report on a deferred path that made no input, which must
+// benchmark-checker-deferred's --cpus parser and its --rss reading of the resident memory, the difference report on a deferred path that made no input, which must
 // say so rather than read its columns, and the state's memory: a lane's arenas in one mapping, kept across readings and
 // unmapped by check_deferred_release; and the arena of rare columns' pages, base pages throughout where more than one
 // lane writes it, and otherwise huge past its prefix (check_input_sparse_arena, by the kernel's advice for the mapping).
@@ -51,11 +51,43 @@ struct CheckDeferredFixture
 
 static const CheckDeferredFixture check_deferred_fixtures[] =
 {
+    { "postmerge-independent-expressions",
+      "int top=3;struct S{int n;};int sum(int a,int b){return a+b;}\n"
+      "int f(int n){int a=n+top;struct S s={n};while(a>0){a-=1;}return sum(a,s.n);}\n"
+      "int g(int n){int a=n*2;switch(n){case 1:a+=3;break;case 3 ... 5:a+=4;break;default:a-=2;}return a;}\n"
+      "int h(int n){return n?sum(n,2):sum(3,n);}\n", true },
+    { "postmerge-ordered-expressions",
+      "int f(int n){return ({int a=n+1;a*2;});}\n"
+      "int g(int n){int a[n+1];return sizeof(a)+__builtin_popcount((unsigned)n);}\n"
+      "int h(int n){int a=n+3;return a*2;}\nint k(int n){return h(n)+4;}\n", true },
+    { "postmerge-builtin-expressions",
+      "int f(int n){return __builtin_expect(n,1)+__builtin_bswap32((unsigned)n);}\n"
+      "int g(int n){int a;return __builtin_add_overflow(n,1,&a)?0:a;}\n"
+      "int h(int n){return __builtin_expect_with_probability(n,1,0.75)+__builtin_popcount((unsigned)n);}\n"
+      "int k(int n){return __builtin_expect(n,0)+__builtin_popcount((unsigned)n+1u);}\n", true },
+    { "postmerge-warning-metadata",
+      "int a[sizeof(1+2+3+4+5+6+7+8+9+10+11+12+13+14+15+16+17+18+19+20+21+22+23+24+25+26+27+28+29+30+31+32+33+34+35)];\n"
+      "unsigned long f(int n){return 9223372036854775808+n;}\n"
+      "unsigned long g(int n){return 18446744073709551615-n;}\n"
+      "unsigned long h(int n){return sizeof(a)+9223372036854775809+n;}\n"
+      "unsigned long k(int n){return sizeof(a)+18446744073709551615-n;}\n", true },
+    { "postmerge-leaf-boundaries",
+      "int use(const char*);int f(int n){int a[]={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};while(n>0){if(n==2)break;n--;continue;}return a[n&7]+use(__func__);}\n"
+      "int g(int n){int a[]={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};return a[n&15]+use(\"second\");}\n"
+      "int h(int n){int a[]={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17};if(n<0)goto out;n+=a[n&15];out:return n+use(__func__);}\n"
+      "int k(int n){int a[]={1,2,3,4};return a[n&3]+use(\"fourth\");}\n", true },
     // Declared x86 builtins called in bodies that lanes read (#148): each lane works out their verdicts itself, writing
     // nothing the top level's reader or another lane reads.
     { "declared-builtins-in-bodies", "void _mm_sfence(void);void _mm_pause(void);void _mm_lfence(void);unsigned _mm_getcsr(void);\n"
       "int f(int n){_mm_sfence();_mm_pause();return n+(int)(_mm_getcsr()&1);}\nint g(int n){_mm_sfence();return n*2;}\n"
       "int h(int n){_mm_lfence();_mm_pause();return n-1;}\nint k(int n){_mm_sfence();_mm_sfence();return f(n)+g(n)+h(n);}\n", true },
+    // __builtin_dump_struct's type names (#148): records completed in bodies that lanes read, with typedefs their members'
+    // declarations spell, whose dumps' lines are planned from the merged records' bodies (CheckGraph.tag_completions)
+    // and the declarators in them.
+    { "dump-struct-records-in-bodies", "typedef unsigned int u32;int printf(const char*,...);\n"
+      "int f(int n){typedef struct{u32 w;}W;struct L{u32 u;W w;struct{int q;}in;}l={1,{2},{n}};__builtin_dump_struct(&l,printf);"
+      "__builtin_dump_struct(&l.in,printf);return n;}\n"
+      "int g(int n){struct{struct{u32 k;}in;}r={{(u32)n}};__builtin_dump_struct(&r.in,printf);return f(n)+1;}\n", true },
     { "kr-promoted-parameters", "int f(a,b) char a; float b; {return a+(int)b;}\nint g(void){return f(258,3.5); }\n", true },
     { "kr-parenthesized-atomic-parameters", "int f(a,b)_Atomic(short) a;_Atomic(float) b;{return a+(int)b;}\n"
       "int g(void){return f(65539,3.5);}\n", true },
@@ -397,6 +429,39 @@ static bool check_deferred_test_cpus(void)
         munmap(pages, page * 2);
     }
     return valid;
+}
+
+static uint64_t check_deferred_benchmark_resident_begin(void);
+static uint64_t check_deferred_benchmark_resident_peak(void);
+static uint64_t check_deferred_benchmark_growth(uint64_t start, uint64_t peak);
+
+// The bytes check_deferred_test_resident touches between its readings' begin and end.
+#define BUSTER_CHECK_DEFERRED_TEST_RESIDENT_BYTES (UINT64_C(16) << 20)
+
+// benchmark-checker-deferred's --rss (#447): a reading that faults in 16 MB of fresh pages must grow the peak by at least
+// three quarters of them, and once they are unmapped, a reading that touches nothing must start its peak afresh and grow
+// it by less than a quarter (without the peak's reset, it would keep the 16 MB). A host that can't reset or read the peak
+// passes, as the benchmark then says the resident memory is unknown.
+static bool check_deferred_test_resident_peak(void)
+{
+    uint8_t* pages = mmap(0, BUSTER_CHECK_DEFERRED_TEST_RESIDENT_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool valid = pages != MAP_FAILED;
+    const uint64_t touched_start = check_deferred_benchmark_resident_begin();
+    for (uint64_t at = 0; valid && at < BUSTER_CHECK_DEFERRED_TEST_RESIDENT_BYTES; at += 4096)
+    {
+        pages[at] = (uint8_t)(at >> 12 | 1);
+    }
+    const uint64_t touched_peak = touched_start != 0 ? check_deferred_benchmark_resident_peak() : 0;
+    if (pages != MAP_FAILED)
+    {
+        munmap(pages, BUSTER_CHECK_DEFERRED_TEST_RESIDENT_BYTES);
+    }
+    const uint64_t idle_start = check_deferred_benchmark_resident_begin();
+    const uint64_t idle_peak = idle_start != 0 ? check_deferred_benchmark_resident_peak() : 0;
+    const uint64_t quarter = BUSTER_CHECK_DEFERRED_TEST_RESIDENT_BYTES / 4;
+    const bool grew = check_deferred_benchmark_growth(touched_start, touched_peak) >= BUSTER_CHECK_DEFERRED_TEST_RESIDENT_BYTES - quarter;
+    const bool reset = check_deferred_benchmark_growth(idle_start, idle_peak) < quarter;
+    return valid && (touched_start == 0 || touched_peak == 0 || grew) && (idle_start == 0 || idle_peak == 0 || reset);
 }
 
 // The difference report on a deferred path that made no input (#432's second review): the vector path's tokens have
@@ -938,8 +1003,8 @@ static uint64_t check_deferred_test_lane_tokens(uint64_t top)
     return BUSTER_CHECK_DEFERRED_LANE_TOKENS + top / BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS;
 }
 
-// The lanes a unit's bodies run on, written again from the rule: one, and one more per check_deferred_test_lane_tokens
-// of their tokens beyond the larger of the largest body's and twice the second largest's, or with `every` as many as
+// The lanes a unit's bodies run on, written again from the rule: one per check_deferred_test_lane_tokens of their tokens
+// beyond the larger of the largest body's and twice the second largest's, and at least one, or with `every` as many as
 // there are lanes; and no more than `lanes` or the bodies, none without bodies.
 static uint64_t check_deferred_test_lanes(uint64_t bodies, uint64_t tokens, uint64_t top, uint64_t largest, uint64_t second, uint64_t lanes, bool every)
 {
@@ -958,7 +1023,8 @@ static uint64_t check_deferred_test_lanes(uint64_t bodies, uint64_t tokens, uint
 // A largest body of four times N, which the first lane reads itself, beside one of N, and of a token fewer: the second
 // lane its tokens beyond the largest body's pay for (#448's rule, which counted the largest body twice, took one). A
 // largest body of three times N beside one of twice N, whose woken lane reads it in about four times N's time, and one
-// of N and of a token fewer: the third lane its tokens beyond four times N pay for.
+// of N and of a token fewer: the third lane its tokens beyond four times N pay for. The grouped-part cases' 42 tokens a
+// body give 2 lanes at 127 to 129 bodies and 6 at 511 to 513.
 typedef struct CheckDeferredSize CheckDeferredSize;
 struct CheckDeferredSize
 {
@@ -983,12 +1049,12 @@ static const CheckDeferredSize check_deferred_sizes[] =
     { "lane-tokens-large-body-two-lanes", 2, 4, 1, 0, 2, 0 },
     { "lane-tokens-second-body-below-three-lanes", 3, 3, 2, 1, 2, 0 },
     { "lane-tokens-second-body-three-lanes", 3, 3, 2, 0, 3, 0 },
-    { .name = "grouped-parts-below-two-lanes-capacity", .bodies = 127, .lanes = 2, .base_tokens = 18 },
-    { .name = "grouped-parts-two-lanes-capacity", .bodies = 128, .lanes = 2, .base_tokens = 18 },
-    { .name = "grouped-parts-above-two-lanes-capacity", .bodies = 129, .lanes = 2, .base_tokens = 18 },
-    { .name = "grouped-parts-below-eight-lanes-capacity", .bodies = 511, .lanes = 6, .base_tokens = 18 },
-    { .name = "grouped-parts-eight-lanes-capacity", .bodies = 512, .lanes = 6, .base_tokens = 18 },
-    { .name = "grouped-parts-above-eight-lanes-capacity", .bodies = 513, .lanes = 6, .base_tokens = 18 },
+    { .name = "grouped-parts-below-two-lanes-capacity", .bodies = 127, .lanes = 2, .base_tokens = 42 },
+    { .name = "grouped-parts-two-lanes-capacity", .bodies = 128, .lanes = 2, .base_tokens = 42 },
+    { .name = "grouped-parts-above-two-lanes-capacity", .bodies = 129, .lanes = 2, .base_tokens = 42 },
+    { .name = "grouped-parts-below-eight-lanes-capacity", .bodies = 511, .lanes = 6, .base_tokens = 42 },
+    { .name = "grouped-parts-eight-lanes-capacity", .bodies = 512, .lanes = 6, .base_tokens = 42 },
+    { .name = "grouped-parts-above-eight-lanes-capacity", .bodies = 513, .lanes = 6, .base_tokens = 42 },
 };
 
 // A CheckDeferredSize's unit: its bodies and the tokens they hold in all, the largest one's (the first of them) and the
@@ -1218,21 +1284,30 @@ static int run_checker_deferred_tests(int count, char** arguments)
                                                        outcome.deferred_largest_body == size_largest && outcome.deferred_second_body == size_second &&
                                                        outcome.deferred_largest_lane == 0 &&
                                                        outcome.deferred_active == (size_lanes < lane_counts[l] ? size_lanes : lane_counts[l]));
+                const bool postmerge = strncmp(name, "postmerge-", 10) == 0 && strcmp(name, "postmerge-ordered-expressions") != 0;
+                // On fewer than BUSTER_CHECK_DEFERRED_POST_LANES of the bodies' lanes, the post-merge rounds stay on the
+                // calling thread: no expression parts and no retry (#447).
+                const bool serial_post = outcome.deferred_active < BUSTER_CHECK_DEFERRED_POST_LANES;
+                const bool expressions = !postmerge ||
+                                         (serial_post || BUSTER_SCALAR_PATH(false) ? outcome.deferred_expression_parts == 0 && !outcome.deferred_expression_retry :
+                                          outcome.deferred_expression_parts != 0 && outcome.deferred_expression_parallel_tokens != 0 && outcome.deferred_expression_serial_tokens == 0 && !outcome.deferred_expression_retry);
                 const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected && copied && sized_right &&
-                                    !outcome.source_shared;
+                                    !outcome.source_shared && expressions;
                 checks += 1;
                 failures += !passed;
                 merged += outcome.deferred;
                 bodies += outcome.deferred_bodies;
                 if (!passed)
                 {
-                    fprintf(stderr, "test-checker-deferred: %s on %u lanes through %s: %s%s%s%s%s\n", name, lane_counts[l], mode_names[m],
+                    fprintf(stderr, "test-checker-deferred: %s on %u lanes through %s: %s%s%s%s%s%s\n", name, lane_counts[l], mode_names[m],
                             !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                             !outcome.equal ? "the scalar and vector paths differ" : "", outcome.deferred != expected ? (expected ? "not merged" : "merged") : "",
                             copied ? "" : " (not the rule's lanes, those it planned before the top level's walk, the rare columns' pages for "
                                           "them or their regions' claims, their parts or tokens, or its reader copied by too many of them or by none)",
                             sized_right ? "" : " (not the bodies' tokens it was made with, not the lanes it was made for, or its largest body not the first lane's)",
-                            outcome.source_shared ? " (source order's rare columns in base pages)" : "");
+                            outcome.source_shared ? " (source order's rare columns in base pages)" : "",
+                            expressions ? "" : serial_post ? " (expected the post-merge rounds on the calling thread alone, below their fewest lanes)" :
+                                                             " (expected parallel expressions without ordered work or retry)");
                 }
             }
         }
@@ -1372,6 +1447,38 @@ static int run_checker_deferred_tests(int count, char** arguments)
                         !outcome.equal ? "the scalar and vector paths differ" : "merged");
             }
         }
+        if (valid && strcmp(name, "postmerge-independent-expressions") == 0)
+        {
+            // With lane 0 delayed until the other lanes take parts, an all-eligible forest must execute on a
+            // nonzero lane as well as its reserved caller part. Count completed work, rather than eligibility.
+            check_corpus_deferred_lanes = 8;
+            check_corpus_deferred_late_first = true;
+            CheckCorpusOutcome parallel;
+            check_corpus_measure(path, &options, false, true, &parallel);
+            check_corpus_deferred_late_first = false;
+            const uint64_t workers = parallel.deferred_expression_worker_mask;
+            const bool executed = BUSTER_SCALAR_PATH(false) ? workers == 0 : (workers & 1) != 0 && (workers & ~UINT64_C(1)) != 0;
+            const bool shared = parallel.prepared && parallel.equal && parallel.deferred_equal && parallel.deferred &&
+                                !parallel.deferred_expression_retry && executed;
+            checks += 1;
+            failures += !shared;
+            if (!shared)
+            {
+                fprintf(stderr, "test-checker-deferred: the delayed expression caller did not share successful work with another lane\n");
+            }
+            check_corpus_deferred_lanes = 8;
+            check_corpus_deferred_fail_expressions = true;
+            CheckCorpusOutcome outcome;
+            check_corpus_measure(path, &options, false, true, &outcome);
+            check_corpus_deferred_fail_expressions = false;
+            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred_expression_retry == !BUSTER_SCALAR_PATH(false);
+            checks += 1;
+            failures += !passed;
+            if (!passed)
+            {
+                fprintf(stderr, "test-checker-deferred: post-merge expression recovery differs from source order\n");
+            }
+        }
         // A unit that merges, read on 8 lanes by a state that read it before: on one lane and on eight with every byte
         // that reading pushed in the state's memory poisoned, on eight with what it wrote there, and on one with every
         // lane's stamp then set to its last (check_deferred_stamp), which each lane's next body wraps: the one lane's
@@ -1480,6 +1587,13 @@ static int run_checker_deferred_tests(int count, char** arguments)
     if (!cpus)
     {
         fprintf(stderr, "test-checker-deferred: benchmark-checker-deferred's --cpus parser read a list wrong\n");
+    }
+    const bool resident_peak = check_deferred_test_resident_peak();
+    checks += 1;
+    failures += !resident_peak;
+    if (!resident_peak)
+    {
+        fprintf(stderr, "test-checker-deferred: benchmark-checker-deferred's --rss missed 16 MB of fresh pages or didn't reset its peak\n");
     }
     const bool no_input = check_deferred_test_no_input();
     checks += 1;

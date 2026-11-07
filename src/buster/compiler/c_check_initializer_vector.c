@@ -201,7 +201,7 @@ static CheckValue check_init_bytes_scalar(const TypeTable* types, TypeId type, c
         {
             const long double magnitude = exponent == 0x7fff ?
                                           (significand == UINT64_C(0x8000000000000000) ? INFINITY : __builtin_nanl("")) :
-                                          ldexpl((long double)significand, exponent == 0 ? -16445 : (int)exponent - 16446);
+                                          host_ldexpl((long double)significand, exponent == 0 ? -16445 : (int)exponent - 16446);
             result.constant_kind = CHECK_CONSTANT_FLOATING;
             result.floating = copysignl(magnitude, negative ? -1.0L : 1.0L);
         }
@@ -441,7 +441,8 @@ static bool check_init_vector_fold(CheckInitWalker* walker, uint32_t node, uint8
             }
             else
             {
-                check_action_fold_floating(op, &a, &b, &answer, node);
+                // The static destination owns this cache, even when its compound-literal operands have automatic storage.
+                check_action_fold_floating(op, &a, &b, &answer, node, walker->static_storage);
             }
         }
         else

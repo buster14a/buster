@@ -467,7 +467,14 @@ static bool pp_window_test_unit(const char* path, bool scalar, uint32_t window, 
     options.scalar = scalar;
     options.window_bytes = window;
     *ready = result && intern_initialize(table) && pp_initialize(pp, &options, table);
-    result = *ready && pp_run(pp, path) && pp->errors == 0;
+    if (*ready)
+    {
+        result = pp->vectorized == (BUSTER_HOST_VECTOR && !scalar) && pp->cache->prepare.vectorized == pp->vectorized;
+        // Exercise window kernels explicitly even on scalar hosts; production defaults are checked above.
+        pp->vectorized = !scalar;
+        pp->cache->prepare.vectorized = !scalar;
+    }
+    result = *ready && result && pp_run(pp, path) && pp->errors == 0;
     *printed = result ? pp_test_print(pp, !scalar, true, printed_length) : 0;
     return *printed != 0;
 }
@@ -1012,6 +1019,8 @@ static bool pp_test_windows(uint64_t seed)
         pp_window_test_source(&text, &random, target);
         const PPOptions options = { .language = languages[s % BUSTER_ARRAY_LENGTH(languages)] };
         PPPrepare prepare = pp_prepare_options(&options);
+        // The kernel comparison deliberately includes software vector twins on baseline hosts.
+        prepare.vectorized = true;
         PPPrepare scalar = prepare;
         scalar.vectorized = false;
         PPFileData whole;

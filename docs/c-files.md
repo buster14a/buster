@@ -131,6 +131,146 @@ decision](c-parser-fragments.md)), and clang's headers for other targets
   `FileCacheCounts` counts its opens, mappings and reads for whoever called
   it: a unit's `Preprocessor.probes`, or a run's lanes.
 
+### Search directories' listings (#653)
+
+A system header found in the last search directory costs a failed `open` in
+every directory before it. `<stdio.h>` fails in clang's resource directory and
+`/usr/local/include`, and on Debian in the multiarch directory too, and each
+of its own headers does the same. On the 9700X, `deflate.c`'s compile made 110
+failed opens of 190, and `sqlite3.c`'s 310 of 485. A unit with a hundred `-I`
+directories makes a hundred for each header. So the cache reads a directory's
+names once that pays:
+
+- **Counting.** Each directory the search looks in (a search directory, or
+  an includer's for a quoted name) has a `FileCacheDirectory`. It counts the
+  failed probes of paths in it that the cache never looked up before, ENOENT
+  only (which also says the directory could be searched).
+- **What a listing costs.** On the 9700X (Btrfs), a failed probe took 0.24
+  to 0.31 µs. A listing (`file_cache_list_directory`: an `open`,
+  `getdents64` to the end, an `fstatfs`, a `close`, and the names' keys in a
+  table) costs a few system calls and then about a tenth of a probe per name:
+  - a small directory's calls take about 1.2 µs in all;
+  - a 1 KB `getdents64` of clang's resource directory (263 names) takes
+    2.3 µs, and of `/usr/include` (440) 3.5 µs;
+  - reading clang's directory whole took 13.5 µs alone, and about 20 µs in
+    the compiler.
+
+  A unit with only `<stdio.h>` fails 26 probes in each of the first two
+  directories. Listing every directory whole at its 16th failed probe made
+  that unit's include searches 15 µs slower (62 to 77 µs), because clang's
+  directory never paid back. It also cost zlib's units 0.6% to 1% more user
+  cycles. Only `sqlite3.c` gained, 60 µs of its 600.
+- **When to list.** So the size decides:
+  - At its 32nd failed probe (`BUSTER_FILE_CACHE_LISTING_MISSES`), a
+    directory gets a first look: one 1 KB `getdents64` buffer
+    (`BUSTER_FILE_CACHE_SMALL_LISTING`, about 25 names).
+  - If that buffer isn't filled to within a record of its end, one more call
+    finds the directory's end. The directory is then listed at once:
+    `/usr/local/include`, an empty `-I` directory, a project's small header
+    directory.
+  - A larger one is `deferred`: not read any further, and read whole only at
+    8 times the misses (`BUSTER_FILE_CACHE_LARGE_LISTING`: 256). That is past
+    `sqlite3.c`'s 155 in clang's directory, where reading it whole cost about
+    as much as the probes it saved. A run of many units through one cache
+    gets there.
+  - `fstatfs` runs only for a listing that will be kept.
+  - The first look comes at 32 rather than 16: a unit with only `<stdio.h>`
+    fails 26 probes in each directory. Its include searches took 60 µs with
+    first looks at 32 or none, and 64 µs at 16, while deflate.c's took 159,
+    154 and 158 µs.
+  - So a unit with few includes, or a short search path, never pays for a
+    listing, and a small directory pays for its listing within the next few
+    probes it saves.
+  - `st_size` doesn't tell the size across file systems: this repository's
+    Ubuntu image gives 4096 for a `/usr/include` of 226 names.
+- **Answering.** Afterwards a path in the directory is "absent" when its first
+  component (`sys` of `sys/types.h`) isn't in the listing
+  (`file_cache_listed_absent`). Its path entry is then the one a failed probe
+  gives it, ENOENT, with no system call. Any other path is opened by its full
+  path as before, so a listing only ever answers "no file here". The table
+  holds 32-bit keys of the names, and two names with one key only cost a
+  probe.
+- **Exactly what a probe would find.** Every name a listing rules out would
+  fail with ENOENT:
+  - The file system's type must be one whose lookups find what its listings
+    show (`file_cache_exact_names`): ext2/3/4, XFS, Btrfs, tmpfs, overlayfs,
+    F2FS, SquashFS, EROFS and bcachefs. vfat, NTFS and CIFS alias names
+    their listings don't show (short names, trailing dots), and NFS and FUSE
+    answer as their servers do, so their directories are probed as before.
+  - Names compare with ASCII letters' case folded. That covers casefold
+    directories (ext4, F2FS, tmpfs and bcachefs, per directory) and XFS's
+    `ascii-ci`.
+  - A directory with a name past ASCII isn't listed, and a component past
+    ASCII is probed, so Unicode's foldings and normalizations never matter.
+  - These components are probed too: `.` and `..`; an empty one; one longer
+    than `NAME_MAX`, whose lookup fails with ENAMETOOLONG, which is fatal.
+- **What a listing doesn't see.** A file created in the directory during the
+  run, after its listing. The cache already keeps every path's answer for the
+  whole run, as #653 says, so no unit could have seen it after looking once.
+  A process out of descriptors gets "not found" for a ruled-out name, where an
+  `open` would have failed with EMFILE: as clang's search, which `stat`s, does,
+  and as the cache already answers a path it looked up before. The search then
+  goes on, and the next directory's probe fails with EMFILE and is the one
+  reported. Keeping EMFILE exact would take a call that allocates a descriptor
+  for every ruled-out name, about as dear as the probe it replaces.
+  `test-preprocessor`'s `pp_test_listing_descriptors` pins this contract
+  (#1564's review).
+- **What a lookup pays.** A unit keeps its search directories'
+  `FileCacheDirectory` pointers (`Preprocessor.directory_entries`). A lookup
+  finds a directory by its path only after a probe failed there, or once some
+  directory of the cache has a listing (`FileCache.listed_directories`). A
+  lookup that finds a file, in a unit that lists nothing, does no directory
+  work. Hashing every uncached path's directory instead had cost a unit with
+  only `<stdio.h>` 14,000 instructions (0.18%) on the 9700X.
+- **Across units and the walk.** The listings live in the cache, so every unit
+  of a run that shares it uses them. The walk (`files_advance`) moves past a
+  candidate a listing rules out without waiting for a wave's probes. It still
+  lists the candidate with the wave's paths, so that `files_add_probes` gives
+  it the ENOENT entry a unit's lookup gives it, and the cache holds the same
+  paths as without listings. It counts a wave's failed probes as it adds them
+  (on one lane, in the probes' order), so every lane count lists the same
+  directories at the same point. On this repository's Ubuntu image, `main.c`'s walk took 31 waves
+  instead of 46, and made 2,082 opens instead of 2,688.
+- **No vector path.** A listing is a few hundred names, read once, and a
+  lookup hashes one component. The system calls are the cost; scalar code
+  is enough here.
+- **Measured** on the 9700X (CPU 2, under the lock), against `ec5f0f6b`
+  ([the record](https://github.com/buster14a/buster-performance/tree/424e9bae8c2a17af92684c5aeba8b46d289ee436/docs/measurements/include-listings-653-2026-11-06):
+  logs, scripts and every version's outputs):
+  - Failed `openat`s (`strace -f -c` of `-c`):
+    - `#include <stdio.h>` alone: 52, unchanged;
+    - zlib 1.3.1's `uncompr.c`: 88 → 75;
+    - `deflate.c`: 110 → 86;
+    - `sqlite3.c` (3.53.4): 310 → 188.
+
+    Every object is byte-identical.
+  - The include searches' time (`benchmark-preprocessor --listing-misses
+    32,0`, one executable):
+    - the one-header unit: 62 and 61 µs;
+    - `uncompr.c`: 131 and 127 µs, and 127 and 128 in another run;
+    - `deflate.c`: 160 and 159 µs;
+    - `sqlite3.c`: 580 and 600 µs.
+
+    So a small or zlib-sized unit's searches are as before, within the
+    medians' ±4 µs.
+  - Whole processes (`time-runs`, two copies each, three rounds) can't tell
+    these apart. With no include, `tiny.c` ran 2% fewer user cycles and 16%
+    to 22% less wall time in this build than in the base, which is the two
+    executables, not the searches (#502).
+  - Many `-I` directories (`-fsyntax-only`, each of H guarded headers in
+    the last of D+1 directories, the D before it empty, #653's case):
+
+    | D | H | failed `openat` | wall time |
+    | ---: | ---: | --- | --- |
+    | 10 | 2,000 | 20,000 → 320 | 17.2 → 7.8 ms |
+    | 100 | 2,000 | 200,000 → 3,200 | 125.4 → 34.6 ms |
+    | 200 | 4,000 | 800,000 → 6,400 | 553.9 → 187.5 ms |
+
+    #653 measured clang at 31.5, 126.8 and 455.9 ms on these shapes.
+  - `benchmark-files` on `main.c`: 28 waves instead of 40, and 2,057 opens
+    instead of 2,647. Its run times are the same, within 0.1 ms on 1 to 8
+    lanes: the searches' time it saves goes to lane 0's listings.
+
 ### Per-file jobs on lanes
 
 `benchmark-files` and `test-files` start one command-owned `LaneTeam` before

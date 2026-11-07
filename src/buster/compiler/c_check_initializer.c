@@ -11,6 +11,8 @@
 #ifndef BUSTER_C_CHECK_INITIALIZER_INCLUDED
 #define BUSTER_C_CHECK_INITIALIZER_INCLUDED
 
+#include "c_check_noderef_types.c"
+
 typedef struct CheckInitString CheckInitString;
 struct CheckInitString
 {
@@ -37,6 +39,7 @@ typedef enum CheckInitStatus
 {
     CHECK_INIT_OK,
     CHECK_INIT_INVALID,
+    CHECK_INIT_MEMBER,
     CHECK_INIT_CHECK_FAILED,
     CHECK_INIT_NON_CONSTANT,
     CHECK_INIT_UNSUPPORTED,
@@ -70,6 +73,7 @@ struct CheckInitializer
     uint32_t count;
     CheckInitStatus status;
     uint32_t failed_token;
+    TypeId failed_type; // The record named by CHECK_INIT_MEMBER; zero for other failures.
     uint32_t warning_count;
     uint32_t warning_token;
 };
@@ -82,7 +86,7 @@ static __attribute__((unused)) bool check_initializer_run(TypeTable* types, cons
 static __attribute__((unused)) bool check_initializer_infer_array(TypeTable* types, const Parser* parser, const InternTable* identifiers, TypeId type,
                                           uint32_t begin, uint32_t end, const uint64_t* designator_indices, const uint8_t* designator_valid,
                                           const TypeId* expression_types, const TypeId* cast_types, Arena* scratch, TypeId* completed,
-                                          uint32_t* failed_token, CheckInitStatus* status);
+                                          uint32_t* failed_token, CheckInitStatus* status, TypeId* failed_type);
 
 static CheckInitStatus check_initializer_part_bits(const TypeTable* types, const CheckInitPart* part, uint64_t* bits);
 static CheckInitStatus check_initializer_live_writes(const TypeTable* types, const CheckInitializer* initialized, Arena* scratch, uint8_t** selected);
@@ -94,6 +98,7 @@ typedef struct CheckInitFrame CheckInitFrame;
 struct CheckInitFrame
 {
     TypeId type;
+    const CheckNoderefType* noderef;
     uint64_t offset;
     uint64_t next;
     uint32_t width;
@@ -110,6 +115,7 @@ typedef struct CheckInitSelection CheckInitSelection;
 struct CheckInitSelection
 {
     TypeId type;
+    const CheckNoderefType* noderef;
     uint64_t offset;
     uint32_t width;
     CheckInitHistoryNode* history;
@@ -177,6 +183,7 @@ struct CheckInitWarningSink
     // facts privately, then publishes only after its final part append. The optional set deduplicates source facts.
     CheckWarningBuffer* events;
     CheckWarningSet* event_keys;
+    CheckNoderefInitializer noderef;
 };
 
 typedef struct CheckInitWarningCollector CheckInitWarningCollector;
@@ -242,6 +249,14 @@ struct CheckInitWalker
     CheckInitializer* result;
 };
 
+// GNU's obsolete `member: value` is a field designator, not an identifier expression or a conditional colon.
+// The parser gives its colon the same assignment role as a modern designator's `=`. Keep source tokens intact.
+static bool check_init_old_style_designator(const Parser* parser, uint32_t token, uint32_t end)
+{
+    return token < end && end - token > 1 && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER &&
+           parser->tokens.kinds[token + 1] == PARSE_KIND_COLON && parser->tree.roles[token + 1] == PARSE_ROLE_ASSIGN;
+}
+
 static bool check_init_aggregate(const TypeTable* types, TypeId type)
 {
     const uint8_t kind = type_kind(types, type_strip_aligned(types, type));
@@ -268,6 +283,71 @@ static void check_init_semantic_warning(CheckInitWalker* walker, const CheckWarn
     }
 }
 
+// clang's diagnostic at an initializer's use of a member that a deprecated or unavailable attribute marks (#147,
+// SemaInit's DiagnoseUseOfDecl): at a designator's member name, or at the first token of the value a member takes by its
+// position, "'x' is deprecated" (-Wdeprecated-declarations) with its message and the note at the attribute, or the error
+// "'x' is unavailable" with its note at the member's name, as a member access's (check_input_member_uses), where the
+// token's context doesn't drop it (CheckGraph.availability_contexts). The error is staged with the warnings, which the
+// driver gives it with (CHECK_WARNING_EVENT_UNAVAILABLE_USE), under `-w` too, which the driver's walk stages them for
+// all the same; a walk with a sink but no event buffer has no place for it, and fails at it instead, as an invalid
+// initializer.
+static void check_init_member_use(CheckInitWalker* walker, uint32_t member, uint32_t token)
+{
+    const CheckGraph* graph = walker->graph;
+    const CheckInputMarkedMember* marked = graph != NULL && graph->marked_member_count != 0 ?
+                                           check_marked_member(graph->marked_members, graph->marked_member_count, member) : NULL;
+    const uint8_t context = marked != NULL && graph->availability_contexts != NULL ? graph->availability_contexts[token] : 0;
+    const CheckInitWarningSink* sink = walker->warnings != NULL ? walker->warnings->sink : NULL;
+    if (marked != NULL && marked->unavailable && !check_marked_dropped(marked, context))
+    {
+        const Parser* parser = walker->parser;
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_DEPRECATED_DECLARATIONS,
+            .kind = CHECK_WARNING_EVENT_UNAVAILABLE_USE,
+            .token = token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = token + 1,
+            .payload = { .name = parser->tokens.names[marked->name], .token = marked->message },
+        };
+        const CheckWarningNote note =
+        {
+            .kind = CHECK_WARNING_NOTE_UNAVAILABLE_HERE,
+            .token = marked->name,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .payload = { .name = parser->tokens.names[marked->name], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        if (sink != NULL && sink->events == NULL)
+        {
+            check_init_fail(walker, CHECK_INIT_INVALID, token);
+        }
+        check_init_semantic_warning(walker, &event, &note, 1);
+    }
+    else if (marked != NULL && !check_marked_dropped(marked, context))
+    {
+        const Parser* parser = walker->parser;
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_DEPRECATED_DECLARATIONS,
+            .kind = CHECK_WARNING_EVENT_DEPRECATED_USE,
+            .token = token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = token + 1,
+            .payload = { .name = parser->tokens.names[marked->name], .token = marked->message },
+        };
+        const CheckWarningNote note =
+        {
+            .kind = CHECK_WARNING_NOTE_DEPRECATED_HERE,
+            .token = marked->attribute,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .payload = { .name = parser->tokens.names[marked->name], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        check_init_semantic_warning(walker, &event, &note, 1);
+    }
+}
+
 static bool check_init_semantic_publish(CheckInitWalker* walker)
 {
     CheckInitWarningSink* sink = walker->warnings != NULL ? walker->warnings->sink : NULL;
@@ -284,8 +364,13 @@ static bool check_init_semantic_publish(CheckInitWalker* walker)
         const bool selected = event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_UNDEFINED_INTERNAL && event->payload.first_type != 0;
         const uint64_t key = (uint64_t)(selected ? CHECK_WARNING_EVENT_KIND_COUNT : event->kind) << 32 | ((uint64_t)event->token + 1);
         const bool excess = event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_EXCESS_INITIALIZERS;
-        const bool once = selected || excess || event->kind == CHECK_WARNING_EVENT_MANY_SCALAR_BRACES || event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL;
-        if (!once || sink->event_keys == NULL || !check_warning_set_contains(&keys, key))
+        const bool once = selected || excess || event->kind == CHECK_WARNING_EVENT_MANY_SCALAR_BRACES || event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL ||
+                          event->kind == CHECK_WARNING_EVENT_NODEREF_CONVERSION;
+        // GNU range initialization converts each selected element, and clang diagnoses each noderef removal. Keep
+        // repeats from this walk, but still drop a scalar conversion already diagnosed by the graph or an earlier walk.
+        // `keys` is a private copy on its first insertion; the sink's prefix stays frozen until publication below.
+        const CheckWarningSet* seen = event->kind == CHECK_WARNING_EVENT_NODEREF_CONVERSION ? sink->event_keys : &keys;
+        if (!once || sink->event_keys == NULL || !check_warning_set_contains(seen, key))
         {
             const CheckWarningNote* notes = event->note_count != 0 ? walker->warning_events.notes + event->note_first : NULL;
             valid = (!once || sink->event_keys == NULL || check_warning_set_add(&keys, key)) &&
@@ -454,6 +539,7 @@ static bool check_init_select(CheckInitWalker* walker, CheckInitFrame* frame, Ch
     bool valid = false;
     *selected = (CheckInitSelection){
         .type = frame->type,
+        .noderef = frame->noderef,
         .offset = frame->offset,
         .width = frame->width,
         .history = direct ? frame->history : NULL,
@@ -466,6 +552,7 @@ static bool check_init_select(CheckInitWalker* walker, CheckInitFrame* frame, Ch
              kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR)
     {
         selected->type = type_element(types, base);
+        selected->noderef = frame->noderef != NULL ? frame->noderef->base : NULL;
         const bool packed = kind == BUSTER_TYPE_KIND_EXT_VECTOR && type_unqualified(selected->type) == BUSTER_TYPE_BOOL;
         const uint64_t size = type_size(types, selected->type);
         const uint64_t bits = packed ? 1 : size * 8;
@@ -493,6 +580,8 @@ static bool check_init_select(CheckInitWalker* walker, CheckInitFrame* frame, Ch
             if (!bit_field || types->members.name[member] != 0)
             {
                 selected->type = types->members.type[member];
+                const CheckNoderefInitializer* noderef = walker->warnings != NULL && walker->warnings->sink != NULL ? &walker->warnings->sink->noderef : NULL;
+                selected->noderef = noderef != NULL ? check_noderef_member(noderef->members, noderef->member_count, member) : NULL;
                 selected->width = bit_field ? types->members.bit_width[member] : 0;
                 valid = types->members.offset[member] <= UINT64_MAX - frame->offset;
                 selected->offset += valid ? types->members.offset[member] : 0;
@@ -669,6 +758,8 @@ static bool check_init_push(CheckInitWalker* walker, const CheckInitSelection* s
         walker->frames[walker->depth] = (CheckInitFrame){
             .type = type_kind(walker->types, type_strip_aligned(walker->types, selected->type)) == BUSTER_TYPE_KIND_ATOMIC ?
                     type_conversion_operand(walker->types, selected->type) : selected->type,
+            .noderef = selected->noderef != NULL && type_kind(walker->types, type_strip_aligned(walker->types, selected->type)) == BUSTER_TYPE_KIND_ATOMIC ?
+                       selected->noderef->base : selected->noderef,
             .offset = selected->offset,
             .width = selected->width,
             .braced = braced,
@@ -685,17 +776,25 @@ static bool check_init_push(CheckInitWalker* walker, const CheckInitSelection* s
 static uint32_t check_init_expression_end(const Parser* parser, uint32_t begin, uint32_t end)
 {
     uint32_t depth = 0;
+    uint32_t questions = 0;
     uint32_t token = begin;
     bool done = false;
     while (token < end && !done)
     {
         const uint8_t kind = parser->tokens.kinds[token];
-        if (depth == 0 && (kind == PARSE_KIND_COMMA || kind == PARSE_KIND_R_BRACE))
+        if (depth == 0 && ((kind == PARSE_KIND_COMMA && questions == 0) || kind == PARSE_KIND_R_BRACE))
         {
             done = true;
         }
         else
         {
+            // The middle operand of ?: is an expression, so an unparenthesized comma belongs to it, not the
+            // initializer list. Delimited operands own their question marks independently (#1252).
+            if (depth == 0)
+            {
+                questions += kind == PARSE_KIND_QUESTION;
+                questions -= kind == PARSE_KIND_COLON && questions != 0;
+            }
             if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
             {
                 depth += 1;
@@ -832,7 +931,8 @@ static void check_init_repeat(CheckInitWalker* walker, uint32_t* position, bool*
             const uint8_t kind = walker->parser->tokens.kinds[*position];
             const uint8_t next = *position + 1 < walker->parser->tokens.count ? walker->parser->tokens.kinds[*position + 1] : PARSE_KIND_COMMA;
             if (implicit && (kind == PARSE_KIND_R_BRACE ||
-                (kind == PARSE_KIND_COMMA && (next == PARSE_KIND_L_SQUARE || next == PARSE_KIND_PERIOD))))
+                (kind == PARSE_KIND_COMMA && (next == PARSE_KIND_L_SQUARE || next == PARSE_KIND_PERIOD ||
+                 check_init_old_style_designator(walker->parser, *position + 1, walker->parser->tokens.count)))))
             {
                 walker->depth = repeat->target_depth;
                 check_init_advance(walker);
@@ -881,10 +981,58 @@ static void check_init_repeat(CheckInitWalker* walker, uint32_t* position, bool*
     }
 }
 
+// The initializer cursor needs the record's own member, not the final named leaf: entering each anonymous member
+// preserves brace elision, union selection and the next positional initializer. The type index already stores that
+// first step. Its construction belongs to type_record_define; this read-only lookup allocates no new index or path.
+// The source reader rejects conflicting direct/promoted names before it completes a record (check_input_record_names).
+static uint32_t check_init_member(const TypeTable* types, uint32_t tag, uint32_t name, bool scalar)
+{
+    const uint32_t begin = types->tags.member_begin[tag];
+    const uint32_t count = types->tags.member_count[tag];
+    const uint32_t lookup = types->tags.lookup[tag];
+    const uint32_t* const names = types->members.name;
+    uint32_t member = 0;
+    if (lookup == 0)
+    {
+        member = scalar ? type_lookup_scan_scalar(names, begin, count, name) : type_lookup_scan(names, begin, count, name);
+    }
+    else if (lookup != BUSTER_TYPE_LOOKUP_WALK)
+    {
+        const uint32_t log2 = types->tags.lookup_log2[tag];
+        member = scalar ? type_lookup_probe_scalar(types->lookup.buckets, lookup, log2, name) :
+                          type_lookup_probe(types->lookup.buckets, lookup, log2, name);
+    }
+    else
+    {
+        // Preserve the existing capacity fallback, including direct members before anonymous members. The type
+        // table and its columns stay unchanged while the inner lookup uses its separate scratch arena.
+        member = type_lookup_scan_scalar(names, begin, count, name);
+        const uint8_t* const flags = types->members.flags;
+        const TypeId* const member_types = types->members.type;
+        for (uint32_t i = 0; i < count && member == 0; i += 1)
+        {
+            if (names[begin + i] == 0 && (flags[begin + i] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0)
+            {
+                uint64_t offset = 0;
+                uint32_t qualifiers = 0;
+                const uint32_t inner = scalar ? type_lookup_member_scalar(types, member_types[begin + i], name, &offset, &qualifiers) :
+                                               type_lookup_member(types, member_types[begin + i], name, &offset, &qualifiers);
+                if (inner != 0 && inner != BUSTER_TYPE_MEMBER_UNKNOWN)
+                {
+                    member = begin + i;
+                }
+            }
+        }
+    }
+    return member;
+}
+
 static void check_init_designate(CheckInitWalker* walker, uint32_t* position, uint32_t end)
 {
     const Parser* parser = walker->parser;
+    const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
     uint32_t token = *position;
+    const bool old_style = check_init_old_style_designator(parser, token, end);
     while (walker->depth > 1 && !walker->frames[walker->depth - 1].braced)
     {
         walker->depth -= 1;
@@ -1000,16 +1148,18 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
                 token = close + 1;
             }
         }
-        else if (parser->tokens.kinds[token] == PARSE_KIND_PERIOD)
+        else if (parser->tokens.kinds[token] == PARSE_KIND_PERIOD || old_style)
         {
-            if ((kind != BUSTER_TYPE_KIND_STRUCT && kind != BUSTER_TYPE_KIND_UNION) || token + 1 >= end ||
-                parser->tokens.kinds[token + 1] != PARSE_KIND_IDENTIFIER)
+            const uint32_t name_token = token + !old_style;
+            const TypeId field_type = frame->type;
+            if ((kind != BUSTER_TYPE_KIND_STRUCT && kind != BUSTER_TYPE_KIND_UNION) || name_token >= end ||
+                parser->tokens.kinds[name_token] != PARSE_KIND_IDENTIFIER)
             {
                 check_init_fail(walker, CHECK_INIT_INVALID, token);
             }
             else
             {
-                const uint32_t name = parser->tokens.names[token + 1];
+                const uint32_t name = parser->tokens.names[name_token];
                 bool found = false;
                 while (!found && walker->result->status == CHECK_INIT_OK)
                 {
@@ -1017,29 +1167,16 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
                     const TypeId record = type_strip_aligned(walker->types, frame->type);
                     const uint32_t tag = walker->types->types.index[type_index(record)];
                     const uint32_t begin = walker->types->tags.member_begin[tag];
-                    const uint32_t count = walker->types->tags.member_count[tag];
-                    uint32_t member = 0;
-                    for (uint32_t i = 0; i < count && member == 0; i += 1)
+                    const uint32_t member = check_init_member(walker->types, tag, name, scalar);
+                    found = member != 0 && walker->types->members.name[member] == name;
+                    if (found)
                     {
-                        if (walker->types->members.name[begin + i] == name)
-                        {
-                            member = begin + i;
-                            found = true;
-                        }
-                    }
-                    for (uint32_t i = 0; i < count && member == 0; i += 1)
-                    {
-                        uint64_t ignored = 0;
-                        if (walker->types->members.name[begin + i] == 0 &&
-                            (walker->types->members.flags[begin + i] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0 &&
-                            type_find_member(walker->types, walker->types->members.type[begin + i], name, &ignored) != 0)
-                        {
-                            member = begin + i;
-                        }
+                        check_init_member_use(walker, member, token + 1);
                     }
                     if (member == 0)
                     {
-                        check_init_fail(walker, CHECK_INIT_INVALID, token);
+                        check_init_fail(walker, CHECK_INIT_MEMBER, name_token);
+                        walker->result->failed_type = field_type;
                     }
                     else
                     {
@@ -1060,7 +1197,7 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
                         }
                     }
                 }
-                token += 2;
+                token += old_style ? 1 : 2;
             }
         }
         else
@@ -1098,7 +1235,8 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
     {
         // GNU's obsolete `[index] value` (and `[first ... last] value`): a designation of one array designator may
         // leave out its `=`, as clang (ext_gnu_missing_equal_designator) and GCC take it; the parser refused the rest.
-        const bool equal = token < end && parser->tokens.kinds[token] == PARSE_KIND_EQUAL;
+        const bool equal = token < end && (parser->tokens.kinds[token] == PARSE_KIND_EQUAL ||
+                                           (old_style && parser->tokens.kinds[token] == PARSE_KIND_COLON));
         const bool gnu = token < end && designators == 1 && parser->tokens.kinds[*position] == PARSE_KIND_L_SQUARE;
         if (!equal && !gnu)
         {
@@ -2057,6 +2195,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
     if (type_kind(walker->types, type_strip_aligned(walker->types, selected->type)) == BUSTER_TYPE_KIND_ATOMIC)
     {
         value_selection.type = type_conversion_operand(walker->types, selected->type);
+        value_selection.noderef = selected->noderef != NULL ? selected->noderef->base : NULL;
         selected = &value_selection;
     }
     const CheckInitConstants* previous_constants = walker->constants;
@@ -2164,6 +2303,24 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                 {
                     check_init_semantic_warning(walker, &warning, NULL, 0);
                 }
+                const CheckNoderefInitializer* noderef = walker->warnings != NULL && walker->warnings->sink != NULL ? &walker->warnings->sink->noderef : NULL;
+                const CheckNoderefType* pointed = selected->noderef != NULL ? selected->noderef->base : NULL;
+                if (type_kind(walker->types, type_strip_aligned(walker->types, destination)) == BUSTER_TYPE_KIND_POINTER &&
+                    type_kind(walker->types, type_strip_aligned(walker->types, check_stream_type(walker->stream, node))) == BUSTER_TYPE_KIND_POINTER &&
+                    noderef != NULL && noderef->values != NULL &&
+                    ((noderef->values[node / 64] >> (node % 64)) & 1u) != 0 && (pointed == NULL || !pointed->marked))
+                {
+                    const CheckWarningEvent annotation = {
+                        .id = CHECK_WARNING_ID_NODEREF,
+                        .kind = CHECK_WARNING_EVENT_NODEREF_CONVERSION,
+                        .token = check_warning_expression_location(walker->parser, walker->types, walker->stream, node, token, end),
+                        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                        .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                        .completion = walker->warning_completion,
+                        .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                    };
+                    check_init_semantic_warning(walker, &annotation, NULL, 0);
+                }
                 check_init_history_value(walker, selected, token, node, false, converted.value.flags);
             }
             if (converted.diagnostic != CHECK_DIAG_NONE)
@@ -2233,6 +2390,7 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
     {
         walker->frames[0] = (CheckInitFrame){
             .type = type,
+            .noderef = walker->warnings != NULL && walker->warnings->sink != NULL ? walker->warnings->sink->noderef.root : NULL,
             .wrapper = true,
             .history = check_init_history_node(walker, NULL, 0, type),
             .designator = BUSTER_CHECK_NONE,
@@ -2290,7 +2448,8 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
         }
         else
         {
-            const bool designated = kind == PARSE_KIND_PERIOD || kind == PARSE_KIND_L_SQUARE;
+            const bool designated = kind == PARSE_KIND_PERIOD || kind == PARSE_KIND_L_SQUARE ||
+                                    check_init_old_style_designator(walker->parser, token, end);
             if (designated)
             {
                 check_init_designate(walker, &token, end);
@@ -2330,6 +2489,15 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
             }
             if (!excess && walker->result->status == CHECK_INIT_OK)
             {
+                // A member a value takes by its position, at each level of its elided braces, at the value's first
+                // token (#147, check_init_member_use).
+                const TypeId record = type_strip_aligned(walker->types, frame->type);
+                const uint8_t record_kind = type_kind(walker->types, record);
+                if (!designated && !frame->wrapper && (record_kind == BUSTER_TYPE_KIND_STRUCT || record_kind == BUSTER_TYPE_KIND_UNION))
+                {
+                    const uint32_t tag = walker->types->types.index[type_index(record)];
+                    check_init_member_use(walker, walker->types->tags.member_begin[tag] + (uint32_t)frame->next, token);
+                }
                 check_init_used(walker, frame, token, true);
                 if (walker->parser->tokens.kinds[token] == PARSE_KIND_L_BRACE)
                 {
@@ -2674,7 +2842,7 @@ static __attribute__((unused)) bool check_initializer_source(TypeTable* types, c
 static bool check_initializer_infer_array(TypeTable* types, const Parser* parser, const InternTable* identifiers, TypeId type, uint32_t begin,
                                           uint32_t end, const uint64_t* designator_indices, const uint8_t* designator_valid,
                                           const TypeId* expression_types, const TypeId* cast_types, Arena* scratch, TypeId* completed,
-                                          uint32_t* failed_token, CheckInitStatus* status)
+                                          uint32_t* failed_token, CheckInitStatus* status, TypeId* failed_type)
 {
     CheckInitializer result = {
         .type = type,
@@ -2706,6 +2874,7 @@ static bool check_initializer_infer_array(TypeTable* types, const Parser* parser
     }
     *completed = valid ? result.type : 0;
     *failed_token = result.failed_token;
+    *failed_type = result.failed_type;
     if (status != 0)
     {
         *status = result.status;
@@ -2991,3 +3160,4 @@ static __attribute__((unused)) CheckInitStatus check_initializer_references(cons
     return status;
 }
 #endif
+

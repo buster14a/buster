@@ -20,7 +20,8 @@ unit writes (#776 measured one cache and table for all the lanes, filled by
 #150's walk before the units and copied by each lane, and found it slower:
 the guide's "One cache for all the lanes, measured"). Each unit's diagnostics
 go to a stream of its own, printed in the command line's order after every
-unit has run. A lane keeps its three big
+unit has run, through the first unit with a fatal (including its notes and
+summary). Later buffers are released without printing. A lane keeps its three big
 arenas from one unit to the next, emptied; it pools the other arenas its units
 release (`arena_pool`, `lane.c`: their pages freed with `MADV_DONTNEED`, and
 the mappings and their writable prefixes kept for the next reservations they
@@ -32,7 +33,15 @@ unit of less than 1 MB of source start with 16 MB of base pages
 which every reservation took for writing, were what limited the lanes.
 `--poison-arenas`, a test option, overwrites what a unit left in its lane's
 three arenas (`arena_poison`), so that a compile that read a byte it didn't
-write would show. The lanes' units are held to the memory (#1109,
+write would show; and a unit with a file cache of its own makes its files'
+token columns unreadable after its run where it would give them back
+(`pp_release_file_columns`, #628), so that a reader left would fault. A unit whose lane has another unit to take gives back its
+scratch's pages past the checker's columns in whole huge pages, keeping the
+one that holds the peak rather than splitting it into base pages that the
+next unit faults in one by one (`check_units_discard_huge`,
+`CheckProgramOptions.discard_huge`, `arena_discard_huge`, #777), and
+`--shared-parts` reports how many did. The lanes' units are held to the
+memory (#1109,
 `CheckUnitsMemory`): once preprocessed, a unit takes an estimate of its peak
 (`check_units_estimate`: 600 bytes a token and 48 MB) from seven eighths of
 what the process may take when the run starts (`MemAvailable`, or the free
@@ -66,7 +75,9 @@ exchange of the global names by their hashes' partitions, then the records
 copied at places that prefix sums give), whose exact twin `check_units_merge`
 is, and checks the bound link on them (`link_check_lanes`); with `-g`, each
 unit keeps its DWARF as `-c -g` writes it, and the merge joins them
-(`check_units_merge_debug`, #779). `-c -o`, the dumps, `--id-order` and two
+(`check_units_merge_debug`, #779). `--id-order N` primes each unit's lane-owned
+intern table before its real compile; the output must match an unprimed run.
+`-c -o`, the dumps and two
 units of one object's name are refused.
 
 `./build/compiler test-check-units [--executable PATH] [--clang PATH]
@@ -97,7 +108,9 @@ without symbols, into the same bytes); a few large units (#777: a unit of 800
 functions beside a small one, whose lanes without units take its functions'
 parts, `--shared-parts`' report, into objects their own alone and executables
 one lane's, and whose `-c` leaves one lane's memory to the exit, with the board
-and without it, `BUSTER_TEST_NO_UNITS_BOARD`); every reservation of two units' `-c` failed in turn, each run
+and without it, `BUSTER_TEST_NO_UNITS_BOARD`, at most one unit giving back
+its scratch's pages in whole huge pages by 8 lanes, and by one the large
+unit alone); every reservation of two units' `-c` failed in turn, each run
 reported and its memory released (a lane's partial setup among them); the
 jobserver's tokens held while the link writes; lanes that don't start; and
 `benchmark-check-units` by `--lanes` 1 and 2, and its refusals of counts it
@@ -107,15 +120,36 @@ command that fails every run;
 with `-g`, the executables by `--lanes` 1 and 8, poisoned and by each path the
 same bytes, and each unit's `-c -g` object its own alone. With `--corpus DIR`
 it compiles DIR's `.c` files at once with `-c`, plainly and poisoned, against
-each alone, and with `--generate DIR` it writes a program of synth's shape
-(512 units of 200 functions by default) for measurements, and tests nothing.
+each alone. DIR may be relative to the command's working directory; it is
+resolved before compiler children change to their output directories. At least
+one file must compile alone: an empty or all-failing corpus is a failed test,
+even when the failures match. The default suite checks relative and absolute
+paths on a mix of valid and invalid files, and rejects empty, all-invalid,
+missing and non-directory corpora. With `--generate DIR` it writes a program
+of synth's shape (512 units of 200 functions by default) for measurements,
+and tests nothing.
 [docs/translation-units.md](../../docs/translation-units.md) has the design and the
 measurements. The end-to-end single- and multi-unit contract, with the
 mixed-tier and actual command-team receipts, is
 [the multicore acceptance guide](../../docs/multicore-acceptance.md);
-`tests/driver/multicore.c` runs it in the shared correctness suite. What
+`tests/driver/multicore.c` runs it in the shared correctness suite, with changed
+identifier IDs in both single- and multi-file repeats. `test-check-units` also
+checks missing nested includes and `-Wfatal-errors` through the first fatal
+unit at 1/2/3/8 lanes, through both kernels with changed IDs and poisoned arenas,
+and the sequential multi-input `-E` text and diagnostics against the valid
+units' standalone bytes in both marker modes. What
 #149's remaining whole-process performance acceptance still needs is there
 too.
+
+`test-check-units` also covers `selectany` through
+`c_check_selectany_driver_test.c`: Clang's weak COMDAT signatures and grouped
+relocations, zero-fill/const/TLS data, equal explicit section names in different
+groups, selectany aliases of ordinary and grouped definitions, stronger ordinary
+definitions, and a relocation to an undefined symbol
+that must disappear with its discarded group. Direct linking uses the same
+first-group choice through one lane, the scalar twin, multiple lanes and
+poisoned arenas. Single-unit runtime binding, debug output and Tier 1 are covered
+too; reversing the units must retain the formerly discarded undefined reference.
 
 `./build/compiler benchmark-check-units [--executable PATH] [--units N]
 [--functions N] [--lanes N,N...] [--runs N] [-- OPTION...]` (#1128) times one

@@ -266,8 +266,11 @@ static __attribute__((unused)) int run_tier1_pipeline_benchmark(int count, char*
         tier0_code->code = tier0_bytes;
         printf("benchmark-tier1-pipeline: fixtures' kernels, not programs; ns per call, medians of %u passes of %u calls each\n", BUSTER_TIER1_PIPELINE_BENCHMARK_PASSES, repeat * BUSTER_TIER1_PIPELINE_INPUTS);
         printf("fixture,shape,tier1,tier0,clang-O0,clang-O2\n");
+        // The geometric means' logarithm and exponential: libm's, from test_libm (#652).
+        double (*const libm_log)(double) = (double (*)(double))test_libm("log");
+        double (*const libm_exp)(double) = (double (*)(double))test_libm("exp");
         double logs[BUSTER_TIER1_PIPELINE_BENCHMARK_COMPILES] = { 0, 0, 0, 0 };
-        bool measured = true;
+        bool measured = libm_log != NULL && libm_exp != NULL;
         uint64_t sink = 0;
         for (uint32_t k = 0; measured && k < BUSTER_TIER1_PIPELINE_CASES; k += 1)
         {
@@ -324,7 +327,7 @@ static __attribute__((unused)) int run_tier1_pipeline_benchmark(int count, char*
                 {
                     qsort(samples[c], BUSTER_TIER1_PIPELINE_BENCHMARK_PASSES, sizeof(double), tier1_pipeline_benchmark_compare);
                     const double median = samples[c][BUSTER_TIER1_PIPELINE_BENCHMARK_PASSES / 2];
-                    logs[c] += log(median);
+                    logs[c] += libm_log(median);
                     printf(",%.3f", median);
                 }
                 printf("\n");
@@ -356,7 +359,7 @@ static __attribute__((unused)) int run_tier1_pipeline_benchmark(int count, char*
             printf("geometric-mean");
             for (uint32_t c = 0; c < BUSTER_TIER1_PIPELINE_BENCHMARK_COMPILES; c += 1)
             {
-                printf(",%s=%.3f", tier1_pipeline_benchmark_names[c], exp(logs[c] / BUSTER_TIER1_PIPELINE_CASES));
+                printf(",%s=%.3f", tier1_pipeline_benchmark_names[c], libm_exp(logs[c] / BUSTER_TIER1_PIPELINE_CASES));
             }
             printf("\nbenchmark-tier1-pipeline: checksum %" PRIu64 "\n", sink);
         }

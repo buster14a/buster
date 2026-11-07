@@ -97,9 +97,8 @@ call boundary doesn't take, by the selector's own predicates
 
 - `indirect` and `variadic`;
 - `abi-record`: an ABI record the boundary refuses, the call's (its result,
-  its outgoing area) or an argument's, or aggregates' parts in registers past
-  the red zone's 14 staging slots (a 64-byte part waits in zmm16 and on and
-  takes none);
+  its outgoing area) or an argument's; aggregate parts that exceed the red
+  zone's staging space use frame storage (#1450) and are accepted;
 - `stack-arguments`: arguments past the boundary's limit
   (`BUSTER_TIER1_SELECT_MAX_ARGUMENTS`), not every argument the ABI passes on
   the stack, which Tier 1 takes below it;

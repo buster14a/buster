@@ -153,7 +153,9 @@ typedef enum IrOp
     // x86's mul gives in rdx), and the x86 builtins' scalar bit manipulations of an I32 or an I64, BMI2's pdep and pext
     // (a's bits deposited at, or extracted from, mask b's set bits) and bzhi (a with its bits from b's low byte up
     // cleared), and BMI1's bextr (a's bits from b's low byte up, as many as its second byte says), whose x86 rows the
-    // typed stream's lowering admits (ir_simd_typed.c).
+    // typed stream's lowering admits (ir_simd_typed.c). The unary splat (#1450) repeats scalar a's raw bits throughout
+    // a vector result; its scalar type gives the lane width, b is absent and flags are zero. It does no arithmetic,
+    // including on floating operands, so signed zeros and NaN payloads are unchanged.
     IR_INTRINSIC,
     // An atomic read/modify/write (#1059): `a` the object's address, `b` the operand, of the result's type (an integer of
     // 1, 2, 4 or 8 bytes), and its flags BUSTER_IR_ATOMIC with its C memory order and its operation
@@ -177,13 +179,15 @@ typedef enum IrOp
 #define BUSTER_IR_RMW_EXCHANGE 0x00u
 #define BUSTER_IR_RMW_ADD 0x20u
 #define BUSTER_IR_RMW_COMPARE 0x40u
-// An IR_INTRINSIC's operation (#141), its `c`: mulhu an I64's alone, the others an I32's or an I64's.
+// An IR_INTRINSIC's operation (#141), its `c`: mulhu an I64's alone, BMI operations an I32's or an I64's; splat's
+// result a vector, its only operand an I8, I16, I32, I64, F32 or F64 whose bit pattern is repeated in every lane.
 #define BUSTER_IR_INTRINSIC_MULHU 0u
 #define BUSTER_IR_INTRINSIC_PDEP 1u
 #define BUSTER_IR_INTRINSIC_PEXT 2u
 #define BUSTER_IR_INTRINSIC_BZHI 3u
 #define BUSTER_IR_INTRINSIC_BEXTR 4u
-#define BUSTER_IR_INTRINSIC_COUNT 5u
+#define BUSTER_IR_INTRINSIC_SPLAT 5u
+#define BUSTER_IR_INTRINSIC_COUNT 6u
 
 // ICMP EQ/NE accept pointers too; the other integer predicates require integer operands. FCMP uses EQ through GE:
 // ordered comparisons, except NE, which is true for unordered inputs, as in C.
@@ -327,9 +331,9 @@ struct IrFunction
     // Exclusive symbol bound supplied by the translation unit. UINT32_MAX permits any non-sentinel SymbolId.
     uint32_t symbol_count;
     // The labels (GNU C's && and goto *, and the producer's jump tables' cases): label k's block, at whose code the
-    // producer defines its k-th label symbol, and which every br_indirect may go to; or BUSTER_IR_NONE for a label no
-    // block holds, in a function without br_indirect (whose labels no jump can reach: a backend defines their symbols
-    // anywhere in the function).
+    // producer defines its k-th label symbol, and which a br_indirect may go to through its explicit list or all-label
+    // targets; or BUSTER_IR_NONE for a label no block holds and no indirect branch reaches (a backend defines its
+    // symbol anywhere in the function).
     uint32_t* labels;
     uint32_t label_count;
     // By-value aggregates' ABI records: the calls' (IrCall.abi), and the function's own when parameter_passed isn't 0:
@@ -467,6 +471,14 @@ static const char* const ir_type_names[IR_TYPE_COUNT] = {
     "m32",
     "m64",
 };
+// A vector operation's lanes' names (#141's element types), by IrSimdLane, and its vector type's, by its width (16, 32 or
+// 64 bytes) and lanes: `add.v16i8` is an add of v4i32's 16 bytes as 8-bit lanes, its flags I8.
+static const char* const ir_lane_names[IR_SIMD_LANE_COUNT] = { "i32", "i8", "i16", "i64", "f32", "f64" };
+static const char* const ir_lane_type_names[3][IR_SIMD_LANE_COUNT] = {
+    { "v4i32", "v16i8", "v8i16", "v2i64", "v4f32", "v2f64" },
+    { "v8i32", "v32i8", "v16i16", "v4i64", "v8f32", "v4f64" },
+    { "v16i32", "v64i8", "v32i16", "v8i64", "v16f32", "v8f64" },
+};
 static const char* const ir_op_names[IR_OP_COUNT] = {
     "invalid",
     "const",
@@ -569,6 +581,7 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "pext",
     "bzhi",
     "bextr",
+    "splat",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -766,15 +779,15 @@ typedef enum IrRule
     X(IR_AND,           3, 3, BUSTER_IR_INTS | BUSTER_IR_VECTORS | BUSTER_IR_MASKS, IR_RULE_SAME, 0) \
     X(IR_OR,            3, 3, BUSTER_IR_INTS | BUSTER_IR_VECTORS | BUSTER_IR_MASKS, IR_RULE_SAME, 0) \
     X(IR_XOR,           3, 3, BUSTER_IR_INTS | BUSTER_IR_VECTORS | BUSTER_IR_MASKS, IR_RULE_SAME, 0) \
-    X(IR_SHL,           3, 3, BUSTER_IR_INTS, IR_RULE_SHIFT, 0) \
-    X(IR_LSHR,          3, 3, BUSTER_IR_INTS, IR_RULE_SHIFT, 0) \
-    X(IR_ASHR,          3, 3, BUSTER_IR_INTS, IR_RULE_SHIFT, 0) \
+    X(IR_SHL,           3, 3, BUSTER_IR_INTS | BUSTER_IR_VECTORS, IR_RULE_SHIFT, 0) \
+    X(IR_LSHR,          3, 3, BUSTER_IR_INTS | BUSTER_IR_VECTORS, IR_RULE_SHIFT, 0) \
+    X(IR_ASHR,          3, 3, BUSTER_IR_INTS | BUSTER_IR_VECTORS, IR_RULE_SHIFT, 0) \
     X(IR_NEG,           1, 1, BUSTER_IR_INTS, IR_RULE_SAME, 0) \
     X(IR_NOT,           1, 1, BUSTER_IR_INTS | BUSTER_IR_VECTORS | BUSTER_IR_MASKS, IR_RULE_SAME, 0) \
-    X(IR_FADD,          3, 3, BUSTER_IR_FLOATS, IR_RULE_SAME, 0) \
-    X(IR_FSUB,          3, 3, BUSTER_IR_FLOATS, IR_RULE_SAME, 0) \
-    X(IR_FMUL,          3, 3, BUSTER_IR_FLOATS, IR_RULE_SAME, 0) \
-    X(IR_FDIV,          3, 3, BUSTER_IR_FLOATS, IR_RULE_SAME, 0) \
+    X(IR_FADD,          3, 3, BUSTER_IR_FLOATS | BUSTER_IR_VECTORS, IR_RULE_SAME, 0) \
+    X(IR_FSUB,          3, 3, BUSTER_IR_FLOATS | BUSTER_IR_VECTORS, IR_RULE_SAME, 0) \
+    X(IR_FMUL,          3, 3, BUSTER_IR_FLOATS | BUSTER_IR_VECTORS, IR_RULE_SAME, 0) \
+    X(IR_FDIV,          3, 3, BUSTER_IR_FLOATS | BUSTER_IR_VECTORS, IR_RULE_SAME, 0) \
     X(IR_FNEG,          1, 1, BUSTER_IR_FLOATS, IR_RULE_SAME, 0) \
     X(IR_ICMP,          3, 7, 1u << IR_I1, IR_RULE_ICMP, 0) \
     X(IR_FCMP,          3, 7, 1u << IR_I1, IR_RULE_FCMP, 0) \
@@ -813,7 +826,7 @@ typedef enum IrRule
     X(IR_VSELECT,       7, 7, BUSTER_IR_VECTORS, IR_RULE_VECTOR_SELECT, 0) \
     X(IR_LIFETIME,      0, 3, 1u << IR_VOID, IR_RULE_SLOT, 0) \
     X(IR_FENCE,         0, 1, 1u << IR_VOID, IR_RULE_FENCE, 0) \
-    X(IR_INTRINSIC,     3, 7, (1u << IR_I32) | (1u << IR_I64), IR_RULE_INTRINSIC, 0) \
+    X(IR_INTRINSIC,     1, 7, (1u << IR_I32) | (1u << IR_I64) | BUSTER_IR_VECTORS, IR_RULE_INTRINSIC, 0) \
     X(IR_ATOMIC_RMW,    3, 7, (1u << IR_I8) | (1u << IR_I16) | (1u << IR_I32) | (1u << IR_I64), IR_RULE_ATOMIC_RMW, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
@@ -821,13 +834,14 @@ static const uint8_t ir_operand_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_R
 #undef BUSTER_IR_OPERAND_ROW
 // The operands that are values where they aren't BUSTER_IR_NONE, as ir_operand_table's bits: an address's index (b),
 // a return's value (a), a call's destination for its aggregate result (c) and an atomic compare-exchange's desired
-// value (c, #1059).
+// value (c, #1059), and an intrinsic's second input (b, absent for splat alone).
 static const uint8_t ir_optional_table[64] = {
     [IR_ADDRESS] = 2,
     [IR_RET] = 1,
     [IR_CALL] = 4,
     [IR_CALL_INDIRECT] = 4,
     [IR_ATOMIC_RMW] = 4,
+    [IR_INTRINSIC] = 2,
 };
 #define BUSTER_IR_FIELD_ROW(op, uses, fields, types, rule, term) [op] = fields,
 static const uint8_t ir_field_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_FIELD_ROW) };
@@ -860,6 +874,81 @@ static IrSimdShape ir_simd_shape(uint32_t type)
 {
     const IrSimdShape result = type >= IR_V4I32 && type <= IR_M64 ? (IrSimdShape)(type - IR_V4I32 + IR_SIMD_V4I32) : IR_SIMD_NONE;
     return result;
+}
+
+static bool ir_splat_scalar_type(uint32_t type)
+{
+    return (type >= IR_I8 && type <= IR_I64) || type == IR_F32 || type == IR_F64;
+}
+
+// A splat copies bits, never evaluates a floating value. The independent lane model writes every lane and keeps
+// the bytes past the vector's width zero. A failed request leaves the caller's result unchanged.
+static bool ir_splat_value(uint32_t type, uint32_t scalar_type, uint64_t bits, IrSimdValue* result)
+{
+    const bool valid = ir_vector_type(type) && ir_splat_scalar_type(scalar_type) && result != NULL;
+    if (valid)
+    {
+        IrSimdValue value = {0};
+        const uint32_t lane_bits = ir_type_bits[scalar_type];
+        const uint32_t lanes = ir_type_bits[type] / lane_bits;
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        {
+            ir_simd_lane_write(&value, lane_bits, lane, bits);
+        }
+        *result = value;
+    }
+    return valid;
+}
+
+// A vector operation's lanes (#141's element types), its `flags`: an IrSimdLane. The IR's vector types are containers of
+// 16, 32 or 64 bytes whatever their elements (the typed stream's VECTOR class is bytes alone, so loads, stores, copies,
+// phis, selects and calls carry a vector as its bytes), and each operation that reads its operands as elements names
+// them: add, sub, mul and the shifts integer lanes of 8, 16, 32 or 64 bits, fadd, fsub, fmul and fdiv floats or doubles,
+// and vcmp and vselect any of them. I32 (0) is the default, so that the v4i32, v8i32 and v16i32 operations before the
+// lanes keep their meaning; every other operation's flags stay 0 (a load's and a store's are their access's).
+static IrSimdOperation ir_lane_operation(uint32_t op)
+{
+    IrSimdOperation result = IR_SIMD_OPERATION_COUNT;
+    switch (op)
+    {
+        case IR_ADD: result = IR_SIMD_ADD; break;
+        case IR_SUB: result = IR_SIMD_SUB; break;
+        case IR_MUL: result = IR_SIMD_MUL; break;
+        case IR_SHL: result = IR_SIMD_SHL; break;
+        case IR_LSHR: result = IR_SIMD_LSHR; break;
+        case IR_ASHR: result = IR_SIMD_ASHR; break;
+        case IR_FADD: result = IR_SIMD_FADD; break;
+        case IR_FSUB: result = IR_SIMD_FSUB; break;
+        case IR_FMUL: result = IR_SIMD_FMUL; break;
+        case IR_FDIV: result = IR_SIMD_FDIV; break;
+        case IR_VCMP: result = IR_SIMD_COMPARE; break;
+        case IR_VSELECT: result = IR_SIMD_SELECT; break;
+        default: break;
+    }
+    return result;
+}
+
+// Whether instruction flags `lane` are valid lanes of `op` on a vector: lanes its operation reads (ir_simd_lane_valid).
+static bool ir_lane_valid(uint32_t op, uint32_t lane)
+{
+    const IrSimdOperation operation = ir_lane_operation(op);
+    return operation != IR_SIMD_OPERATION_COUNT && lane < IR_SIMD_LANE_COUNT && ir_simd_lane_valid(operation, (IrSimdLane)lane);
+}
+
+// The mask type of a comparison of vector type `type`'s lanes `lane`, a bit per lane (m8 for 8 lanes or fewer): IR_VOID
+// for a type that isn't a vector.
+static uint32_t ir_lane_mask(uint32_t type, uint32_t lane)
+{
+    const IrSimdShape shape = lane < IR_SIMD_LANE_COUNT ? ir_simd_lane_mask(ir_simd_shape(type), (IrSimdLane)lane) : IR_SIMD_NONE;
+    const uint32_t result = shape == IR_SIMD_NONE ? IR_VOID : IR_M8 + (uint32_t)(shape - IR_SIMD_M8);
+    return result;
+}
+
+// How many lanes `lane` vector type `type` has.
+static uint32_t ir_lane_count(uint32_t type, uint32_t lane)
+{
+    const uint32_t bits = lane < IR_SIMD_LANE_COUNT ? ir_simd_lane_bits((IrSimdLane)lane) : 0;
+    return ir_vector_type(type) && bits != 0 ? ir_type_bits[type] / bits : 0;
 }
 
 // How many of this thread's scans for SIMD values or vectors (ir_function_has_simd_path, ir_function_has_vectors_path)
@@ -1033,10 +1122,11 @@ static inline __attribute__((always_inline)) bool ir_constant_fits(IrConstant va
 }
 
 // The IR type of a machine row's operand or result (#141, IrFunction.rows) of the typed stream's class `class` and, a
-// vector's or a mask's, `bytes`: an integer's of its bytes, whatever its signedness, a float's or a double's, a vector's
-// container of its bytes (v4i32, v8i32 or v16i32, whatever its elements: the row's records give its bits their meaning),
-// a mask's of its bytes, and void for a void result; IR_TYPE_COUNT for a class a row call doesn't take: a long double, a
-// 128-bit integer, and a vector of 4 or 8 bytes.
+// vector's or a mask's, `bytes`: an integer's of its bytes, whatever its signedness, a float's or a double's, a
+// vector's container of its bytes (v4i32, v8i32 or v16i32, whatever its elements: the row's records give its bits their
+// meaning; an SSE carrier's of 4 or 8 bytes f32 or f64, #1280, ir_typed_stack_type), a mask's of its bytes, and void
+// for a void result; IR_TYPE_COUNT for a class a row call doesn't take: a long double, a 128-bit integer, and a vector
+// of any other width.
 static uint32_t ir_row_type(uint32_t class, uint32_t bytes)
 {
     uint32_t type = IR_TYPE_COUNT;
@@ -1053,7 +1143,9 @@ static uint32_t ir_row_type(uint32_t class, uint32_t bytes)
         case BUSTER_TYPED_CLASS_U64: type = IR_I64; break;
         case BUSTER_TYPED_CLASS_F32: type = IR_F32; break;
         case BUSTER_TYPED_CLASS_F64: type = IR_F64; break;
-        case BUSTER_TYPED_CLASS_VECTOR: type = bytes == 16 ? IR_V4I32 : bytes == 32 ? IR_V8I32 : bytes == 64 ? IR_V16I32 : IR_TYPE_COUNT; break;
+        case BUSTER_TYPED_CLASS_VECTOR:
+            type = bytes == 4 ? IR_F32 : bytes == 8 ? IR_F64 : bytes == 16 ? IR_V4I32 : bytes == 32 ? IR_V8I32 : bytes == 64 ? IR_V16I32 : IR_TYPE_COUNT;
+            break;
         case BUSTER_TYPED_CLASS_MASK: type = bytes == 1 ? IR_M8 : bytes == 2 ? IR_M16 : bytes == 4 ? IR_M32 : bytes == 8 ? IR_M64 : IR_TYPE_COUNT; break;
         default: break;
     }
@@ -1195,7 +1287,7 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
     }
     else if (((op == IR_LOAD || op == IR_STORE) && (!ir_access_flags_valid(op, f->flags[i]) || f->alignment_log2[i] > 31)) ||
              (op == IR_ATOMIC_RMW && (!ir_rmw_flags_valid(f->flags[i]) || f->alignment_log2[i] > 31)) ||
-             ((op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW) && (f->flags[i] != 0 || f->alignment_log2[i] != 0)))
+             ((op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW) && ((f->flags[i] != 0 && !ir_lane_valid(op, f->flags[i])) || f->alignment_log2[i] != 0)))
     {
         check.error = IR_ERROR_METADATA;
     }
@@ -1229,8 +1321,14 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_NONE: break;
             case IR_RULE_CONSTANT: valid = a < f->constant_count && ir_constant_fits(f->constants[a], (uint8_t)type); break;
             case IR_RULE_PARAMETER: valid = a < f->parameter_count && f->parameter_types[a] == type; break;
-            case IR_RULE_SAME: valid = ta == type && ((ir_operand_table[op] & 2) == 0 || tb == type); break;
-            case IR_RULE_SHIFT: valid = ta == type && ir_integer(tb); break;
+            // A vector's arithmetic reads lanes its operation takes (ir_lane_valid: fadd's floats or doubles, never the
+            // default I32), and the bitwise operations none; a scalar's, none.
+            case IR_RULE_SAME:
+                valid = ta == type && ((ir_operand_table[op] & 2) == 0 || tb == type) &&
+                        (ir_vector_type(type) && ir_lane_operation(op) != IR_SIMD_OPERATION_COUNT ? ir_lane_valid(op, f->flags[i]) : f->flags[i] == 0);
+                break;
+            // A vector's shift (#141's element types) is each lane's by the same lane of b, a vector of its type.
+            case IR_RULE_SHIFT: valid = ta == type && (ir_vector_type(type) ? tb == type : ir_integer(tb) && f->flags[i] == 0); break;
             case IR_RULE_ICMP: valid = ta == tb && c < IR_PREDICATE_COUNT && (ir_integer(ta) || (ta == IR_PTR && c <= IR_NE)); break;
             case IR_RULE_FCMP: valid = ta == tb && ir_floating(ta) && c <= IR_GE; break;
             case IR_RULE_SELECT: valid = ta == IR_I1 && tb == type && operand_types[2] == type; break;
@@ -1248,11 +1346,30 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                         ((!ir_mask_type(ta) && !ir_mask_type(type)) || ta == type || (ir_mask_type(ta) && ir_integer(type)) || (ir_integer(ta) && ir_mask_type(type)));
                 break;
             case IR_RULE_VECTOR_CONSTANT: valid = a < f->vector_constant_count && ir_simd_value_valid(f->vector_constants + a, ir_simd_shape(type)); break;
-            case IR_RULE_VECTOR_COMPARE: valid = ir_vector_type(ta) && ta == tb && c < IR_PREDICATE_COUNT && type == (ta == IR_V16I32 ? IR_M16 : IR_M8); break;
-            case IR_RULE_VECTOR_SELECT: valid = ta == (type == IR_V16I32 ? IR_M16 : IR_M8) && tb == type && operand_types[2] == type; break;
+            // A mask of a bit per lane (ir_lane_mask); floating lanes' predicates C's alone (eq to ge), as fcmp's.
+            case IR_RULE_VECTOR_COMPARE:
+                valid = ir_vector_type(ta) && ta == tb && c < (ir_simd_lane_floating((IrSimdLane)f->flags[i]) ? IR_GE + 1u : (uint32_t)IR_PREDICATE_COUNT) &&
+                        type == ir_lane_mask(ta, f->flags[i]);
+                break;
+            case IR_RULE_VECTOR_SELECT: valid = ir_vector_type(type) && ta == ir_lane_mask(type, f->flags[i]) && tb == type && operand_types[2] == type; break;
             case IR_RULE_SLOT: valid = a < f->slot_count && (op != IR_LIFETIME || b <= 1); break;
             case IR_RULE_FENCE: valid = (a & ~(BUSTER_IR_FENCE_ORDER | BUSTER_IR_FENCE_SIGNAL)) == 0 && (a & BUSTER_IR_FENCE_ORDER) <= BUSTER_IR_FENCE_SEQ_CST; break;
-            case IR_RULE_INTRINSIC: valid = ta == type && tb == type && c < BUSTER_IR_INTRINSIC_COUNT && (c != BUSTER_IR_INTRINSIC_MULHU || type == IR_I64); break;
+            case IR_RULE_INTRINSIC:
+            {
+                if (c == BUSTER_IR_INTRINSIC_SPLAT)
+                {
+                    valid = ir_vector_type(type) && ir_splat_scalar_type(ta) && b == BUSTER_IR_NONE;
+                }
+                else if (b >= f->instruction_count || f->type[b] == IR_VOID || f->type[b] >= IR_TYPE_COUNT)
+                {
+                    check = ir_check(IR_ERROR_OPERAND, i, 1);
+                }
+                else
+                {
+                    valid = (type == IR_I32 || type == IR_I64) && ta == type && f->type[b] == type && c < BUSTER_IR_INTRINSIC_SPLAT &&
+                            (c != BUSTER_IR_INTRINSIC_MULHU || type == IR_I64);
+                }
+            } break;
             case IR_RULE_ATOMIC_RMW:
             {
                 // A compare-exchange's desired value of its type (an optional use, which the operand loop leaves
@@ -1332,11 +1449,43 @@ static __m512i ir_lookup_bytes(__m512i table, __m128i op)
     return _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_zextsi128_si512(op), table)));
 }
 
+// The types of one operand column's `valid` lanes, and zero in the others. `low` and `high` hold the 128 types from
+// `base`, which end with the batch's own; `head` holds the function's first 64, its parameters' and its entry's
+// constants'. A value in neither, rare in a producer's local code, is a load of its own (#786).
+static __m512i ir_operand_types(const IrFunction* f, __m512i low, __m512i high, __m512i head, uint32_t base, __m512i value, __mmask16 valid)
+{
+    // A function of at most 128 instructions has all its types in the window, from 0.
+    const __m512i local = f->instruction_count <= 2 * 64 ? value : _mm512_sub_epi32(value, _mm512_set1_epi32((int)base));
+    const __mmask16 near = f->instruction_count <= 2 * 64 ? valid : valid & _mm512_cmplt_epu32_mask(local, _mm512_set1_epi32(2 * 64));
+    __m512i result = _mm512_maskz_cvtepu8_epi32(near, _mm512_castsi512_si128(_mm512_permutex2var_epi8(low, _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(local)), high)));
+    const __mmask16 outside = valid & ~near;
+    if (outside != 0)
+    {
+        const __mmask16 early = outside & _mm512_cmplt_epu32_mask(value, _mm512_set1_epi32(64));
+        result = _mm512_mask_mov_epi32(result, early, _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_zextsi128_si512(_mm512_cvtepi32_epi8(value)), head))));
+        uint32_t far = outside & ~early;
+        if (far != 0)
+        {
+            uint32_t values[BUSTER_IR_VECTOR_COUNT];
+            uint32_t types[BUSTER_IR_VECTOR_COUNT];
+            _mm512_storeu_si512(values, value);
+            const __mmask16 loaded = (__mmask16)far;
+            while (far != 0)
+            {
+                const uint32_t lane = (uint32_t)__builtin_ctz(far);
+                far &= far - 1;
+                types[lane] = f->type[values[lane]];
+            }
+            result = _mm512_mask_loadu_epi32(result, loaded, types);
+        }
+    }
+    return result;
+}
+
 // A bit for every row needing the scalar semantic check. The common arithmetic, comparison, selection and memory
-// rules are checked here. Operand types are in-register permutes when a function's whole type array fits in two
-// registers; larger functions keep the scalar gather's per-lane loads, whose invalid and unused lanes keep the
-// gather's zero through the masks (#786).
-static __mmask16 ir_check_batch(const IrFunction* f, uint32_t first, uint32_t count, __mmask16* terminators)
+// rules are checked here. Operand types are in-register byte permutes (ir_operand_types), whose invalid and unused
+// lanes are zero as the scalar gather's were.
+static __mmask16 ir_check_batch(const IrFunction* f, __m512i head, uint32_t first, uint32_t count, __mmask16* terminators)
 {
     const __mmask16 active = (__mmask16)((1u << count) - 1u);
     const __m128i op_bytes = _mm_maskz_loadu_epi8(active, f->op + first);
@@ -1380,44 +1529,16 @@ static __mmask16 ir_check_batch(const IrFunction* f, uint32_t first, uint32_t co
     const __mmask16 memory = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE));
     bad |= memory & (_mm512_test_epi32_mask(flags, _mm512_set1_epi32(~BUSTER_IR_VOLATILE)) | _mm512_cmpgt_epu32_mask(align, _mm512_set1_epi32(31)));
     bad |= ~memory & (_mm512_test_epi32_mask(flags, none) | _mm512_test_epi32_mask(align, none));
-    __m512i ta;
-    __m512i tb;
-    __m512i tc;
-    if (f->instruction_count <= 2 * 64)
-    {
-        const __mmask64 low_types = f->instruction_count >= 64 ? (__mmask64)-1 : ((__mmask64)1 << f->instruction_count) - 1;
-        const __mmask64 high_types = f->instruction_count >= 2 * 64 ? (__mmask64)-1 : f->instruction_count > 64 ? ((__mmask64)1 << (f->instruction_count - 64)) - 1 : 0;
-        const __m512i types_low = _mm512_maskz_loadu_epi8(low_types, f->type);
-        const __m512i types_high = _mm512_maskz_loadu_epi8(high_types, f->type + (f->instruction_count < 64 ? f->instruction_count : 64));
-        ta = _mm512_maskz_cvtepu8_epi32(valid_a, _mm512_castsi512_si128(_mm512_permutex2var_epi8(types_low, _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(a)), types_high)));
-        tb = _mm512_maskz_cvtepu8_epi32(valid_b, _mm512_castsi512_si128(_mm512_permutex2var_epi8(types_low, _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(b)), types_high)));
-        tc = _mm512_maskz_cvtepu8_epi32(valid_c, _mm512_castsi512_si128(_mm512_permutex2var_epi8(types_low, _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(c)), types_high)));
-    }
-    else
-    {
-        uint32_t types_a[BUSTER_IR_VECTOR_COUNT] = { 0 };
-        uint32_t types_b[BUSTER_IR_VECTOR_COUNT] = { 0 };
-        uint32_t types_c[BUSTER_IR_VECTOR_COUNT] = { 0 };
-        for (uint32_t lane = 0; lane < count; lane += 1)
-        {
-            const uint32_t bit = 1u << lane;
-            if ((valid_a & bit) != 0)
-            {
-                types_a[lane] = f->type[f->a[first + lane]];
-            }
-            if ((valid_b & bit) != 0)
-            {
-                types_b[lane] = f->type[f->b[first + lane]];
-            }
-            if ((valid_c & bit) != 0)
-            {
-                types_c[lane] = f->type[f->c[first + lane]];
-            }
-        }
-        ta = _mm512_loadu_si512(types_a);
-        tb = _mm512_loadu_si512(types_b);
-        tc = _mm512_loadu_si512(types_c);
-    }
+    // The 128 types that end with the batch's own: all of a function of at most 128 instructions.
+    const uint32_t base = first + count > 2 * 64 ? first + count - 2 * 64 : 0;
+    const uint32_t window = f->instruction_count - base;
+    const __mmask64 low_types = window >= 64 ? (__mmask64)-1 : ((__mmask64)1 << window) - 1;
+    const __mmask64 high_types = window >= 2 * 64 ? (__mmask64)-1 : window > 64 ? ((__mmask64)1 << (window - 64)) - 1 : 0;
+    const __m512i types_low = _mm512_maskz_loadu_epi8(low_types, f->type + base);
+    const __m512i types_high = _mm512_maskz_loadu_epi8(high_types, f->type + base + (window < 64 ? window : 64));
+    const __m512i ta = ir_operand_types(f, types_low, types_high, head, base, a, valid_a);
+    const __m512i tb = ir_operand_types(f, types_low, types_high, head, base, b, valid_b);
+    const __m512i tc = ir_operand_types(f, types_low, types_high, head, base, c, valid_c);
     bad |= use_a & (_mm512_cmpeq_epi32_mask(ta, _mm512_setzero_si512()) | _mm512_cmpge_epu32_mask(ta, _mm512_set1_epi32(IR_TYPE_COUNT)));
     bad |= use_b & (_mm512_cmpeq_epi32_mask(tb, _mm512_setzero_si512()) | _mm512_cmpge_epu32_mask(tb, _mm512_set1_epi32(IR_TYPE_COUNT)));
     bad |= use_c & (_mm512_cmpeq_epi32_mask(tc, _mm512_setzero_si512()) | _mm512_cmpge_epu32_mask(tc, _mm512_set1_epi32(IR_TYPE_COUNT)));
@@ -1437,16 +1558,18 @@ static __mmask16 ir_check_batch(const IrFunction* f, uint32_t first, uint32_t co
     bad |= fcmp & (_mm512_cmpneq_epi32_mask(ta, tb) | _mm512_cmpgt_epu32_mask(c, _mm512_set1_epi32(IR_GE)) | ~a_float);
     bad |= select & (_mm512_cmpneq_epi32_mask(ta, _mm512_set1_epi32(IR_I1)) | _mm512_cmpneq_epi32_mask(tb, type) | _mm512_cmpneq_epi32_mask(tc, type));
     bad |= memory & _mm512_cmpneq_epi32_mask(ta, _mm512_set1_epi32(IR_PTR));
-    // An intrinsic's operands of its type, and an operation of its type's (mulhu an I64's alone).
-    const __mmask16 intrinsic = _mm512_cmpeq_epi32_mask(rules, _mm512_set1_epi32(IR_RULE_INTRINSIC));
-    const __mmask16 mulhu = _mm512_cmpeq_epi32_mask(c, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_MULHU)) & _mm512_cmpneq_epi32_mask(type, _mm512_set1_epi32(IR_I64));
-    bad |= intrinsic & (_mm512_cmpneq_epi32_mask(ta, type) | _mm512_cmpneq_epi32_mask(tb, type) | _mm512_cmpge_epu32_mask(c, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_COUNT)) | mulhu);
-    const __mmask16 defer = ~(same | shift | icmp | fcmp | select | memory | intrinsic | no_rule);
+    // Intrinsics have operation-specific operands: two integers for BMI/mulhu, one scalar for a vector splat.
+    // Their uncommon rows take the scalar semantic check, including the optional second operand's bounds.
+    // A vector's floating arithmetic (#141's element types) reads the lanes its flags name, which the scalar oracle checks
+    // (a nonzero flag is deferred above; this is fadd's default I32, which no lanes are).
+    const __mmask16 vector_result = _mm512_cmpge_epu32_mask(type, _mm512_set1_epi32(IR_V4I32)) & _mm512_cmple_epu32_mask(type, _mm512_set1_epi32(IR_V16I32));
+    bad |= vector_result & _mm512_cmpge_epu32_mask(op, _mm512_set1_epi32(IR_FADD)) & _mm512_cmple_epu32_mask(op, _mm512_set1_epi32(IR_FDIV));
+    const __mmask16 defer = ~(same | shift | icmp | fcmp | select | memory | no_rule);
     return active & (bad | defer);
 }
 
 // The verifier's and the derived arrays' hot functions (this one, ir_cfg_validated, ir_check_dominance, ir_verify_path
-// and ir_build_uses) stay out of line and start lines of their own, so that where the code before them ends doesn't
+// and ir_uses_path) stay out of line and start lines of their own, so that where the code before them ends doesn't
 // move their loops within lines, which changed their times between builds of the same code (#786).
 static __attribute__((noinline, aligned(64))) IrCheck ir_check_rows(const IrFunction* f, bool vector)
 {
@@ -1455,6 +1578,12 @@ static __attribute__((noinline, aligned(64))) IrCheck ir_check_rows(const IrFunc
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     uint32_t block = 0;
     uint32_t first = 0;
+    // The first 64 types, which only a function of more than 128 instructions looks up apart (ir_operand_types).
+    __m512i head = _mm512_setzero_si512();
+    if (BUSTER_VECTOR_PATH(vector) && f->instruction_count > 2 * 64)
+    {
+        head = _mm512_loadu_si512(f->type);
+    }
     while (check.error == IR_OK && first < f->instruction_count)
     {
         const uint32_t remaining = f->instruction_count - first;
@@ -1469,7 +1598,7 @@ static __attribute__((noinline, aligned(64))) IrCheck ir_check_rows(const IrFunc
         uint32_t pending = 1;
         if (BUSTER_VECTOR_PATH(vector))
         {
-            pending = ir_check_batch(f, first, count, &actual);
+            pending = ir_check_batch(f, head, first, count, &actual);
         }
         else if (f->op[first] < IR_OP_COUNT)
         {
@@ -1865,44 +1994,148 @@ static IrCheck ir_check_use_batch(const IrUseBatch* batch, bool dominance, bool 
     return check;
 }
 
+// The exact check of instruction i's operands, in ir_operand's order: each defined before its use within a block and,
+// with a dominator tree, in a block that dominates the use's. A phi's incoming value is used at its predecessor's end.
+// The scalar twin checks every instruction so, and the vector path the lanes its batch leaves to it.
+static IrCheck ir_check_operands(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance, uint32_t i)
+{
+    IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
+    const uint64_t count = ir_operand_count(f, i);
+    const bool phi = f->op[i] == IR_PHI;
+    for (uint32_t p = 0; check.error == IR_OK && p < count; p += 1)
+    {
+        const IrOperand operand = ir_operand(f, i, p, cfg->instruction_blocks[i]);
+        const uint32_t definition = cfg->instruction_blocks[operand.value];
+        const uint32_t position = phi ? f->block_offsets[operand.block + 1] - 1 : i;
+        bool invalid = operand.value >= position;
+        if (definition != operand.block)
+        {
+            invalid = dominance != 0 && (dominance->leave[definition] == 0 || dominance->leave[operand.block] == 0 || dominance->enter[definition] > dominance->enter[operand.block] || dominance->leave[definition] < dominance->leave[operand.block]);
+        }
+        if (invalid)
+        {
+            check = ir_check(IR_ERROR_DOMINANCE, i, operand.position);
+        }
+    }
+    return check;
+}
+
+// The lanes of one operand column whose value is defined in an earlier block (`earlier`) and whose definition's block
+// doesn't dominate the use's: its block and its tree interval are gathered, the use's are the lanes' own.
+static __mmask16 ir_dominance_earlier(const IrCfg* cfg, const IrDominance* dominance, __mmask16 earlier, __m512i value, __m512i use_enter, __m512i use_leave)
+{
+    __mmask16 bad = 0;
+    if (earlier != 0)
+    {
+        const __m512i zero = _mm512_setzero_si512();
+        const __m512i block = _mm512_mask_i32gather_epi32(zero, earlier, value, cfg->instruction_blocks, 4);
+        const __m512i enter = _mm512_mask_i32gather_epi32(zero, earlier, block, dominance->enter, 4);
+        const __m512i leave = _mm512_mask_i32gather_epi32(zero, earlier, block, dominance->leave, 4);
+        bad = _mm512_cmpeq_epi32_mask(leave, zero) | _mm512_cmpeq_epi32_mask(use_leave, zero) | _mm512_cmpgt_epu32_mask(enter, use_enter) | _mm512_cmplt_epu32_mask(leave, use_leave);
+        bad &= earlier;
+    }
+    return bad;
+}
+
+// The lanes of 16 instructions, from `first`, whose operands the exact check must decide: a phi's and a call's, whose
+// operands are in extra; a use of a value at or after its own instruction, which is an error within the block; and,
+// with a dominator tree, a use of an earlier block's value whose block doesn't dominate the use's. Any other use is of
+// an earlier value of its own block, which needs nothing more (#786).
+static __mmask16 ir_dominance_batch(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance, uint32_t first, uint32_t count)
+{
+    const __mmask16 active = (__mmask16)((1u << count) - 1u);
+    const __m128i op = _mm_maskz_loadu_epi8(active, f->op + first);
+    const __m512i operands = ir_lookup_bytes(_mm512_loadu_si512(ir_operand_table), op);
+    const __m512i optional = ir_lookup_bytes(_mm512_loadu_si512(ir_optional_table), op);
+    const __m512i a = _mm512_maskz_loadu_epi32(active, f->a + first);
+    const __m512i b = _mm512_maskz_loadu_epi32(active, f->b + first);
+    const __m512i c = _mm512_maskz_loadu_epi32(active, f->c + first);
+    const __m512i none = _mm512_set1_epi32(-1);
+    const __m512i one = _mm512_set1_epi32(1);
+    const __m512i two = _mm512_set1_epi32(2);
+    const __m512i four = _mm512_set1_epi32(4);
+    const __m512i index = _mm512_add_epi32(_mm512_set1_epi32((int)first), _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
+    const __mmask16 extra = _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_PHI)) | _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_CALL)) | _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_CALL_INDIRECT));
+    const __mmask16 direct = active & ~extra;
+    const __mmask16 use_a = direct & (_mm512_test_epi32_mask(operands, one) | (_mm512_test_epi32_mask(optional, one) & _mm512_cmpneq_epi32_mask(a, none)));
+    const __mmask16 use_b = direct & (_mm512_test_epi32_mask(operands, two) | (_mm512_test_epi32_mask(optional, two) & _mm512_cmpneq_epi32_mask(b, none)));
+    const __mmask16 use_c = direct & (_mm512_test_epi32_mask(operands, four) | (_mm512_test_epi32_mask(optional, four) & _mm512_cmpneq_epi32_mask(c, none)));
+    __mmask16 pending = extra | (use_a & _mm512_cmpge_epu32_mask(a, index)) | (use_b & _mm512_cmpge_epu32_mask(b, index)) | (use_c & _mm512_cmpge_epu32_mask(c, index));
+    if (dominance != 0)
+    {
+        // Sixteen instructions are in at most sixteen consecutive blocks from the first's: their starts and tree
+        // intervals are one load each, which each lane's block picks by a permute.
+        const uint32_t base = cfg->instruction_blocks[first];
+        const uint32_t span = f->block_count - base;
+        const __mmask16 held = span >= BUSTER_IR_VECTOR_COUNT ? (__mmask16)0xffff : (__mmask16)((1u << span) - 1u);
+        const __m512i local = _mm512_sub_epi32(_mm512_maskz_loadu_epi32(active, cfg->instruction_blocks + first), _mm512_set1_epi32((int)base));
+        const __m512i start = _mm512_permutexvar_epi32(local, _mm512_maskz_loadu_epi32(held, f->block_offsets + base));
+        const __m512i use_enter = _mm512_permutexvar_epi32(local, _mm512_maskz_loadu_epi32(held, dominance->enter + base));
+        const __m512i use_leave = _mm512_permutexvar_epi32(local, _mm512_maskz_loadu_epi32(held, dominance->leave + base));
+        pending |= ir_dominance_earlier(cfg, dominance, use_a & _mm512_cmplt_epu32_mask(a, start), a, use_enter, use_leave);
+        pending |= ir_dominance_earlier(cfg, dominance, use_b & _mm512_cmplt_epu32_mask(b, start), b, use_enter, use_leave);
+        pending |= ir_dominance_earlier(cfg, dominance, use_c & _mm512_cmplt_epu32_mask(c, start), c, use_enter, use_leave);
+    }
+    return pending;
+}
+
 static __attribute__((noinline, aligned(64))) IrCheck ir_check_dominance(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance, bool vector)
 {
     (void)vector;
 
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
-    IrUseBatch batch = { 0 };
-    for (uint32_t i = 0; check.error == IR_OK && i < f->instruction_count; i += 1)
+    const uint32_t step = BUSTER_VECTOR_PATH(vector) ? BUSTER_IR_VECTOR_COUNT : 1;
+    for (uint32_t first = 0; check.error == IR_OK && first < f->instruction_count; first += step)
     {
-        const uint64_t count = ir_operand_count(f, i);
-        for (uint32_t p = 0; check.error == IR_OK && p < count; p += 1)
+        const uint32_t remaining = f->instruction_count - first;
+        uint32_t pending = 1;
+        if (BUSTER_VECTOR_PATH(vector))
         {
-            const IrOperand operand = ir_operand(f, i, p, cfg->instruction_blocks[i]);
-            const uint32_t definition_block = cfg->instruction_blocks[operand.value];
-            const uint32_t lane = batch.count;
-            batch.definitions[lane] = operand.value;
-            batch.positions[lane] = f->op[i] == IR_PHI ? f->block_offsets[operand.block + 1] - 1 : i;
-            batch.definition_blocks[lane] = definition_block;
-            batch.use_blocks[lane] = operand.block;
-            batch.instructions[lane] = i;
-            batch.operands[lane] = operand.position;
-            if (dominance != 0)
+            pending = ir_dominance_batch(f, cfg, dominance, first, remaining < BUSTER_IR_VECTOR_COUNT ? remaining : BUSTER_IR_VECTOR_COUNT);
+        }
+        while (check.error == IR_OK && pending != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctz(pending);
+            pending &= pending - 1;
+            check = ir_check_operands(f, cfg, dominance, first + lane);
+        }
+    }
+    return check;
+}
+
+// A phi's and a switch's own rules. Phis start a block other than the entry, one incoming value per predecessor, each
+// from a distinct predecessor and of the phi's type; a switch's cases are distinct. A phi after a non-phi of its block
+// is the first misplaced one, since one after a misplaced phi comes after that phi's error.
+static IrCheck ir_check_join(const IrFunction* f, const IrCfg* cfg, Arena* scratch, uint32_t* seen, uint32_t i)
+{
+    IrCheck check = ir_check(IR_OK, i, 0);
+    if (f->op[i] == IR_PHI)
+    {
+        const uint32_t b = cfg->instruction_blocks[i];
+        const bool misplaced = i != f->block_offsets[b] && f->op[i - 1] != IR_PHI;
+        // Initial function entry has no predecessor from which a phi can select a value. A producer needing a loop at
+        // entry must add a real preheader with an explicit initial value before introducing phis.
+        if (b == 0 || misplaced || f->b[i] != cfg->predecessor_offsets[b + 1] - cfg->predecessor_offsets[b])
+        {
+            check = ir_check(IR_ERROR_PHI, i, 0);
+        }
+        for (uint32_t p = 0; check.error == IR_OK && p < f->b[i]; p += 1)
+        {
+            const uint32_t predecessor = f->extra[f->a[i] + p * 2];
+            const uint32_t value = f->extra[f->a[i] + p * 2 + 1];
+            if (predecessor >= f->block_count || !ir_predecessor(cfg, b, predecessor) || seen[predecessor] == i || value >= f->instruction_count || f->type[value] != f->type[i])
             {
-                batch.definition_enter[lane] = dominance->enter[definition_block];
-                batch.definition_leave[lane] = dominance->leave[definition_block];
-                batch.use_enter[lane] = dominance->enter[operand.block];
-                batch.use_leave[lane] = dominance->leave[operand.block];
+                check = ir_check(IR_ERROR_PHI, i, p);
             }
-            batch.count += 1;
-            if (batch.count == BUSTER_IR_VECTOR_COUNT)
+            else
             {
-                check = ir_check_use_batch(&batch, dominance != 0, BUSTER_VECTOR_PATH(vector));
-                batch.count = 0;
+                seen[predecessor] = i;
             }
         }
     }
-    if (check.error == IR_OK && batch.count != 0)
+    else
     {
-        check = ir_check_use_batch(&batch, dominance != 0, BUSTER_VECTOR_PATH(vector));
+        check = ir_check(ir_switch_unique(f, i, scratch), i, 0);
     }
     return check;
 }
@@ -1933,41 +2166,27 @@ static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scra
             check = ir_check(IR_ERROR_DOMINANCE, BUSTER_IR_NONE, b);
         }
     }
-    for (uint32_t b = 0; check.error == IR_OK && b < f->block_count; b += 1)
+    // The phis and switches, which the vector path finds 64 operations at a time.
+    const uint32_t step = BUSTER_VECTOR_PATH(vector) ? 64 : 1;
+    for (uint32_t first = 0; check.error == IR_OK && first < f->instruction_count; first += step)
     {
-        bool past_phis = false;
-        for (uint32_t i = f->block_offsets[b]; check.error == IR_OK && i < f->block_offsets[b + 1]; i += 1)
+        const uint32_t remaining = f->instruction_count - first;
+        uint64_t pending = 0;
+        if (BUSTER_VECTOR_PATH(vector))
         {
-            if (f->op[i] == IR_PHI)
-            {
-                // Initial function entry has no predecessor from which a phi can select a value. A producer needing
-                // a loop at entry must add a real preheader with an explicit initial value before introducing phis.
-                if (b == 0 || past_phis || f->b[i] != cfg->predecessor_offsets[b + 1] - cfg->predecessor_offsets[b])
-                {
-                    check = ir_check(IR_ERROR_PHI, i, 0);
-                }
-                for (uint32_t p = 0; check.error == IR_OK && p < f->b[i]; p += 1)
-                {
-                    const uint32_t predecessor = f->extra[f->a[i] + p * 2];
-                    const uint32_t value = f->extra[f->a[i] + p * 2 + 1];
-                    if (predecessor >= f->block_count || !ir_predecessor(cfg, b, predecessor) || seen[predecessor] == i || value >= f->instruction_count || f->type[value] != f->type[i])
-                    {
-                        check = ir_check(IR_ERROR_PHI, i, p);
-                    }
-                    else
-                    {
-                        seen[predecessor] = i;
-                    }
-                }
-            }
-            else
-            {
-                past_phis = true;
-            }
-            if (check.error == IR_OK && f->op[i] == IR_SWITCH)
-            {
-                check = ir_check(ir_switch_unique(f, i, scratch), i, 0);
-            }
+            const __mmask64 active = remaining >= 64 ? (__mmask64)-1 : ((__mmask64)1 << remaining) - 1;
+            const __m512i op = _mm512_maskz_loadu_epi8(active, f->op + first);
+            pending = _mm512_mask_cmpeq_epi8_mask(active, op, _mm512_set1_epi8(IR_PHI)) | _mm512_mask_cmpeq_epi8_mask(active, op, _mm512_set1_epi8(IR_SWITCH));
+        }
+        else
+        {
+            pending = f->op[first] == IR_PHI || f->op[first] == IR_SWITCH;
+        }
+        while (check.error == IR_OK && pending != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
+            pending &= pending - 1;
+            check = ir_check_join(f, cfg, scratch, seen, first + lane);
         }
     }
     if (check.error == IR_OK)
@@ -2007,6 +2226,22 @@ static __attribute__((noinline, aligned(64))) IrCheck ir_verify_path(const IrFun
 
 static IrCheck ir_verify_scalar(const IrFunction* f, Arena* scratch, const IrDominance* dominance);
 
+// ir_verify_path's steps past the shape and rows (#1379): the validated CFG and the graph against `dominance`, for a
+// function whose shape and rows a verification on the same path has already passed and which hasn't changed since. Both
+// checks read the function alone, so its result is the whole verification's.
+static __attribute__((unused)) IrCheck ir_verify_graph(const IrFunction* f, Arena* scratch, const IrDominance* dominance, bool vector)
+{
+    const uint64_t mark = scratch->length;
+    IrCfg cfg = { 0 };
+    IrCheck check = ir_check(ir_cfg_validated(f, scratch, scratch, &cfg), BUSTER_IR_NONE, 0);
+    if (check.error == IR_OK)
+    {
+        check = ir_check_graph(f, &cfg, scratch, dominance, BUSTER_VECTOR_PATH(vector));
+    }
+    arena_pop_to(scratch, mark);
+    return check;
+}
+
 static IrCheck ir_verify(const IrFunction* f, Arena* scratch, const IrDominance* dominance)
 {
 #if !BUSTER_HOST_VECTOR
@@ -2021,11 +2256,118 @@ static IrCheck ir_verify_scalar(const IrFunction* f, Arena* scratch, const IrDom
     return ir_verify_path(f, scratch, dominance, false);
 }
 
-static __attribute__((noinline, aligned(64))) IrError ir_build_uses(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result)
+// #1634: the vector twin's place for each of a batch's 48 fixed operands: bit k of the batch's operand mask is column
+// k % 3 (a, b, c) of lane k / 3, so ascending bits run in ir_operand's order. Each entry is lane << 2 | column.
+static const uint8_t ir_uses_slots[48] = {
+    0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, 16, 17, 18, 20,
+    21, 22, 24, 25, 26, 28, 29, 30, 32, 33, 34, 36, 37, 38, 40, 41,
+    42, 44, 45, 46, 48, 49, 50, 52, 53, 54, 56, 57, 58, 60, 61, 62,
+};
+// Bit 3 * lane of the 48, where pdep deposits a 16-lane mask's bit for that lane's operand a; b's are one bit higher.
+#define BUSTER_IR_USES_LANE_BITS UINT64_C(0x249249249249)
+
+// One batch of up to 16 instructions from first, for either pass of the vector twin: with uses zero, counts each
+// operand's value in `counts` (offsets + 1); otherwise places each use at its value's cursor in `counts`. One byte
+// permute of the opcode tables gives every instruction's fixed operands, and pdep spreads the three column masks into
+// one 48-bit mask whose ascending bits are ir_operand's order; the loops read each operand from its column, with no
+// per-operand decode and no staging buffer. A phi's inputs or a call's arguments follow its own fixed operands, so the
+// mask is walked in segments that end at each such instruction. Returns the batch's operand count.
+static uint64_t ir_uses_batch(const IrFunction* f, uint32_t first, uint32_t count, uint32_t* counts, IrUse* uses)
 {
+    const __mmask16 active = (__mmask16)((1u << count) - 1u);
+    const __m128i op_bytes = _mm_maskz_loadu_epi8(active, f->op + first);
+    const __m512i op = _mm512_cvtepu8_epi32(op_bytes);
+    const __m512i operands = ir_lookup_bytes(_mm512_loadu_si512(ir_operand_table), op_bytes);
+    const __m512i optional = ir_lookup_bytes(_mm512_loadu_si512(ir_optional_table), op_bytes);
+    const __m512i none = _mm512_set1_epi32(-1);
+    const __m512i one = _mm512_set1_epi32(1);
+    const __m512i two = _mm512_set1_epi32(2);
+    const __m512i four = _mm512_set1_epi32(4);
+    // ir_value_mask: an opcode's operands, and its optional ones where they aren't BUSTER_IR_NONE.
+    const __mmask16 use_a = active & (_mm512_test_epi32_mask(operands, one) | (_mm512_test_epi32_mask(optional, one) & _mm512_cmpneq_epi32_mask(_mm512_maskz_loadu_epi32(active, f->a + first), none)));
+    const __mmask16 use_b = active & (_mm512_test_epi32_mask(operands, two) | (_mm512_test_epi32_mask(optional, two) & _mm512_cmpneq_epi32_mask(_mm512_maskz_loadu_epi32(active, f->b + first), none)));
+    const __mmask16 use_c = active & (_mm512_test_epi32_mask(operands, four) | (_mm512_test_epi32_mask(optional, four) & _mm512_cmpneq_epi32_mask(_mm512_maskz_loadu_epi32(active, f->c + first), none)));
+    __mmask16 variadic = active & (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_PHI)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)));
+    const uint64_t present = _pdep_u64(use_a, BUSTER_IR_USES_LANE_BITS) | _pdep_u64(use_b, BUSTER_IR_USES_LANE_BITS << 1) | _pdep_u64(use_c, BUSTER_IR_USES_LANE_BITS << 2);
+    const uint32_t* const columns[4] = { f->a + first, f->b + first, f->c + first, f->c + first };
+    uint64_t total = 0;
+    uint32_t lane = 0;
+    bool more = true;
+    while (more)
+    {
+        // The fixed operands of lanes lane..last, where last is the next phi or call, or the batch's last lane.
+        const uint32_t last = variadic != 0 ? (uint32_t)__builtin_ctz(variadic) : count - 1;
+        const uint64_t segment = ((UINT64_C(1) << (3 * (last + 1))) - 1) & ~((UINT64_C(1) << (3 * lane)) - 1);
+        uint64_t taken = present & segment;
+        total += (uint64_t)__builtin_popcountll(taken);
+        if (uses == 0)
+        {
+            while (taken != 0)
+            {
+                const uint32_t slot = ir_uses_slots[__builtin_ctzll(taken)];
+                counts[columns[slot & 3][slot >> 2]] += 1;
+                taken &= taken - 1;
+            }
+        }
+        else
+        {
+            while (taken != 0)
+            {
+                const uint32_t slot = ir_uses_slots[__builtin_ctzll(taken)];
+                const uint32_t value = columns[slot & 3][slot >> 2];
+                const uint32_t place = counts[value];
+                counts[value] = place + 1;
+                uses[place] = (IrUse){
+                    .instruction = first + (slot >> 2),
+                    .operand = slot & 3,
+                };
+                taken &= taken - 1;
+            }
+        }
+        if (variadic != 0)
+        {
+            const uint32_t i = first + last;
+            const bool phi = f->op[i] == IR_PHI;
+            const uint32_t amount = phi ? f->b[i] : f->calls[f->b[i]].argument_count;
+            const uint32_t* const extra = phi ? f->extra + f->a[i] + 1 : f->extra + f->calls[f->b[i]].argument_first;
+            const uint32_t stride = phi ? 2 : 1;
+            for (uint32_t p = 0; p < amount; p += 1)
+            {
+                const uint32_t value = extra[(uint64_t)p * stride];
+                if (uses == 0)
+                {
+                    counts[value] += 1;
+                }
+                else
+                {
+                    const uint32_t place = counts[value];
+                    counts[value] = place + 1;
+                    uses[place] = (IrUse){
+                        .instruction = i,
+                        .operand = 3 + p,
+                    };
+                }
+            }
+            total += amount;
+            variadic &= variadic - 1;
+        }
+        lane = last + 1;
+        more = lane < count;
+    }
+    return total;
+}
+
+// The use lists of a verified function, which ir_build_uses verifies first; a caller that has just verified it, as the
+// optimizer has, builds them without verifying it again (#786). Arena and scratch are disjoint. The scalar twin decodes
+// each operand with ir_operand; the vector twin (#1634) decodes 16 instructions at once in ir_uses_batch. Both count
+// each value's uses, sum the counts into offsets, then place every use in instruction order, then operand order.
+static __attribute__((noinline, aligned(64))) IrError ir_uses_path(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result, bool vector)
+{
+    (void)vector;
+
     const uint64_t mark = arena->length;
     const uint64_t temporary = scratch->length;
-    IrCheck check = arena == scratch ? ir_check(IR_ERROR_STRUCTURE, BUSTER_IR_NONE, 0) : ir_verify(f, scratch, 0);
+    IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     IrUses uses = {
         .value_count = f->instruction_count,
     };
@@ -2041,7 +2383,17 @@ static __attribute__((noinline, aligned(64))) IrError ir_build_uses(const IrFunc
         }
     }
     uint64_t total = 0;
-    for (uint32_t i = 0; check.error == IR_OK && i < f->instruction_count; i += 1)
+    if (check.error == IR_OK && BUSTER_VECTOR_PATH(vector))
+    {
+        // A count can't wrap before the total passes UINT32_MAX, which refuses the function as the scalar twin does.
+        for (uint32_t first = 0; first < f->instruction_count; first += BUSTER_IR_VECTOR_COUNT)
+        {
+            const uint32_t count = f->instruction_count - first < BUSTER_IR_VECTOR_COUNT ? f->instruction_count - first : BUSTER_IR_VECTOR_COUNT;
+            total += ir_uses_batch(f, first, count, uses.offsets + 1, 0);
+        }
+        check.error = total > UINT32_MAX ? IR_ERROR_LIMIT : IR_OK;
+    }
+    for (uint32_t i = 0; check.error == IR_OK && !BUSTER_VECTOR_PATH(vector) && i < f->instruction_count; i += 1)
     {
         const uint64_t count = ir_operand_count(f, i);
         total += count;
@@ -2074,7 +2426,12 @@ static __attribute__((noinline, aligned(64))) IrError ir_build_uses(const IrFunc
             uses.offsets[value + 1] += uses.offsets[value];
             cursor[value] = uses.offsets[value];
         }
-        for (uint32_t i = 0; i < f->instruction_count; i += 1)
+        for (uint32_t first = 0; BUSTER_VECTOR_PATH(vector) && first < f->instruction_count; first += BUSTER_IR_VECTOR_COUNT)
+        {
+            const uint32_t count = f->instruction_count - first < BUSTER_IR_VECTOR_COUNT ? f->instruction_count - first : BUSTER_IR_VECTOR_COUNT;
+            ir_uses_batch(f, first, count, cursor, uses.uses);
+        }
+        for (uint32_t i = 0; !BUSTER_VECTOR_PATH(vector) && i < f->instruction_count; i += 1)
         {
             const uint64_t count = ir_operand_count(f, i);
             for (uint32_t p = 0; p < count; p += 1)
@@ -2096,6 +2453,27 @@ static __attribute__((noinline, aligned(64))) IrError ir_build_uses(const IrFunc
     }
     arena_pop_to(scratch, temporary);
     return check.error;
+}
+
+static __attribute__((unused)) IrError ir_uses_validated_scalar(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result)
+{
+    return ir_uses_path(f, arena, scratch, result, false);
+}
+
+static IrError ir_uses_validated(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result)
+{
+    return ir_uses_path(f, arena, scratch, result, true);
+}
+
+static IrError ir_build_uses(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result)
+{
+    const IrCheck check = arena == scratch ? ir_check(IR_ERROR_STRUCTURE, BUSTER_IR_NONE, 0) : ir_verify(f, scratch, 0);
+    IrError error = check.error;
+    if (error == IR_OK)
+    {
+        error = ir_uses_validated(f, arena, scratch, result);
+    }
+    return error;
 }
 
 static void ir_print_constant(FILE* output, IrConstant value)
@@ -2218,7 +2596,11 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                 const uint32_t a = f->a[i];
                 const uint32_t b = f->b[i];
                 const uint32_t c = f->c[i];
-                fprintf(output, "  %%%" PRIu32 " = %s.%s", i, ir_op_names[op], ir_type_names[f->type[i]]);
+                // A vector operation's lanes (#141's element types) in its type's name, but a comparison's, whose type is
+                // its mask: `lanes=` after its predicate.
+                const bool laned = op != IR_VCMP && ir_vector_type(f->type[i]) && f->flags[i] != 0 && f->flags[i] < IR_SIMD_LANE_COUNT && ir_lane_operation(op) != IR_SIMD_OPERATION_COUNT;
+                fprintf(output, "  %%%" PRIu32 " = %s.%s", i, ir_op_names[op],
+                        laned ? ir_lane_type_names[f->type[i] - IR_V4I32][f->flags[i]] : ir_type_names[f->type[i]]);
                 switch (op)
                 {
                     case IR_CONST:
@@ -2334,6 +2716,10 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                                 "uge",
                             };
                             fprintf(output, " %s", predicates[c]);
+                            if (op == IR_VCMP && f->flags[i] != 0)
+                            {
+                                fprintf(output, " lanes=%s", f->flags[i] < IR_SIMD_LANE_COUNT ? ir_lane_names[f->flags[i]] : "invalid");
+                            }
                         }
                         if (op == IR_INTRINSIC)
                         {
