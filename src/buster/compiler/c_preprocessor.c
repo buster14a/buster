@@ -17080,8 +17080,8 @@ static const PPFeature pp_features_constexpr_builtin[] = {
 };
 
 // Implemented source capabilities, independent of the frozen Clang oracle. Attribute acceptance alone is not
-// implementation: diagnostic-only attributes and unpublished linkage obligations remain zero. These
-// entries have declaration/type, control, symbol or executable lowering consumers. C23 date codes describe the
+// implementation: attributes without an implemented consumer and unpublished linkage obligations remain zero. These
+// entries have declaration/type, diagnostic, control, symbol or executable lowering consumers. C23 date codes describe the
 // standardized attribute, not the language mode (the spelling is also accepted as an extension in earlier modes).
 // Feature dates are language-mode gates; __has_extension asks about the same implemented syntax in older modes.
 // Sorted for binary search. __has_warning remains the diagnostic vocabulary, not a promise to emit each warning.
@@ -17122,6 +17122,7 @@ static const PPFeature pp_implemented_c_attribute[] = {
     { "clang::overloadable", 1 },
     { "clang::sized_by", 1 },
     { "clang::sized_by_or_null", 1 },
+    { "deprecated", 201904 },
     { "fallthrough", 201910 },
     { "gnu::alias", 1 },
     { "gnu::aligned", 1 },
@@ -17145,6 +17146,7 @@ static const PPFeature pp_implemented_c_attribute[] = {
     { "gnu::visibility", 1 },
     { "gnu::weak", 1 },
     { "gnu::weakref", 1 },
+    { "maybe_unused", 202106 },
 };
 static const PPFeature pp_implemented_feature[] = {
     { "c_alignas", 1, 2011 },

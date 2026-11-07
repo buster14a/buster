@@ -2212,6 +2212,10 @@ struct Tier1SelectPlan
     uint64_t arena_bytes;
     // The path that planned it, which the legacy emitter's choice of immediates' forms takes too.
     bool vector;
+    // Whether `function` passed a full verification, the selector's own or its caller's (tier1_select_plan_verified):
+    // every plan the selector publishes has, so the liveness build doesn't verify its function again (#1379). A plan
+    // made otherwise (a test's) leaves it false.
+    bool function_verified;
 };
 
 typedef struct Tier1SelectCode Tier1SelectCode;
@@ -5512,6 +5516,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         }
         plan.effective_use_offsets[count] = plan.effective_use_count;
         plan.arena_bytes = output->length - output_mark;
+        plan.function_verified = true;
         if (error == TIER1_SELECT_OK)
         {
             *result = plan;

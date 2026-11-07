@@ -2226,6 +2226,22 @@ static __attribute__((noinline, aligned(64))) IrCheck ir_verify_path(const IrFun
 
 static IrCheck ir_verify_scalar(const IrFunction* f, Arena* scratch, const IrDominance* dominance);
 
+// ir_verify_path's steps past the shape and rows (#1379): the validated CFG and the graph against `dominance`, for a
+// function whose shape and rows a verification on the same path has already passed and which hasn't changed since. Both
+// checks read the function alone, so its result is the whole verification's.
+static __attribute__((unused)) IrCheck ir_verify_graph(const IrFunction* f, Arena* scratch, const IrDominance* dominance, bool vector)
+{
+    const uint64_t mark = scratch->length;
+    IrCfg cfg = { 0 };
+    IrCheck check = ir_check(ir_cfg_validated(f, scratch, scratch, &cfg), BUSTER_IR_NONE, 0);
+    if (check.error == IR_OK)
+    {
+        check = ir_check_graph(f, &cfg, scratch, dominance, BUSTER_VECTOR_PATH(vector));
+    }
+    arena_pop_to(scratch, mark);
+    return check;
+}
+
 static IrCheck ir_verify(const IrFunction* f, Arena* scratch, const IrDominance* dominance)
 {
 #if !BUSTER_HOST_VECTOR
