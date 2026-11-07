@@ -227,6 +227,10 @@ static void check_test_program_plan_cache(CheckTest* test)
             cached[token] = 0xa5a5a5a5u;
             first[token] = 0xa5a5a5a5u;
         }
+        for (uint32_t i = 0; i <= plans; i += 1)
+        {
+            next[i] = 0xa5a5a5a5u;
+        }
         const CheckInitializers initializers = { .declaration_tokens = declarations, .count = size, .token_count = count };
         CheckProgram program = { .input = &input, .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
         const bool compound = check_program_plans(&program, &parser, &initializers, first, planned, next, cached);
@@ -241,7 +245,8 @@ static void check_test_program_plan_cache(CheckTest* test)
             same &= next[i] == (i + 1 < size ? i + 1 : BUSTER_CHECK_NONE);
         }
         same &= size <= 2 || cached[0] == count - 1;
-        check_test_expect(test, same && cached[count] == 0xa5a5a5a5u, "initializer ancestry leaves cheap scratch untouched and activates compression only after its raw-walk budget");
+        check_test_expect(test, same && cached[count] == 0xa5a5a5a5u && next[plans] == 0xa5a5a5a5u,
+                          "initializer ancestry leaves cheap scratch untouched and activates compression only after its raw-walk budget");
     }
     arena_release(&arena);
 }
