@@ -196,6 +196,10 @@ static inline __attribute__((always_inline)) uint32_t check_input_batch_add(Chec
         batch->leaves += leaf;
         batch->count = place + 1;
         reader->value_next[node] = BUSTER_CHECK_NONE;
+        if (reader->walk_ends != NULL)
+        {
+            reader->walk_ends[node] = BUSTER_CHECK_NONE;
+        }
         result = node;
     }
     else
