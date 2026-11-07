@@ -58,9 +58,9 @@ static void cc_warning_option_run(CCCompatibilityTest* test, const char* name, c
     {
         const char* arguments[48] =
         {
-            actions[action],
             "-fno-diagnostics-show-option",
             "-fno-color-diagnostics",
+            actions[action],
         };
         uint32_t count = 3;
         for (uint32_t i = 0; options[i] != NULL; i += 1)
@@ -83,7 +83,9 @@ static void cc_warning_option_run(CCCompatibilityTest* test, const char* name, c
         {
             arguments[count] = scalar != 0 ? "--scalar" : NULL;
             arguments[count + 1] = NULL;
-            CCCompatibilityRun ours = cc_compat_run(test, test->compiler, NULL, arguments);
+            // Only Clang needs the first two rendering switches. Buster already emits plain diagnostics without
+            // option suffixes, and its C driver deliberately rejects unimplemented -f options.
+            CCCompatibilityRun ours = cc_compat_run(test, test->compiler, NULL, arguments + 2);
             const bool good = ours.status == (errors != 0) && ours.errors != NULL && strcmp(ours.errors, expected) == 0;
             snprintf(description, sizeof(description), "warning option %s, %s, %s: complete diagnostic and status", name, actions[action], scalar != 0 ? "scalar" : "default");
             cc_compat_expect(test, good, description);
