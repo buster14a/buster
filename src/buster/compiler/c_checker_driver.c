@@ -398,6 +398,74 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_TOO_LARGE:
             snprintf(text, capacity, "integer constant expression evaluates to value %" PRIu64 " that cannot be represented in a 32-bit unsigned integer type", value);
             break;
+        case CHECK_ARGUMENT_TCB_CONFLICT:
+        {
+            // Both attributes by their names as written, and the TCB (the report's literal).
+            const String8 other = check_driver_attribute_spelling(parser, pp, (uint32_t)value, false);
+            snprintf(text, capacity, "attributes '%.*s(\"%.*s\")' and '%.*s(\"%.*s\")' are mutually exclusive", (int)written.length, written.pointer, (int)literal.length,
+                     literal.pointer, (int)other.length, other.pointer, (int)literal.length, literal.pointer);
+            break;
+        }
+        case CHECK_ARGUMENT_CALLBACK_NO_CALLEE: snprintf(text, capacity, "'callback' attribute specifies no callback callee"); break;
+        case CHECK_ARGUMENT_CALLBACK_UNKNOWN:
+            snprintf(text, capacity, "'callback' attribute argument '%.*s' is not a known function parameter", (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_CALLBACK_THIS: snprintf(text, capacity, "'callback' argument at position %u references unavailable implicit 'this'", number); break;
+        case CHECK_ARGUMENT_CALLBACK_INVALID_CALLEE: snprintf(text, capacity, "'callback' attribute specifies invalid callback callee"); break;
+        case CHECK_ARGUMENT_CALLBACK_NOT_FUNCTION: snprintf(text, capacity, "'callback' attribute callee does not have function type"); break;
+        case CHECK_ARGUMENT_CALLBACK_COUNT:
+            snprintf(text, capacity, "'%s' attribute references function of type %.*s which expects %u argument%s but attribute specifies %u parameter index argument%s",
+                     parsed, (int)literal.length, literal.pointer, number, number == 1 ? "" : "s", (uint32_t)value, value == 1 ? "" : "s");
+            break;
+        case CHECK_ARGUMENT_CALLBACK_VARIADIC: snprintf(text, capacity, "'callback' attribute callee may not be variadic"); break;
+        case CHECK_ARGUMENT_CALLBACK_MULTIPLE: snprintf(text, capacity, "multiple 'callback' attributes specified"); break;
+        case CHECK_ARGUMENT_SWIFT_ASYNC_KIND:
+            snprintf(text, capacity, "first argument to 'swift_async' must be either 'none', 'swift_private', or 'not_swift_private'");
+            break;
+        case CHECK_ARGUMENT_SWIFT_ASYNC_BLOCK:
+            snprintf(text, capacity, "'swift_async' completion handler parameter must have block type returning 'void', type here is %.*s", (int)literal.length,
+                     literal.pointer);
+            break;
+        case CHECK_ARGUMENT_ERROR_DOMAIN:
+            snprintf(text, capacity, "domain argument %s%.*s%sdoes not refer to global constant", number != 0 ? "'" : "", (int)literal.length, literal.pointer,
+                     number != 0 ? "' " : "");
+            break;
+        case CHECK_ARGUMENT_DUPLICATE_ASPECT:
+            snprintf(text, capacity, "duplicate aspect '%.*s' in 'modular_format' attribute", (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_DIFFERENT_ARGUMENTS: snprintf(text, capacity, "attribute '%s' is already applied with different arguments", parsed); break;
+        case CHECK_ARGUMENT_REQUIRES_FORMAT: snprintf(text, capacity, "'modular_format' attribute requires 'format' attribute"); break;
+        case CHECK_ARGUMENT_AVAILABILITY_PLATFORM: snprintf(text, capacity, "expected a platform name, e.g., 'macos'"); break;
+        case CHECK_ARGUMENT_AVAILABILITY_COMMA: snprintf(text, capacity, "expected ','"); break;
+        case CHECK_ARGUMENT_AVAILABILITY_CHANGE: snprintf(text, capacity, "expected 'introduced', 'deprecated', or 'obsoleted'"); break;
+        case CHECK_ARGUMENT_AVAILABILITY_REDUNDANT:
+            snprintf(text, capacity, "redundant '%.*s' availability change; only the last specified change will be used", (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_AVAILABILITY_EQUAL: snprintf(text, capacity, "expected '=' after '%.*s'", (int)literal.length, literal.pointer); break;
+        case CHECK_ARGUMENT_AVAILABILITY_MESSAGE: snprintf(text, capacity, "expected string literal for optional message in 'availability' attribute"); break;
+        case CHECK_ARGUMENT_AVAILABILITY_ENVIRONMENT_NAME: snprintf(text, capacity, "expected an environment name, e.g., 'compute'"); break;
+        case CHECK_ARGUMENT_AVAILABILITY_VERSION: snprintf(text, capacity, "expected a version of the form 'major[.minor[.subminor]]'"); break;
+        case CHECK_ARGUMENT_AVAILABILITY_ZERO: snprintf(text, capacity, "version number must have non-zero major, minor, or sub-minor version"); break;
+        case CHECK_ARGUMENT_AVAILABILITY_STAGE:
+            snprintf(text, capacity, "'%.*s' is not an availability stage; use 'introduced', 'deprecated', or 'obsoleted'", (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_AVAILABILITY_ANY_APPLE:
+            snprintf(text, capacity, "invalid anyAppleOS version '%.*s' in availability attribute", (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_AVAILABILITY_ENVIRONMENT:
+            snprintf(text, capacity, "unexpected parameter 'environment' in availability attribute, not permitted in C/C++");
+            break;
+        case CHECK_ARGUMENT_SOURCE_KEYWORD: snprintf(text, capacity, "expected 'language', 'defined_in', 'generated_declaration', or 'USR'"); break;
+        case CHECK_ARGUMENT_SOURCE_DUPLICATE:
+            snprintf(text, capacity, "duplicate '%.*s' clause in an 'external_source_symbol' attribute", (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_SOURCE_EQUAL: snprintf(text, capacity, "expected '=' after %.*s", (int)literal.length, literal.pointer); break;
+        case CHECK_ARGUMENT_UNEXPECTED_SEMI: snprintf(text, capacity, "unexpected ';' before ')'"); break;
+        case CHECK_ARGUMENT_OBJC_VARIABLES: snprintf(text, capacity, "'%s' attribute only applies to variables", parsed); break;
+        case CHECK_ARGUMENT_SOURCE_STRING:
+            snprintf(text, capacity, "expected string literal for %s in 'external_source_symbol' attribute",
+                     number == 0 ? "language name" : number == 1 ? "source container name" : "USR");
+            break;
         case CHECK_ARGUMENT_MATRIX_DISABLED: snprintf(text, capacity, "matrix types extension is disabled. Pass -fenable-matrix to enable it"); break;
         case CHECK_ARGUMENT_KERNEL_FUNCTIONS: snprintf(text, capacity, "'%s' attribute only applies to functions", parsed); break;
         case CHECK_ARGUMENT_VARIADIC_CONVENTION: snprintf(text, capacity, "variadic function cannot use %s calling convention", check_input_convention_name(number)); break;
@@ -2144,7 +2212,9 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_MEMBER_BASE ||
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_MEMBER_NAME ||
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_SIZEOF ||
-                                                (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_BINARY) &&
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_BINARY ||
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_CALLBACK_COUNT ||
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_SWIFT_ASYNC_BLOCK) &&
                                                report->type != 0;
                             CheckWarningSpelling spell = { .count = pp->table->count };
                             spell.bytes = typed ? BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count) : NULL;
@@ -2156,8 +2226,17 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             }
                             const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
                             // (lifetime_capture_by's argument as written: its token's spelling.)
-                            const bool captured = ((report->detail & 0xffu) == CHECK_ARGUMENT_CAPTURE_UNKNOWN || (report->detail & 0xffu) == CHECK_ARGUMENT_ATOMIC_OPTION) &&
+                            const uint32_t argument_error = report->detail & 0xffu;
+                            const bool captured = (argument_error == CHECK_ARGUMENT_CAPTURE_UNKNOWN || argument_error == CHECK_ARGUMENT_ATOMIC_OPTION ||
+                                                   argument_error == CHECK_ARGUMENT_CALLBACK_UNKNOWN ||
+                                                   (argument_error == CHECK_ARGUMENT_ERROR_DOMAIN && (report->detail >> 8) != 0) ||
+                                                   argument_error == CHECK_ARGUMENT_AVAILABILITY_REDUNDANT || argument_error == CHECK_ARGUMENT_AVAILABILITY_EQUAL ||
+                                                   argument_error == CHECK_ARGUMENT_AVAILABILITY_STAGE || argument_error == CHECK_ARGUMENT_AVAILABILITY_ANY_APPLE ||
+                                                   argument_error == CHECK_ARGUMENT_SOURCE_DUPLICATE || argument_error == CHECK_ARGUMENT_SOURCE_EQUAL) &&
                                                   report->value < count;
+                            // (A TCB's string, after the other attribute's name in the value, and a duplicate aspect's.)
+                            const uint32_t string_token = (report->detail & 0xffu) == CHECK_ARGUMENT_TCB_CONFLICT ? (uint32_t)(report->value >> 32) :
+                                                          (report->detail & 0xffu) == CHECK_ARGUMENT_DUPLICATE_ASPECT ? (uint32_t)report->value : count;
                             const uint32_t at = captured ? parser->tokens.sources[report->value] : 0;
                             uint8_t* spelling_buffer = captured ? arena_push(scratch, pp->output.kinds[at] == BUSTER_PP_KIND_INTEGER ? 24 :
                                                                                  (uint64_t)pp->output.values[at] - pp->output.locations[at] + 1, 1) : NULL;
@@ -2165,6 +2244,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             const uint32_t spelling_length = spelling_buffer != NULL ? pp_spelling(pp, pp->output.kinds[at], pp->output.values[at], pp->output.locations[at],
                                                                                                    spelling_buffer, &spelling_bytes) : 0;
                             String8 literal = (report->detail & 0xffu) == CHECK_ARGUMENT_CODE_MODEL && token < count ? check_warning_string_text(parser, pp, token, scratch) :
+                                                    string_token < count ? check_warning_strings_value(parser, pp, string_token, scratch) :
                                                     spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling) :
                                                     captured && parser->tokens.names[report->value] != 0 ? check_driver_attribute_spelling(parser, pp, report->value, false) :
                                                     captured ? (String8){ (char*)spelling_bytes, spelling_length } : (String8){ "", 0 };
@@ -2173,6 +2253,13 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                 const String8 second = check_driver_warning_type(parser, pp, input, types, &spell, scratch, (TypeId)report->value, 0);
                                 const char* both = check_warning_text(scratch, "%.*s and %.*s", (int)literal.length, literal.pointer, (int)second.length, second.pointer);
                                 literal = both != NULL ? (String8){ (char*)both, strlen(both) } : (String8){ "", 0 };
+                            }
+                            // (An anyAppleOS version as clang's VersionTuple prints it.)
+                            char version_text[48];
+                            if (captured && argument_error == CHECK_ARGUMENT_AVAILABILITY_ANY_APPLE)
+                            {
+                                check_version_print(check_version_tuple(check_availability_version(spelling_bytes, spelling_length)), version_text, sizeof(version_text));
+                                literal = (String8){ version_text, strlen(version_text) };
                             }
                             check_driver_attribute_argument(parser, pp, report->attribute, report->detail, report->value, literal, text, sizeof(text));
                             // (An incomplete tag's declaration, named by its type alone: preferred_type's, #147.)
@@ -2189,15 +2276,26 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             }
                             const bool constant = report->note_kind == CHECK_INPUT_NOTE_CONSTANT_SUBEXPRESSION || report->note_kind == CHECK_INPUT_NOTE_CONSTANT_DIVISION;
                             const bool matched = (report->note_kind == CHECK_INPUT_NOTE_MATCH_PAREN || report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE ||
-                                                  forward || function || constant) &&
+                                                  report->note_kind == CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE || forward || function || constant) &&
                                                  report->note_token < count;
                             const PPOutputDiagnosticNote note = {
                                 .token = matched ? parser->tokens.sources[report->note_token] : 0,
                                 .message = forward || function ? declared : report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE ? "previous attribute is here" :
+                                           report->note_kind == CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE ? "conflicting attribute is here" :
                                            report->note_kind == CHECK_INPUT_NOTE_CONSTANT_DIVISION ? "division by zero" :
                                            constant ? "subexpression not valid in a constant expression" : "to match this '('",
                             };
-                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, matched ? 1u : 0u, "%s", text);
+                            // (A `,` or `=` clang's ExpectAndConsume expects just past the token before: past the identifier's end.)
+                            const bool past = (argument_error == CHECK_ARGUMENT_AVAILABILITY_COMMA || argument_error == CHECK_ARGUMENT_SOURCE_EQUAL) && token < count &&
+                                              parser->tokens.names[token] != 0;
+                            if (past)
+                            {
+                                pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, intern_length(pp->table, parser->tokens.names[token]), publication, "%s", text);
+                            }
+                            else
+                            {
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, matched ? 1u : 0u, "%s", text);
+                            }
                             arena_pop_to(scratch, type_mark);
                         }
                         else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT && input->reports[index].attribute < count)

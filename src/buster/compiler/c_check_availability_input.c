@@ -152,6 +152,111 @@ static CheckAvailabilityVersion check_availability_version(const uint8_t* bytes,
     return result;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// The availability attribute's platforms and versions (#1447, c_check_attribute_checks_input.c), which its diagnostics'
+// renderers share.
+
+// Each platform's name as clang's messages print it (AvailabilityAttr::getPrettyPlatformName), by its index of
+// check_availability_platforms (anyAppleOS's is never printed: its attributes have none of these messages).
+static const char* const check_availability_pretty[] =
+{
+    "Android", "Fuchsia", "iOS", "macOS", "tvOS", "watchOS", "DriverKit", "iOS (App Extension)", "macOS (App Extension)", "tvOS (App Extension)",
+    "watchOS (App Extension)", "macCatalyst", "macCatalyst (App Extension)", "visionOS", "visionOS (App Extension)", "anyAppleOS", "Swift", "Shader Model",
+    "OpenHarmony OS",
+};
+
+_Static_assert(BUSTER_ARRAY_LENGTH(check_availability_pretty) == BUSTER_ARRAY_LENGTH(check_availability_platforms), "a pretty name for each platform");
+
+#define BUSTER_CHECK_AVAILABILITY_SWIFT 16u
+#define BUSTER_CHECK_AVAILABILITY_FUCHSIA 1u
+
+// The platform an availability attribute names (its name as written), as clang's parser and Sema take it: a name with
+// xros or xrOS in it is kept as written (`*xros`, which the parser warns of), macosx and macosx_app_extension are macOS's,
+// any other canonicalizePlatformName's; an index of check_availability_platforms, or UINT32_MAX for a platform of no
+// pretty name (an unknown one).
+static uint32_t check_availability_attribute_platform(const uint8_t* bytes, uint32_t length, bool* xros)
+{
+    *xros = check_availability_contains(bytes, length, "xros") || check_availability_contains(bytes, length, "xrOS");
+    uint32_t result = !*xros && check_availability_equal(bytes, length, "macosx_app_extension") ? 8u : UINT32_MAX;
+    for (uint32_t i = 0; !*xros && result == UINT32_MAX && i < BUSTER_ARRAY_LENGTH(check_availability_aliases); i += 1)
+    {
+        result = check_availability_equal(bytes, length, check_availability_aliases[i].given) ? check_availability_aliases[i].platform : UINT32_MAX;
+    }
+    for (uint32_t i = 0; result == UINT32_MAX && i < BUSTER_ARRAY_LENGTH(check_availability_platforms); i += 1)
+    {
+        result = check_availability_equal(bytes, length, check_availability_platforms[i]) ? i : UINT32_MAX;
+    }
+    return result;
+}
+
+// A parsed version as a VersionTuple (CheckVersionTuple).
+static CheckVersionTuple check_version_tuple(CheckAvailabilityVersion version)
+{
+    const CheckVersionTuple result = { .major = version.major, .minor = version.minor, .subminor = version.subminor, .components = version.components };
+    return result;
+}
+
+// VersionTuple's order of two versions (their missing components 0): negative, zero or positive.
+static int check_version_compare(CheckVersionTuple a, CheckVersionTuple b)
+{
+    const int major = (a.major > b.major) - (a.major < b.major);
+    const int minor = (a.minor > b.minor) - (a.minor < b.minor);
+    const int subminor = (a.subminor > b.subminor) - (a.subminor < b.subminor);
+    return major != 0 ? major : minor != 0 ? minor : subminor;
+}
+
+// Whether a version is VersionTuple's empty one (all its components 0).
+static bool check_version_empty(CheckVersionTuple version)
+{
+    return version.major == 0 && version.minor == 0 && version.subminor == 0;
+}
+
+// A version as VersionTuple::getAsString prints it, its components as written, into `text` (`capacity` bytes).
+static void check_version_print(CheckVersionTuple version, char* text, uint32_t capacity)
+{
+    snprintf(text, capacity, version.components <= 1 ? "%u" : version.components == 2 ? "%u.%u" : "%u.%u.%u", version.major, version.minor, version.subminor);
+}
+
+// The gap of versions a platform's OS skipped to 26 (llvm::Triple::isValidVersionForOS and getCanonicalVersionForOS, by
+// AvailabilityAttr::getOSType): its last version before the gap, and the bump of a version in it in `*bump` (macOS's 16 and
+// 10, iOS's, tvOS's and macCatalyst's 19 and 7, watchOS's 12 and 14, visionOS's 3 and 23); 0 for a platform of no gap.
+static uint32_t check_availability_gap(uint32_t platform, uint32_t* bump)
+{
+    const bool macos = platform == 3 || platform == 8;
+    const bool ios = platform == 2 || platform == 4 || platform == 7 || platform == 9 || platform == 11 || platform == 12;
+    const bool watchos = platform == 5 || platform == 10;
+    const bool xros = platform == 13 || platform == 14;
+    *bump = macos ? 10u : ios ? 7u : watchos ? 14u : xros ? 23u : 0u;
+    return macos ? 16u : ios ? 19u : watchos ? 12u : xros ? 3u : 0u;
+}
+
+// Whether `version` is valid for the platform's OS (out of its gap, check_availability_gap), and in `*canonical` the
+// version clang's Sema takes for it (getCanonicalVersionForOS): macOS's 10.16 is 11.0, the version before a gap (16, 19,
+// 12, 3) 26.0, and one in the gap its major bumped.
+static bool check_availability_canonical(uint32_t platform, CheckVersionTuple version, CheckVersionTuple* canonical)
+{
+    uint32_t bump = 0;
+    const uint32_t start = check_availability_gap(platform, &bump);
+    const CheckVersionTuple first = { .major = start, .components = 1 };
+    const CheckVersionTuple common = { .major = 26, .components = 1 };
+    const CheckVersionTuple big_sur = { .major = 10, .minor = 16, .components = 2 };
+    const bool valid = start == 0 || !(check_version_compare(version, first) > 0 && check_version_compare(version, common) < 0);
+    *canonical = version;
+    if (start == 16 && check_version_compare(version, big_sur) == 0)
+    {
+        *canonical = (CheckVersionTuple){ .major = 11, .components = 2 };
+    }
+    else if (start != 0 && check_version_compare(version, first) == 0)
+    {
+        *canonical = (CheckVersionTuple){ .major = 26, .components = 2 };
+    }
+    else if (!valid)
+    {
+        canonical->major += bump;
+    }
+    return valid;
+}
+
 // The version a spec's number gives: a numeric constant's spelling, where a number of another kind (a keyword the parser
 // reads as one, `true` or `__func__`, or an #embed's data) is no version, as it is no numeric_constant of clang's.
 static CheckAvailabilityVersion check_input_availability_number(CheckInputReader* reader, uint32_t token)

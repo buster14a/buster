@@ -74,6 +74,8 @@ enum
     CHECK_WARNING_ID_REDEFINE_EXTNAME = 82,
     CHECK_WARNING_ID_THREAD_SAFETY_ATTRIBUTES = 83,
     CHECK_WARNING_ID_NODEREF = 84,
+    CHECK_WARNING_ID_TCB_ENFORCEMENT = 85,
+    CHECK_WARNING_ID_INVALID_VERSION_AVAILABILITY = 86,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -251,6 +253,33 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_NODEREF_PLACEMENT,
     CHECK_WARNING_EVENT_NODEREF_DEREFERENCE,
     CHECK_WARNING_EVENT_NODEREF_CONVERSION,
+    // A call in a TCB's function of a function in none of its TCBs (#1447, check_input_tcb_calls), at the call's first token:
+    // payload.name the callee's name, payload.token the caller's TCB attribute's string token.
+    CHECK_WARNING_EVENT_TCB_VIOLATION,
+    // The availability attribute's warnings (#1447, c_check_attribute_checks_input.c), -Wavailability's but the invalid
+    // version's (-Winvalid-version-availability): a platform clang doesn't know, at it (payload.token); unavailable that
+    // overrides the stages, at its keyword; an invalid version of a platform's OS, at the platform, and its note
+    // (CHECK_WARNING_NOTE_IMPLICIT_VERSION), payload.data indexing CheckInput.availability_texts; Swift's stages and
+    // Fuchsia's minor version, at the attribute; a stage's version before an earlier stage's, at the attribute
+    // (payload.data as the invalid version's); and a redeclaration's availability that doesn't match, at it, with its note
+    // at the other (CHECK_WARNING_NOTE_PREVIOUS_ATTRIBUTE).
+    CHECK_WARNING_EVENT_AVAILABILITY_PLATFORM,
+    CHECK_WARNING_EVENT_AVAILABILITY_UNAVAILABLE,
+    CHECK_WARNING_EVENT_AVAILABILITY_VERSION,
+    CHECK_WARNING_EVENT_AVAILABILITY_SWIFT,
+    CHECK_WARNING_EVENT_AVAILABILITY_FUCHSIA,
+    CHECK_WARNING_EVENT_AVAILABILITY_ORDERING,
+    CHECK_WARNING_EVENT_AVAILABILITY_MISMATCH,
+    // Objective-C's pointer type attributes where their type takes them not (#1447, check_input_attribute_objc), at the
+    // attribute: objc_gc's "only applies to pointer types", objc_ownership's "... Objective-C object or block pointer types"
+    // (weak's named '__weak'); payload.first_type the type there, payload.second_type the declarator's, payload.token
+    // its name (or where it would be), payload.data the type's typedef's spelling.
+    CHECK_WARNING_EVENT_OBJC_POINTER_TYPE,
+    CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE,
+    CHECK_WARNING_EVENT_OBJC_WEAK_TYPE,
+    // Their handlers' warning of an identifier argument they don't know, "'X' attribute argument not supported: 'Y'", as
+    // CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED's but in the declarator's type's phase.
+    CHECK_WARNING_EVENT_OBJC_UNSUPPORTED,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -275,6 +304,10 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_SPAN_REASON,
     CHECK_WARNING_NOTE_UNAVAILABLE_HERE,
     CHECK_WARNING_NOTE_NODEREF_DECLARATION,
+    // An invalid availability version's canonical one (payload.data indexing CheckInput.availability_texts), and the
+    // previous attribute of a redeclaration's availability (#1447).
+    CHECK_WARNING_NOTE_IMPLICIT_VERSION,
+    CHECK_WARNING_NOTE_PREVIOUS_ATTRIBUTE,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 

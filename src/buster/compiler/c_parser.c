@@ -4370,6 +4370,14 @@ static bool parse_scalar_type_argument_attribute(const ParseScalar* parser, Iden
     return result;
 }
 
+// clang's attributes whose arguments its parser reads its own way, as no expressions (#1447): availability's
+// (ParseAvailabilityAttribute) and external_source_symbol's (ParseExternalSourceSymbolAttribute), by their GNU names, a
+// keyword's underscores too. Their arguments are a balanced run of tokens, which the checker reads as clang's parser does.
+static bool parse_scalar_custom_attribute(const ParseScalar* parser, IdentId name)
+{
+    return parse_scalar_attribute_spelled(parser, name, true, "availability") || parse_scalar_attribute_spelled(parser, name, true, "external_source_symbol");
+}
+
 // An expression parse failure inside a GNU attribute can follow an earlier malformed string slot. Clang's
 // ParseAttributeArgsCommon diagnoses that slot before parsing expressions (section(1,), for example). Only this
 // already-failed path consults the shared generated argument/fact rows; ordinary attribute parsing pays no lookup.
@@ -4827,6 +4835,15 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
         frame->mode = PARSE_MODE_OPERAND;
         frame->flags |= BUSTER_PARSE_FRAME_EMPTY_OK;
         frame->argument += 1;
+    }
+    else if (kind == PARSE_KIND_L_PAREN && group == PARSE_ROLE_OPEN_ATTRIBUTE_LIST && parse_scalar_custom_attribute(parser, parser->names[(int64_t)i - 1]))
+    {
+        // availability's and external_source_symbol's arguments, which clang's parser reads its own way (#1447): a balanced
+        // run of tokens, as a C23 attribute's arguments are, which the checker reads as clang's parser does
+        // (c_check_attribute_checks_input.c).
+        ParseFrame* call = parse_scalar_open(parser, i, PARSE_ROLE_OPEN_CALL, PARSE_MODE_ATTRIBUTE_TOKENS, PARSE_MODE_OPERATOR, false, step);
+        call->flags |= BUSTER_PARSE_FRAME_ATTRIBUTE;
+        call->closer_role = PARSE_ROLE_CLOSE_CALL;
     }
     else if (kind == PARSE_KIND_L_PAREN)
     {
@@ -12618,6 +12635,39 @@ static bool parse_statements_vector(ParseKernels* kernels, uint32_t count, Parse
     return result;
 }
 
+// The kernels read a GNU attribute's arguments as an expression's, where the scalar parser reads availability's and
+// external_source_symbol's as a balanced run of tokens (#1447, parse_scalar_custom_attribute): a top-level declaration
+// with either name before a `(` goes to the scalar parser, its first token flagged. A unit whose names have neither
+// (nearly every one: the interner finds no such name) looks at no token; one that has them, 16 tokens a compare.
+static void parse_flag_custom_attributes(ParseKernels* kernels, const ParseInput* input)
+{
+    static const char* const spellings[4] = { "availability", "__availability__", "external_source_symbol", "__external_source_symbol__" };
+    const InternTable* table = input->meanings != NULL ? input->meanings->table : NULL;
+    IdentId names[4] = { 0, 0, 0, 0 };
+    bool any = false;
+    for (uint32_t s = 0; table != NULL && s < 4; s += 1)
+    {
+        names[s] = intern_find(table, (const uint8_t*)spellings[s], (uint32_t)strlen(spellings[s]));
+        any |= names[s] != 0;
+    }
+    const uint32_t count = input->count;
+    for (uint32_t block = 0; any && block < count; block += 16)
+    {
+        const __mmask16 live = count - block < 16 ? (__mmask16)((1u << (count - block)) - 1) : (__mmask16)0xffff;
+        const __m512i loaded = _mm512_maskz_loadu_epi32(live, input->names + block);
+        __mmask16 found = 0;
+        for (uint32_t s = 0; s < 4; s += 1)
+        {
+            found |= names[s] != 0 ? _mm512_mask_cmpeq_epi32_mask(live, loaded, _mm512_set1_epi32((int32_t)names[s])) : 0;
+        }
+        for (uint32_t selected = found; selected != 0; selected &= selected - 1)
+        {
+            const uint32_t t = block + (uint32_t)__builtin_ctz(selected);
+            kernels->flags[t] |= t + 1 < count && input->kinds[t + 1] == PARSE_KIND_L_PAREN ? 1u : 0u;
+        }
+    }
+}
+
 // Every kernel in AVX-512 in turn, then the fallback, into kernels->parents: the data-parallel parser.
 static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* input, const IdentId* predeclared, ParseVectorBuffers* buffers)
 {
@@ -12651,6 +12701,7 @@ static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* i
     if (!result.everything)
     {
         parse_check_avx512(kernels, names, input->flags, count, buffers->typed, &buffers->check_twins);
+        parse_flag_custom_attributes(kernels, input);
         for (uint32_t block = 0; block < count; block += 64)
         {
             const __mmask64 live = count - block < 64 ? (((__mmask64)1 << (count - block)) - 1) : ~(__mmask64)0;
