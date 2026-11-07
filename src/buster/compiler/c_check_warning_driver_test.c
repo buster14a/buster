@@ -36,6 +36,34 @@ static const char check_driver_format_attributed_source[] =
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        .name = "middle format annotation survives a final bare declaration",
+        .source = "int printf(const char*,...);\nint printf(const char*,...)__attribute__((format(printf,1,2)));\n"
+                  "int printf(const char*,...);\nvoid f(void){printf(\"%d\",\"str\");}\n",
+        .options = { "-fno-builtin" },
+        .warnings = 1,
+    },
+    {
+        .name = "later format annotation does not change an earlier call",
+        .source = "int report(const char*,...);\nvoid before(void){report(\"%d\",\"str\");}\n"
+                  "int report(const char*,...)__attribute__((format(printf,1,2)));\nint report(const char*,...);\n"
+                  "void after(void){report(\"%d\",\"str\");}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "block format inheritance follows the visible declaration",
+        .source = "int report(const char*,...);\nvoid f(void){{"
+                  "int report(const char*,...)__attribute__((format(printf,1,2)));"
+                  "int report(const char*,...);report(\"%d\",\"str\");}"
+                  "report(\"%d\",\"str\");}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "bare format inheritance preserves unrelated declaration attributes",
+        .source = "int report(const char*,...)__attribute__((format(printf,1,2)));\n"
+                  "int report(const char*,...)__attribute__((noinline));\nvoid f(void){report(\"%d\",\"str\");}\n",
+        .warnings = 1,
+    },
+    {
         .name = "hosted plain format names retain inferred checks",
         .source = check_driver_format_plain_source,
         .warnings = 5,

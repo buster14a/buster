@@ -1114,6 +1114,49 @@ static bool check_input_attribute_copy(CheckInputReader* reader, const CheckInpu
     return valid;
 }
 
+// A compatible visible bare function redeclaration keeps its predecessor's format contract. Copy only those
+// records into a new accumulator: neither the predecessor nor already published declaration metadata is mutable.
+static void check_input_format_inherit(CheckInputReader* reader, uint32_t token, uint32_t previous)
+{
+    const CheckInputAttributes* prior = check_input_attributes_at(reader->output, previous);
+    bool inherit = false;
+    for (uint32_t i = 0; prior != NULL && i < prior->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = prior->records + i;
+        inherit |= attribute->kind == CHECK_ATTRIBUTE_FORMAT && !attribute->ignored && !attribute->subject_ignored;
+    }
+    const CheckInputAttributes* own = inherit ? check_input_attributes_at(reader->output, token) : NULL;
+    bool annotated = false;
+    for (uint32_t i = 0; own != NULL && i < own->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = own->records + i;
+        annotated |= attribute->kind == CHECK_ATTRIBUTE_FORMAT && !attribute->ignored && !attribute->subject_ignored;
+    }
+    if (inherit && !annotated)
+    {
+        CheckInputAttributes* copy = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1);
+        bool valid = copy != NULL;
+        if (valid)
+        {
+            *copy = (CheckInputAttributes){ 0 };
+            valid = own == NULL || check_input_attribute_copy(reader, own, copy);
+        }
+        for (uint32_t i = 0; valid && i < prior->count; i += 1)
+        {
+            const CheckInputAttribute* attribute = prior->records + i;
+            if (attribute->kind == CHECK_ATTRIBUTE_FORMAT && !attribute->ignored && !attribute->subject_ignored)
+            {
+                valid = check_input_attribute_append(reader, copy, *attribute);
+            }
+        }
+        reader->output->resource |= !valid;
+        if (valid)
+        {
+            check_input_set_attributes_at(reader->output, token, copy);
+        }
+    }
+}
+
 // Both input accumulators are complete and immutable; output must be distinct from them. This combines metadata
 // after each syntactic position has applied its own type effects, so a vector is never applied twice. Argument
 // arrays and decoded strings are shared immutable arena payloads. Writable record capacity is owned by output.

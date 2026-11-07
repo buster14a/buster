@@ -2865,7 +2865,11 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
         const uint32_t name_id = parser->tokens.names[callee_token];
         const String8 name = { .pointer = (char*)intern_bytes(pp->table, name_id), .length = intern_length(pp->table, name_id) };
         const uint32_t callee_object = callee < graph->count ? check_stream_object(stream, callee) : 0;
-        const uint32_t definition = program != NULL && callee_object != 0 && callee_object <= program->object_count ?
+        // A source use reads its visible declaration snapshot, not a later declaration of the same object.
+        const uint32_t visible = input->declarations != NULL && callee_token < input->token_count ?
+                                 input->declarations[callee_token] : BUSTER_CHECK_NONE;
+        const uint32_t definition = visible < input->token_count ? visible :
+                                    program != NULL && callee_object != 0 && callee_object <= program->object_count ?
                                     program->object_declarations[callee_object] : BUSTER_CHECK_NONE;
         // A spelled printf-family name only applies where the callee resolves to a function declaration
         // or stays undeclared: a local object — a function pointer named `printf` — can shadow the

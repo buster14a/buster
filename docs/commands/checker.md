@@ -12,6 +12,9 @@ policy (#1390): `-ffreestanding`, `-fno-builtin` and exact
 `-fbuiltin` follows the existing last-option policy. Explicit `__builtin_`
 spellings and retained `format(printf, ...)` attributes remain checked.
 `dprintf` has no builtin catalog row and requires an explicit format attribute.
+Bare compatible function redeclarations inherit their visible predecessor's
+format records without mutating published metadata; each call reads the
+declaration visible there, so later or closed-block annotations do not leak.
 The original default-warning fixtures cover those boundaries, redeclarations,
 embedded NULs, complete Clang diagnostics, warning promotion/suppression and
 scalar/vector object twins at one and three requested lanes.

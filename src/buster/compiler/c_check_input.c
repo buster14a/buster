@@ -8087,6 +8087,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             if (kind == C_BINDING_FUNCTION)
             {
                 check_input_noderef_redeclaration(reader, token, previous);
+                check_input_format_inherit(reader, token, previous);
             }
             check_input_naked_inherit(reader, token, previous);
             const TypeId composite = library_redeclaration && compatible == TYPE_ANSWER_NO ? reader->declared_types[token] :
