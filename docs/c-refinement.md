@@ -310,13 +310,11 @@ stages, pipelined: a batch's stage 1 runs in the middle of the batch before's
 stages 2 to 3.
 
 1. **Load and hash** (`refine_hash_batch`). Each identifier's first 32 bytes
-   are read with a plain load, and the bytes past its length cleared by a
-   masked move per two identifiers, whose mask `bzhi` makes from their lengths,
-   when the batch's last identifier's 32 bytes lie in the source (the starts
-   ascend, so all but a source's last few batches); else with one masked load,
-   bounded by its length, so the load never reads outside the token. Masks made
-   in vectors (a byte permute and a compare per two identifiers) took 0.01 ms
-   more. Four identifiers are hashed at a time
+   are read with one masked load, whose mask `bzhi` makes from its length, so
+   the load clears the bytes past the identifier and never reads outside it.
+   Plain loads with a masked move per two identifiers, wherever the batch's
+   last identifier's 32 bytes lay in the source, took about one instruction
+   more per token (#1674, below). Four identifiers are hashed at a time
    (`intern_hash_vectors4_short`, below), and its buckets' offsets stored for
    stage 2; the buckets are not prefetched (#871), and the pipelining leaves
    the out-of-order core a batch's work to cover their loads. The rare identifiers of 33
@@ -514,18 +512,21 @@ against the measurements above and below:
   bucket's vector. Clang turns `matches != 0 ? id : 0` there into a branch
   around the id's load, and keeps it with `__builtin_unpredictable`; an empty
   `asm` on the loaded id and a mask instead of the `?:` give a `cmov`.
-- Stage 1's plain 32-byte loads at each identifier's start cross a cache line
-  about half the time: `refine_pass_b_64_plain` has 3.8% to 4.5% of the
-  line-crossing loads sampled in `-c` of `sqlite3.c` (#1555). Masked loads
-  don't avoid them. On Zen 5, a masked load bounded by the identifier's length
-  is counted as crossing when only its masked-off bytes are past the line.
-  With stage 1's masked path for every batch, `-c` of `sqlite3.c` counted as
-  many line-crossing loads, stage 1's share of the samples didn't fall, and
-  over six placements the whole driver stayed within main's own floor. So the
-  plain loads stay. (The same experiment took 18.80 instructions per token in
-  `benchmark-refinement` against 19.80, with fewer cycles in three
-  alternating rounds, but in two builds at one placement each, which the
-  record doesn't qualify: [the record](https://github.com/buster14a/buster-performance/tree/f6ce6bcb2ffaf8f8386a1a04e81433d849fb5668/docs/measurements/line-crossing-loads-1555-repeat-2026-11-07).)
+- Stage 1 reads each identifier with a masked load bounded by its length
+  (#1674). Plain 32-byte loads, cleared by a masked move per two identifiers
+  from a 64-bit mask of two `bzhi`, a shift and an or, took 19.80
+  instructions per token of `sqlite3.c` where the masked loads take 18.80
+  (19.63 and 18.66 on `src`, 28.64 and 27.60 on the C library corpus). At
+  six placements of the frontend unit, the refine phase took 1.3% fewer cycles
+  per token on `sqlite3.c` and 1.0% on `src`, at every placement, where main
+  against itself gave 0.0% and 0.1%; on the C library corpus, 0.3%, within
+  main's own spread. The whole driver, of which the phase is about 1%, stayed
+  within its floor ([the record](https://github.com/buster14a/buster-performance/tree/6ce26cb4be565915d6e803fcda936d4fc600ff95/docs/measurements/refine-masked-loads-1674-2026-11-07)).
+- The loads cross a cache line about half the time: stage 1 has 3.8% to 4.5% of
+  the line-crossing loads sampled in `-c` of `sqlite3.c` (#1555). On Zen 5 a
+  masked load is counted as crossing when only its masked-off bytes are past
+  the line, so the masked loads cross as often as the plain ones did, and no
+  narrower load avoids it ([the record](https://github.com/buster14a/buster-performance/tree/f6ce6bcb2ffaf8f8386a1a04e81433d849fb5668/docs/measurements/line-crossing-loads-1555-repeat-2026-11-07)).
 
 Identifier lengths per occurrence, which set the prefix and the loads' widths:
 
