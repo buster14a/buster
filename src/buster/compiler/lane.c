@@ -291,6 +291,10 @@ static __attribute__((unused)) void arena_discard(Arena* arena);
 // kept, at most 2 MB: freeing it whole made each unit take a fresh one, cleared by the kernel, and synth's link by 8
 // lanes took 4.3% longer than with arena_discard, where keeping it took 2.2% less.
 static __attribute__((unused)) void arena_discard_huge(Arena* arena);
+// arena_discard, or with `whole` arena_discard_huge, of the pages past `kept` bytes from the arena's start, or past its
+// length if that is further: for an arena whose next users push about `kept` bytes into it again, which they then find
+// resident rather than fault in again, cleared (#628: the C driver's scratch after the reader).
+static __attribute__((unused)) void arena_discard_past(Arena* arena, uint64_t kept, bool whole);
 // Keeps the executable's .bss in base pages (#652), for a compile's commands to call first: it is 220 MB of statics, the
 // tests' and benchmarks' arrays among them, of which a compile writes 11 pages whatever its size (an empty file's -c as
 // sqlite3.c's: the C driver's state, the parser's tables), in three 2 MB stretches. With transparent huge pages `always`,
@@ -1011,12 +1015,13 @@ static bool arena_untouched(const Arena* arena)
 
 // The pages arena_discard gives back, past the length from the first huge page boundary past it: to the peak's page, or
 // with `whole` to the last huge page boundary at or below the peak (arena_discard_huge).
-static void arena_discard_to(Arena* arena, bool whole)
+static void arena_discard_to(Arena* arena, uint64_t from, bool whole)
 {
     if (arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted)
     {
         const uintptr_t base = (uintptr_t)arena->base;
-        const uintptr_t begin = (base + arena->length + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+        const uint64_t kept = from > arena->length ? from : arena->length;
+        const uintptr_t begin = (base + kept + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
         const uint64_t written = arena->committed > arena->mapping_offset ? arena->committed - arena->mapping_offset : 0;
         const uintptr_t last = base + (arena->peak < written ? arena->peak : written);
         const uintptr_t end = whole ? last & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1) :
@@ -1030,12 +1035,17 @@ static void arena_discard_to(Arena* arena, bool whole)
 
 static void arena_discard(Arena* arena)
 {
-    arena_discard_to(arena, false);
+    arena_discard_to(arena, 0, false);
+}
+
+static void arena_discard_past(Arena* arena, uint64_t kept, bool whole)
+{
+    arena_discard_to(arena, kept, whole);
 }
 
 static void arena_discard_huge(Arena* arena)
 {
-    arena_discard_to(arena, true);
+    arena_discard_to(arena, 0, true);
 }
 
 static void arena_static_base_pages(void)
