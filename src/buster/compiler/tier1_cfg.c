@@ -14,9 +14,11 @@
 //    each phi operand a use on its edge: USE[b] = U[b] | (P[b] & ~D[b]), then OUT[b] |= P[b] after the solve.
 // 2. A value gets an interval per block it is defined in or live into, from its definition or the block's start to its
 //    last use or the block's end, and an unused definition one position. A block continues its layout predecessor's
-//    ranges when it has no phis and every value live into it leaves that predecessor live: then every value of its
-//    entry state continues, so that a fragment transition at its start, which runs inside the block, never meets a
-//    value an edge brought there. A range is cut around each fixed range of its class that blocks every register the
+//    ranges only along a straight-line CFG chain, when it has no phis and every value live into it leaves that
+//    predecessor live. Alternative handlers and loop headers start independent ranges, so pressure or clobbers in
+//    one handler do not constrain another handler's entry. Every value of a continuing entry state continues, so
+//    that a fragment transition at its start, which runs inside the block, never meets a value an edge brought
+//    there. A range is cut around each fixed range of its class that blocks every register the
 //    value may take (a call's clobbers for a double): the allocator takes a fixed range's registers from every
 //    interval it overlaps, so the piece over it goes to memory and the pieces around it keep their registers, where
 //    the whole range couldn't have one for a use that needs it. Intervals are numbered by value, then position, so
@@ -1204,16 +1206,26 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                 error = TIER1_CFG_INVALID;
             }
         }
-        // Blocks whose entry state continues from their layout predecessor (see 2. above), and each block's entry
-        // state's size, for the edges' moves.
+        // Only a straight-line CFG chain continues its layout predecessor's state (see 2. above). Layout adjacency
+        // alone can join mutually exclusive dispatch handlers: a spill in one then becomes another's entry contract,
+        // and a fixed clobber narrows registers for the entire merged interval. Keep both ends of branches/joins
+        // independent; the ordinary edge moves reconcile their locations. Count each entry state for those moves.
         uint8_t* merges = ready ? arena_push(scratch, blocks, 1) : 0;
         uint32_t* entering = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
         ready = ready && merges != 0 && entering != 0;
+        const uint32_t* const predecessor_offsets = input->predecessor_offsets;
+        const uint32_t* const predecessors = input->predecessors;
+        const uint32_t* const successor_offsets = input->successor_offsets;
+        const uint32_t* const phi_offsets = input->phi_offsets;
         for (uint32_t b = 0; ready && b < blocks; b += 1)
         {
             const uint64_t* in = liveness.in + (uint64_t)b * words;
-            bool merge = b != 0 && input->phi_offsets[b] == input->phi_offsets[b + 1];
-            uint32_t count = input->phi_offsets[b + 1] - input->phi_offsets[b];
+            const uint32_t incoming = predecessor_offsets[b];
+            const bool single_predecessor = predecessor_offsets[b + 1] - incoming == 1;
+            bool merge = b != 0 && single_predecessor && predecessors[incoming] == b - 1 &&
+                         successor_offsets[b] - successor_offsets[b - 1] == 1 &&
+                         phi_offsets[b] == phi_offsets[b + 1];
+            uint32_t count = phi_offsets[b + 1] - phi_offsets[b];
             for (uint64_t w = 0; w < words; w += 1)
             {
                 merge = merge && (in[w] & ~liveness.out[((uint64_t)b - 1) * words + w]) == 0;

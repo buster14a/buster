@@ -1427,6 +1427,7 @@ static void tier1_cfg_test_fixtures(Tier1CfgTestTally* tally, Arena* output, Are
 
 #include "tier1_cfg_spill_test.c"
 #include "tier1_cfg_edges_test.c"
+#include "tier1_cfg_regions_test.c"
 
 static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
 {
@@ -1475,6 +1476,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
             tier1_cfg_test_fixtures(&tally, &output, &scratch);
             tier1_cfg_test_undefined(&tally, &output, &scratch);
             tier1_cfg_test_current_slots(&tally, &output, &scratch);
+            tier1_cfg_test_regions(&tally, &output, &scratch);
             tier1_cfg_test_edge_views(&tally, &scratch);
             tier1_cfg_test_wide_edges(&tally, &output, &scratch);
             Tier1CfgTestBuilder* builder = arena_push(&work, sizeof(Tier1CfgTestBuilder), _Alignof(Tier1CfgTestBuilder));

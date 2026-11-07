@@ -25,6 +25,21 @@ requirements. [Command index](README.md).
   The allocation guide's "Allocation over a CFG (#140)" and "The opmask class
   (#179)" have the contract and what is pending.
 
+## Dispatch interval boundaries (#1216)
+
+Adjacent blocks share intervals only when they form a straight-line CFG chain:
+the earlier block has one successor and the later block has that block as its
+only predecessor. The existing phi, liveness and fixed-range boundary checks
+still apply. Branches, joins and loop headers get independent intervals, so
+register pressure in a sibling handler cannot become their incoming spill
+state merely through layout order. Edge moves carry values between the ranges.
+
+`test-tier1-cfg` covers dispatch handlers with local pressure and clobbers,
+joins, back edges and retained straight-line merging, through both allocator
+paths and the existing verifier and certificate oracles. These fixtures check
+allocation behavior; the issue's dynamic speedtest1/five-script edge-traffic
+target and 9700X runtime requirement still need workload measurements.
+
 ## Edge validation and emission indexing (#1356)
 
 `tier1_cfg_input_valid` checks both complete offset arrays before any edge-array

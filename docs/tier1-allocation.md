@@ -335,10 +335,19 @@ use there, or to the block's end where it stays live. A value's blocks come
 block by block from the live-in rows, counted and then filled, so building the
 intervals costs the live pairs rather than values times blocks.
 
-A block continues its layout predecessor's intervals when it has no phis and
-every value live into it is live out of that predecessor. Then every value of
-its entry state continues, and a fragment transition at its first position runs
-inside the block, on every path into it. Without that rule a phi moved in on an
+A block continues its layout predecessor's intervals only along a straight-line
+CFG chain: the predecessor's only successor is the block, the block's only
+predecessor is that layout predecessor, it has no phis, and every value live into
+it is live out of the predecessor. Branches, joins and loop headers start
+independent intervals. Layout adjacency alone used to join mutually exclusive
+dispatch handlers: pressure in one handler could leave another's incoming
+values in slots, and a fixed clobber restricted the whole merged interval.
+The chain boundary keeps those decisions local; ordinary edge moves reconcile
+the separate intervals (#1216).
+
+Within a chain, every value in the block's entry state continues. A fragment
+transition at its first position runs inside the block, on every path into it.
+Without that rule a phi moved in on an
 edge could take a register that a continuing value gives up at the block's
 start, in a transition that runs only after the edge's moves. Intervals are
 numbered by value, then position: each interval's uses are a slice of its
