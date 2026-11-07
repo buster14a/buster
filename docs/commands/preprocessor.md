@@ -36,6 +36,11 @@ requirements. [Command index](README.md).
   A raw forced include skipped by `#pragma once` or an include guard leaves the synthetic include depth balanced;
   the following ordinary forced header still observes level 1, its child level 2, and the main file level 0 (#1616).
   `-E -fpreprocessed` is rejected; a `.i` input is already preprocessed.
+  Unknown command-line warning names are diagnosed before the prelude, with
+  the complete command's ordered suppression and promotion policy and the
+  ordinary diagnostic counters/replay. Driver aliases and valued spellings
+  stay separate from warning-group names; see
+  [Warning option names](driver.md#warning-option-names).
   `docs/c-preprocessor.md` explains the design, the `clang -E`
   oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
   (`main.c` includes it; `./build/compiler test-preprocessor` runs them),

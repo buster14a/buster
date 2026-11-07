@@ -103,18 +103,37 @@ static void check_common_report_at(const Parser* parser, Preprocessor* pp, const
     check_common_report_published(parser, pp, input, token, publication_source, id, default_ignored, message, notes, note_count, scratch);
 }
 
-static void check_common_report_phase_at(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t publication,
-                                         PPDiagnosticPhase phase, uint32_t id, bool default_ignored, const char* message,
-                                         const CheckCommonNote* notes, uint32_t note_count, Arena* scratch)
-{
-    const uint32_t publication_source = publication < parser->tokens.count ? parser->tokens.sources[publication] : pp->output.count;
-    check_common_report_published_phase(parser, pp, input, token, publication_source, phase, id, default_ignored, message, notes, note_count, scratch);
-}
-
 static void check_common_report(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t id,
                                 bool default_ignored, const char* message, const CheckCommonNote* notes, uint32_t note_count, Arena* scratch)
 {
     check_common_report_at(parser, pp, input, token, token, id, default_ignored, message, notes, note_count, scratch);
+}
+
+// A warning that is not ignored at its token, `severity` its policy there, published at `publication_source`.
+static void check_common_publish(const Parser* parser, Preprocessor* pp, uint32_t token, uint32_t publication_source, PPDiagnosticPhase phase,
+                                 uint32_t id, CheckWarningSeverity severity, const char* message, const CheckCommonNote* notes, uint32_t note_count,
+                                 Arena* scratch)
+{
+    const char* option = id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[id].option : NULL;
+    const bool error = severity >= CHECK_WARNING_ERROR;
+    const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", error ? "-Werror," : "", option) : error ? " [-Werror]" : "";
+    const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                   error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+    PPOutputDiagnosticNote attached[8];
+    const uint32_t used = note_count < BUSTER_ARRAY_LENGTH(attached) ? note_count : (uint32_t)BUSTER_ARRAY_LENGTH(attached);
+    for (uint32_t i = 0; i < used; i += 1)
+    {
+        attached[i] = (PPOutputDiagnosticNote)
+        {
+            .token = notes[i].token < parser->tokens.count ? parser->tokens.sources[notes[i].token] : parser->tokens.sources[token],
+            .message = notes[i].message,
+        };
+    }
+    if (suffix != NULL)
+    {
+        pp_diagnose_output_notes_phase(pp, disposition, parser->tokens.sources[token], publication_source, phase,
+                                       used != 0 ? attached : NULL, used, "%s%s", message, suffix);
+    }
 }
 
 // `check_common_report_at` with the publication already a source position: a diagnostic published past its
@@ -130,26 +149,7 @@ static void check_common_report_published_phase(const Parser* parser, Preprocess
     const CheckWarningSeverity severity = check_common_severity(pp, parser, input, token, id, default_ignored);
     if (severity != CHECK_WARNING_IGNORE)
     {
-        const char* option = id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[id].option : NULL;
-        const bool error = severity >= CHECK_WARNING_ERROR;
-        const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", error ? "-Werror," : "", option) : error ? " [-Werror]" : "";
-        const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
-                                       error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
-        PPOutputDiagnosticNote attached[8];
-        const uint32_t used = note_count < BUSTER_ARRAY_LENGTH(attached) ? note_count : (uint32_t)BUSTER_ARRAY_LENGTH(attached);
-        for (uint32_t i = 0; i < used; i += 1)
-        {
-            attached[i] = (PPOutputDiagnosticNote)
-            {
-                .token = notes[i].token < parser->tokens.count ? parser->tokens.sources[notes[i].token] : parser->tokens.sources[token],
-                .message = notes[i].message,
-            };
-        }
-        if (suffix != NULL)
-        {
-            pp_diagnose_output_notes_phase(pp, disposition, parser->tokens.sources[token], publication_source, phase,
-                                           used != 0 ? attached : NULL, used, "%s%s", message, suffix);
-        }
+        check_common_publish(parser, pp, token, publication_source, phase, id, severity, message, notes, note_count, scratch);
     }
 }
 
@@ -498,11 +498,75 @@ static uint32_t check_common_function_boundary(const Parser* parser, uint32_t to
     return end != token && end < parser->tokens.count ? end + 1 : end;
 }
 
+// The parser contexts check_common_unevaluated reads: check_warning_graph_void_context's memo and climb path, each a column
+// over the unit's tokens. They are pushed at the unit's first published warning that asks, and go with the passes'
+// scratch, as check_driver_common_warnings resets them, so a unit that publishes none of those warnings pays nothing. No
+// pass pops its own scratch across a report (the selections' ranges and a literal's spelling report nothing in theirs).
+typedef struct CheckCommonContexts CheckCommonContexts;
+struct CheckCommonContexts
+{
+    uint8_t* known;
+    uint32_t* path;
+    bool failed;
+};
+static _Thread_local CheckCommonContexts check_common_contexts;
+
+// Whether `token` lies in an operand clang leaves unevaluated (#147): the expression operand of sizeof, _Alignof or
+// __alignof__, parenthesized or not, typeof's, or _Generic's controlling expression. There clang drops its runtime-behavior
+// warnings (DiagRuntimeBehavior: division by zero, array bounds, sign comparison, constant conversion) and its unused-result
+// and self-assignment ones, which check isUnevaluatedContext. The graph's evaluation facts already keep an operand's own
+// nodes unchecked, but a GNU statement expression's statements are graph roots of their own, which only the parse tree places
+// in the operand. The contexts are -Wvoid-ptr-dereference's (check_warning_graph_void_context), as clang's parser enters
+// them: an array declarator's bound, in the operand's type name or in a declaration inside the statement expression, is
+// constant-evaluated, where clang keeps its unused-result warnings, and a sizeof of an expression of variable array type in
+// an evaluated context evaluates its operand after all (TRANSFORMED), which warns again.
+static bool check_common_unevaluated(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, Arena* scratch)
+{
+    CheckCommonContexts* contexts = &check_common_contexts;
+    const uint32_t count = parser->tokens.count;
+    if (contexts->known == NULL && !contexts->failed && token < count)
+    {
+        contexts->known = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count);
+        contexts->path = contexts->known != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
+        contexts->failed = contexts->path == NULL;
+        if (contexts->failed)
+        {
+            check_common_exhausted(pp);
+        }
+        else
+        {
+            memset(contexts->known, 0, count);
+        }
+    }
+    const uint8_t context = !contexts->failed && contexts->known != NULL && token < count ?
+                            check_warning_graph_void_context(input, parser, contexts->known, contexts->path, token) : CHECK_VOID_CONTEXT_KNOWN;
+    const bool result = (context & CHECK_VOID_CONTEXT_UNEVALUATED) != 0 && (context & CHECK_VOID_CONTEXT_TRANSFORMED) == 0;
+    return result;
+}
+
+// A warning clang issues only where its expression is evaluated (check_common_unevaluated), published at `publication`'s
+// source in `phase`. Only a warning its policy would publish asks for its context.
+static void check_common_report_evaluated(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t publication,
+                                          PPDiagnosticPhase phase, uint32_t id, bool default_ignored, const char* message,
+                                          const CheckCommonNote* notes, uint32_t note_count, Arena* scratch)
+{
+    if (token < parser->tokens.count && !pp->fatal)
+    {
+        const CheckWarningSeverity severity = check_common_severity(pp, parser, input, token, id, default_ignored);
+        // (The contexts' allocation can fail, which is fatal: then nothing more is published.)
+        if (severity != CHECK_WARNING_IGNORE && !check_common_unevaluated(parser, pp, input, token, scratch) && !pp->fatal)
+        {
+            const uint32_t publication_source = publication < parser->tokens.count ? parser->tokens.sources[publication] : pp->output.count;
+            check_common_publish(parser, pp, token, publication_source, phase, id, severity, message, notes, note_count, scratch);
+        }
+    }
+}
+
 static void check_common_report_unused(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t id,
                                        const char* message, const CheckCommonNote* notes, uint32_t note_count, Arena* scratch)
 {
-    check_common_report_phase_at(parser, pp, input, token, check_common_function_boundary(parser, token), PP_DIAGNOSTIC_DEFERRED, id, false,
-                                 message, notes, note_count, scratch);
+    check_common_report_evaluated(parser, pp, input, token, check_common_function_boundary(parser, token), PP_DIAGNOSTIC_DEFERRED, id, false,
+                                  message, notes, note_count, scratch);
 }
 
 // The deferred publication an expression warning gets inside a function: every unused-result, bounds,
@@ -511,8 +575,16 @@ static void check_common_report_deferred(const Parser* parser, Preprocessor* pp,
                                          bool default_ignored, const char* message, const CheckCommonNote* notes, uint32_t note_count,
                                          Arena* scratch)
 {
-    check_common_report_phase_at(parser, pp, input, token, check_common_function_boundary(parser, token), PP_DIAGNOSTIC_DEFERRED, id,
-                                 default_ignored, message, notes, note_count, scratch);
+    check_common_report_evaluated(parser, pp, input, token, check_common_function_boundary(parser, token), PP_DIAGNOSTIC_DEFERRED, id,
+                                  default_ignored, message, notes, note_count, scratch);
+}
+
+// The unused-result warnings clang reports where the expression stands rather than at the body's end: an unused
+// comparison and the `void *` cast question.
+static void check_common_report_discarded(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t id,
+                                          const char* message, const CheckCommonNote* notes, uint32_t note_count, Arena* scratch)
+{
+    check_common_report_evaluated(parser, pp, input, token, token, PP_DIAGNOSTIC_SEMANTIC, id, false, message, notes, note_count, scratch);
 }
 
 // A closer's opener is the token whose parent it is; the closer's own parent is the enclosing construct.
@@ -1236,8 +1308,8 @@ static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t no
                                              "relational comparison result unused";
             const CheckCommonNote note = { report, parser->tokens.kinds[left] == PARSE_KIND_EQUALEQUAL ? "use '=' to turn this equality comparison into an assignment" :
                                                      parser->tokens.kinds[left] == PARSE_KIND_EXCLAIMEQUAL ? "use '|=' to turn this inequality comparison into an or-assignment" : "" };
-            check_common_report(parser, pp, input, report, CHECK_WARNING_ID_UNUSED_COMPARISON, false, message,
-                                note.message[0] != 0 ? &note : NULL, note.message[0] != 0 ? 1u : 0u, scratch);
+            check_common_report_discarded(parser, pp, input, report, CHECK_WARNING_ID_UNUSED_COMPARISON, message,
+                                          note.message[0] != 0 ? &note : NULL, note.message[0] != 0 ? 1u : 0u, scratch);
         }
         else if (report_role == PARSE_ROLE_CLOSE_CAST)
         {
@@ -1250,8 +1322,8 @@ static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t no
                 if (void_pointer)
                 {
                     // A `void *` question reports where the cast stands, not at the body's end.
-                    check_common_report(parser, pp, input, cast != BUSTER_CHECK_NONE ? cast : report, CHECK_WARNING_ID_UNUSED_VALUE, false,
-                                        "expression result unused; should this cast be to 'void'?", NULL, 0, scratch);
+                    check_common_report_discarded(parser, pp, input, cast != BUSTER_CHECK_NONE ? cast : report, CHECK_WARNING_ID_UNUSED_VALUE,
+                                                  "expression result unused; should this cast be to 'void'?", NULL, 0, scratch);
                 }
                 else
                 {
@@ -1324,8 +1396,8 @@ static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node)
                                       check_common_void_pointer_cast(stream, types, right_result);
             if (void_pointer)
             {
-                check_common_report(parser, pp, input, cast != BUSTER_CHECK_NONE ? cast : right, CHECK_WARNING_ID_UNUSED_VALUE, false,
-                                    "expression result unused; should this cast be to 'void'?", NULL, 0, scratch);
+                check_common_report_discarded(parser, pp, input, cast != BUSTER_CHECK_NONE ? cast : right, CHECK_WARNING_ID_UNUSED_VALUE,
+                                              "expression result unused; should this cast be to 'void'?", NULL, 0, scratch);
             }
             else
             {
@@ -1390,9 +1462,9 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
         // A `void *` question reports with the cast itself; an ordinary unused result waits for the body's end.
         if (void_pointer)
         {
-            check_common_report(parser, emission->pp, emission->input, report != BUSTER_CHECK_NONE ? report : token,
-                                CHECK_WARNING_ID_UNUSED_VALUE, false, "expression result unused; should this cast be to 'void'?", NULL, 0,
-                                emission->scratch);
+            check_common_report_discarded(parser, emission->pp, emission->input, report != BUSTER_CHECK_NONE ? report : token,
+                                          CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused; should this cast be to 'void'?", NULL, 0,
+                                          emission->scratch);
         }
         else
         {
@@ -1761,8 +1833,8 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                                             "relational comparison result unused";
             const CheckCommonNote note = { token, parser->tokens.kinds[token] == PARSE_KIND_EQUALEQUAL ? "use '=' to turn this equality comparison into an assignment" :
                                                      parser->tokens.kinds[token] == PARSE_KIND_EXCLAIMEQUAL ? "use '|=' to turn this inequality comparison into an or-assignment" : "" };
-            check_common_report(parser, pp, input, token, CHECK_WARNING_ID_UNUSED_COMPARISON, false, message,
-                                note.message[0] != 0 ? &note : NULL, note.message[0] != 0 ? 1u : 0u, scratch);
+            check_common_report_discarded(parser, pp, input, token, CHECK_WARNING_ID_UNUSED_COMPARISON, message,
+                                          note.message[0] != 0 ? &note : NULL, note.message[0] != 0 ? 1u : 0u, scratch);
         }
     }
 }
@@ -5297,6 +5369,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     const char* fail_at = getenv("BUSTER_TEST_COMMON_WARNING_FAIL_AT");
     check_common_resources.fail_at = fail_at != NULL ? (uint32_t)strtoul(fail_at, NULL, 10) : UINT32_MAX;
     check_common_resources.pushes = 0;
+    check_common_contexts = (CheckCommonContexts){ 0 };
     // What the passes push is theirs alone, and the scratch goes back to where it was after them, so that the backend's
     // pushes reuse its pages rather than take others past them (#628: 21.7 MB of sqlite3.c's, through the backend's peak).
     const uint64_t mark = scratch->length;
@@ -5325,4 +5398,5 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     }
     check_common_format(parser, pp, input, stream, types, &spell, program, scratch);
     arena_pop_to(scratch, mark);
+    check_common_contexts = (CheckCommonContexts){ 0 };
 }
