@@ -15,7 +15,7 @@
 #include "ir_optimize_verified.c"
 #include "ir_wide.c"
 #include "ir_truth.c"
-#include "ir_schedule.c"
+#include "tier1_schedule_ir.c"
 #include "c_check_tier1_inline.c"
 #include "c_check_tier1_schedule.c"
 
@@ -360,13 +360,13 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     {
         // With --verify, the original columns and the permutation, which the scalar reference checks.
         const uint64_t mark = scratch->length;
-        IrScheduleOriginal original = { 0 };
+        Tier1ScheduleIrOriginal original = { 0 };
         uint32_t* order = certify ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)wide.function.instruction_count + 1) : 0;
         uint32_t* place = certify ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)wide.function.instruction_count + 1) : 0;
-        const bool copied = !certify || (order != 0 && place != 0 && ir_schedule_copy(&wide.function, scratch, &original));
-        IrScheduleStats schedule_stats = { 0 };
-        IrError error = copied ? ir_schedule_function(&wide.function, scratch, order, &schedule_stats) : IR_ERROR_MEMORY;
-        error = error == IR_OK && certify && !ir_schedule_verify(&original, &wide.function, order, place) ? IR_ERROR_STRUCTURE : error;
+        const bool copied = !certify || (order != 0 && place != 0 && tier1_schedule_ir_copy(&wide.function, scratch, &original));
+        Tier1ScheduleIrStats schedule_stats = { 0 };
+        IrError error = copied ? tier1_schedule_ir_function(&wide.function, scratch, order, &schedule_stats) : IR_ERROR_MEMORY;
+        error = error == IR_OK && certify && !tier1_schedule_ir_verify(&original, &wide.function, order, place) ? IR_ERROR_STRUCTURE : error;
         arena_pop_to(scratch, mark);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, error, BUSTER_IR_NONE, 0, NULL);
         stage = outcome.stage;

@@ -9,7 +9,7 @@ requirements. [Command index](README.md).
 - `--tier1-schedule=none|post|pre` (with `--tier1`) schedules Tier 1's code
   block by block: `post` after allocation, on each block's machine records
   (`tier1_schedule.c`, applied by `c_check_tier1_schedule.c`), and `pre` before
-  selection, on each block's IR instructions (`ir_schedule.c`). Both are
+  selection, on each block's IR instructions (`tier1_schedule_ir.c`). Both are
   measurement options, off by default; `--tier1-report`'s `schedule_blocks` and
   `schedule_moved` count what they did, and `--verify` checks every scheduled
   block against its scalar reference. [The scheduling guide](../../docs/tier1-scheduling.md)

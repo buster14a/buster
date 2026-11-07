@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Preallocation block scheduling (#172): the C driver's --tier1-schedule=pre reorders each block's instructions before
-// the optimizer's final verification, so that Tier 1's selection, allocation and emission take the new order. Include
-// after ir.c. The postallocation variant is tier1_schedule.c's, on machine records.
+// Tier 1's preallocation block scheduling (#172): the C driver's --tier1-schedule=pre reorders each block's IR
+// instructions before the optimizer's final verification, so that Tier 1's selection, allocation and emission take the
+// new order. Include after ir.c. The postallocation variant is tier1_schedule.c's, on machine records.
+//
+// This is a target pass on the IR, not a machine-independent one: its weights are x86 classes for Zen 5 and its glue
+// mirrors Tier 1's x86 selection. It runs on the IR because Tier 1 has no machine IR before allocation: the selector's
+// plan is a pattern per IR node, which liveness, allocation and emission walk in the IR's order, and the records are
+// made with physical registers. Scheduling before selection reorders the trees the selector then makes, which folds a
+// single-use child of the same block wherever it is (tier1_select_tree_child), but for the load fold below.
 //
 // A block's instructions between its barriers form a segment, list-scheduled on its own: each ready instruction of
 // greatest priority first, ties by original position. A barrier keeps its place and nothing moves across it: a phi, a
@@ -20,19 +26,19 @@
 // one node of the segment's graph, the load placed right before the consumer, its weight added to the consumer's.
 // Scheduling it apart would trade the fold for a register, which is what this variant measures for every other value.
 //
-// ir_schedule_function mutates exclusively owned, verified columns in place, as ir_truth_simplify does: no use lists or
-// verified-analysis handles may be live across it. Blocks keep their instruction counts, so block_offsets, the extra
+// tier1_schedule_ir_function mutates exclusively owned, verified columns in place, as ir_truth_simplify does: no use
+// lists or verified-analysis handles may be live across it. Blocks keep their instruction counts, so block_offsets, the extra
 // column, the side tables and the labels are unchanged; the instruction columns are permuted within blocks and every
 // value operand (a, b, c by ir_value_mask, phi incomings and call arguments) renamed. The caller runs the optimizer and
 // its final SSA verifier afterwards. The pass is scalar: its graph is the operands' (at most three edges an instruction
 // in a segment, every instruction with one is a barrier) and the memory order's chain, built in one pass, and its
 // selection is a binary heap; the 9700X's measurement of its compile time is in docs/tier1-scheduling.md.
 
-#ifndef BUSTER_IR_SCHEDULE_C
-#define BUSTER_IR_SCHEDULE_C
+#ifndef BUSTER_TIER1_SCHEDULE_IR_C
+#define BUSTER_TIER1_SCHEDULE_IR_C
 
-typedef struct IrScheduleStats IrScheduleStats;
-struct IrScheduleStats
+typedef struct Tier1ScheduleIrStats Tier1ScheduleIrStats;
+struct Tier1ScheduleIrStats
 {
     // Segments of two instructions or more, and instructions that changed places.
     uint32_t segments;
@@ -41,7 +47,7 @@ struct IrScheduleStats
     uint32_t glued;
 };
 
-static bool ir_schedule_barrier(const IrFunction* f, uint32_t i)
+static bool tier1_schedule_ir_barrier(const IrFunction* f, uint32_t i)
 {
     const uint32_t op = f->op[i];
     return op == IR_PHI || op == IR_PARAM || ir_terminator_table[op] != 0 || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA ||
@@ -50,12 +56,12 @@ static bool ir_schedule_barrier(const IrFunction* f, uint32_t i)
 }
 
 // The instructions that keep their order among themselves in a segment: memory accesses and divisions.
-static bool ir_schedule_ordered(uint32_t op)
+static bool tier1_schedule_ir_ordered(uint32_t op)
 {
     return op == IR_LOAD || op == IR_STORE || op == IR_SDIV || op == IR_UDIV || op == IR_SREM || op == IR_UREM;
 }
 
-static uint32_t ir_schedule_weight(uint32_t op)
+static uint32_t tier1_schedule_ir_weight(uint32_t op)
 {
     uint32_t weight = 1;
     switch (op)
@@ -97,8 +103,8 @@ static uint32_t ir_schedule_weight(uint32_t op)
 }
 
 // The segment's scratch, each column of the function's instruction count (indexed by original instruction).
-typedef struct IrScheduleWork IrScheduleWork;
-struct IrScheduleWork
+typedef struct Tier1ScheduleIrWork Tier1ScheduleIrWork;
+struct Tier1ScheduleIrWork
 {
     uint32_t* uses;
     // The single consumer a load folds into (glued), or BUSTER_IR_NONE; and each node's glued load.
@@ -115,22 +121,22 @@ struct IrScheduleWork
 };
 
 // The node an instruction belongs to in its segment: its consumer for a glued load.
-static uint32_t ir_schedule_node(const IrScheduleWork* w, uint32_t i)
+static uint32_t tier1_schedule_ir_node(const Tier1ScheduleIrWork* w, uint32_t i)
 {
     return w->glued_to[i] != BUSTER_IR_NONE ? w->glued_to[i] : i;
 }
 
 // Whether heap entry x goes before y: greater height, then smaller original position.
-static bool ir_schedule_before(const IrScheduleWork* w, uint32_t x, uint32_t y)
+static bool tier1_schedule_ir_before(const Tier1ScheduleIrWork* w, uint32_t x, uint32_t y)
 {
     return w->height[x] > w->height[y] || (w->height[x] == w->height[y] && x < y);
 }
 
-static void ir_schedule_push(IrScheduleWork* w, uint32_t* size, uint32_t node)
+static void tier1_schedule_ir_push(Tier1ScheduleIrWork* w, uint32_t* size, uint32_t node)
 {
     uint32_t at = *size;
     *size += 1;
-    while (at != 0 && ir_schedule_before(w, node, w->heap[(at - 1) / 2]))
+    while (at != 0 && tier1_schedule_ir_before(w, node, w->heap[(at - 1) / 2]))
     {
         w->heap[at] = w->heap[(at - 1) / 2];
         at = (at - 1) / 2;
@@ -138,7 +144,7 @@ static void ir_schedule_push(IrScheduleWork* w, uint32_t* size, uint32_t node)
     w->heap[at] = node;
 }
 
-static uint32_t ir_schedule_pop(IrScheduleWork* w, uint32_t* size)
+static uint32_t tier1_schedule_ir_pop(Tier1ScheduleIrWork* w, uint32_t* size)
 {
     const uint32_t top = w->heap[0];
     *size -= 1;
@@ -149,8 +155,8 @@ static uint32_t ir_schedule_pop(IrScheduleWork* w, uint32_t* size)
     {
         const uint32_t left = 2 * at + 1;
         uint32_t child = left;
-        child = left + 1 < *size && ir_schedule_before(w, w->heap[left + 1], w->heap[left]) ? left + 1 : child;
-        sifting = left < *size && ir_schedule_before(w, w->heap[child], last);
+        child = left + 1 < *size && tier1_schedule_ir_before(w, w->heap[left + 1], w->heap[left]) ? left + 1 : child;
+        sifting = left < *size && tier1_schedule_ir_before(w, w->heap[child], last);
         if (sifting)
         {
             w->heap[at] = w->heap[child];
@@ -166,12 +172,12 @@ static uint32_t ir_schedule_pop(IrScheduleWork* w, uint32_t* size)
 
 // The edge from instruction `from` to instruction `to` of the segment [first, end), between their nodes; counted in
 // `pending` (the node's unscheduled predecessors) and, on the second pass, stored in its successor list.
-static void ir_schedule_edge(IrScheduleWork* w, uint32_t first, uint32_t end, uint32_t from, uint32_t to, bool store)
+static void tier1_schedule_ir_edge(Tier1ScheduleIrWork* w, uint32_t first, uint32_t end, uint32_t from, uint32_t to, bool store)
 {
     if (from >= first && from < end)
     {
-        const uint32_t source = ir_schedule_node(w, from);
-        const uint32_t target = ir_schedule_node(w, to);
+        const uint32_t source = tier1_schedule_ir_node(w, from);
+        const uint32_t target = tier1_schedule_ir_node(w, to);
         if (source != target && store)
         {
             w->successors[w->successor_offsets[source]] = target;
@@ -186,7 +192,7 @@ static void ir_schedule_edge(IrScheduleWork* w, uint32_t first, uint32_t end, ui
 }
 
 // The segment's edges: each instruction's operands within it, and the order of its memory accesses and divisions.
-static void ir_schedule_edges(const IrFunction* f, IrScheduleWork* w, uint32_t first, uint32_t end, bool store)
+static void tier1_schedule_ir_edges(const IrFunction* f, Tier1ScheduleIrWork* w, uint32_t first, uint32_t end, bool store)
 {
     uint32_t previous = BUSTER_IR_NONE;
     for (uint32_t i = first; i < end; i += 1)
@@ -194,13 +200,13 @@ static void ir_schedule_edges(const IrFunction* f, IrScheduleWork* w, uint32_t f
         const uint64_t count = ir_operand_count(f, i);
         for (uint32_t p = 0; p < count; p += 1)
         {
-            ir_schedule_edge(w, first, end, ir_operand(f, i, p, 0).value, i, store);
+            tier1_schedule_ir_edge(w, first, end, ir_operand(f, i, p, 0).value, i, store);
         }
-        if (ir_schedule_ordered(f->op[i]))
+        if (tier1_schedule_ir_ordered(f->op[i]))
         {
             if (previous != BUSTER_IR_NONE)
             {
-                ir_schedule_edge(w, first, end, previous, i, store);
+                tier1_schedule_ir_edge(w, first, end, previous, i, store);
             }
             previous = i;
         }
@@ -208,7 +214,7 @@ static void ir_schedule_edges(const IrFunction* f, IrScheduleWork* w, uint32_t f
 }
 
 // Schedules the segment [first, end) of non-barrier instructions into w->order[first..end).
-static uint32_t ir_schedule_segment(const IrFunction* f, IrScheduleWork* w, uint32_t first, uint32_t end, IrScheduleStats* stats)
+static uint32_t tier1_schedule_ir_segment(const IrFunction* f, Tier1ScheduleIrWork* w, uint32_t first, uint32_t end, Tier1ScheduleIrStats* stats)
 {
     // Glue each load that folds into its consumer in the original order: its only use, in the segment, not a memory
     // access itself, with no other ordered instruction between them.
@@ -223,7 +229,7 @@ static uint32_t ir_schedule_segment(const IrFunction* f, IrScheduleWork* w, uint
         const uint32_t op = f->op[i];
         const uint64_t count = ir_operand_count(f, i);
         uint32_t load = BUSTER_IR_NONE;
-        for (uint32_t p = 0; !ir_schedule_ordered(op) && p < count; p += 1)
+        for (uint32_t p = 0; !tier1_schedule_ir_ordered(op) && p < count; p += 1)
         {
             const uint32_t value = ir_operand(f, i, p, 0).value;
             const bool folds = value >= first && value < i && f->op[value] == IR_LOAD && w->uses[value] == 1 && value == previous && w->glued_to[value] == BUSTER_IR_NONE;
@@ -235,20 +241,20 @@ static uint32_t ir_schedule_segment(const IrFunction* f, IrScheduleWork* w, uint
             w->glued_from[i] = load;
             stats->glued += 1;
         }
-        previous = ir_schedule_ordered(op) ? i : previous;
+        previous = tier1_schedule_ir_ordered(op) ? i : previous;
     }
     for (uint32_t i = first; i <= end; i += 1)
     {
         w->successor_offsets[i] = 0;
         w->pending[i] = 0;
     }
-    ir_schedule_edges(f, w, first, end, false);
+    tier1_schedule_ir_edges(f, w, first, end, false);
     for (uint32_t i = first; i < end; i += 1)
     {
         w->successor_offsets[i + 1] += w->successor_offsets[i];
     }
     // successor_offsets[node] is its list's start; the second pass advances it to its end.
-    ir_schedule_edges(f, w, first, end, true);
+    tier1_schedule_ir_edges(f, w, first, end, true);
     // Heights, from the segment's end: a node's weight (with its glued load's) and its longest successor's. Its successors
     // are its list, which ends at successor_offsets[node] and starts at its predecessor's end.
     for (uint32_t remaining = end; remaining != first; remaining -= 1)
@@ -260,22 +266,22 @@ static uint32_t ir_schedule_segment(const IrFunction* f, IrScheduleWork* w, uint
         {
             height = height > w->height[w->successors[k]] ? height : w->height[w->successors[k]];
         }
-        const uint32_t glued = w->glued_from[i] != BUSTER_IR_NONE ? ir_schedule_weight(IR_LOAD) : 0;
-        w->height[i] = ir_schedule_weight(f->op[i]) + glued + height;
+        const uint32_t glued = w->glued_from[i] != BUSTER_IR_NONE ? tier1_schedule_ir_weight(IR_LOAD) : 0;
+        w->height[i] = tier1_schedule_ir_weight(f->op[i]) + glued + height;
     }
     uint32_t size = 0;
     for (uint32_t i = first; i < end; i += 1)
     {
         if (w->glued_to[i] == BUSTER_IR_NONE && w->pending[i] == 0)
         {
-            ir_schedule_push(w, &size, i);
+            tier1_schedule_ir_push(w, &size, i);
         }
     }
     uint32_t output = first;
     uint32_t moved = 0;
     while (size != 0)
     {
-        const uint32_t node = ir_schedule_pop(w, &size);
+        const uint32_t node = tier1_schedule_ir_pop(w, &size);
         const uint32_t load = w->glued_from[node];
         if (load != BUSTER_IR_NONE)
         {
@@ -293,7 +299,7 @@ static uint32_t ir_schedule_segment(const IrFunction* f, IrScheduleWork* w, uint
             w->pending[successor] -= 1;
             if (w->pending[successor] == 0)
             {
-                ir_schedule_push(w, &size, successor);
+                tier1_schedule_ir_push(w, &size, successor);
             }
         }
     }
@@ -302,7 +308,7 @@ static uint32_t ir_schedule_segment(const IrFunction* f, IrScheduleWork* w, uint
 
 // The value operands of instruction i renamed by `place` (old to new): a, b and c by ir_value_mask, a phi's incomings
 // and a call's arguments in extra. `renamed` marks the extra slots done, so that none is renamed twice.
-static void ir_schedule_rename(IrFunction* f, uint32_t i, const uint32_t* place, uint64_t* renamed)
+static void tier1_schedule_ir_rename(IrFunction* f, uint32_t i, const uint32_t* place, uint64_t* renamed)
 {
     const uint32_t mask = ir_value_mask(f, i);
     f->a[i] = (mask & 1) ? place[f->a[i]] : f->a[i];
@@ -325,12 +331,12 @@ static void ir_schedule_rename(IrFunction* f, uint32_t i, const uint32_t* place,
 // Schedules every block of `f` in place (see the file's comment), with scratch from `scratch`, popped before it
 // returns, and with `order` not null, stores the permutation there, order[new] = old, of instruction_count elements.
 // Returns IR_ERROR_MEMORY, f unchanged, when there's no room.
-static __attribute__((unused)) IrError ir_schedule_function(IrFunction* f, Arena* scratch, uint32_t* order, IrScheduleStats* stats)
+static __attribute__((unused)) IrError tier1_schedule_ir_function(IrFunction* f, Arena* scratch, uint32_t* order, Tier1ScheduleIrStats* stats)
 {
     const uint64_t mark = scratch->length;
     const uint32_t n = f->instruction_count;
-    *stats = (IrScheduleStats){ 0 };
-    IrScheduleWork w = {
+    *stats = (Tier1ScheduleIrStats){ 0 };
+    Tier1ScheduleIrWork w = {
         .uses = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
         .glued_to = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
         .glued_from = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
@@ -362,11 +368,11 @@ static __attribute__((unused)) IrError ir_schedule_function(IrFunction* f, Arena
             const uint32_t end = f->block_offsets[b + 1];
             for (uint32_t i = first; i <= end; i += 1)
             {
-                const bool cut = i == end || ir_schedule_barrier(f, i);
+                const bool cut = i == end || tier1_schedule_ir_barrier(f, i);
                 if (cut && i - first >= 2)
                 {
                     stats->segments += 1;
-                    stats->moved += ir_schedule_segment(f, &w, first, i, stats);
+                    stats->moved += tier1_schedule_ir_segment(f, &w, first, i, stats);
                 }
                 first = cut ? i + 1 : first;
             }
@@ -406,7 +412,7 @@ static __attribute__((unused)) IrError ir_schedule_function(IrFunction* f, Arena
             memset(renamed, 0, ((uint64_t)f->extra_count / 64 + 1) * sizeof(uint64_t));
             for (uint32_t i = 0; i < n; i += 1)
             {
-                ir_schedule_rename(f, i, w.place, renamed);
+                tier1_schedule_ir_rename(f, i, w.place, renamed);
             }
         }
     }
@@ -417,20 +423,20 @@ static __attribute__((unused)) IrError ir_schedule_function(IrFunction* f, Arena
     arena_pop_to(scratch, mark);
     if (!ready)
     {
-        *stats = (IrScheduleStats){ 0 };
+        *stats = (Tier1ScheduleIrStats){ 0 };
     }
     return ready ? IR_OK : IR_ERROR_MEMORY;
 }
 
-// The columns ir_schedule_function changes, copied before it runs, for ir_schedule_verify.
-typedef struct IrScheduleOriginal IrScheduleOriginal;
-struct IrScheduleOriginal
+// The columns tier1_schedule_ir_function changes, copied before it runs, for tier1_schedule_ir_verify.
+typedef struct Tier1ScheduleIrOriginal Tier1ScheduleIrOriginal;
+struct Tier1ScheduleIrOriginal
 {
     IrFunction function;
 };
 
 // Copies `f`'s instruction columns and extra into `arena` as `original`'s function, the other columns borrowed.
-static __attribute__((unused)) bool ir_schedule_copy(const IrFunction* f, Arena* arena, IrScheduleOriginal* original)
+static __attribute__((unused)) bool tier1_schedule_ir_copy(const IrFunction* f, Arena* arena, Tier1ScheduleIrOriginal* original)
 {
     const uint64_t n = f->instruction_count;
     IrFunction copy = *f;
@@ -452,7 +458,11 @@ static __attribute__((unused)) bool ir_schedule_copy(const IrFunction* f, Arena*
         memcpy(copy.a, f->a, n * sizeof(uint32_t));
         memcpy(copy.b, f->b, n * sizeof(uint32_t));
         memcpy(copy.c, f->c, n * sizeof(uint32_t));
-        memcpy(copy.extra, f->extra, (uint64_t)f->extra_count * sizeof(uint32_t));
+        // An empty column may hold no pointer at all: copying nothing from null is still undefined behavior.
+        if (f->extra_count != 0)
+        {
+            memcpy(copy.extra, f->extra, (uint64_t)f->extra_count * sizeof(uint32_t));
+        }
         original->function = copy;
     }
     return ready;
@@ -463,7 +473,7 @@ static __attribute__((unused)) bool ir_schedule_copy(const IrFunction* f, Arena*
 // each original instruction at its new place with its operands renamed to their new places; and in each block every
 // operand defined there must come first, and the loads, stores and divisions must keep their order. `place` is
 // instruction_count words of scratch.
-static __attribute__((unused)) bool ir_schedule_verify(const IrScheduleOriginal* original, const IrFunction* scheduled, const uint32_t* order, uint32_t* place)
+static __attribute__((unused)) bool tier1_schedule_ir_verify(const Tier1ScheduleIrOriginal* original, const IrFunction* scheduled, const uint32_t* order, uint32_t* place)
 {
     const IrFunction* f = &original->function;
     const uint32_t n = f->instruction_count;
@@ -475,7 +485,10 @@ static __attribute__((unused)) bool ir_schedule_verify(const IrScheduleOriginal*
     for (uint32_t i = 0; valid && i < n; i += 1)
     {
         valid = order[i] < n && place[order[i]] == UINT32_MAX;
-        place[order[valid ? i : 0]] = valid ? i : place[order[0]];
+        if (valid)
+        {
+            place[order[i]] = i;
+        }
     }
     for (uint32_t b = 0; valid && b < f->block_count; b += 1)
     {
@@ -485,7 +498,7 @@ static __attribute__((unused)) bool ir_schedule_verify(const IrScheduleOriginal*
         for (uint32_t o = first; valid && o < end; o += 1)
         {
             const uint32_t i = place[o];
-            valid = i >= first && i < end && (!ir_schedule_barrier(f, o) || i == o);
+            valid = i >= first && i < end && (!tier1_schedule_ir_barrier(f, o) || i == o);
             valid = valid && scheduled->op[i] == f->op[o] && scheduled->type[i] == f->type[o] && scheduled->flags[i] == f->flags[o] &&
                     scheduled->alignment_log2[i] == f->alignment_log2[o];
             const uint64_t count = valid ? ir_operand_count(f, o) : 0;
@@ -497,7 +510,7 @@ static __attribute__((unused)) bool ir_schedule_verify(const IrScheduleOriginal*
                 // A phi's incoming value may be defined later in its block (a loop's back edge): only the others' order.
                 valid = valid && (f->op[o] == IR_PHI || value < first || value >= end || place[value] < i);
             }
-            if (valid && ir_schedule_ordered(f->op[o]))
+            if (valid && tier1_schedule_ir_ordered(f->op[o]))
             {
                 valid = ordered == BUSTER_IR_NONE || place[ordered] < i;
                 ordered = o;

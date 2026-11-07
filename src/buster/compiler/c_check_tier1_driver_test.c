@@ -1360,7 +1360,7 @@ static bool check_test_tier1_quoted(char* out, size_t size, const char* path)
 
 // --tier1-schedule (#172): the rematerialization fixture, its loops' loads, stores, multiplications and flags, compiled by
 // each path with each scheduling variant. --verify (always the builds') checks every scheduled block against the scalar
-// reference (tier1_schedule_verify after allocation, ir_schedule_verify before selection); each executable must print
+// reference (tier1_schedule_verify after allocation, tier1_schedule_ir_verify before selection); each executable must print
 // clang's build's output, and the report must say records or instructions moved, which a dropped option would not. The
 // postallocation variant only permutes records, so its record count is the plain build's.
 static void check_test_driver_tier1_schedule(CheckTest* test, const char* clang, const char* executable, const char* directory)

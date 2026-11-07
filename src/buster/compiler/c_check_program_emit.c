@@ -323,7 +323,7 @@ struct CheckEmitGrowth
 // lane's first body and emptied for each, and the forms the lane's last target allows (X86_FORM_COUNT entries).
 #define BUSTER_CHECK_TIER1_STEPS 8
 // --tier1-schedule's variants (#172): none, each block's records after allocation (c_check_tier1_schedule.c), or each
-// block's IR instructions before selection and allocation (ir_schedule.c).
+// block's IR instructions before selection and allocation (tier1_schedule_ir.c).
 #define BUSTER_CHECK_TIER1_SCHEDULE_NONE 0
 #define BUSTER_CHECK_TIER1_SCHEDULE_POST 1
 #define BUSTER_CHECK_TIER1_SCHEDULE_PRE 2
