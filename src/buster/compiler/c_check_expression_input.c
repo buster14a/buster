@@ -71,22 +71,22 @@ struct CheckInputValues
 static inline CheckInputValues check_input_expression_values(CheckInputReader* reader, uint32_t token)
 {
     CheckInputValues values = { .first = BUSTER_CHECK_NONE, .last = BUSTER_CHECK_NONE, .count = 0 };
+    // Without a branch on whether a child has values, which the children of the walk's tokens mispredict (#529): a
+    // child's last value and count are read whether it has values or not and taken only where it has, and the link
+    // from the chain so far is stored into `unlinked` where there is no chain or the child has no values.
+    uint32_t unlinked = 0;
     for (uint32_t child = reader->first_child[token]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
     {
         const uint32_t begin = reader->first_value[child];
-        if (begin != BUSTER_CHECK_NONE)
-        {
-            if (values.last != BUSTER_CHECK_NONE)
-            {
-                reader->value_next[values.last] = begin;
-            }
-            else
-            {
-                values.first = begin;
-            }
-            values.last = reader->last_value[child];
-            values.count += reader->value_counts[child];
-        }
+        const uint32_t last = reader->last_value[child];
+        const uint32_t counted = reader->value_counts[child];
+        const bool has = begin != BUSTER_CHECK_NONE;
+        const bool chained = has & (values.last != BUSTER_CHECK_NONE);
+        uint32_t* const link = chained ? &reader->value_next[chained ? values.last : 0] : &unlinked;
+        *link = begin;
+        values.first = (has & (values.last == BUSTER_CHECK_NONE)) ? begin : values.first;
+        values.last = has ? last : values.last;
+        values.count += has ? counted : 0;
     }
     return values;
 }
