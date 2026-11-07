@@ -726,6 +726,9 @@ struct CheckOptions
     // past it are as the kernel mapped them, zero (#628's fresh_output): the C driver's output arena, whose first user the
     // run is. The run then clears no column and writes no zero in its main loop (CheckStream.zero_columns).
     bool fresh_output;
+    // check_graph_query_runtime replays every node even where no constant_p query's result changes (#1628): the oracle a
+    // test compares the replay's skip with.
+    bool replay_queries;
 };
 
 _Static_assert(sizeof(CheckValue) == 96 && __builtin_offsetof(CheckValue, category) == 4 && __builtin_offsetof(CheckValue, flags) == 8 && __builtin_offsetof(CheckValue, constant_kind) == 12 &&
@@ -4058,7 +4061,8 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
             }
             if (result && pass == 0)
             {
-                result = check_graph_query_runtime(types, graph, stream, scratch, pure, levels, arguments, maximum_arguments, BUSTER_SCALAR_PATH(options->scalar));
+                result = check_graph_query_runtime(types, graph, stream, scratch, pure, levels, arguments, maximum_arguments, BUSTER_SCALAR_PATH(options->scalar),
+                                                   options->replay_queries);
             }
         }
         if (stream->statistics.scratch_bytes < scratch->length)
