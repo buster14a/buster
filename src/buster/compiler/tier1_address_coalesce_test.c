@@ -66,10 +66,10 @@ static void tier1_select_test_coalesced_addresses(Tier1SelectTest* test)
                                 X86Instruction lea = tier1_select_memory_holes(&plan.patterns[2], registers, 0);
                                 lea.reg = destinations[d];
                                 lea.form = shape == 0 ? X86_FORM_LEA_R32_M : X86_FORM_LEA_R64_M;
-                                uint8_t bytes[16];
-                                const uint64_t lea_bytes = x86_encode(&lea, 1, bytes, sizeof(bytes), 0, 0);
-                                const uint64_t add_bytes = x86_encode(code.records + first, 1, bytes, sizeof(bytes), 0, 0);
-                                tier1_select_test_expect(test, add_bytes != 0 && add_bytes < lea_bytes, "coalesced add removes the address operand's SIB byte");
+                                uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
+                                const int64_t lea_bytes = x86_encode(&lea, 1, bytes, sizeof(bytes), 0, 0);
+                                const int64_t add_bytes = x86_encode(code.records + first, 1, bytes, sizeof(bytes), 0, 0);
+                                tier1_select_test_expect(test, add_bytes > 0 && lea_bytes == add_bytes + 1, "coalesced add removes the address operand's SIB byte");
                             }
                         }
                     }
