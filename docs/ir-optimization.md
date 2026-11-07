@@ -57,10 +57,13 @@ incoming edge and value, and each visit of its phi meets the incoming values
 on executable edges: n visits of n each were 55–66% of a `--tier1` compile of
 such a chain at 16,000 arms (#1729). The lattice only falls, so a visit of an
 overdefined value skips its transfer, and a phi's meet stops at its first
-overdefined incoming value. The worklist also holds queued phis apart and
-visits one only once no other instruction is queued, so that the edges and
+overdefined incoming value. The worklist also holds a phi queued again (by a
+new edge into its executable block, or a changed incoming value) apart, and
+visits it only once no other instruction is queued, so that the edges and
 values reaching a join in one wave share a visit: a join whose arms all give
-one constant, which stays constant, is visited once rather than once per arm.
+one constant, which stays constant, is visited twice rather than once per arm.
+A phi's first visit keeps its place in its block, before the instructions that
+read it, and a new edge into a block reached before queues only its phis.
 `IrOptimizeResult.sccp_phi_incoming` counts the incoming values the phi
 transfers examined. The order of visits doesn't change the fixed point, which
 the vector sweeps' exact agreement with the worklist checks.
