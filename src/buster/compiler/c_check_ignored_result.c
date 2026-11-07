@@ -453,6 +453,18 @@ static __attribute__((noinline)) void check_common_ignored_report(CheckCommonEmi
     }
 }
 
+// A root's call (check_common_discarded's), whose result warns (check_common_ignored_of), where its place discards it
+// (check_common_discarded_place): a statement's or a for clause's, not an initializer's value.
+static __attribute__((noinline)) void check_common_ignored_statement(CheckCommonEmission* emission, uint32_t node)
+{
+    CheckCommonIgnoredResult found;
+    if (emission->ignored != NULL && check_common_ignored_of(emission, node, &found) &&
+        check_common_discarded_place(emission->parser, emission->input->graph.tokens[node]))
+    {
+        check_common_ignored_report(emission, &found);
+    }
+}
+
 // The discarded call `node`'s warning, if its result warns of one (check_common_ignored_of): whether it does.
 static __attribute__((noinline)) bool check_common_ignored_call(CheckCommonEmission* emission, uint32_t node)
 {

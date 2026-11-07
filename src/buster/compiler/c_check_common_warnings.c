@@ -416,6 +416,22 @@ static uint32_t check_common_parent(const Parser* parser, uint32_t token)
     return result;
 }
 
+// Whether the expression at `token` is discarded where it stands: its parent (past groups) is an expression statement's
+// terminator, a for's init clause's `;` or its `)` (the increment's). An initializer's value, braced or not, a compound
+// literal's, an argument and an operand are read, not discarded.
+static bool check_common_discarded_place(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t parent = check_common_parent(parser, token);
+    const uint8_t parent_role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
+    const uint32_t grandparent = parent < count ? check_common_parent(parser, parent) : BUSTER_CHECK_NONE;
+    const bool for_init = parent_role == PARSE_ROLE_TERMINATOR && grandparent < count &&
+                          parser->tree.roles[grandparent] == PARSE_ROLE_CLOSE_FOR &&
+                          !check_common_for_condition(parser, token, parent);
+    const bool result = check_common_statement_terminator(parser, parent) || for_init || parent_role == PARSE_ROLE_CLOSE_FOR;
+    return result;
+}
+
 // The closing brace of the function around `token`: Clang defers an unused result and an unused-but-set parameter to
 // the end of the function, after the body's own warnings. A token outside a body keeps its own place.
 static uint32_t check_common_function_end(const Parser* parser, uint32_t token)
@@ -1374,12 +1390,7 @@ static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node)
         emission->emitted[right_node] = 1;
     }
     const uint32_t parent = check_common_parent(parser, comma);
-    const uint8_t parent_role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
-    const uint32_t grandparent = parent < count ? check_common_parent(parser, parent) : BUSTER_CHECK_NONE;
-    const bool for_init = parent_role == PARSE_ROLE_TERMINATOR && grandparent < count &&
-                          parser->tree.roles[grandparent] == PARSE_ROLE_CLOSE_FOR &&
-                          !check_common_for_condition(parser, comma, parent);
-    const bool discarded = check_common_statement_terminator(parser, parent) || for_init || parent_role == PARSE_ROLE_CLOSE_FOR;
+    const bool discarded = check_common_discarded_place(parser, comma);
     if (discarded)
     {
         // The `expr, 0` idiom looks through nested comma results only: a conditional arm that happens to
@@ -1480,11 +1491,7 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
     const uint32_t parent = check_common_parent(parser, token);
     const uint8_t role = token < count ? parser->tree.roles[token] : PARSE_ROLE_NONE;
     const uint8_t parent_role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
-    const uint32_t grandparent = parent < count ? check_common_parent(parser, parent) : BUSTER_CHECK_NONE;
-    const bool for_init = parent_role == PARSE_ROLE_TERMINATOR && grandparent < count &&
-                          parser->tree.roles[grandparent] == PARSE_ROLE_CLOSE_FOR &&
-                          !check_common_for_condition(parser, token, parent);
-    const bool discarded = check_common_statement_terminator(parser, parent) || for_init || parent_role == PARSE_ROLE_CLOSE_FOR;
+    const bool discarded = check_common_discarded_place(parser, token);
     const CheckOp op = graph->ops[node];
     if (discarded && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL)
     {
@@ -2480,7 +2487,8 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         // Expression roots in graph order: each evaluated expression emits its subtree's deferred warnings
         // where clang's traversal puts them — the diagnostics' shared publication slot keeps this order. A root
         // whose subtree holds no reach and whose discarded expression is no comma and can't have a marker can't warn.
-        // An expression statement's call warns of its discarded result at once (#1447), in unreachable code too.
+        // An expression statement's call warns of its discarded result at once (#1447), in unreachable code too; an
+        // initializer's values, which a declaration's `;` casts to void as roots of their own, are read, not discarded.
         CheckCommonScan roots = { 0 };
         for (uint32_t node = check_common_next_root(facts->parents, graph->count, &roots, vector); node < graph->count && !pp->fatal;
              node = check_common_next_root(facts->parents, graph->count, &roots, vector))
@@ -2489,7 +2497,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             if (expr != node && expr < graph->count && check_common_ignored_op(graph->ops[expr]) && facts->parents[node] == BUSTER_CHECK_NONE &&
                 stream->diagnostics[node] == CHECK_DIAG_NONE)
             {
-                check_common_ignored_call(&emission, expr);
+                check_common_ignored_statement(&emission, expr);
             }
             if (facts->parents[node] == BUSTER_CHECK_NONE && facts->evaluated[node] != 0 && stream->diagnostics[node] == CHECK_DIAG_NONE &&
                 emitted[node] == 0 &&

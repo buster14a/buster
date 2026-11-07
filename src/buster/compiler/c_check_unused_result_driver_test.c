@@ -159,6 +159,24 @@ static const CheckDriverDefaultWarningFixture check_driver_unused_result_fixture
         .warnings = 2,
     },
     {
+        // An initializer's values (scalar and braced, designated, nested and a compound literal's) are read, not discarded,
+        // though a declaration's `;` casts each to void as a root of its own; a statement's call after them still warns.
+        .name = "initializers' calls keep their results",
+        .source = "typedef struct { const char* p; unsigned long n; } S;\n"
+                  "extern unsigned long strlen(const char*) __attribute__((__pure__));\n"
+                  "__attribute__((const)) int c(int);\n"
+                  "__attribute__((warn_unused_result)) int w(int);\n"
+                  "unsigned long f(const char* x) { S s = { .p = x, .n = __builtin_strlen(x) }; return s.n; }\n"
+                  "unsigned long g(const char* x) { const S s = { .p = x, .n = strlen(x), }; return s.n; }\n"
+                  "unsigned long h(const char* x) { S s = { x, strlen(x) }; S t[1] = { { x, strlen(x) } }; return s.n + t[0].n; }\n"
+                  "int k(int n) { int a = c(n); int b[2] = { c(n), w(n) }; int d = { c(n) }; return a + b[0] + d; }\n"
+                  "unsigned long m(const char* x) { return ((S){ .p = x, .n = strlen(x) }).n; }\n"
+                  "unsigned long q(const char* x) { S s; s = (S){ x, strlen(x) }; return s.n; }\n"
+                  "static int z[2] = { sizeof(int), 1 };\n"
+                  "int y(int n) { c(n); strlen(\"\"); return z[0]; }\n",
+        .warnings = 2,
+    },
+    {
         .name = "ignored results of library functions without builtins",
         .source = "int abs(int);\n"
                   "double rint(double);\n"
