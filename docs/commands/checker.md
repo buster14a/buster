@@ -13,7 +13,8 @@ policy (#1390): `-ffreestanding`, `-fno-builtin` and exact
 spellings and retained `format(printf, ...)` attributes remain checked.
 `dprintf` has no builtin catalog row and requires an explicit format attribute.
 Bare compatible function redeclarations inherit their visible predecessor's
-format records without mutating published metadata; each call reads the
+format records without mutating published metadata; binding-only readers with
+no optional attribute column retain its absence. Each call reads the
 declaration visible there, so later or closed-block annotations do not leak.
 A first block-scope extern remains discoverable by a later file declaration;
 a block redeclaration of an existing outer declaration keeps its scope end.

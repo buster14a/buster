@@ -1118,7 +1118,9 @@ static bool check_input_attribute_copy(CheckInputReader* reader, const CheckInpu
 // records into a new accumulator: neither the predecessor nor already published declaration metadata is mutable.
 static void check_input_format_inherit(CheckInputReader* reader, uint32_t token, uint32_t previous)
 {
-    const CheckInputAttributes* prior = check_input_attributes_at(reader->output, previous);
+    // Binding-only clients can omit the optional attribute column entirely.
+    const CheckInputAttributes* prior = check_sparse_wide_present(reader->output->attributes) ?
+                                        check_input_attributes_at(reader->output, previous) : NULL;
     bool inherit = false;
     for (uint32_t i = 0; prior != NULL && i < prior->count; i += 1)
     {
