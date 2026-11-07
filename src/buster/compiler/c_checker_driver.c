@@ -536,7 +536,8 @@ struct CheckDriverDiagnostic
     uint32_t position;
     uint32_t completion;
     // An error clang reports again at its place, where the reports' walk keeps every one rather than a token's first: a
-    // musttail return's for each cleanup scope it leaves (#147).
+    // musttail return's for each cleanup scope it leaves, a braced static subobject's non-constant value after its
+    // conversion's (#147).
     bool repeated;
 };
 
@@ -1695,7 +1696,10 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     const uint32_t node = report->node;
     const uint32_t token = report->token;
     const CheckOp op = node < stream->count ? graph->ops[node] : CHECK_OP_COUNT;
-    const bool returning = op == CHECK_OP_CONVERT && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_RETURN;
+    // (A value returned from a void function is clang's "void function 'g' should not return a value", which the semantic
+    // message gives.)
+    const bool returning = op == CHECK_OP_CONVERT && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_RETURN &&
+                           check_action_kind(types, graph->types[node]) != BUSTER_TYPE_KIND_VOID;
     const uint32_t argument_index = op == CHECK_OP_CALL ? stream->diagnostic_operands[node] : 0;
     const bool passing = op == CHECK_OP_CALL && argument_index != 0 && graph->argument_counts != NULL && argument_index <= graph->argument_counts[node];
     const bool applies = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE &&
@@ -4984,8 +4988,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 check_input_bit(input.declaration_bits, earlier.failed_declaration, BUSTER_CHECK_BITS_STATIC) != 0 &&
                                 check_init_value_nonconstant(&stream, &types, earlier.failed_type, earlier.failed_source - 1))
                             {
+                                // (Repeated: at the conversion's own place, which the reports' walk would keep alone.)
                                 additional[additional_count++] = (CheckDriverDiagnostic){ place, check_driver_initializer_message(CHECK_INIT_NON_CONSTANT), place,
-                                                                                          earlier.completion };
+                                                                                          earlier.completion, true };
                             }
                         }
                         if (diagnosed)
