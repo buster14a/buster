@@ -3357,6 +3357,8 @@ struct CheckDriverLibraries
     uint32_t argument_count;
 };
 
+#include "c_driver_named_libraries.c"
+
 // Says why the -l libraries didn't import (runtime_libraries_import's error).
 static void check_driver_libraries_failed(const RuntimeLibraries* libraries, RuntimeError error)
 {
@@ -5324,9 +5326,6 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             libraries.linker.missing = true;
         }
     }
-    // A source link with named libraries needs the foreign resolver's archive selection and argv-ordered -l state,
-    // just as a positional archive does (#1470). Compile-only and no-library C commands keep their existing paths.
-    mixed_inputs |= link && libraries.count != 0;
     const bool linker_valid = linker_ready && linker_options_finish(&libraries.linker, &arena);
     const bool runtime_path_refused = link && linker_valid && libraries.linker.runpath.pointer != NULL && runtime_kind != RUNTIME_KIND_DYNAMIC;
     // Code generation's options, which the driver reports before a usage error: the first one it doesn't implement, else
@@ -5362,12 +5361,19 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         }
     }
     parsed = parsed && dependency_check_destinations(&options.dependencies, inputs, input_count, output, emit_object, link, &arena);
-    if (parsed && stdin_count != 0)
+    // Resolve the remaining request refusals before the archive probe or any source stream is opened: PIC/PIE,
+    // instrumentation, ABI layouts and the language/target. The Tier 1 combination check has no source dependency.
+    const CheckRequestRefusal refusal = parsed ? check_request_refusal(&request, &options, emit_object || link) : codegen;
+    const bool invalid_tier1 = !lanes->tier1 && (lanes->tier1_strict || tier1_report || lanes->tier1_refusals != NULL || lanes->tier1_no_rematerialize ||
+                                               tier1_gvn || lanes->tier1_no_lifetimes || lanes->tier1_no_inline);
+    const bool libraries_ready = !parsed || refusal.error != CHECK_REQUEST_ACCEPTED || !link || mixed_inputs || libraries.count == 0 ||
+                                 worker_budget.dry_run || invalid_tier1 || check_driver_named_archives(&libraries, runtime_kind, &arena, &mixed_inputs);
+    if (parsed && libraries_ready && stdin_count != 0)
     {
         parsed = driver_read_stdin(&arena, &options.stdin_source);
         options.stdin_ready = parsed;
     }
-    if (parsed)
+    if (parsed && libraries_ready)
     {
         char** sources = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, (uint64_t)input_count + 1);
         uint32_t source_inputs = 0;
@@ -5383,11 +5389,6 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         }
         parsed = parsed && driver_cache_streams(&arena, sources, source_inputs, &options);
     }
-    // The rest of what the request asks for that the driver doesn't implement, refused before any unit or output is
-    // opened: position-independent code when it emits code (the parser already resolves the last PIC/PIE option; Tier 0
-    // can't yet emit shared-library-safe symbol and TLS accesses, #811; non-emitting actions keep PIC), the ABI layouts
-    // the checker doesn't implement, never emitted silently, and a language or target it doesn't take.
-    const CheckRequestRefusal refusal = parsed ? check_request_refusal(&request, &options, emit_object || link) : codegen;
     options.semantic_pragmas = true;
     options.timing = time_stages;
     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
@@ -5486,8 +5487,14 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         check_request_describe(stderr, &refusal);
         fprintf(stderr, "\n");
     }
-    else if ((lanes->tier1_strict || tier1_report || lanes->tier1_refusals != NULL || lanes->tier1_no_rematerialize || tier1_gvn || lanes->tier1_no_lifetimes || lanes->tier1_no_inline) &&
-             !lanes->tier1)
+    else if (!libraries_ready)
+    {
+        if (arena_failure.bytes != 0)
+        {
+            arena_report_failure(stderr, "named-library arguments", (uint64_t)(count + 1) * sizeof(String8));
+        }
+    }
+    else if (invalid_tier1)
     {
         fprintf(stderr, "error: %s needs --tier1\n", lanes->tier1_strict ? "--tier1-strict" : tier1_report ? "--tier1-report" : lanes->tier1_refusals != NULL ? "--tier1-refusals" :
                                                     lanes->tier1_no_rematerialize ? "--tier1-no-rematerialize" : tier1_gvn ? "--tier1-gvn" :
@@ -5601,3 +5608,4 @@ static int run_check_command(int count, char** arguments, bool executable)
 {
     return run_check_command_mode(count, arguments, executable, true);
 }
+

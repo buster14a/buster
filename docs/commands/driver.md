@@ -187,13 +187,15 @@ suffix for following inputs only; `-x none` restores suffix inference. Joined
 A non-regular C or preprocessed-assembly source (`/dev/null`, a FIFO, `/dev/fd/N`)
 is read to EOF once, like stdin. Include probes still refuse those files.
 
-C-only links without named libraries retain the existing direct path. Source
-links with `-lNAME` or `-l:FILE` use the mixed/foreign path even when every
-positional input is C (#1470), so named archives get the same lazy member
-selection and input ordering as positional archives. Both the shared-library
-search and static runtime's archive search retain their existing flags and
-`-L` directories; no new runtime or writer mode is introduced. `-c` and
-syntax checking do not resolve named libraries.
+C-only links retain the existing direct path, including its shared-library
+version validation and runtime snapshot. When a `-lNAME` or `-l:FILE` request
+selects a populated archive, the source command uses the mixed/foreign path
+(#1470), so that archive gets the same lazy member selection and input ordering
+as a positional archive. Empty archives retain the direct path. The selection
+keeps `-L` directory order and static runtime mode; named DSOs on an archive
+link keep their named-search identity and as-needed state. Exact `-l:FILE`
+DSO-only links retain the direct importer's existing refusal. No new runtime or
+writer mode is introduced. `-c` and syntax checking do not resolve libraries.
 
 Mixed commands compile C and assembly on the unit scheduler's lanes, retain
 their ELF objects in memory, and use the built-in foreign resolver and writer
@@ -225,3 +227,4 @@ The last command runs the focused original argv-level fixtures, also included
 in `test-checker-driver`: own/Clang objects, object-only links, lazy archives,
 shared libraries, runtime modes, scalar/multiple lanes and worker caps, parallel
 `.S`, positional languages, stdin, compile-only output and failure preservation.
+
