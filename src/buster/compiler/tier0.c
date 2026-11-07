@@ -638,6 +638,11 @@ struct Tier0Function
     // with iretq. It keeps no temporary below rsp, where a nested interrupt's frame would land: its red zone's
     // temporaries are its frame's (Tier0Frame.temporaries). Its result is void, and it takes no variadic arguments.
     uint8_t interrupt;
+    // Whether the prologue realigns the stack to 16 bytes at least (#1447, x86's force_align_arg_pointer, LLVM's
+    // stackrealign), as a frame whose objects need more does (tier0_frame_alignment): its caller, an interrupt handler or
+    // code of another ABI, may leave rsp misaligned. Its objects are then aligned whatever rsp was; its incoming stack
+    // arguments stay where the caller put them, read through rbp.
+    bool realign_stack;
 };
 
 #define BUSTER_TIER0_INTERRUPT_HANDLER 1
@@ -4562,7 +4567,8 @@ static bool tier0_object_parameters(const Tier0Function* function)
 }
 
 // The log2 of the alignment a function's frame needs past 16 bytes, to which the prologue realigns it
-// (Tier0Frame.alignment_log2), or 0 for none: the most its objects need and the most its calls' outgoing areas need
+// (Tier0Frame.alignment_log2), or 0 for none (16 bytes' for a force_align_arg_pointer function's, Tier0Function.realign_stack,
+// which the frame realigns whatever it needs): the most its objects need and the most its calls' outgoing areas need
 // (AbiCall.stack_alignment_log2, which an argument aligned past 16 raises). An aggregate parameter that keeps its
 // incoming bytes rather than living in the frame (tier0_parameter_in_place) is aligned to 16 at most, so that every
 // object may count. Out of line, once per function, before selection, whose integer depths it decides; the vector
@@ -4582,7 +4588,7 @@ static __attribute__((noinline)) uint32_t tier0_frame_alignment(const Tier0Funct
         const uint32_t alignment = function->calls[c].stack_alignment_log2;
         log2 = alignment > log2 ? alignment : log2;
     }
-    return log2 > BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 ? log2 : 0;
+    return log2 > BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 ? log2 : function->realign_stack ? BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 : 0;
 }
 
 // tier0_frame_alignment for the vector path: the objects' alignments 16 locals at a time (their bytes loaded under the
@@ -4609,7 +4615,7 @@ static __attribute__((noinline)) uint32_t tier0_frame_alignment_vector(const Tie
         most = _mm512_max_epu32(most, _mm512_and_si512(calls, _mm512_set1_epi32(0xff)));
     }
     const uint32_t log2 = _mm512_reduce_max_epu32(most);
-    return log2 > BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 ? log2 : 0;
+    return log2 > BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 ? log2 : function->realign_stack ? BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 : 0;
 }
 
 // Phase 3: each local's home, and the frame. A parameter whose register the body doesn't touch stays in it. The other

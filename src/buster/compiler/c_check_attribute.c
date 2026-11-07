@@ -128,6 +128,10 @@ typedef enum CheckInputAttributeKind
     // x86's interrupt (#147): an interrupt service routine, clang's handleAnyX86InterruptAttr's checks
     // (check_input_interrupt_handler), with its implicit used; its arguments are expressions it never counts.
     CHECK_ATTRIBUTE_INTERRUPT,
+    // x86's force_align_arg_pointer (#1447): a function whose prologue realigns the stack, which an interrupt handler or an
+    // old caller may leave misaligned (Tier0Function.realign_stack); clang's handler ignores it, without a word, on a
+    // function pointer or a typedef of a function's type or of a pointer to one.
+    CHECK_ATTRIBUTE_FORCE_ALIGN_ARG_POINTER,
 } CheckInputAttributeKind;
 
 typedef enum CheckInputAttributeError
@@ -491,6 +495,7 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "naked", CHECK_ATTRIBUTE_NAKED, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     // x86's, whose arguments clang's parser reads as expressions and its handler ignores, whatever their count.
     { "interrupt", CHECK_ATTRIBUTE_INTERRUPT, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 255 },
+    { "force_align_arg_pointer", CHECK_ATTRIBUTE_FORCE_ALIGN_ARG_POINTER, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "no_stack_protector", CHECK_ATTRIBUTE_NO_STACK_PROTECTOR, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "fallthrough", CHECK_ATTRIBUTE_FALLTHROUGH, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     // clang's, on a return statement alone (check_input_statement_attributes, c_check_musttail.c): GNU's spelling and
@@ -2216,10 +2221,13 @@ struct CheckInputSubjectRow
 // The subjects of attributes that clang's handlers check themselves, rather than its generated diagAppertainsToDecl,
 // as rows, in byte order (check_input_subject_row): GCC's, GNU's spelling and gnu::'s, x86's interrupt's (#147, a
 // target's attribute of no generated row: handleAnyX86InterruptAttr's, a function's or a function pointer's with a
-// prototype), handleSentinelAttr's and handleTransparentUnionAttr's; and clang's own, GNU's spelling and clang::'s,
+// prototype), x86's force_align_arg_pointer's (#1447, handleForceAlignArgPointerAttr's, a function's, which ignores a
+// function pointer or a typedef of a function without a word: check_input_attribute_subjects), handleSentinelAttr's
+// and handleTransparentUnionAttr's; and clang's own, GNU's spelling and clang::'s,
 // handleWeakImportAttr's (#147), whose definitions it ignores with its own warning (check_input_attribute_subjects).
 static const CheckInputSubjectRow check_input_subject_handlers[] =
 {
+    { "force_align_arg_pointer", 23, BUSTER_CHECK_SUBJECT_FUNCTION, false, "functions" },
     { "interrupt", 9, BUSTER_CHECK_SUBJECT_PROTOTYPED, false, "non-K&R-style functions" },
     { "sentinel", 8, BUSTER_CHECK_SUBJECT_FUNCTION | BUSTER_CHECK_SUBJECT_FUNCTION_POINTER_VARIABLE, false, "functions, methods and blocks" },
     { "transparent_union", 17, BUSTER_CHECK_SUBJECT_UNION | BUSTER_CHECK_SUBJECT_UNION_TYPEDEF, false, "unions" },
@@ -6675,7 +6683,17 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         const uint32_t counted = attribute->kind == CHECK_ATTRIBUTE_COUNTED_BY && attribute->argument_first + 1 == attribute->argument_end &&
                                          parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_IDENTIFIER ? attribute->argument_first : BUSTER_CHECK_NONE;
         const bool undeclared = counted != BUSTER_CHECK_NONE && c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[counted]) == 0;
-        if (row != NULL && (row->subjects & subjects) == 0 && row->error && undeclared)
+        // force_align_arg_pointer's handler ignores a function pointer (a variable's, a parameter's or a member's) or a
+        // typedef of a function's type or a pointer to one, without a word (#1447).
+        const bool quiet = attribute->kind == CHECK_ATTRIBUTE_FORCE_ALIGN_ARG_POINTER && (subjects & BUSTER_CHECK_SUBJECT_FUNCTION) == 0 &&
+                           ((subjects & BUSTER_CHECK_SUBJECT_FUNCTION_POINTER) != 0 ||
+                            (subjects & (BUSTER_CHECK_SUBJECT_TYPEDEF | BUSTER_CHECK_SUBJECT_FUNCTION_LIKE)) == (BUSTER_CHECK_SUBJECT_TYPEDEF | BUSTER_CHECK_SUBJECT_FUNCTION_LIKE));
+        if (quiet)
+        {
+            attribute->ignored = true;
+            attribute->subject_ignored = true;
+        }
+        else if (row != NULL && (row->subjects & subjects) == 0 && row->error && undeclared)
         {
             check_input_report(reader, counted, CHECK_INPUT_UNDECLARED);
             valid = false;
