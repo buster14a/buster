@@ -368,6 +368,96 @@ static void cc_compat_cleanup(CCCompatibilityTest* test)
     }
 }
 
+// A FIFO has no size. The writer blocks in open until the compiler opens it, then the compiler reads until the
+// writer closes. The alarm keeps a compiler that never opens the FIFO from leaving the writer waiting.
+static void cc_compat_fifo_source(CCCompatibilityTest* test)
+{
+    char fifo[PATH_MAX];
+    snprintf(fifo, sizeof(fifo), "%s/stream.c", test->directory);
+    const bool made = mkfifo(fifo, 0600) == 0;
+    fflush(NULL);
+    const pid_t writer = made ? fork() : -1;
+    if (writer == 0)
+    {
+        alarm(15);
+        const int fd = open(fifo, O_WRONLY);
+        const char text[] = "int stream_value;\n";
+        const bool wrote = fd >= 0 && write(fd, text, sizeof(text) - 1) == (ssize_t)(sizeof(text) - 1);
+        if (fd >= 0)
+        {
+            close(fd);
+        }
+        _exit(wrote ? 0 : 1);
+    }
+    const char* const args[] = { "-fsyntax-only", "stream.c", NULL };
+    CCCompatibilityRun run = writer > 0 ? cc_compat_run(test, test->compiler, NULL, args) : (CCCompatibilityRun){ .status = -1 };
+    int waited_status = 0;
+    pid_t waited = -1;
+    do
+    {
+        waited = writer > 0 ? waitpid(writer, &waited_status, 0) : -1;
+    }
+    while (waited < 0 && writer > 0 && errno == EINTR);
+    const bool writer_ok = waited == writer && WIFEXITED(waited_status) && WEXITSTATUS(waited_status) == 0;
+    cc_compat_expect(test, made && writer > 0 && writer_ok && run.status == 0, "FIFO source is read until EOF");
+    if (!(made && writer_ok && run.status == 0))
+    {
+        fprintf(stderr, "  fifo diagnostics: %s\n", run.errors != NULL ? run.errors : "(missing)");
+    }
+    cc_compat_release(&run);
+    unlink(fifo);
+}
+
+// /dev/fd/N is the process's own pipe. The write end is closed before the compiler runs, so read() reaches EOF.
+static void cc_compat_pipe_source(CCCompatibilityTest* test)
+{
+    int ends[2] = { -1, -1 };
+    const bool opened = pipe(ends) == 0;
+    fflush(NULL);
+    const pid_t writer = opened ? fork() : -1;
+    if (writer == 0)
+    {
+        if (ends[0] >= 0)
+        {
+            close(ends[0]);
+        }
+        const char text[] = "int pipe_value;\n";
+        const bool wrote = ends[1] >= 0 && write(ends[1], text, sizeof(text) - 1) == (ssize_t)(sizeof(text) - 1);
+        if (ends[1] >= 0)
+        {
+            close(ends[1]);
+        }
+        _exit(wrote ? 0 : 1);
+    }
+    if (ends[1] >= 0)
+    {
+        close(ends[1]);
+        ends[1] = -1;
+    }
+    char spec[64];
+    snprintf(spec, sizeof(spec), "/dev/fd/%d", ends[0]);
+    const char* const args[] = { "-fsyntax-only", "-x", "c", spec, NULL };
+    CCCompatibilityRun run = opened && writer > 0 ? cc_compat_run(test, test->compiler, NULL, args) : (CCCompatibilityRun){ .status = -1 };
+    int waited_status = 0;
+    pid_t waited = -1;
+    do
+    {
+        waited = writer > 0 ? waitpid(writer, &waited_status, 0) : -1;
+    }
+    while (waited < 0 && writer > 0 && errno == EINTR);
+    const bool writer_ok = waited == writer && WIFEXITED(waited_status) && WEXITSTATUS(waited_status) == 0;
+    cc_compat_expect(test, opened && writer_ok && run.status == 0, "/dev/fd pipe source is read until EOF");
+    if (!(opened && writer_ok && run.status == 0))
+    {
+        fprintf(stderr, "  pipe diagnostics: %s\n", run.errors != NULL ? run.errors : "(missing)");
+    }
+    cc_compat_release(&run);
+    if (ends[0] >= 0)
+    {
+        close(ends[0]);
+    }
+}
+
 static int driver_compatibility_tests(const char* compiler, const char* clang)
 {
     CCCompatibilityTest test = { .clang = clang != NULL ? clang : "clang" };
@@ -560,6 +650,89 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
         }
         cc_compat_expect(&test, archive_found, "runtime library probe resolves an existing archive");
         cc_compat_release(&gcc);
+        const char* const combined[] = { "-print-search-dirs", "-print-file-name=libgcc.a", NULL };
+        CCCompatibilityRun both = cc_compat_run(&test, test.compiler, NULL, combined);
+        CCCompatibilityRun file_only = cc_compat_run(&test, test.compiler, NULL, archive);
+        const bool file_line = file_only.status == 0 && file_only.output != NULL && file_only.output[0] == '/';
+        cc_compat_expect(&test, both.status == 0 && both.output != NULL && strstr(both.output, "libraries: =") != NULL && file_line &&
+                               strstr(both.output, file_only.output) != NULL, "search dirs keep an accompanying file lookup");
+        cc_compat_release(&both);
+        cc_compat_release(&file_only);
+        const char* const file_first[] = { "-print-file-name=libgcc.a", "-print-search-dirs", NULL };
+        CCCompatibilityRun first = cc_compat_run(&test, test.compiler, NULL, file_first);
+        CCCompatibilityRun file_again = cc_compat_run(&test, test.compiler, NULL, archive);
+        cc_compat_expect(&test, first.status == 0 && first.output != NULL && file_again.output != NULL && strstr(first.output, "programs: =") != NULL &&
+                               strstr(first.output, file_again.output) != NULL, "file lookup before search dirs is still printed");
+        cc_compat_release(&first);
+        cc_compat_release(&file_again);
+        const char* const empty_name[] = { "-print-file-name=", NULL };
+        CCCompatibilityRun empty_file = cc_compat_run(&test, test.compiler, NULL, empty_name);
+        cc_compat_expect(&test, empty_file.status == 0 && empty_file.output != NULL && strcmp(empty_file.output, "\n") == 0, "empty file lookup is not a directory");
+        cc_compat_release(&empty_file);
+        const bool stale = cc_compat_write(&test, "real.d", "stale\n");
+        char link_path[PATH_MAX];
+        snprintf(link_path, sizeof(link_path), "%s/dep.d", test.directory);
+        unlink(link_path);
+        const bool linked = symlink("real.d", link_path) == 0;
+        const char* const through[] = { "-MD", "-c", "a.c", "-MF", "dep.d", "-o", "out/same.o", NULL };
+        CCCompatibilityRun through_run = cc_compat_run(&test, test.compiler, NULL, through);
+        struct stat link_status;
+        char target[PATH_MAX];
+        const ssize_t target_length = readlink(link_path, target, sizeof(target) - 1);
+        if (target_length >= 0)
+        {
+            target[target_length] = 0;
+        }
+        char* updated = cc_compat_read(&test, "real.d");
+        const char* const plain[] = { "-MD", "-c", "a.c", "-MF", "plain.d", "-o", "out/same.o", NULL };
+        CCCompatibilityRun plain_run = cc_compat_run(&test, test.compiler, NULL, plain);
+        char* plain_rule = cc_compat_read(&test, "plain.d");
+        cc_compat_expect(&test, stale && linked && through_run.status == 0 && plain_run.status == 0 && lstat(link_path, &link_status) == 0 &&
+                               S_ISLNK(link_status.st_mode) && target_length > 0 && strcmp(target, "real.d") == 0 && updated != NULL &&
+                               plain_rule != NULL && strcmp(updated, "stale\n") != 0 && strcmp(updated, plain_rule) == 0,
+                         "a symlinked depfile is written through and left a symlink");
+        if (!(through_run.status == 0 && updated != NULL && plain_rule != NULL && strcmp(updated, plain_rule) == 0))
+        {
+            fprintf(stderr, "  symlink depfile status %d, target: %s\n  updated: %s\n  plain: %s\n  diagnostics: %s\n", through_run.status,
+                    target_length > 0 ? target : "(none)", updated != NULL ? updated : "(missing)", plain_rule != NULL ? plain_rule : "(missing)",
+                    through_run.errors != NULL ? through_run.errors : "(missing)");
+        }
+        free(updated);
+        free(plain_rule);
+        cc_compat_release(&through_run);
+        cc_compat_release(&plain_run);
+        const char* const null_source[] = { "-dM", "-E", "-x", "c", "/dev/null", NULL };
+        CCCompatibilityRun null_predefines = cc_compat_run(&test, test.compiler, NULL, null_source);
+        cc_compat_expect(&test, null_predefines.status == 0 && null_predefines.output != NULL && strstr(null_predefines.output, "#define") != NULL,
+                         "/dev/null is an empty translation unit");
+        if (null_predefines.status != 0)
+        {
+            fprintf(stderr, "  /dev/null diagnostics: %s\n", null_predefines.errors != NULL ? null_predefines.errors : "(missing)");
+        }
+        cc_compat_release(&null_predefines);
+        const char* const null_object[] = { "-c", "-x", "c", "/dev/null", "-o", "null.o", NULL };
+        CCCompatibilityRun null_compile = cc_compat_run(&test, test.compiler, NULL, null_object);
+        char null_object_path[PATH_MAX];
+        struct stat null_object_status;
+        snprintf(null_object_path, sizeof(null_object_path), "%s/null.o", test.directory);
+        cc_compat_expect(&test, null_compile.status == 0 && stat(null_object_path, &null_object_status) == 0 && S_ISREG(null_object_status.st_mode) &&
+                               null_object_status.st_size > 0, "/dev/null compiles to an object");
+        if (null_compile.status != 0)
+        {
+            fprintf(stderr, "  /dev/null -c diagnostics: %s\n", null_compile.errors != NULL ? null_compile.errors : "(missing)");
+        }
+        cc_compat_release(&null_compile);
+        const char* const dev_stdin[] = { "-dM", "-E", "-x", "c", "/dev/stdin", NULL };
+        CCCompatibilityRun stdin_device = cc_compat_run(&test, test.compiler, NULL, dev_stdin);
+        cc_compat_expect(&test, stdin_device.status == 0 && stdin_device.output != NULL && strstr(stdin_device.output, "#define") != NULL,
+                         "/dev/stdin is read to EOF");
+        if (stdin_device.status != 0)
+        {
+            fprintf(stderr, "  /dev/stdin diagnostics: %s\n", stdin_device.errors != NULL ? stdin_device.errors : "(missing)");
+        }
+        cc_compat_release(&stdin_device);
+        cc_compat_fifo_source(&test);
+        cc_compat_pipe_source(&test);
         const char* modes[] = { "-pie", "-static", "-static-pie" };
         for (uint32_t m = 0; m < 3; m += 1)
         {
@@ -662,10 +835,10 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
         CCCompatibilityRun linux_c_run = cc_compat_run(&test, test.compiler, NULL, linux_c);
         cc_compat_expect(&test, linux_source && linux_c_run.status != 0, "a .c file still expands linux");
         cc_compat_release(&linux_c_run);
-        const bool plain = cc_compat_write(&test, "plain.c", "#define M(x) ((x)+1)\nint v = M(2);\n");
+        const bool plain_source = cc_compat_write(&test, "plain.c", "#define M(x) ((x)+1)\nint v = M(2);\n");
         const char* const fpre[] = { "-E", "-fpreprocessed", "plain.c", NULL };
         CCCompatibilityRun fpre_run = cc_compat_run(&test, test.compiler, NULL, fpre);
-        cc_compat_expect(&test, plain && fpre_run.status != 0 && fpre_run.errors != NULL && strstr(fpre_run.errors, "-fpreprocessed") != NULL, "-E rejects -fpreprocessed");
+        cc_compat_expect(&test, plain_source && fpre_run.status != 0 && fpre_run.errors != NULL && strstr(fpre_run.errors, "-fpreprocessed") != NULL, "-E rejects -fpreprocessed");
         cc_compat_release(&fpre_run);
         const bool injected = cc_compat_write(&test, "inject.c", "int injected(void) { return 0; }\n");
         const char define_newline[] = "FOO=1\n#error injected";
@@ -717,7 +890,7 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
         // -fpreprocessed is refused as an option, not as an operand of a value option or an input after -- (#1552's review).
         const char* const operand_args[] = { "-E", "-MT", "-fpreprocessed", "plain.c", NULL };
         CCCompatibilityRun operand_run = cc_compat_run(&test, test.compiler, NULL, operand_args);
-        cc_compat_expect(&test, plain && operand_run.status == 0, "-MT's operand -fpreprocessed is not an option");
+        cc_compat_expect(&test, plain_source && operand_run.status == 0, "-MT's operand -fpreprocessed is not an option");
         if (operand_run.status != 0)
         {
             fprintf(stderr, "  -MT operand diagnostics: %s\n", operand_run.errors != NULL ? operand_run.errors : "(missing)");

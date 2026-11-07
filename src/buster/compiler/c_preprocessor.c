@@ -253,6 +253,14 @@ typedef enum PPRawStrings
     PP_RAW_STRINGS_OFF,
 } PPRawStrings;
 
+// One non-regular primary input, read to EOF before any unit or replay opens it. `path` borrows the command's argv.
+typedef struct PPStreamInput PPStreamInput;
+struct PPStreamInput
+{
+    const char* path;
+    String8 bytes;
+};
+
 typedef struct PPOptions PPOptions;
 struct PPOptions
 {
@@ -260,6 +268,9 @@ struct PPOptions
     // Frozen command-owned stdin bytes, shared read-only by a unit and its diagnostic replay.
     String8 stdin_source;
     bool stdin_ready;
+    // Named non-regular inputs, read once the same way. A replay and a second pass see these bytes, not the stream.
+    PPStreamInput* streams;
+    uint32_t stream_count;
     bool explicit_language;
     // A .i input is already preprocessed. Tokens copied to the output are not expanded again; directives still run.
     bool preprocessed;
@@ -4158,6 +4169,7 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
     // Without blocking: opening a FIFO waits for a writer otherwise, also for the walk's speculative probes of includes
     // no unit reaches. A FIFO, a device or a directory then isn't a regular file, and is none. O_NONBLOCK changes
     // nothing for a regular file, and O_NOCTTY keeps a terminal from becoming the process's controlling one.
+    // A primary source is not one of those probes: pp_run_input reads a non-regular input to EOF, as `-` does.
     const int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
     int error = fd >= 0 ? 0 : errno;
     counts->opens += 1;
@@ -17101,8 +17113,8 @@ static const PPFeature pp_features_constexpr_builtin[] = {
 };
 
 // Implemented source capabilities, independent of the frozen Clang oracle. Attribute acceptance alone is not
-// implementation: diagnostic-only attributes and unpublished linkage obligations remain zero. These
-// entries have declaration/type, control, symbol or executable lowering consumers. C23 date codes describe the
+// implementation: attributes without an implemented consumer and unpublished linkage obligations remain zero. These
+// entries have declaration/type, diagnostic, control, symbol or executable lowering consumers. C23 date codes describe the
 // standardized attribute, not the language mode (the spelling is also accepted as an extension in earlier modes).
 // Feature dates are language-mode gates; __has_extension asks about the same implemented syntax in older modes.
 // Sorted for binary search. __has_warning remains the diagnostic vocabulary, not a promise to emit each warning.
@@ -17143,6 +17155,7 @@ static const PPFeature pp_implemented_c_attribute[] = {
     { "clang::overloadable", 1 },
     { "clang::sized_by", 1 },
     { "clang::sized_by_or_null", 1 },
+    { "deprecated", 201904 },
     { "fallthrough", 201910 },
     { "gnu::alias", 1 },
     { "gnu::aligned", 1 },
@@ -17166,6 +17179,7 @@ static const PPFeature pp_implemented_c_attribute[] = {
     { "gnu::visibility", 1 },
     { "gnu::weak", 1 },
     { "gnu::weakref", 1 },
+    { "maybe_unused", 202106 },
 };
 static const PPFeature pp_implemented_feature[] = {
     { "c_alignas", 1, 2011 },
@@ -19067,11 +19081,86 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_run_source(Preprocessor* pp, const char* name,
     return result && !pp->fatal;
 }
 
-// The driver has read stdin once before starting unit lanes. Its source bytes also outlive diagnostic replay.
+// The command's cached bytes for `path`, or null when this input is an ordinary file.
+static const PPStreamInput* pp_cached_stream(const Preprocessor* pp, const char* path)
+{
+    const PPStreamInput* result = NULL;
+    for (uint32_t i = 0; result == NULL && i < pp->options.stream_count; i += 1)
+    {
+        if (strcmp(pp->options.streams[i].path, path) == 0)
+        {
+            result = pp->options.streams + i;
+        }
+    }
+    return result;
+}
+
+// The driver has read stdin, and any non-regular primary input, once before starting unit lanes. Those bytes also
+// outlive diagnostic replay. A stream that no command cached is read here, into this unit's arena, which the replay
+// still holds. Include probes stay on the non-blocking file cache and are unchanged.
 BUSTER_PREPROCESSOR_ENTRY bool pp_run_input(Preprocessor* pp, const char* path)
 {
+    bool result = false;
     const bool input_stdin = strcmp(path, "-") == 0;
-    return input_stdin ? pp->options.stdin_ready && pp_run_source(pp, "<stdin>", (const uint8_t*)pp->options.stdin_source.pointer, (uint32_t)pp->options.stdin_source.length) : pp_run(pp, path);
+    const PPStreamInput* cached = input_stdin ? NULL : pp_cached_stream(pp, path);
+    if (input_stdin)
+    {
+        result = pp->options.stdin_ready && pp_run_source(pp, "<stdin>", (const uint8_t*)pp->options.stdin_source.pointer, (uint32_t)pp->options.stdin_source.length);
+    }
+    else if (cached != NULL)
+    {
+        result = cached->bytes.length <= UINT32_MAX &&
+                 pp_run_source(pp, path, (const uint8_t*)cached->bytes.pointer, (uint32_t)cached->bytes.length);
+    }
+    else
+    {
+        String8 bytes = { 0 };
+        const int kind = driver_read_nonregular(&pp->arena, path, &bytes);
+        if (kind > 0)
+        {
+            result = bytes.length <= UINT32_MAX && pp_run_source(pp, path, (const uint8_t*)bytes.pointer, (uint32_t)bytes.length);
+        }
+        else if (kind == 0)
+        {
+            result = pp_run(pp, path);
+        }
+    }
+    return result;
+}
+
+// Reads each non-regular input once into `arena` and records it on `options`. `-` is stdin and is left to
+// driver_read_stdin. A regular file, a directory, and a missing path are left for the file cache. A failed stream
+// read fails the command; driver_read_nonregular has already said why.
+static bool driver_cache_streams(Arena* arena, char** inputs, uint32_t count, PPOptions* options)
+{
+    bool result = true;
+    options->streams = NULL;
+    options->stream_count = 0;
+    if (count != 0)
+    {
+        options->streams = BUSTER_ARENA_PUSH_ARRAY(arena, PPStreamInput, count);
+        result = options->streams != NULL;
+    }
+    for (uint32_t i = 0; result && i < count; i += 1)
+    {
+        bool seen = strcmp(inputs[i], "-") == 0;
+        for (uint32_t earlier = 0; !seen && earlier < options->stream_count; earlier += 1)
+        {
+            seen = strcmp(options->streams[earlier].path, inputs[i]) == 0;
+        }
+        String8 bytes = { 0 };
+        const int kind = seen ? 0 : driver_read_nonregular(arena, inputs[i], &bytes);
+        result = kind >= 0;
+        if (result && kind > 0)
+        {
+            options->streams[options->stream_count] = (PPStreamInput){
+                .path = inputs[i],
+                .bytes = bytes,
+            };
+            options->stream_count += 1;
+        }
+    }
+    return result;
 }
 
 // Build only, never publish, a unit's dependency output before releasing its source/cache. Remove the main source
@@ -21903,6 +21992,7 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
         parsed = driver_read_stdin(&arena, &options.stdin_source);
         options.stdin_ready = parsed;
     }
+    parsed = parsed && driver_cache_streams(&arena, inputs, input_count, &options);
     if (arena.base == NULL || (!parsed && arena_failure.bytes != 0))
     {
         arena_report_failure(stderr, "preprocessing", BUSTER_PP_ARENA_BYTES);

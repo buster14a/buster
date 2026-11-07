@@ -47,7 +47,12 @@ requirements. [Command index](README.md).
   (`x86_match.c`) takes value immediates by `x86_immediate_encodes`: so
   `main.c` includes `x86_semantics.c` before it, and `x86_match_initialize`
   needs `x86_semantics_initialize` first (`x86_semantics_initialized`), which
-  `tier0_initialize` runs where it hasn't run.
+  `tier0_initialize` runs where it hasn't run. It rebuilds the tables
+  unconditionally, and a baked executable starts with them built
+  ([build](build.md)). So every compile route (the C driver's, its mixed
+  inputs' and `assemble`) tests `x86_semantics_initialized` before calling it
+  (#1571). The bake, `test-baked-tables` and the tests that check the build
+  call it directly.
   `x86_semantics_test.c` holds its tests (`main.c` includes it after the
   assembler's, taking the encoder tests' printer and branch sizing tests'
   runner; `./build/compiler test-x86-semantics` runs them) and
