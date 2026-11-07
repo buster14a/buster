@@ -20,6 +20,64 @@ struct CheckDriverDefaultWarningFixture
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        .name = "two relational operands of each bitwise operator",
+        .source = "int f(int a,int b,int c,int d){return (a<b & c<d)+(a>b | c>d)+(a<=b ^ c>=d);}\n",
+    },
+    {
+        .name = "two equality operands of each bitwise operator",
+        .source = "int f(int a,int b,int c,int d){return (a==b & c!=d)+(a!=b | c==d)+(a==b ^ c!=d);}\n",
+    },
+    {
+        .name = "mixed equality and relational operands",
+        .source = "int f(int a,int b,int c,int d){return (a==b & c<d)+(a>=b | c!=d)+(a!=b ^ c<=d);}\n",
+    },
+    {
+        .name = "eager chains of three comparisons",
+        .source = "int f(int a,int b,int c,int d,int e,int g){return (a<b ^ c<d ^ e<g)+(a==b & c==d & e==g)+(a!=b | c!=d | e!=g);}\n",
+    },
+    {
+        .name = "mixed eager bitwise chains",
+        .source = "int f(int a,int b,int c,int d,int e,int g){return (a<b & c<d ^ e<g)+(a==b ^ c==d | e==g);}\n",
+    },
+    {
+        .name = "bare bitwise operand suppresses comparison precedence",
+        .source = "int f(int a,int b,int c,int d){return (a&b ^ c<d)+(a<b | c^d);}\n",
+    },
+    {
+        .name = "parenthesized comparisons are explicit",
+        .source = "int f(int a,int b,int c,int d){return ((a<b) & (c<d))+((a==b)^c)+(a|(b!=c));}\n",
+    },
+    {
+        .name = "relational left operand still warns once per operator",
+        .source = "int f(int a,int b,int c){return (a<b & c)+(a<=b | c)+(a>b ^ c);}\n",
+        .warnings = 3,
+        .notes = 6,
+    },
+    {
+        .name = "relational right operand still warns once per operator",
+        .source = "int f(int a,int b,int c){return (a & b>=c)+(a | b<c)+(a ^ b<=c);}\n",
+        .warnings = 3,
+        .notes = 6,
+    },
+    {
+        .name = "equality left operand still warns once per operator",
+        .source = "int f(int a,int b,int c){return (a==b & c)+(a!=b | c)+(a==b ^ c);}\n",
+        .warnings = 3,
+        .notes = 6,
+    },
+    {
+        .name = "equality right operand still warns once per operator",
+        .source = "int f(int a,int b,int c){return (a & b!=c)+(a | b==c)+(a ^ b!=c);}\n",
+        .warnings = 3,
+        .notes = 6,
+    },
+    {
+        .name = "parenthesized bitwise operand does not suppress warning",
+        .source = "int f(int a,int b,int c,int d){return ((a&b) ^ c<d)+(a<b | (c^d));}\n",
+        .warnings = 2,
+        .notes = 4,
+    },
+    {
         .name = "nondecimal literal conversion bit patterns and lossy controls",
         .source = "#define X 0xe2\n"
                   "signed char take(signed char x) { return x; }\n"
