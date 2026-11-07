@@ -104,6 +104,15 @@ pair's paths taking turns first. Any file or function that fails fails it. Run i
 under the 9700X's lock with `taskset -c 2`; the 9700X job runs it on the frozen
 `sqlite3.c` where the IR or its lowering changes.
 
+`./build/compiler test-ir-source --benchmark-self-test [preprocessor options]
+file...` prepares the actual source benchmark's corpus, including its twin
+lowerings, promotion, GVN and optimizer checks, then runs both measured lowering
+paths once. It opens no performance counters and reports no timings. Unlike
+benchmark commands, this correctness mode also runs on baseline host builds.
+Put `--benchmark-self-test` first. Shared correctness CI checks the classic bit
+builtins with `-march=x86-64` and `-march=znver5`, including functions that add
+and remove BMI, LZCNT and POPCNT through their target attributes (#1374).
+
 `./build/compiler benchmark-ir [--instructions N] [--passes N] [--only
 scalar|vector|uses|cfg] [--after-scalar MS]` measures the verifier and derived
 builders on small and large synthetic functions. `benchmark-ir-lowering

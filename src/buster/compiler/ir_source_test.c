@@ -551,7 +551,10 @@ static bool ir_source_exhausted(const char* file, char** options, uint32_t optio
     return refused;
 }
 
-static int run_ir_source_tests(int count, char** arguments)
+// Defined with the benchmark: its corpus admission and both measured lowering paths, without a timing report.
+static int run_ir_source_benchmark_tests(int count, char** arguments);
+
+static int ir_source_tests_command(int count, char** arguments)
 {
     const char* print = 0;
     bool simd = false;
@@ -737,4 +740,10 @@ static int run_ir_source_tests(int count, char** arguments)
     free(files);
     free(options);
     return passed ? 0 : 1;
+}
+
+static int run_ir_source_tests(int count, char** arguments)
+{
+    const bool benchmark = count > 0 && strcmp(arguments[0], "--benchmark-self-test") == 0;
+    return benchmark ? run_ir_source_benchmark_tests(count - 1, arguments + 1) : ir_source_tests_command(count, arguments);
 }

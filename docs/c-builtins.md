@@ -104,7 +104,11 @@ so the future typed stream can retain both.
 Both selectors must lower nonconstant calls, preserve effects, and respect the
 generated-code ISA. An AVX-512 host fold grants no ISA feature to emitted code;
 baseline x86-64 bit operations need baseline sequences where `lzcnt`, `tzcnt`,
-or `popcnt` are unavailable. Execution fixtures must cover both selectors.
+or `popcnt` are unavailable. Execution fixtures must cover both selectors. The
+source producer takes each of these instructions where the function's target has
+it, and `bsf`, `bsr` and `bswap` at every level (#1374,
+[the integration guide](c-builtins-integration.md)'s "The bit builtins'
+instructions").
 
 The normal `__has_builtin` mode consults the shared capability inventory in
 `c_builtin_catalog.c`; its integer entries currently advertise folding only.

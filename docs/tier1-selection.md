@@ -138,7 +138,12 @@ patterns are:
   `rm` and index or control in `vvvv`, the destination any register, an operand's too. Neither folds an operand. The
   emission's target allow-list refuses the instruction for a target without BMI2 (BMI1 for `bextr`), the lowering's
   own admission having refused its row there already; `test-tier1-select` runs each of both widths from both operand
-  orders into its own register and each operand's natively on both paths where the machine has them.
+  orders into its own register and each operand's natively on both paths where the machine has them. The bit
+  operations (#1374), `tzcnt`, `bsf`, `lzcnt`, `bsr` and `popcnt`, are `TIER1_RULE_INTRINSIC` too: their one
+  instruction of the width, the operand in `rm` and the destination in `reg`, any register, the operand's too; and
+  `bswap`, the operand moved into the destination where it isn't there, then swapped in place. The allow-list refuses
+  `tzcnt` without BMI, `lzcnt` without LZCNT and `popcnt` without POPCNT; `test-tier1-select` runs each of both widths
+  into its operand's register and into two others, natively on both paths.
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
   flags-aware form chooser, comparison/branch fusion, simple selects using
   `cmov`, unconditional branches, returns and `IR_UNREACHABLE` as `ud2`.
