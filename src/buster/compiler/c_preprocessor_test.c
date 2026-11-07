@@ -3787,6 +3787,16 @@ static bool pp_test_scalar_reference(const char* directory)
         };
         Preprocessor* pp = &runs[k];
         result = stream != 0 && intern_initialize(&tables[k]) && pp_initialize(pp, &options, &tables[k]);
+        if (result)
+        {
+            const bool vectorized = BUSTER_HOST_VECTOR && !options.scalar;
+            result = pp_prepare_options(&options).vectorized == vectorized && pp->vectorized == vectorized &&
+                     pp->cache->prepare.vectorized == vectorized;
+            if (!result)
+            {
+                printf("scalar reference: run %u: preparation does not follow host and scalar option\n", k);
+            }
+        }
         uint32_t files[BUSTER_ARRAY_LENGTH(sources)];
         if (result)
         {
