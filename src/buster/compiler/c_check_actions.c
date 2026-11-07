@@ -2348,13 +2348,29 @@ static inline __attribute__((always_inline)) void check_action_assignment(TypeTa
     }
 }
 
+// Whether clang's CheckIncrementDecrementOperand takes an operand of `type` (its _Atomic's value type) in C: a real
+// type (a complete enumeration's), a pointer or a complex type. Another, a vector's, a record's, an array's, a
+// function's or void, is "cannot increment value of type" (c_check_semantic_diagnostic.c), before the operand's
+// modifiability is tested.
+static bool check_action_steppable(const TypeTable* table, TypeId type)
+{
+    const TypeId value = type_conversion_operand(table, type);
+    const uint8_t kind = check_action_kind(table, value);
+    return kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_BIT_INT || kind == BUSTER_TYPE_KIND_POINTER ||
+           kind == BUSTER_TYPE_KIND_COMPLEX || (kind == BUSTER_TYPE_KIND_ENUM && type_is_complete(table, value));
+}
+
 static void check_action_update(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
     const CheckValue target = action->operands[0];
     const bool increment = action->op >= CHECK_OP_PRE_INCREMENT && action->op <= CHECK_OP_POST_DECREMENT;
     const bool postfix = action->op == CHECK_OP_POST_INCREMENT || action->op == CHECK_OP_POST_DECREMENT;
     const uint8_t kind = check_action_kind(table, type_conversion_operand(table, target.type));
-    if (check_action_modifiable(table, &target, action, result))
+    if (increment && !check_action_steppable(table, target.type))
+    {
+        check_action_diagnose(result, CHECK_DIAG_ARITHMETIC_REQUIRED, 0);
+    }
+    else if (check_action_modifiable(table, &target, action, result))
     {
         if (increment && kind == BUSTER_TYPE_KIND_COMPLEX)
         {

@@ -5469,9 +5469,9 @@ change, it refused such a declaration by name.
   (`SimpleTypoCorrection`); only that one is tried, so `alignd`'s closest,
   `align` (a declspec's), gives no suggestion. The lists are clang's
   `AttributeSpellingList.inc` (the end of `c_check_attribute_clang.inc`).
-- **`__clang__`.** Where a C23 attribute's scope goes (before `::`), or its
-  name after `[[` or a comma, the number the predefined `__clang__` expands to is
-  clang's `_Clang`, with its `-Wignored-attributes` warning "'__clang__' is a
+- **`__clang__`.** Where a C23 attribute's scope or name goes, right after
+  `[[` or after a comma in that list, the number the predefined `__clang__`
+  expands to is clang's `_Clang`, with its `-Wignored-attributes` warning "'__clang__' is a
   predefined macro name, not an attribute scope specifier; did you mean
   '_Clang' instead?" (clang's `TryParseCXX11AttributeIdentifier`). The parser
   makes such a number the identifier `_Clang` before it reads the unit
@@ -5482,6 +5482,8 @@ change, it refused such a declaration by name.
   error at the same token. A direct expansion's definition note is at line 2
   of `<built-in>`; wrapped and redefined macros keep their recorded expansion
   provenance.
+  In a GNU list, `__attribute__((__clang__::x))`, the number stays one, where
+  clang's list ends with "expected ')'" at it.
 - **Statements.** C23 attributes alone before a statement are the
   statement's where the next token starts no declaration, as clang's
   `isDeclarationStatement` decides (`[[x]] y += 1;`): the parser reads them so
@@ -6803,6 +6805,52 @@ arguments against the function. The checker now gives these as clang does.
   strings. `c_check_attribute_effects_driver_test.c` covers complete
   thread-safety expressions with their warning option, loader diagnostics and
   loader section bytes and flags, through the scalar and vector paths.
+
+## Operand errors (#147)
+
+- **Increments and decrements.** As clang's `CheckIncrementDecrementOperand`,
+  the operand's type is tested before its modifiability
+  (`check_action_steppable`). A real type (a complete enumeration's), a pointer
+  or a complex type is stepped. Any other is "cannot increment value of type
+  T" (or "decrement"), an array's and a const record's too; a vector's, a
+  record's and a function's are among them. T is the operand's type with its
+  qualifiers, an `_Atomic` one's value type, spelled with the typedef its
+  object was declared with (`check_semantic_operand_spelling`, through
+  dereferences, subscripts and members).
+- **Vector typedefs' a.k.a.** Clang's desugaring stops at a vector type's own
+  typedef: a typedef of `v4si` prints `'w4si' (aka 'v4si')`, and `v4si` itself
+  `'v4si' (vector of 4 'int' values)` (`check_driver_warning_type_at`).
+- **A failed initializer conversion.** A scalar initializer's INITIALIZE is at
+  its declarator, outside the initializer's tokens. When its conversion fails,
+  that error is the only one: the initializers' walk doesn't check that
+  initializer again (`check_initializers_diagnose_warnings`). A static
+  object's still gets clang's second, non-constant error at the initializer
+  after a conversion clang warns of and makes (`-Wint-conversion`'s and
+  `-Wincompatible-pointer-types`'), where the converted value is no constant:
+  an object's value read, or an address converted to an integer narrower
+  than a pointer (`check_init_converted_nonconstant`); an absolute address
+  (`(int *)5`) stays a constant.
+- **Differences left.**
+  - `++` and `--` of a complex type are refused ("arithmetic operands
+    required"), where clang takes them.
+  - Arithmetic on a pointer to an incomplete type is "incomplete type is not
+    permitted here", where clang's is "arithmetic on a pointer to an incomplete
+    type" with a "forward declaration" note.
+  - A vector type reached through a pointer typedef (`typedef v4si *pv;`)
+    prints without its typedef's name, and so does a member's type
+    (`x.f++` of a member `uu f` prints `'struct u'` where clang's is
+    `'uu' (aka 'struct u')`): a record's members keep no declaration.
+  - A braced scalar initializer's failed conversion (`static long x = { p };`)
+    is still "invalid initializer", with no non-constant error.
+  - `(*p)++` of a `void *p` lacks clang's `-Wvoid-ptr-dereference` warning
+    before its error, and `c++` of a const variable clang's "variable 'c'
+    declared const here" note.
+  - Conversion errors other than an initializer's pointer and integer ones are
+    "incompatible operand or conversion types": an assignment's, a return's, an
+    argument's, an integer converted to a pointer and a record or floating
+    value converted to a scalar it can't be. Clang's fix-it suffixes ("; dereference
+    with *", "; take the address with &", "; remove *", "; remove &") are
+    missing everywhere.
 
 ## Ignorable and unsupported pragmas
 
