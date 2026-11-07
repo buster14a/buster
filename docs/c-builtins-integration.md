@@ -195,6 +195,56 @@ level, clang's time. The kernel is 16 instructions by Tier 0 and 11 by Tier 1 at
 record](https://github.com/buster14a/buster-performance/tree/28689ea8be9e0bbbe4e6b91a0371ed36093510b6/docs/measurements/bit-builtins-1374-2026-11-07)
 has the commands, receipts and limitations.
 
+### Generic and C23 bit instructions (#1652)
+
+The generic bit builtins, `clzs`/`ctzs`, `clrsb*`, `bswapg`, and C23's
+`stdc_*` counts and rounding operations use the same primitive rows as the
+classic builtins. `check_lower_bits_operation` constructs each row from the
+function's own target; `check_lower_miscellaneous_bits` supplies the required
+32- and 64-bit row indices to `c_builtin_bits_lower.c`'s recipe. The optional
+`CBuiltinBitsRows` descriptor stores each index plus one, with zero retaining
+the recipe, and identifies counts whose instructions define the zero result.
+The recipe appends those indices through its existing transactional scalar
+and vector copies. The IR recognizes each row as the existing pure intrinsic.
+
+- `popcountg`, `stdc_count_ones`, `stdc_count_zeros` and `stdc_has_single_bit`
+  use POPCNT where enabled. Targets without it retain the SWAR population
+  count.
+- Leading counts use LZCNT where enabled. Values below the instruction's
+  width are zero-extended and their excess leading zeros subtracted. Baseline
+  BSR reads `x | 1`, then computes `width - 1 - index + (x == 0)`; no zero
+  reaches the undefined intrinsic, including when the other limb of a wide
+  value is nonzero.
+- Trailing counts use TZCNT where enabled and BSF otherwise. A narrow value
+  receives a sentinel bit just above its width, giving that width for zero.
+  A full-width baseline BSF receives the top bit and adds one for zero.
+- Defined zero counts remain the source width. `clzg`/`ctzg` then select their
+  supplied fallback, which is evaluated once even for a nonzero operand.
+  `clrsb*` counts the leading zeros after complementing a negative operand and
+  subtracts its sign bit. The first-one/first-zero and complemented counts
+  retain their existing corrections.
+- `stdc_bit_width`, `stdc_bit_floor` and `stdc_bit_ceil` use leading counts.
+  Their variable shifts are masked to a count below 64, and a separate range
+  test clears an absent or overflowing bit; the IR never receives an
+  out-of-range shift. Byte swaps use BSWAP, shifted down when the value is
+  narrower than its machine form.
+
+Operands of 65–128 bits still split into two limbs. Counts combine the two
+defined limb counts; population counts add them. Byte swaps reverse the two
+64-bit limbs, exchange them and remove the bits beyond the declared width.
+Argument evaluation, signed-result extension, rotations, carry chains and
+bit reversals retain their existing recipes.
+
+`test-checker --program-bits` checks generic/C23 instruction forms and results
+at `x86-64`, `x86-64-v2`, `x86-64-v3` and `znver5`, on both paths. Its boundary
+fixture includes bools, enums, bit-fields, widths around 32 and 64, 65/96/100/127
+and 128-bit operands, all-zero and one-zero limbs, and both extreme `int`
+fallbacks. The Tier 1 driver fixture compares both paths and rematerialization
+choices with Clang, including the wide forms. The existing IR-source fixture
+also exercises generic rows under per-function target feature overrides.
+These checks establish semantics and instruction selection; no additional
+throughput measurement is claimed here.
+
 ### The overflow builtins' instructions (#1385)
 
 `__builtin_add_overflow`, `sub_overflow` and `mul_overflow`, and clang's typed
@@ -827,7 +877,7 @@ the floating environment among the read/modify/writes; a math builtin's facts).
 
 | Family | Effects | Requirements | Direct form |
 | --- | --- | --- | --- |
-| `atomic-access` (`load_n`, `store_n`, C11's, an `_Atomic` object's) | reads or writes, atomic, orders, barrier | none | an aligned integer's, enumeration's or pointer's, of a constant order: the typed stream's marked `LOAD` or `SET` (and a seq_cst store's `FENCE`); an implicit `_Atomic` object's aligned load or store, and an update's first load, seq_cst's |
+| `atomic-access` (`load_n`, `store_n`, C11's, an `_Atomic` object's) | reads or writes, atomic, orders, barrier | none | an aligned integer's, enumeration's or pointer's, of a constant order: the typed stream's marked `LOAD` or `SET`; a seq_cst store emits memory `xchg`; an implicit `_Atomic` object's aligned load or store, and an update's first load, seq_cst's |
 | `atomic-rmw` (exchange, compare-exchange, fetch ops, test-and-set, clear, `__sync`) | reads and writes, atomic, orders, barrier; the IEEE maximum and minimum also the floating environment and exceptions | fixed registers | an aligned integer's or enumeration's exchange, or addition or subtraction returning the old or the new value (a pointer's exchange and a test-and-set's too), of a constant order: the typed stream's `ATOMIC_RMW` (`xchg` or `lock xadd`); an implicit `_Atomic` integer's increment, decrement, `+=` or `-=` |
 | `fence` (thread, signal, `__sync_synchronize`) | orders, barrier | none | a constant order: the typed stream's `FENCE` |
 | `terminal` (`trap`, `unreachable`) | terminates | none | none |
@@ -857,10 +907,12 @@ store's code, which keep `unmodeled`'s bounds) and checks each against its
 contract: no callee-saved register
 written but those its published frame restores, no object written or read, no
 fence or locked access, no floating environment read or exception raised, that
-its contract doesn't have (but where it is `UNMODELED`), no trap without a
+its contract doesn't have (but where it is `UNMODELED`, or the old-value read
+of a store's exact width-matched `xchg [rdi], rsi; ret` body), no trap without a
 return its contract doesn't allow, and each claim backed by its code but where
 the contract is `UNMODELED`, whose effects are bounds (a load reads its object
-and a store writes it and fences; a
+and a store writes it with a locked exchange whose old value dies in caller-saved
+`rsi`; a
 read/modify/write writes its object with a locked access; a thread fence fences
 and a signal fence only returns; a terminal builtin traps and doesn't return; a
 claim of the floating environment reads MXCSR or the x87's control word; errno
@@ -902,21 +954,28 @@ whose argument evaluates for no effect, as a direct fence's. The lowering
 (`check_lower_atomic_direct`) evaluates the pointer and, for a store, the value
 converted to the object's type, and writes the typed stream's `LOAD` or `SET` of
 that type's class with the atomic marker (`BUSTER_TYPED_ACCESS_ATOMIC` and the
-order), and after a seq_cst store the `FENCE` of seq_cst. An implicit `_Atomic`
+order). An implicit `_Atomic`
 object's load and store, and an update's first load, are direct too
 (`check_lower_atomic_direct_plan`): its plan's address and buffers stay, and its
-leaf's call becomes the marked access of its bits' class, of seq_cst. Tier 0
-compiles a marked access as any other (`mov`, `movzx`; atomic when naturally
-aligned on x86-64, whose total store order gives a load's and a release store's
-orders), the store's `FENCE` its `mfence`; the IR keeps it as an atomic access
+leaf's call becomes the marked access of its bits' class, of seq_cst. Loads and
+relaxed/release stores compile as ordinary accesses (`mov`, `movzx`; atomic when
+naturally aligned on x86-64, whose total store order gives their orders). A
+seq_cst store emits a width-matched memory `xchg` without `mfence` in both native
+tiers (#1396). The typed stream and IR keep its write-only store semantics, so
+an initializing store does not read undefined bytes. An implicit assignment
+continues to return its converted desired value, including float, bool and
+pointer values, from its unchanged desired buffer. Tier 0's value-returning
+`STORE` saves the desired result, and Tier 1 copies a live desired SSA value into
+reserved `r11`, before the exchange destroys its value register. The IR keeps
+the store as an atomic access
 ([the IR guide](ir.md)'s "Atomic accesses") that no pass splits, merges,
-eliminates or moves past another access, a call or a fence, and Tier 1 selects
-it as an ordinary access it never folds. clang's code is the same but for a
-seq_cst store, its `xchg` where this is `mov` and `mfence`, the helpers' and
-GCC's older mapping, equally a full barrier; which is cheaper on Zen 5 is for the
-9700X's measurements. A dynamic or invalid order (which the helper strengthens
+eliminates or moves past another access, a call or a fence. The memory exchange
+supplies the full barrier; standalone seq_cst fences still emit `mfence`. No
+performance measurement is claimed for this change. A dynamic or invalid order (which the helper strengthens
 to seq_cst), a scoped family's, a floating object's and an unaligned or wider
-one keep their helper or libatomic's call. The planner reserves no leaf for an
+one keep their helper or libatomic's call. Native store helpers likewise use
+`xchg` and continue to strengthen every order they receive to seq_cst; this does
+not strengthen the inline relaxed/release stores. The planner reserves no leaf for an
 implicit object's access or update (its update loop's compare-exchange is
 direct: "Direct compare-exchanges", below), and a width's load, store and
 exchange leaves only where a C11 or generic load, store or exchange of a native
@@ -1025,7 +1084,7 @@ planned where 144 were); SQLite 3.50.4 has none, and its object is unchanged.
 line of the totals over its units (`helpers`, with `units`, `refused`: units the
 lowering refused an operation by name, `direct`: the lowered code's direct
 forms, an atomic access's marked `LOAD`, `STORE` or `SET`, a read/modify/write's
-`ATOMIC_RMW` or `ATOMIC_CAS`, a fence's `FENCE` (but a seq_cst store's own) and an
+`ATOMIC_RMW` or `ATOMIC_CAS`, a fence's `FENCE` and an
 asm statement's `X86` entry in its caller, `helper`: the
 lowered code's call sites of a helper,
 an explicit builtin's, an implicit `_Atomic` access's, a generic form's and an
@@ -1057,17 +1116,25 @@ run whose threads never overlap, which leaves the fenced run's check weaker,
 not wrong; the test prints both counts. It also reads each build's
 `--helper-report` and its objects' fenced threads (one `mfence` each, the
 control's none). The same litmus runs twice more with atomic accesses: a
-seq_cst store and a seq_cst load (the direct marked `SET`, its `FENCE` and the
+seq_cst store and a seq_cst load (the direct marked `SET` and the
 marked `LOAD`), which must never show both loads reading 0, and relaxed ones, the
-second control; a seq_cst thread's object has one `mfence`, a relaxed one's
-none. On the same container, the relaxed control showed both loads reading 0 in
+second control; a seq_cst thread's object has one memory `xchg` and no `mfence`,
+and the relaxed one's has neither. In the earlier #1059 baseline using
+`mov`/`mfence`, the relaxed control on that container showed both loads reading 0 in
 50 to 18,745 of 100,000 iterations, and the seq_cst runs in none.
 `test-checker`'s atomic-access section (`c_check_program_atomic_access_test.c`)
 lowers loads and stores of each width and order, C11's, a pointer's and an
 implicit object's by both paths, checks each function's marked entries, its
 fences, its calls and Tier 0's records by both twins, the lowered code's marked accesses and the plan's helper uses,
 then runs every width and order, the implicit object's loads, stores and
-updates and the helpers' cases natively against clang. Its read/modify/write
+updates and the helpers' cases natively against clang. The seq_cst store checks
+require the exact exchange width and no separate fence, and a following explicit
+fence must survive. `test-tier1-select` keeps the desired value live across each
+store width and order, with direct and folded addresses and guard bytes;
+`test-tier1-emit`'s certificate rejects a store weakened to `mov` or missing its
+preserving copy. `test-tier0`'s depth fixtures keep live values below `SET` and
+value-returning `STORE` at the register table's boundary and beyond it.
+Its read/modify/write
 section (`c_check_program_atomic_rmw_test.c`) lowers exchanges, additions and
 subtractions of each width, the `__sync`, C11, pointer and test-and-set forms
 and an implicit object's increment by both paths, checks each function's
@@ -1221,8 +1288,9 @@ signed/unsigned pointer-valued stores retain Clang's pointer-sign warning.
 
 `c_builtin_atomic_helpers.c` emits original baseline SysV leaf bodies with
 explicit parameter/result classes. Naturally aligned 1/2/4/8-byte loads
-return zero-extended raw bits; width-specific stores followed by MFENCE and
-MOV loads provide conservative sequential consistency. Thread/sync fences
+return zero-extended raw bits; width-specific memory XCHG stores and MOV loads
+provide conservative sequential consistency. The store helper discards the old
+bits in caller-saved RSI, preserving its void result and raw-value ABI. Thread/sync fences
 use MFENCE. Signal fences require no machine instruction. A fence of a constant
 order is no helper's call at all, but the typed stream's `FENCE` ("Helper
 contracts and direct forms", above). Every helper CALL,
@@ -1519,8 +1587,9 @@ carry is an effect, never folds. A `_BitInt` past 128 bits, which clang takes,
 is refused by name.
 
 `c_builtin_bits_lower.c`'s recipes compute them on U64 temporaries, a value
-zero-extended from its width, as clang's code computes on its `iN`: SWAR
-popcounts (a smear for leading zeros), reversals by masked swaps of halves,
+zero-extended from its width, as clang's code computes on its `iN`: the
+target-selected counts and byte swaps described above, SWAR population counts
+where POPCNT is absent, reversals by masked swaps of halves,
 selections by multiplying with a compare's 0 or 1, without branches. A rotation
 masks its count for a width that is a power of two and takes a remainder for
 another `_BitInt`'s. A carry chain adds or subtracts twice, each carry a

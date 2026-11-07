@@ -1420,6 +1420,14 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         X86Instruction record = holes->memory;
         record.reg = holes->right;
         record.form = width == 1 ? X86_FORM_MOV_RM8_R8 : width == 2 ? X86_FORM_MOV_RM16_R16 : width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32;
+        if (holes->operation == X86_OPERATION_XCHG)
+        {
+            // The desired SSA value can remain live after this store. Xchg returns the discarded old value in the
+            // reserved scratch instead; keep the memory record last for a frame address's displacement patch.
+            tier1_select_append(&result, tier1_select_move(8, BUSTER_TIER1_SELECT_SCRATCH, holes->right));
+            record.reg = BUSTER_TIER1_SELECT_SCRATCH;
+            record.form = width == 1 ? X86_FORM_XCHG_RM8_R8 : width == 2 ? X86_FORM_XCHG_RM16_R16 : width == 8 ? X86_FORM_XCHG_RM64_R64 : X86_FORM_XCHG_RM32_R32;
+        }
         tier1_select_append(&result, record);
         break;
     }
@@ -4862,6 +4870,11 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         {
             base.values[2] = function->a[b];
             tier1_select_fold(forest, node, b, &base);
+        }
+        if (store && (function->flags[node] & (BUSTER_IR_ATOMIC | BUSTER_IR_ORDER)) == (BUSTER_IR_ATOMIC | (BUSTER_IR_FENCE_SEQ_CST << BUSTER_IR_ORDER_SHIFT)))
+        {
+            base.operation = X86_OPERATION_XCHG;
+            base.intrinsic_cost = 2;
         }
         Tier1SelectPattern folded = base;
         const bool walked = tier1_select_memory(forest, node, a, &folded, 0);

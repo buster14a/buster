@@ -233,9 +233,94 @@ static void check_debug_values_test_ranges(CheckDebugTestTally* tally)
     check_debug_test_expect(tally, same, "the span index's range and location lists are the scan's, byte for byte", "");
 }
 
+// A function type's parameter names are not variables of the enclosing body (#1688). The const qualifiers here
+// belong only to unused prototypes, while volatile belongs to an actual definition parameter and must survive.
+static void check_debug_values_test_parameters(CheckDebugTestTally* tally, const char* directory, Arena* arena)
+{
+    static const char text[] =
+        "int file_prototype(const int file_parameter);\n"
+        "int debug_parameters(volatile int live_parameter, int (*live_callback)(int signature_parameter))\n"
+        "{\n"
+        "    int prototype(const int prototype_parameter);\n"
+        "    int (*pointer)(int pointer_parameter) = 0;\n"
+        "    typedef int Callback(int typedef_parameter);\n"
+        "    Callback *alias = pointer;\n"
+        "    struct Holder { int (*member)(int member_parameter); } holder = { 0 };\n"
+        "    int local = live_parameter;\n"
+        "    {\n"
+        "        int nested(int (*callback_parameter)(int inner_parameter));\n"
+        "        int nested_local = local + 1;\n"
+        "        local = nested_local;\n"
+        "    }\n"
+        "    return local + (pointer != 0) + (alias != 0) + (holder.member != 0) + (live_callback != 0);\n"
+        "}\n";
+    static const char* const forbidden[] = {
+        "\"file_parameter\"",
+        "\"signature_parameter\"",
+        "\"prototype_parameter\"",
+        "\"pointer_parameter\"",
+        "\"typedef_parameter\"",
+        "\"member_parameter\"",
+        "\"callback_parameter\"",
+        "\"inner_parameter\"",
+        "DW_TAG_const_type",
+    };
+    static const char* const required[] = {
+        "\"live_parameter\"",
+        "\"live_callback\"",
+        "\"pointer\"",
+        "\"alias\"",
+        "\"holder\"",
+        "\"local\"",
+        "\"nested_local\"",
+        "DW_TAG_volatile_type",
+        "DW_TAG_subroutine_type",
+    };
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/dbg_parameters.c", directory);
+    const bool written = foreign_test_write(source, text, sizeof(text) - 1);
+    check_debug_test_expect(tally, written, "write the prototype-parameter fixture", source);
+    String8 files[2] = { 0 };
+    for (uint32_t v = 0; written && v < 3; v += 1)
+    {
+        char object[PATH_MAX];
+        char report[PATH_MAX + 24];
+        char errors[PATH_MAX + 24];
+        snprintf(object, sizeof(object), "%s/dbg_parameters_%u.o", directory, v);
+        snprintf(report, sizeof(report), "%s.info", object);
+        snprintf(errors, sizeof(errors), "%s.err", object);
+        char* compile[] = { (char*)(v == 2 ? "clang" : "/proc/self/exe"), (char*)"-c", (char*)"-g", (char*)"-o", object, source,
+                            v == 1 ? (char*)"--scalar" : 0, 0 };
+        const bool compiled = object_test_run(compile, "/dev/null", errors) == 0;
+        check_debug_test_expect(tally, compiled, "Buster's paths and clang compile the prototype-parameter fixture", errors);
+        char* dump[] = { (char*)"llvm-dwarfdump", (char*)"--debug-info", object, 0 };
+        const bool dumped = compiled && object_test_run(dump, report, errors) == 0;
+        const String8 info = dumped ? foreign_test_read(arena, report) : (String8){ 0 };
+        check_debug_test_expect(tally, info.pointer != NULL, "read the prototype-parameter DWARF", report);
+        for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(forbidden); n += 1)
+        {
+            check_debug_test_expect(tally, info.pointer != NULL && strstr(info.pointer, forbidden[n]) == NULL,
+                                    "function-type parameter names and unused source qualifiers stay out of DWARF", forbidden[n]);
+        }
+        for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(required); n += 1)
+        {
+            check_debug_test_expect(tally, info.pointer != NULL && strstr(info.pointer, required[n]) != NULL,
+                                    "definition parameters, locals, qualifiers and callback signatures remain in DWARF", required[n]);
+        }
+        if (v < 2 && compiled)
+        {
+            files[v] = foreign_test_read(arena, object);
+        }
+    }
+    check_debug_test_expect(tally, files[0].pointer != NULL && files[1].pointer != NULL && files[0].length == files[1].length &&
+                                  memcmp(files[0].pointer, files[1].pointer, files[0].length) == 0,
+                            "prototype-parameter objects are byte-identical by both paths", source);
+}
+
 static void check_debug_values_test(CheckDebugTestTally* tally, const char* directory, Arena* arena)
 {
     check_debug_values_test_ranges(tally);
+    check_debug_values_test_parameters(tally, directory, arena);
     char source[PATH_MAX];
     char other[PATH_MAX];
     char outputs[3][PATH_MAX];
