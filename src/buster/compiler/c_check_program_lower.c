@@ -311,8 +311,9 @@ struct CheckLowerTable
     uint32_t* labels;
     uint32_t label_count;
     uint32_t first_label;
-    // The dispatch's two GLOBAL_ADDRESS entries in the function, which check_lower_finish gives the table's symbol.
-    uint32_t addresses[2];
+    // The dispatch's GLOBAL_ADDRESS entry in the function, which check_lower_finish gives the table's symbol. DUP
+    // shares that value between the indexed entry load and the addition of its signed offset (#1217).
+    uint32_t address;
     // The lowest value, in its class's bits, and the label of the switch's default or end (a control entry's index).
     uint64_t lower;
     uint32_t fallback;
@@ -832,9 +833,11 @@ struct CheckLowerWriter
     uint32_t label_symbol_capacity;
     // Each label's jump table (Tier0Function.label_tables, #785): 1 + t for the function's table t's, numbered as its
     // dispatches come, and 0 for a label whose address the program takes; and each table's JUMP_INDIRECT's entry
-    // (Tier0Function.table_jumps), `table_jump_count` of them, with room for the program's tables.
+    // (Tier0Function.table_jumps) and shared GLOBAL_ADDRESS (table_addresses), `table_jump_count` of them, with room for
+    // the program's tables. The addresses let ir_lower materialize these direct symbols before loops (#1217).
     uint32_t* label_tables;
     uint32_t* table_jumps;
+    uint32_t* table_addresses;
     uint32_t table_jump_count;
     // The function's lifetime events (#177, Tier0Function.lifetime_entries and lifetime_locals): each LIFETIME control's,
     // one per local of its block, at the entry the control comes before, with room for the program's.
@@ -12779,7 +12782,7 @@ static bool check_lower_switch_table(CheckProgramLowered* lowered, uint32_t capa
                     .labels = labels,
                     .label_count = label_count,
                     .first_label = first,
-                    .addresses = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE },
+                    .address = BUSTER_CHECK_NONE,
                     .lower = (sorted[0].lower ^ sign) & mask,
                     .fallback = controls[end].target,
                 };
@@ -12861,7 +12864,8 @@ static void check_lower_table_index(CheckLowerWriter* writer, const CheckLowerTa
 // part's label symbols; then to the default (or the switch's end) when the index (check_lower_table_index) is past the
 // table's last entry, and otherwise to the table's address (its provisional symbol, which check_lower_finish and the
 // emission's merge replace) plus the entry's 32-bit offset of its label from it, as clang -O0's code goes. Its entries
-// are the switch statement's, for -g's rows, as clang's code is.
+// are the switch statement's, for -g's rows, as clang's code is. DUP reuses the table's address for both operations;
+// the IR lowering carries the same value through it, without requiring value numbering to merge two symbol nodes.
 static void check_lower_switch_dispatch(CheckLowerWriter* writer, uint32_t table, uint32_t local, uint8_t class)
 {
     CheckLowerTable* item = writer->tables + table;
@@ -12886,9 +12890,8 @@ static void check_lower_switch_dispatch(CheckLowerWriter* writer, uint32_t table
     check_lower_emit(writer, BUSTER_TYPED_GT, BUSTER_TYPED_CLASS_I32, 0);
     check_lower_emit(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, item->fallback);
     check_lower_emit(writer, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, (uint64_t)writer->provisional_tables + table);
-    item->addresses[0] = writer->count - 1;
-    check_lower_emit(writer, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, (uint64_t)writer->provisional_tables + table);
-    item->addresses[1] = writer->count - 1;
+    item->address = writer->count - 1;
+    check_lower_emit(writer, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
     check_lower_table_index(writer, item, local, class, index_class);
     if (index_class == BUSTER_TYPED_CLASS_U32)
     {
@@ -12901,6 +12904,7 @@ static void check_lower_switch_dispatch(CheckLowerWriter* writer, uint32_t table
     check_lower_emit(writer, BUSTER_TYPED_JUMP_INDIRECT, BUSTER_TYPED_CLASS_U64, 0);
     if (writer->table_jump_count < writer->table_count)
     {
+        writer->table_addresses[writer->table_jump_count] = item->address;
         writer->table_jumps[writer->table_jump_count++] = writer->count - 1;
     }
     else
@@ -14547,6 +14551,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     BUSTER_CHECK_LOWER_COLUMN(label_entries, uint32_t, (uint64_t)program->control_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(label_tables, uint32_t, (uint64_t)program->control_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(table_jumps, uint32_t, (uint64_t)shared->lowered->table_count + 1);
+    BUSTER_CHECK_LOWER_COLUMN(table_addresses, uint32_t, (uint64_t)shared->lowered->table_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(lifetime_entries, uint32_t, (uint64_t)program->lifetime_event_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(lifetime_locals, uint32_t, (uint64_t)program->lifetime_event_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(runtimes, uint16_t, CHECK_LOWER_RUNTIMES);
@@ -15246,6 +15251,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         function->label_count = writer->label_entry_count;
         BUSTER_CHECK_LOWER_COPY(label_tables, label_tables, uint32_t, writer->table_jump_count != 0 ? writer->label_entry_count : 0);
         BUSTER_CHECK_LOWER_COPY(table_jumps, table_jumps, uint32_t, writer->table_jump_count);
+        BUSTER_CHECK_LOWER_COPY(table_addresses, table_addresses, uint32_t, writer->table_jump_count);
         function->table_count = writer->table_jump_count;
         // The lifetime events before an entry: one after the last entry has nothing to come before, and is left out.
         uint32_t lifetimes = writer->lifetime_count;
@@ -15540,8 +15546,7 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
         {
             const CheckLowerTable* table = lowered->tables + t;
             uint64_t* values = (uint64_t*)lowered->functions[table->function].values;
-            values[table->addresses[0]] = lowered->case_symbol_base + t;
-            values[table->addresses[1]] = lowered->case_symbol_base + t;
+            values[table->address] = lowered->case_symbol_base + t;
         }
     }
     return valid;

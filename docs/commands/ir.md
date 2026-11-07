@@ -78,6 +78,15 @@ and `__int128` programs (four times the count) run through the shared IR's
 interpreter (#176) against their stack machines. The default count is 32
 programs.
 
+The optional `Tier0Function.table_addresses` column (#1217) identifies direct
+jump-table symbol addresses to materialize once in the entry preheader. Its
+ordered indices, entry kinds, classes and symbol access are validated before
+lowering; inputs without the column keep ordinary entry placement. Targeted
+tests cover two tables, mixed computed gotos, unreachable tables, a table
+backedge to source entry zero, and malformed columns with output/scratch
+rollback. [The lowering guide](lowering.md#jump-table-address-reuse-1217)
+records the producer contract and the native dispatch check.
+
 `./build/compiler test-ir-source [--print NAME] [preprocessor options] file...`
 (`ir_source_test.c`) is #131's acceptance on real C: each file checked, selected
 and emitted as `-c` compiles it (`ir_source_prepare`, as benchmark-backend-source

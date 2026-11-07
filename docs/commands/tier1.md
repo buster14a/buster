@@ -165,18 +165,36 @@ memory-order and shared-load counterexamples, and full-width pointer-integer
 addition folded into a memory operand. `test-x86-target-selection` also
 reaches these fixtures through the existing memory-plan tests.
 
+Memory operands may also fold shared same-block pointer conversions,
+full-width additions and address nodes. Each access publishes the original
+base/index as its effective uses; the shared producer remains only when another
+selected user needs its address value. A frame address may be shared in its
+block or the entry preheader. The walk still stops at narrow arithmetic,
+additional indices, out-of-range displacements and longer cross-block chains.
+This folds address computation without moving, merging or widening an access.
+`test-tier1-emit` executes shared and escaping frame/offset addresses with
+rematerialization on and off, kept frame pointers and realigned frames.
+
+`tier1_address_coalesce_test.c` checks that a simple unscaled, undisplaced
+base-plus-index uses `add` when allocation puts the result in either input
+register. This removes the SIB byte while keeping one instruction. Other
+destinations, scales and displacements retain `lea`; unpatched frame operands
+also retain it for the frame-layout handoff. Both selector paths execute the
+32-bit, 64-bit and pointer fixtures against the independent IR interpreter.
+Flags are dead between IR nodes, as required by the existing emitter contract.
+
 The immediate-multiply candidate and both corresponding BURS productions
 have cost 3, versus 2 for a copy and shift and 1 for a 3/5/9 multiply's lea.
 This is a latency-biased selection heuristic, not a measured runtime result
 or an instruction-count bound. Signed loads retain their exact access width
-in the selected pattern's `source_width`; its `width` is the 32- or 64-bit
+in the selected pattern's `width`; its `source_width` is the 32- or 64-bit
 result. Their existing single-use, same-block and memory-barrier checks
 remain mandatory. I8-to-I16 sign extensions keep their canonicalization,
 and narrow arithmetic is never widened by the address walk.
 
 These local rules do not establish #1217's corpus-wide acceptance targets.
-Repeated frame/symbol-address rematerialization and table-base hoisting
-still need separate allocation/IR evidence. Record speedtest1/Lua dynamic
+Address values that escape, register pressure and table-base placement still
+need corpus evidence. Record speedtest1/Lua dynamic
 counts and approved-host runtime results in `buster14a/buster-performance`,
 not in this source repository; use `measure-tier1-programs` for the runtime
 comparison described above.
