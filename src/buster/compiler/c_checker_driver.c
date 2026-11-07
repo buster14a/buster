@@ -5364,6 +5364,22 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         parsed = driver_read_stdin(&arena, &options.stdin_source);
         options.stdin_ready = parsed;
     }
+    if (parsed)
+    {
+        char** sources = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, (uint64_t)input_count + 1);
+        uint32_t source_inputs = 0;
+        parsed = sources != NULL && (input_count == 0 || input_kinds != NULL);
+        for (uint32_t i = 0; parsed && i < input_count; i += 1)
+        {
+            const CheckDriverInputKind kind = input_kinds[i].kind;
+            if (kind == CHECK_DRIVER_INPUT_C || kind == CHECK_DRIVER_INPUT_ASSEMBLY_CPP)
+            {
+                sources[source_inputs] = inputs[i];
+                source_inputs += 1;
+            }
+        }
+        parsed = parsed && driver_cache_streams(&arena, sources, source_inputs, &options);
+    }
     // The rest of what the request asks for that the driver doesn't implement, refused before any unit or output is
     // opened: position-independent code when it emits code (the parser already resolves the last PIC/PIE option; Tier 0
     // can't yet emit shared-library-safe symbol and TLS accesses, #811; non-emitting actions keep PIC), the ABI layouts
