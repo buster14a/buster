@@ -2679,8 +2679,9 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
         const uint32_t token = graph->tokens[node];
         own = token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_COMMA;
     }
-    else
+    else if (op == CHECK_OP_NOT || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITION || op == CHECK_OP_CONDITIONAL)
     {
+        // (A static assertion's operand, a root, takes its bit after the facts' pass: check_common_assertion_reach.)
         conversion = check_common_truth_floating(graph, stream, node);
     }
     const uint8_t result = (uint8_t)((own ? BUSTER_CHECK_REACH_TREE : 0u) | (conversion ? BUSTER_CHECK_REACH_CONVERSION : 0u));
@@ -5113,6 +5114,20 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
     return result;
 }
 
+// A static assertion's floating literal (check_common_truth_operands) as the conversion walk's candidate: its operand, a root
+// with a constant-warning entry each, takes the bit from that short list rather than a test of every node's context.
+static void check_common_assertion_reach(const CheckGraph* graph, const CheckStream* stream, uint8_t* reach)
+{
+    for (uint32_t i = 0; graph->contexts != NULL && i < graph->const_warning_count; i += 1)
+    {
+        const uint32_t node = graph->const_warnings[i].node;
+        if (node < graph->count && (graph->contexts[node] & BUSTER_CHECK_CONTEXT_ASSERT) != 0 && check_common_truth_floating(graph, stream, node))
+        {
+            reach[node] |= BUSTER_CHECK_REACH_CONVERSION;
+        }
+    }
+}
+
 // The graph's facts (CheckCommonFacts) into `facts`: each node's parent, whether its value is used, its reach and its arm
 // effect, in one pass over the nodes in graph order, so that its operands' and arguments' already hold, and then which
 // nodes are evaluated. An operand that doesn't precede its node, which the graph's validation rules out, gives it every
@@ -5165,6 +5180,7 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
                 arm_effects[node] = check_common_arm_effect(graph, stream, types, arm_effects, node);
             }
         }
+        check_common_assertion_reach(graph, stream, reach);
         evaluated = check_common_evaluated(graph, stream, types, parser, program, parents, scratch);
     }
     *facts = (CheckCommonFacts){ .parents = parents, .used = used, .evaluated = evaluated, .reach = reach, .arm_effects = arm_effects };
