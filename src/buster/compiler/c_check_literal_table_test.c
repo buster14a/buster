@@ -126,7 +126,7 @@ static void check_test_literal_table_case(CheckTest* test, const char* source, b
                                    (!compact || path == 0 || (input.graph.count < dense_nodes && dense_nodes - input.graph.count >= BUSTER_CHECK_LITERAL_TABLE_MINIMUM &&
                                     plan->count == 1 && plan->parts[0].kind == CHECK_INIT_BYTES)),
                               "eligible tables publish one bytes part and zero element nodes; unsupported shapes retain the full checker");
-            if (compact && path != 0)
+            if (compact && path != 0 && input.literal_table_count == 1)
             {
                 const CheckInputLiteralTable* table = input.literal_tables;
                 check_test_expect(test, table->plan.type == input.declared_types[table->declaration] && table->part.type == table->plan.type,
@@ -387,6 +387,43 @@ static bool check_test_literal_rows_source(char* source, uint64_t capacity, cons
     return used > 0 && (uint64_t)used < capacity;
 }
 
+static bool check_test_literal_records_source(char* source, uint64_t capacity, uint32_t rows, uint32_t form, bool sized)
+{
+    static const char* const records[] = {
+        "struct R{int a;unsigned char b;long c;short d;};",
+        "struct __attribute__((packed)) R{int a;unsigned char b;long c;short d;};",
+        "struct __attribute__((aligned(32))) R{int a;unsigned char b;long c;short d;};",
+        "struct R{int a;unsigned char b:3;long c;short d;};",
+        "struct R{int a;unsigned char b;double c;short d;};",
+        "struct R{volatile int a;unsigned char b;long c;short d;};",
+        "struct R{_Atomic(int) a;unsigned char b;long c;short d;};",
+        "struct R{int a;_Bool b;long c;short d;};",
+        "struct R{int a[1];unsigned char b;long c;short d;};",
+    };
+    int used = snprintf(source, capacity, "%s%sstruct R table[", records[form < BUSTER_ARRAY_LENGTH(records) ? form : 0], form == 13 ? "volatile " : "const ");
+    if (sized && used > 0 && (uint64_t)used < capacity)
+    {
+        used += snprintf(source + used, capacity - (uint64_t)used, "%u", rows + 3);
+    }
+    if (used > 0 && (uint64_t)used < capacity)
+    {
+        used += snprintf(source + used, capacity - (uint64_t)used, "]={");
+    }
+    for (uint32_t i = 0; i < rows && used > 0 && (uint64_t)used < capacity; i += 1)
+    {
+        const bool changed = i == 7;
+        const char* first = changed && form == 10 ? "1+" : changed && form == 11 ? ".a=" : "";
+        used += snprintf(source + used, capacity - (uint64_t)used, "{%s%d,%u,%s%uL%s}%s", first, (int)(i * 37) - 200,
+                         changed && form == 12 ? 512 : i % 2, i % 3 == 0 ? "-" : "", i * 100003,
+                         changed && form == 9 ? "" : ",-17", i + 1 < rows || i % 2 == 0 ? "," : "");
+    }
+    if (used > 0 && (uint64_t)used < capacity)
+    {
+        used += snprintf(source + used, capacity - (uint64_t)used, "};\n");
+    }
+    return used > 0 && (uint64_t)used < capacity;
+}
+
 static void check_test_literal_table_contract(CheckTest* test, const char* element)
 {
     char source[8192];
@@ -400,8 +437,10 @@ static void check_test_literal_table_contract(CheckTest* test, const char* eleme
     Arena rollback = arena_reserve(UINT64_C(1) << 20);
     const PPOptions preprocessing = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
     const ParseOptions parsing = { 0 };
-    bool ready = output.base != NULL && scratch.base != NULL && rollback.base != NULL &&
-                 check_test_literal_table_source(source, sizeof(source), element, 129, 0, true) &&
+    const bool records = strcmp(element, "records") == 0;
+    const bool made = records ? check_test_literal_records_source(source, sizeof(source), 33, 0, true) :
+                               check_test_literal_table_source(source, sizeof(source), element, 129, 0, true);
+    bool ready = output.base != NULL && scratch.base != NULL && rollback.base != NULL && made &&
                  intern_initialize(&identifiers) && pp_initialize(&pp, &preprocessing, &identifiers) &&
                  parse_initialize(&parser, &parsing, preprocessing.language) &&
                  pp_run_source(&pp, "table-contract.c", (const uint8_t*)source, strlen(source)) && parse_translation_unit(&parser, &pp) &&
@@ -430,7 +469,21 @@ static void check_test_literal_table_contract(CheckTest* test, const char* eleme
         for (uint32_t path = 0; path < 2; path += 1)
         {
             parser.options.scalar = path != 0;
-            for (uint32_t width = 8; width <= 64; width *= 2)
+            if (records)
+            {
+                const CheckInputLiteralTable* table = input.literal_tables;
+                const TypeId record = type_element(&types.table, table->plan.type);
+                uint32_t first = 0;
+                uint32_t members = 0;
+                uint8_t* bytes = mapping + page - table->part.byte_count;
+                memset(bytes, 0, table->part.byte_count);
+                const bool same = check_literal_table_record(&types.table, record, &first, &members) &&
+                                  check_literal_table_records_fill(&reader, begin + 1, end - 1, 33 * members, first, members,
+                                                                   type_size(&types.table, record), bytes) &&
+                                  memcmp(bytes, table->part.bytes, table->part.byte_count) == 0;
+                check_test_expect(test, same && scratch.length == 0, "scalar/vector record batches preserve mixed member widths within guarded output");
+            }
+            for (uint32_t width = 8; !records && width <= 64; width *= 2)
             {
                 for (uint32_t count = 0; count <= found; count += 1)
                 {
@@ -485,8 +538,8 @@ static void check_test_literal_table_contract(CheckTest* test, const char* eleme
             check_test_expect(test, unchanged, "payload and retained-record allocation failures restore arenas and publish no ignored range or table");
             rollback.capacity = capacity;
         }
-        // A floating table's scratch, refused at every 4 bytes past its length (#1210's review): its converted bitset
-        // (check_literal_table_floating), then what its conversions take, until the table is accepted. Each refusal is a
+        // A floating or record table's scratch, refused at every 4 bytes past its length: its converted bitset or token
+        // column, then what its conversions take, until the table is accepted. Each refusal is a
         // resource failure that restores both arenas and publishes no ignored range or table; the first room that holds
         // the table accepts it, and no step before it does.
         const bool floating = strcmp(element, "float") == 0 || strcmp(element, "double") == 0;
@@ -494,11 +547,11 @@ static void check_test_literal_table_contract(CheckTest* test, const char* eleme
         TypeId* query_types = BUSTER_ARENA_PUSH_ARRAY(&scratch, TypeId, (uint64_t)parser.tokens.count + 1);
         TypeId* linked_types = query_types != NULL ? BUSTER_ARENA_PUSH_ARRAY(&scratch, TypeId, (uint64_t)identifiers.count + 1) : NULL;
         allocated = allocated && linked_types != NULL;
-        check_test_expect(test, allocated, "floating scratch refusal adapter has room");
+        check_test_expect(test, allocated, "literal table scratch refusal adapter has room");
         const uint64_t scratch_capacity = scratch.capacity;
         uint32_t refusals = 0;
         bool accepted = false;
-        for (uint64_t room = 0; allocated && floating && !accepted && room <= 4096; room += 4)
+        for (uint64_t room = 0; allocated && (floating || records) && !accepted && room <= 4096; room += 4)
         {
             CheckInput copy = input;
             copy.literal_tables = NULL;
@@ -527,9 +580,9 @@ static void check_test_literal_table_contract(CheckTest* test, const char* eleme
             }
             refusals += !accepted;
             check_test_expect(test, accepted ? copy.literal_table_count == 1 && !copy.resource && scratch.length == before : unchanged,
-                              "a floating table's scratch refusal restores arenas and publishes nothing, and enough room accepts it");
+                              "a literal table's scratch refusal restores arenas and publishes nothing, and enough room accepts it");
         }
-        check_test_expect(test, !floating || (accepted && refusals != 0), "a floating table's scratch is refused, then accepted with room");
+        check_test_expect(test, !(floating || records) || (accepted && refusals != 0), "a literal table's scratch is refused, then accepted with room");
         arena_pop_to(&scratch, scratch_mark);
     }
     if (mapping != MAP_FAILED)
@@ -628,6 +681,7 @@ static void check_test_literal_tables(CheckTest* test, const char* clang)
     check_test_literal_table_contract(test, "unsigned char");
     check_test_literal_table_contract(test, "float");
     check_test_literal_table_contract(test, "double");
+    check_test_literal_table_contract(test, "records");
     check_test_literal_table_order(test);
     char source[32768];
     static const uint32_t counts[] = { 127, 128, 129, 255, 256, 257 };
@@ -676,6 +730,62 @@ static void check_test_literal_tables(CheckTest* test, const char* clang)
         if (made)
         {
             check_test_program_source(test, source, "literal-table-native", clang);
+        }
+    }
+    // Arrays of structs of integer members (#1383), whose padding the table leaves zero, at file scope and as block-scope
+    // statics, sized and not; a struct with a double member and one with a bit-field keep the ordinary path. Each runs
+    // against clang's build.
+    for (uint32_t form = 0; form < 5; form += 1)
+    {
+        static const char* const records[] = {
+            "struct R{int a;unsigned char b;long c;short d;signed char e;};",
+            "struct R{int a;unsigned char b;long c;short d;signed char e;};",
+            "struct R{int a;unsigned char b;long c;short d;signed char e;};",
+            "struct R{int a;unsigned char b;double c;short d;signed char e;};",
+            "struct R{int a;unsigned char b:3;long c;short d;signed char e;};",
+        };
+        int used = snprintf(source, sizeof(source), "%s%sR table[%s]={", records[form], form == 1 ? "int tested(int n){static const struct " : "const struct ",
+                            form == 2 ? "" : "40");
+        for (uint32_t i = 0; i < 40 && used > 0 && (uint64_t)used < sizeof(source); i += 1)
+        {
+            used += snprintf(source + used, sizeof(source) - (uint64_t)used, "{%d,%u,%s%u,-%u,0x%x},", (int)(i * 37) - 700, (i * 13) & 7,
+                             i % 3 == 0 ? "-" : "", i * 100003, i % 300, i % 100);
+        }
+        if (used > 0 && (uint64_t)used < sizeof(source))
+        {
+            used += snprintf(source + used, sizeof(source) - (uint64_t)used,
+                             "};%s{const struct R*r;r=&table[(unsigned)n%%40];return r->a+r->b+(int)((long)r->c%%1000)+r->d+r->e+(int)sizeof table;}%s\n",
+                             form == 1 ? "" : "int tested(int n)", form == 1 ? "}" : "");
+        }
+        const bool fits = used > 0 && (uint64_t)used < sizeof(source);
+        check_test_expect(test, fits, "struct literal table native fixture fits");
+        if (fits)
+        {
+            check_test_literal_table_case(test, source, form < 3, false);
+            check_test_program_source(test, source, "literal-table-records", clang);
+        }
+    }
+    for (uint32_t form = 0; form < 14; form += 1)
+    {
+        for (uint32_t sized = 0; sized < 2; sized += 1)
+        {
+            const bool made = check_test_literal_records_source(source, sizeof(source), 33, form, sized != 0);
+            check_test_expect(test, made, "record table source fixture fits");
+            if (made)
+            {
+                check_test_literal_table_case(test, source, form < 3, false);
+            }
+        }
+    }
+    for (uint32_t rows = 31; rows <= 33; rows += 1)
+    {
+        char table[8192];
+        const bool made = check_test_literal_records_source(table, sizeof(table), rows, 0, false);
+        const int used = made ? snprintf(source, sizeof(source), "int before(int n){struct P{int x;};return n+(int)sizeof(struct P);}\n%s", table) : -1;
+        check_test_expect(test, used > 0 && (uint64_t)used < sizeof(source), "record table threshold and deferred replay source fits");
+        if (used > 0 && (uint64_t)used < sizeof(source))
+        {
+            check_test_literal_table_case(test, source, rows >= 32, true);
         }
     }
     // Block-scope statics (#1383) take the table path from the source-order reader; an automatic table keeps the

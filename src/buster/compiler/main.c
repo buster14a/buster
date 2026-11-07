@@ -123,8 +123,6 @@ int run_c_lexer_benchmark(int argc, char** argv);
 #include "buster/compiler/x86_64_encoder.c"
 #include "buster/compiler/x86_64_encoder_test.c"
 #include "buster/compiler/x86_zen5.c"
-#include "buster/compiler/x86_zen5_measure.c"
-#include "buster/compiler/x86_zen5_test.c"
 #include "buster/compiler/x86_64_disassembler.c"
 #include "buster/compiler/x86_64_disassembler_test.c"
 #include "buster/compiler/x86_64_disassembler_cli.c"
@@ -338,6 +336,10 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 #include "buster/compiler/assembler_benchmark.c"
 
 #include "buster/compiler/x86_semantics_test.c"
+// The Zen 5 model's harness and tests (#181), whose fixtures come from the form table and the effects tables, and
+// which run only the forms the host's target allows.
+#include "buster/compiler/x86_zen5_measure.c"
+#include "buster/compiler/x86_zen5_test.c"
 int run_x86_semantics_benchmark(int argc, char** argv);
 // The compiler's code of the headers' x86 intrinsics against clang -O0's, for the test-x86-intrinsics command: the objects
 // decoded by the disassembler and followed by the effects above.

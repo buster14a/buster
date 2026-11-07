@@ -418,9 +418,23 @@ static bool memory_refuse(uint32_t operation)
     return prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 && prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &filter) == 0;
 }
 
-// Runs a command under `limit` and refusal `refused` (memory_refuse; 0 for none), which must succeed unless it refuses
-// every reservation or commit (1 and 2), in which case it must fail with a fatal byte-count diagnostic.
-static bool memory_command(char* const* arguments, const char* log, rlim_t limit, uint32_t refused)
+// Sets RLIMIT_DATA, which bounds the commit charge of the process's private writable mappings, to `bytes`.
+static bool memory_data_bound(rlim_t bytes)
+{
+    struct rlimit previous;
+    bool result = getrlimit(RLIMIT_DATA, &previous) == 0;
+    if (result)
+    {
+        previous.rlim_cur = bytes < previous.rlim_max ? bytes : previous.rlim_max;
+        result = setrlimit(RLIMIT_DATA, &previous) == 0;
+    }
+    return result;
+}
+
+// Runs a command under `limit` (RLIMIT_AS), `data` (RLIMIT_DATA) and refusal `refused` (memory_refuse; 0 for none),
+// which must succeed unless it refuses every reservation or commit (1 and 2), in which case it must fail with a fatal
+// byte-count diagnostic.
+static int memory_run(char* const* arguments, const char* log, rlim_t limit, rlim_t data, uint32_t refused)
 {
     const pid_t child = fork();
     if (child == 0)
@@ -431,15 +445,43 @@ static bool memory_command(char* const* arguments, const char* log, rlim_t limit
         {
             close(output);
         }
-        ready = ready && (limit == RLIM_INFINITY || memory_limit(limit)) && (refused == 0 || memory_refuse(refused));
+        ready = ready && (limit == RLIM_INFINITY || memory_limit(limit)) && (data == RLIM_INFINITY || memory_data_bound(data)) &&
+                (refused == 0 || memory_refuse(refused));
         if (ready)
         {
             execvp(arguments[0], arguments);
         }
         _exit(127);
     }
+    int status = 0;
+    pid_t waited = -1;
+    do
+    {
+        waited = child > 0 ? waitpid(child, &status, 0) : -1;
+    } while (waited < 0 && errno == EINTR);
+    return waited == child && child > 0 && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+// Prints a failed command's first lines of output.
+static void memory_report(char* const* arguments, const char* log)
+{
+    fprintf(stderr, "failed memory command: %s %s; log: %s\n", arguments[0], arguments[1] != 0 ? arguments[1] : "", log);
+    FILE* stream = fopen(log, "r");
+    char line[512];
+    for (uint32_t i = 0; stream != 0 && i < 16 && fgets(line, sizeof(line), stream) != 0; i += 1)
+    {
+        fputs(line, stderr);
+    }
+    if (stream != 0)
+    {
+        fclose(stream);
+    }
+}
+
+static bool memory_command(char* const* arguments, const char* log, rlim_t limit, rlim_t data, uint32_t refused)
+{
     const bool fails = refused == 1 || refused == 2;
-    bool valid = memory_wait(child, fails ? 1 : 0);
+    bool valid = memory_run(arguments, log, limit, data, refused) == (fails ? 1 : 0);
     if (fails)
     {
         char text[4096] = { 0 };
@@ -453,17 +495,77 @@ static bool memory_command(char* const* arguments, const char* log, rlim_t limit
     }
     if (!valid)
     {
-        fprintf(stderr, "failed memory command: %s %s; log: %s\n", arguments[0], arguments[1] != 0 ? arguments[1] : "", log);
-        FILE* stream = fopen(log, "r");
-        char line[512];
-        for (uint32_t i = 0; stream != 0 && i < 16 && fgets(line, sizeof(line), stream) != 0; i += 1)
+        memory_report(arguments, log);
+    }
+    return valid;
+}
+
+// Whether the log file holds `text`, in its first 64 KB.
+static bool memory_log_has(const char* log, const char* text)
+{
+    char buffer[65536] = { 0 };
+    FILE* stream = fopen(log, "r");
+    if (stream != 0)
+    {
+        fread(buffer, 1, sizeof(buffer) - 1, stream);
+        fclose(stream);
+    }
+    return strstr(buffer, text) != 0;
+}
+
+// #1521: a unit of about 540,000 tokens (100,000 declarations and a function of 30,000 statements), compiled to an
+// object where commit charge is bounded below the preprocessor's full tables (10 GB), as on a host of 7 GB: under a 4 GiB
+// RLIMIT_DATA, and with --strict under strict overcommit's headroom. The tables' refused commit used to switch the
+// thread to compact reservations, after which every arena held 64 MB and the unit failed as "can't reserve type table"
+// or "checker input capacity exhausted"; now the tables take their compact shape and the other arenas keep theirs.
+// Without --strict, the same unit also runs where the address space refuses the tables' mapping (memory_refuse's
+// layout refusal), which does switch the thread to compact reservations, and under a 2 GiB RLIMIT_DATA, which may
+// refuse a later commit: each compiles, or fails saying that its arenas held 64 MiB each or that a commit was refused,
+// rather than with a capacity error alone.
+static bool memory_large_unit(char* compiler, const char* directory, bool strict)
+{
+    char source[PATH_MAX];
+    char output[PATH_MAX];
+    char log[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/large.c", directory);
+    snprintf(output, sizeof(output), "%s/large.o", directory);
+    snprintf(log, sizeof(log), "%s/large-%s.log", directory, strict ? "strict" : "data");
+    FILE* file = fopen(source, "w");
+    bool valid = file != 0;
+    for (uint32_t i = 0; valid && i < 100000; i += 1)
+    {
+        valid = fprintf(file, "int a%u;\n", i) > 0;
+    }
+    valid = valid && fputs("int f(int x)\n{\n", file) >= 0;
+    for (uint32_t i = 0; valid && i < 30000; i += 1)
+    {
+        valid = fputs("    x = x * 3 + 1;\n", file) >= 0;
+    }
+    valid = valid && fputs("    return x;\n}\n", file) >= 0;
+    if (file != 0)
+    {
+        valid = fclose(file) == 0 && valid;
+    }
+    char* arguments[] = { compiler, "-O0", "-c", source, "-o", output, 0 };
+    valid = valid && memory_command(arguments, log, RLIM_INFINITY, strict ? RLIM_INFINITY : UINT64_C(4) << 30, 0);
+    if (valid && !strict)
+    {
+        snprintf(log, sizeof(log), "%s/large-layout.log", directory);
+        int status = memory_run(arguments, log, RLIM_INFINITY, RLIM_INFINITY, 3);
+        valid = status == 0 || (status == 1 && memory_log_has(log, "note: memory reservations were limited to 64 MiB each"));
+        if (!valid)
         {
-            fputs(line, stderr);
+            memory_report(arguments, log);
         }
-        if (stream != 0)
+        snprintf(log, sizeof(log), "%s/large-short.log", directory);
+        status = valid ? memory_run(arguments, log, RLIM_INFINITY, UINT64_C(2) << 30, 0) : -1;
+        const bool said = memory_log_has(log, "fatal error: can't commit memory") || memory_log_has(log, "note: the system refused to commit");
+        const bool short_valid = status == 0 || (status == 1 && said);
+        if (valid && !short_valid)
         {
-            fclose(stream);
+            memory_report(arguments, log);
         }
+        valid = valid && short_valid;
     }
     return valid;
 }
@@ -503,19 +605,20 @@ static bool memory_commands(char* compiler, const char* directory, bool valgrind
             traced[5 + j] = options[i][j];
         }
         const rlim_t limit = valgrind || strict ? RLIM_INFINITY : UINT64_C(2) << 30;
-        valid = memory_command(valgrind ? traced : options[i], log, limit, 0) && valid;
+        valid = memory_command(valgrind ? traced : options[i], log, limit, RLIM_INFINITY, 0) && valid;
         for (uint32_t refused = 1; !valgrind && !strict && refused <= 3; refused += 1)
         {
             snprintf(log, sizeof(log), "%s/%s-%u-%u.log", directory, refused == 3 ? "layout" : "failure", i, refused);
-            valid = memory_command(options[i], log, RLIM_INFINITY, refused) && valid;
+            valid = memory_command(options[i], log, RLIM_INFINITY, RLIM_INFINITY, refused) && valid;
         }
     }
     if (valid)
     {
         snprintf(log, sizeof(log), "%s/executable.log", directory);
         char* run[] = { output, 0 };
-        valid = memory_command(run, log, RLIM_INFINITY, 0);
+        valid = memory_command(run, log, RLIM_INFINITY, RLIM_INFINITY, 0);
     }
+    valid = (valgrind || memory_large_unit(compiler, directory, strict)) && valid;
     // Preserve logs and products on failure so that CI's artifact identifies the actual refused allocation.
     return valid;
 }

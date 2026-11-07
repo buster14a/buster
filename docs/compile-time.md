@@ -168,9 +168,11 @@ Each upper bound is the time the item would save if its cost went to zero.
      kernel clearing pages.
    - Upper bound: about 30 ms, with the cache misses of sparse columns besides.
    - Follow-up: [#528](https://github.com/buster14a/buster/issues/528), which
-     took 115 MB of it and 17% of the kernel's cycles, #570 46 MB more and
-     [#572](https://github.com/buster14a/buster/issues/572) 121 MB more
-     ("Memory first touched", below).
+     took 115 MB of it and 17% of the kernel's cycles, #570 46 MB more,
+     [#572](https://github.com/buster14a/buster/issues/572) 121 MB more and
+     [#628](https://github.com/buster14a/buster/issues/628) 150 MB more, to
+     240 MB, with 23% fewer kernel cycles ("Memory first touched", below);
+     [#1701](https://github.com/buster14a/buster/issues/1701) has what is left.
 3. **The checker's graph and program passes**, 35.7 ms (18.9%):
    `check-expressions` 20.0 ms and `check-program` 15.7 ms, with no system
    time.
@@ -439,7 +441,7 @@ below, has what #628 changed since (the stream's values among it, now columns):
 
 Not at the peak, the reader's own arena's 61 MB of huge pages are still most of
 `check-input`'s system time. [#628](https://github.com/buster14a/buster/issues/628)
-follows up on these.
+followed up on these: "#628's outcome", below, has where it left them.
 
 ### The binding table, the fresh output and the stream's columns (#628)
 
@@ -1252,6 +1254,120 @@ Since no fault maps those pages, every later load there costs the same again.
 The gated loads now read `check_input_rare_line`'s static line of zeros
 instead, and the classes' pass takes 0.43 ms.
 
+### The preprocessor's output before the backend (#628)
+
+After the change above, the backend's end was the compile's peak. A map on the
+VM (main `6b4e178f`, instrumented as in "Partly used huge pages", whose peak
+it kept within 0.1 MB), with huge pages and one lane (the 9700X's runs are pinned
+to a CPU; the VM's four CPUs give four lanes, whose arenas add 28.7 MB at the
+backend's `lanes` stage), put the stages' ends at:
+
+| stage's end | resident (KiB) |
+| --- | ---: |
+| the reader | 240,196 |
+| `static-data` | 237,516 |
+| `check-program` | 233,552 |
+| `lower` | 249,840 |
+| `emit-setup`, the peak | 251,888 |
+
+At the peak, the pushes' pages were the checker's graph (34 MB from
+`check_graph_initialize`, 29.6 MB from `check_graph_run`), the program
+(28.4 MB), the reader's output (24.6 MB), the parser's token and tree columns
+(16 MB) and the preprocessor's output (12.5 MB). Each made unreadable before
+the selection, in turn, showed what the backend reads: the selection reads the
+tree's parents and lowering the parser's token columns, but nothing reads the
+preprocessor's output but `-g`'s line table and the diagnostics.
+
+So a unit without errors whose history is still deferred gives the output
+back before the backend (`pp_release_output`, `docs/c-preprocessor.md`'s
+"Deferred history"), and a reader asks for it first (`pp_output_ensure`): a
+diagnostic records the history, whose replay gives it back, and one that
+doesn't, as an undefined reference's system-header test, has it from a replay
+without history. The tests, run with every unit's output unreadable, found
+the readers that didn't ask: the unparsed literals' diagnostics of a failed
+parse, which the release now leaves alone, and the undefined reference's
+test.
+
+On the VM, the same build and options: the peak is 251,968 → 239,848 KiB, and
+the reader's end is the compile's peak again, the backend's end 1 MB below
+it. The objects are the same bytes, with `-Wall -Wextra`, `-g` and `--lanes
+8` too. With `-Wall -Wextra`, `sqlite3.c`'s 25 warnings record the history,
+and its peak (272,208 KiB) is the replay's; `-g` records it from the start.
+
+On the 9700X, main `73fcf006` against the change, each compile under its own
+grant of the lock, the order alternating by round
+([the record](https://github.com/buster14a/buster-performance/tree/dfef704959b5b7079e77724bdf7897bef2ff531d/docs/measurements/output-release-628-2026-11-07)), every object the same bytes in six modes
+and the diagnostics too (medians):
+
+| measure | main | the change |
+| --- | ---: | ---: |
+| peak RSS, the step's options (9 rounds) | 248,644 KiB | 239,824 KiB |
+| task clock | 120.46 ms | 120.49 ms |
+| user cycles | 581.98 M | 581.99 M |
+| kernel cycles | 84.97 M | 84.97 M |
+| page faults | 6,656 | 6,655 |
+| peak RSS, `-w` (5 rounds) | 248,640 KiB | 239,816 KiB |
+| task clock, `-w` | 105.19 ms | 105.10 ms |
+| kernel cycles, `-w` | 84.15 M | 84.26 M |
+
+The peak falls 8.8 MB, to the reader's end. The time and the kernel's cycles
+are the same, within the rounds' spread: the release only gives the pages back
+earlier than the exit would, and the backend faults in nothing it wouldn't
+have.
+
+### #628's outcome
+
+[#628](https://github.com/buster14a/buster/issues/628) started from #617's
+393 MB. Its changes, each in a section above:
+- the binding table in the reader's base pages, no fills over a fresh output
+  arena, and the stream's values as columns and payload rows (#1022);
+- the parse's tail, the graph's columns, the rare columns' pages, the sparse
+  marks and `check_program`'s discard of the scratch (#1076);
+- the twelve sparse output columns (#1166), and #1167's attributes column and
+  declaration bits;
+- the graph's leaves as records and payload rows (#1562);
+- the expansion history's replay run only past a unit's first `[[`, and its
+  output given back once compared (#1574; #1584 records three changes measured
+  and not taken);
+- the parser's scratch without the benchmark's traversal arrays, and no
+  assembly IDs without an assembly statement (this section's opening);
+- the files' token columns given back after the run, and `-Wempty-body`'s
+  invocation place without the replay (#1647);
+- the scratch given back after the reader past what the next stages push again,
+  and the rare columns in base pages, read only where written (#1684);
+- the preprocessor's output given back before the backend (#1695).
+
+As #518's step measures them, on the 9700X (`measure-compile --runs 11`
+against tcc, then `perf stat -r 11` of the compiler, CPU 2), main `2a852f20`,
+#617's merge, against main `94e166ec`, #1695's, each run under its own grant
+of the lock, in the order base, main, main, base
+([the record](https://github.com/buster14a/buster-performance/tree/e835986b41c233f2667060745926ed126159eb95/docs/measurements/step-628-2026-11-07)):
+
+| measure | `2a852f20` | `94e166ec` |
+| --- | ---: | ---: |
+| peak RSS | 390,188 / 390,172 KiB | 239,844 / 239,840 KiB |
+| wall, `measure-compile`'s median | 135.157 / 134.956 ms | 119.813 / 119.710 ms |
+| system time, its median | 16.484 / 19.608 ms | 13.257 / 17.038 ms |
+| kernel cycles | 107.68 / 108.15 M | 82.99 / 82.33 M |
+| user cycles | 639.98 / 640.54 M | 576.76 / 577.24 M |
+| minor faults | 2,220 / 2,221 | 6,760 / 6,760 |
+
+Each cell gives both of a tree's rounds. The peak is 38.5% lower and the
+kernel's cycles 23%, and the system time, which `getrusage` gives coarsely, is
+lower in each order. The faults are the base pages', which fault 4 KiB at a
+time where a huge page was cleared whole.
+
+Every peak in the compile is now within a few megabytes of the others: the
+reader's end, `static-data`'s end and the backend's end (the map in "The
+preprocessor's output before the backend"). What they all hold is what is
+left: the reader's scratch columns, about 88 MB at its end, the graph with room
+for a node a token, of which `sqlite3.c` uses 42%, the parser's columns, which
+the selection and the lowering read, and the reader's output. Two options
+still add their own: with `-Wall -Wextra`, the history's replay for the
+warnings adds 26 MB in `check-program` (the VM: 269 MB against 237 MB), and
+with `-g`, the debug rows and line table 26 MB in the backend (268 MB).
+[#1701](https://github.com/buster14a/buster/issues/1701) has them.
+
 ## The checker's graph and program passes (#530)
 
 **Measured against `main` on the 9700X.** Medians of 15 interleaved
@@ -1656,6 +1772,172 @@ keeps the probes and the receipts.
 | user cycles | 590.785 M | 589.415 M | −0.23% |
 | user instructions | 1,304.696 M | 1,299.420 M | −0.40% |
 | `check-input` | 46.614 ms | 46.388 ms | −0.23 ms |
+
+## The coded walk's actions inlined into its loop (#1671)
+
+**What the walk does.** A probe of `-c sqlite3.c` counted it
+([#1671](https://github.com/buster14a/buster/issues/1671#issuecomment-6710430485)):
+- **451,790 actions** over 695,362 postorder positions, making 316,456 nodes. Half the actions (229,679) splice no
+  values.
+- **The largest classes:** identifiers 95,402; lists 74,297; terminators 54,508; literals 44,184; binaries 42,766.
+- **Flushes:** 3,592 before a visit, 87 of a full batch, 1 at the end.
+
+**Where main's cycles went**, by source line on the 9700X, in shares of the whole compile:
+
+| part | share |
+| --- | ---: |
+| each action's call frame | about 2.3% |
+| the preparation: the compaction's gather, the identifiers' gathers, the literals | about 2.4% |
+| `check_graph_record_nodes` | 0.78% |
+| the flush's writes and gathers | about 0.6% |
+| the batch's adds | 0.57% |
+| the value splice | 0.56% |
+| each class action's own body | 0.17% at most |
+
+**The call frame.** `check_input_expression_coded` was a call per action, not inlined into the chunk's loop. Each paid:
+- four arguments pushed on the stack after a `vzeroupper` (about 60% of `check_input_expressions_coded_range`'s samples);
+- the prologue and epilogue;
+- spills.
+
+The flush only looked large off the host, where the VM's page faults in the walk (6,821) put it at 36% of the actions.
+
+**The change.**
+- **The untimed loop** takes the action always inlined, with the identifier and literal cursors in registers.
+- **The hot class actions.** Once the action was inlined, clang called the identifier's, literal's and terminator's
+  actions instead, so those three are always inlined too.
+- **The timed loop** (`PPOptions.expression_timing`, `benchmark-checker-bindings`) calls a wrapper, so the body is
+  inlined once.
+- **Nothing the actions do changes.** The scalar path, the walk's visit at every token, stays their twin.
+
+**Measured on the 9700X.** Main `1c966613` against the head `6c1b3ac8`, in 8 interleaved rounds, then
+`measure-compile` each way. Every run held the lock on its own. The objects are the same bytes.
+[The record](https://github.com/buster14a/buster-performance/tree/19c50f5aeda77b78d9d70f48ad3ea9326aadc064/docs/measurements/check-input-1671-coded-inline-2026-11-07)
+keeps the probe, main's profile by line and instruction, and the receipts.
+
+| measure | main | head | difference |
+| --- | ---: | ---: | ---: |
+| wall time | 121.810 ms | 120.990 ms | −0.67% |
+| user cycles | 591.072 M | 586.604 M | −0.76% |
+| user instructions | 1,298.686 M | 1,278.616 M | −1.55% |
+| `check-input` | 46.480 ms | 45.673 ms | −0.81 ms |
+| `expressions.actions` | 10.075 ms | 9.436 ms | −0.64 ms |
+
+## The coded walk's flush records its nodes 16 at a time (#1671)
+
+**What it replaces.** Each flush of the coded walk's batch called `check_graph_record_nodes`, which recorded the
+batch's nodes one at a time: about 0.8% of `-c sqlite3.c`'s cycles on the 9700X, about 15 cycles a node. It records:
+- each node's purity (`check_graph_pure`);
+- the validation's counters.
+
+`check_graph_run` takes these in place of a validation.
+
+**The change.** The flush's vector path records its 16 nodes in the step that writes them
+(`check_input_batch_record`), as `check_graph_validate_block` already computes purity:
+- **Each node's own part.** The operator's class from `check_graph_classes`' table (made once a walk), and the requested
+  type, builtin or void.
+- **A leaf's part.** Its type and overload head, gathered from its record by its slot.
+- **Operands before the 16** are gathered from `recorded_pure`. Those among them are taken in node order.
+- **The counters**, by popcounts and reductions.
+- **Around it.** The nodes a visit made before the batch are recorded first. The scalar path keeps
+  `check_graph_record_nodes` as the twin.
+
+**The checks.**
+- `test-checker` compares every source fixture's recorded facts with both validations.
+- A probe that validates every graph found `sqlite3.c`'s 309,214 nodes' recorded purity and counters equal to the
+  validation's.
+
+**Measured on the 9700X.** Main `219e7e9b`, with #1692, against the head `38152245` (this change merged with it), in 8
+interleaved rounds, then `measure-compile` each way. Every run held the lock on its own. The objects are the same bytes.
+Against main `73fcf006`, before #1692, it measured −0.56% wall and −0.67 ms of `check-input`.
+[The record](https://github.com/buster14a/buster-performance/tree/ee69c4a5186a0308078c67be14623f4baefd9ecd/docs/measurements/check-input-1671-coded-record-2026-11-07)
+keeps both A/Bs' receipts, each build's profile and the probe.
+
+| measure | main | head | difference |
+| --- | ---: | ---: | ---: |
+| wall time | 119.460 ms | 118.450 ms | −0.85% |
+| user cycles | 580.282 M | 575.560 M | −0.81% |
+| user instructions | 1,288.534 M | 1,279.602 M | −0.69% |
+| `check-input` | 43.966 ms | 43.183 ms | −0.78 ms |
+| `expressions.actions` | 9.660 ms | 8.868 ms | −0.79 ms |
+
+**A refinement that didn't pay.** The recording's gathers then took most of the flush's samples:
+- a leaf's type and overload head from its record;
+- its operands' purity.
+
+A version replaced them, keeping a leaf's purity as a batch byte written with the leaf and taking the operands lane by
+lane in node order. Against this change it was no faster:
+- `check-input` was 43.11 against 43.12 ms;
+- user cycles were −0.27%, lower in only 5 of 8 rounds;
+- user instructions were +0.41%.
+
+The gathers had overlapped with the flush's other work, so the change keeps them. The record holds both A/Bs.
+
+## The return flow's library-noreturn answers by name (#1709)
+
+**What cost.** The return-warning facts (`c_check_return_flow.c`) leave a direct call to a known, non-noreturn
+function unknown when its name is a catalogue entry with the `r` attribute (`abort`, `exit`, `longjmp`…), whose
+noreturn depends on builtin policy rather than the declaration's flag. Main searched the catalogue by name for every
+such call: in `-c sqlite3.c`, 13,142 searches of about 2,200 distinct names. `builtin_intrinsic_lookup` was 1.00% of
+the compile's cycles, all of it from `check_program_return_call`.
+
+**Now.** Only 16 of the catalogue's 3,775 entries carry `r`. `check_program_return_facts` interns their spellings
+once (`intern_find`) and marks their ids in a byte per identifier (`check_program_return_library_names`); a call reads
+its name's byte. The answer depends on the interned name alone, so the facts are the same.
+- **The twin.** The search (`check_program_return_library_search`) stays: it answers when the scratch arena has no
+  room for the bytes, and `test-checker` compares the bytes with it over every catalogue name, near misses and the
+  predefined names.
+- **The table's drift.** The same test checks that the table of 16 names is exactly the catalogue's `r` entries, in
+  its order, so a regenerated catalogue that changes the set fails there.
+- **A first step, kept in the record.** Memoizing each name's search still made 2,182 searches, and the A/B gained
+  0.78%.
+
+**Measured on the 9700X.** Main `829eb71a` against `56143cc3`, in 8 interleaved rounds, then `measure-compile` each
+way. Every run held the lock on its own. [The record](https://github.com/buster14a/buster-performance/tree/7e65d1a31fa2d399d5c92c98f2e5ee53e97765f6/docs/measurements/check-program-1709-return-library-2026-11-07) keeps the receipts, the three builds' profiles and the
+probe.
+
+| measure | main | head | difference |
+| --- | ---: | ---: | ---: |
+| wall time | 118.620 ms | 117.420 ms | −1.01%, lower in 8 of 8 rounds |
+| user cycles | 576.707 M | 569.578 M | −1.24% |
+| user instructions | 1,279.591 M | 1,272.399 M | −0.56% |
+| `check-program` | 24.625 ms | 23.601 ms | −1.02 ms |
+
+`builtin_intrinsic_lookup` is gone from the profile. The frozen corpus's objects are the same bytes, and sqlite
+3.50.4's `-c -g -Wall -Wextra` objects and diagnostics are the same bytes as main's on the vector path and with
+`--scalar`.
+
+## What remains of check-input (#1671)
+
+After #1692 and #1694, `check-input` is 43.15 ms on `-c sqlite3.c` (main `829eb71a`, the 9700X). A study found no
+remaining part worth more than about 0.3 ms by local changes.
+[The record](https://github.com/buster14a/buster-performance/tree/72bc1dd97d260c9b7e04ddaffcde4ad72a0eae71/docs/measurements/check-input-1671-remaining-2026-11-07)
+keeps the profiles, the probes and the A/Bs below.
+
+**Where its time is,** in shares of the compile's cycles:
+
+| part | share | profile |
+| --- | ---: | --- |
+| the coded walk | about 6% | its loop's spills, the flush's recording, the value splice and the dispatch, each 0.7–0.8% |
+| the walk in source order's own lines | 4.3% | no line above 0.27% |
+| the declaration steps | about 4.9% | flat |
+
+**What was ruled out, by measurement:**
+- **The declaration steps in vector passes.** The file-scope declarations hold 70% of the steps' time, and each is
+  distinct. Their per-parameter bookkeeping is branching and binding calls; its stores are about 0.04 ms in all.
+- **Caching the specifiers.** 96.5% of `check_input_specifiers`' 42,308 calls repeat an earlier call's tokens, but
+  they are one or two tokens long, and each still writes its tokens' ignored marks. The bound is about 0.3 ms.
+- **The expressions' graph built by passes.** #1038's numbering alone takes 3.21 ms for 323,623 nodes, as much as the
+  class actions it would replace, before any column is written.
+- **The coded walk's rare class actions out of line.** The instructions were identical: clang already kept them out of
+  line.
+- **The walk's label marks computed ahead.**
+  - Gathered a line at a time, they cost +0.28% cycles: the gathers sat on the walk's path.
+  - Made before the walk without gathers, they removed 5.5 M instructions and no cycles: the per-visit tests were cheap
+    and well predicted.
+  - So batching the plain names' visits, 17% of the walk's time, wasn't tried.
+
+**Outside check-input.** check-program's `check_program_return_call` looks every direct call's callee up in the builtin
+catalogue by name: 13,142 binary searches on `sqlite3.c`, 0.95% of the compile.
 
 ## The passes after checking (#592)
 

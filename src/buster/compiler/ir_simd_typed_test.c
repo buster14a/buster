@@ -445,6 +445,107 @@ static void ir_simd_typed_test_bits(IrTestTally* tally)
     printf("  IR SIMD rows: %u of the bit builtins' rows decode to intrinsics\n", rows);
 }
 
+// The signed overflow builtins' rows (#1385, check_lower_overflow_row's): add, imul and cmp with seto, of two ints or two
+// longs into an int, each a row Tier 0 takes, decoded at every target (their forms are baseline) as its intrinsic of its
+// operands, in their order. Then each row changed one way: a decoration, a displacement, an immediate, memory, a register
+// by number, the other width's operation, another condition's setcc, a result other than an int, unsigned operands,
+// a third operand, the operands swapped in the operation, the extension of the result into itself and the setcc's
+// record dropped: each not the overflows' decoder's, so at most the IR's machine row.
+static void ir_simd_typed_test_overflows(IrTestTally* tally)
+{
+    static const struct
+    {
+        uint16_t forms[2];
+        uint8_t intrinsic;
+        const char* name;
+    } operations[] = {
+        { { X86_FORM_ADD_R32_RM32, X86_FORM_ADD_R64_RM64 }, BUSTER_IR_INTRINSIC_SADDO, "saddo" },
+        { { X86_FORM_CMP_R32_RM32, X86_FORM_CMP_R64_RM64 }, BUSTER_IR_INTRINSIC_SSUBO, "ssubo" },
+        { { X86_FORM_IMUL_R32_RM32, X86_FORM_IMUL_R64_RM64 }, BUSTER_IR_INTRINSIC_SMULO, "smulo" },
+    };
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    const uint8_t direct = BUSTER_X86_REGISTER_DIRECT;
+    const uint8_t r = BUSTER_TIER0_ROLE_INTEGER_RESULT;
+    const uint8_t i0 = BUSTER_TIER0_ROLE_INTEGER(0);
+    const uint8_t i1 = BUSTER_TIER0_ROLE_INTEGER(1);
+    const uint8_t s0 = BUSTER_TIER0_ROLE_SCRATCH(0);
+    uint32_t rows = 0;
+    for (uint32_t k = 0; tables && k < BUSTER_ARRAY_LENGTH(operations); k += 1)
+    {
+        for (uint32_t wide = 0; wide < 2; wide += 1)
+        {
+            const uint8_t operand = wide != 0 ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_I32;
+            const uint32_t count = 3;
+            Tier0Operation row;
+            memset(&row, 0, sizeof(row));
+            row.records[0] = (X86Instruction){ .form = operations[k].forms[wide], .reg = i0, .rm = i1, .mode = direct };
+            row.records[1] = (X86Instruction){ .form = X86_FORM_SETO_RM8, .rm = s0, .mode = direct };
+            row.records[2] = (X86Instruction){ .form = X86_FORM_MOVZX_R32_RM8, .reg = r, .rm = s0, .mode = direct };
+            row.record_count = (uint8_t)count;
+            row.operand_count = 2;
+            row.operand_classes[0] = operand;
+            row.operand_classes[1] = operand;
+            row.result_class = BUSTER_TYPED_CLASS_I32;
+            char description[192];
+            snprintf(description, sizeof(description), "%s of %u-byte operands: a row Tier 0 takes", operations[k].name, tier0_class_bytes(operand));
+            ir_test_expect(tally, tier0_operation_valid(&row), description);
+            IrSimdTypedOperation decoded;
+            memset(&decoded, 0xa5, sizeof(decoded));
+            const IrSimdTypedStatus status = ir_simd_typed_row(&row, 0, &decoded);
+            snprintf(description, sizeof(description), "%s of %u-byte operands: its intrinsic of its operands at the baseline", operations[k].name, tier0_class_bytes(operand));
+            ir_test_expect(tally, status == IR_SIMD_TYPED_OK && decoded.intrinsic == operations[k].intrinsic + 1 && decoded.operand_count == 2 &&
+                                      decoded.operand_classes[0] == operand && decoded.operand_classes[1] == operand && decoded.intrinsic_operands[0] == 0 &&
+                                      decoded.intrinsic_operands[1] == 1 && decoded.required_features == 0 && decoded.mask_bytes == 0 && !decoded.machine,
+                           description);
+            rows += status == IR_SIMD_TYPED_OK;
+            for (uint32_t m = 0; m < 13; m += 1)
+            {
+                Tier0Operation changed = row;
+                X86Instruction* operation = &changed.records[0];
+                switch (m)
+                {
+                case 0: operation->decorations = 1; break;
+                case 1: operation->displacement = 8; break;
+                case 2: operation->immediate = 1; break;
+                case 3: operation->mode = BUSTER_X86_MEMORY_BASE; break;
+                case 4: operation->rm = X86_REGISTER_RCX; break;
+                case 5: operation->form = operations[k].forms[!wide]; break;
+                case 6: changed.records[count - 2].form = X86_FORM_SETB_RM8; break;
+                case 7: changed.result_class = wide != 0 ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_U32; break;
+                case 8:
+                    changed.operand_classes[0] = (uint8_t)(operand + 1);
+                    changed.operand_classes[1] = (uint8_t)(operand + 1);
+                    break;
+                case 9:
+                    changed.operand_count = 3;
+                    changed.operand_classes[2] = operand;
+                    break;
+                case 10:
+                    operation->reg = i1;
+                    operation->rm = i0;
+                    break;
+                case 11: changed.records[count - 1].rm = r; break;
+                default:
+                    changed.records[count - 2] = changed.records[count - 1];
+                    changed.record_count -= 1;
+                    break;
+                }
+                IrSimdTypedOperation mutated;
+                memset(&mutated, 0x3c, sizeof(mutated));
+                const IrSimdTypedStatus mutated_status = ir_simd_typed_overflow(&changed, &mutated);
+                snprintf(description, sizeof(description), "%s of %u-byte operands: its row changed one way (%u) isn't an overflow's row", operations[k].name,
+                         tier0_class_bytes(operand), m);
+                ir_test_expect(tally, mutated_status == IR_SIMD_TYPED_UNSUPPORTED, description);
+                const IrSimdTypedStatus row_status = ir_simd_typed_row(&changed, UINT64_MAX, &mutated);
+                ir_test_expect(tally, ir_simd_typed_test_undecoded(row_status, &mutated), description);
+            }
+        }
+    }
+    ir_test_expect(tally, rows == BUSTER_ARRAY_LENGTH(operations) * 2, "every signed overflow builtin's row decodes");
+    printf("  IR SIMD rows: %u of the signed overflow builtins' rows decode to intrinsics\n", rows);
+}
+
 // The machine rows (#141, ir_simd_typed_machine_row): rows the IR's own operations don't take decode as the row itself,
 // with their operands' classes and bytes and their features: the union of their forms' (x86_target_requirement's) and
 // of their vectors' and masks' moves' (AVX512F, VL below 64 bytes, DQ for a byte mask, BW for a doubleword or a
@@ -1051,6 +1152,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_masks(tally);
     ir_simd_typed_test_intrinsics(tally);
     ir_simd_typed_test_bits(tally);
+    ir_simd_typed_test_overflows(tally);
     ir_simd_typed_test_compare_masks(tally);
     type_test_table_close(&table);
 }

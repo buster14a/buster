@@ -135,10 +135,10 @@
 //   - LOAD: the value of `class` at the address the operand (U64) holds. An integer class's LOAD, STORE and SET take a
 //     `value` (#1059): 0 for an ordinary access, or BUSTER_TYPED_ACCESS_ATOMIC with a C memory order
 //     (BUSTER_TYPED_FENCE_ORDER's bits) for an atomic one, a single access of the class's bytes, naturally aligned. Its
-//     code is an ordinary access's: on x86-64 a naturally aligned access of 1, 2, 4 or 8 bytes is atomic, and the total
-//     store order gives a load's and a release store's orders; a seq_cst store's fence is the FENCE of seq_cst after it,
-//     which its producer writes. The IR keeps the order (BUSTER_IR_ATOMIC), and ir_lower refuses a marker of another
-//     shape; Tier 0, whose code is the same either way, doesn't read it.
+//     code is an ordinary access's except for a seq_cst store: on x86-64 a naturally aligned access of 1, 2, 4 or 8 bytes
+//     is atomic, and the total store order gives a load's and a release store's orders. A seq_cst STORE or SET uses a
+//     memory xchg, discarding the old value and preserving STORE's desired result. The IR keeps the order
+//     (BUSTER_IR_ATOMIC), and ir_lower refuses a marker of another shape.
 //   - ADD ... SHR: the two operands' sum ... (by `class`, which both operands have, but a shift's count, any integer
 //     class); DIV, MOD and SHR divide and shift right as `class`'s signedness says. The generated code wraps.
 //   - PTR_ADD: the first operand (U64) plus the second (I64 or U64) times `value`, the element's size (nonzero).
@@ -638,6 +638,11 @@ struct Tier0Function
     // with iretq. It keeps no temporary below rsp, where a nested interrupt's frame would land: its red zone's
     // temporaries are its frame's (Tier0Frame.temporaries). Its result is void, and it takes no variadic arguments.
     uint8_t interrupt;
+    // Whether the prologue realigns the stack to 16 bytes at least (#1447, x86's force_align_arg_pointer, LLVM's
+    // stackrealign), as a frame whose objects need more does (tier0_frame_alignment): its caller, an interrupt handler or
+    // code of another ABI, may leave rsp misaligned. Its objects are then aligned whatever rsp was; its incoming stack
+    // arguments stay where the caller put them, read through rbp.
+    bool realign_stack;
 };
 
 #define BUSTER_TIER0_INTERRUPT_HANDLER 1
@@ -1738,6 +1743,7 @@ struct Tier0RecordSpec
 //   - INDEX_CONST(s), INDEX_HOME(s), OFFSET_HOME: a store's address [R2 + R1 * 2^s] (or [R1 + K]) and its value a
 //     constant (K) or a local (A).
 //   - LAST: a return that is the function's last entry, without the jump to the epilogue.
+//   - ATOMIC: a seq_cst STORE or SET, memory xchg with its operands on the stack and the old value discarded.
 //   - WIDE_SCALE: a pointer addition whose element size is past imul's sign-extended imm32, materialized in R0.
 #define BUSTER_TIER0_VARIANT_PLAIN 0
 #define BUSTER_TIER0_VARIANT_CONST 1
@@ -1755,6 +1761,8 @@ struct Tier0RecordSpec
 #define BUSTER_TIER0_VARIANT_INDEX_HOME(s) (25 + (s))
 #define BUSTER_TIER0_VARIANT_OFFSET_HOME 29
 #define BUSTER_TIER0_VARIANT_LAST 30
+// STORE and SET share RETURN's otherwise unused variant number.
+#define BUSTER_TIER0_VARIANT_ATOMIC 30
 #define BUSTER_TIER0_VARIANT_WIDE_SCALE 31
 #define BUSTER_TIER0_VARIANT_CONVERT_HOME 16
 #define BUSTER_TIER0_VARIANTS 32
@@ -2756,6 +2764,20 @@ static void tier0_define_templates(void)
         tier0_add(floating ? tier0_rmem(tier0_store_form(class), BUSTER_TIER0_SOURCE_X1, BUSTER_TIER0_RM_BASE, BUSTER_TIER0_SOURCE_R1, 0, 0)
                            : tier0_rmem(tier0_store_form(class), BUSTER_TIER0_SOURCE_R1, BUSTER_TIER0_RM_BASE, BUSTER_TIER0_SOURCE_R2, 0, 0));
         tier0_end(BUSTER_TYPED_SET, class, BUSTER_TIER0_VARIANT_PLAIN, 0);
+        if (!floating)
+        {
+            // Xchg overwrites its value register. SET consumes both operands, while STORE keeps the desired value
+            // in a scratch until the address register becomes its result. Neither may take a local's home directly.
+            const uint32_t exchange = tier0_sized(class, X86_FORM_XCHG_RM8_R8, X86_FORM_XCHG_RM16_R16, X86_FORM_XCHG_RM32_R32, X86_FORM_XCHG_RM64_R64);
+            tier0_begin();
+            tier0_add(tier0_rmem(exchange, BUSTER_TIER0_SOURCE_R1, BUSTER_TIER0_RM_BASE, BUSTER_TIER0_SOURCE_R2, 0, 0));
+            tier0_end(BUSTER_TYPED_SET, class, BUSTER_TIER0_VARIANT_ATOMIC, 0);
+            tier0_begin();
+            tier0_add(tier0_rr(X86_FORM_MOV_R64_RM64, BUSTER_TIER0_SOURCE_R0, BUSTER_TIER0_SOURCE_R1));
+            tier0_add(tier0_rmem(exchange, BUSTER_TIER0_SOURCE_R1, BUSTER_TIER0_RM_BASE, BUSTER_TIER0_SOURCE_R2, 0, 0));
+            tier0_add(tier0_rr(X86_FORM_MOV_R64_RM64, BUSTER_TIER0_SOURCE_R2, BUSTER_TIER0_SOURCE_R0));
+            tier0_end(BUSTER_TYPED_STORE, class, BUSTER_TIER0_VARIANT_ATOMIC, 0);
+        }
         const uint32_t store_imm = tier0_sized(class, X86_FORM_MOV_RM8_IMM8, X86_FORM_MOV_RM16_IMM16, X86_FORM_MOV_RM32_IMM32, X86_FORM_MOV_RM64_IMM32);
         if (!floating)
         {
@@ -3409,9 +3431,9 @@ static BUSTER_BAKED_UNIT uint16_t tier0_inc_dec;
 
 static bool tier0_inc_dec_costs_no_more(void)
 {
-    static const uint8_t steps[] = { X86_COST_INC_RM32_REGISTER, X86_COST_DEC_RM32_REGISTER, X86_COST_INC_RM64_REGISTER, X86_COST_DEC_RM64_REGISTER };
-    static const uint8_t originals[] = { X86_COST_ADD_RM32_IMM8_REGISTER, X86_COST_SUB_RM32_IMM8_REGISTER, X86_COST_ADD_RM64_IMM8_REGISTER,
-                                         X86_COST_SUB_RM64_IMM8_REGISTER };
+    static const uint16_t steps[] = { X86_COST_CASE_INC_RM32_REGISTER, X86_COST_CASE_DEC_RM32_REGISTER, X86_COST_CASE_INC_RM64_REGISTER, X86_COST_CASE_DEC_RM64_REGISTER };
+    static const uint16_t originals[] = { X86_COST_CASE_ADD_RM32_IMM8_REGISTER, X86_COST_CASE_SUB_RM32_IMM8_REGISTER, X86_COST_CASE_ADD_RM64_IMM8_REGISTER,
+                                          X86_COST_CASE_SUB_RM64_IMM8_REGISTER };
     bool cheaper = true;
     for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(steps); s += 1)
     {
@@ -3420,10 +3442,13 @@ static bool tier0_inc_dec_costs_no_more(void)
         {
             const X86CostCase* step = &x86_zen5_cases[steps[s]];
             const X86CostCase* original = &x86_zen5_cases[originals[o]];
-            const bool known = step->latency != BUSTER_X86_COST_UNKNOWN && step->throughput != BUSTER_X86_COST_UNKNOWN &&
-                               step->retired_ops != BUSTER_X86_COST_UNKNOWN && original->latency != BUSTER_X86_COST_UNKNOWN &&
-                               original->throughput != BUSTER_X86_COST_UNKNOWN && original->retired_ops != BUSTER_X86_COST_UNKNOWN;
-            cheaper &= known && step->latency <= original->latency && step->throughput <= original->throughput && step->retired_ops <= original->retired_ops;
+            static const uint8_t columns[] = { X86_COST_LATENCY, X86_COST_THROUGHPUT, X86_COST_RETIRED_OPS };
+            for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(columns); c += 1)
+            {
+                const uint16_t mine = step->values[columns[c]];
+                const uint16_t theirs = original->values[columns[c]];
+                cheaper &= mine != BUSTER_X86_COST_UNKNOWN && theirs != BUSTER_X86_COST_UNKNOWN && mine <= theirs;
+            }
         }
     }
     return cheaper;
@@ -3460,8 +3485,9 @@ static void tier0_prepare_tables(void)
 
 static bool tier0_initialize(void)
 {
-    // Tier 0 reads the effects tables: its immediates' forms (x86_choose_forms) and its rows' (tier0_operation_form_valid).
-    if (!tier0_initialized && (x86_semantics_initialized || x86_semantics_initialize()))
+    // Tier 0 reads the effects tables: its immediates' forms (x86_choose_forms) and its rows' (tier0_operation_form_valid);
+    // and the Zen 5 model (#181), which its records' rows come from and whose tests check them.
+    if (!tier0_initialized && (x86_semantics_initialized || x86_semantics_initialize()) && (x86_zen5_initialized || x86_zen5_initialize()))
     {
         tier0_prepare_tables();
         tier0_inc_dec = tier0_inc_dec_costs_no_more() ? BUSTER_X86_CONTEXT_INC_DEC : 0;
@@ -3879,6 +3905,8 @@ static inline __attribute__((always_inline)) void tier0_fuse_entries(const Tier0
         entries->absorbed[i] = 0;
         const bool here = tier0_label(labels, i);
         const bool before = i > 0 && tier0_label(labels, i - 1);
+        const bool sequential = (kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET) && tier0_class_integer(class) &&
+                                 values[i] == (BUSTER_TYPED_ACCESS_ATOMIC | BUSTER_TYPED_FENCE_SEQ_CST);
         // The entry's own variants.
         uint32_t log2 = 0;
         if (kind == BUSTER_TYPED_CONST && tier0_class_floating(class) && values[i] == 0)
@@ -3896,6 +3924,10 @@ static inline __attribute__((always_inline)) void tier0_fuse_entries(const Tier0
         else if (kind == BUSTER_TYPED_RETURN && i + 1 == function->count)
         {
             variant = BUSTER_TIER0_VARIANT_LAST;
+        }
+        else if (sequential)
+        {
+            variant = BUSTER_TIER0_VARIANT_ATOMIC;
         }
         // A local and a constant as a compare's or a multiplication's operands; or a leaf as the last operand.
         const bool has_last = tier0_shapes[kind].last == BUSTER_TIER0_STACK_OPERAND && !(kind == BUSTER_TYPED_RETURN && class == BUSTER_TYPED_CLASS_VOID);
@@ -3919,7 +3951,7 @@ static inline __attribute__((always_inline)) void tier0_fuse_entries(const Tier0
             tier0_absorb(entries, i, i - 2);
             leaf_taken = true;
         }
-        if (!leaf_taken && i >= 1 && !here && has_last)
+        if (!leaf_taken && !sequential && i >= 1 && !here && has_last)
         {
             const uint8_t previous = kinds[i - 1];
             const bool constant = previous == BUSTER_TYPED_CONST && (tier0_class_integer(operand) || kind == BUSTER_TYPED_DISCARD) &&
@@ -4558,7 +4590,8 @@ static bool tier0_object_parameters(const Tier0Function* function)
 }
 
 // The log2 of the alignment a function's frame needs past 16 bytes, to which the prologue realigns it
-// (Tier0Frame.alignment_log2), or 0 for none: the most its objects need and the most its calls' outgoing areas need
+// (Tier0Frame.alignment_log2), or 0 for none (16 bytes' for a force_align_arg_pointer function's, Tier0Function.realign_stack,
+// which the frame realigns whatever it needs): the most its objects need and the most its calls' outgoing areas need
 // (AbiCall.stack_alignment_log2, which an argument aligned past 16 raises). An aggregate parameter that keeps its
 // incoming bytes rather than living in the frame (tier0_parameter_in_place) is aligned to 16 at most, so that every
 // object may count. Out of line, once per function, before selection, whose integer depths it decides; the vector
@@ -4578,7 +4611,7 @@ static __attribute__((noinline)) uint32_t tier0_frame_alignment(const Tier0Funct
         const uint32_t alignment = function->calls[c].stack_alignment_log2;
         log2 = alignment > log2 ? alignment : log2;
     }
-    return log2 > BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 ? log2 : 0;
+    return log2 > BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 ? log2 : function->realign_stack ? BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 : 0;
 }
 
 // tier0_frame_alignment for the vector path: the objects' alignments 16 locals at a time (their bytes loaded under the
@@ -4605,7 +4638,7 @@ static __attribute__((noinline)) uint32_t tier0_frame_alignment_vector(const Tie
         most = _mm512_max_epu32(most, _mm512_and_si512(calls, _mm512_set1_epi32(0xff)));
     }
     const uint32_t log2 = _mm512_reduce_max_epu32(most);
-    return log2 > BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 ? log2 : 0;
+    return log2 > BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 ? log2 : function->realign_stack ? BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 : 0;
 }
 
 // Phase 3: each local's home, and the frame. A parameter whose register the body doesn't touch stays in it. The other
@@ -12380,6 +12413,7 @@ struct Tier0Bits
     uint64_t* product;
     uint64_t* same;
     uint64_t* sib;
+    uint64_t* sequential;
     uint8_t* sib_log2;
     uint64_t* labels;
     // A consumer takes the leaf before it; takes a local and a constant (HOME_CONST); takes a pointer addition or a
@@ -12417,6 +12451,8 @@ static void tier0_vector_values(const Tier0Function* function, Tier0Bits* bits)
         ((uint8_t*)bits->product)[byte] =
             (uint8_t)(_mm512_mask_cmpeq_epi64_mask(lanes, product, narrowed_product) & _mm512_cmpeq_epi64_mask(previous, previous_narrowed));
         ((uint8_t*)bits->same)[byte] = (uint8_t)_mm512_mask_cmpeq_epi64_mask(lanes & lanes_3, back3, value);
+        ((uint8_t*)bits->sequential)[byte] =
+            (uint8_t)_mm512_mask_cmpeq_epi64_mask(lanes, value, _mm512_set1_epi64(BUSTER_TYPED_ACCESS_ATOMIC | BUSTER_TYPED_FENCE_SEQ_CST));
         // A SIB scale: one bit set, at most 8; its log2 is 63 less its leading zeros.
         const __mmask8 one_bit = _mm512_cmpeq_epi64_mask(_mm512_popcnt_epi64(value), _mm512_set1_epi64(1));
         const __mmask8 small = _mm512_cmple_epu64_mask(value, _mm512_set1_epi64(8));
@@ -12549,6 +12585,9 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         const uint64_t exempt = _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_TIER0_KIND_EXEMPT));
         const uint64_t pointer_add = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_PTR_ADD));
         const uint64_t discard = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_DISCARD));
+        const uint64_t sequential = bits->sequential[block] & _mm512_movepi8_mask(tier0_lookup(tier0_vector_integer, classes)) &
+                                    (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_STORE)) |
+                                     _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_SET)));
         // Whether the constant before fits the consumer's immediate.
         const uint64_t general_fits = exempt | ~wide | fits_1;
         const uint64_t fits = (shift & count_1) | (pointer_add & fits_1 & size & product) | (~shift & ~pointer_add & general_fits);
@@ -12565,7 +12604,7 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         const uint64_t home_home = lanes & compare & ~labels & ~labels_1 & local_1 & local_2 & property_home_const & (block != 0 ? ~0ull : ~3ull);
         const uint64_t leaf_constant = constant_1 & (integer_1 | discard) & fits & property_const;
         const uint64_t leaf_home = local_1 & property_home;
-        const uint64_t leaf = lanes & has_last & ~labels & (leaf_constant | leaf_home) & ~home_const & ~home_home & (block != 0 ? ~0ull : ~1ull);
+        const uint64_t leaf = lanes & has_last & ~labels & (leaf_constant | leaf_home) & ~home_const & ~home_home & ~sequential & (block != 0 ? ~0ull : ~1ull);
         bits->leaf[block] = leaf;
         bits->home_const[block] = home_const | home_home;
         // The variants: the entry's own, then the leaf fusion's.
@@ -12585,6 +12624,7 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         variant = _mm512_mask_mov_epi8(variant, leaf & leaf_home & convert, _mm512_or_si512(classes_1, tier0_variant(BUSTER_TIER0_VARIANT_CONVERT_HOME)));
         variant = _mm512_mask_mov_epi8(variant, home_const, tier0_variant(BUSTER_TIER0_VARIANT_HOME_CONST));
         variant = _mm512_mask_mov_epi8(variant, home_home, tier0_variant(BUSTER_TIER0_VARIANT_HOME_HOME));
+        variant = _mm512_mask_mov_epi8(variant, sequential, tier0_variant(BUSTER_TIER0_VARIANT_ATOMIC));
         _mm512_mask_storeu_epi8(entries->variants + first, lanes, variant);
         _mm512_mask_storeu_epi8(entries->key_kinds + first, lanes, key_kind);
         _mm512_mask_storeu_epi8(entries->key_classes + first, lanes, key_class);
@@ -13542,7 +13582,7 @@ static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
     Tier0Bits bits;
     memset(&bits, 0, sizeof(bits));
     bits.blocks = blocks;
-    uint64_t** columns[] = { &bits.fits, &bits.count, &bits.zero, &bits.size, &bits.product, &bits.same, &bits.sib, &bits.labels, &bits.leaf,
+    uint64_t** columns[] = { &bits.fits, &bits.count, &bits.zero, &bits.size, &bits.product, &bits.same, &bits.sib, &bits.sequential, &bits.labels, &bits.leaf,
                              &bits.home_const, &bits.one, &bits.two, &bits.rmw };
     bool pushed = tier0_push_entries(&entries, scratch.arena, count);
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(columns); c += 1)

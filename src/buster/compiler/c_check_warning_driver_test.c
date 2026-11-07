@@ -625,9 +625,100 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .notes = 1,
     },
     {
+        // An indirection through a pointer to void (#147, -Wvoid-ptr-dereference): its operand's type as written (a typedef
+        // kept, top-level qualifiers dropped), in dead code too; not right after a unary `&` nor in sizeof's or alignof's
+        // operand.
+        .name = "void pointer dereferences",
+        .source = "typedef void *VP;\nvoid f(void *p, VP v, const void *c, void *const k) {\n"
+                  "  (void)*p; (void)*v; (void)*c; (void)*k; void *q = &*p; q = &(*p); q = & *p;\n"
+                  "  (void)sizeof(*p); (void)_Alignof(*p); (void)__alignof__ *p; (void)(1 ? *p : *p);\n"
+                  "  if (0) (void)*p; (void)**(void **)p; (void)q;\n}\n",
+        .warnings = 10,
+    },
+    {
+        // Clang decides by the context its parser is in (#147): an unselected _Generic association or choose_expr operand in
+        // an alignof's operand is unevaluated with it, as are a _Generic's controlling expression and a statement
+        // expression in sizeof's; an array declarator's bound, in a sizeof's type name too, is evaluated; and a sizeof of a
+        // variable array's element evaluates its operand.
+        .name = "void pointer dereferences by context",
+        .source = "void *p; int i;\nunsigned long f(int n) {\n  char v[n][n]; int w[(*p, 3)];\n"
+                  "  return _Alignof(_Generic(i, int: i, default: *p)) + _Alignof(__builtin_choose_expr(0, i, *p)) + _Generic(*p, void: 1, default: 2)\n"
+                  "    + sizeof(({ (void)*p; 1; })) + sizeof(char (*)[(*p, n)]) + sizeof(int[(*p, n)]) + sizeof(v[(*p, 0)]) + sizeof(w);\n}\n"
+                  "void g(int a[(*p, 3)]) { (void)a; }\n",
+        .warnings = 12,
+    },
+    {
+        // An assignment to a const variable, through an array's subscripts or a record's members to it, or through a
+        // pointer to a const record (#147): the variable named with its declared type and the "declared const here" note at
+        // its name; a pointer's target is the generic error.
+        .name = "const variable assignments",
+        .source = "typedef const int CI;\nstruct s { int a; };\nvoid f(const int p, const struct s *q) {\n  const int x = 1; x = 2; x++; p = 3;\n"
+                  "  const int a[2] = {0}; a[0] = 1; const int m[2][2] = {0}; m[0][1] = 1;\n"
+                  "  CI y = 1; y = 2; const struct s v = {0}; v.a = 1; q->a = 2;\n}\nvoid g(const int *r) { r[0] = 1; *r = 2; }\n",
+        .errors = 10,
+        .notes = 8,
+    },
+    {
+        // Arithmetic on a pointer to an incomplete type (#147): clang's message of the pointee as written, a subscript's at
+        // its `[`, and the "forward declaration" note at the tag's declaring name.
+        .name = "incomplete pointer arithmetic",
+        .source = "struct s; union u; enum e; typedef struct s S;\nvoid f(struct s *p, struct s *q, union u *w, enum e *n, S *t) {\n"
+                  "  (void)(p + 1); (void)(1 + p); (void)(p - q); p++; --p; p += 2; (void)p[1]; (void)1[p];\n"
+                  "  (void)(w + 1); (void)(n - 1); (void)(t + 1);\n}\n",
+        .errors = 11,
+        .notes = 11,
+    },
+    {
         .name = "independent bodies retain source order at requested lanes",
         .source = "int*f0(void){return 1-1;}\nint*f1(void){return 2-2;}\nint*f2(void){return 3-3;}\n",
         .warnings = 3,
+    },
+    {
+        // A GNU statement expression in an unevaluated operand (#147): its statements are the graph's roots, but clang drops
+        // the unused-result and runtime-behavior warnings in sizeof's, _Alignof's, __alignof__'s and typeof's operands
+        // (check_common_unevaluated). None of these statement expressions has a side effect, which clang's
+        // -Wunevaluated-expression would report.
+        .name = "statement expression results in sizeof operands",
+        .source = "int *q;\nunsigned long g(void) { return sizeof(({ *q; 1; })); }\nunsigned long k(void) { return sizeof(({ 1 + 2; 1; })); }\n",
+    },
+    {
+        .name = "unused results in unevaluated statement expressions",
+        .source = "int *q;\nstruct S { int m; } *ps, vs;\nunsigned long f(int x) {\n"
+                  "    return sizeof(({ x == 1; x != 1; x < 1; 1; })) + sizeof(({ (0, x); (void *)q; ps->m; vs.m; 1; })) +\n"
+                  "           sizeof(({ x ? 1 : 2; ({ 3; 4; }); 5; })) + sizeof(x ? ({ 1; 2; }) : 3) + sizeof (({ *q; 1; })) +\n"
+                  "           __alignof__(({ *q; x == 1; (void *)q; 1; })) + _Alignof(({ 1; 2; }));\n}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "runtime behavior warnings in unevaluated statement expressions",
+        .source = "int a[2];\nunsigned u;\nint s;\nunsigned long f(int x) {\n"
+                  "    return sizeof(({ x / 0; 1; })) + sizeof(({ x % 0; 1; })) + sizeof(({ a[5]; 1; })) + sizeof(({ char c = 300; c; })) +\n"
+                  "           sizeof(({ u < s; 1; })) + sizeof(({ int b[2]; b[2]; })) + __alignof__(({ a[2]; x / 0; 1; }));\n}\n",
+        .options = { "-Wsign-compare" },
+    },
+    {
+        .name = "typeof statement expressions are unevaluated",
+        .source = "int *q;\nvoid f(int x) {\n    __typeof__(({ *q; x == 1; x = x; x / 0; 1; })) t = 0;\n"
+                  "    typeof(({ (0, x); (void *)q; 1; })) v = 0;\n    (void)t;\n    (void)v;\n}\n",
+        .options = { "-Wself-assign" },
+    },
+    {
+        // The evaluated controls: a statement expression outside the operand, sizeof's own discarded result, and array
+        // bounds, which clang evaluates as constant expressions even in a sizeof's type name or in a declaration inside its
+        // statement expression, until a nested sizeof makes them unevaluated again.
+        .name = "evaluated statement expressions and array bounds keep their warnings",
+        .source = "int *q;\nunsigned long f(int x) {\n    ({ *q; 1; });\n    sizeof(({ 1; 2; }));\n"
+                  "    unsigned long n = sizeof(int[({ x == 1; 2; })]) + sizeof(({ int w[({ 3; 4; })]; 5; }));\n"
+                  "    return n + ({ x < 1; 6; }) + sizeof(int[sizeof(({ 7; 8; }))]);\n}\n",
+        .warnings = 6,
+        .notes = 1,
+    },
+    {
+        // A sizeof of an expression of variable array type evaluates it after all (clang's TransformToPotentiallyEvaluated),
+        // which the contexts mark TRANSFORMED; a statement expression whose value decays to a pointer is no variable array,
+        // and stays unevaluated. (A statement expression inside a variable array's operand isn't supported yet.)
+        .name = "a statement expression decaying from a variable array stays unevaluated",
+        .source = "void g(int n) {\n    char vv[n][n];\n    (void)sizeof(({ 3; vv[0]; }));\n    (void)sizeof(({ 4; vv; }));\n}\n",
     },
 };
 

@@ -36,6 +36,11 @@ requirements. [Command index](README.md).
   A raw forced include skipped by `#pragma once` or an include guard leaves the synthetic include depth balanced;
   the following ordinary forced header still observes level 1, its child level 2, and the main file level 0 (#1616).
   `-E -fpreprocessed` is rejected; a `.i` input is already preprocessed.
+  Unknown command-line warning names are diagnosed before the prelude, with
+  the complete command's ordered suppression and promotion policy and the
+  ordinary diagnostic counters/replay. Driver aliases and valued spellings
+  stay separate from warning-group names; see
+  [Warning option names](driver.md#warning-option-names).
   `docs/c-preprocessor.md` explains the design, the `clang -E`
   oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
   (`main.c` includes it; `./build/compiler test-preprocessor` runs them),
@@ -66,8 +71,11 @@ requirements. [Command index](README.md).
   headers' tokens from runs the main loop keeps (`pp_system_levels`, "System
   levels"), with the history's judgment (`pp_system_levels_history`) as twin.
   The checker's driver gives the files' token columns back after the run
-  (`pp_release_file_columns`), and a replay prepares the files again;
-  `pp_test_deferred_history` replays after that release. `-Wempty-body` places
+  (`pp_release_file_columns`), and a replay prepares the files again; and
+  the output's columns before the backend (`pp_release_output`), which a
+  replay gives back to a reader that asks (`pp_output_ensure`).
+  `pp_test_deferred_history` releases both and replays after that release,
+  comparing the output it gives back with the recorded run's. `-Wempty-body` places
   a lone invocation from the file's bytes (`pp_output_invocation_place`),
   which `test-preprocessor` checks against the history's place in every file
   it compiles (`pp_test_invocation_places`) and in a fixture

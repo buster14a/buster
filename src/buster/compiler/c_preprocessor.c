@@ -776,7 +776,9 @@ struct FileCache
     uint32_t listing_misses;
     // The directories with a listing: until there is one, a lookup that finds a file looks no directory up.
     uint32_t listed_directories;
-    Arena arrays[4];
+    // The four arrays' arena of tables, file_cache_initialize's (#1521), or empty where they are tables of a unit's
+    // (pp_initialize_once).
+    Arena arrays;
     // Each lane's arenas, reserved when the lane first prepares a record.
     FileCacheArenas lanes[BUSTER_LANE_MAX_COUNT];
     // The records prepared, and their tokens (for the tests and the benchmark).
@@ -1422,8 +1424,10 @@ struct Preprocessor
     Arena columns[3];
     Arena arrays[BUSTER_PP_ARRAYS];
     uint32_t array_count;
-    // The output, and the three stacks of buffers.
+    // The output, and the three stacks of buffers. Once released (pp_release_output), the output keeps its count but not
+    // its columns until a replay gives them back (pp_output_ensure).
     PPTokens output;
+    bool output_released;
     PPTokens arguments;
     // Lazy delimiter links for immutable raw argument slices, indexed through argument_indexed. A write after a
     // stack rewind invalidates its suffix (pp_room); live contexts retain their bounded, unchanged prefix.
@@ -1757,9 +1761,9 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_publish(Pre
 // The cutoff has no source location or notes; once fatal, later errors and warnings contribute neither text nor counts.
 static bool pp_diagnostic_begin(Preprocessor* pp, PPSeverity* severity, bool* limited)
 {
-    // A source pragma's error is MAPPED_ERROR and keeps clang's ordinary error severity under -Wfatal-errors; every
-    // other error becomes fatal below. It has no effect on warnings, and the error budget can't cut in first: the
-    // diagnostic is already fatal.
+    // A source pragma's error, or a command-line warning whose complete policy was already resolved, is MAPPED_ERROR
+    // and keeps its ordinary error severity under -Wfatal-errors; every other error becomes fatal below. It has no
+    // effect on warnings, and the error budget can't cut in first: the diagnostic is already fatal.
     const bool source_error = *severity == PP_SEVERITY_MAPPED_ERROR;
     *severity = (source_error || *severity == PP_SEVERITY_DEFERRED_ERROR) ? PP_SEVERITY_ERROR :
                 *severity == PP_SEVERITY_MAPPED_FATAL ? PP_SEVERITY_FATAL : *severity;
@@ -1833,6 +1837,8 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
 static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_history_ensure(Preprocessor* pp);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_release_file_columns(Preprocessor* pp, bool poison);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_release_output(Preprocessor* pp, bool poison);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_output_ensure(Preprocessor* pp);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_location_in_main_file(const Preprocessor* pp, uint32_t location);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnose_eval_method_use(Preprocessor* pp, uint32_t use, uint32_t position, uint32_t pragma_source);
 
@@ -4006,7 +4012,7 @@ static uint32_t file_cache_shift(void)
     return arena_capacity_shift(records > paths ? records : paths);
 }
 
-// The entries and entry bytes of a cache's four arrays at capacity shift `shift`, in FileCache.arrays' order: the
+// The entries and entry bytes of a cache's four arrays at capacity shift `shift`, in file_cache_start's order: the
 // records, their identity slots, the paths and their slots.
 static void file_cache_array_shape(uint32_t shift, uint64_t counts[4], uint64_t sizes[4])
 {
@@ -4022,8 +4028,8 @@ static void file_cache_array_shape(uint32_t shift, uint64_t counts[4], uint64_t 
 
 // Starts a cache whose bytes are all zero, with its four arrays at `arrays` (file_cache_array_shape's, at `shift`, zero
 // too, or a null among them if they couldn't be reserved), and reserves its paths' bytes. The arrays are the caller's to
-// release: file_cache_initialize's own arenas, or a unit's tables (pp_initialize_once, #652), which hold the cache itself
-// too and so need neither its 120 KB written zero nor four arenas of their own.
+// release: file_cache_initialize's arena of tables, or a unit's tables (pp_initialize_once, #652), which hold the cache
+// itself too and so need neither its 120 KB written zero nor an arena of their own.
 static bool file_cache_start(FileCache* cache, InternTable* table, PPPrepare prepare, uint32_t shift, void* const arrays[4])
 {
     cache->prepare = prepare;
@@ -4051,14 +4057,21 @@ static __attribute__((unused)) bool file_cache_initialize(FileCache* cache, Inte
     uint64_t counts[4];
     uint64_t sizes[4];
     file_cache_array_shape(shift, counts, sizes);
-    // Reserved in turn until one can't be (file_cache_release releases those that were).
-    void* arrays[4] = { 0 };
-    bool reserved = true;
-    for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(cache->arrays); i += 1)
+    // One arena of tables (#1521), each in the pages an arena of its own would have: it commits them whole without
+    // charging their 568 MiB, of which a unit's files touch a few pages, and takes one mapping and one commit for four.
+    ArenaTable tables[4];
+    void* arrays[4];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(tables); i += 1)
     {
-        cache->arrays[i] = arena_reserve(counts[i] * sizes[i] + 64);
-        arrays[i] = cache->arrays[i].base != 0 ? arena_push_array(&cache->arrays[i], counts[i], sizes[i], 64) : 0;
-        reserved = arrays[i] != 0;
+        tables[i] = (ArenaTable){
+            .bytes = counts[i] * sizes[i] + 64,
+            .small = BUSTER_ARENA_SMALL_BYTES,
+        };
+    }
+    cache->arrays = arena_reserve_tables(tables, BUSTER_ARRAY_LENGTH(tables));
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(tables); i += 1)
+    {
+        arrays[i] = tables[i].base;
     }
     return file_cache_start(cache, table, prepare, shift, arrays);
 }
@@ -4091,10 +4104,7 @@ static __attribute__((unused)) void file_cache_release(FileCache* cache)
         arena_release(&arenas->arena);
         arena_release(&arenas->bytes);
     }
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cache->arrays); i += 1)
-    {
-        arena_release(&cache->arrays[i]);
-    }
+    arena_release(&cache->arrays);
     arena_release(&cache->path_arena);
     *cache = (FileCache){ 0 };
 }
@@ -8572,9 +8582,13 @@ static bool pp_index_arguments(Preprocessor* pp)
 {
     if (pp->argument_links == 0)
     {
-        const uint64_t bytes = (uint64_t)(BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift) * sizeof(uint32_t);
-        pp->argument_link_arena = arena_reserve_small(bytes, BUSTER_PP_TABLE_SMALL_BYTES);
-        pp->argument_links = arena_push_array(&pp->argument_link_arena, (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift), sizeof(uint32_t), 64);
+        // A table committed whole (arena_reserve_tables), uncharged where commit charge isn't bounded (#1521).
+        ArenaTable links = {
+            .bytes = (uint64_t)(BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift) * sizeof(uint32_t),
+            .small = BUSTER_PP_TABLE_SMALL_BYTES,
+        };
+        pp->argument_link_arena = arena_reserve_tables(&links, 1);
+        pp->argument_links = links.base;
         if (pp->argument_links == 0)
         {
             pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory indexing macro arguments");
@@ -17675,6 +17689,8 @@ static uint32_t pp_feature_lookup(const PPFeature* table, uint32_t count, const 
     return result;
 }
 
+#include "c_preprocessor_warning_options.c"
+
 // Whether `name` is `text`'s `size` bytes (with `prefix`, whether it starts with them), ASCII case aside, as clang's
 // __is_target_* builtins compare names.
 static bool pp_name_matches(const uint8_t* name, uint32_t length, const char* text, uint32_t size, bool prefix)
@@ -18554,16 +18570,20 @@ static void pp_dedupe_directories(Preprocessor* pp)
 }
 
 // An array of `count` records of `size` bytes in an arena of its own (address space, touched as it is used), whose first
-// `small` bytes are base pages (arena_reserve_small), while `*reserved` (which becomes false if it can't be): where a
-// history table moves when it outgrows its slice (pp_history_grow).
+// `small` bytes are base pages, while `*reserved` (which becomes false if it can't be): where a history table moves when
+// it outgrows its slice (pp_history_grow). It is committed whole, up to 2 GB, as a table (arena_reserve_tables), which
+// charges no commit for it where commit charge isn't bounded (#1521).
 static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small)
 {
     void* result = 0;
     if (*reserved && pp->array_count < BUSTER_PP_ARRAYS)
     {
-        Arena* arena = &pp->arrays[pp->array_count];
-        *arena = arena_reserve_small(count * size + 64, small);
-        result = arena_push_array(arena, count, size, 64);
+        ArenaTable array = {
+            .bytes = count * size + 64,
+            .small = small,
+        };
+        pp->arrays[pp->array_count] = arena_reserve_tables(&array, 1);
+        result = array.base;
         pp->array_count += 1;
     }
     *reserved = result != 0;
@@ -18949,17 +18969,24 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     return result;
 }
 
+// The full shape, and once more in the compact one (arena_capacity_shift) if the first was refused: by the address
+// space, which switches the thread to compact reservations (arena_compact), or by commit charge, which sets
+// arena_commit_refused and leaves the thread's other reservations as they were (#1521). Either stays the thread's, so
+// that its later units start in the compact shape. A retry that succeeds leaves the caller's last failure as it was, so
+// that no later report reads the first shape's.
 BUSTER_PREPROCESSOR_ENTRY bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTable* table)
 {
-    const bool compact = arena_compact;
+    const bool compact = arena_compact || arena_commit_refused;
+    const ArenaFailure failure = arena_failure;
     bool result = pp_initialize_once(pp, options, table);
-    if (!result && !pp->fatal && !compact && arena_compact)
+    if (!result && !pp->fatal && !compact && (arena_compact || arena_commit_refused))
     {
         ArenaPool* pool = arena_pool;
         arena_pool = 0;
         pp_release(pp);
         arena_pool = pool;
         result = pp_initialize_once(pp, options, table);
+        arena_failure = result ? failure : arena_failure;
     }
     return result;
 }
@@ -19108,9 +19135,10 @@ static bool pp_command_include_raw(Preprocessor* pp, const char* path)
 // Runs the main file, then gives the output's keywords their kinds. Returns false if there were errors.
 static bool pp_run_prelude(Preprocessor* pp)
 {
-    bool result = true;
+    pp_warning_options_diagnose(pp);
+    bool result = !pp->fatal;
     // The predefines.
-    if (pp->options.predefines_path != 0)
+    if (result && pp->options.predefines_path != 0)
     {
         const uint32_t file = pp_lookup_path(pp, pp->options.predefines_path, (uint32_t)strlen(pp->options.predefines_path), BUSTER_PP_NONE, 0, BUSTER_PP_SYSTEM_FILE);
         pp->flt_eval_method = predefines_eval_method(&pp->options.predefines);
@@ -19125,7 +19153,7 @@ static bool pp_run_prelude(Preprocessor* pp)
             pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't read the predefines file '%s': %s", pp->options.predefines_path, pp_read_error(pp, file));
         }
     }
-    else
+    else if (result)
     {
         // Made in scratch memory, which only pp_virtual_file's copy of the text outlives.
         Scratch scratch = scratch_begin(&pp->arena);
@@ -19344,6 +19372,49 @@ static bool pp_eval_method_uses_same(const Preprocessor* a, const Preprocessor* 
     return same;
 }
 
+// A released output (pp_release_output) taken from `replay`, whose output is the unit's again: its columns move to the
+// unit, and the replay keeps none. Nothing for an output that wasn't released.
+static void pp_output_adopt(Preprocessor* pp, Preprocessor* replay)
+{
+    if (pp->output_released)
+    {
+        // A poisoned output's pages are still mapped, unreadable (pp_release_output): they go now.
+        arena_release(&pp->output.columns);
+        pp->output.columns = replay->output.columns;
+        pp->output.kinds = replay->output.kinds;
+        pp->output.flags = replay->output.flags;
+        pp->output.values = replay->output.values;
+        pp->output.locations = replay->output.locations;
+        pp->output.capacity = replay->output.capacity;
+        replay->output.columns = (Arena){ 0 };
+        replay->output.kinds = NULL;
+        replay->output.flags = NULL;
+        replay->output.values = NULL;
+        replay->output.locations = NULL;
+        replay->output.count = 0;
+        replay->output.capacity = 0;
+        pp->output_released = false;
+    }
+}
+
+// A released output whose replay failed: columns of zeros for its count, which place each token at no location, so that
+// the diagnostics after the failure's are unlocated rather than reads of columns that are gone. Nothing for an output
+// that wasn't released; a count that can't have its columns leaves an empty output.
+static void pp_output_restore_empty(Preprocessor* pp)
+{
+    if (pp->output_released)
+    {
+        const uint32_t count = pp->output.count;
+        arena_release(&pp->output.columns);
+        if (!pp_tokens_reserve(&pp->output, count))
+        {
+            pp->output = (PPTokens){ 0 };
+        }
+        pp->output.count = pp->output.kinds != NULL ? count : 0;
+        pp->output_released = false;
+    }
+}
+
 // Records a deferred history (PPOptions.defer_history): preprocesses the unit again as pp_run or pp_run_source ran it,
 // with history, into a preprocessor of its own (in an arena of its own) with the same options, file cache, intern table
 // and time, which prints the diagnostics if `report` says so, and takes its history, which the replay keeps until
@@ -19376,7 +19447,8 @@ static void pp_history_record(Preprocessor* pp, bool report)
         const bool result = pp->history_path != 0 ? pp_preprocess_file(replay, pp->history_path) :
                                                     pp_preprocess_source(replay, pp->history_name, pp->history_bytes, pp->history_length);
         same = result == pp->history_result && replay->fatal == pp->history_fatal && replay->errors == pp->history_errors &&
-               (pp->history_warning_filter_deferred || replay->warnings == pp->history_warnings) && pp_tokens_same(&replay->output, &pp->output) &&
+               (pp->history_warning_filter_deferred || replay->warnings == pp->history_warnings) &&
+               (pp->output_released ? replay->output.count == pp->output.count : pp_tokens_same(&replay->output, &pp->output)) &&
                pp_eval_method_uses_same(pp, replay);
     }
     if (same)
@@ -19414,6 +19486,8 @@ static void pp_history_record(Preprocessor* pp, bool report)
         {
             pp_diagnostic_take(pp, replay);
         }
+        // A released output (pp_release_output) is the replay's: its count is the unit's, and the replay is the run again.
+        pp_output_adopt(pp, replay);
         // The replay's output is the unit's, token for token (pp_tokens_same), and nothing reads it after that comparison:
         // its history and diagnostics name the unit's tokens, which the unit's own output holds. Its columns go now rather
         // than at pp_release, so that a unit with a diagnostic doesn't keep a second output to its end (#628: 12 MB of
@@ -19439,6 +19513,7 @@ static void pp_history_record(Preprocessor* pp, bool report)
         pp->diagnostic_collection_failed |= pp->options.collect_diagnostics && replay != NULL && replay->diagnostic_collection_failed;
         const uint32_t replacement_position = retained && replay->output.count > pp->output.count ? replay->output.count : pp->output.count;
         pp->history_failed = true;
+        pp_output_restore_empty(pp);
         if (report)
         {
             pp->errors = replay != 0 ? replay->errors : 0;
@@ -19582,6 +19657,83 @@ BUSTER_PREPROCESSOR_ENTRY void pp_release_file_columns(Preprocessor* pp, bool po
             }
         }
     }
+}
+
+// Once the checker has checked the program and given its warnings, only a diagnostic (a token's place and spelling) and
+// -g's line table read the unit's output, 10 bytes a token (12.5 MB of sqlite3.c's, at the backend's peak, #628). A unit
+// whose history is still deferred gives the columns back, keeping the count. A later reader asks for them first
+// (pp_output_ensure), and a replay of the unit, which is the run again, gives them back: a diagnostic's, which records
+// the history (pp_history_record), or one without history. A unit whose history is recorded keeps its output, which only
+// a replay could give back. With `poison` (the driver's --poison-arenas), the pages stay mapped but unreadable, so that
+// any reader that doesn't ask for the output first faults.
+BUSTER_PREPROCESSOR_ENTRY void pp_release_output(Preprocessor* pp, bool poison)
+{
+    Arena* columns = &pp->output.columns;
+    if (pp->history_deferred && !pp->output_released && columns->base != NULL)
+    {
+        pp->output_released = true;
+        if (poison && columns->mapping_bytes != 0 && columns->committed != 0 &&
+            mprotect(columns->base - columns->mapping_offset, columns->committed, PROT_NONE) == 0)
+        {
+            // The arena is then never pooled: arena_release unmaps an arena whose writable extent it doesn't know.
+            columns->unaccounted = true;
+        }
+        else
+        {
+            arena_release(columns);
+            pp->output.kinds = NULL;
+            pp->output.flags = NULL;
+            pp->output.values = NULL;
+            pp->output.locations = NULL;
+            pp->output.capacity = 0;
+        }
+    }
+}
+
+// The unit's output, given back if pp_release_output released it, by preprocessing the unit again as pp_history_record
+// does but without history, quietly, into a preprocessor of its own whose output the unit then takes (pp_output_adopt):
+// so that a reader that doesn't record the history (pp_history_at, unrecorded, gives no origins) finds it as it was. The
+// replay must give the run's result, errors, fatal error and count of tokens; one that doesn't, or can't be made, leaves
+// columns of zeros (pp_output_restore_empty). A diagnostic, which records the history anyway, has the output from that
+// replay instead (pp_history_record). Returns whether the output was there or came back.
+BUSTER_PREPROCESSOR_ENTRY bool pp_output_ensure(Preprocessor* pp)
+{
+    bool result = !pp->output_released;
+    if (!result)
+    {
+        Arena arena = pp->history_path != 0 || pp->history_name != 0 ? arena_reserve(sizeof(Preprocessor) + 64) : (Arena){ 0 };
+        Preprocessor* replay = arena_push(&arena, sizeof(Preprocessor), _Alignof(Preprocessor));
+        PPOptions options = pp->options;
+        options.no_history = true;
+        options.defer_history = false;
+        options.quiet = true;
+        options.collect_diagnostics = false;
+        options.timing = false;
+        options.files = pp->cache;
+        options.dependencies.enabled = false;
+        const bool initialized = replay != 0 && pp_initialize(replay, &options, pp->table);
+        if (initialized)
+        {
+            // The unit's time, which __DATE__, __TIME__ and __TIMESTAMP__ give.
+            memcpy(replay->date, pp->date, sizeof(pp->date));
+            memcpy(replay->time, pp->time, sizeof(pp->time));
+            memcpy(replay->timestamp, pp->timestamp, sizeof(pp->timestamp));
+            replay->has_epoch = pp->has_epoch;
+            replay->unit_seconds = pp->unit_seconds;
+            const bool ran = pp->history_path != 0 ? pp_preprocess_file(replay, pp->history_path) :
+                                                     pp_preprocess_source(replay, pp->history_name, pp->history_bytes, pp->history_length);
+            result = ran == pp->history_result && replay->fatal == pp->history_fatal && replay->errors == pp->history_errors &&
+                     replay->output.count == pp->output.count;
+            if (result)
+            {
+                pp_output_adopt(pp, replay);
+            }
+            pp_release_unit(replay);
+        }
+        arena_release(&arena);
+        pp_output_restore_empty(pp);
+    }
+    return result;
 }
 
 // A source expansion may have no output token (#if), so its retained location/origin is the diagnostic source.
@@ -22185,7 +22337,7 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
         // An alias of clang's (-mpascal-strings) is read as the option it stands for (-fpascal-strings).
         const char* argument = predefines_alias(arguments[i]);
         const bool malformed_linker = strcmp(argument, "-Wl") == 0 || strncmp(argument, "-Wl=", 4) == 0;
-        if ((strncmp(argument, "-W", 2) == 0 && strncmp(argument, "-Wl,", 4) != 0 && !malformed_linker) || strcmp(argument, "-w") == 0 ||
+        if ((strncmp(argument, "-W", 2) == 0 && !pp_warning_transport(argument) && !malformed_linker) || strcmp(argument, "-w") == 0 ||
             strcmp(argument, "-pedantic") == 0 || strcmp(argument, "-pedantic-errors") == 0)
         {
             warnings[options->semantic_warning_option_count++] = argument;

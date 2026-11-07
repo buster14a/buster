@@ -9,6 +9,8 @@
 # From run 41519216885's plain rows, its shards' reports (the mean of its x86-64 and native times), 2026-11-02. The
 # sanitizer rows take these too, so their shards balance only roughly. The last two lines are from run 41543634134,
 # for commands main added since.
+# The builtin and 8-way checker costs from #1700 are provisional subdivisions of the prior recorded costs;
+# refresh their values using hosted runs after the partition changes.
 76.8 Test the foreign inputs [8 CPUs]
 154.4 Check the no-recursion rule on the call graph [8 CPUs]
 71.2 Test the calling convention [8 CPUs]
@@ -51,17 +53,24 @@
 48.5 Compare -c's functions and objects with clang -O0 -c's on frozen musl sources
 6.5 Test differential harness accounting, subprocesses and failure preservation
 32.8 Test deferred function bodies against source order
-46.4 Test integer builtin actions against Clang
-64.4 Test typed postorder checking and source fixtures (part 1 of 4)
+12.0 Test integer builtin actions against Clang (part 1 of 4)
+12.0 Test integer builtin actions against Clang (part 2 of 4)
+11.2 Test integer builtin actions against Clang (part 3 of 4)
+11.2 Test integer builtin actions against Clang (part 4 of 4)
+47.2 Test typed postorder checking and source fixtures (part 1 of 8)
 3.0 Lower c-testsuite's programs and the frozen SQLite source with node templates as the tasks do
 19.1 Lower every function of c-testsuite's programs and the frozen SQLite and musl sources into the IR
 28.8 Test the C lexer as C++
 38.3 Compare main.c's checking and its functions and objects with clang's
 24.2 Check semantic mutants of the frozen SQLite and musl sources against Clang
 40.3 Compile main.c by -c, its referenced definitions and all of them, by both paths
-35.4 Test typed postorder checking and source fixtures (part 2 of 4)
-71.2 Test typed postorder checking and source fixtures (part 3 of 4)
-21.7 Test typed postorder checking and source fixtures (part 4 of 4)
+17.7 Test typed postorder checking and source fixtures (part 2 of 8)
+35.6 Test typed postorder checking and source fixtures (part 3 of 8)
+10.9 Test typed postorder checking and source fixtures (part 4 of 8)
+17.2 Test typed postorder checking and source fixtures (part 5 of 8)
+17.7 Test typed postorder checking and source fixtures (part 6 of 8)
+35.6 Test typed postorder checking and source fixtures (part 7 of 8)
+10.8 Test typed postorder checking and source fixtures (part 8 of 8)
 20.7 Test the semantic driver's diagnostics and emission against clang, with lazy system headers
 15.8 Allocate every function of c-testsuite's programs and the frozen SQLite and musl sources over its CFG
 20.7 Test the IR and typed-stream lowering

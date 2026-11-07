@@ -2093,6 +2093,23 @@ read them, and so does a cache that units share (`PPOptions.files`). With the
 driver's `--poison-arenas` the pages stay mapped but unreadable, and later
 pushes go past them, so that a reader left behind faults.
 
+The output goes back too, before the backend (`pp_release_output`, #628).
+Once the checker has checked the program and given its warnings, the backend
+reads the program; only a diagnostic (a token's place and spelling) and `-g`'s
+line table read the output, 10 bytes a token (12.5 MB of `sqlite3.c`'s, which
+were the backend's peak). A unit whose history is still deferred, without
+errors, that goes on to its object or executable and doesn't link with other
+units, empties the output's columns and keeps its count. A reader asks for the
+output first (`pp_output_ensure`), as `pp_diagnose_output` and the checker's
+token spellings do: the history's replay, which is the run again, then gives
+it back, its count checked against the unit's rather than its tokens
+(`pp_output_adopt`). A replay that fails leaves columns of zeros, so that the
+diagnostics after its fatal error are unlocated. A unit whose history is
+recorded keeps its output, as only a replay gives it back: one with
+diagnostics, `--scalar`, `-flazy-system-headers` and `-g`, whose line table
+reads the output's places. With `--poison-arenas` the columns stay mapped but
+unreadable.
+
 A reader that needs only where an output token's outermost invocation starts
 can often have it without the history. `pp_output_invocation_place` finds
 the file tokens that the output has before and after the token's run of

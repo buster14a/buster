@@ -123,8 +123,12 @@ patterns are:
   twin `tier1_select_barriers_scalar`), so the check is a comparison. Inside the
   plan's pass, its store made the operands' walk reload the function's columns
   (the build's `-fno-strict-aliasing`): 40 instructions more per node. C's aligned atomic loads and stores of a constant
-  order reach it as atomic accesses (#1059), selected as ordinary ones (`mov`, `movzx`) since x86-64's total store order
-  gives their orders, with a seq_cst store's `fence` after it. An exchange, an addition or a subtraction of a constant
+  order reach it as atomic accesses (#1059). Loads and relaxed/release stores select ordinary accesses (`mov`, `movzx`),
+  since x86-64's total store order gives their orders. A seq_cst `store` keeps its semantic IR operation and selects a
+  copy of its desired value into reserved `r11`, then a width-matched memory `xchg`, without `mfence` (#1396). The copy
+  preserves the desired SSA value if it remains live, and the final memory record retains folded and frame addresses.
+  Both selection paths and the emitted-code certificate use this kernel; tests reject replacing the exchange by `mov`
+  or dropping the preserving copy. An exchange, an addition or a subtraction of a constant
   order reaches it as the IR's `rmw` (`TIER1_RULE_ATOMIC_RMW`): the operand copied to the scratch register, `xchg` or
   `lock xadd` of the object's width (a byte's and a short's at their own, never their 32-bit register's, which
   `test-tier1-select` runs on guard bytes), and the old value zero-extended into its register as a load's is, a barrier
@@ -143,7 +147,13 @@ patterns are:
   instruction of the width, the operand in `rm` and the destination in `reg`, any register, the operand's too; and
   `bswap`, the operand moved into the destination where it isn't there, then swapped in place. The allow-list refuses
   `tzcnt` without BMI, `lzcnt` without LZCNT and `popcnt` without POPCNT; `test-tier1-select` runs each of both widths
-  into its operand's register and into two others, natively on both paths.
+  into its operand's register and into two others, natively on both paths. The signed overflows (#1385), `saddo`, `ssubo` and
+  `smulo`, are `TIER1_RULE_INTRINSIC` too (`tier1_select_overflow`): `add` or `imul` into the destination, which takes
+  the left operand first unless it holds an operand already (both operations and their flags commute), or `cmp` of
+  the two, which writes no register; then `mov` of 0 into the destination, which keeps the flags, and `seto` into its
+  low byte, the destination any register. `test-tier1-select` runs each of both widths from both operand orders, of a
+  masked operand and of one value twice, into a register apart and into each operand's, natively on both paths
+  against the host compiler's builtins.
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
   flags-aware form chooser, comparison/branch fusion, simple selects using
   `cmov`, unconditional branches, returns and `IR_UNREACHABLE` as `ud2`.
@@ -693,8 +703,10 @@ whose `TIER1_RULE_DIVIDE` costs 8 against the others' 1, 2, 5 and 7, always did.
 The current cost is a **structural upper bound on record count**, including
 possible copies and operand-overlap repairs. It is not a measured latency,
 throughput, encoded-byte count, or guarantee about final runtime. Allocation
-can remove copies from either path. The measured Zen 5 model is not complete
-enough to replace this bound for every operand case. One rule departs from it: a
+can remove copies from either path. The Zen 5 model (#181, `x86_zen5.c`) has a
+row for every case the selector emits, which its tests check, but the cover's
+cost doesn't read it: replacing the bound is a decision of its own, to be
+measured on generated programs. One rule departs from it: a
 division by a constant's reciprocal costs 7, below `div`'s 8, though its records
 (up to 13) may outnumber `div`'s, since `div`'s and `idiv`'s latency, which no
 count of records sees, is the larger.
@@ -1346,12 +1358,11 @@ record includes form, mnemonic, all memory/register/immediate fields, model ID
 and each cost column. Summaries report unknown IDs and missing fields for each
 origin separately; UINT16_MAX denotes a missing field. Summaries go to stderr.
 This observed emitter inventory is generated independently of the model's case
-table. Unknown IDs stay unknown. Its coverage
-is only the bounded generated fixtures, not a claim of complete Tier 1 emitter
-or corpus coverage for [#181](https://github.com/buster14a/buster/issues/181).
-In particular, the plan-origin inventory currently lacks compare, select and
-conditional-branch families covered by direct expansion tests. Expansion rows
-do not establish coverage of those complete planner paths.
+table. Every record of the plans and expansions must have a complete Zen 5 row
+(#181, `x86_zen5_accounts`), which the test checks after the semantics'
+coverage; the wrappers' records are the test's own. The emitters' tests
+(`test-tier1-emit`, `test-tier1-masks`, `test-tier1-pipeline`) check every
+complete function's records the same way.
 
 `test-tier1-emit` executes real pressure plans through liveness, allocation,
 frame planning, fragment emission, branch sizing and encoding. Original

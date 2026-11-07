@@ -2985,6 +2985,15 @@ static uint8_t* tier1_masks_test_load(Tier1MasksTest* test, Tier1EmitResult* emi
             covered &= x86_effects(code->records[r].form)->operation != X86_OPERATION_NONE;
         }
         ok = ok && tier1_masks_test_expect(test, covered, "every record has a form x86_semantics.c covers");
+        // #181: and a complete Zen 5 row (x86_zen5_rows.c), each of x86-64-v4's forms, which Zen 5 runs: AVX512-FP16's,
+        // which it doesn't (the fp16 fixtures'), have none.
+        uint32_t missing = 0;
+        for (uint32_t r = 0; ok && r < code->count; r += 1)
+        {
+            const bool runs = x86_target_form_allowed(test->v4, code->records[r].form);
+            missing += runs && !x86_zen5_accounts(x86_zen5_id(&code->records[r]), BUSTER_X86_COST_ALL_COLUMNS);
+        }
+        ok = ok && tier1_masks_test_expect(test, missing == 0, "every record Zen 5 runs has a complete Zen 5 row");
     }
     for (uint32_t r = 0; ok && test->print && r < code->count; r += 1)
     {

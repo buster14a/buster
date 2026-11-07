@@ -940,7 +940,8 @@ static void tier0_test_record_count_bounds(Tier0TestTally* tally)
 
 // #221: every record of a function's code must have a covered form (x86_effects), which the effects' consumers (the
 // unwind tables' analyzer, a scheduler) need of each record Tier 0 emits, an X86 entry's too: a row's form must be
-// covered (tier0_operation_form_valid, #760).
+// covered (tier0_operation_form_valid, #760). #181: and a row of the Zen 5 model (x86_zen5.c) that accounts for every
+// column, measured, derived or absent, which the model's consumers need of each record the backend emits.
 static bool tier0_test_covered(Tier0TestTally* tally, const char* check, const char* name, const Tier0Code* code)
 {
     bool result = true;
@@ -948,6 +949,9 @@ static bool tier0_test_covered(Tier0TestTally* tally, const char* check, const c
     {
         result = tier0_test_expect(tally, x86_effects(code->records[r].form)->operation != X86_OPERATION_NONE, check,
                                    "%s: record %u (%s) has no covered form, which the effects' consumers need", name, r, x86_semantics_test_name(code->records[r].form));
+        result = result && tier0_test_expect(tally, x86_zen5_accounts(x86_zen5_id(&code->records[r]), BUSTER_X86_COST_ALL_COLUMNS), check,
+                                             "%s: record %u (%s, mode %u) has no complete Zen 5 row (x86_zen5_rows.c), which measure-x86-zen5 measures", name, r,
+                                             x86_semantics_test_name(code->records[r].form), code->records[r].mode);
     }
     return result;
 }
@@ -6106,7 +6110,7 @@ static int run_tier0_tests(int argc, char** argv)
     {
         fprintf(stderr, "usage: build/compiler test-tier0 [--seed N] [--count N] [--cross-check [--cross-count N] [--clang PATH] [--keep]]\n");
     }
-    else if (!(x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize()))
+    else if (!(x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize() && tier0_initialize()))
     {
         fprintf(stderr, "test-tier0: the tables can't be built\n");
     }

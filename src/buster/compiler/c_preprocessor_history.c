@@ -868,6 +868,10 @@ static void pp_diagnose_output_location(Preprocessor* pp, PPSeverity severity, u
 
 static void pp_diagnose_output_arguments(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t position, PPDiagnosticPhase phase, const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, va_list arguments)
 {
+    // The output's columns, which the backend may have given back (pp_release_output): the history this diagnostic records
+    // anyway gives them back.
+    pp_history_ensure(pp);
+    pp_output_ensure(pp);
     pp_diagnose_output_location(pp, severity, token, token < pp->output.count ? pp->output.locations[token] : 0, position, phase, notes, note_count, format, arguments);
 }
 
@@ -876,6 +880,8 @@ static void pp_diagnose_output_arguments(Preprocessor* pp, PPSeverity severity, 
 static void pp_diagnose_source_location(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, uint32_t position, PPDiagnosticPhase phase,
                                         const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, va_list arguments)
 {
+    // The notes' places are the output's (pp_release_output).
+    pp_output_ensure(pp);
     const bool always = severity == PP_SEVERITY_WARNING_ALWAYS;
     severity = always ? PP_SEVERITY_WARNING : severity;
     const PPSeverity requested = severity;
@@ -984,6 +990,8 @@ static uint32_t pp_spelling_offset_location(Preprocessor* pp, uint32_t location,
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_diagnose_output_offset_at(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t offset,
                                                                                                            uint32_t position, const char* format, ...)
 {
+    pp_history_ensure(pp);
+    pp_output_ensure(pp);
     const uint32_t location = token < pp->output.count ? pp_spelling_offset_location(pp, pp->output.locations[token], offset) : 0;
     va_list arguments;
     va_start(arguments, format);

@@ -1,5 +1,12 @@
 # Tier 1 emitted-case measurement preparation
 
+`measure-x86-zen5` now measures every case Tier 0 and Tier 1 emit, from the
+Zen 5 model's rows ([x86-zen5.md](x86-zen5.md)); the selector's records the
+tests compile all have complete rows. What follows is the earlier preparation,
+which remains as the manifest's reader, grouping and fixture diagnostics; its
+manifest's cost columns are the model's (`latency`, `throughput`,
+`retired_ops`, `flags_latency`, `load_extra`, `fp_ops`, `pipes`).
+
 `measure-tier1-model` prepares bounded experiments for the remaining actual
 selector cases in [#181](https://github.com/buster14a/buster/issues/181). It
 consumes `test-tier1-select --manifest`, accepts only its `origin=plan` rows as

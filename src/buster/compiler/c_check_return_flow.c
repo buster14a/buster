@@ -58,15 +58,62 @@ static bool check_program_return_unknowns(const CheckProgram* program, Arena* sc
     return ready;
 }
 
-// What a call's direct callee's name says of its return (check_program_return_call): a library builtin that clang's table
-// says doesn't return, whose contract depends on options this fact doesn't retain. One answer per identifier, looked up
-// once: BUSTER_CHECK_RETURN_NAME_UNSEEN until then, a name's own lookup after it. Null where the identifiers are absent or
-// the memo couldn't be made, every call then looking its name up.
-#define BUSTER_CHECK_RETURN_NAME_UNSEEN 0u
-#define BUSTER_CHECK_RETURN_NAME_RETURNS 1u
-#define BUSTER_CHECK_RETURN_NAME_LIBRARY 2u
+// Library noreturn depends on builtin options and named typedef visibility. Those policies are not the declaration's
+// FUNCTION_NORETURN bit, so a call to a declaration named as a catalogue entry with the 'r' attribute stays unknown
+// rather than guessed from its name. The answer depends on the interned name alone (#1709).
+// The scalar answer, and the twin of the table below: a search of the catalogue by name.
+static uint8_t check_program_return_library_search(const InternTable* identifiers, uint32_t name)
+{
+    const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)intern_bytes(identifiers, name), intern_length(identifiers, name));
+    const bool unknown = info != NULL && memchr(info->attributes, 'r', info->attributes_length) != NULL;
+    return unknown ? BUSTER_CHECK_RETURN_UNKNOWN : 0;
+}
 
-static uint8_t check_program_return_call(const CheckProgram* program, uint32_t node, const uint32_t* unknowns, uint8_t* names)
+// The catalogue's entries with the 'r' attribute, in its order. test-checker's return marks check that these are all
+// of them, so a regenerated catalogue that changes the set fails there.
+static const BuiltinIntrinsicName check_program_return_library_entries[] =
+{
+#define BUSTER_CHECK_RETURN_NAME(n) { n, sizeof(n) - 1 },
+    BUSTER_CHECK_RETURN_NAME("_Exit")
+    BUSTER_CHECK_RETURN_NAME("__builtin_abort")
+    BUSTER_CHECK_RETURN_NAME("__builtin_eh_return")
+    BUSTER_CHECK_RETURN_NAME("__builtin_longjmp")
+    BUSTER_CHECK_RETURN_NAME("__builtin_trap")
+    BUSTER_CHECK_RETURN_NAME("__builtin_unreachable")
+    BUSTER_CHECK_RETURN_NAME("__builtin_verbose_trap")
+    BUSTER_CHECK_RETURN_NAME("__fastfail")
+    BUSTER_CHECK_RETURN_NAME("__int2c")
+    BUSTER_CHECK_RETURN_NAME("__ud2")
+    BUSTER_CHECK_RETURN_NAME("_exit")
+    BUSTER_CHECK_RETURN_NAME("_longjmp")
+    BUSTER_CHECK_RETURN_NAME("abort")
+    BUSTER_CHECK_RETURN_NAME("exit")
+    BUSTER_CHECK_RETURN_NAME("longjmp")
+    BUSTER_CHECK_RETURN_NAME("siglongjmp")
+#undef BUSTER_CHECK_RETURN_NAME
+};
+
+// One byte per id of `identifiers`: BUSTER_CHECK_RETURN_UNKNOWN at the ids that spell an entry above, zero elsewhere,
+// so a call reads its answer instead of searching the catalogue. NULL if the scratch arena has no room; the calls then
+// search, with the same answers.
+static uint8_t* check_program_return_library_names(const InternTable* identifiers, Arena* scratch)
+{
+    const uint32_t count = identifiers != NULL ? identifiers->count : 0;
+    uint8_t* names = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
+    if (names != NULL)
+    {
+        memset(names, 0, count);
+        for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(check_program_return_library_entries); e += 1)
+        {
+            const BuiltinIntrinsicName* entry = check_program_return_library_entries + e;
+            const IdentId name = intern_find(identifiers, (const uint8_t*)entry->name, entry->length);
+            names[name] = name != 0 && name < count ? BUSTER_CHECK_RETURN_UNKNOWN : names[name];
+        }
+    }
+    return names;
+}
+
+static uint8_t check_program_return_call(const CheckProgram* program, uint32_t node, const uint32_t* unknowns, const uint8_t* names)
 {
     const CheckInput* input = program->input;
     const CheckStream* stream = program->stream;
@@ -85,20 +132,7 @@ static uint8_t check_program_return_call(const CheckProgram* program, uint32_t n
     else if (known && program->identifiers != NULL)
     {
         const uint32_t name = program->parser->tokens.names[declaration];
-        uint8_t answer = names != NULL && name < program->identifiers->count ? names[name] : BUSTER_CHECK_RETURN_NAME_UNSEEN;
-        if (answer == BUSTER_CHECK_RETURN_NAME_UNSEEN)
-        {
-            const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)intern_bytes(program->identifiers, name), intern_length(program->identifiers, name));
-            // Library noreturn depends on builtin options and named typedef visibility. Those policies are not the
-            // declaration's FUNCTION_NORETURN bit, so preserve conservative handling rather than guess from its name.
-            const bool unknown = info != NULL && memchr(info->attributes, 'r', info->attributes_length) != NULL;
-            answer = unknown ? BUSTER_CHECK_RETURN_NAME_LIBRARY : BUSTER_CHECK_RETURN_NAME_RETURNS;
-            if (names != NULL && name < program->identifiers->count)
-            {
-                names[name] = answer;
-            }
-        }
-        result = answer == BUSTER_CHECK_RETURN_NAME_LIBRARY ? BUSTER_CHECK_RETURN_UNKNOWN : 0;
+        result = names != NULL && name < program->identifiers->count ? names[name] : check_program_return_library_search(program->identifiers, name);
     }
     return result;
 }
@@ -112,7 +146,7 @@ static uint8_t check_program_return_fact(const uint8_t* facts, uint32_t count, u
 // and a possible unknown control contract. Conditional operands retain only executable arms; an unknown condition
 // guarantees a stop only if both alternatives stop. An operand or argument that doesn't precede the node counts for
 // nothing.
-static uint8_t check_program_return_node(CheckProgram* program, const uint8_t* facts, uint32_t node, const uint32_t* unknowns, uint8_t* names)
+static uint8_t check_program_return_node(CheckProgram* program, const uint8_t* facts, uint32_t node, const uint32_t* unknowns, const uint8_t* names)
 {
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
@@ -201,7 +235,7 @@ static uint8_t check_program_return_node(CheckProgram* program, const uint8_t* f
 // only those nodes take check_program_return_node. A node's operands precede it, so their facts are made; one that doesn't
 // precede it has none yet, which check_program_return_node reads as none too. The sources are 16 operators at a time,
 // whose bits each block's nodes then take. Every other node's facts are zero, as the scalar path makes them.
-static void check_program_return_sparse(CheckProgram* program, uint8_t* facts, const uint32_t* unknowns, uint8_t* names, uint64_t* work)
+static void check_program_return_sparse(CheckProgram* program, uint8_t* facts, const uint32_t* unknowns, const uint8_t* names, uint64_t* work)
 {
     const CheckGraph* graph = &program->input->graph;
     const uint32_t count = graph->count;
@@ -261,17 +295,13 @@ static uint8_t* check_program_return_facts(CheckProgram* program, Arena* scratch
     uint8_t* facts = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : NULL;
     uint32_t* unknowns = NULL;
     const bool ready = (count == 0 || facts != NULL) && check_program_return_unknowns(program, scratch, &unknowns, scalar);
-    const uint32_t name_count = program->identifiers != NULL ? program->identifiers->count : 0;
-    uint8_t* names = ready && name_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, name_count) : NULL;
-    if (names != NULL)
-    {
-        memset(names, BUSTER_CHECK_RETURN_NAME_UNSEEN, name_count);
-    }
     if (!ready)
     {
         check_program_fail(program, CHECK_PROGRAM_RESOURCE, 0);
         facts = NULL;
     }
+    // The names' answers are an optimisation only: without them every call searches the catalogue, as before.
+    const uint8_t* names = ready && count != 0 ? check_program_return_library_names(program->identifiers, scratch) : NULL;
     if (ready && !BUSTER_SCALAR_PATH(scalar) && count != 0)
     {
         check_program_return_sparse(program, facts, unknowns, names, work);

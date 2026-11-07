@@ -1316,11 +1316,13 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         const uint64_t value = end ? 0 : function->values[i];
         frame->entry += !end;
         // Validate the dispatch domain before classifying effects. Machine rows, frame addresses and tail-call
-        // intrinsics have no model here, but a bit builtin's row (#1374, ir_simd_typed_bits), its intrinsic's value.
-        // Indirect jumps use this function's label tokens, without executing code bytes.
+        // intrinsics have no model here, but a bit builtin's row (#1374, ir_simd_typed_bits) and a signed overflow builtin's
+        // (#1385, ir_simd_typed_overflow), its intrinsic's value. Indirect jumps use this function's label tokens, without
+        // executing code bytes.
         IrSimdTypedOperation bits = { 0 };
-        const bool bit_row = kind == BUSTER_TYPED_X86 && value < function->operation_count &&
-                             ir_simd_typed_bits(function->operations + value, UINT64_MAX, &bits) == IR_SIMD_TYPED_OK && function->operations[value].result_class == class;
+        const bool bit_row = kind == BUSTER_TYPED_X86 && value < function->operation_count && function->operations[value].result_class == class &&
+                             (ir_simd_typed_bits(function->operations + value, UINT64_MAX, &bits) == IR_SIMD_TYPED_OK ||
+                              ir_simd_typed_overflow(function->operations + value, &bits) == IR_SIMD_TYPED_OK);
         if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || (kind == BUSTER_TYPED_X86 && !bit_row) ||
             kind == BUSTER_TYPED_FRAME_ADDRESS || kind == BUSTER_TYPED_TAIL_CALL || (class > BUSTER_TYPED_CLASS_U128 && class != BUSTER_TYPED_CLASS_MASK))
         {
@@ -1352,6 +1354,10 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             }
             needed = function->call_argument_counts[value] + (function->call_targets[value] == 0);
             pushed = class != BUSTER_TYPED_CLASS_VOID && needed == 0;
+        }
+        else if (kind == BUSTER_TYPED_X86)
+        {
+            needed = bits.operand_count;
         }
         else if (kind != BUSTER_TYPED_JUMP && kind != BUSTER_TYPED_FENCE && !(kind == BUSTER_TYPED_RETURN && class == BUSTER_TYPED_CLASS_VOID))
         {
@@ -1395,7 +1401,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         }
         else if (kind == BUSTER_TYPED_X86)
         {
-            shape = classes[top - 1] == bits.operand_classes[0];
+            shape = classes[top - 1] == bits.operand_classes[bits.operand_count - 1] && classes[top - bits.operand_count] == bits.operand_classes[0];
         }
         else if (kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET)
         {
@@ -1598,8 +1604,18 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
                             (InterpreterValue){ .low = interpreter_typed_normalize(class, ~stack[top - 1].low) };
             break;
         case BUSTER_TYPED_X86:
-            stack[top - 1] = (InterpreterValue){ .low = interpreter_typed_normalize(class, ir_intrinsic_bits(bits.intrinsic - 1u, 8 * tier0_class_bytes(operand), stack[top - 1].low)) };
-            classes[top - 1] = (uint8_t)class;
+            if (bits.operand_count == 2)
+            {
+                const uint32_t width = 8 * tier0_class_bytes(operand);
+                stack[top - 2] = (InterpreterValue){ .low = interpreter_typed_normalize(class, ir_intrinsic_overflow(bits.intrinsic - 1u, width, stack[top - 2].low, stack[top - 1].low)) };
+                classes[top - 2] = (uint8_t)class;
+                top -= 1;
+            }
+            else
+            {
+                stack[top - 1] = (InterpreterValue){ .low = interpreter_typed_normalize(class, ir_intrinsic_bits(bits.intrinsic - 1u, 8 * tier0_class_bytes(operand), stack[top - 1].low)) };
+                classes[top - 1] = (uint8_t)class;
+            }
             break;
         case BUSTER_TYPED_CONVERT:
             stack[top - 1] = interpreter_typed_convert_value(class, operand, stack[top - 1], &result->status);

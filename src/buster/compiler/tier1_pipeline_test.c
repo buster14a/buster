@@ -1104,6 +1104,8 @@ static uint8_t* tier1_pipeline_load(Tier1PipelineTest* test, const Tier0Program*
                 covered &= x86_effects(code->records[r].form)->operation != X86_OPERATION_NONE;
             }
             ok = ok && tier1_pipeline_expect(test, covered, "every complete record has a covered form");
+            // #181: and a complete Zen 5 row (x86_zen5_rows.c).
+            ok = ok && tier1_pipeline_expect(test, x86_zen5_missing(code->records, code->count, BUSTER_X86_COST_ALL_COLUMNS) == 0, "every complete record has a complete Zen 5 row");
         }
         uint32_t marked = 0;
         for (uint32_t record = 0; ok && record < code->count; record += 1)

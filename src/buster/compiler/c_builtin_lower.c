@@ -7,8 +7,10 @@
 // are U64 pointer locals: the recipe stores the converted integer through that pointer, then leaves its I32 boolean.
 // Unary recipes leave the builtin's declared result. All recipes preserve the preexisting value stack.
 //
-// Generated code uses only baseline integer arithmetic, comparisons, shifts and memory operations. Counts use SWAR;
-// full multiplication uses four 32x32 products. The compiler's vector copy uses its host ISA, independently of that
+// Generated code uses only baseline integer arithmetic, comparisons, shifts and memory operations. Counts use SWAR. An
+// overflow builtin's exact result is one 64-bit operation of operands of at most 32 bits, the 64-bit operation with its own
+// carry or sign test for a sum or a difference of operands of the destination's signedness, or one U128 product of the
+// extended operands for a product of a 64-bit one (#1385). The compiler's vector copy uses its host ISA, independently of that
 // generated-code policy. Recipes use U64 temporaries so arithmetic wraps and right shifts are logical. Narrow source
 // values are explicitly converted first. Widths 8/16/32/64 have fixed machine classes; unsigned width1 is _Bool in a
 // U8 slot and explicitly truncates to one bit. A _BitInt of another width up to 64 bits takes the narrowest of those
@@ -320,35 +322,6 @@ static uint32_t cbuiltin_lower_unary(CBuiltinLowerRecipe* recipe, const CBuiltin
     return result_class;
 }
 
-// Low/high limbs of the unsigned product. The intermediate sums each fit a U64 exactly, including their carry bits.
-static void cbuiltin_lower_product(CBuiltinLowerRecipe* recipe, uint32_t low, uint32_t high, uint32_t a, uint32_t b)
-{
-    const uint32_t al = cbuiltin_lower_temporary(recipe);
-    const uint32_t ah = cbuiltin_lower_temporary(recipe);
-    const uint32_t bl = cbuiltin_lower_temporary(recipe);
-    const uint32_t bh = cbuiltin_lower_temporary(recipe);
-    const uint32_t middle = cbuiltin_lower_temporary(recipe);
-    const uint32_t other = cbuiltin_lower_temporary(recipe);
-    const uint32_t temporary = cbuiltin_lower_temporary(recipe);
-    cbuiltin_lower_immediate(recipe, al, BUSTER_TYPED_AND, a, UINT32_MAX);
-    cbuiltin_lower_immediate(recipe, ah, BUSTER_TYPED_SHR, a, 32);
-    cbuiltin_lower_immediate(recipe, bl, BUSTER_TYPED_AND, b, UINT32_MAX);
-    cbuiltin_lower_immediate(recipe, bh, BUSTER_TYPED_SHR, b, 32);
-    cbuiltin_lower_binary(recipe, low, BUSTER_TYPED_MUL, a, b);
-    cbuiltin_lower_binary(recipe, temporary, BUSTER_TYPED_MUL, al, bl);
-    cbuiltin_lower_immediate(recipe, temporary, BUSTER_TYPED_SHR, temporary, 32);
-    cbuiltin_lower_binary(recipe, middle, BUSTER_TYPED_MUL, ah, bl);
-    cbuiltin_lower_binary(recipe, middle, BUSTER_TYPED_ADD, middle, temporary);
-    cbuiltin_lower_immediate(recipe, temporary, BUSTER_TYPED_AND, middle, UINT32_MAX);
-    cbuiltin_lower_binary(recipe, other, BUSTER_TYPED_MUL, al, bh);
-    cbuiltin_lower_binary(recipe, other, BUSTER_TYPED_ADD, other, temporary);
-    cbuiltin_lower_binary(recipe, high, BUSTER_TYPED_MUL, ah, bh);
-    cbuiltin_lower_immediate(recipe, temporary, BUSTER_TYPED_SHR, middle, 32);
-    cbuiltin_lower_binary(recipe, high, BUSTER_TYPED_ADD, high, temporary);
-    cbuiltin_lower_immediate(recipe, temporary, BUSTER_TYPED_SHR, other, 32);
-    cbuiltin_lower_binary(recipe, high, BUSTER_TYPED_ADD, high, temporary);
-}
-
 // Pushes the low bits of U64 slot `input` that a destination of descriptor `type` (of at most 64 bits) keeps, extended
 // through 64 bits by its signedness: by its class's conversions where its width is the class's, and by a pair of shifts
 // for a narrower _BitInt's, an arithmetic one for a signed one.
@@ -385,9 +358,231 @@ static void cbuiltin_lower_destination(CBuiltinLowerRecipe* recipe, uint32_t inp
     }
 }
 
-// The exact result is a two-limb two's-complement integer. Comparing both limbs with the destination's extended
-// low value handles all mixed signedness cases, including unsigned64 + unsigned64 and signed64 * unsigned64.
-static void cbuiltin_lower_overflow(CBuiltinLowerRecipe* recipe, const CBuiltinLowerCall* call)
+// Pushes an overflow operand's value from its slot as a U64, extended by its signedness (a bool's low bit alone).
+static void cbuiltin_lower_operand(CBuiltinLowerRecipe* recipe, uint32_t slot, uint32_t type)
+{
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOCAL, cbuiltin_lower_type_class(type), slot);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+    if (type == 1)
+    {
+        cbuiltin_lower_constant(recipe, 1);
+        cbuiltin_lower_operation(recipe, BUSTER_TYPED_AND);
+    }
+}
+
+// Stores the exact result's low limb `low` through the destination pointer at the destination's class: its low bits for
+// a whole class of 8 to 64 bits, else its normalized value (a bool's low bit, a _BitInt's extension from its width), kept in
+// a temporary. Returns the slot that holds the destination's value: `low` or that temporary.
+static uint32_t cbuiltin_lower_store(CBuiltinLowerRecipe* recipe, const CBuiltinLowerCall* call, uint32_t low)
+{
+    const uint32_t type = call->result_type;
+    const uint32_t class = cbuiltin_lower_type_class(type);
+    const bool whole = (type & ~BUSTER_CBUILTIN_SIGNED) != 1 && cbuiltin_lower_type_whole(type);
+    const uint32_t normalized = whole ? low : cbuiltin_lower_temporary(recipe);
+    if (!whole)
+    {
+        cbuiltin_lower_destination(recipe, low, type);
+        cbuiltin_lower_set(recipe, normalized);
+    }
+    cbuiltin_lower_local(recipe, call->destination);
+    cbuiltin_lower_local(recipe, normalized);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, class, 0);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET, class, 0);
+    return normalized;
+}
+
+// Pushes whether U64 slot `low` doesn't fit a destination of descriptor `type` (of fewer than 64 bits) as an I32: the
+// destination's extension of its low bits (`normalized`'s value, cbuiltin_lower_store's, where that slot isn't `low`)
+// differs from it.
+static void cbuiltin_lower_mismatch(CBuiltinLowerRecipe* recipe, uint32_t type, uint32_t low, uint32_t normalized)
+{
+    if (normalized == low)
+    {
+        cbuiltin_lower_destination(recipe, low, type);
+    }
+    else
+    {
+        cbuiltin_lower_local(recipe, normalized);
+    }
+    cbuiltin_lower_local(recipe, low);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_NE);
+}
+
+// Pushes whether U64 slot `value` is negative as an I64, as an I32.
+static void cbuiltin_lower_negative(CBuiltinLowerRecipe* recipe, uint32_t value)
+{
+    cbuiltin_lower_local(recipe, value);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 0);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_LT);
+}
+
+// The destination's test of a two-limb exact result (`high`:`low`, two's complement), which it fits where its extension of
+// the low bits gives the low limb back and the high limb is the low limb's extension (its sign's, or zero); it takes the
+// low bits. Where the first part fails, the second's sign is the low limb's rather than the destination's value's, which
+// the result doesn't depend on. A 64-bit destination's extension is the low limb itself.
+static void cbuiltin_lower_overflow_limbs(CBuiltinLowerRecipe* recipe, const CBuiltinLowerCall* call, uint32_t low, uint32_t high)
+{
+    const uint32_t normalized = cbuiltin_lower_store(recipe, call, low);
+    cbuiltin_lower_constant(recipe, 0);
+    if ((call->result_type & BUSTER_CBUILTIN_SIGNED) != 0)
+    {
+        cbuiltin_lower_local(recipe, low);
+        cbuiltin_lower_constant(recipe, 63);
+        cbuiltin_lower_operation(recipe, BUSTER_TYPED_SHR);
+        cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
+    }
+    cbuiltin_lower_local(recipe, high);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_NE);
+    if ((call->result_type & ~BUSTER_CBUILTIN_SIGNED) != 64)
+    {
+        cbuiltin_lower_mismatch(recipe, call->result_type, low, normalized);
+        cbuiltin_lower_emit(recipe, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_I32, 0);
+    }
+}
+
+// Operands of at most 32 bits each (#1385): the exact result fits 64 bits, signed, or for a product of two unsigned 32-bit
+// operands, unsigned, so that one 64-bit operation computes it. It fits a destination of fewer than 64 bits where the
+// destination's extension of its low bits gives it back, and a signed one besides only where it is below 2^63 as an
+// unsigned product (whose low bits past 2^63 a _BitInt(63)'s extension could give back); and a 64-bit destination where
+// its sign allows: a signed one, an unsigned product below 2^63; an unsigned one, a result that isn't negative, as a sum or
+// a product of unsigned operands never is.
+static void cbuiltin_lower_overflow_narrow(CBuiltinLowerRecipe* recipe, const CBuiltinLowerCall* call)
+{
+    const bool sign = (call->result_type & BUSTER_CBUILTIN_SIGNED) != 0;
+    const bool narrow = (call->result_type & ~BUSTER_CBUILTIN_SIGNED) != 64;
+    const bool product = call->id == CBUILTIN_MUL_OVERFLOW;
+    const bool subtract = call->id == CBUILTIN_SUB_OVERFLOW;
+    const bool unsigned_operands = ((call->a_type | call->b_type) & BUSTER_CBUILTIN_SIGNED) == 0;
+    const uint32_t widths = (call->a_type & ~BUSTER_CBUILTIN_SIGNED) + (call->b_type & ~BUSTER_CBUILTIN_SIGNED);
+    const bool exact_unsigned = product && unsigned_operands && widths > 63;
+    const bool negative = sign ? exact_unsigned : !narrow && (subtract || !unsigned_operands);
+    const uint32_t low = cbuiltin_lower_temporary(recipe);
+    cbuiltin_lower_operand(recipe, call->a, call->a_type);
+    cbuiltin_lower_operand(recipe, call->b, call->b_type);
+    cbuiltin_lower_operation(recipe, product ? BUSTER_TYPED_MUL : subtract ? BUSTER_TYPED_SUB : BUSTER_TYPED_ADD);
+    cbuiltin_lower_set(recipe, low);
+    const uint32_t normalized = cbuiltin_lower_store(recipe, call, low);
+    if (narrow)
+    {
+        cbuiltin_lower_mismatch(recipe, call->result_type, low, normalized);
+    }
+    if (negative)
+    {
+        cbuiltin_lower_negative(recipe, low);
+        if (narrow)
+        {
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_I32, 0);
+        }
+    }
+    else if (!narrow)
+    {
+        cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 0);
+    }
+}
+
+// A sum or a difference with a 64-bit operand, both operands of the destination's signedness (#1385): the operation's own
+// overflow at 64 bits (an unsigned sum's carry, low < a; an unsigned difference's borrow, a < b; a signed sum's, the sign
+// of (low ^ a) & (low ^ b), and a signed difference's, of (a ^ b) & (a ^ low)), or at a narrower destination the low bits':
+// past 64 bits the exact result fits no destination of its signedness, and within them one exactly where its extension of
+// the low bits gives them back.
+static void cbuiltin_lower_overflow_same(CBuiltinLowerRecipe* recipe, const CBuiltinLowerCall* call)
+{
+    const bool sign = (call->result_type & BUSTER_CBUILTIN_SIGNED) != 0;
+    const bool narrow = (call->result_type & ~BUSTER_CBUILTIN_SIGNED) != 64;
+    const bool subtract = call->id == CBUILTIN_SUB_OVERFLOW;
+    const uint32_t low = cbuiltin_lower_temporary(recipe);
+    cbuiltin_lower_operand(recipe, call->a, call->a_type);
+    cbuiltin_lower_operand(recipe, call->b, call->b_type);
+    cbuiltin_lower_operation(recipe, subtract ? BUSTER_TYPED_SUB : BUSTER_TYPED_ADD);
+    cbuiltin_lower_set(recipe, low);
+    const uint32_t normalized = cbuiltin_lower_store(recipe, call, low);
+    if (sign)
+    {
+        if (subtract)
+        {
+            cbuiltin_lower_operand(recipe, call->a, call->a_type);
+            cbuiltin_lower_operand(recipe, call->b, call->b_type);
+            cbuiltin_lower_operation(recipe, BUSTER_TYPED_XOR);
+            cbuiltin_lower_operand(recipe, call->a, call->a_type);
+            cbuiltin_lower_local(recipe, low);
+        }
+        else
+        {
+            cbuiltin_lower_local(recipe, low);
+            cbuiltin_lower_operand(recipe, call->a, call->a_type);
+            cbuiltin_lower_operation(recipe, BUSTER_TYPED_XOR);
+            cbuiltin_lower_local(recipe, low);
+            cbuiltin_lower_operand(recipe, call->b, call->b_type);
+        }
+        cbuiltin_lower_operation(recipe, BUSTER_TYPED_XOR);
+        cbuiltin_lower_operation(recipe, BUSTER_TYPED_AND);
+        cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
+        cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 0);
+    }
+    else if (subtract)
+    {
+        cbuiltin_lower_operand(recipe, call->a, call->a_type);
+        cbuiltin_lower_operand(recipe, call->b, call->b_type);
+    }
+    else
+    {
+        cbuiltin_lower_local(recipe, low);
+        cbuiltin_lower_operand(recipe, call->a, call->a_type);
+    }
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_LT);
+    if (narrow)
+    {
+        cbuiltin_lower_mismatch(recipe, call->result_type, low, normalized);
+        cbuiltin_lower_emit(recipe, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_I32, 0);
+    }
+}
+
+// A product with a 64-bit operand (#1385), exact in two's complement as two limbs: the low one the operands' 64-bit product,
+// and the high one their 128-bit product's, each operand extended by its signedness (a bool's low bit alone), of which both
+// operands of one extension take one mul or imul (Tier 0's tier0_int128_product, Tier 1's split product).
+static void cbuiltin_lower_overflow_product(CBuiltinLowerRecipe* recipe, const CBuiltinLowerCall* call)
+{
+    const uint32_t low = cbuiltin_lower_temporary(recipe);
+    const uint32_t high = cbuiltin_lower_temporary(recipe);
+    const uint32_t slots[2] =
+    {
+        call->a,
+        call->b,
+    };
+    const uint32_t types[2] =
+    {
+        call->a_type,
+        call->b_type,
+    };
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        if (types[i] == 1)
+        {
+            cbuiltin_lower_operand(recipe, slots[i], types[i]);
+        }
+        else
+        {
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOCAL, cbuiltin_lower_type_class(types[i]), slots[i]);
+        }
+        cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U128, 0);
+    }
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U128, 0);
+    cbuiltin_lower_constant(recipe, 64);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U128, 0);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+    cbuiltin_lower_set(recipe, high);
+    cbuiltin_lower_operand(recipe, call->a, call->a_type);
+    cbuiltin_lower_operand(recipe, call->b, call->b_type);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_MUL);
+    cbuiltin_lower_set(recipe, low);
+    cbuiltin_lower_overflow_limbs(recipe, call, low, high);
+}
+
+// A sum or a difference of mixed signedness with a 64-bit operand: the exact result as a two-limb two's-complement integer,
+// the high limb the operands' signs' and the low operation's carry's, which the destination's test of both limbs handles
+// whatever the signedness.
+static void cbuiltin_lower_overflow_mixed(CBuiltinLowerRecipe* recipe, const CBuiltinLowerCall* call)
 {
     const uint32_t a = cbuiltin_lower_temporary(recipe);
     const uint32_t b = cbuiltin_lower_temporary(recipe);
@@ -396,8 +591,6 @@ static void cbuiltin_lower_overflow(CBuiltinLowerRecipe* recipe, const CBuiltinL
     const uint32_t low = cbuiltin_lower_temporary(recipe);
     const uint32_t high = cbuiltin_lower_temporary(recipe);
     const uint32_t temporary = cbuiltin_lower_temporary(recipe);
-    const uint32_t normalized = cbuiltin_lower_temporary(recipe);
-    const uint32_t mismatch = cbuiltin_lower_temporary(recipe);
     const uint32_t slots[2] =
     {
         call->a,
@@ -420,13 +613,7 @@ static void cbuiltin_lower_overflow(CBuiltinLowerRecipe* recipe, const CBuiltinL
     };
     for (uint32_t i = 0; i < 2; i += 1)
     {
-        cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOCAL, cbuiltin_lower_type_class(types[i]), slots[i]);
-        cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
-        if (types[i] == 1)
-        {
-            cbuiltin_lower_constant(recipe, 1);
-            cbuiltin_lower_operation(recipe, BUSTER_TYPED_AND);
-        }
+        cbuiltin_lower_operand(recipe, slots[i], types[i]);
         cbuiltin_lower_set(recipe, values[i]);
         if ((types[i] & BUSTER_CBUILTIN_SIGNED) != 0)
         {
@@ -438,54 +625,47 @@ static void cbuiltin_lower_overflow(CBuiltinLowerRecipe* recipe, const CBuiltinL
             cbuiltin_lower_set(recipe, negatives[i]);
         }
     }
-    if (call->id == CBUILTIN_MUL_OVERFLOW)
+    const bool subtract = call->id == CBUILTIN_SUB_OVERFLOW;
+    cbuiltin_lower_binary(recipe, low, subtract ? BUSTER_TYPED_SUB : BUSTER_TYPED_ADD, a, b);
+    cbuiltin_lower_binary(recipe, temporary, BUSTER_TYPED_LT, subtract ? a : low, subtract ? b : a);
+    cbuiltin_lower_constant(recipe, 0);
+    cbuiltin_lower_local(recipe, an);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
+    cbuiltin_lower_set(recipe, high);
+    cbuiltin_lower_local(recipe, high);
+    cbuiltin_lower_local(recipe, bn);
+    cbuiltin_lower_operation(recipe, subtract ? BUSTER_TYPED_ADD : BUSTER_TYPED_SUB);
+    cbuiltin_lower_local(recipe, temporary);
+    cbuiltin_lower_operation(recipe, subtract ? BUSTER_TYPED_SUB : BUSTER_TYPED_ADD);
+    cbuiltin_lower_set(recipe, high);
+    cbuiltin_lower_overflow_limbs(recipe, call, low, high);
+}
+
+// An overflow builtin of operands and a destination of at most 64 bits, by the cheapest of the recipes above that computes
+// its exact result: one 64-bit operation for operands of at most 32 bits, the 64-bit operation's own carry or overflow for
+// a sum or a difference of operands of the destination's signedness, one 128-bit product, or two limbs for a sum or a
+// difference of mixed signedness.
+static void cbuiltin_lower_overflow(CBuiltinLowerRecipe* recipe, const CBuiltinLowerCall* call)
+{
+    const uint32_t sign = call->result_type & BUSTER_CBUILTIN_SIGNED;
+    const bool narrow = (call->a_type & ~BUSTER_CBUILTIN_SIGNED) <= 32 && (call->b_type & ~BUSTER_CBUILTIN_SIGNED) <= 32;
+    const bool same = (call->a_type & BUSTER_CBUILTIN_SIGNED) == sign && (call->b_type & BUSTER_CBUILTIN_SIGNED) == sign;
+    if (narrow)
     {
-        cbuiltin_lower_product(recipe, low, high, a, b);
-        cbuiltin_lower_binary(recipe, temporary, BUSTER_TYPED_MUL, b, an);
-        cbuiltin_lower_binary(recipe, high, BUSTER_TYPED_SUB, high, temporary);
-        cbuiltin_lower_binary(recipe, temporary, BUSTER_TYPED_MUL, a, bn);
-        cbuiltin_lower_binary(recipe, high, BUSTER_TYPED_SUB, high, temporary);
+        cbuiltin_lower_overflow_narrow(recipe, call);
+    }
+    else if (call->id == CBUILTIN_MUL_OVERFLOW)
+    {
+        cbuiltin_lower_overflow_product(recipe, call);
+    }
+    else if (same)
+    {
+        cbuiltin_lower_overflow_same(recipe, call);
     }
     else
     {
-        const bool subtract = call->id == CBUILTIN_SUB_OVERFLOW;
-        cbuiltin_lower_binary(recipe, low, subtract ? BUSTER_TYPED_SUB : BUSTER_TYPED_ADD, a, b);
-        cbuiltin_lower_binary(recipe, temporary, BUSTER_TYPED_LT, subtract ? a : low, subtract ? b : a);
-        cbuiltin_lower_constant(recipe, 0);
-        cbuiltin_lower_local(recipe, an);
-        cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
-        cbuiltin_lower_set(recipe, high);
-        cbuiltin_lower_local(recipe, high);
-        cbuiltin_lower_local(recipe, bn);
-        cbuiltin_lower_operation(recipe, subtract ? BUSTER_TYPED_ADD : BUSTER_TYPED_SUB);
-        cbuiltin_lower_local(recipe, temporary);
-        cbuiltin_lower_operation(recipe, subtract ? BUSTER_TYPED_SUB : BUSTER_TYPED_ADD);
-        cbuiltin_lower_set(recipe, high);
+        cbuiltin_lower_overflow_mixed(recipe, call);
     }
-    const uint32_t destination_class = cbuiltin_lower_type_class(call->result_type);
-    cbuiltin_lower_destination(recipe, low, call->result_type);
-    cbuiltin_lower_set(recipe, normalized);
-    cbuiltin_lower_binary(recipe, mismatch, BUSTER_TYPED_NE, low, normalized);
-    cbuiltin_lower_constant(recipe, 0);
-    if ((call->result_type & BUSTER_CBUILTIN_SIGNED) != 0)
-    {
-        cbuiltin_lower_local(recipe, normalized);
-        cbuiltin_lower_constant(recipe, 63);
-        cbuiltin_lower_operation(recipe, BUSTER_TYPED_SHR);
-        cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
-    }
-    cbuiltin_lower_local(recipe, high);
-    cbuiltin_lower_operation(recipe, BUSTER_TYPED_NE);
-    cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
-    cbuiltin_lower_local(recipe, mismatch);
-    cbuiltin_lower_operation(recipe, BUSTER_TYPED_OR);
-    cbuiltin_lower_set(recipe, mismatch);
-    cbuiltin_lower_local(recipe, call->destination);
-    cbuiltin_lower_local(recipe, normalized);
-    cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, destination_class, 0);
-    cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET, destination_class, 0);
-    cbuiltin_lower_local(recipe, mismatch);
-    cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
 }
 
 // A 128-bit operand's or destination's descriptor: BUSTER_CBUILTIN_LOWER_WIDE, signed or not, with no other bit beside it

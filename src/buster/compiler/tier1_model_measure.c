@@ -168,7 +168,7 @@ static bool tier1_model_footer(char* fields, const uint64_t* rows)
 
 static bool tier1_model_read(const char* path, const uint8_t* allowed, Tier1ModelManifest* manifest)
 {
-    static const char header[] = "origin,record,form,mnemonic,mode,reg,rm,index,vvvv,decorations,immediate,displacement,cost_id,gpr_latency,throughput,retired_ops,flags_latency,load_extra,executed_uops,pipes\n";
+    static const char header[] = "origin,record,form,mnemonic,mode,reg,rm,index,vvvv,decorations,immediate,displacement,cost_id,latency,throughput,retired_ops,flags_latency,load_extra,fp_ops,pipes\n";
     static const char footer[] = "# tier1-manifest-end,version=1,";
     FILE* file = fopen(path, "rb");
     bool valid = file != 0;
@@ -665,7 +665,7 @@ int run_tier1_model_measure(int argc, char** argv)
         valid = only == UINT64_MAX || (only < manifest->count && manifest->cases[only].refusal == 0);
         printf("# manifest_fnv1a64=%016" PRIx64 " bytes=%" PRIu64 " plan_rows=%" PRIu64 " expansion_rows=%" PRIu64 " wrapper_rows=%" PRIu64 "\n", manifest->hash, manifest->bytes, manifest->rows[0], manifest->rows[1], manifest->rows[2]);
         printf("# cases=%u unknown_cases=%u unknown_records=%" PRIu64 " eligible_cases=%u refused_cases=%u eligible_records=%" PRIu64 " refused_records=%" PRIu64 "\n", manifest->count, unknown_cases, manifest->unknown, eligible_cases, manifest->count - eligible_cases, eligible_records, manifest->rows[0] - eligible_records);
-        printf("# missing_columns gpr_latency=%" PRIu64 " throughput=%" PRIu64 " retired_ops=%" PRIu64 " flags_latency=%" PRIu64 " load_extra=%" PRIu64 " executed_uops=%" PRIu64 " pipes=%" PRIu64 "\n", manifest->missing[0], manifest->missing[1], manifest->missing[2], manifest->missing[3], manifest->missing[4], manifest->missing[5], manifest->missing[6]);
+        printf("# missing_columns latency=%" PRIu64 " throughput=%" PRIu64 " retired_ops=%" PRIu64 " flags_latency=%" PRIu64 " load_extra=%" PRIu64 " fp_ops=%" PRIu64 " pipes=%" PRIu64 "\n", manifest->missing[0], manifest->missing[1], manifest->missing[2], manifest->missing[3], manifest->missing[4], manifest->missing[5], manifest->missing[6]);
         printf("# register-renamed exact form/immediate/address/alias cases; flags latency, load increments, executed uops and pipes remain unknown; no model update\n");
     }
     if (valid && list)
@@ -678,7 +678,7 @@ int run_tier1_model_measure(int argc, char** argv)
             printf("%u,%" PRIu64 ",%" PRIu64 ",%u,%s,%u,%u,%u,%u,%u,%u,%d,%d,%u,%u,%s\n", i, entry->first, entry->occurrences, r.form, x86_form_description(r.form)->mnemonic, r.mode, r.reg, r.rm, r.index, r.vvvv, r.decorations, r.immediate, r.displacement, entry->cost_id, entry->experiments, entry->refusal != 0 ? entry->refusal : "");
         }
     }
-    X86CostCounters counters = { .fd = {-1, -1, -1} };
+    X86CostCounters counters = { .fd = {-1, -1, -1, -1, -1} };
     X86CostProgram baseline = {0};
     if (valid && !list && !verify)
     {
@@ -715,13 +715,7 @@ int run_tier1_model_measure(int argc, char** argv)
     {
         munmap(baseline.code, BUSTER_X86_COST_CODE_SIZE);
     }
-    for (uint32_t i = 0; i < 3; i += 1)
-    {
-        if (counters.fd[i] >= 0)
-        {
-            close(counters.fd[i]);
-        }
-    }
+    x86_zen5_counters_close(&counters);
     free(allowed);
     free(manifest);
     if (!valid)

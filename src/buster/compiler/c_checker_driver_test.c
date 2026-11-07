@@ -5256,8 +5256,9 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                 // Share the text renderer, not the sparse walk's selection or ordering. The exact semantic
                 // catalogue separately compares this spelling and its caret against Clang (#1107).
                 uint32_t location = phase == 2 ? extra[index].token : token;
+                PPOutputDiagnosticNote note = { 0 };
                 const char* message = phase == 2 ? extra[index].message :
-                                      phase == 1 ? check_semantic_expression(parser, pp, input, stream, types, stream->reports + index, &spell, &location, scratch) :
+                                      phase == 1 ? check_semantic_expression(parser, pp, input, stream, types, stream->reports + index, &spell, &location, &note, scratch) :
                                                    check_semantic_input(parser, pp, input, types, input->reports + index, &spell, scratch);
                 const uint32_t source = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
                 if (phase == 0 && input->reports[index].message == CHECK_INPUT_UNDECLARED && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
@@ -7105,6 +7106,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 #include "c_check_convention_driver_test.c"
 #include "c_check_interrupt_driver_test.c"
 #include "c_check_tier1_driver_test.c"
+#include "c_check_string_pool_driver_test.c"
 #include "c_check_frame_pointer_driver_test.c"
 #include "c_check_stack_clash_driver_test.c"
 #include "c_check_fence_driver_test.c"
@@ -8384,6 +8386,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_string_pool(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_ignored_pragmas(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
@@ -8647,6 +8653,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_tier1_bits(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_overflow(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

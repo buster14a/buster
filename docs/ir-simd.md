@@ -249,6 +249,16 @@ LZCNT, POPCNT). `test-ir-simd` decodes each written out, of each class and
 result, checks its features against `x86_target_requirement`'s, and refuses ten
 changes of each as anything but at most a machine row.
 
+After them, `ir_simd_typed_overflow` decodes the signed overflow builtins' rows
+(#1385, `check_lower_overflow_row`): two operands of an int's or a long's class,
+an int result, and three records, `add`, `cmp` or `imul` of the class's width
+with `reg` `INTEGER(0)` and `rm` `INTEGER(1)`, `seto` of `SCRATCH(0)` and
+`movzx` of it into `INTEGER_RESULT`. Each is the IR's binary `intrinsic`
+`saddo`, `ssubo` or `smulo` of the operands' type (a long's truncated to the
+`i32` result), at every target. `test-ir-simd` decodes each of both widths
+written out and refuses thirteen changes of each as anything but at most a
+machine row.
+
 ## Scalar splats (#1450)
 
 The opcode table already fills its 64-entry byte-permute register. A scalar
