@@ -141,7 +141,11 @@ static uint8_t* check_program_return_facts(CheckProgram* program, Arena* scratch
         else
         {
             uint32_t mask = UINT32_MAX;
-            if (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF)
+            if (op == CHECK_OP_VALUE)
+            {
+                mask = 0;
+            }
+            else if (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF)
             {
                 mask = operands[0] < node && (graph->ops[operands[0]] == CHECK_OP_VLA_BOUND || graph->ops[operands[0]] == CHECK_OP_VLA_EXTENT) ? 1u : 0;
             }
@@ -174,7 +178,9 @@ static uint8_t* check_program_return_facts(CheckProgram* program, Arena* scratch
                 }
             }
         }
-        facts[node] = result;
+        // Query runtime plans and Clang's source-warning CFG do not share an execution contract here. Even a
+        // child's proven stop cannot turn the retained conservative query boundary into a guaranteed stop.
+        facts[node] = op == CHECK_OP_BUILTIN_QUERY ? BUSTER_CHECK_RETURN_UNKNOWN : result;
     }
     return facts;
 }

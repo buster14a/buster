@@ -2860,11 +2860,9 @@ static __attribute__((noinline)) void check_test_program_fpclassify(CheckTest* t
                                true, "fpclassify-argument-twice", clang);
 }
 
-// A small aggregate body must not clear its unit's unrelated graph. Poison the dead control-task suffix, as the
-// next body's builder may, and retain reference epochs for nodes reached by earlier bodies. Both a completed walk
-// and its conservative early stop must restore those marks before builtin/reference selection reads them. The
-// capacities end in every remainder of four: a capacity that isn't a multiple of four is the cleanup-room case
-// (#147) that once left the visited list misaligned, which UBSan catches and the poisoned suffix locates.
+// The warning walk borrows only control marks and the label queue. Poison every suffix and retain facts at every
+// capacity remainder, including conservative and proven terminating edges. No graph marks or alignment ledger are
+// borrowed by this walk now; only the body's two control bytes and queue entries may change.
 static void check_test_program_return_marks(CheckTest* test)
 {
     enum { TOKENS = 1024, BASE_CAPACITY = 8 * TOKENS + 16, CAPACITY = BASE_CAPACITY + 3, NODES = 4096 };
@@ -2875,59 +2873,69 @@ static void check_test_program_return_marks(CheckTest* test)
     const TypeMember member = { .name = 1, .type = BUSTER_TYPE_LONG, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD };
     ready = ready && record != 0 && type_complete_record(&types.table, record, &member, 1, (TypeRecordAttributes){ 0 });
     TypeId function = ready ? type_function(&types.table, record, NULL, 0, 0) : 0;
-    CheckOp* ops = BUSTER_ARENA_PUSH_ARRAY(&scratch, CheckOp, NODES);
-    uint32_t* operands = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES);
-    uint32_t* seconds = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES);
-    uint32_t* absent = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES);
-    uint32_t* marks = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES + 1);
-    uint32_t* stack = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES + 1);
+    uint8_t* facts = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, NODES + 1);
     uint32_t* labels = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, CAPACITY + 1);
     CheckControlTask* tasks = BUSTER_ARENA_PUSH_ARRAY(&scratch, CheckControlTask, CAPACITY);
-    ready = ready && function != 0 && ops != NULL && operands != NULL && seconds != NULL && absent != NULL && marks != NULL && stack != NULL && labels != NULL && tasks != NULL;
-    check_test_expect(test, ready, "return warning mark fixture has bounded graph and control scratch");
+    ready = ready && function != 0 && facts != NULL && labels != NULL && tasks != NULL;
+    check_test_expect(test, ready, "return warning fixture has bounded facts and control scratch");
+    static const uint8_t contracts[] = { 0, BUSTER_CHECK_RETURN_UNKNOWN, BUSTER_CHECK_RETURN_STOPS };
     for (uint32_t capacity = BASE_CAPACITY; ready && capacity <= CAPACITY; capacity += 1)
     {
-        for (uint32_t unsafe = 0; ready && unsafe < 2; unsafe += 1)
+        for (uint32_t contract = 0; contract < BUSTER_ARRAY_LENGTH(contracts); contract += 1)
         {
-            for (uint32_t node = 0; node < NODES; node += 1)
+            for (uint32_t node = 0; node <= NODES; node += 1)
             {
-                ops[node] = CHECK_OP_VALUE;
-                operands[node] = seconds[node] = absent[node] = BUSTER_CHECK_NONE;
-                marks[node] = node == 0 ? unsafe : node % 2;
+                facts[node] = node == 0 ? contracts[contract] : 0x73;
             }
-            ops[0] = unsafe ? CHECK_OP_COMMA : CHECK_OP_VALUE;
-            ops[1] = unsafe ? CHECK_OP_CALL : CHECK_OP_VALUE;
-            operands[0] = unsafe ? 2 : BUSTER_CHECK_NONE;
-            seconds[0] = unsafe ? 1 : BUSTER_CHECK_NONE;
-            marks[NODES] = stack[NODES] = labels[capacity] = UINT32_C(0x71625344);
+            for (uint32_t label = 0; label <= CAPACITY; label += 1)
+            {
+                labels[label] = UINT32_C(0x71625344);
+            }
             memset(tasks, 0xa5, (uint64_t)CAPACITY * sizeof(*tasks));
-            const CheckInput input = { .token_count = TOKENS, .declared_types = &function,
-                                       .graph = { .count = NODES, .ops = ops, .operand0 = operands, .operand1 = seconds, .operand2 = absent } };
+            const CheckInput input = { .token_count = TOKENS, .declared_types = &function, .graph = { .count = NODES } };
             CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input, .body_count = 2 };
-            CheckControl entries[] = { { .kind = CHECK_CONTROL_RETURN, .node = 0 }, { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE } };
+            CheckControl entries[] = { { .kind = CHECK_CONTROL_EVALUATE, .node = 0 }, { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE } };
             CheckControlWriter writer = { .program = &program, .entries = entries, .tasks = tasks, .labels = labels, .capacity = capacity };
             CheckProgramBody body = { .count = BUSTER_ARRAY_LENGTH(entries), .entry_count = BUSTER_ARRAY_LENGTH(entries) };
-            check_program_return_flow(&writer, &body, marks, stack, NULL, true);
-            const uint32_t touched_offset = (capacity + 3) & ~UINT32_C(3);
-            bool same = body.return_flow && !body.falls && body.return_warning == 0 &&
-                        marks[NODES] == UINT32_C(0x71625344) && stack[NODES] == UINT32_C(0x71625344) && labels[capacity] == UINT32_C(0x71625344);
-            for (uint32_t node = 0; same && node < NODES; node += 1)
+            check_program_return_flow(&writer, &body, facts, true);
+            bool same = body.return_flow && body.falls && body.return_warning == (contract == 0 ? 1 : 0);
+            for (uint32_t node = 0; same && node <= NODES; node += 1)
             {
-                same = marks[node] == (node == 0 ? unsafe : node % 2);
+                same = facts[node] == (node == 0 ? contracts[contract] : 0x73);
             }
-            // The call stops its comma expression with the other operand still queued. Only one or three ledger words
-            // change, after the bytes a capacity that isn't a multiple of four leaves as alignment padding.
+            for (uint32_t label = BUSTER_ARRAY_LENGTH(entries); same && label <= CAPACITY; label += 1)
+            {
+                same = labels[label] == UINT32_C(0x71625344);
+            }
             const uint8_t* bytes = (const uint8_t*)tasks;
-            for (uint32_t byte = capacity; same && byte < touched_offset; byte += 1)
+            for (uint32_t byte = BUSTER_ARRAY_LENGTH(entries); same && byte < (uint64_t)CAPACITY * sizeof(*tasks); byte += 1)
             {
                 same = bytes[byte] == 0xa5;
             }
-            for (uint32_t byte = touched_offset + (1 + 2 * unsafe) * sizeof(uint32_t); same && byte < touched_offset + NODES; byte += 1)
-            {
-                same = bytes[byte] == 0xa5;
-            }
-            check_test_expect(test, same, "small return warning walks preserve liveness epochs and touch only visited-node scratch at every capacity remainder, including early stops");
+            check_test_expect(test, same, "return warning walks retain immutable facts and every unused control/queue byte at each capacity remainder");
         }
+    }
+    if (ready)
+    {
+        // An attested query runtime plan may evaluate its argument. That alone does not attest the source-warning
+        // CFG contract: its guaranteed terminating child must leave the query itself conservative.
+        CheckOp ops[] = { CHECK_OP_BUILTIN_MISC, CHECK_OP_BUILTIN_QUERY };
+        uint32_t absent[] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+        uint32_t members[] = { CBUILTIN_TRAP, CBUILTIN_CONSTANT_P };
+        uint32_t offsets[] = { 0, 0 };
+        uint32_t counts[] = { 0, 1 };
+        uint32_t arguments[] = { 0 };
+        CheckBuiltinMiscEffect misc = { .node = 0, .terminates = true };
+        CheckBuiltinQueryEffect query = { .node = 1, .evaluated_operands = 1 };
+        const CheckInput input = { .graph = { .count = BUSTER_ARRAY_LENGTH(ops), .ops = ops, .operand0 = absent,
+                                            .operand1 = absent, .operand2 = absent, .members = members,
+                                            .argument_offsets = offsets, .argument_counts = counts, .argument_nodes = arguments } };
+        const CheckStream stream = { .misc = &misc, .misc_count = 1, .queries = &query, .query_count = 1 };
+        CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input, .stream = &stream };
+        const uint8_t* query_facts = check_program_return_facts(&program, &scratch, NULL);
+        check_test_expect(test, query_facts != NULL && query_facts[0] == BUSTER_CHECK_RETURN_STOPS &&
+                               query_facts[1] == BUSTER_CHECK_RETURN_UNKNOWN,
+                          "an evaluated query operand never promotes its conservative warning contract to a guaranteed stop");
     }
     arena_release(&scratch);
     check_test_types_close(&types);
