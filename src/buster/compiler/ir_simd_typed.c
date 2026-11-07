@@ -114,6 +114,14 @@ static uint64_t ir_typed_vector_moves(uint32_t bytes, uint64_t target_features)
                                                                                    BUSTER_X86_FEATURE(AVX);
 }
 
+// The widest vector Tier 1 moves whole at a target (#1624): 64 bytes with AVX512F, 32 with AVX, and else x86-64's 16. A
+// wider vector the C driver's --tier1 lowers (ir_lower_typed_target_pieces) is split into this width's pieces after
+// promotion (ir_vector_split.c).
+static uint32_t ir_typed_vector_piece(uint64_t target_features)
+{
+    return (target_features & BUSTER_X86_FEATURE(AVX512F)) != 0 ? 64 : (target_features & BUSTER_X86_FEATURE(AVX)) != 0 ? 32 : 16;
+}
+
 // A comparison's opmask forms (#717's C comparisons, #1623's comparisons into a mask), by its lanes: signed and unsigned
 // integers' vpcmp and vpcmpu of each width, floats' and doubles' vcmpps and vcmppd (unsigned_lanes 0).
 static const uint16_t ir_simd_typed_comparisons[IR_SIMD_LANE_COUNT][2][3] = {

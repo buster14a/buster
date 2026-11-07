@@ -1459,6 +1459,54 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
         "void *x __attribute__((mode(IF)));\n",
         "struct S { int n; }; struct S x __attribute__((mode(IF)));\n",
         "int x __attribute__((mode(V2IF)));\n",
+        // A calling convention's count is clang's error where it meets a function, after a definition's -Wgcc-compat, and
+        // on another subject its warning alone; no_caller_saved_registers' count first, as a type's (#147).
+        "void f(void) __attribute__((preserve_all(1)));\n",
+        "int x __attribute__((preserve_all(1)));\n",
+        "void (*p)(void) __attribute__((preserve_all(1, 2)));\n",
+        "__attribute__((stdcall(1))) void f(void);\n",
+        "void f(void) __attribute__((pcs(\"aapcs\", 1))) {}\n",
+        "int x __attribute__((ms_abi(1), unused));\n",
+        // no_caller_saved_registers with System V's convention, in either order and every place, is the bit's type, which
+        // the assertions see where the diagnostics can't (#1639's review).
+        "typedef void N(void) __attribute__((no_caller_saved_registers));\n__attribute__((cdecl, no_caller_saved_registers)) void f(void);\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(f), N), \"cdecl first\");\n",
+        "typedef void N(void) __attribute__((no_caller_saved_registers));\n__attribute__((sysv_abi)) __attribute__((no_caller_saved_registers)) void f(void);\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(f), N), \"sysv_abi first, two lists\");\n",
+        "typedef void N(void) __attribute__((no_caller_saved_registers));\n__attribute__((no_caller_saved_registers, sysv_abi)) void f(void);\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(f), N), \"bit first\");\n",
+        "typedef void N(void) __attribute__((no_caller_saved_registers));\n__attribute__((cdecl)) void f(void) __attribute__((no_caller_saved_registers));\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(f), N), \"prefix and suffix\");\n",
+        "typedef void N(void) __attribute__((no_caller_saved_registers));\n__attribute__((cdecl, no_caller_saved_registers)) void (*p)(void);\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(p), N*), \"a pointer\");\n",
+        "typedef void N(void) __attribute__((no_caller_saved_registers));\ntypedef void F(void) __attribute__((sysv_abi, no_caller_saved_registers));\n"
+        "_Static_assert(__builtin_types_compatible_p(F, N), \"a typedef\");\n",
+        "typedef void N(void) __attribute__((no_caller_saved_registers));\n__attribute__((cdecl, no_caller_saved_registers)) void f(void);\n"
+        "_Static_assert(!__builtin_types_compatible_p(__typeof__(f), void (void)), \"not System V's alone\");\n",
+        // no_caller_saved_registers (#147): a System V function's type, with System V's convention too, through typedefs,
+        // pointers and variadic functions; nothing on a tag, and the function types' warning on another subject.
+        "__attribute__((no_caller_saved_registers)) int v;\n",
+        "__attribute__((no_caller_saved_registers(1))) void f(void);\n",
+        "int x __attribute__((no_caller_saved_registers(1)));\n",
+        "__attribute__((no_caller_saved_registers)) void f(void); void f(void) {}\n",
+        "__attribute__((no_caller_saved_registers, sysv_abi)) void f(void) {}\n",
+        "__attribute__((cdecl, no_caller_saved_registers)) void f(void) {}\n",
+        "typedef void F(void) __attribute__((no_caller_saved_registers)); F f __attribute__((sysv_abi));\n",
+        "__attribute__((no_caller_saved_registers)) void f(int a, ...) {}\n",
+        "__attribute__((no_caller_saved_registers)) void g(void); void (*p)(void) __attribute__((no_caller_saved_registers)) = g;\n",
+        "typedef void F(void) __attribute__((no_caller_saved_registers)); F *p; void h(void) { void (*q)(void) __attribute__((no_caller_saved_registers)) = p; (void)q; }\n",
+        "[[gnu::no_caller_saved_registers]] void f(void) {}\n",
+        "void f(void) [[gnu::no_caller_saved_registers]];\n",
+        "__attribute__((no_caller_saved_registers)) int f(int a, double b) { return a + (int)b; } int h(void) { return f(1, 2.0); }\n",
+        "struct __attribute__((no_caller_saved_registers)) S { int a; };\n",
+        "union __attribute__((no_caller_saved_registers)) U { int a; };\n",
+        "enum __attribute__((no_caller_saved_registers)) E { A };\n",
+        "struct S { int a; } __attribute__((no_caller_saved_registers));\n",
+        "struct S { int a __attribute__((no_caller_saved_registers)); };\n",
+        "typedef int T __attribute__((no_caller_saved_registers));\n",
+        "void f(int a __attribute__((no_caller_saved_registers)));\n",
+        "void f(void) __attribute__((stdcall(1)));\n",
+        "void (*p)(void) __attribute__((stdcall(1)));\n",
         // target diagnostics name the decoded unsupported fragment, including permitted escapes.
         "int f(void) __attribute__((target(\"bo\\\\gus\")));\n",
         "int f(void) __attribute__((target(\"bo\\tgus\")));\n",
