@@ -1570,6 +1570,67 @@ static uint32_t check_driver_parameter_place(const Parser* parser, const CheckIn
     return result;
 }
 
+// A failed conversion of `source`'s value to `target` (spelled with `target_spelling`'s typedef) as clang words it (#147,
+// Sema::DiagnoseAssignmentResult): its kind's words (check_driver_conversion_kind), its `action`'s (0 initializing, 1
+// assigning, 2 returning, 3 passing, each putting the target or the source first as clang's does), the fix-it's
+// (check_driver_conversion_hint) and its flag. The source's type as written, with its typedef. NULL where a type has none.
+static const char* check_driver_conversion_words(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                 CheckWarningSpelling* spell, uint32_t source, TypeId target, uint32_t target_spelling, uint8_t action, Arena* scratch)
+{
+    const char* result = NULL;
+    if (source < stream->count && target != 0)
+    {
+        const TypeId value = check_stream_type(stream, source);
+        const uint32_t source_spelling = check_driver_pointer_spelling(parser, input, stream, types, source);
+        const String8 to = check_driver_warning_type(parser, pp, input, types, spell, scratch, target, target_spelling);
+        const String8 from = check_driver_warning_type(parser, pp, input, types, spell, scratch, value, source_spelling);
+        const CheckDriverConversion kind = check_driver_conversion_kind(types, target, value);
+        const uint32_t incompatible = kind == CHECK_DRIVER_CONVERSION_INCOMPATIBLE ? 1 : 0;
+        static const char* const lead[] = {
+            "incompatible integer to pointer conversion ",
+            "incompatible pointer to integer conversion ",
+            "incompatible pointer types ",
+            "incompatible function pointer types ",
+            "",
+        };
+        static const char* const flag[] = { " [-Wint-conversion]", " [-Wint-conversion]", " [-Wincompatible-pointer-types]",
+                                            " [-Wincompatible-function-pointer-types]", "" };
+        static const char* const actions[4][2] = {
+            { "initializing %.*s with an expression of type %.*s", "initializing %.*s with an expression of incompatible type %.*s" },
+            { "assigning to %.*s from %.*s", "assigning to %.*s from incompatible type %.*s" },
+            { "returning %.*s from a function with result type %.*s", "returning %.*s from a function with incompatible result type %.*s" },
+            { "passing %.*s to parameter of type %.*s", "passing %.*s to parameter of incompatible type %.*s" },
+        };
+        const char* hint = check_driver_conversion_hint(types, stream, source, value, target);
+        // clang's actions put the target first where they initialize or assign, the source first where they return or pass.
+        const String8 first = action < 2 ? to : from;
+        const String8 second = action < 2 ? from : to;
+        const char* words = to.length != 0 && from.length != 0 && action < 4 ?
+                            check_warning_text(scratch, actions[action][incompatible], (int)first.length, first.pointer, (int)second.length, second.pointer) : NULL;
+        result = words != NULL ? check_warning_text(scratch, "%s%s%s%s", lead[kind], words, hint, flag[kind]) : NULL;
+    }
+    return result;
+}
+
+// An initializer's subobject whose conversion failed (#147, CheckInitDiagnostic.failed_source): clang's words of it as an
+// initialization (check_driver_conversion_words), at the subobject's expression (`token`), or at the declarator
+// (`declaration`) where it is the whole initializer of no braces, the declared type then spelled with its typedef. NULL
+// where it is none of those (the generic "invalid initializer" stays).
+static const char* check_driver_initializer_conversion(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                                       const TypeTable* types, TypeId target, uint32_t source, uint32_t declaration, uint32_t token,
+                                                       uint32_t* located, Arena* scratch)
+{
+    CheckWarningSpelling spell = { 0 };
+    const bool declared = declaration < input->token_count;
+    const bool whole = declared && token < parser->tokens.count && check_sparse_get(input->initializer_begins, declaration) == token &&
+                       parser->tokens.kinds[token] != PARSE_KIND_L_BRACE;
+    uint32_t spelling = 0;
+    const TypeId spelled = whole ? check_input_object_spelling(types, input, parser, declaration, input->declared_types[declaration], target, &spelling) : target;
+    const char* result = check_driver_conversion_words(parser, pp, input, stream, types, &spell, source, spelled, spelling, 0, scratch);
+    *located = whole ? declaration : token;
+    return result;
+}
+
 // A failed assignment conversion's error as clang words it (#147, Sema::DiagnoseAssignmentResult), where `report` is one:
 // an initializer's (at its declarator), an assignment's (at its `=`), a return's (at its expression) or a call's argument's
 // (at the argument, with "passing argument to parameter here" at its parameter, `*note_token` and `*note`, where the callee
@@ -1653,39 +1714,9 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
             target_spelling = check_driver_parameter_spelling(parser, input, parameter);
         }
     }
-    const char* result = NULL;
-    if (applies && source < stream->count && target != 0)
-    {
-        const TypeId value = check_stream_type(stream, source);
-        const uint32_t source_spelling = check_driver_pointer_spelling(parser, input, stream, types, source);
-        const String8 to = check_driver_warning_type(parser, pp, input, types, spell, scratch, target, target_spelling);
-        const String8 from = check_driver_warning_type(parser, pp, input, types, spell, scratch, value, source_spelling);
-        const CheckDriverConversion kind = check_driver_conversion_kind(types, target, value);
-        const bool incompatible = kind == CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
-        static const char* const lead[] = {
-            "incompatible integer to pointer conversion ",
-            "incompatible pointer to integer conversion ",
-            "incompatible pointer types ",
-            "incompatible function pointer types ",
-            "",
-        };
-        static const char* const flag[] = { " [-Wint-conversion]", " [-Wint-conversion]", " [-Wincompatible-pointer-types]",
-                                            " [-Wincompatible-function-pointer-types]", "" };
-        const char* hint = check_driver_conversion_hint(types, stream, source, value, target);
-        // clang's actions put the target first where they assign or initialize, the source first where they pass or return.
-        const String8 first = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE ? to : from;
-        const String8 second = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE ? from : to;
-        const char* action = op == CHECK_OP_INITIALIZE ? (incompatible ? "initializing %.*s with an expression of incompatible type %.*s" :
-                                                                         "initializing %.*s with an expression of type %.*s") :
-                             op == CHECK_OP_ASSIGN ? (incompatible ? "assigning to %.*s from incompatible type %.*s" : "assigning to %.*s from %.*s") :
-                             returning ? (incompatible ? "returning %.*s from a function with incompatible result type %.*s" :
-                                                         "returning %.*s from a function with result type %.*s") :
-                             (incompatible ? "passing %.*s to parameter of incompatible type %.*s" : "passing %.*s to parameter of type %.*s");
-        const char* words = to.length != 0 && from.length != 0 ?
-                            check_warning_text(scratch, action, (int)first.length, first.pointer, (int)second.length, second.pointer) : NULL;
-        result = words != NULL ? check_warning_text(scratch, "%s%s%s%s", lead[kind], words, hint, flag[kind]) : NULL;
-        *located = at;
-    }
+    const uint8_t action = op == CHECK_OP_INITIALIZE ? 0 : op == CHECK_OP_ASSIGN ? 1 : returning ? 2 : 3;
+    const char* result = applies ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, target, target_spelling, action, scratch) : NULL;
+    *located = result != NULL ? at : *located;
     return result;
 }
 
@@ -4836,17 +4867,25 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         {
                             earlier.status = initializers.status;
                             earlier.failed_type = initializers.failed_type;
+                            earlier.failed_source = initializers.failed_source;
+                            earlier.failed_declaration = initializers.failed_declaration;
                             earlier.token = initializers.token;
                             earlier.completion = initializers.completion;
                         }
                         if ((diagnosed && earlier.status != CHECK_INIT_OK) || earlier.status == CHECK_INIT_RESOURCE ||
                             (!diagnosed && initializers.status != CHECK_INIT_OK))
                         {
-                            const char* message = earlier.status == CHECK_INIT_MEMBER ?
+                            // A subobject's failed conversion is clang's words of it (#147), at its place.
+                            uint32_t place = earlier.token;
+                            const char* conversion = earlier.status == CHECK_INIT_INVALID && earlier.failed_source != 0 ?
+                                check_driver_initializer_conversion(checking, checking_pp, &input, &stream, &types, earlier.failed_type, earlier.failed_source - 1,
+                                                                    earlier.failed_declaration, earlier.token, &place, output_arena) : NULL;
+                            const char* message = conversion != NULL ? conversion : earlier.status == CHECK_INIT_MEMBER ?
                                 check_driver_initializer_field_message(checking, checking_pp, &input, &types, earlier.failed_type, earlier.token, output_arena) :
                                 check_driver_initializer_message(earlier.status);
-                            additional[additional_count++] = (CheckDriverDiagnostic){ earlier.token,
-                                message != NULL ? message : "initializer checking capacity exhausted", earlier.token, earlier.completion };
+                            place = conversion != NULL ? place : earlier.token;
+                            additional[additional_count++] = (CheckDriverDiagnostic){ place,
+                                message != NULL ? message : "initializer checking capacity exhausted", place, earlier.completion };
                         }
                         if (diagnosed)
                         {
