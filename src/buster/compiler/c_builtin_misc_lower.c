@@ -31,6 +31,8 @@
 
 #define BUSTER_CBUILTIN_MISC_SMALL_BYTES 32u
 
+#include "c_builtin_bits_lower.c"
+
 typedef struct CBuiltinMiscLowerCall CBuiltinMiscLowerCall;
 struct CBuiltinMiscLowerCall
 {
@@ -44,6 +46,8 @@ struct CBuiltinMiscLowerCall
     uint32_t argument_types[4];
     uint32_t result_type;
     uint32_t result_object;
+    // Optional primitive machine rows for a bit recipe, selected by the producer from this function's target.
+    CBuiltinBitsRows bit_rows;
     // __builtin_clear_padding's stores (c_check_program_lower.c's check_lower_padding): each a byte offset << 32, its
     // bytes << 8 and the mask of the bits it keeps (0 for a run of zeros, else one byte's AND).
     const uint64_t* padding;
@@ -53,8 +57,6 @@ struct CBuiltinMiscLowerCall
     uint64_t padding_elements;
     uint64_t padding_stride;
 };
-
-#include "c_builtin_bits_lower.c"
 
 // An alignment builtin (cbuiltin_align) as clang's code computes it, of its descriptors (CBuiltinMiscLowerCall's
 // argument_types and result_type, a pointer's 64 bits): the source's bits zero-extended from its width, the alignment's
@@ -817,7 +819,7 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
         }
         else if (cbuiltin_bits(call->id))
         {
-            cbuiltin_bits_recipe(&recipe, call->id, call->arguments, call->argument_types, call->argument_count, call->result_type, call->result_object);
+            cbuiltin_bits_recipe(&recipe, call->id, call->arguments, call->argument_types, call->argument_count, call->result_type, call->result_object, &call->bit_rows);
         }
         else if (cbuiltin_align(call->id))
         {

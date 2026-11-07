@@ -360,7 +360,8 @@ static __attribute__((noinline)) void check_test_bits_stdc_library_sources(Check
 // shifts, ffs's of 0 among them, at the targets their rows' forms depend on: x86-64's bsf, bsr and bswap beside the
 // popcount recipe, x86-64-v2's popcnt, x86-64-v3's tzcnt and lzcnt, and znver5's. Each runs natively against clang -O0's
 // build at the same -march where the host has the target's features, by both paths, and its lowering's rows are the
-// target's forms (check_test_program_source_native_bounds' "bits-classic" check).
+// target's forms (check_test_program_source_native_bounds' "bits-classic" check). The generic/C23 fixture (#1652)
+// checks the same rows after its width, zero and fallback corrections, including both-zero and one-zero wide limbs.
 static __attribute__((noinline)) void check_test_bits_classic(CheckTest* test, const char* clang)
 {
     static const char* const marches[] = { "-march=x86-64", "-march=x86-64-v2", "-march=x86-64-v3", "-march=znver5" };
@@ -377,6 +378,41 @@ static __attribute__((noinline)) void check_test_bits_classic(CheckTest* test, c
         "mix(__builtin_parity(u));mix(__builtin_parityl(l));mix(__builtin_parityll(l));"
         "mix(__builtin_ffs((int)u));mix(__builtin_ffsl((long)l));mix(__builtin_ffsll((long long)l));mix((unsigned)__builtin_ffs((int)(u&0xff00)));"
         "mix((unsigned char)__builtin_clz(u|1)+__builtin_ctzll(l|0x8000000000000000ull)+__builtin_popcount((unsigned)__builtin_bswap16(w)));}"
+        "return (int)(h^(h>>32));}";
+    static const char* const generic_source =
+        "static unsigned long h;\n"
+        "#define M(x) h=h*31+(unsigned long)(x)\n"
+        "#define COUNTS(T,name) static void name(T x,int f){"
+        "M(__builtin_popcountg(x));M(__builtin_clzg(x,f));M(__builtin_ctzg(x,f));"
+        "M(__builtin_stdc_leading_zeros(x));M(__builtin_stdc_leading_ones(x));"
+        "M(__builtin_stdc_trailing_zeros(x));M(__builtin_stdc_trailing_ones(x));"
+        "M(__builtin_stdc_first_leading_zero(x));M(__builtin_stdc_first_leading_one(x));"
+        "M(__builtin_stdc_first_trailing_zero(x));M(__builtin_stdc_first_trailing_one(x));"
+        "M(__builtin_stdc_count_zeros(x));M(__builtin_stdc_count_ones(x));M(__builtin_stdc_has_single_bit(x));"
+        "M(__builtin_stdc_bit_width(x));M(__builtin_stdc_bit_floor(x));M(__builtin_stdc_bit_ceil(x));"
+        "if(x){M(__builtin_clzg(x));M(__builtin_ctzg(x));}}\n"
+        "COUNTS(unsigned char,c8) COUNTS(unsigned short,c16) COUNTS(unsigned,c32) COUNTS(unsigned long,c64)\n"
+        "COUNTS(unsigned _BitInt(5),c5) COUNTS(unsigned _BitInt(31),c31) COUNTS(unsigned _BitInt(33),c33)\n"
+        "COUNTS(unsigned _BitInt(65),c65) COUNTS(unsigned _BitInt(96),c96) COUNTS(unsigned _BitInt(100),c100)\n"
+        "COUNTS(unsigned _BitInt(127),c127) COUNTS(unsigned __int128,c128)\n"
+        "enum U{U0,U1};struct B{unsigned x:5;unsigned long y:37;};\n"
+        "static const unsigned long values[]={0,1,2,3,0x80,0xff,0x100,0x8000,0xffff,0x80000000,0xffffffff,"
+        "0x100000000ul,0x8000000000000000ul,0xfffffffffffffffful,0x0123456789abcdeful};"
+        "int tested(int n){h=(unsigned)n;for(unsigned i=0;i<sizeof values/sizeof values[0];i++){"
+        "unsigned long v=values[i];int f=(n&1)?(-2147483647-1):2147483647;unsigned short s=v;_Bool b=v&1;enum U e=(enum U)(unsigned)v;struct B fields={(unsigned)v,v};"
+        "c8(v,f);c16(v,f);c32(v,f);c64(v,f);c5(v,f);c31(v,f);c33(v,f);"
+        "M(__builtin_popcountg(b));M(__builtin_clzg(b,f));M(__builtin_ctzg(b,f));"
+        "M(__builtin_popcountg(e));M(__builtin_clzg(e,f));M(__builtin_ctzg(fields.x,f));M(__builtin_clzg(fields.y,f));"
+        "M(__builtin_clrsb((int)v));M(__builtin_clrsbl((long)v));M(__builtin_clrsbll((long long)v));"
+        "if(s){M(__builtin_clzs(s));M(__builtin_ctzs(s));}"
+        "M(__builtin_bswapg((unsigned short)v));M(__builtin_bswapg((unsigned)v));M(__builtin_bswapg(v));"
+        "M((long)__builtin_bswapg((_BitInt(48))v));"
+        "for(unsigned part=0;part<3;part++){unsigned __int128 x=part==0?v:((unsigned __int128)v<<64)|(part==2?v:0);"
+        "c65(x,f);c96(x,f);c100(x,f);c127(x,f);c128(x,f);"
+        "unsigned __int128 swap=__builtin_bswapg(x);M(swap);M(swap>>64);"
+        "swap=(unsigned __int128)__builtin_bswapg((unsigned _BitInt(80))x);M(swap);M(swap>>64);"
+        "swap=__builtin_stdc_bit_floor(x);M(swap);M(swap>>64);"
+        "swap=__builtin_stdc_bit_ceil(x);M(swap);M(swap>>64);}}"
         "return (int)(h^(h>>32));}";
     const X86Target native = x86_target_native();
     for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(marches); t += 1)
@@ -395,6 +431,8 @@ static __attribute__((noinline)) void check_test_bits_classic(CheckTest* test, c
             check_test_program_build_release();
             check_test_program_march = marches[t];
             check_test_program_source_native_limits(test, source, "bits-classic-boundary-values", clang, false, -1, 0, &target, run_native);
+            check_test_program_build_release();
+            check_test_program_source_native_limits(test, generic_source, "bits-generic-boundary-values", clang, false, -1, 0, &target, run_native);
             check_test_program_build_release();
             check_test_program_march = "-march=x86-64";
         }

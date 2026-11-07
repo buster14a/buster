@@ -1610,12 +1610,39 @@ array and clang declares it, an `extern` one too, which clang's optimized code
 stores into with aligned SSE moves (`check_data_declared_alignment`, #978);
 compound literals and string literals keep their types' alignment.
 
+Identical live string literals share one storage atom per translation unit
+(#1474), in both code-generation tiers. `c_check_string_pool.c` groups selected
+literal records by exact array type, requested alignment and decoded byte length
+and contents, including embedded and trailing NULs. Concatenation and alternate
+escape spellings therefore share storage when they produce the same object.
+Each occurrence keeps its existing object identity and symbol, defined at offset
+zero in the shared atom; code references and static pointer relocations retain
+their original symbols and byte addends. Pooling happens after reachability
+selection, so an unreferenced earlier occurrence cannot own a live literal's
+storage. Named arrays, including const arrays initialized by a literal, and
+predefined function/source-name arrays keep separate atoms. There is no suffix
+merging or cross-unit pool in this producer.
+
+The pool reuses the batched string hash and scalar/vector radix sorter. Equal
+hashes require full-key equality; mixed-key collisions use an iterative merge
+sort, with the earliest equal record as the canonical one. Thus collision runs
+need at most O(n log n) key comparisons and linear scratch, rather than pairwise
+search. A shared metadata validator rejects invalid type, size, alignment and
+symbol descriptors before the pool reads payload bytes. Planning copies each
+unique literal once, and publication capacity counts unique atoms and bytes;
+failed calls retain the existing transaction rollback guarantees.
+
 The emitter consumes checked aggregate initializer plans, including brace
 elision, designated/range stores, bit-fields, compatible string copies and
 selected union members. It handles integer and bit-precise storage,
 binary32/binary64 and complex components, x87 components with deterministic
 padding, and pointers. Objects use RODATA, DATA_RELRO, DATA, BSS, TDATA or TBSS
-as appropriate; retained string candidates use STRINGS. Symbolic pointers emit
+as appropriate. Only ordinary single-terminated byte literals use STRINGS
+(`SHF_MERGE | SHF_STRINGS` in ELF). Wide literals, embedded-NUL literals and
+predefined arrays use RODATA: an external linker must not split a complete
+embedded-NUL object into independently mergeable substrings or merge an
+identity-bearing array. Identical embedded-NUL and wide literals still share
+the compiler's canonical atom. Symbolic pointers emit
 ABS64 fixups with signed byte addends; absolute pointer values remain bytes.
 External targets may remain unresolved. A referenced internal function needs
 its real code atom: standalone data inspection reports that limitation, while
@@ -6600,6 +6627,19 @@ arguments against the function. The checker now gives these as clang does.
   (that declaration at or before its definition), and the lowering gives it
   `no_caller_saved_registers`' set of every register (`check_lower_preserve`,
   LLVM's `CSR_64_AllRegs` of `x86_intrcc`) and its 1 or 2 parameters' kind.
+
+  x86's `force_align_arg_pointer` (`CHECK_ATTRIBUTE_FORCE_ALIGN_ARG_POINTER`,
+  #1447) is clang's `handleForceAlignArgPointerAttr`'s: a function's, with
+  no arguments ("takes no arguments" otherwise). It ignores the attribute
+  without a word on a function pointer (a variable's, a parameter's, a
+  member's) and on a typedef of a function's type or of a pointer to one,
+  and with "only applies to functions" on anything else
+  (`check_input_subject_handlers`' row). A redeclaration inherits it; one
+  after the definition drops it with "attribute declaration must precede
+  definition". `CheckProgram.object_realign` holds each function's first
+  declaration with it, and `check_program_realign(program, b)` says whether
+  body `b` realigns its stack (`Tier0Function.realign_stack`,
+  `docs/tier0.md`'s realigned frames: 16 bytes' at least).
   A variadic routine, which clang compiles, is refused by name ("unsupported:
   variadic interrupt service routines"), as are `__builtin_eh_return`,
   `__builtin_setjmp` and musttail calls in one, as in any preserving frame.

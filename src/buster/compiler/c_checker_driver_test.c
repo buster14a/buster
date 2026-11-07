@@ -7105,6 +7105,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 #include "c_check_convention_driver_test.c"
 #include "c_check_interrupt_driver_test.c"
 #include "c_check_tier1_driver_test.c"
+#include "c_check_string_pool_driver_test.c"
 #include "c_check_frame_pointer_driver_test.c"
 #include "c_check_stack_clash_driver_test.c"
 #include "c_check_fence_driver_test.c"
@@ -8383,6 +8384,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
         if (executable != NULL)
         {
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_string_pool(&test, clang, executable, directory);
+            }
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_ignored_pragmas(&test, clang, executable, directory);

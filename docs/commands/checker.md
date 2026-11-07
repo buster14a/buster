@@ -180,6 +180,23 @@ unused-warning fixtures also check exact scope-completion tokens.
   scalar-result controls, for clauses, macros and source policy through default and scalar modes and a requested
   deferred-option route. These single-file syntax-only commands are capped at one lane and use the ordinary-reader
   fallback; they do not establish admitted deferred-reader coverage.
+  A GNU statement expression in the expression operand of `sizeof`, `_Alignof`, `__alignof__` or `typeof` is
+  unevaluated (#147). Its statements are graph roots of their own, outside the operand's evaluation facts.
+  Clang drops its unused-result, unused-comparison, comma-operand, `void *`-cast, self-assignment, division,
+  bounds, sign-comparison and constant-conversion warnings there. `check_common_unevaluated` reads the token's
+  parser context from `-Wvoid-ptr-dereference`'s `check_warning_graph_void_context`, only when one of these
+  warnings is about to be published. An array declarator's bound is constant-evaluated to clang, which keeps
+  its unused-result warnings. So does a bound in the operand's type name or in a declaration inside the
+  statement expression. A `sizeof` of a variable-array expression evaluates its operand after all.
+  The contexts' memo is pushed at a unit's first such warning, so a unit without one pays nothing. Six
+  original default-warning fixtures compare complete output with Clang, among them the evaluated and bound
+  controls and a value that decays from a variable array. Still separate: `-Wuninitialized` reads and writes
+  in such a statement expression, which need the evaluation facts themselves; the input reader's
+  `-Wshift-count-overflow` there; clang's runtime-warning drop in every array bound; a variable-array
+  `sizeof`'s comma operands, which clang warns of when it evaluates them; `-Wunevaluated-expression`, which
+  isn't implemented; and three forms the checker refuses: a statement expression in a variable-array
+  `sizeof`'s operand, `sizeof ({ ... })` (whose `(` is the statement expression's own), and a statement
+  expression as `_Generic`'s controlling expression.
   Runtime `-Wshift-count-negative` and `-Wshift-count-overflow` warnings inspect an independently constant count
   even when the left operand is not constant (#1394). The ordinary shift uses the promoted left type's value width;
   compound shifts use the original lvalue's underlying integer type, including atomic operands, matching Clang.
@@ -213,6 +230,15 @@ unused-warning fixtures also check exact scope-completion tokens.
   ordinary, scalar and deferred readers against Clang, with independent warning counts.
   `c_check_data.c` and `c_check_data_input.c` turn selected static scalar definitions into real
   Link atoms/fixups; their tests compare emitted ELF bytes with Clang objects.
+  `c_check_string_pool.c` shares exact decoded literal storage after selection, keeping
+  symbols and addends intact and named/predefined arrays distinct (#1474).
+  The default `test-checker` data tests cover unique atom/byte demand, transaction
+  rollback, embedded-NUL storage, guarded invalid descriptors and scalar/vector
+  hash/sort boundaries. The program-selection tests include a dead first occurrence
+  followed by live duplicates. `test-checker-driver --executable build/compiler`
+  runs `c_check_string_pool_driver_test.c` through both tiers and readers, using
+  direct linking and object output linked by the system toolchain, with Clang and
+  independently stated results as oracles.
   `benchmark-checker --shape wide|chain` measures synthetic graph checking,
   including scheduling and output materialization. `docs/c-checker.md`
   records the checker contract, declaration/initializer and control-flow

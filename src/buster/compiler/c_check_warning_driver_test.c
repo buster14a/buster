@@ -674,6 +674,53 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .source = "int*f0(void){return 1-1;}\nint*f1(void){return 2-2;}\nint*f2(void){return 3-3;}\n",
         .warnings = 3,
     },
+    {
+        // A GNU statement expression in an unevaluated operand (#147): its statements are the graph's roots, but clang drops
+        // the unused-result and runtime-behavior warnings in sizeof's, _Alignof's, __alignof__'s and typeof's operands
+        // (check_common_unevaluated). None of these statement expressions has a side effect, which clang's
+        // -Wunevaluated-expression would report.
+        .name = "statement expression results in sizeof operands",
+        .source = "int *q;\nunsigned long g(void) { return sizeof(({ *q; 1; })); }\nunsigned long k(void) { return sizeof(({ 1 + 2; 1; })); }\n",
+    },
+    {
+        .name = "unused results in unevaluated statement expressions",
+        .source = "int *q;\nstruct S { int m; } *ps, vs;\nunsigned long f(int x) {\n"
+                  "    return sizeof(({ x == 1; x != 1; x < 1; 1; })) + sizeof(({ (0, x); (void *)q; ps->m; vs.m; 1; })) +\n"
+                  "           sizeof(({ x ? 1 : 2; ({ 3; 4; }); 5; })) + sizeof(x ? ({ 1; 2; }) : 3) + sizeof (({ *q; 1; })) +\n"
+                  "           __alignof__(({ *q; x == 1; (void *)q; 1; })) + _Alignof(({ 1; 2; }));\n}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "runtime behavior warnings in unevaluated statement expressions",
+        .source = "int a[2];\nunsigned u;\nint s;\nunsigned long f(int x) {\n"
+                  "    return sizeof(({ x / 0; 1; })) + sizeof(({ x % 0; 1; })) + sizeof(({ a[5]; 1; })) + sizeof(({ char c = 300; c; })) +\n"
+                  "           sizeof(({ u < s; 1; })) + sizeof(({ int b[2]; b[2]; })) + __alignof__(({ a[2]; x / 0; 1; }));\n}\n",
+        .options = { "-Wsign-compare" },
+    },
+    {
+        .name = "typeof statement expressions are unevaluated",
+        .source = "int *q;\nvoid f(int x) {\n    __typeof__(({ *q; x == 1; x = x; x / 0; 1; })) t = 0;\n"
+                  "    typeof(({ (0, x); (void *)q; 1; })) v = 0;\n    (void)t;\n    (void)v;\n}\n",
+        .options = { "-Wself-assign" },
+    },
+    {
+        // The evaluated controls: a statement expression outside the operand, sizeof's own discarded result, and array
+        // bounds, which clang evaluates as constant expressions even in a sizeof's type name or in a declaration inside its
+        // statement expression, until a nested sizeof makes them unevaluated again.
+        .name = "evaluated statement expressions and array bounds keep their warnings",
+        .source = "int *q;\nunsigned long f(int x) {\n    ({ *q; 1; });\n    sizeof(({ 1; 2; }));\n"
+                  "    unsigned long n = sizeof(int[({ x == 1; 2; })]) + sizeof(({ int w[({ 3; 4; })]; 5; }));\n"
+                  "    return n + ({ x < 1; 6; }) + sizeof(int[sizeof(({ 7; 8; }))]);\n}\n",
+        .warnings = 6,
+        .notes = 1,
+    },
+    {
+        // A sizeof of an expression of variable array type evaluates it after all (clang's TransformToPotentiallyEvaluated),
+        // which the contexts mark TRANSFORMED; a statement expression whose value decays to a pointer is no variable array,
+        // and stays unevaluated. (A statement expression inside a variable array's operand isn't supported yet.)
+        .name = "a statement expression decaying from a variable array stays unevaluated",
+        .source = "void g(int n) {\n    char vv[n][n];\n    (void)sizeof(({ 3; vv[0]; }));\n    (void)sizeof(({ 4; vv; }));\n}\n",
+    },
 };
 
 static void check_test_driver_warning_fixtures(CheckTest* test, const char* clang, const char* executable, const char* directory,

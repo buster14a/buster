@@ -567,6 +567,7 @@ static void oracle_test_empty_path(OracleTest* test)
 }
 
 // Diagnostic controls must preserve both the inherited environment and distinct stderr in use/check modes.
+// Read them in the test's C helper: a shell can supply its own defaults, such as bash's TERM=dumb when TERM is unset.
 static void oracle_test_diagnostic_environment(OracleTest* test)
 {
     static const char* const names[] = {
@@ -580,6 +581,7 @@ static void oracle_test_diagnostic_environment(OracleTest* test)
     static const char* const values[] = {
         0,
         "",
+        "dumb",
         "fixits-v1",
         "fixits-v2",
     };
@@ -591,12 +593,10 @@ static void oracle_test_diagnostic_environment(OracleTest* test)
     snprintf(path, sizeof(path), "PATH=%s", getenv("PATH") != 0 ? getenv("PATH") : "/usr/bin:/bin");
     for (uint32_t n = 0; n < sizeof(names) / sizeof(names[0]); n += 1)
     {
-        char script[256];
-        snprintf(script, sizeof(script), "printf '%%s|%%s' \"${%s+x}\" \"${%s-}\" >&2", names[n], names[n]);
         char* arguments[] = {
-            "sh",
-            "-c",
-            script,
+            test->helper,
+            "environment",
+            (char*)names[n],
             0,
         };
         bool correct = true;
@@ -1352,7 +1352,8 @@ static void oracle_test_identities(OracleTest* test)
 // " short" if it gave fewer); `list DIRECTORY` each name getdents64 gives but . and .., after its inode, in its order;
 // `mtime PATH` its modification time's seconds; `inode PATH` the inode number stat gives ("none" if it gives none);
 // `mkdir PATH` "made", "there" or "failed"; `cat`, `readlink`, `rmdir`, `unlink`, `device` and `zero` exercise the
-// corresponding file operations without depending on a system utility; `tty` whether it could open /dev/tty; and
+// corresponding file operations without depending on a system utility; `tty` whether it could open /dev/tty;
+// `environment NAME` the variable's presence and bytes on stderr, without a shell's defaults; and
 // `replay` the replay test's tool (oracle_test_replays): it prints its files as it finds them (the bytes of the counter
 // and of the file it removes, then each file's name, size, mode, modification time and inode, then after a line "--"
 // each one's status-change time and link count and its directory's times), adds one to the counter in place, makes a
@@ -1453,6 +1454,11 @@ static const char oracle_test_helper[] =
     "        putchar('\\n');\n"
     "    }\n"
     "    else if (argc == 2 && strcmp(argv[1], \"tty\") == 0) puts(open(\"/dev/tty\", O_RDWR | O_NOCTTY) >= 0 ? \"tty\" : \"none\");\n"
+    "    else if (argc == 3 && strcmp(argv[1], \"environment\") == 0)\n"
+    "    {\n"
+    "        const char* value = getenv(argv[2]);\n"
+    "        fprintf(stderr, \"%s|%s\", value != 0 ? \"x\" : \"\", value != 0 ? value : \"\");\n"
+    "    }\n"
     "    else if (argc == 2 && strcmp(argv[1], \"replay\") == 0)\n"
     "    {\n"
     "        static const char* const names[] = { \"replay-counter\", \"replay-gone\", \"replay-made\" };\n"

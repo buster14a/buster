@@ -85,6 +85,11 @@ records without recursion. Two passes measure and then write CU-relative
 no relocation when units are concatenated.
 
 Named parameters and locals retain their source declarations through lowering.
+Only parameters owned by a function definition contribute named values and
+their qualified source types. Names in prototypes, function pointers and other
+function-type declarators stay in the checker's records for semantic lookup,
+but do not become locals of an enclosing body or independent debug-type roots
+(#1688). Their adjusted parameter types remain reachable from the signature.
 Tier 0 publishes its final local homes with source-aware output only. The C
 producer describes register values with `DW_OP_regx`, and storage with
 `DW_OP_bregx` plus the actual home displacement. It does not force a frame
@@ -129,6 +134,10 @@ records, bit fields, unions, enums, typedefs, shadowing, statics, and aligned
 and dynamic frames. It checks native executables, `-c -g` objects linked by
 GNU ld, lld and `link-foreign`, and merged data-only units, together with
 `llvm-dwarfdump --verify` and scalar/vector/lane determinism.
+It also compares an original nested prototype/function-pointer fixture with
+Clang's DWARF: function-type parameter names and otherwise unused prototype
+qualifiers are absent, while real parameters, locals, their qualifiers and
+callback signatures remain. The two Buster paths emit identical objects.
 
 ## Native executable attachment
 

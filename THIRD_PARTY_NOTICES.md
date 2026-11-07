@@ -17,6 +17,16 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The command-line warning vocabulary, unknown-option diagnostic policy and
+original CLI regressions in `c_preprocessor_warning_options.c`,
+`c_driver_warning_options_test.c` and their integration (#1467) are original
+project material under the default terms. LLVM revision
+`7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s `Warnings.cpp`, `Diagnostic.cpp`,
+`DiagnosticIDs.cpp`, `DiagnosticFrontendKinds.td`, `Options.td`,
+`CompilerInvocation.cpp` and the Clang driver supply behavioral facts;
+Clang runs externally as the diagnostic oracle. The existing frozen warning
+name catalog is reused. No upstream implementation or test fixture is imported.
+
 The declaration-attribute completion work for #1447/#147 in
 `c_check_attribute_expression.c`, `c_check_thread_safety_input.c`, their checker
 and diagnostic integration, and the added attribute driver fixtures is original

@@ -22,8 +22,8 @@
 // atomic read/modify/write operations (c_builtin_atomic_rmw_helpers.c's leaves).
 // Size zero is required for fences. Unsupported IDs/sizes and arena exhaustion publish no bytes or arena length.
 //
-// Baseline x86-64 uses MOV for naturally aligned scalar atomic loads. A MOV followed by MFENCE implements these
-// seq_cst stores; thread/sync fences use MFENCE. The algorithm is original and uses existing encoder forms only.
+// Baseline x86-64 uses MOV for naturally aligned scalar atomic loads. A memory XCHG implements these seq_cst stores,
+// discarding the old value in the caller-saved RSI; thread/sync fences use MFENCE. Existing encoder forms suffice.
 // Background: https://llvm.org/docs/Atomics.html#atomics-and-codegen
 // This standalone body emitter does not establish source dispatch, target acceptance or source-level atomic support.
 #ifndef BUSTER_C_BUILTIN_ATOMIC_HELPERS_INCLUDED
@@ -52,7 +52,7 @@ static __attribute__((unused)) CBuiltinAtomicHelper cbuiltin_atomic_helper_emit(
     const bool valid = ((load || store) && scalar_size) || ((thread_fence || signal_fence) && bytes == 0);
     if (valid)
     {
-        X86Instruction records[3] = { 0 };
+        X86Instruction records[2] = { 0 };
         uint32_t count = 0;
         if (load || store)
         {
@@ -63,7 +63,7 @@ static __attribute__((unused)) CBuiltinAtomicHelper cbuiltin_atomic_helper_emit(
             }
             else
             {
-                form = bytes == 1 ? X86_FORM_MOV_RM8_R8 : bytes == 2 ? X86_FORM_MOV_RM16_R16 : bytes == 4 ? X86_FORM_MOV_RM32_R32 : X86_FORM_MOV_RM64_R64;
+                form = bytes == 1 ? X86_FORM_XCHG_RM8_R8 : bytes == 2 ? X86_FORM_XCHG_RM16_R16 : bytes == 4 ? X86_FORM_XCHG_RM32_R32 : X86_FORM_XCHG_RM64_R64;
             }
             records[count] = (X86Instruction)
             {
@@ -74,7 +74,7 @@ static __attribute__((unused)) CBuiltinAtomicHelper cbuiltin_atomic_helper_emit(
             };
             count += 1;
         }
-        if (store || thread_fence)
+        if (thread_fence)
         {
             records[count] = (X86Instruction){ .form = X86_FORM_MFENCE };
             count += 1;
