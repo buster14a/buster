@@ -2356,14 +2356,25 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
 
 // A printf-family call's format string: its name decides the format argument, and a literal's bytes decide each
 // conversion's expected type.
-static uint32_t check_common_format_index(String8 name)
+// Only infer a plain library name's format where the unit keeps it a builtin. Explicit __builtin_ spellings
+// remain builtins under the same options; dprintf, absent from the builtin catalog, needs an explicit attribute.
+static uint32_t check_common_format_index(String8 name, const PPOptions* options)
 {
+    const bool explicit_builtin = name.length > 10 && memcmp(name.pointer, "__builtin_", 10) == 0;
+    if (explicit_builtin)
+    {
+        name.pointer += 10;
+        name.length -= 10;
+    }
     uint32_t result = UINT32_MAX;
     if (name.length == 6 && memcmp(name.pointer, "printf", 6) == 0) result = 0;
     else if (name.length == 7 && memcmp(name.pointer, "fprintf", 7) == 0) result = 1;
     else if (name.length == 7 && memcmp(name.pointer, "sprintf", 7) == 0) result = 1;
     else if (name.length == 8 && memcmp(name.pointer, "snprintf", 8) == 0) result = 2;
-    else if (name.length == 7 && memcmp(name.pointer, "dprintf", 7) == 0) result = 1;
+    if (result != UINT32_MAX && !explicit_builtin && !pp_library_builtin(options, (const uint8_t*)name.pointer, (uint32_t)name.length))
+    {
+        result = UINT32_MAX;
+    }
     return result;
 }
 
@@ -2862,7 +2873,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
         const bool function_callee = callee_object == 0 ||
                                      (definition < input->token_count && input->declaration_kinds != NULL &&
                                       input->declaration_kinds[definition] == C_BINDING_FUNCTION);
-        uint32_t format_index = function_callee ? check_common_format_index(name) : UINT32_MAX;
+        uint32_t format_index = function_callee ? check_common_format_index(name, &pp->options) : UINT32_MAX;
         uint32_t first_argument = format_index != UINT32_MAX ? format_index + 1 : UINT32_MAX;
         if (format_index == UINT32_MAX && definition < input->token_count)
         {

@@ -17,8 +17,115 @@ struct CheckDriverDefaultWarningFixture
     bool compare_warning_text;
 };
 
+static const char check_driver_format_plain_source[] =
+    "typedef struct _IO_FILE FILE;\n"
+    "int printf(const char*,...);\nint fprintf(FILE*,const char*,...);\n"
+    "int sprintf(char*,const char*,...);\nint snprintf(char*,unsigned long,const char*,...);\n"
+    "void f(FILE*p,char*b){printf(\"%d\",\"str\");fprintf(p,\"%d\",\"str\");"
+    "sprintf(b,\"%d\",\"str\");snprintf(b,16,\"%d\",\"str\");snprintf(b,16,\"%s.mo\\0\",\"x\");}\n";
+
+// The first attribute survives a bare redeclaration; the second is attached after a bare declaration.
+// A non-library name with a different format index keeps its source contract under the same options.
+static const char check_driver_format_attributed_source[] =
+    "int printf(const char*,...)__attribute__((format(printf,1,2)));\nint printf(const char*,...);\n"
+    "int snprintf(char*,unsigned long,const char*,...);\n"
+    "int snprintf(char*,unsigned long,const char*,...)__attribute__((format(printf,3,4)));\n"
+    "int trace(int,const char*,...)__attribute__((format(printf,2,3)));\n"
+    "void f(char*b){printf(\"%d\",\"str\");snprintf(b,16,\"%d\",\"str\");trace(0,\"%d\",\"str\");}\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
+    {
+        .name = "hosted plain format names retain inferred checks",
+        .source = check_driver_format_plain_source,
+        .warnings = 5,
+    },
+    {
+        .name = "freestanding plain format names have no inferred contract",
+        .source = check_driver_format_plain_source,
+        .options = { "-ffreestanding" },
+    },
+    {
+        .name = "global no builtin disables plain format inference",
+        .source = check_driver_format_plain_source,
+        .options = { "-fno-builtin" },
+    },
+    {
+        .name = "per name exclusions disable all four supported format names",
+        .source = check_driver_format_plain_source,
+        .options = { "-fno-builtin-printf", "-fno-builtin-fprintf", "-fno-builtin-sprintf", "-fno-builtin-snprintf" },
+    },
+    {
+        .name = "printf exclusion preserves the other names",
+        .source = check_driver_format_plain_source,
+        .options = { "-fno-builtin-printf" },
+        .warnings = 4,
+    },
+    {
+        .name = "snprintf exclusion disables its embedded NUL check too",
+        .source = check_driver_format_plain_source,
+        .options = { "-fno-builtin-snprintf" },
+        .warnings = 3,
+    },
+    {
+        .name = "builtin exclusions match the whole name",
+        .source = check_driver_format_plain_source,
+        .options = { "-fno-builtin-print" },
+        .warnings = 5,
+    },
+    {
+        .name = "later builtin option restores plain format inference",
+        .source = check_driver_format_plain_source,
+        .options = { "-fno-builtin", "-fbuiltin" },
+        .warnings = 5,
+    },
+    {
+        .name = "later no builtin option disables plain format inference",
+        .source = check_driver_format_plain_source,
+        .options = { "-fbuiltin", "-fno-builtin" },
+    },
+    {
+        .name = "freestanding preserves explicit and redeclared format contracts",
+        .source = check_driver_format_attributed_source,
+        .options = { "-ffreestanding" },
+        .warnings = 3,
+    },
+    {
+        .name = "global no builtin preserves explicit and redeclared format contracts",
+        .source = check_driver_format_attributed_source,
+        .options = { "-fno-builtin" },
+        .warnings = 3,
+    },
+    {
+        .name = "per name exclusions preserve explicit and redeclared format contracts",
+        .source = check_driver_format_attributed_source,
+        .options = { "-fno-builtin-printf", "-fno-builtin-snprintf" },
+        .warnings = 3,
+    },
+    {
+        .name = "plain dprintf needs an explicit format contract",
+        .source = "int dprintf(int,const char*,...);\nvoid f(void){dprintf(1,\"%d\",\"str\");}\n",
+    },
+    {
+        .name = "attributed dprintf remains checked when builtins are disabled",
+        .source = "int dprintf(int,const char*,...)__attribute__((format(printf,2,3)));\nvoid f(void){dprintf(1,\"%d\",\"str\");}\n",
+        .options = { "-ffreestanding", "-fno-builtin", "-fno-builtin-dprintf" },
+        .warnings = 1,
+    },
+    {
+        .name = "explicit builtin printf remains checked when builtins are disabled",
+        .source = "void f(void){__builtin_printf(\"%d\",\"str\");}\n",
+        .options = { "-ffreestanding", "-fno-builtin", "-fno-builtin-printf" },
+        .warnings = 1,
+    },
+    {
+        .name = "local printf function pointer has no inferred format contract",
+        .source = "void f(void(*printf)(const char*,...)){printf(\"%d\",\"str\");}\n",
+    },
+    {
+        .name = "valid plain format calls retain a quiet twin",
+        .source = "int printf(const char*,...);\nint snprintf(char*,unsigned long,const char*,...);\nvoid f(char*b){printf(\"%d\",7);snprintf(b,16,\"%s.mo\",\"x\");}\n",
+    },
     {
         .name = "one parenthesized comparison does not hide the other warning",
         .source = "int f(int a,int b,int c,int d){return ((a<b) & c<d)+(a==b ^ (c!=d));}\n",
