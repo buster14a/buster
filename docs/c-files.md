@@ -208,7 +208,13 @@ names once that pays:
   run, after its listing. The cache already keeps every path's answer for the
   whole run, as #653 says, so no unit could have seen it after looking once.
   A process out of descriptors gets "not found" for a ruled-out name, where an
-  `open` would have failed with EMFILE: as clang's search, which `stat`s, does.
+  `open` would have failed with EMFILE: as clang's search, which `stat`s, does,
+  and as the cache already answers a path it looked up before. The search then
+  goes on, and the next directory's probe fails with EMFILE and is the one
+  reported. Keeping EMFILE exact would take a call that allocates a descriptor
+  for every ruled-out name, about as dear as the probe it replaces.
+  `test-preprocessor`'s `pp_test_listing_descriptors` pins this contract
+  (#1564's review).
 - **What a lookup pays.** A unit keeps its search directories'
   `FileCacheDirectory` pointers (`Preprocessor.directory_entries`). A lookup
   finds a directory by its path only after a probe failed there, or once some
@@ -228,7 +234,9 @@ names once that pays:
 - **No vector path.** A listing is a few hundred names, read once, and a
   lookup hashes one component. The system calls are the cost; scalar code
   is enough here.
-- **Measured** on the 9700X (CPU 2, under the lock), against `ec5f0f6b`:
+- **Measured** on the 9700X (CPU 2, under the lock), against `ec5f0f6b`
+  ([the record](https://github.com/buster14a/buster-performance/tree/424e9bae8c2a17af92684c5aeba8b46d289ee436/docs/measurements/include-listings-653-2026-11-06):
+  logs, scripts and every version's outputs):
   - Failed `openat`s (`strace -f -c` of `-c`):
     - `#include <stdio.h>` alone: 52, unchanged;
     - zlib 1.3.1's `uncompr.c`: 88 → 75;

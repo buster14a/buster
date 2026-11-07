@@ -235,7 +235,7 @@ static void check_test_attribute_abis(CheckTest* test)
     {
         const CheckInputCallingConvention conventions[] = {
             CHECK_CALL_SYSV, CHECK_CALL_MICROSOFT, CHECK_CALL_VECTOR, CHECK_CALL_REG,
-            CHECK_CALL_PRESERVE_MOST, CHECK_CALL_PRESERVE_ALL, CHECK_CALL_PRESERVE_NONE,
+            CHECK_CALL_PRESERVE_MOST, CHECK_CALL_PRESERVE_ALL, CHECK_CALL_PRESERVE_NONE, CHECK_CALL_NO_CALLER_SAVED,
         };
         const TypeId integer = BUSTER_TYPE_INT;
         const TypeId function = type_function(&types.table, integer, &integer, 1, BUSTER_TYPE_FLAG_PROTOTYPE);
@@ -271,10 +271,15 @@ static void check_test_attribute_abis(CheckTest* test)
                 const uint32_t type_count = types.table.types.count;
                 const uint8_t actual = check_input_attribute_abi_origin(&reader, &attributes, origin);
                 const bool matches = origin == 0 || origin == abi + 1;
-                check_test_expect(test, actual == (matches ? abi + 1 : origin) &&
-                                       attributes.error == (matches ? CHECK_ATTRIBUTE_ERROR_NONE : CHECK_ATTRIBUTE_ERROR_CONFLICT) &&
-                                       input.report_count == (matches ? 0 : 1) &&
-                                       (matches || (attributes.error_first == 70 && attributes.error_end == 74 && reports[0].token == 70)) &&
+                // no_caller_saved_registers with System V's convention is one type; with another, refused by name (#147).
+                const uint8_t every = TYPE_FUNCTION_ABI_NO_CALLER_SAVED + 1;
+                const bool bit = origin != 0 && (origin == every) != (abi == TYPE_FUNCTION_ABI_NO_CALLER_SAVED);
+                const bool paired = bit && (origin == TYPE_FUNCTION_ABI_SYSV + 1 || abi == TYPE_FUNCTION_ABI_SYSV);
+                const bool kept = matches || paired;
+                check_test_expect(test, actual == (paired ? every : matches ? abi + 1 : origin) &&
+                                       attributes.error == (kept ? CHECK_ATTRIBUTE_ERROR_NONE : bit ? CHECK_ATTRIBUTE_ERROR_UNKNOWN : CHECK_ATTRIBUTE_ERROR_CONFLICT) &&
+                                       input.report_count == (kept ? 0 : 1) &&
+                                       (kept || (attributes.error_first == 70 && attributes.error_end == 74 && reports[0].token == 70)) &&
                                        types.table.types.count == type_count && scratch.length == 31,
                                   "spelling ABI provenance distinguishes explicit SysV from implicit default without changing canonical types");
             }

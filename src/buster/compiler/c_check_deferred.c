@@ -6,9 +6,11 @@
 //   - The top level is read first: check_input_run with every function body deferred, on a table of its own that records
 //     its changes (TypeChanges). Where the walk skips a body, check_deferred_cut records the reader's counts there: its
 //     types and tags, its binding events and active declarations, and each table the walk appends to.
-//   - After the walk, check_deferred_bodies reads the bodies on lanes: one per BUSTER_CHECK_DEFERRED_LANE_TOKENS (and
-//     one per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens) of the bodies' tokens beyond the larger of
-//     the largest body's and twice the second largest's, at least one and no more than bodies.
+//   - After the walk, check_deferred_bodies reads the bodies on lanes: one, and one more per
+//     BUSTER_CHECK_DEFERRED_LANE_TOKENS (and one per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens) of
+//     the bodies' tokens beyond the larger of the largest body's and twice the second largest's, no more than bodies.
+//     The post-merge rounds take those lanes only where they are BUSTER_CHECK_DEFERRED_POST_LANES or more
+//     (check_deferred_post_lanes).
 //     It cuts the bodies into parts before the lanes start (parts_by_cost), promotes the part containing the largest
 //     body for the first lane, and every lane takes the others from one counter, costliest first (check_deferred_lane):
 //     the others are woken for the bodies and read them more slowly. A lane copies the top
@@ -44,13 +46,17 @@
 #include <time.h>
 
 #define BUSTER_CHECK_DEFERRED_MAX_LANES 64
-// The bodies' tokens beyond their critical path that pay for a lane (check_deferred_bodies): this many, and one more per
-// BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, since a lane's copy of the reader grows with the top
-// level. The bodies take one lane per share of these, and at least one: a second lane needs two shares, since it also
-// puts the merge's pass and the post-merge rounds on lanes, a cost paid once (docs/c-deferred-bodies.md, "How many
-// lanes" and "The rule after the post-merge rounds (#447)").
+// The bodies' tokens beyond their critical path that pay for a lane past the first (check_deferred_bodies): this many,
+// and one more per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, since a lane's copy of the reader
+// grows with the top level (docs/c-deferred-bodies.md, "How many lanes" and "The post-merge rounds' lanes (#447)").
 #define BUSTER_CHECK_DEFERRED_LANE_TOKENS 3072
 #define BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS 3
+// The fewest of the bodies' lanes on which the post-merge rounds (the controls, binding answers, constant contexts and
+// expression parts) run on lanes too (check_deferred_post_lanes); on fewer, they run on the calling thread alone. Each
+// round on lanes costs its dispatch, its wake-ups and its parts' ordered publication, which on the 9700X a unit's
+// post-merge work pays for only where its bodies take four lanes or more (docs/c-deferred-bodies.md, "The post-merge
+// rounds' lanes (#447)").
+#define BUSTER_CHECK_DEFERRED_POST_LANES 4
 // The unit's tokens from which check_input_run's arena of rare columns is base pages where more than one lane reads the
 // bodies (check_deferred_shared, #764, #847). In a smaller unit the top level's walk faults in most of the arena's huge
 // pages, the bodies' lanes write into them at no cost, and the phases after the merge read the huge zero page where
@@ -2483,16 +2489,15 @@ static void check_deferred_primary_part(CheckDeferred* deferred)
     }
 }
 
-// The lanes the bodies take: one per `lane_tokens` of the bodies' tokens (`total` of them in `bodies`) beyond their
-// critical path, the larger of the largest body and twice the second largest, at least one and no more than the
-// reader's lanes or the bodies (check_deferred_bodies says why).
+// The lanes the bodies take: one, and one more per `lane_tokens` of the bodies' tokens (`total` of them in `bodies`)
+// beyond their critical path, the larger of the largest body and twice the second largest, no more than the reader's
+// lanes or the bodies (check_deferred_bodies says why).
 static uint32_t check_deferred_rule_of(uint32_t lanes, bool every_lane, uint64_t total, uint32_t bodies, uint32_t largest, uint32_t second_body,
                                        uint32_t lane_tokens)
 {
     const uint64_t second = (uint64_t)second_body * 2;
     const uint64_t path = largest > second ? largest : second;
-    const uint64_t shares = (total > path ? total - path : 0) / lane_tokens;
-    const uint64_t paid = every_lane ? UINT64_MAX : shares > 1 ? shares : 1;
+    const uint64_t paid = every_lane ? UINT64_MAX : 1 + (total > path ? total - path : 0) / lane_tokens;
     const uint32_t most = lanes < bodies ? lanes : bodies;
     return paid < most ? (uint32_t)paid : most;
 }
@@ -2501,6 +2506,14 @@ static uint32_t check_deferred_rule_of(uint32_t lanes, bool every_lane, uint64_t
 static uint32_t check_deferred_rule(const CheckDeferred* deferred, uint64_t total, uint32_t bodies, uint32_t largest, uint32_t second_body, uint32_t lane_tokens)
 {
     return check_deferred_rule_of(deferred->lanes, deferred->every_lane, total, bodies, largest, second_body, lane_tokens);
+}
+
+// The lanes the post-merge rounds take: the bodies' lanes, by the rule or every lane they can take, where those are
+// BUSTER_CHECK_DEFERRED_POST_LANES or more, and otherwise one, the calling thread's original walks (#447).
+static uint32_t check_deferred_post_lanes(const CheckDeferred* deferred)
+{
+    const uint32_t lanes = check_deferred_rule(deferred, deferred->body_tokens, deferred->body_count, deferred->largest_body, deferred->second_body, deferred->lane_tokens);
+    return lanes >= BUSTER_CHECK_DEFERRED_POST_LANES ? lanes : 1;
 }
 
 // Whether check_input_run's arena of rare columns is base pages throughout: where the rule gives a large unit's bodies
@@ -2608,13 +2621,13 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
         deferred->largest_parameters = parameters > deferred->largest_parameters ? parameters : deferred->largest_parameters;
     }
     CheckDeferredRun run = { .deferred = deferred };
-    // One lane per `lane_tokens` of the bodies' tokens beyond their critical path, and at least one: the critical path is
-    // the larger of the largest body, which the first lane reads itself, and twice the second largest, which a woken lane
-    // reads at about half the first lane's speed. A lane costs its copy of the reader and its wake-up, which its share of
-    // the walks must pay for, and the copy grows with the top level: BUSTER_CHECK_DEFERRED_LANE_TOKENS, and one more per
-    // BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens. A second lane also puts the merge's pass and the
-    // post-merge rounds on lanes, so two shares pay for it. And no more lanes than bodies, which are at least as many as
-    // the parts: a lane past them would take none.
+    // One lane, and one more per `lane_tokens` of the bodies' tokens beyond their critical path: the larger of the
+    // largest body, which the first lane reads itself, and twice the second largest, which a woken lane reads at about
+    // half the first lane's speed. A lane costs its copy of the reader and its wake-up, which its share of the walks must
+    // pay for, and the copy grows with the top level: BUSTER_CHECK_DEFERRED_LANE_TOKENS, and one more per
+    // BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens. The post-merge rounds join the lanes only from
+    // BUSTER_CHECK_DEFERRED_POST_LANES of them (check_deferred_post_lanes). And no more lanes than bodies, which are at
+    // least as many as the parts: a lane past them would take none.
     const uint32_t count = reader->parser->tokens.count;
     deferred->top_tokens = count > total ? (uint32_t)(count - total) : 0;
     deferred->lane_tokens = BUSTER_CHECK_DEFERRED_LANE_TOKENS + deferred->top_tokens / BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS;

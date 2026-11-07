@@ -52,6 +52,7 @@
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <sys/syscall.h>
+#include <sys/resource.h>
 
 #define BUSTER_PP_TEST_CONTEXT 6
 #define BUSTER_PP_TEST_MAX_OUTPUT (1ull << 32)
@@ -611,6 +612,12 @@ static bool pp_test_deferred_history(const PPOptions* options, const char* path,
         printf("%s: with its history deferred, a run counts different statistics\n", label);
         result = false;
     }
+    // A compile gives its files' token columns back after the run (pp_release_file_columns): the replay that records the
+    // deferred history then prepares the files again, and must give the same history.
+    if (ready[1])
+    {
+        pp_release_file_columns(&runs[1], false);
+    }
     const uint32_t count = runs[0].output.count;
     uint32_t probe = count;
     for (uint32_t i = 0; result && probe == count && i < count; i += 1)
@@ -720,6 +727,29 @@ static bool pp_test_system_levels(const Preprocessor* a, const Preprocessor* b, 
     return result;
 }
 
+// pp_output_invocation_place, the file's own place of an output token's invocation, against its twin by the expansion
+// history (pp_output_expansion_begin), on run `a`, which has its history: at the first and last token of each run of
+// tokens a macro made, where the file places one, the history must place it there too. Returns whether they agree.
+static bool pp_test_invocation_places(const Preprocessor* a, const char* label)
+{
+    bool result = true;
+    const PPTokens* output = &a->output;
+    for (uint32_t t = 0; result && t < output->count; t += 1)
+    {
+        const bool made = (output->flags[t] & BUSTER_PP_FROM_MACRO) != 0;
+        const bool edge = made && (t == 0 || t + 1 == output->count || (output->flags[t - 1] & BUSTER_PP_FROM_MACRO) == 0 ||
+                                   (output->flags[t + 1] & BUSTER_PP_FROM_MACRO) == 0);
+        const uint32_t place = edge ? pp_output_invocation_place(a, t) : 0;
+        const uint32_t twin = place != 0 ? pp_output_expansion_begin(a, t, pp_history_at(a, t)) : 0;
+        if (place != twin)
+        {
+            printf("%s: output token %u's invocation is at %u by the file and at %u by the history\n", label, t, place, twin);
+            result = false;
+        }
+    }
+    return result;
+}
+
 // Both kernels again as a compile runs them, without the expansion starts that -E's line markers need: the main loop
 // takes some direct paths only then (pp_expand_file_direct, pp_emit_simple), so the streams, the expansion history and
 // the statistics (but the timing ones) must agree in this configuration too, and the vectorized run's with its history
@@ -759,7 +789,7 @@ static bool pp_test_compile_kernels(const PPOptions* options, const char* path, 
         printf("%s: the vectorized and scalar kernels count different statistics\n", label);
         result = false;
     }
-    result = result && pp_test_system_levels(&runs[0], &runs[1], label);
+    result = result && pp_test_system_levels(&runs[0], &runs[1], label) && pp_test_invocation_places(&runs[0], label);
     for (uint32_t k = 0; k < 2; k += 1)
     {
         if (ready[k])
@@ -3592,6 +3622,228 @@ static bool pp_test_directory_listings(const char* directory)
     printf("directory listings: %s (%s; skipped opens, names a listing can't rule out, a shared cache, a name past ASCII, a large directory)\n",
            result ? "as expected" : "WRONG",
            listable ? "listed" : "this file system's directories aren't listed");
+    return result;
+}
+
+// The descriptors pp_test_exhaust_descriptors takes: as many as the lowered limit leaves, at most this many.
+#define BUSTER_PP_TEST_SPARE_DESCRIPTORS 16
+
+// What pp_test_exhaust_descriptors changed, for pp_test_restore_descriptors.
+typedef struct PPTestDescriptors PPTestDescriptors;
+struct PPTestDescriptors
+{
+    struct rlimit saved;
+    int taken[BUSTER_PP_TEST_SPARE_DESCRIPTORS + 1];
+    uint32_t count;
+    bool limited;
+};
+
+// Leaves the process no descriptor to open: lowers RLIMIT_NOFILE's soft limit to a few past the lowest free
+// descriptor, and takes every one below it, so that an open fails with EMFILE until pp_test_restore_descriptors.
+static bool pp_test_exhaust_descriptors(PPTestDescriptors* state)
+{
+    *state = (PPTestDescriptors){ 0 };
+    const int first = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    bool result = first >= 0 && getrlimit(RLIMIT_NOFILE, &state->saved) == 0;
+    if (first >= 0)
+    {
+        state->taken[state->count] = first;
+        state->count += 1;
+    }
+    struct rlimit lowered = state->saved;
+    lowered.rlim_cur = (rlim_t)first + BUSTER_PP_TEST_SPARE_DESCRIPTORS;
+    state->limited = result && lowered.rlim_cur < state->saved.rlim_cur && setrlimit(RLIMIT_NOFILE, &lowered) == 0;
+    result = state->limited;
+    int taken = result ? 0 : -1;
+    while (result && taken >= 0 && state->count <= BUSTER_PP_TEST_SPARE_DESCRIPTORS)
+    {
+        taken = fcntl(first, F_DUPFD_CLOEXEC, 0);
+        if (taken >= 0)
+        {
+            state->taken[state->count] = taken;
+            state->count += 1;
+        }
+    }
+    const int probe = result ? open("/dev/null", O_RDONLY | O_CLOEXEC) : -1;
+    result = result && probe < 0 && errno == EMFILE;
+    if (probe >= 0)
+    {
+        close(probe);
+    }
+    return result;
+}
+
+// Gives back what pp_test_exhaust_descriptors took: its descriptors, and the limit.
+static void pp_test_restore_descriptors(PPTestDescriptors* state)
+{
+    for (uint32_t i = 0; i < state->count; i += 1)
+    {
+        close(state->taken[i]);
+    }
+    if (state->limited)
+    {
+        setrlimit(RLIMIT_NOFILE, &state->saved);
+    }
+    *state = (PPTestDescriptors){ 0 };
+}
+
+// The index of the path a unit looked up as `prefix`/`name`, or BUSTER_PP_NONE if it never did.
+static uint32_t pp_test_looked_up(const Preprocessor* pp, const char* prefix, const char* name)
+{
+    char path[4400];
+    snprintf(path, sizeof(path), "%s/%s", prefix, name);
+    const uint32_t length = (uint32_t)strlen(path);
+    uint32_t result = BUSTER_PP_NONE;
+    for (uint32_t f = 0; result == BUSTER_PP_NONE && f < pp->file_count; f += 1)
+    {
+        result = pp->files[f].path_length == length && memcmp(pp->files[f].path, path, length) == 0 ? f : BUSTER_PP_NONE;
+    }
+    return result;
+}
+
+// #653's contract under descriptor exhaustion, which #1564's review asked to pin. Once a search directory is listed,
+// a name its listing rules out gets ENOENT without an open, even with no descriptor left, so the search goes on to the
+// next directory, whose probe fails with EMFILE and is the one reported. Without listings, the first directory's probe
+// fails with EMFILE and ends the search there. A name the listing has is probed as before and fails with EMFILE in the
+// first directory either way. The cache keeps each answer: after the descriptors come back, another unit sharing it
+// gets the listed directory's ENOENT and the probed directory's EMFILE for those paths, without an open.
+static bool pp_test_listing_descriptors(const char* directory)
+{
+    char first[4200];
+    char second[4200];
+    char path[4400];
+    snprintf(first, sizeof(first), "%s/descriptors-first", directory);
+    snprintf(second, sizeof(second), "%s/descriptors-second", directory);
+    bool result = mkdir(first, 0700) == 0 && mkdir(second, 0700) == 0;
+    snprintf(path, sizeof(path), "%s/listed.h", first);
+    result = result && pp_test_write_file(path, "int listed;\n");
+    for (uint32_t i = 0; result && i < 40; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/h%02u.h", second, i);
+        result = pp_test_write_file(path, "int header;\n");
+    }
+    struct statfs system;
+    const bool listable = result && statfs(first, &system) == 0 && file_cache_exact_names((uint64_t)system.f_type);
+    const char* const directories[] = { first, second };
+    PPOptions options = {
+        .language = {
+            .standard = 2023,
+        },
+        .no_standard_includes = true,
+        .include_directories = directories,
+        .include_directory_count = BUSTER_ARRAY_LENGTH(directories),
+        .quiet = true,
+    };
+    // Unit 0 lists, unit 1 never does, and unit 2 shares unit 0's cache after the descriptors come back.
+    static InternTable tables[3];
+    static Preprocessor units[3];
+    for (uint32_t u = 0; u < 2; u += 1)
+    {
+        units[u] = (Preprocessor){ 0 };
+        result = result && intern_initialize(&tables[u]) && pp_initialize(&units[u], &options, &tables[u]);
+    }
+    if (result)
+    {
+        units[1].cache->listing_misses = 0;
+    }
+    // Every h??.h fails in `first` and is found in `second`: `first` is listed at its BUSTER_FILE_CACHE_LISTING_MISSES-th.
+    for (uint32_t c = 0; result && c < 40; c += 1)
+    {
+        char name[16];
+        snprintf(name, sizeof(name), "h%02u.h", c);
+        for (uint32_t u = 0; result && u < 2; u += 1)
+        {
+            uint32_t found;
+            result = pp_find_include(&units[u], (const uint8_t*)name, (uint32_t)strlen(name), true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found, BUSTER_PP_NONE) !=
+                     BUSTER_PP_NONE;
+        }
+    }
+    const bool listed = units[0].cache->listed_directories != 0;
+    result = result && listed == listable && units[1].cache->listed_directories == 0;
+    // With no descriptor left: a name nowhere (`absent.h`), and one only `first` has (`listed.h`), each a reported search
+    // (an #include's) in both units.
+    PPTestDescriptors descriptors = { 0 };
+    const bool exhausted = result && pp_test_exhaust_descriptors(&descriptors);
+    uint64_t opens[2] = { units[0].probes.opens, units[1].probes.opens };
+    uint32_t absent[2] = { BUSTER_PP_NONE, BUSTER_PP_NONE };
+    bool fatal[2] = { false, false };
+    for (uint32_t u = 0; exhausted && u < 2; u += 1)
+    {
+        uint32_t found;
+        absent[u] = pp_find_include(&units[u], (const uint8_t*)"absent.h", 8, true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found, 0);
+        fatal[u] = units[u].fatal;
+    }
+    uint32_t has[2] = { BUSTER_PP_NONE, BUSTER_PP_NONE };
+    for (uint32_t u = 0; exhausted && u < 2; u += 1)
+    {
+        // A unit's fatal error ends its run; a search after it still looks the path up, which this checks.
+        uint32_t found;
+        has[u] = pp_find_include(&units[u], (const uint8_t*)"listed.h", 8, true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found, BUSTER_PP_NONE);
+    }
+    // Also what an exhaustion that failed part of the way took.
+    pp_test_restore_descriptors(&descriptors);
+    result = result && exhausted;
+    // `absent.h`: with the listing, `first`'s answer is ENOENT without an open and `second`'s probe fails with EMFILE;
+    // without it, `first`'s probe fails with EMFILE and the search ends there.
+    const uint32_t absent_first[2] = { pp_test_looked_up(&units[0], first, "absent.h"), pp_test_looked_up(&units[1], first, "absent.h") };
+    const uint32_t absent_second[2] = { pp_test_looked_up(&units[0], second, "absent.h"), pp_test_looked_up(&units[1], second, "absent.h") };
+    const int listed_error = listable ? ENOENT : EMFILE;
+    result = result && absent[0] == BUSTER_PP_NONE && absent[1] == BUSTER_PP_NONE && fatal[0] && fatal[1] && absent_first[0] != BUSTER_PP_NONE &&
+             units[0].files[absent_first[0]].error == listed_error && absent_first[1] != BUSTER_PP_NONE && units[1].files[absent_first[1]].error == EMFILE &&
+             absent_second[1] == BUSTER_PP_NONE &&
+             (listable ? absent_second[0] != BUSTER_PP_NONE && units[0].files[absent_second[0]].error == EMFILE : absent_second[0] == BUSTER_PP_NONE);
+    // `listed.h`: probed in `first` in both units, failing with EMFILE, which an unreported search treats as no file
+    // there and goes on past, to `second`, whose probe fails too.
+    const uint32_t has_first[2] = { pp_test_looked_up(&units[0], first, "listed.h"), pp_test_looked_up(&units[1], first, "listed.h") };
+    result = result && has[0] == BUSTER_PP_NONE && has[1] == BUSTER_PP_NONE && has_first[0] != BUSTER_PP_NONE && units[0].files[has_first[0]].error == EMFILE &&
+             has_first[1] != BUSTER_PP_NONE && units[1].files[has_first[1]].error == EMFILE;
+    // The opens each unit attempted under exhaustion: `absent.h`'s one (`second`'s with the listing, `first`'s without),
+    // and `listed.h`'s two.
+    const uint64_t made[2] = { units[0].probes.opens - opens[0], units[1].probes.opens - opens[1] };
+    result = result && made[0] == 3u && made[1] == 3u;
+    // Another unit through unit 0's cache, with descriptors again: the cached answers, and no open for them.
+    units[2] = (Preprocessor){ 0 };
+    options.files = units[0].cache;
+    const bool shared = result && pp_initialize(&units[2], &options, &tables[0]);
+    if (shared)
+    {
+        uint32_t found;
+        const uint32_t again = pp_find_include(&units[2], (const uint8_t*)"absent.h", 8, true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found, BUSTER_PP_NONE);
+        const uint32_t again_first = pp_test_looked_up(&units[2], first, "absent.h");
+        const uint32_t again_second = pp_test_looked_up(&units[2], second, "absent.h");
+        result = again == BUSTER_PP_NONE && units[2].probes.opens == (listable ? 0u : 1u) && again_first != BUSTER_PP_NONE &&
+                 units[2].files[again_first].error == listed_error &&
+                 (listable ? again_second != BUSTER_PP_NONE && units[2].files[again_second].error == EMFILE : true);
+    }
+    result = result && shared;
+    if (!result)
+    {
+        printf("listing descriptors: exhausted %u, listed %u (%u), absent.h fatal %u/%u, opens %lu/%lu\n", exhausted, listed, listable, fatal[0], fatal[1],
+               (unsigned long)made[0], (unsigned long)made[1]);
+    }
+    for (uint32_t u = 3; u > 0; u -= 1)
+    {
+        if (u - 1 != 2 || shared)
+        {
+            pp_release(&units[u - 1]);
+        }
+    }
+    for (uint32_t u = 0; u < 2; u += 1)
+    {
+        intern_release(&tables[u]);
+    }
+    for (uint32_t i = 0; i < 40; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/h%02u.h", second, i);
+        unlink(path);
+    }
+    snprintf(path, sizeof(path), "%s/listed.h", first);
+    unlink(path);
+    rmdir(first);
+    rmdir(second);
+    printf("listing descriptors: %s (%s; with no descriptor left, a ruled-out name is ENOENT and the next directory's EMFILE "
+           "is reported; without listings, the first's)\n",
+           result ? "as expected" : "WRONG", listable ? "listed" : "this file system's directories aren't listed");
     return result;
 }
 
@@ -8732,6 +8984,7 @@ static bool pp_test_sections(PPTestDeal* deal, const char* directory, bool with_
     passed &= PP_TEST_SECTION(deal, 1, pp_test_lookup_accounting(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_directory_reads(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_directory_listings(directory));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_listing_descriptors(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_final_copy_accounting());
     passed &= PP_TEST_SECTION(deal, 1, pp_test_trailing_splices());
     passed &= PP_TEST_SECTION(deal, 1, pp_test_scalar_reference(directory));

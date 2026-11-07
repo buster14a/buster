@@ -675,7 +675,9 @@ static __attribute__((always_inline)) inline void ir_typed_lanes(IrTypedSink* si
     }
 }
 
-static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands)
+// `unmasked`: a comparison into a mask alone (#1623, IrSimdTypedOperation.compare_mask) whose writemask the typed stream
+// gives every lane of (ir_typed_unmasked), so that its mask is the vcmp's alone, with no AND.
+static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands, bool unmasked)
 {
     static const uint8_t ops[IR_SIMD_OPERATION_COUNT] = {
         [IR_SIMD_ADD] = IR_ADD,
@@ -694,7 +696,14 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         [IR_SIMD_FDIV] = IR_FDIV,
     };
     uint32_t value = BUSTER_IR_NONE;
-    if (operation->expand_mask)
+    if (operation->compare_mask)
+    {
+        // The lanes' mask, `type` (the decoder made the row's result bytes the lanes' mask's), and the writemask's AND.
+        const uint32_t mask = ir_typed_emit(sink, IR_VCMP, type, operands[0], operands[1], operation->predicate, 0);
+        ir_typed_lanes(sink, mask, operation->lane);
+        value = unmasked ? mask : ir_typed_emit(sink, IR_AND, type, mask, operands[2], BUSTER_IR_NONE, 0);
+    }
+    else if (operation->expand_mask)
     {
         // The comparison's mask, a bit per lane, and -1 or 0 in each lane by it, at the same lanes' width.
         const IrType mask_type = (IrType)ir_lane_mask(type, operation->lane);
@@ -713,6 +722,17 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         ir_typed_lanes(sink, value, operation->lane);
     }
     return value;
+}
+
+// Whether entry `i`, a comparison into a mask alone (#1623), has a writemask of every lane: a constant whose bits for
+// the lanes are all set, converted to the mask, just before it, as the comparison intrinsics' rows without a mask
+// operand have it (_mm512_cmpeq_epi8_mask's -1). The typed stream decides it, so both lowering passes agree.
+static bool ir_typed_unmasked(const Tier0Function* input, const IrSimdTypedOperation* operation, uint32_t i)
+{
+    const uint32_t lanes = operation->compare_mask ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) : 0;
+    const uint64_t every = lanes >= 64 ? UINT64_MAX : (UINT64_C(1) << lanes) - 1;
+    return lanes != 0 && i >= 2 && input->kinds[i - 1] == BUSTER_TYPED_CONVERT && input->classes[i - 1] == BUSTER_TYPED_CLASS_MASK && input->kinds[i - 2] == BUSTER_TYPED_CONST &&
+           input->classes[i - 2] >= BUSTER_TYPED_CLASS_I8 && input->classes[i - 2] <= BUSTER_TYPED_CLASS_U64 && (input->values[i - 2] & every) == every;
 }
 
 // A scalar BMI instruction's row (#141, ir_simd_typed_intrinsic) as its IR intrinsic of the operands its record places;
@@ -1294,7 +1314,10 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_labels(IrTypedSin
 // ---------------------------------------------------------------------------------------------------------------------
 // Entry points
 
-static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector, uint64_t target_features)
+// `pieces`: a vector wider than the target moves whole (ir_typed_vector_piece) is taken as its pieces' moves would be, for
+// a caller that splits it into them before selection (#1624, ir_vector_split.c); otherwise it is refused.
+static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector, uint64_t target_features,
+                                          bool pieces)
 {
     (void)vector;
 
@@ -1398,8 +1421,10 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         {
             const uint32_t bytes = ir_typed_vector_bytes(input, i);
             // Tier 1's moves of it (ir_typed_vector_moves, #1281): AVX512F's of a zmm register; of an xmm or a ymm one, or
-            // an SSE carrier's, VL's EVEX ones, or else AVX's VEX ones.
-            const uint64_t required = ir_typed_vector_moves(bytes, target_features);
+            // an SSE carrier's, VL's EVEX ones, or else AVX's VEX ones. A vector wider than the target moves whole, where
+            // the caller splits it (#1624), its pieces' (ir_typed_vector_piece: x86-64's xmm, AVX's ymm).
+            const uint32_t piece = ir_typed_vector_piece(target_features);
+            const uint64_t required = ir_typed_vector_moves(pieces && bytes > piece && bytes <= 64 ? piece : bytes, target_features);
             // DUP, DISCARD and JUMP_VALUE have no own width; their source has already been admitted. Every real
             // transport is a full 128/256/512-bit value or an SSE carrier of 4 or 8 bytes (#1280), an f32 or f64 of its
             // bits (ir_typed_stack_type).
@@ -1509,7 +1534,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
 // Preserve scalar clients of the internal path as well as the public entry points.
 static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, vector, 0);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, vector, 0, false);
 }
 
 // The legacy typed stream erases pointer categories into U64, so its i64 values
@@ -1528,13 +1553,13 @@ static __attribute__((unused)) IrCheck ir_lower_typed(const Tier0Function* input
 #if !BUSTER_HOST_VECTOR
     return ir_lower_typed_scalar(input, result_type, symbol_count, output, scratch, result);
 #else
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, true, 0);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, true, 0, false);
 #endif
 }
 
 static __attribute__((unused)) IrCheck ir_lower_typed_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, 0);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, 0, false);
 }
 
 // Output features are explicit. The old entry points intentionally grant none: a vector producer must retain its
@@ -1542,10 +1567,18 @@ static __attribute__((unused)) IrCheck ir_lower_typed_scalar(const Tier0Function
 // unsupported forms from missing target features on IR_ERROR_UNSUPPORTED.
 static __attribute__((unused)) IrCheck ir_lower_typed_target(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, BUSTER_HOST_VECTOR != 0, target_features);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, BUSTER_HOST_VECTOR != 0, target_features, false);
 }
 
 static __attribute__((unused)) IrCheck ir_lower_typed_target_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, target_features);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, target_features, false);
+}
+
+// The C driver's --tier1 (#1624): ir_lower_typed_target, but a vector wider than the target moves whole is taken, for
+// ir_vector_split to split into the target's widest vectors after promotion; by the vector path, or by its scalar twin.
+static __attribute__((unused)) IrCheck ir_lower_typed_target_pieces(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch,
+                                                                    IrFunction* result, bool scalar)
+{
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, !scalar && BUSTER_HOST_VECTOR != 0, target_features, true);
 }

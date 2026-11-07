@@ -13,9 +13,9 @@
 // which, in a large unit, check_input_run's arena of rare columns is base pages or huge: #764, #847; where more than one
 // lane reads a unit that isn't large, the lanes claiming the arena's regions before their first writes), its reader be copied by
 // one of them at least and by no more (#432's review), and its parts be as many as a group of them cuts. Each fixture
-// is read again on 8 lanes by the reader's rule of how many (one lane per BUSTER_CHECK_DEFERRED_LANE_TOKENS, and one per
-// BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, of the bodies' tokens beyond the larger of the
-// largest body's and twice the second largest's, and at least one), and eight of bodies of
+// is read again on 8 lanes by the reader's rule of how many (one lane, and one more per
+// BUSTER_CHECK_DEFERRED_LANE_TOKENS, and one per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, of
+// the bodies' tokens beyond the larger of the largest body's and twice the second largest's), and eight of bodies of
 // known tokens are read by the rule alone, as they are and with every unit large (CheckDeferred.base_page_tokens): on
 // each side of a second lane and of an
 // eighth, beside a largest body, which the first lane reads itself, and beside a second largest, which a woken lane
@@ -63,16 +63,19 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "postmerge-builtin-expressions",
       "int f(int n){return __builtin_expect(n,1)+__builtin_bswap32((unsigned)n);}\n"
       "int g(int n){int a;return __builtin_add_overflow(n,1,&a)?0:a;}\n"
-      "int h(int n){return __builtin_expect_with_probability(n,1,0.75)+__builtin_popcount((unsigned)n);}\n", true },
+      "int h(int n){return __builtin_expect_with_probability(n,1,0.75)+__builtin_popcount((unsigned)n);}\n"
+      "int k(int n){return __builtin_expect(n,0)+__builtin_popcount((unsigned)n+1u);}\n", true },
     { "postmerge-warning-metadata",
       "int a[sizeof(1+2+3+4+5+6+7+8+9+10+11+12+13+14+15+16+17+18+19+20+21+22+23+24+25+26+27+28+29+30+31+32+33+34+35)];\n"
       "unsigned long f(int n){return 9223372036854775808+n;}\n"
       "unsigned long g(int n){return 18446744073709551615-n;}\n"
-      "unsigned long h(int n){return sizeof(a)+9223372036854775809+n;}\n", true },
+      "unsigned long h(int n){return sizeof(a)+9223372036854775809+n;}\n"
+      "unsigned long k(int n){return sizeof(a)+18446744073709551615-n;}\n", true },
     { "postmerge-leaf-boundaries",
       "int use(const char*);int f(int n){int a[]={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};while(n>0){if(n==2)break;n--;continue;}return a[n&7]+use(__func__);}\n"
       "int g(int n){int a[]={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};return a[n&15]+use(\"second\");}\n"
-      "int h(int n){int a[]={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17};if(n<0)goto out;n+=a[n&15];out:return n+use(__func__);}\n", true },
+      "int h(int n){int a[]={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17};if(n<0)goto out;n+=a[n&15];out:return n+use(__func__);}\n"
+      "int k(int n){int a[]={1,2,3,4};return a[n&3]+use(\"fourth\");}\n", true },
     // Declared x86 builtins called in bodies that lanes read (#148): each lane works out their verdicts itself, writing
     // nothing the top level's reader or another lane reads.
     { "declared-builtins-in-bodies", "void _mm_sfence(void);void _mm_pause(void);void _mm_lfence(void);unsigned _mm_getcsr(void);\n"
@@ -1007,8 +1010,7 @@ static uint64_t check_deferred_test_lanes(uint64_t bodies, uint64_t tokens, uint
 {
     const uint64_t path = largest > second * 2 ? largest : second * 2;
     const uint64_t beyond = tokens > path ? tokens - path : 0;
-    const uint64_t shares = beyond / check_deferred_test_lane_tokens(top);
-    const uint64_t wanted = every ? lanes : shares > 1 ? shares : 1;
+    const uint64_t wanted = every ? lanes : 1 + beyond / check_deferred_test_lane_tokens(top);
     const uint64_t most = bodies < lanes ? bodies : lanes;
     return wanted < most ? wanted : most;
 }
@@ -1017,12 +1019,12 @@ static uint64_t check_deferred_test_lanes(uint64_t bodies, uint64_t tokens, uint
 // (check_deferred_test_lane_tokens): `bodies` functions of empty statements, whose bodies
 // have N tokens each from their opening brace to their closing one, but the first `first` times as many, the second
 // `second` times as many, and the last `fewer` fewer; and the lanes the rule gives them on 8. Bodies of N: a second lane
-// needs twice N tokens beyond twice the second largest body's (#447: one lane per N, and at least one), and an eighth
-// eight times as many, each with a token fewer too. A largest body of four times N, which the first lane reads itself,
-// beside two of N, and of a token fewer: the second lane its tokens beyond the largest body's pay for (#448's rule, which
-// counted the largest body twice, took one). A largest body of three times N beside one of twice N, whose woken lane
-// reads it in about four times N's time, and two of N and of a token fewer: the third lane its tokens beyond four times
-// N pay for. The grouped-part cases' 53 tokens a body give 2 lanes at 127 to 129 bodies and 6 at 511 to 513.
+// needs N tokens beyond twice the second largest body's, and an eighth seven times as many, each with a token fewer too.
+// A largest body of four times N, which the first lane reads itself, beside one of N, and of a token fewer: the second
+// lane its tokens beyond the largest body's pay for (#448's rule, which counted the largest body twice, took one). A
+// largest body of three times N beside one of twice N, whose woken lane reads it in about four times N's time, and one
+// of N and of a token fewer: the third lane its tokens beyond four times N pay for. The grouped-part cases' 42 tokens a
+// body give 2 lanes at 127 to 129 bodies and 6 at 511 to 513.
 typedef struct CheckDeferredSize CheckDeferredSize;
 struct CheckDeferredSize
 {
@@ -1039,20 +1041,20 @@ struct CheckDeferredSize
 
 static const CheckDeferredSize check_deferred_sizes[] =
 {
-    { "lane-tokens-below-two-lanes", 4, 1, 1, 1, 1, 0 },
-    { "lane-tokens-two-lanes", 4, 1, 1, 0, 2, 0 },
-    { "lane-tokens-below-eight-lanes", 10, 1, 1, 1, 7, 0 },
-    { "lane-tokens-eight-lanes", 10, 1, 1, 0, 8, 0 },
-    { "lane-tokens-large-body-below-two-lanes", 3, 4, 1, 1, 1, 0 },
-    { "lane-tokens-large-body-two-lanes", 3, 4, 1, 0, 2, 0 },
-    { "lane-tokens-second-body-below-three-lanes", 4, 3, 2, 1, 2, 0 },
-    { "lane-tokens-second-body-three-lanes", 4, 3, 2, 0, 3, 0 },
-    { .name = "grouped-parts-below-two-lanes-capacity", .bodies = 127, .lanes = 2, .base_tokens = 53 },
-    { .name = "grouped-parts-two-lanes-capacity", .bodies = 128, .lanes = 2, .base_tokens = 53 },
-    { .name = "grouped-parts-above-two-lanes-capacity", .bodies = 129, .lanes = 2, .base_tokens = 53 },
-    { .name = "grouped-parts-below-eight-lanes-capacity", .bodies = 511, .lanes = 6, .base_tokens = 53 },
-    { .name = "grouped-parts-eight-lanes-capacity", .bodies = 512, .lanes = 6, .base_tokens = 53 },
-    { .name = "grouped-parts-above-eight-lanes-capacity", .bodies = 513, .lanes = 6, .base_tokens = 53 },
+    { "lane-tokens-below-two-lanes", 3, 1, 1, 1, 1, 0 },
+    { "lane-tokens-two-lanes", 3, 1, 1, 0, 2, 0 },
+    { "lane-tokens-below-eight-lanes", 9, 1, 1, 1, 7, 0 },
+    { "lane-tokens-eight-lanes", 9, 1, 1, 0, 8, 0 },
+    { "lane-tokens-large-body-below-two-lanes", 2, 4, 1, 1, 1, 0 },
+    { "lane-tokens-large-body-two-lanes", 2, 4, 1, 0, 2, 0 },
+    { "lane-tokens-second-body-below-three-lanes", 3, 3, 2, 1, 2, 0 },
+    { "lane-tokens-second-body-three-lanes", 3, 3, 2, 0, 3, 0 },
+    { .name = "grouped-parts-below-two-lanes-capacity", .bodies = 127, .lanes = 2, .base_tokens = 42 },
+    { .name = "grouped-parts-two-lanes-capacity", .bodies = 128, .lanes = 2, .base_tokens = 42 },
+    { .name = "grouped-parts-above-two-lanes-capacity", .bodies = 129, .lanes = 2, .base_tokens = 42 },
+    { .name = "grouped-parts-below-eight-lanes-capacity", .bodies = 511, .lanes = 6, .base_tokens = 42 },
+    { .name = "grouped-parts-eight-lanes-capacity", .bodies = 512, .lanes = 6, .base_tokens = 42 },
+    { .name = "grouped-parts-above-eight-lanes-capacity", .bodies = 513, .lanes = 6, .base_tokens = 42 },
 };
 
 // A CheckDeferredSize's unit: its bodies and the tokens they hold in all, the largest one's (the first of them) and the
@@ -1283,8 +1285,11 @@ static int run_checker_deferred_tests(int count, char** arguments)
                                                        outcome.deferred_largest_lane == 0 &&
                                                        outcome.deferred_active == (size_lanes < lane_counts[l] ? size_lanes : lane_counts[l]));
                 const bool postmerge = strncmp(name, "postmerge-", 10) == 0 && strcmp(name, "postmerge-ordered-expressions") != 0;
-                const bool expressions = !postmerge || outcome.deferred_active <= 1 ||
-                                         (BUSTER_SCALAR_PATH(false) ? outcome.deferred_expression_parts == 0 && !outcome.deferred_expression_retry :
+                // On fewer than BUSTER_CHECK_DEFERRED_POST_LANES of the bodies' lanes, the post-merge rounds stay on the
+                // calling thread: no expression parts and no retry (#447).
+                const bool serial_post = outcome.deferred_active < BUSTER_CHECK_DEFERRED_POST_LANES;
+                const bool expressions = !postmerge ||
+                                         (serial_post || BUSTER_SCALAR_PATH(false) ? outcome.deferred_expression_parts == 0 && !outcome.deferred_expression_retry :
                                           outcome.deferred_expression_parts != 0 && outcome.deferred_expression_parallel_tokens != 0 && outcome.deferred_expression_serial_tokens == 0 && !outcome.deferred_expression_retry);
                 const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected && copied && sized_right &&
                                     !outcome.source_shared && expressions;
@@ -1301,7 +1306,8 @@ static int run_checker_deferred_tests(int count, char** arguments)
                                           "them or their regions' claims, their parts or tokens, or its reader copied by too many of them or by none)",
                             sized_right ? "" : " (not the bodies' tokens it was made with, not the lanes it was made for, or its largest body not the first lane's)",
                             outcome.source_shared ? " (source order's rare columns in base pages)" : "",
-                            expressions ? "" : " (expected parallel expressions without ordered work or retry)");
+                            expressions ? "" : serial_post ? " (expected the post-merge rounds on the calling thread alone, below their fewest lanes)" :
+                                                             " (expected parallel expressions without ordered work or retry)");
                 }
             }
         }

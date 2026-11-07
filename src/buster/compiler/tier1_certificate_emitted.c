@@ -711,9 +711,10 @@ struct Tier1CertEmittedKernel
     uint32_t use_count;
     uint32_t definition;
     uint32_t definition_location;
-    // A call's aggregate result's parts (#789, #1284), which it defines in their registers after it.
-    uint32_t results[2];
-    uint32_t result_locations[2];
+    // A call's aggregate result's parts (#789, #1284), which it defines in their registers after it: up to a split
+    // vector's four (#1624, tier1_select_result_parts).
+    uint32_t results[BUSTER_TIER1_SELECT_RESULT_PARTS];
+    uint32_t result_locations[BUSTER_TIER1_SELECT_RESULT_PARTS];
     uint32_t result_count;
     // A call's outgoing area's bytes from rsp, which its callee owns: killed after it.
     uint32_t outgoing;
@@ -934,7 +935,7 @@ static bool tier1_cert_emitted_call_steps(const Tier1CertEmittedBuild* build, ui
         n += valid;
     }
     *before = n;
-    Tier1SelectPart results[2];
+    Tier1SelectPart results[BUSTER_TIER1_SELECT_RESULT_PARTS];
     const uint32_t result_count = returned ? tier1_select_result_parts(abi->call.result, abi->result_size, results) : 0;
     valid = valid && (!returned || result_count != 0);
     for (uint32_t k = 0; valid && k < result_count; k += 1)
@@ -1763,7 +1764,7 @@ static bool tier1_cert_emitted_wide(const Tier1SelectPlan* plan, const Tier1Emit
         const IrPassed* record = tier1_select_parameter_record(function, p);
         wide = record != 0 && record->size != 0 && tier1_cert_emitted_wide_parts(record->location, record->size);
     }
-    Tier1SelectPart parts[2];
+    Tier1SelectPart parts[BUSTER_TIER1_SELECT_RESULT_PARTS];
     const uint32_t returned = function->result_size != 0 ? tier1_select_result_parts(function->result_abi, function->result_size, parts) : 0;
     for (uint32_t k = 0; !wide && k < returned; k += 1)
     {
@@ -2560,15 +2561,14 @@ static bool tier1_cert_emitted_result(Tier1CertEmittedBuild* build, uint32_t nod
     const X86Instruction* records = emitted->code.records;
     const AbiReturn result = function->result_abi;
     const uint32_t value = address < function->instruction_count ? emitted->node_values[address] : BUSTER_TIER1_CFG_NONE;
-    Tier1SelectPart parts[2];
+    Tier1SelectPart parts[BUSTER_TIER1_SELECT_RESULT_PARTS];
     const uint32_t part_count = tier1_select_result_parts(result, function->result_size, parts);
     const bool hidden = result.kind == BUSTER_ABI_RESULT_MEMORY;
-    const uint32_t second_slot = part_count != 0 ? tier1_select_part_slots(parts[0].bytes) : 0;
     uint32_t at = r;
     bool valid = source < 16 && source != BUSTER_TIER1_SELECT_SCRATCH && value != BUSTER_TIER1_CFG_NONE && r <= end;
     for (uint32_t k = 0; valid && k < part_count; k += 1)
     {
-        const int32_t staged = tier1_emit_staging_part(k == 0 ? 0 : second_slot, parts[k].bytes);
+        const int32_t staged = tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes);
         const uint32_t pieces = tier1_cert_emitted_pieces(parts[k].bytes);
         const bool vector = (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
         valid = end - at >= 2 * pieces;
@@ -2593,7 +2593,7 @@ static bool tier1_cert_emitted_result(Tier1CertEmittedBuild* build, uint32_t nod
     {
         const bool vector = (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
         const X86Instruction load = {
-            .displacement = tier1_emit_staging_part(k == 0 ? 0 : second_slot, parts[k].bytes),
+            .displacement = tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes),
             .reg = (uint8_t)(parts[k].reg & 0x1f),
             .rm = X86_REGISTER_RSP,
             .mode = BUSTER_X86_MEMORY_BASE,
@@ -2669,7 +2669,7 @@ static bool tier1_cert_emitted_return(Tier1CertEmittedBuild* build, uint32_t nod
     valid = valid && tier1_cert_emitted_add_use(&kernel, build->pseudo + 6, tier1_cert_emitted_entry_frame(build, 0, 8));
     // And an aggregate result (#789, #1284): its parts in their registers, or the hidden pointer in rax.
     const IrFunction* function = build->plan->function;
-    Tier1SelectPart parts[2];
+    Tier1SelectPart parts[BUSTER_TIER1_SELECT_RESULT_PARTS];
     const uint32_t part_count = function->result_size != 0 ? tier1_select_result_parts(function->result_abi, function->result_size, parts) : 0;
     for (uint32_t k = 0; valid && k < part_count; k += 1)
     {
@@ -2994,7 +2994,7 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
     build.parameter_parts = build.incoming + function->parameter_count;
     build.result_parts = build.parameter_parts + 2 * (function->parameter_count + 1);
     build.step_node = BUSTER_IR_NONE;
-    uint32_t value_total = build.result_parts + 2;
+    uint32_t value_total = build.result_parts + BUSTER_TIER1_SELECT_RESULT_PARTS;
     build.call_first = valid ? arena_push_array(scratch, (uint64_t)count + 1, 4, 4) : 0;
     build.call_steps = valid ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(Tier1CertEmittedStep*), _Alignof(Tier1CertEmittedStep*)) : 0;
     build.call_step_count = valid ? arena_push(scratch, (uint64_t)count + 1, 1) : 0;
@@ -3262,7 +3262,7 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
             };
         }
         tier1_cert_emitted_step_values(build.entry_steps, build.entry_count, cert_values);
-        Tier1SelectPart result_parts[2];
+        Tier1SelectPart result_parts[BUSTER_TIER1_SELECT_RESULT_PARTS];
         const uint32_t result_part_count = function->result_size != 0 ? tier1_select_result_parts(function->result_abi, function->result_size, result_parts) : 0;
         for (uint32_t k = 0; k < result_part_count; k += 1)
         {

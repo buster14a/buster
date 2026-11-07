@@ -29,8 +29,10 @@ unit whose bodies take one lane, a prefix, a repair and `-flazy-system-headers`'
 selection are read in source order. [docs/function-lanes.md](../../docs/function-lanes.md)'s
 "The checker's bodies on lanes" has the measurements and the default.
 
-After a successful merge, controls, binding answers and constant contexts run
-on whole-body groups. The expression graph is built in complete parser-forest
+After a successful merge where the bodies took `BUSTER_CHECK_DEFERRED_POST_LANES`
+(4) lanes or more (`check_deferred_post_lanes`; on fewer, these rounds run on
+the calling thread alone, #447), controls, binding answers and constant
+contexts run on whole-body groups. The expression graph is built in complete parser-forest
 parts after binding recovery, selections, complete uses, region setup and
 `sizeof` preparation. Independent parts have private graph counters, value
 chains, append lists, warnings and immutable type-table views. The caller
@@ -53,13 +55,13 @@ timing requests retain the original complete-unit expression walk.
 publication times. `expressions` remains elapsed wall time; the detailed
 `expressions.work.*` fields sum work across lanes, rather than elapsed time.
 
-The reader runs one lane per `BUSTER_CHECK_DEFERRED_LANE_TOKENS` (and one per
-`BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` of the top level's tokens) of the
-bodies' tokens beyond the larger of the largest body's and twice the second
-largest's, at least one and no more than its lanes or the bodies: a lane's copy
-of the reader, which grows with the top level, and its wake-up must be paid for
-by its share of the walks, and a second lane needs two shares, since it also
-puts the merge's pass and the post-merge rounds on lanes (#447). The calling thread cuts the bodies into parts before the
+The reader runs one lane, and one more per `BUSTER_CHECK_DEFERRED_LANE_TOKENS`
+(and one per `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` of the top level's tokens)
+of the bodies' tokens beyond the larger of the largest body's and twice the
+second largest's, no more than its lanes or the bodies: a lane's copy of the
+reader, which grows with the top level, and its wake-up must be paid for by its
+share of the walks. The post-merge rounds take those lanes only from four of
+them (#447). The calling thread cuts the bodies into parts before the
 lanes start (`parts_by_cost`), stably promotes the part containing the largest
 body, and reads that part at once as the first lane. The others, woken for the
 bodies, take the rest in the remaining cost order from the counter
@@ -107,8 +109,9 @@ opening must be selected. The merge's scans of the token columns
 (`check_deferred_entries` and the others) must give their scalar twins'
 positions and counts on ranges ending at a protected page, and every merged
 fixture must merge alike with the twins (`CheckDeferred.scalar_merge`).
-Post-merge fixtures require actual parallel expression work, including builtins,
-local initializers and 15/16/17-leaf boundaries. An injected failure after the
+Post-merge fixtures, of four bodies each, require actual parallel expression
+work on four lanes or more, including builtins, local initializers and
+15/16/17-leaf boundaries, and none on two or three. An injected failure after the
 expression round must reproduce the complete source-order result.
 A delayed-caller fixture also checks the completed parts' lane identities,
 requiring real expression execution on the caller and at least one other lane.

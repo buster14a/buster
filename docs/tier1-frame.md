@@ -403,6 +403,52 @@ against 2,064 without, by both paths. Every build prints clang's output. That
 was measured in a cloud container: frame sizes against `clang -O2` on the
 corpora and the run time on the 9700X are still to be measured.
 
+## Call-save rows and callee-saved registers: what wasn't done (#1625)
+
+#1625 measured two refinements that #177's design deferred and #1450's item 8
+left unattempted, on the 9700X, with main `cf38957a`, on speedtest1 and Lua
+5.4.8 as `measure-tier1-programs` builds them by `--tier1`. Neither is worth
+implementing now. [The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-frames-1625-2026-11-07)
+(buster-performance#313) has the measurement patch, the scripts and the outputs.
+
+### Shared call-save rows
+
+A function that calls has an 8-byte row for each caller-saved general register
+that some call saves, and the row lives over the whole function
+(`Tier1EmitPrepared.call_save_mask`).
+
+The rows take 23.2% of speedtest1's 146,874 frame bytes and 20.7% of Lua's
+66,288. Colouring them as objects are coloured could shrink them, but not below
+the most registers any one call saves. Under that bound:
+- sharing among the rows themselves saves at most 1.9% and 2.0% of those bytes;
+- sharing with the spill slots too saves at most 5.8% and 2.3%;
+- that is about 3 bytes per frame, in frames already 0.89× clang -O2's.
+
+### Shrink-wrapping
+
+Tier 1 gives callee-saved registers only to values live across a call, and
+pushes each in the prologue. A register used in the entry's straight run, up to
+its first branch, must be saved there on every path. Only one first used after a
+branch could be saved later.
+
+IBS op samples of the executables show:
+- callee-saved pushes and pops are 3.66% of speedtest1's executed ops;
+- those of registers first used after a branch are 1.27% of speedtest1's, and 0%
+  to 3.6% of a Lua script's.
+
+That is the ceiling, assuming no path uses them. Each is a single op through the
+stack engine.
+
+clang -O2 shrink-wraps, yet its speedtest1 executes more callee-saved pushes and
+pops than Tier 1's does (1,046 sampled against 813), and its cycle samples show
+the same on four of the five scripts.
+
+Placing saves per path would touch the frame protocol, the unwind tables and the
+code certificate, for a bound of about 1% on speedtest1. If it is reconsidered,
+`luaD_precall` comes first: its Lua-function path calls nothing, and all five of
+its saved registers could move.
+
 ## Native frame companion
 
 [`tier1_frame_emit.c`](../src/buster/compiler/tier1_frame_emit.c) consumes the

@@ -3018,12 +3018,47 @@ static uint16_t tier1_select_part_form(uint32_t bytes, bool load)
                                                                                 X86_FORM_NONE;
 }
 
+// The most parts a result has (#1624): a vector's split across xmm0 to xmm3.
+#define BUSTER_TIER1_SELECT_RESULT_PARTS 4u
+
 // The parts of an aggregate result of `size` bytes in rax and rdx or xmm0 and xmm1 (#789), eightbyte 1 alone with HIGH
-// (#141); none for any other result.
+// (#141), or a vector's wider than the target's registers (#1624, tier0_vector_result_parts' shape, #1193): split
+// across the first two or four vector registers, 16 or 32 bytes each (xmm's without AVX, ymm's with it), part k at byte
+// k * part_bytes of its object. None for any other result. `parts` has room for BUSTER_TIER1_SELECT_RESULT_PARTS.
 static uint32_t tier1_select_result_parts(AbiReturn result, uint32_t size, Tier1SelectPart* parts)
 {
-    const bool registers = result.kind == BUSTER_ABI_RESULT_REGISTERS && result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE;
-    return registers ? tier1_select_parts_of(result.registers, (result.flags & BUSTER_ABI_FLAG_HIGH) != 0, false, false, size, BUSTER_TIER1_SELECT_RESULT_GENERAL, 2, parts) : 0;
+    uint32_t vectors = 0;
+    while (vectors < BUSTER_ABI_RESULT_PARTS && result.registers[vectors] == (uint8_t)(BUSTER_ABI_REGISTER_VECTOR | vectors))
+    {
+        vectors += 1;
+    }
+    bool rest = true;
+    for (uint32_t k = vectors; k < BUSTER_ABI_RESULT_PARTS; k += 1)
+    {
+        rest = rest && result.registers[k] == BUSTER_ABI_REGISTER_NONE;
+    }
+    const bool split = result.kind == BUSTER_ABI_RESULT_REGISTERS && (result.flags & BUSTER_ABI_FLAG_HIGH) == 0 && (vectors == 2 || vectors == 4) && rest &&
+                       (result.part_bytes == 16 || result.part_bytes == 32) && size == vectors * result.part_bytes;
+    const bool registers = !split && result.kind == BUSTER_ABI_RESULT_REGISTERS && result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE;
+    uint32_t count = registers ? tier1_select_parts_of(result.registers, (result.flags & BUSTER_ABI_FLAG_HIGH) != 0, false, false, size, BUSTER_TIER1_SELECT_RESULT_GENERAL, 2, parts) : 0;
+    for (uint32_t k = 0; split && k < vectors; k += 1)
+    {
+        parts[k] = (Tier1SelectPart){ .reg = result.registers[k], .offset = (uint8_t)(k * result.part_bytes), .bytes = result.part_bytes };
+        count += 1;
+    }
+    return count;
+}
+
+// The first red-zone staging slot of result part k (#1624): the slots of the parts before it, each a whole vector
+// register's bytes' or an eightbyte's one (tier1_select_part_slots).
+static uint32_t tier1_select_result_slot(const Tier1SelectPart* parts, uint32_t k)
+{
+    uint32_t slot = 0;
+    for (uint32_t j = 0; j < k; j += 1)
+    {
+        slot += tier1_select_part_slots(parts[j].bytes);
+    }
+    return slot;
 }
 
 // Whether Tier 1 takes an argument's or a parameter's ABI record for a value of IR type `type` (#789): a scalar in one
@@ -3088,7 +3123,7 @@ static uint32_t tier1_select_x87_parts(AbiReturn result, uint32_t size)
 // returns through a hidden pointer that clang doesn't count (DEMOTED), which only a vector makes.
 static bool tier1_select_result_supported(AbiReturn result, uint32_t size)
 {
-    Tier1SelectPart parts[2];
+    Tier1SelectPart parts[BUSTER_TIER1_SELECT_RESULT_PARTS];
     const uint32_t high = size != 0 ? BUSTER_ABI_FLAG_HIGH : 0;
     const bool flags = (result.flags & ~(BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO | high)) == 0;
     const bool registers = tier1_select_result_parts(result, size, parts) != 0;

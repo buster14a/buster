@@ -1358,6 +1358,73 @@ static bool check_test_tier1_quoted(char* out, size_t size, const char* path)
     return true;
 }
 
+// --tier1-schedule (#172): the rematerialization fixture, its loops' loads, stores, multiplications and flags, compiled by
+// each path with each scheduling variant. --verify (always the builds') checks every scheduled block against the scalar
+// reference (tier1_schedule_verify after allocation, tier1_schedule_ir_verify before selection); each executable must print
+// clang's build's output, and the report must say records or instructions moved, which a dropped option would not. The
+// postallocation variant only permutes records, so its record count is the plain build's.
+static void check_test_driver_tier1_schedule(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/tier1-schedule.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-schedule-clang", directory);
+    const bool written = parse_test_write(source, check_test_tier1_remat_source, sizeof(check_test_tier1_remat_source) - 1);
+    char* clang_arguments[] = { (char*)clang, "-O0", "-o", reference, source, NULL };
+    char* clang_text = NULL;
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &clang_text) == 0;
+    free(clang_text);
+    char expected[256] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the scheduling fixture runs");
+    static const char* const variants[3] = { NULL, "--tier1-schedule=post", "--tier1-schedule=pre" };
+    for (uint32_t path = 0; ran && path < 2; path += 1)
+    {
+        uint64_t records[3] = { 0 };
+        uint64_t moved[3] = { 0 };
+        for (uint32_t v = 0; v < 3; v += 1)
+        {
+            char output[512];
+            snprintf(output, sizeof(output), "%s/tier1-schedule-%u-%u", directory, path, v);
+            char* arguments[12] = { (char*)executable, "--tier1", "--tier1-report", "--verify" };
+            uint32_t count = 4;
+            if (variants[v] != NULL)
+            {
+                arguments[count++] = (char*)variants[v];
+            }
+            if (path != 0)
+            {
+                arguments[count++] = "--scalar";
+            }
+            arguments[count++] = "-o";
+            arguments[count++] = output;
+            arguments[count++] = source;
+            arguments[count] = NULL;
+            char* text = NULL;
+            const int status = check_test_driver_spawn(arguments, &text);
+            const bool reported = check_test_tier1_field(text, "records", &records[v]) && check_test_tier1_field(text, "schedule_moved", &moved[v]);
+            uint64_t internal = 1;
+            const bool clean = check_test_tier1_field(text, "internal_failures", &internal) && internal == 0;
+            if (status != 0 && text != NULL)
+            {
+                fprintf(stderr, "%s", text);
+            }
+            free(text);
+            check_test_expect(test, status == 0 && reported && clean, "each scheduling variant compiles the fixture, every block passing its reference");
+            char actual[256] = { 0 };
+            check_test_expect(test, status == 0 && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "each scheduling variant's executable prints clang's build's output");
+            unlink(output);
+        }
+        check_test_expect(test, moved[0] == 0 && moved[1] != 0 && moved[2] != 0, "both variants reach Tier 1 and move its code, none without the option");
+        check_test_expect(test, records[1] == records[0], "the postallocation variant permutes records alone");
+        printf("  Tier 1's scheduling, %s path: %" PRIu64 " records, %" PRIu64 " moved after allocation, %" PRIu64 " IR instructions moved before (%" PRIu64 " records)\n",
+               path == 0 ? "vector" : "scalar", records[0], moved[1], moved[2], records[2]);
+    }
+    unlink(source);
+    unlink(reference);
+}
+
 // --tier1-gvn (#866): the rematerialization fixture compiled with #866's congruence solver before promotion, by each
 // path, against the same fixture compiled without it. Its function is still Tier 1's and its executable still prints
 // clang's build's output, so the solver's merged values reach Tier 1's code without changing what the program does; and
@@ -2878,9 +2945,145 @@ static void check_test_driver_tier1_bits(CheckTest* test, const char* clang, con
     }
 }
 
+// The wide vectors' fixture (#1624): GNU C's 32- and 64-byte vectors at targets whose registers are narrower (x86-64's
+// and x86-64-v2's 16 bytes, x86-64-v3's 32), which ir_vector_split.c splits into the target's widest: the scalar host's
+// emulations' shape (host_scalar_vectors.h: a union of a vector and its lanes, the lanes computed, the vector returned),
+// vectors passed and returned by value (the results split across xmm0 to xmm3 or ymm0 and ymm1), loaded and stored
+// through pointers in a loop, chosen at a join (a phi), and constants; and a vector operator, which Tier 0 computes in
+// pieces. The other unit (clang -O2's) passes random vectors and hashes every result.
+static const char check_test_tier1_wide_vectors_header[] =
+    "#include <stdint.h>\n"
+    "typedef int v8si __attribute__((vector_size(32)));\n"
+    "typedef int v16si __attribute__((vector_size(64)));\n"
+    "typedef unsigned char v64qu __attribute__((vector_size(64)));\n"
+    "v16si w_add(v16si a, v16si b);\n"
+    "v8si w_pick(const v8si* p, const v8si* q, int which);\n"
+    "void w_reverse(v16si* out, const v16si* in, unsigned n);\n"
+    "v16si w_constant(int k);\n"
+    "uint64_t w_sum(v16si a);\n"
+    "v64qu w_bytes(v64qu a, v64qu b);\n"
+    "v8si w_ops(v8si a, v8si b);\n";
+
+static const char check_test_tier1_wide_vectors_source[] =
+    "#include \"tier1-wide-vectors.h\"\n"
+    "typedef union W512 { v16si value; uint32_t u32[16]; } W512;\n"
+    "typedef union B512 { v64qu value; uint8_t u8[64]; } B512;\n"
+    "__attribute__((noinline)) v16si w_add(v16si a, v16si b)\n"
+    "{\n"
+    "    W512 a_ = { .value = a };\n"
+    "    W512 b_ = { .value = b };\n"
+    "    W512 r = { 0 };\n"
+    "    for (unsigned i = 0; i < 16; i += 1)\n"
+    "    {\n"
+    "        r.u32[i] = a_.u32[i] + b_.u32[i] * 3u;\n"
+    "    }\n"
+    "    return r.value;\n"
+    "}\n"
+    "v8si w_pick(const v8si* p, const v8si* q, int which)\n"
+    "{\n"
+    "    v8si r = *p;\n"
+    "    if (which & 1)\n"
+    "    {\n"
+    "        r = *q;\n"
+    "    }\n"
+    "    return r;\n"
+    "}\n"
+    "void w_reverse(v16si* out, const v16si* in, unsigned n)\n"
+    "{\n"
+    "    for (unsigned i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        out[i] = in[n - 1 - i];\n"
+    "    }\n"
+    "}\n"
+    "v16si w_constant(int k)\n"
+    "{\n"
+    "    v16si c = { 1, -2, 3, -4, 5, -6, 7, -8, 9, -10, 11, -12, 13, -14, 15, 0x7fffffff };\n"
+    "    v16si d = { 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1400, 1500, -1 };\n"
+    "    v16si r = d;\n"
+    "    if (k > 0)\n"
+    "    {\n"
+    "        r = c;\n"
+    "    }\n"
+    "    return r;\n"
+    "}\n"
+    "uint64_t w_sum(v16si a)\n"
+    "{\n"
+    "    W512 a_ = { .value = a };\n"
+    "    uint64_t s = 0;\n"
+    "    for (unsigned i = 0; i < 16; i += 1)\n"
+    "    {\n"
+    "        s = s * 31 + a_.u32[i];\n"
+    "    }\n"
+    "    return s;\n"
+    "}\n"
+    "v64qu w_bytes(v64qu a, v64qu b)\n"
+    "{\n"
+    "    B512 a_ = { .value = a };\n"
+    "    B512 b_ = { .value = b };\n"
+    "    B512 r = { 0 };\n"
+    "    for (unsigned i = 0; i < 64; i += 1)\n"
+    "    {\n"
+    "        r.u8[i] = (uint8_t)(a_.u8[i] ^ b_.u8[63 - i]);\n"
+    "    }\n"
+    "    return r.value;\n"
+    "}\n"
+    "v8si w_ops(v8si a, v8si b)\n"
+    "{\n"
+    "    return a + b;\n"
+    "}\n";
+
+static const char check_test_tier1_wide_vectors_other_source[] =
+    "#include \"tier1-wide-vectors.h\"\n"
+    "#include <stdio.h>\n"
+    "#include <string.h>\n"
+    "static uint64_t hash = 1469598103934665603ull;\n"
+    "static void mix(const void* p, unsigned n) { const unsigned char* b = p; for (unsigned i = 0; i < n; i += 1) { hash ^= b[i]; hash *= 1099511628211ull; } }\n"
+    "int main(void)\n"
+    "{\n"
+    "    uint32_t s = 12345;\n"
+    "    for (int round = 0; round < 200; round += 1)\n"
+    "    {\n"
+    "        uint32_t words[64];\n"
+    "        for (int i = 0; i < 64; i += 1) { s = s * 1664525u + 1013904223u; words[i] = s; }\n"
+    "        v16si a, b; v8si p, q; v64qu x, y; v16si arr[5], out[5];\n"
+    "        memcpy(&a, words, 64); memcpy(&b, words + 16, 64); memcpy(&p, words + 32, 32); memcpy(&q, words + 40, 32);\n"
+    "        memcpy(&x, words + 48, 64); memcpy(&y, words, 64);\n"
+    "        for (int i = 0; i < 5; i += 1) memcpy(&arr[i], words + 8 * i, 64);\n"
+    "        v16si r = w_add(a, b); mix(&r, 64);\n"
+    "        v8si t = w_pick(&p, &q, round); mix(&t, 32);\n"
+    "        w_reverse(out, arr, 1 + round % 5); mix(out, 64 * (1 + round % 5));\n"
+    "        v16si c = w_constant(round % 3 - 1); mix(&c, 64);\n"
+    "        uint64_t sum = w_sum(a); mix(&sum, 8);\n"
+    "        v64qu z = w_bytes(x, y); mix(&z, 64);\n"
+    "        v8si o = w_ops(p, q); mix(&o, 32);\n"
+    "    }\n"
+    "    printf(\"%016llx\\n\", (unsigned long long)hash);\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds by x86-64, x86-64-v2 and x86-64-v3, every function Tier 1's and its code certified, run where the host
+// has each target's features.
+static void check_test_driver_tier1_wide_vectors(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const targets[3] = { "x86-64", "x86-64-v2", "x86-64-v3" };
+    for (uint32_t t = 0; t < 3; t += 1)
+    {
+        X86Target target = { 0 };
+        const bool parsed = x86_target_parse(targets[t], (uint32_t)strlen(targets[t]), &target);
+        const bool host = parsed && (x86_target_native().features & target.features) == target.features;
+        char option[32];
+        char what[64];
+        snprintf(option, sizeof(option), "-march=%s", targets[t]);
+        snprintf(what, sizeof(what), "wide vectors' (%s)", targets[t]);
+        check_test_driver_tier1_units(test, clang, executable, directory, "tier1-wide-vectors", what, check_test_tier1_wide_vectors_header, check_test_tier1_wide_vectors_source,
+                                      check_test_tier1_wide_vectors_other_source, option, host, 0);
+    }
+}
+
 // The machine rows' fixture (#141): x86-64-v4's vector builtins and the vector operators on elements other than 32-bit
 // integers, whose X86 rows the IR's row calls run (tier1_emit_cfg_row): bytes, words and quadwords; compares into masks
-// of every width; masked and zero-masked operations and blends; two-source permutes and shuffles; shifts by an
+// of every width, unmasked and masked, which the IR decodes into its own comparisons (#1623); masked and zero-masked
+// operations and blends; two-source permutes and shuffles; shifts by an
 // immediate, by a count in a general register and by vectors; masked loads and stores, a store of no result and a
 // compress; inserts, extracts and widening conversions of 16-, 32- and 64-byte vectors; broadcasts from general registers,
 // reductions and extractions into them; a loop whose row results cross its back edge, with values live across rows; and
@@ -2918,13 +3121,14 @@ static const char check_test_tier1_rows_source[] =
     "    __mmask32 w = _mm512_cmpgt_epi16_mask(a, b);\n"
     "    __mmask16 d = _mm512_cmple_epi32_mask(a, b);\n"
     "    __mmask8 q = _mm512_cmpneq_epi64_mask(a, b);\n"
-    "    return eq ^ (lt << 1) ^ ((uint64_t)w << 7) ^ ((uint64_t)d << 23) ^ ((uint64_t)q << 40);\n"
+    "    __mmask16 f = _mm512_cmp_ps_mask(_mm512_castsi512_ps(a), _mm512_castsi512_ps(b), _CMP_LE_OS);\n"
+    "    return eq ^ (lt << 1) ^ ((uint64_t)w << 7) ^ ((uint64_t)d << 23) ^ ((uint64_t)q << 40) ^ ((uint64_t)f << 47);\n"
     "}\n"
     "__m512i r_masked(__m512i a, __m512i b, __mmask64 k, __mmask16 k16)\n"
     "{\n"
     "    __m512i x = _mm512_mask_add_epi8(a, k, a, b);\n"
-    "    __m512i y = _mm512_maskz_sub_epi32(k16, x, b);\n"
-    "    __m512i z = _mm512_mask_blend_epi8(k, y, b);\n"
+    "    __m512i y = _mm512_maskz_sub_epi32(_mm512_mask_cmpgt_epi32_mask(k16, x, b) | (k16 >> 4), x, b);\n"
+    "    __m512i z = _mm512_mask_blend_epi8(_mm512_mask_cmplt_epu8_mask(k, y, a) ^ (k >> 5), y, b);\n"
     "    return _mm512_mask_mov_epi16(z, (__mmask32)(k >> 3), a);\n"
     "}\n"
     "__m512i r_permutes(__m512i a, __m512i b, __m512i idx)\n"
@@ -3056,7 +3260,10 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
                                   check_test_tier1_rows_other_source, "-march=x86-64-v4", host, 0);
     // #1283: Tier 1 places a row's vector roles one at a time, so that most rows take no move into or out of place: by
     // each path, with rematerialization and without, every function Tier 1's, at most one move for every two rows (Tier 0's
-    // placement moved every vector operand in and every vector result out: 150 for the unit's 58 rows).
+    // placement moved every vector operand in and every vector result out: 150 for the unit's 58 rows). The unit's 11
+    // compares into masks were rows that took no move; #1623 decodes them into the IR's comparisons, so the bound counts
+    // them with the rows still.
+    const uint64_t compares = 11;
     char header[512];
     char unit[512];
     char object[512];
@@ -3071,9 +3278,10 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
         CheckTestTier1Build build;
         const bool compiled = check_test_tier1_build(executable, unit, "", object, (run & 2) == 0, (run & 1) != 0, true, false, "-march=x86-64-v4", &build);
         char message[256];
-        snprintf(message, sizeof(message), "the machine rows' unit takes at most a move into or out of place for every two rows (path %u, rematerialize %u: %llu rows, %llu moves)", run & 1,
+        snprintf(message, sizeof(message),
+                 "the machine rows' unit takes at most a move into or out of place for every two rows and compares (path %u, rematerialize %u: %llu rows, %llu moves)", run & 1,
                  (run & 2) == 0 ? 1u : 0u, (unsigned long long)build.machine_rows, (unsigned long long)build.row_moves);
-        check_test_expect(test, compiled && build.machine_rows >= 50 && 2 * build.row_moves <= build.machine_rows, message);
+        check_test_expect(test, compiled && build.machine_rows >= 50 && 2 * build.row_moves <= build.machine_rows + compares, message);
         unlink(object);
     }
     unlink(unit);

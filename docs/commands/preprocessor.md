@@ -65,6 +65,13 @@ requirements. [Command index](README.md).
   calls `pp_history_ensure` first. `check_input_system_tokens` judges system
   headers' tokens from runs the main loop keeps (`pp_system_levels`, "System
   levels"), with the history's judgment (`pp_system_levels_history`) as twin.
+  The checker's driver gives the files' token columns back after the run
+  (`pp_release_file_columns`), and a replay prepares the files again;
+  `pp_test_deferred_history` replays after that release. `-Wempty-body` places
+  a lone invocation from the file's bytes (`pp_output_invocation_place`),
+  which `test-preprocessor` checks against the history's place in every file
+  it compiles (`pp_test_invocation_places`) and in a fixture
+  (`pp_test_history_invocation_places`).
   `c_preprocessor_history_test.c` is part of `test-preprocessor`, including its
   Clang diagnostic comparisons. `benchmark-preprocessor --history-cost`
   compares recording it with deferring it and reports retained and temporary
@@ -144,6 +151,9 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   `.` and `..`, a name past ASCII or past `NAME_MAX`), a cache another unit shares, a directory with a name past
   ASCII never listed, one of 64 names put off by its first look and listed at its 256th, and every path, file and
   error the same as with listings off;
+  with no descriptor left after a listing (`pp_test_listing_descriptors`), a ruled-out name's ENOENT and the next
+  directory's EMFILE, reported there, against the first directory's EMFILE without listings, and the answers a unit
+  sharing the cache then gets;
   the directory-read boundary (`pp_test_directory_reads`, #1604): exact returned-byte MSan shadow, untouched
   guards and unread tails, short reads, EOF and failed calls, plus guarded malformed/truncated records. The generic
   raw `getdents64` syscall wrapper unpoisons only a positive returned range; no listing semantic or EMFILE-policy

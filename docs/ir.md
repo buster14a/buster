@@ -269,6 +269,28 @@ repeated uses. Void-result instructions have empty slices. Block IDs, symbols,
 slots, constants and side-table offsets never count as value uses. Derived counts
 are accumulated in u64 and checked before becoming u32 offsets.
 
+The builder has two twins (#1634). The scalar one, `ir_uses_validated_scalar`,
+decodes each operand through `ir_operand`. The vector one, `ir_uses_validated`,
+decodes 16 instructions at a time (`ir_uses_batch`):
+
+- One byte permute of the opcode tables gives every instruction's `a`, `b` and
+  `c` masks. One compare per column finds the optional operands that are present.
+- `pdep` spreads the three column masks into one 48-bit mask. Bit `3 * lane +
+  column` is set where that instruction has that operand, so ascending bits run
+  in `ir_operand`'s order: instruction by instruction, then `a`, `b`, `c`.
+- The count and fill loops walk that mask with `tzcnt` and read each operand
+  straight from its column, with no per-operand decode and no staging buffer.
+  A first version interleaved and compressed the operands through a stack
+  buffer. On the 9700X its overlapping vector stores and scalar reloads made
+  32-instruction functions 14% to 19% slower, so it was dropped.
+- A phi's inputs or a call's arguments follow that instruction's own fixed
+  operands, so the mask is walked in segments that end at each phi or call.
+
+Both twins allocate the same arrays and build identical lists. The optimizer's
+preparation uses the scalar twin on its scalar path. Placing a use is still
+a dependent increment of its value's cursor, so a value with many uses
+serializes its own increments in both twins.
+
 ## Verification
 
 `ir_verify` checks common instruction rules 16 rows at a time. Byte-permute tables
@@ -874,7 +896,10 @@ and vector classification produce identical columns, side arrays and block range
 ./build/compiler benchmark-ir-source [--only VARIANT] [--after-scalar MS] [preprocessor options] file...
 ```
 
-`test-ir` has independently expected CFG/use lists and rejection fixtures,
+`test-ir` compares the two use-list twins on its printer fixtures, guarded
+tails, every-operand-kind fixture, generated functions and allocation
+failures. `test-ir-source` compares them on every lowered and promoted source
+form (`uses_forms`, `uses_failed`). `test-ir` also has independently expected CFG/use lists and rejection fixtures,
 conversion and constant coverage, loop/diamond/self phis, duplicate targets,
 8,192 adversarial i128 switch cases, guarded columns of lengths 0 through 33,
 dominance tails, overflow, arena rollback, exact printer text and random

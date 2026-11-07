@@ -2,8 +2,9 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Real C producer acceptance for #141's machine rows: the vector operators on elements other than 32-bit integers and the
 // vector builtins, whose X86 rows the typed stream's lowering makes the IR's row calls (IrFunction.rows). Bytes, words and
-// quadwords, a compare into a mask, a masked operation and a masked store of no result, a shift by a count from a general
-// register, a permute, and a loop whose row results cross its back edge as phis.
+// quadwords, a compare into a mask (the IR's own vcmp since #1623, ir_simd_typed_compare_mask), a masked operation and a
+// masked store of no result, a shift by a count from a general register, a permute, and a loop whose row results cross
+// its back edge as phis.
 typedef char v64i8 __attribute__((vector_size(64)));
 typedef short v32i16 __attribute__((vector_size(64)));
 typedef long long v8i64 __attribute__((vector_size(64)));

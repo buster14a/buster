@@ -3961,7 +3961,9 @@ return it. `-Wempty-body` leaves an `if` that has an
 invocations' columns, including an argument-first or nested expansion (#1339).
 Only an enabled candidate whose position comes from a macro requests deferred
 expansion history; file-spelled positions and units without empty-body candidates keep
-that history deferred. The driver tests compare quiet, indented and same-line
+that history deferred. A macro's position that the file alone gives, one
+invocation between two file tokens (`pp_output_invocation_place`), keeps it
+deferred too; `--scalar` asks the history, its twin (#628). The driver tests compare quiet, indented and same-line
 body, object, argument, nested and pasted macro cases with Clang on both paths,
 and check that file-spelled candidates and suppressed warnings do not replay history.
 `-Wparentheses` covers a `for` condition as well as an `if`,
@@ -6327,10 +6329,17 @@ arguments against the function. The checker now gives these as clang does.
   base's section, value and size. It creates no group of its own, including when
   its base belongs to a selectany group.
 
-  The rest stay refused by name: `no_caller_saved_registers` (register
-  preservation), and the attributes whose handlers clang has its own
-  (`pass_object_size`, `interrupt` and others). Recognizing their
-  names does not supply those handlers or their ABI effects.
+  `no_caller_saved_registers` is a calling convention's attribute here
+  (`CHECK_CALL_NO_CALLER_SAVED`, [the calling-convention guide](calling-convention.md)):
+  clang's function type bit, a System V function's type whose callee keeps
+  every register. Its count is checked before its subject, as clang's type
+  processing does. On a tag it is nothing; elsewhere it gets the function
+  types' warning. With `sysv_abi` or `cdecl` it is the same type. With
+  another convention, which clang also takes, it is refused by name.
+
+  The rest stay refused by name: the attributes whose handlers clang has its
+  own (`pass_object_size`, `interrupt` and others). Recognizing their names
+  does not supply those handlers or their ABI effects.
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,
   and C++'s `Owner`, `Pointer`, `contained_type` and
@@ -6646,10 +6655,24 @@ arguments against the function. The checker now gives these as clang does.
     missing-semicolon and malformed K&R-tail repairs above preserve their
     original parse errors and notes; they do not make every parser or semantic
     failure resumable (`docs/c-parser.md`).
-  - A function definition's attribute whose argument count is wrong
-    (`regparm`, `pcs`) is the count's error alone: clang's parser's
-    `-Wgcc-compat` warning before it is missing. `-Winvalid-noreturn` isn't
-    made (nor `-Wreturn-type` but for a function returning an aggregate).
+  - `-Winvalid-noreturn` isn't made (nor `-Wreturn-type` but for a function
+    returning an aggregate). A calling convention's wrong count is clang's
+    error where the convention meets a function, after a definition's
+    `-Wgcc-compat` warning, and on another subject its warning alone
+    (`CheckInputAttribute.convention_count`).
+  - A calling convention's redeclaration and assignment messages, the same for
+    `no_caller_saved_registers`:
+    - a function declared `preserve_all` after a declaration without it is
+      "conflicting types for 'f'". clang's is "function declared
+      'preserve_all' here was previously declared without calling
+      convention", or for `no_caller_saved_registers` "function declared with
+      'no_caller_saved_registers' attribute was previously declared without
+      the 'no_caller_saved_registers' attribute", with its "previous
+      declaration is here" note;
+    - an assignment between pointers to functions of two conventions is
+      "incompatible operand or conversion types", where clang's is
+      "incompatible function pointer types assigning to …";
+    - a typedef's type prints without clang's `'F *' (aka '…')`.
   - After a missing `;`'s recovery, as everywhere, a declaration's checker
     error ends what is published (`int x _Alignas(3) int y _Alignas(4);`
     stops at "requested alignment is not a power of 2", where clang goes on

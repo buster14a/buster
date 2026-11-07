@@ -27,9 +27,13 @@ requirements. [Command index](README.md).
   [--print] [--file IR]` runs hand-written and random 128-bit IR, and Tier 0's
   random 128-bit programs, through the split by both paths, the optimizer and
   both of Tier 1's paths natively, against the IR's interpreter on the unsplit
-  function and the programs' stack machine; and Tier 0's random long double
+  function and the programs' stack machine; Tier 0's random long double
   programs, whose values the CFG consumer keeps in frame objects and computes on
-  the x87 stack (`TIER1_RULE_X87`, #141), natively against their stack machine.
+  the x87 stack (`TIER1_RULE_X87`, #141), natively against their stack machine;
+  and vectors wider than the target's registers (`ir_vector_split.c`, #1624),
+  hand-written IR through the split into 16- and 32-byte pieces by both paths,
+  the interpreter and the optimizer, natively at x86-64's pieces, with its
+  refusals and its scan's two paths (`tier1_wide_vectors_test.c`).
   The convention's rarer aggregate shapes are taken; those of vectors still
   refuse explicitly ([the Tier 1 guide](../../docs/tier1.md)'s list). AVX-512's
   masks (#179) are selected (`kmov`, `kand`, `kor`, `kxor`, `knot`, and loads,
@@ -41,8 +45,9 @@ requirements. [Command index](README.md).
   xmm15, machine rows' roles below 16 too (#1281). Run
   `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit`,
   `test-tier1-pipeline --cross-check` and `test-tier1-masks` (hand-written mask and vector IR
-  natively against the IR's interpreter; Tier 0's mask programs and every `_k*`
-  builtin's row through the IR, SSA and the optimizer to Tier 1's native code) for bounded typed-stream/native
+  natively against the IR's interpreter; Tier 0's mask programs, every `_k*`
+  builtin's row and every comparison into a mask (#1623) through the IR, SSA and
+  the optimizer to Tier 1's native code) for bounded typed-stream/native
   validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
   pipeline's fixtures by Tier 1, Tier 0 and clang `-O0`/`-O2` (bounded kernels,
   not programs; under the 9700X's lock, CPU 2), and `benchmark-tier1-select-source
@@ -60,7 +65,7 @@ requirements. [Command index](README.md).
   for supported inputs and the complete C-source acceptance still pending.
 - `measure-tier1-programs --clang PATH [--tcc PATH] --sqlite DIR --speedtest DIR
   --lua DIR --scripts DIR [--runs N] [--warmups N] [--directory DIR] [--keep]
-  [--uncounted]` (`tier1_programs_measure.c`, #138 and #1189) builds the
+  [--uncounted] [--variant OPTION]...` (`tier1_programs_measure.c`, #138 and #1189) builds the
   programs Tier 1 is measured by against clang -O2: speedtest1 (DIR/sqlite3.c,
   DIR/speedtest1.c, #136's flags and options) and Lua 5.4.8's interpreter (its
   33 sources) running the five scripts of the `cc3387f` record. Each is built
@@ -88,7 +93,10 @@ requirements. [Command index](README.md).
   than `cc`, and each run's counters are its own rather than `perf stat`'s of
   one run per build. `correctness.tests` checks its dispatch on every run: an
   incomplete command prints its usage, and one without its inputs fails its
-  first build.
+  first build. Each `--variant` (four at most) adds a build of `--tier1`'s
+  with OPTION after its options, named `--tier1 OPTION`, checked and timed as
+  every build is, with its medians against `--tier1`'s in the table (#172's
+  `--variant --tier1-schedule=post`: [the scheduling guide](../tier1-scheduling.md)).
 - `measure-tier1-rows --clang PATH [--base COMPILER] [--src DIR] [--lexer
   FILE]... [--march ARCH] [--rounds N] [--passes N] [--runs N] [--warmups N]
   [--directory DIR] [--keep] [--uncounted]` (`tier1_rows_measure.c`, #1283)
