@@ -2051,7 +2051,7 @@ static void check_input_warning_once(CheckInputReader* reader, const CheckWarnin
 // declarator's name backward over its declarator and specifiers for the identifier that resolves to a typedef.
 // The scan may cross sibling declarators, their initializers and parameter commas — a declarator's own name and
 // `,`/`=` can sit between the name and the shared specifiers (`S a, *b`, `f(T x, U y)`) — while a `;`, `:`,
-// brace or group close cannot. `declaration` is the declaration's name token; 0 says its base was spelled
+// brace, group close or a type's keyword cannot. `declaration` is the declaration's name token; 0 says its base was spelled
 // directly (or that the declaration is not one at all). Clang prints that typedef's name for the type's base
 // then, and an `aka` for what it hides unless it is its anonymous tag's own typedef.
 static uint32_t check_input_typedef_spelling(const CheckInput* input, const Parser* parser, uint32_t declaration)
@@ -2073,11 +2073,12 @@ static uint32_t check_input_typedef_spelling(const CheckInput* input, const Pars
         }
         else
         {
+            // A type keyword or a tag's is the base spelled directly (#147): `f(T x, void *y)`'s y crosses no further.
             const uint8_t kind = parser->tokens.kinds[token];
             const uint8_t role = parser->tree.roles[token];
             found = kind != PARSE_KIND_SEMI && kind != PARSE_KIND_R_BRACE && kind != PARSE_KIND_L_BRACE &&
-                    kind != PARSE_KIND_COLON && role != PARSE_ROLE_TERMINATOR &&
-                    role != PARSE_ROLE_CLOSE_GROUP && role != PARSE_ROLE_LABEL;
+                    kind != PARSE_KIND_COLON && kind != PARSE_KIND_TYPE && kind != PARSE_KIND_STRUCT && kind != PARSE_KIND_ENUM &&
+                    role != PARSE_ROLE_TERMINATOR && role != PARSE_ROLE_CLOSE_GROUP && role != PARSE_ROLE_LABEL;
         }
     }
     return result;
