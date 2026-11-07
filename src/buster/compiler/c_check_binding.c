@@ -382,10 +382,17 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
         output->binding_statistics.identifiers = identifiers;
         output->binding_statistics.declarations = declarations;
     }
+    // The vector path's passes visit the uses, and the declarations, each listed once in order
+    // (check_input_operation_events), where each visited every event with a branch on its operation; the scalar path, the
+    // twin, visits every event (#529).
+    const bool listed = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    const uint64_t list_mark = reader->scratch != NULL ? reader->scratch->length : 0;
+    uint32_t* uses = valid && listed && reader->scratch != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)events->count + 15) : NULL;
+    const uint32_t use_count = uses != NULL ? check_input_operation_events(events, C_BINDING_USE, uses) : events->count;
     const bool deferred = valid && reader->deferred != NULL && check_deferred_binding_answers(reader->deferred, reader, resolved);
-    for (uint32_t event = 0; valid && !deferred && event < events->count; event += 1)
+    for (uint32_t at = 0; valid && !deferred && at < use_count; at += 1)
     {
-        check_input_binding_answer(reader, resolved, event);
+        check_input_binding_answer(reader, resolved, uses != NULL ? uses[at] : at);
     }
     valid &= !output->resource;
     const bool unused_columns = check_sparse_present(output->body_declarations) && check_sparse_present(output->parameters) &&
@@ -403,19 +410,11 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
             memset(used_tokens, 0, count);
             memset(parameters, 0, count);
             memset(reported, 0, count);
-            // The vector path's passes visit the uses and the declarations, each listed once in order
-            // (check_input_operation_events), where each visited every event with a branch on its operation; the scalar
-            // path, the twin, visits every event (#529).
-            const bool listed = !BUSTER_SCALAR_PATH(parser->options.scalar);
-            const uint64_t list_mark = reader->scratch->length;
-            uint32_t* uses = listed ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)events->count + 15) : NULL;
             uint32_t* declares = uses != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)events->count + 15) : NULL;
-            const bool lists = listed && declares != NULL;
-            const uint32_t use_count = lists ? check_input_operation_events(events, C_BINDING_USE, uses) : events->count;
-            const uint32_t declare_count = lists ? check_input_operation_events(events, C_BINDING_DECLARE, declares) : events->count;
+            const uint32_t declare_count = declares != NULL ? check_input_operation_events(events, C_BINDING_DECLARE, declares) : events->count;
             for (uint32_t at_use = 0; at_use < use_count; at_use += 1)
             {
-                const uint32_t event = lists ? uses[at_use] : at_use;
+                const uint32_t event = uses != NULL ? uses[at_use] : at_use;
                 if (events->operation[event] == C_BINDING_USE)
                 {
                     const uint32_t handle = resolved[event];
@@ -447,7 +446,7 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
             // A use that bound an earlier declaration also keeps a later definition of the same entity used.
             for (uint32_t at_declare = 0; at_declare < declare_count; at_declare += 1)
             {
-                const uint32_t event = lists ? declares[at_declare] : at_declare;
+                const uint32_t event = declares != NULL ? declares[at_declare] : at_declare;
                 const uint32_t previous = events->previous[event];
                 if (events->operation[event] == C_BINDING_DECLARE && previous != 0 && previous <= events->count &&
                     events->operation[previous - 1] == C_BINDING_DECLARE && events->key[previous - 1] == events->key[event] &&
@@ -458,9 +457,8 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
             }
             if (check_input_parameter_marks(output, parser, parameters))
             {
-                check_input_unused_events(reader, used, used_tokens, parameters, reported, lists ? declares : NULL, declare_count);
+                check_input_unused_events(reader, used, used_tokens, parameters, reported, declares, declare_count);
             }
-            arena_pop_to(reader->scratch, list_mark);
         }
         else if (used == NULL || (count != 0 && (used_tokens == NULL || parameters == NULL || reported == NULL)))
         {
@@ -469,6 +467,10 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
             output->resource = true;
             valid = false;
         }
+    }
+    if (reader->scratch != NULL)
+    {
+        arena_pop_to(reader->scratch, list_mark);
     }
     return valid && output->report_count == 0;
 }
