@@ -7100,6 +7100,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 #include "c_check_attribute_arguments_driver_test.c"
 #include "c_check_parse_note_driver_test.c"
 #include "c_check_convention_driver_test.c"
+#include "c_check_interrupt_driver_test.c"
 #include "c_check_tier1_driver_test.c"
 #include "c_check_frame_pointer_driver_test.c"
 #include "c_check_stack_clash_driver_test.c"
@@ -8430,6 +8431,11 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_conventions(&test, clang, executable, directory);
                 check_test_driver_preserving_frames(&test, clang, executable, directory);
+                check_test_driver_interrupt_handlers(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_interrupts(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

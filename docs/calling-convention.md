@@ -1864,6 +1864,15 @@ every register. With `sysv_abi` or `cdecl` it is that type. With another
 convention (`ms_abi`, `vectorcall`, `preserve_all` and the others, which clang
 takes), it is refused by name, since the type has no room for both.
 
+A call in a `no_caller_saved_registers` function, or in an x86 `interrupt`
+service routine, of a callee without the attribute on its declaration is
+clang's `-Wexcessive-regsave` warning (#147, `docs/c-checker.md`): the
+callee may clobber the vector registers the caller keeps. An interrupt
+service routine's definition keeps that same set of every register in Tier
+0's handler frame (`check_program_interrupt`, `Tier0Function.interrupt`,
+`docs/tier0.md`), which returns with `iretq`; a variadic one is refused by
+name ("unsupported: variadic interrupt service routines").
+
 Tier 0 leaves out the result's registers, which the caller reads (LLVM's
 return lowering takes them out of the set). A definition whose frame Tier 0's
 preserving frame doesn't take is refused by name: one that makes a musttail

@@ -842,6 +842,12 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_NODEREF_CONVERSION:
             result = "casting to dereferenceable pointer removes 'noderef' attribute";
             break;
+        case CHECK_WARNING_EVENT_EXCESSIVE_REGSAVE:
+            result = payload->data == 0 ?
+                     "interrupt service routine should only call a function with attribute 'no_caller_saved_registers' or be compiled with '-mgeneral-regs-only'" :
+                     "function with attribute 'no_caller_saved_registers' should only call a function with attribute 'no_caller_saved_registers' or be compiled with "
+                     "'-mgeneral-regs-only'";
+            break;
         case CHECK_WARNING_EVENT_DEPRECATED_USE:
         {
             // The message is the attribute's string as written, without its quotes or prefix. An anonymous tag's name is its
@@ -1136,6 +1142,9 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
         case CHECK_WARNING_NOTE_NODEREF_DECLARATION:
             result = check_warning_text(scratch, "%.*s declared here", (int)name.length, name.pointer);
             break;
+        case CHECK_WARNING_NOTE_DECLARED_HERE:
+            result = check_warning_text(scratch, "'%.*s' declared here", (int)name.length, name.pointer);
+            break;
         case CHECK_WARNING_NOTE_SPAN_REASON:
         {
             static const char* const places[] = { "", "1st", "2nd" };
@@ -1260,6 +1269,11 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                             pp_diagnose_output_phase(pp, disposition, source, semantic ? boundary : event->payload.token,
                                                      semantic ? PP_DIAGNOSTIC_SEMANTIC : PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
                         }
+                    }
+                    else if ((event->flags & BUSTER_CHECK_WARNING_UNLOCATED) != 0)
+                    {
+                        // An implicit attribute's warning, which clang gives no location (#147: interrupt's used).
+                        pp_diagnose_unlocated_notes(pp, disposition, boundary, notes, event->note_count, "%s%s", message, suffix);
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE || event->kind == CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED)
                     {

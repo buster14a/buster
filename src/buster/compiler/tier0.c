@@ -627,7 +627,21 @@ struct Tier0Function
     uint8_t preserve_vectors;
     uint8_t preserve_vector_bytes;
     uint8_t preserve_mask_bytes;
+    // An x86 interrupt service routine (#147, clang's `interrupt`, LLVM's x86_intrcc): BUSTER_TIER0_INTERRUPT_HANDLER, or
+    // _ERROR_CODE for one whose exception pushes an error code. The processor enters it with the interrupted code's rip,
+    // cs, rflags, rsp and ss on the stack (and the error code below them), not a call's return address, so that a
+    // preserving frame of every register (preserve_general and the rest) keeps the interrupted code's registers; its
+    // prologue clears the direction flag (cld), as the interrupted code's may be set, and gives its parameters from that
+    // stack: the first, the frame's address, in rdi, and the second, the error code, in rsi, both of which the frame
+    // saved, so that their System V locations take them as ever (tier0_emit_interrupt). The error code's frame is 8
+    // bytes out of a call's alignment, which its reservation makes up; its epilogue steps over the error code. It ends
+    // with iretq. It keeps no temporary below rsp, where a nested interrupt's frame would land: its red zone's
+    // temporaries are its frame's (Tier0Frame.temporaries). Its result is void, and it takes no variadic arguments.
+    uint8_t interrupt;
 };
+
+#define BUSTER_TIER0_INTERRUPT_HANDLER 1
+#define BUSTER_TIER0_INTERRUPT_ERROR_CODE 2
 
 #define BUSTER_TIER0_LIFETIME_END 0x80000000u
 #define BUSTER_TIER0_FRAME_POINTER_NONE 0
@@ -786,6 +800,10 @@ struct Tier0Code
     uint32_t frame_preserve_vectors;
     uint8_t frame_preserve_vector_bytes;
     uint8_t frame_preserve_mask_bytes;
+    // An interrupt service routine's frame (#147, Tier0Function.interrupt): its epilogue's iretq for the ret, after an add
+    // of 8 to rsp over the error code where it has one, whose frame's canonical frame address is 8 bytes further up
+    // (emitted_tier0_interrupt_rows).
+    uint8_t frame_interrupt;
     Tier0Error error;
     uint32_t node;
 };
@@ -957,8 +975,18 @@ static bool tier0_preserve_valid(const Tier0Function* function)
     const uint32_t masks = function->preserve_mask_bytes;
     const bool preserving = function->preserve_general != 0 || vectors != 0 || masks != 0;
     const bool widths = (vectors == 0 && bytes == 0) || (vectors == 16 && (bytes == 16 || bytes == 32 || bytes == 64)) || (vectors == 32 && bytes == 64);
+    // An interrupt service routine (Tier0Function.interrupt) keeps registers, returns nothing, and takes its frame's
+    // address, and the error code where it has one, at their System V locations, in rdi and rsi, without variadic ones.
+    const uint32_t interrupt = function->interrupt;
+    const AbiLocation* parameters = function->parameters;
+    const bool handler = interrupt == 0 ||
+                         (interrupt <= BUSTER_TIER0_INTERRUPT_ERROR_CODE && preserving && function->parameter_count == interrupt && parameters != 0 &&
+                          function->result.kind == BUSTER_ABI_RESULT_IGNORE && function->incoming_variadic == 0 &&
+                          parameters[0].kind == BUSTER_ABI_LOCATION_REGISTERS && parameters[0].registers[0] == X86_REGISTER_RDI &&
+                          (interrupt == BUSTER_TIER0_INTERRUPT_HANDLER ||
+                           (parameters[1].kind == BUSTER_ABI_LOCATION_REGISTERS && parameters[1].registers[0] == X86_REGISTER_RSI)));
     return (function->preserve_general & ~BUSTER_TIER0_GENERAL_CALLER_SAVED) == 0 && widths && (masks == 0 || masks == 2 || masks == 8) &&
-           (!preserving || (!function->eh_return && !function->returns_twice && function->call_tails == 0));
+           (!preserving || (!function->eh_return && !function->returns_twice && function->call_tails == 0)) && handler;
 }
 
 // Whether the function keeps registers for its caller past System V's callee-saved ones (Tier0Function.preserve_general).
@@ -4181,6 +4209,10 @@ struct Tier0Frame
     // (tier0_preserve_block_bytes), which the frame's alignment, its bias and its incoming area count past the pushes.
     uint32_t preserved;
     uint32_t preserve_bytes;
+    // An interrupt service routine's (#147, Tier0Function.interrupt): its kind, and its red zone's temporaries' place in
+    // the frame, from rbp, the first's (BUSTER_TIER0_TEMPORARIES of them, 8 bytes each: tier0_temporary_place).
+    uint8_t interrupt;
+    int32_t temporaries;
 };
 
 // A memory class's slot: 16 bytes for each integer depth, of which an x87 value takes 10 and a 128-bit integer 16.
@@ -4704,6 +4736,7 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
     }
     // The frame pointer's push, first, counts with the others, and so do a preserving function's (#147), last.
     frame->eh_return = function->eh_return;
+    frame->interrupt = function->interrupt;
     frame->preserved = tier0_preserved_general(function);
     frame->preserve_bytes = tier0_preserve_block_bytes(tier0_preserved_vectors(function), function->preserve_vector_bytes, function->preserve_mask_bytes);
     frame->pushes = (uint32_t)__builtin_popcount(frame->saved) + (frame->pointer ? 1u : 0u) + (frame->eh_return ? BUSTER_TIER0_EH_PUSHES : 0u) +
@@ -4909,13 +4942,19 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
     // With the pushes and the return address, a multiple of 16 at every call, for an object aligned to 16, and with a
     // frame pointer, under which every allocation keeps it so. A realigned frame's rsp is rounded down to its alignment
     // after the reservation instead, which keeps it so too.
-    // A preserving function's block below the pushes counts with them (#147, Tier0Frame.preserve_bytes).
+    // A preserving function's block below the pushes counts with them (#147, Tier0Frame.preserve_bytes). An interrupt
+    // service routine with an error code is entered 8 bytes off a call's alignment (Tier0Function.interrupt).
     const uint64_t above = 8 * frame->pushes + 8 + frame->preserve_bytes;
+    const uint64_t entered = above + (frame->interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE ? 8 : 0);
     const bool realigned = frame->alignment_log2 != 0;
     if ((frame->calls || aligned || frame->pointer) && !realigned)
     {
-        offset = (offset + above + 15) / 16 * 16 - above;
+        offset = (offset + entered + 15) / 16 * 16 - entered;
     }
+    // An interrupt service routine's red zone temporaries (#147, Tier0Frame.temporaries): the frame's top, right below
+    // the pushes and the preserve block, from rbp, which neither a realignment nor the body's allocations move; and no
+    // place reaches them (a realigned frame's are below its rsp's rounding down, as far below them as the frame's size).
+    offset += frame->interrupt != 0 ? 8 * BUSTER_TIER0_TEMPORARIES : 0;
     valid = valid && offset <= INT32_MAX;
     frame->size = valid ? (uint32_t)offset : 0;
     // The incoming area: past the frame, the pushes and the return address from rsp, or in a realigned frame, whose rsp is
@@ -4965,6 +5004,9 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
     frame->base = frame->based ? X86_REGISTER_R15 : biased ? X86_REGISTER_RBP : X86_REGISTER_RSP;
     valid = valid && (!biased || offset + 8 * (frame->pushes - 1) + frame->preserve_bytes <= INT32_MAX);
     frame->bias = valid && biased ? (int32_t)-(int64_t)(offset + 8 * (frame->pushes - 1) + frame->preserve_bytes) : 0;
+    // An interrupt service routine's frame has a frame pointer, its temporaries the frame's top 128 bytes from rbp.
+    valid = valid && (frame->interrupt == 0 || frame->pointer);
+    frame->temporaries = frame->interrupt != 0 && valid ? (int32_t)-(int64_t)(8 * (frame->pushes - 1) + frame->preserve_bytes + 8 * BUSTER_TIER0_TEMPORARIES) : 0;
     for (uint32_t l = 0; l < function->local_count && frame->base != X86_REGISTER_RSP; l += 1)
     {
         if (!homes[l].is_register && homes[l].reg == X86_REGISTER_RSP && homes[l].mode == BUSTER_X86_MEMORY_BASE)
@@ -5161,6 +5203,10 @@ struct Tier0Writer
     uint32_t branch_count;
     Tier0Choices* choices;
     uint32_t choice_count;
+    // An interrupt service routine's red zone temporaries are its frame's, from rbp at `temporaries` (Tier0Frame's),
+    // where no nested interrupt's frame lands; anyone else's are below rsp.
+    bool frame_temporaries;
+    int32_t temporaries;
 };
 
 static void tier0_put(Tier0Writer* writer, X86Instruction record)
@@ -5345,10 +5391,17 @@ static uint32_t tier0_copy_records(uint32_t size)
     return size >= 16 ? 2 * ((size + 15) / 16) : size > piece ? 4 : 2;
 }
 
-// The red zone temporary `t`'s place below rsp (BUSTER_TIER0_TEMPORARIES).
-static int32_t tier0_temporary(uint32_t t)
+// The red zone temporary `t`'s place below rsp (BUSTER_TIER0_TEMPORARIES), or an interrupt service routine's in its frame,
+// from rbp (Tier0Writer.frame_temporaries).
+static int32_t tier0_temporary(const Tier0Writer* writer, uint32_t t)
 {
-    return -8 * (int32_t)(t + 1);
+    return writer->frame_temporaries ? writer->temporaries + 8 * (int32_t)t : -8 * (int32_t)(t + 1);
+}
+
+// The register the temporaries' places are from: rsp, or an interrupt service routine's rbp.
+static uint8_t tier0_temporary_base(const Tier0Writer* writer)
+{
+    return writer->frame_temporaries ? X86_REGISTER_RBP : X86_REGISTER_RSP;
 }
 
 // Part `part` of an aggregate whose address is in `base` loaded into its register as tier0_parts_of says: one load of its
@@ -5361,7 +5414,7 @@ static void tier0_load_part(Tier0Writer* writer, Tier0Part part, uint8_t base, u
     if (part.load == BUSTER_TIER0_PART_TEMPORARY)
     {
         const uint32_t form = xmm ? X86_FORM_MOVSD_X_XM64 : X86_FORM_MOV_R64_RM64;
-        tier0_put(writer, tier0_instruction(form, reg, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, tier0_temporary(temporary), 0));
+        tier0_put(writer, tier0_instruction(form, reg, tier0_temporary_base(writer), BUSTER_X86_MEMORY_BASE, tier0_temporary(writer, temporary), 0));
     }
     else if (part.load == BUSTER_TIER0_PART_OVERLAP)
     {
@@ -5502,7 +5555,7 @@ static __attribute__((noinline)) uint32_t tier0_place_aggregates(const Tier0Func
                 }
                 else if (part.load == BUSTER_TIER0_PART_TEMPORARY)
                 {
-                    tier0_copy(writer, X86_REGISTER_RSP, tier0_temporary(temporaries), source, part.offset, part.bytes, general, xmm);
+                    tier0_copy(writer, tier0_temporary_base(writer), tier0_temporary(writer, temporaries), source, part.offset, part.bytes, general, xmm);
                     temporaries += 1;
                 }
             }
@@ -5826,9 +5879,9 @@ static X86Instruction tier0_int128_half(uint32_t form, const Tier0Frame* frame, 
 }
 
 // A red zone temporary below rsp as a memory operand of `form` (tier0_temporary's place), with `reg`.
-static X86Instruction tier0_red_zone(uint32_t form, uint8_t reg, uint32_t t)
+static X86Instruction tier0_red_zone(const Tier0Writer* writer, uint32_t form, uint8_t reg, uint32_t t)
 {
-    return tier0_instruction(form, reg, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, tier0_temporary(t), 0);
+    return tier0_instruction(form, reg, tier0_temporary_base(writer), BUSTER_X86_MEMORY_BASE, tier0_temporary(writer, t), 0);
 }
 
 // An x87 instruction on st(i).
@@ -6636,11 +6689,11 @@ static void tier0_emit_fence(uint64_t value, Tier0Writer* writer)
 #define BUSTER_TIER0_X87_TRUNCATE_RECORDS 5
 static void tier0_x87_truncate(Tier0Writer* writer, uint8_t scratch)
 {
-    tier0_put(writer, tier0_red_zone(X86_FORM_FNSTCW_M16, 0, 0));
-    tier0_put(writer, tier0_red_zone(X86_FORM_MOVZX_R32_RM16, scratch, 0));
+    tier0_put(writer, tier0_red_zone(writer, X86_FORM_FNSTCW_M16, 0, 0));
+    tier0_put(writer, tier0_red_zone(writer, X86_FORM_MOVZX_R32_RM16, scratch, 0));
     tier0_put(writer, tier0_instruction(X86_FORM_OR_RM32_IMM32, 0, scratch, BUSTER_X86_REGISTER_DIRECT, 0, 0x0c00));
-    tier0_put(writer, tier0_red_zone(X86_FORM_MOV_RM16_R16, scratch, 1));
-    tier0_put(writer, tier0_red_zone(X86_FORM_FLDCW_M16, 0, 1));
+    tier0_put(writer, tier0_red_zone(writer, X86_FORM_MOV_RM16_R16, scratch, 1));
+    tier0_put(writer, tier0_red_zone(writer, X86_FORM_FLDCW_M16, 0, 1));
 }
 
 // A long double entry's records (tier0_memory_entry's): its operands loaded onto the x87 stack from their slots (an F80
@@ -6764,8 +6817,8 @@ static void tier0_emit_x87(const Tier0Function* function, const Tier0Entries* en
         if (from == BUSTER_TYPED_CLASS_F32 || from == BUSTER_TYPED_CLASS_F64)
         {
             const bool single = from == BUSTER_TYPED_CLASS_F32;
-            tier0_put(writer, tier0_red_zone(single ? X86_FORM_MOVSS_XM32_X : X86_FORM_MOVSD_XM64_X, (uint8_t)(floating - 1), 0));
-            tier0_put(writer, tier0_red_zone(single ? X86_FORM_FLD_M32 : X86_FORM_FLD_M64, 0, 0));
+            tier0_put(writer, tier0_red_zone(writer, single ? X86_FORM_MOVSS_XM32_X : X86_FORM_MOVSD_XM64_X, (uint8_t)(floating - 1), 0));
+            tier0_put(writer, tier0_red_zone(writer, single ? X86_FORM_FLD_M32 : X86_FORM_FLD_M64, 0, 0));
             tier0_put(writer, tier0_memory_slot(X86_FORM_FSTP_M80, frame, depth, 0));
         }
         else if (!tier0_class_x87(from))
@@ -6779,15 +6832,15 @@ static void tier0_emit_x87(const Tier0Function* function, const Tier0Entries* en
             {
                 tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_RM32, operand, operand, BUSTER_X86_REGISTER_DIRECT, 0, 0));
             }
-            tier0_put(writer, tier0_red_zone(wide ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32, operand, 0));
-            tier0_put(writer, tier0_red_zone(wide ? X86_FORM_FILD_M64 : X86_FORM_FILD_M32, 0, 0));
+            tier0_put(writer, tier0_red_zone(writer, wide ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32, operand, 0));
+            tier0_put(writer, tier0_red_zone(writer, wide ? X86_FORM_FILD_M64 : X86_FORM_FILD_M32, 0, 0));
             if (from == BUSTER_TYPED_CLASS_U64)
             {
                 // 2^64 as a float (0x5f800000) where the top bit is set, else 0: sar makes the bit a mask.
                 tier0_put(writer, tier0_instruction(X86_FORM_SAR_RM64_IMM8, 0, operand, BUSTER_X86_REGISTER_DIRECT, 0, 63));
                 tier0_put(writer, tier0_instruction(X86_FORM_AND_RM32_IMM32, 0, operand, BUSTER_X86_REGISTER_DIRECT, 0, 0x5f800000));
-                tier0_put(writer, tier0_red_zone(X86_FORM_MOV_RM32_R32, operand, 1));
-                tier0_put(writer, tier0_red_zone(X86_FORM_FADD_M32, 0, 1));
+                tier0_put(writer, tier0_red_zone(writer, X86_FORM_MOV_RM32_R32, operand, 1));
+                tier0_put(writer, tier0_red_zone(writer, X86_FORM_FADD_M32, 0, 1));
             }
             tier0_put(writer, tier0_memory_slot(X86_FORM_FSTP_M80, frame, depth - 1, 0));
         }
@@ -6797,8 +6850,8 @@ static void tier0_emit_x87(const Tier0Function* function, const Tier0Entries* en
         // CONVERT from F80 to float or double.
         const bool single = class == BUSTER_TYPED_CLASS_F32;
         tier0_put(writer, tier0_memory_slot(X86_FORM_FLD_M80, frame, depth - 1, 0));
-        tier0_put(writer, tier0_red_zone(single ? X86_FORM_FSTP_M32 : X86_FORM_FSTP_M64, 0, 0));
-        tier0_put(writer, tier0_red_zone(single ? X86_FORM_MOVSS_X_XM32 : X86_FORM_MOVSD_X_XM64, (uint8_t)floating, 0));
+        tier0_put(writer, tier0_red_zone(writer, single ? X86_FORM_FSTP_M32 : X86_FORM_FSTP_M64, 0, 0));
+        tier0_put(writer, tier0_red_zone(writer, single ? X86_FORM_MOVSS_X_XM32 : X86_FORM_MOVSD_X_XM64, (uint8_t)floating, 0));
     }
     else
     {
@@ -6809,28 +6862,28 @@ static void tier0_emit_x87(const Tier0Function* function, const Tier0Entries* en
         if (class == BUSTER_TYPED_CLASS_U64)
         {
             const uint8_t high = tier0_integer_depths[depth];
-            X86Instruction limit = tier0_red_zone(X86_FORM_MOV_RM32_IMM32, 0, 3);
+            X86Instruction limit = tier0_red_zone(writer, X86_FORM_MOV_RM32_IMM32, 0, 3);
             limit.immediate = 0x5f000000;
             tier0_put(writer, limit);
-            tier0_put(writer, tier0_red_zone(X86_FORM_FLD_M32, 0, 3));
+            tier0_put(writer, tier0_red_zone(writer, X86_FORM_FLD_M32, 0, 3));
             tier0_put(writer, tier0_x87_register(X86_FORM_FUCOMI_ST0_ST, 1));
             tier0_put(writer, tier0_instruction(X86_FORM_SETBE_RM8, 0, high, BUSTER_X86_REGISTER_DIRECT, 0, 0));
             tier0_put(writer, tier0_instruction(X86_FORM_FLDZ, 0, 0, 0, 0, 0));
             tier0_put(writer, tier0_x87_register(X86_FORM_FCMOVBE_ST0_ST, 1));
             tier0_put(writer, tier0_x87_register(X86_FORM_FSTP_ST, 1));
             tier0_put(writer, tier0_x87_register(X86_FORM_FSUBP_ST_ST0, 1));
-            tier0_put(writer, tier0_red_zone(X86_FORM_FISTP_M64, 0, 2));
-            tier0_put(writer, tier0_red_zone(X86_FORM_FLDCW_M16, 0, 0));
+            tier0_put(writer, tier0_red_zone(writer, X86_FORM_FISTP_M64, 0, 2));
+            tier0_put(writer, tier0_red_zone(writer, X86_FORM_FLDCW_M16, 0, 0));
             tier0_put(writer, tier0_instruction(X86_FORM_MOVZX_R32_RM8, high, high, BUSTER_X86_REGISTER_DIRECT, 0, 0));
             tier0_put(writer, tier0_instruction(X86_FORM_SHL_RM64_IMM8, 0, high, BUSTER_X86_REGISTER_DIRECT, 0, 63));
-            tier0_put(writer, tier0_red_zone(X86_FORM_XOR_R64_RM64, high, 2));
+            tier0_put(writer, tier0_red_zone(writer, X86_FORM_XOR_R64_RM64, high, 2));
             tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, result, high, BUSTER_X86_REGISTER_DIRECT, 0, 0));
         }
         else
         {
-            tier0_put(writer, tier0_red_zone(X86_FORM_FISTP_M64, 0, 2));
-            tier0_put(writer, tier0_red_zone(X86_FORM_FLDCW_M16, 0, 0));
-            tier0_put(writer, tier0_red_zone(X86_FORM_MOV_R64_RM64, result, 2));
+            tier0_put(writer, tier0_red_zone(writer, X86_FORM_FISTP_M64, 0, 2));
+            tier0_put(writer, tier0_red_zone(writer, X86_FORM_FLDCW_M16, 0, 0));
+            tier0_put(writer, tier0_red_zone(writer, X86_FORM_MOV_R64_RM64, result, 2));
         }
     }
 }
@@ -8169,20 +8222,20 @@ static void tier0_emit_u64_convert_form(const Tier0Entries* entries, bool regist
         const bool single = class == BUSTER_TYPED_CLASS_F32;
         const uint8_t x = tier0_integer_depths[depth - 1];
         const uint8_t result = (uint8_t)floating;
-        tier0_put(writer, tier0_red_zone(X86_FORM_MOV_RM64_R64, x, 0));
+        tier0_put(writer, tier0_red_zone(writer, X86_FORM_MOV_RM64_R64, x, 0));
         tier0_put(writer, tier0_instruction(X86_FORM_AND_RM32_IMM8, 0, x, direct, 0, 1));
         tier0_put(writer, tier0_instruction(X86_FORM_ADD_R32_RM32, x, x, direct, 0, 0));
-        tier0_put(writer, tier0_red_zone(X86_FORM_OR_R64_RM64, x, 0));
+        tier0_put(writer, tier0_red_zone(writer, X86_FORM_OR_R64_RM64, x, 0));
         tier0_put(writer, tier0_instruction(X86_FORM_SHR_RM64_IMM8, 0, x, direct, 0, 1));
-        tier0_put(writer, tier0_red_zone(X86_FORM_CMP_RM64_IMM8, 0, 0));
-        tier0_put(writer, tier0_red_zone(X86_FORM_CMOVGE_R64_RM64, x, 0));
+        tier0_put(writer, tier0_red_zone(writer, X86_FORM_CMP_RM64_IMM8, 0, 0));
+        tier0_put(writer, tier0_red_zone(writer, X86_FORM_CMOVGE_R64_RM64, x, 0));
         tier0_put(writer, tier0_instruction(single ? X86_FORM_CVTSI2SS_X_RM64 : X86_FORM_CVTSI2SD_X_RM64, result, x, direct, 0, 0));
-        tier0_put(writer, tier0_red_zone(X86_FORM_MOV_R64_RM64, x, 0));
+        tier0_put(writer, tier0_red_zone(writer, X86_FORM_MOV_R64_RM64, x, 0));
         tier0_put(writer, tier0_instruction(X86_FORM_SHR_RM64_IMM8, 0, x, direct, 0, 63));
         tier0_put(writer, tier0_instruction(X86_FORM_SHL_RM64_IMM8, 0, x, direct, 0, single ? 23 : 52));
-        tier0_put(writer, tier0_red_zone(single ? X86_FORM_MOVSS_XM32_X : X86_FORM_MOVSD_XM64_X, result, 1));
-        tier0_put(writer, tier0_red_zone(single ? X86_FORM_ADD_RM32_R32 : X86_FORM_ADD_RM64_R64, x, 1));
-        tier0_put(writer, tier0_red_zone(single ? X86_FORM_MOVSS_X_XM32 : X86_FORM_MOVSD_X_XM64, result, 1));
+        tier0_put(writer, tier0_red_zone(writer, single ? X86_FORM_MOVSS_XM32_X : X86_FORM_MOVSD_XM64_X, result, 1));
+        tier0_put(writer, tier0_red_zone(writer, single ? X86_FORM_ADD_RM32_R32 : X86_FORM_ADD_RM64_R64, x, 1));
+        tier0_put(writer, tier0_red_zone(writer, single ? X86_FORM_MOVSS_X_XM32 : X86_FORM_MOVSD_X_XM64, result, 1));
     }
     else if (registers)
     {
@@ -8213,19 +8266,19 @@ static void tier0_emit_u64_convert_form(const Tier0Entries* entries, bool regist
         const uint8_t result = tier0_integer_depths[depth];
         // 2^63 in temporary 0, through the result's register, which holds nothing yet.
         tier0_put(writer, single ? tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, result, 0, 0, 0x5f000000) : tier0_instruction(X86_FORM_MOV_R64_IMM64, 0, result, 0, 0x43e00000, 0));
-        tier0_put(writer, tier0_red_zone(single ? X86_FORM_MOV_RM32_R32 : X86_FORM_MOV_RM64_R64, result, 0));
-        tier0_put(writer, tier0_red_zone(single ? X86_FORM_UCOMISS_X_XM32 : X86_FORM_UCOMISD_X_XM64, value, 0));
-        tier0_put(writer, tier0_red_zone(X86_FORM_SETAE_RM8, 0, 1));
+        tier0_put(writer, tier0_red_zone(writer, single ? X86_FORM_MOV_RM32_R32 : X86_FORM_MOV_RM64_R64, result, 0));
+        tier0_put(writer, tier0_red_zone(writer, single ? X86_FORM_UCOMISS_X_XM32 : X86_FORM_UCOMISD_X_XM64, value, 0));
+        tier0_put(writer, tier0_red_zone(writer, X86_FORM_SETAE_RM8, 0, 1));
         tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, result, 0, 0, 0));
-        tier0_put(writer, tier0_red_zone(single ? X86_FORM_CMOVAE_R32_RM32 : X86_FORM_CMOVAE_R64_RM64, result, 0));
-        tier0_put(writer, tier0_red_zone(single ? X86_FORM_MOV_RM32_R32 : X86_FORM_MOV_RM64_R64, result, 2));
-        tier0_put(writer, tier0_red_zone(single ? X86_FORM_SUBSS_X_XM32 : X86_FORM_SUBSD_X_XM64, value, 2));
+        tier0_put(writer, tier0_red_zone(writer, single ? X86_FORM_CMOVAE_R32_RM32 : X86_FORM_CMOVAE_R64_RM64, result, 0));
+        tier0_put(writer, tier0_red_zone(writer, single ? X86_FORM_MOV_RM32_R32 : X86_FORM_MOV_RM64_R64, result, 2));
+        tier0_put(writer, tier0_red_zone(writer, single ? X86_FORM_SUBSS_X_XM32 : X86_FORM_SUBSD_X_XM64, value, 2));
         tier0_put(writer, tier0_instruction(single ? X86_FORM_CVTTSS2SI_R64_XM32 : X86_FORM_CVTTSD2SI_R64_XM64, result, value, direct, 0, 0));
         // The top bit back: setae's byte shifted into it in place (its lowest bit alone survives a shift by 63).
-        X86Instruction top = tier0_red_zone(X86_FORM_SHL_RM64_IMM8, 0, 1);
+        X86Instruction top = tier0_red_zone(writer, X86_FORM_SHL_RM64_IMM8, 0, 1);
         top.immediate = 63;
         tier0_put(writer, top);
-        tier0_put(writer, tier0_red_zone(X86_FORM_XOR_R64_RM64, result, 1));
+        tier0_put(writer, tier0_red_zone(writer, X86_FORM_XOR_R64_RM64, result, 1));
     }
 }
 
@@ -8453,7 +8506,7 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
                         }
                         else if (pass == 0 && part.load == BUSTER_TIER0_PART_TEMPORARY)
                         {
-                            tier0_copy(writer, X86_REGISTER_RSP, tier0_temporary(temporary), X86_REGISTER_RAX, part.offset, part.bytes,
+                            tier0_copy(writer, tier0_temporary_base(writer), tier0_temporary(writer, temporary), X86_REGISTER_RAX, part.offset, part.bytes,
                                        X86_REGISTER_R10, 0);
                         }
                         else if (pass != 0 && part.reg != BUSTER_TIER0_PART_STACK)
@@ -9108,6 +9161,21 @@ static __attribute__((cold, noinline)) void tier0_emit_realignment(const Tier0Fr
 // pushed, the frame reserved, in a realigned frame rsp rounded down to its alignment (and with entries that move rsp,
 // r15 set to it, its base), and the parameters moved from where they arrive to their homes (none for one that stays,
 // or that arrives on the stack).
+// An interrupt service routine's entry (#147, Tier0Function.interrupt), after its frame keeps every register: the
+// direction flag cleared, as the interrupted code's may be set (LLVM's x86_intrcc's cld), then its parameters where their
+// System V locations, rdi and rsi, say they arrive: the processor's frame's address (the interrupted rip's place, past rbp's
+// push and the error code) and the error code. Out of line and cold, as tier0_emit_preserve is.
+static __attribute__((noinline, cold)) void tier0_emit_interrupt(const Tier0Frame* frame, Tier0Writer* writer)
+{
+    const bool error_code = frame->interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE;
+    tier0_put(writer, tier0_instruction(X86_FORM_CLD, 0, 0, 0, 0, 0));
+    tier0_put(writer, tier0_instruction(X86_FORM_LEA_R64_M, X86_REGISTER_RDI, X86_REGISTER_RBP, BUSTER_X86_MEMORY_BASE, error_code ? 16 : 8, 0));
+    if (error_code)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_RSI, X86_REGISTER_RBP, BUSTER_X86_MEMORY_BASE, 8, 0));
+    }
+}
+
 static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references, Tier0Writer* writer)
 {
     if (frame->pointer)
@@ -9154,6 +9222,10 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
     if (frame->alignment_log2 != 0)
     {
         tier0_emit_realignment(frame, writer);
+    }
+    if (frame->interrupt != 0)
+    {
+        tier0_emit_interrupt(frame, writer);
     }
     if (function->incoming_variadic != 0)
     {
@@ -9241,13 +9313,14 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
 }
 
 // How many records tier0_emit_prologue writes, without writing them: the pushes, a frame pointer's mov, the frame's sub,
-// a realigned frame's and and its base's mov, and each parameter's move, store or load into its home (an aggregate's part
-// stores and slot copies), after the incoming variadic saves (a store per argument register) when it has them. The
-// epilogue's are tier0_count_epilogue's.
+// a realigned frame's and and its base's mov, an interrupt service routine's cld and parameters (tier0_emit_interrupt),
+// and each parameter's move, store or load into its home (an aggregate's part stores and slot copies), after the incoming
+// variadic saves (a store per argument register) when it has them. The epilogue's are tier0_count_epilogue's.
 static uint32_t tier0_count_prologue(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references)
 {
     uint32_t count = frame->pushes + (frame->pointer ? 1 : 0) + tier0_reservation_records(frame->probe, frame->size, frame->alignment_log2, frame->moves) +
-                     tier0_realignment_records(frame->probe, frame->alignment_log2) + (frame->based ? 1 : 0) + tier0_preserve_records(function, true);
+                     tier0_realignment_records(frame->probe, frame->alignment_log2) + (frame->based ? 1 : 0) + tier0_preserve_records(function, true) +
+                     (frame->interrupt == 0 ? 0 : frame->interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE ? 3 : 2);
     count += function->incoming_variadic != 0 ? BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS : 0;
     const bool objects = frame->object_parameters;
     for (uint32_t p = 0; p < function->parameter_count; p += 1)
@@ -9301,7 +9374,7 @@ static __attribute__((noinline)) void tier0_load_result(const Tier0Function* fun
     {
         if (parts[k].load == BUSTER_TIER0_PART_TEMPORARY)
         {
-            tier0_copy(writer, X86_REGISTER_RSP, tier0_temporary(k), X86_REGISTER_RAX, parts[k].offset, parts[k].bytes, X86_REGISTER_RCX, 0);
+            tier0_copy(writer, tier0_temporary_base(writer), tier0_temporary(writer, k), X86_REGISTER_RAX, parts[k].offset, parts[k].bytes, X86_REGISTER_RCX, 0);
         }
     }
     for (uint32_t pass = 0; pass < 2; pass += 1)
@@ -9356,15 +9429,22 @@ static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Frame*
         tier0_emit_preserve(function, frame, false, writer);
     }
     tier0_emit_teardown(frame, false, writer);
-    tier0_put(writer, tier0_instruction(X86_FORM_RET, 0, 0, 0, 0, 0));
+    // An interrupt service routine's (#147): the error code stepped over, then iretq.
+    if (frame->interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_ADD_RM64_IMM8, 0, X86_REGISTER_RSP, 0, 0, 8));
+    }
+    tier0_put(writer, tier0_instruction(frame->interrupt != 0 ? X86_FORM_IRETQ : X86_FORM_RET, 0, 0, 0, 0, 0));
 }
 
 // How many records tier0_emit_epilogue writes, without writing them: the result's loads (tier0_result_records), a
 // preserving function's loads (tier0_preserve_records), the frame's release (an add, or with a frame pointer the lea or
-// mov), the pops (tier0_count_teardown) and the ret.
+// mov), the pops (tier0_count_teardown) and the ret (an interrupt service routine's iretq, after its add over the error
+// code where it has one).
 static uint32_t tier0_count_epilogue(const Tier0Function* function, const Tier0Frame* frame)
 {
-    const uint32_t records = tier0_count_teardown(frame) + 1 + tier0_preserve_records(function, false);
+    const uint32_t records = tier0_count_teardown(frame) + 1 + tier0_preserve_records(function, false) +
+                             (frame->interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE ? 1 : 0);
     return records + (function->result_size != 0 ? tier0_result_records(function) : frame->x87_result ? 1 : 0);
 }
 
@@ -10195,7 +10275,7 @@ static inline __attribute__((always_inline)) void tier0_emit_body_entries(const 
                                                                          const Tier0Home* homes, const uint32_t* references, Tier0Code* code, Tier0Choices* choices,
                                                                          bool deep)
 {
-    Tier0Writer writer = { code->records, 0, code->references, 0, code->branches, code->targets, 0, choices, 0 };
+    Tier0Writer writer = { code->records, 0, code->references, 0, code->branches, code->targets, 0, choices, 0, frame->interrupt != 0, frame->temporaries };
     tier0_emit_prologue(function, frame, homes, references, &writer);
     // The body's branches after the prologue's (a probe's loop's, #177).
     uint32_t branches = writer.branch_count;
@@ -10574,6 +10654,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         code->frame_preserve_vectors = frame.preserve_bytes != 0 ? tier0_preserved_vectors(function) : 0;
         code->frame_preserve_vector_bytes = frame.preserve_bytes != 0 ? function->preserve_vector_bytes : 0;
         code->frame_preserve_mask_bytes = frame.preserve_bytes != 0 ? function->preserve_mask_bytes : 0;
+        code->frame_interrupt = frame.interrupt;
     }
     return error;
 }
@@ -13126,7 +13207,7 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
     int64_t* choice_values = choices->values;
     uint16_t* contexts = choices->contexts;
     const Tier0HomeTable table = tier0_home_table(homes, function->local_count);
-    Tier0Writer writer = { records, 0, links, 0, branch_records, targets, 0, choices, 0 };
+    Tier0Writer writer = { records, 0, links, 0, branch_records, targets, 0, choices, 0, frame->interrupt != 0, frame->temporaries };
     tier0_emit_prologue(function, frame, homes, references, &writer);
     // The body's branches after the prologue's (a probe's loop's, #177).
     uint32_t branches = writer.branch_count;
