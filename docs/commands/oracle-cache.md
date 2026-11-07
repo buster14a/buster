@@ -39,6 +39,12 @@ key is SHA-256 of:
   (`oracle_environment_names`) with their values, each with its roots made
   alike (below); its time limit; and the bytes of its standard input.
 
+The keyed diagnostic controls include GCC's extra fix-it output, colors and
+URL settings (including `TERM_URLS` and `TERM`). Unset and empty values remain
+distinct. A compiler run with `GCC_DIAGNOSTICS_LOG` set (even to an empty
+value) executes without cache admission, as its log may be outside the
+caller-declared replay artifacts.
+
 A compiler's run (`OracleRun.dependencies`) is traced: it runs under a seccomp
 filter that stops each call of its processes that looks at a path (`open`,
 `stat`, `access`, `readlink`, `execve` and their kin), lists a directory, or
@@ -79,8 +85,14 @@ wrote is taken when the object there is the one that compile left. What the
 cache leaves out (`oracle_path_rule`, by what each call does at a path,
 `OracleUse`): the package manager's files (under `/usr` but `/usr/local`, and
 `/bin`, `/sbin` and `/lib*`), the package database's identity standing for
-them. The kernel's (`/proc`, `/sys`), which describe the processes and the
-machine, change with no file changing (a process's id in `/proc/self/stat`,
+them. This exemption applies only to simple path spellings: repeated slashes
+and `.` components keep their own dependency records, so `/usr//local` and
+`/usr/./local` cannot bypass the `/usr/local` exception. The original spelling
+is retained; neither `..` nor symbolic links are collapsed. Entry version 4
+rejects older records that may have omitted these dependencies.
+
+The kernel's (`/proc`, `/sys`), which describe the processes and the machine,
+change with no file changing (a process's id in `/proc/self/stat`,
 the time in `/proc/uptime`, the inode and times `stat` gives of `/proc/self`,
 its process's): a check for one (`access`, `faccessat2` and `chdir`, which say
 whether it is there, as LLVM checks for `/proc/self/fd` and `/proc/self/exe`)

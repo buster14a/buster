@@ -498,6 +498,28 @@ static bool lane_test_arenas(void)
 {
     LaneTestTally tally = { 0 };
 
+    // /proc/loadavg's runnable tasks, which arena_host_busy compares with the CPUs online (#672).
+    static const struct
+    {
+        const char* text;
+        uint64_t runnable;
+    } loads[] = {
+        { "0.52 0.58 0.59 8/1234 56789\n", 8 },
+        { "12.00 9.50 7.25 1/987 4321\n", 1 },
+        { "0.00 0.00 0.00 15/15 1", 15 },
+        { "0.00 0.00 0.00 99999999999/5 1\n", UINT32_MAX },
+        { "0.00 0.00 0.00 /5 1\n", 0 },
+        { "no slash here\n", 0 },
+        { "", 0 },
+    };
+    for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(loads); i += 1)
+    {
+        lane_test_expect(&tally, arena_loadavg_runnable(loads[i].text, strlen(loads[i].text)) == loads[i].runnable,
+                         "/proc/loadavg's runnable tasks were misread");
+    }
+    // Text cut before the slash says nothing.
+    lane_test_expect(&tally, arena_loadavg_runnable(loads[0].text, 15) == 0, "/proc/loadavg cut before its slash was read");
+
     // Every power-of-two alignment, each after a 1-byte push that leaves the arena misaligned.
     Arena arena = arena_reserve(64ull << 20);
     lane_test_expect(&tally, arena.base != 0 && arena.capacity == 64ull << 20, "a 64 MB arena couldn't be reserved");
@@ -788,6 +810,43 @@ static bool lane_test_arenas(void)
         lane_test_expect(&tally, head && head_end && !head_huge, "the start of an arena takes huge pages once its pushes go past it");
     }
     arena_release(&large);
+
+    // On a busy host (arena_pages_busy, #672) an arena is advised against huge pages throughout, and its commits past its
+    // base pages advise none; so is an arena of tables. The process's own setting (PR_SET_THP_DISABLE) stays as it was,
+    // for the processes it starts.
+    const bool was_busy = arena_pages_busy;
+    const int was_disabled = prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0);
+    arena_pages_busy = true;
+    Arena busy = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+    const uint8_t* busy_past = busy.base != 0 ? arena_push(&busy, 3 * BUSTER_ARENA_HUGE_PAGE_BYTES, 1) : 0;
+    lane_test_expect(&tally, busy_past == busy.base && busy.base != 0, "a busy host's arena couldn't be pushed past its base pages");
+    if (busy_past != 0)
+    {
+        const bool busy_head = lane_test_vm_flag((uintptr_t)busy.base, "nh", &found) && found;
+        const bool busy_tail = lane_test_vm_flag((uintptr_t)busy.base + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES, "nh", &found) && found;
+        const bool busy_end = lane_test_vm_flag((uintptr_t)busy.base + BUSTER_LANE_TEST_LARGE_ARENA - 1, "nh", &found) && found;
+        const bool busy_huge = lane_test_vm_flag((uintptr_t)busy.base + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES, "hg", &found);
+        const bool busy_capable = lane_test_huge_capable((uintptr_t)busy.base + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES, &found) || !found;
+        lane_test_expect(&tally, busy_head && busy_tail && busy_end && !busy_huge && !busy_capable && !busy.huge,
+                         "a busy host's arena may take huge pages");
+    }
+    arena_release(&busy);
+    ArenaTable busy_tables[] = {
+        { .bytes = 8 * BUSTER_ARENA_HUGE_PAGE_BYTES, .small = BUSTER_ARENA_SMALL_BYTES },
+        { .bytes = 8 * BUSTER_ARENA_HUGE_PAGE_BYTES, .small = BUSTER_ARENA_SMALL_BYTES },
+    };
+    Arena busy_arena = arena_reserve_tables(busy_tables, BUSTER_ARRAY_LENGTH(busy_tables));
+    if (busy_arena.base != 0)
+    {
+        const uintptr_t inside = (uintptr_t)busy_tables[1].base + 4 * BUSTER_ARENA_HUGE_PAGE_BYTES;
+        const bool tables_refused = lane_test_vm_flag(inside, "nh", &found) && found;
+        const bool tables_capable = lane_test_huge_capable(inside, &found) || !found;
+        lane_test_expect(&tally, tables_refused && !tables_capable, "a busy host's arena of tables may take huge pages");
+    }
+    lane_test_expect(&tally, busy_arena.base != 0, "a busy host's arena of tables couldn't be reserved");
+    arena_release(&busy_arena);
+    arena_pages_busy = was_busy;
+    lane_test_expect(&tally, prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) == was_disabled, "a busy host's arenas changed the process's huge pages");
 
     // An arena with 2 MB or more of base pages (a units lane's floor, #152) is advised against huge pages there, and
     // asks for them past.

@@ -36,6 +36,10 @@ requirements. [Command index](README.md).
   probe each page (the frame guide's "Stack-clash protection on request");
   `test-checker-driver`'s stack-clash fixture faults on a guard page through
   them where clang -O0's build does, and steps over it without the option.
+  Its two-page-aligned frame and dynamic outgoing call area must use Tier 1
+  under `--verify` (#1450). `test-tier1-emit` also executes outgoing-area
+  probes on a controlled stack, checking preserved arguments, exact release,
+  intermediate and final partial guard pages, and bounded output capacity.
 - `measure-frames [--functions] LABEL=FILE...` (`frame_measure.c`) reads each
   function's frame from an ELF object's or executable's code: its pushes and
   `sub rsp` along the control flow's paths (each instruction's depth its

@@ -407,8 +407,13 @@ static bool check_deferred_expression_graph(CheckDeferredExpressionPart* part, c
 #undef BUSTER_CHECK_EXPRESSION_SLICE
         // In the closed parallel action set, only identifier/literal/string and scalar-class tokens make VALUEs,
         // at most one each. Label addresses, VM sizes, region proofs and constant-context expect stay ordered.
-        // Their compact leaf reservation avoids faulting 96 bytes at every node's worst-case token slot.
-        graph->leaves = source->leaves + part->leaf_offset;
+        // Their compact leaf reservation avoids faulting a leaf at every node's worst-case token slot. Its leaves' rows
+        // take the same range of the graph's rows, as a leaf takes one at most (#628), numbered from the part's first.
+        graph->leaf_records = source->leaf_records != NULL ? source->leaf_records + part->leaf_offset : NULL;
+        graph->leaf_payloads = source->leaf_payloads != NULL ? source->leaf_payloads + part->leaf_offset : NULL;
+        graph->dense_leaves = source->dense_leaves != NULL ? source->dense_leaves + part->leaf_offset : NULL;
+        graph->leaf_payload_count = 0;
+        graph->leaf_payload_capacity = part->leaf_capacity;
         // Arguments use postorder-sized slots; node slots include the producer's VLA/sizeof headroom.
         graph->argument_nodes = source->argument_nodes + part->begin;
         graph->argument_tokens = source->argument_tokens + part->begin;
@@ -522,6 +527,30 @@ static void check_deferred_expression_lane(void* argument)
     }
 }
 
+// The part `from`'s leaves appended to `to`'s, which has `leaves` of them: its records, and its rows after `to`'s rows, its
+// records' rows renumbered after them. Both move toward the graph's start, from the part's reserved range (or stay).
+// Renumbering visits the part's leaves only where both graphs have rows, which few units do (on sqlite3.c, 80 leaves of
+// 144,720 have one), so it is a scalar loop.
+static void check_deferred_expression_leaves(CheckGraph* to, const CheckGraph* from, uint32_t leaves)
+{
+    if (to->dense_leaves != NULL)
+    {
+        memmove(to->dense_leaves + leaves, from->dense_leaves, (uint64_t)from->leaf_count * sizeof(CheckValue));
+    }
+    else
+    {
+        const uint32_t rows = to->leaf_payload_count;
+        memmove(to->leaf_payloads + rows, from->leaf_payloads, (uint64_t)from->leaf_payload_count * sizeof(CheckValue));
+        memmove(to->leaf_records + leaves, from->leaf_records, (uint64_t)from->leaf_count * sizeof(CheckGraphLeaf));
+        for (uint32_t leaf = 0; rows != 0 && from->leaf_payload_count != 0 && leaf < from->leaf_count; leaf += 1)
+        {
+            CheckGraphLeaf* record = to->leaf_records + leaves + leaf;
+            record->row += record->row != 0 ? rows : 0;
+        }
+        to->leaf_payload_count = rows + from->leaf_payload_count;
+    }
+}
+
 static uint32_t check_deferred_expression_node(uint32_t node, uint32_t base)
 {
     return node == BUSTER_CHECK_NONE ? node : node + base;
@@ -561,7 +590,7 @@ static bool check_deferred_expression_append(CheckInputReader* reader, const Che
             BUSTER_CHECK_EXPRESSION_COPY(fp_environments);
         }
 #undef BUSTER_CHECK_EXPRESSION_COPY
-        memmove(to->leaves + leaves, from->leaves, (uint64_t)from->leaf_count * sizeof(CheckValue));
+        check_deferred_expression_leaves(to, from, leaves);
         uint32_t n = 0;
         for (; !BUSTER_SCALAR_PATH(!vector) && n < from->count; n += 16)
         {

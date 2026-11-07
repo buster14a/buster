@@ -57,7 +57,8 @@ static bool ir_interpreter_simd_supported(const IrFunction* function)
         {
             const uint8_t op = function->op[i];
             supported = op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_BITCAST || op == IR_SELECT ||
-                        op == IR_PHI || op == IR_LOAD || ir_interpreter_simd_opcode(op) != IR_SIMD_OPERATION_COUNT;
+                        op == IR_PHI || op == IR_LOAD || (op == IR_INTRINSIC && function->c[i] == BUSTER_IR_INTRINSIC_SPLAT) ||
+                        ir_interpreter_simd_opcode(op) != IR_SIMD_OPERATION_COUNT;
         }
     }
     return supported;
@@ -116,26 +117,35 @@ static InterpreterStatus ir_interpreter_simd_operation(const IrInterpreterFrame*
 {
     const IrFunction* function = frame->function;
     const uint8_t op = function->op[i];
-    const uint32_t ids[3] = { function->a[i], function->b[i], function->c[i] };
-    const uint8_t mask = ir_operand_table[op];
-    IrSimdAction action = {
-        .operation = ir_interpreter_simd_opcode(op),
-        .result = ir_simd_shape(function->type[i]),
-        .predicate = op == IR_VCMP ? (IrSimdPredicate)function->c[i] : IR_SIMD_EQ,
-        // Its lanes (#141's element types): a vector operation's flags, which the verifier checked.
-        .lane = (IrSimdLane)function->flags[i],
-    };
-    IrSimdValue values[3] = {0};
-    const IrSimdValue* operands[3] = {0};
-    for (uint32_t p = 0; p < 3; p += 1)
+    bool executed = false;
+    if (op == IR_INTRINSIC && function->c[i] == BUSTER_IR_INTRINSIC_SPLAT)
     {
-        if ((mask & (1u << p)) != 0)
-        {
-            values[p] = ir_interpreter_simd_value(frame, ids[p]);
-            operands[p] = values + p;
-            action.operands[p] = ir_simd_shape(function->type[ids[p]]);
-        }
+        const uint32_t source = function->a[i];
+        executed = ir_splat_value(function->type[i], function->type[source], frame->values[source].low, result);
     }
-    const bool executed = ir_simd_evaluate(&action, operands, 0, 0, 0, result);
+    else
+    {
+        const uint32_t ids[3] = { function->a[i], function->b[i], function->c[i] };
+        const uint32_t mask = ir_value_mask(function, i);
+        IrSimdAction action = {
+            .operation = ir_interpreter_simd_opcode(op),
+            .result = ir_simd_shape(function->type[i]),
+            .predicate = op == IR_VCMP ? (IrSimdPredicate)function->c[i] : IR_SIMD_EQ,
+            // Its lanes (#141's element types): a vector operation's flags, which the verifier checked.
+            .lane = (IrSimdLane)function->flags[i],
+        };
+        IrSimdValue values[3] = {0};
+        const IrSimdValue* operands[3] = {0};
+        for (uint32_t p = 0; p < 3; p += 1)
+        {
+            if ((mask & (1u << p)) != 0)
+            {
+                values[p] = ir_interpreter_simd_value(frame, ids[p]);
+                operands[p] = values + p;
+                action.operands[p] = ir_simd_shape(function->type[ids[p]]);
+            }
+        }
+        executed = ir_simd_evaluate(&action, operands, 0, 0, 0, result);
+    }
     return executed ? INTERPRETER_OK : INTERPRETER_UNSUPPORTED;
 }

@@ -1356,7 +1356,7 @@ static bool check_control_fold_operand(const CheckControlWriter* writer, uint32_
                              offset.constant_kind == CHECK_CONSTANT_INTEGER && offset.integer <= program->types->types.extent[type_index(type)];
         object = bounded ? array : BUSTER_CHECK_NONE;
     }
-    const bool named = object < graph->count && graph->ops[object] == CHECK_OP_VALUE && check_graph_leaf_of(graph, object)->object != 0 &&
+    const bool named = object < graph->count && graph->ops[object] == CHECK_OP_VALUE && check_graph_leaf_object(graph, object) != 0 &&
                        (value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
     return operand < graph->count && (check_control_fold_value(&value) || named) && check_control_fold_push(writer, depth, visits, operand);
 }
@@ -2708,7 +2708,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
         const CheckOp op = graph->ops[node];
         if (op == CHECK_OP_VALUE)
         {
-            const CheckValue value = *check_graph_leaf_of(graph, node);
+            const CheckValue value = check_graph_leaf_value(graph, node);
             if (value.overload_head == 0 && value.object != 0 && value.object < program->object_count &&
                 ((value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0 || check_input_bit(program->input->declaration_bits, value.object - 1, BUSTER_CHECK_BITS_STATIC)) && seen[value.object] != epoch)
             {

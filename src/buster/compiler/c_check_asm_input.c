@@ -755,8 +755,10 @@ static bool check_input_asm_bit(const uint32_t* bits, uint32_t index)
 
 // The tokens whose object (CheckInput.objects) is labelled, by `labelled`'s bits (an object's), as bits of `declared` (a
 // token's, (count + 31) / 32 words), which it writes whole (#877): a labelled object's declarations, to which the uses
-// below refer. AVX-512 gathers 16 tokens' words of `labelled` and stores their 16 bits at once; the scalar path, its
-// twin, tests each token's.
+// below refer. AVX-512 gathers 16 tokens' words of `labelled` where the labelled objects' filter (CheckInputFilter)
+// passes one of their objects, and stores their 16 bits at once: a unit that includes glibc's headers labels a few dozen
+// objects, and gathering at every 16 tokens in both kernels took 0.45% of sqlite3.c's -c's cycles (#529). The scalar
+// path, its twin, tests each token's.
 static void check_input_asm_labelled_tokens(const CheckInput* input, const uint32_t* labelled, uint32_t* declared, bool scalar)
 {
     (void)scalar;
@@ -783,14 +785,21 @@ static void check_input_asm_labelled_tokens(const CheckInput* input, const uint3
         // below, so that every word the tokens reach is whole.
         uint16_t* halves = (uint16_t*)declared;
         const __m512i ones = _mm512_set1_epi32(1);
+        const CheckInputFilter filter = check_input_filter_bits(labelled, (slots + 31) / 32);
         for (uint32_t first = 0; first < count; first += 16)
         {
             const __mmask16 lanes = (__mmask16)check_input_scan_all(first, count);
             const __m512i objects = _mm512_maskz_loadu_epi32(lanes, input->objects + first);
             const __mmask16 named = _mm512_mask_test_epi32_mask(lanes, objects, objects) & _mm512_cmplt_epu32_mask(objects, _mm512_set1_epi32((int32_t)slots));
-            const __m512i words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), named, _mm512_srli_epi32(objects, 5), labelled, 4);
-            const __m512i bits = _mm512_srlv_epi32(words, _mm512_and_si512(objects, _mm512_set1_epi32(31)));
-            halves[first / 16] = _mm512_mask_test_epi32_mask(named, bits, ones);
+            const __mmask16 candidates = check_input_filter_test(&filter, objects, named);
+            __mmask16 marked = 0;
+            if (candidates != 0)
+            {
+                const __m512i words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), candidates, _mm512_srli_epi32(objects, 5), labelled, 4);
+                const __m512i bits = _mm512_srlv_epi32(words, _mm512_and_si512(objects, _mm512_set1_epi32(31)));
+                marked = _mm512_mask_test_epi32_mask(candidates, bits, ones);
+            }
+            halves[first / 16] = marked;
         }
         // The last word's other half, past the tokens.
         if (((count + 15) / 16) % 2 != 0)
@@ -801,20 +810,28 @@ static void check_input_asm_labelled_tokens(const CheckInput* input, const uint3
 }
 
 // Of the next 16 tokens from `first` below `end`, those whose declaration (CheckInput.declarations) is a token `declared`
-// marks: the uses and declarations of labelled objects. AVX-512 gathers their words of `declared`; the scalar path, its
-// twin, takes every token, whose declaration the pass tests.
-static uint32_t check_input_asm_labelled_uses(const CheckInput* input, const uint32_t* declared, uint32_t first, uint32_t end, bool scalar)
+// marks: the uses and declarations of labelled objects. AVX-512 gathers their words of `declared` where `filter`
+// (check_input_filter_bits of `declared`) passes one of their declarations; the scalar path, its twin, takes every token,
+// whose declaration the pass tests, and leaves the filter unread.
+static uint32_t check_input_asm_labelled_uses(const CheckInput* input, const uint32_t* declared, const CheckInputFilter* filter, uint32_t first, uint32_t end,
+                                              bool scalar)
 {
     (void)scalar;
+    (void)filter;
 
     uint32_t lanes = (uint32_t)check_input_scan_all(first, end) & 0xffff;
     if (!BUSTER_SCALAR_PATH(scalar))
     {
         const __m512i declarations = _mm512_maskz_loadu_epi32((__mmask16)lanes, input->declarations + first);
         const __mmask16 named = _mm512_mask_cmplt_epu32_mask((__mmask16)lanes, declarations, _mm512_set1_epi32((int32_t)input->token_count));
-        const __m512i words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), named, _mm512_srli_epi32(declarations, 5), declared, 4);
-        const __m512i bits = _mm512_srlv_epi32(words, _mm512_and_si512(declarations, _mm512_set1_epi32(31)));
-        lanes = _mm512_mask_test_epi32_mask(named, bits, _mm512_set1_epi32(1));
+        const __mmask16 candidates = check_input_filter_test(filter, declarations, named);
+        lanes = 0;
+        if (candidates != 0)
+        {
+            const __m512i words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), candidates, _mm512_srli_epi32(declarations, 5), declared, 4);
+            const __m512i bits = _mm512_srlv_epi32(words, _mm512_and_si512(declarations, _mm512_set1_epi32(31)));
+            lanes = _mm512_mask_test_epi32_mask(candidates, bits, _mm512_set1_epi32(1));
+        }
     }
     return lanes;
 }
@@ -879,9 +896,10 @@ static void check_input_asm_labels(CheckInputReader* reader)
             }
         }
         check_input_asm_labelled_tokens(input, labelled, declared, scalar);
+        const CheckInputFilter filter = !scalar ? check_input_filter_bits(declared, (uint32_t)((input->token_count + 31) / 32)) : (CheckInputFilter){ 0 };
         for (uint32_t first = 0; first < limit && !input->resource; first += 16)
         {
-            const uint32_t uses = check_input_asm_labelled_uses(input, declared, first, limit, scalar);
+            const uint32_t uses = check_input_asm_labelled_uses(input, declared, &filter, first, limit, scalar);
             for (uint32_t selected = uses; selected != 0 && !input->resource; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);

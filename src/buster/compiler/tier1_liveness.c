@@ -84,8 +84,11 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
     else
     {
         // Dominance was already checked by the successful selector plan; this validates the borrowed IR's shape and
-        // local rules without fabricating another dominance view. Mutation invalidates both the plan and this API.
-        const IrCheck check = BUSTER_VECTOR_PATH(vector) ? ir_verify(function, scratch, 0) : ir_verify_scalar(function, scratch, 0);
+        // local rules without fabricating another dominance view. Mutation invalidates both the plan and this API. A plan
+        // the selector published is of a function a full verification passed, which isn't repeated (#1379).
+        const IrCheck check = plan->function_verified                ? ir_check(IR_OK, BUSTER_IR_NONE, 0) :
+                              BUSTER_VECTOR_PATH(vector) ? ir_verify(function, scratch, 0) :
+                                                           ir_verify_scalar(function, scratch, 0);
         if (check.error != IR_OK)
         {
             error = check.error == IR_ERROR_MEMORY ? TIER1_LIVENESS_MEMORY : TIER1_LIVENESS_INVALID;

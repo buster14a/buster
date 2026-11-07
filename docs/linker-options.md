@@ -16,6 +16,13 @@ The shell quotes above preserve `$ORIGIN` and commas. Buster does not expand
 runtime paths; the loader interprets them. `-L` selects libraries at link time,
 whereas `-rpath` records directories to search when the executable runs.
 
+The C driver forwards these options only through `-Wl,` or `-Xlinker`.
+For example, use `-Wl,--rpath=` for an explicitly empty path; bare `-rpath=`
+is an unsupported driver option. Compiler options such as `-Rpass=inline`
+do not enter the linker stream and cannot accidentally become runtime paths.
+If explicitly forwarded as `-Wl,-Rpass=inline`, however, the argument has the
+linker's joined `-RPATH` meaning, with the literal path `pass=inline`.
+
 ## Supported direct-link options
 
 | Linker arguments | Effect |
@@ -49,6 +56,22 @@ Commands that do not link (`-c`, `-fsyntax-only`, `-E`, and checker-only modes)
 consume linker forwarding and leave its payload unused. A missing operand to
 `-Xlinker` remains a malformed driver command. Forwarded operands such as `-E`,
 `-c`, `--version`, or a filename do not become driver actions or source inputs.
+
+### Empty runtime paths (#1534)
+
+An explicitly empty path is intentional compatibility behavior, distinct from
+an option with no argument. `-Wl,-rpath,` and `-Xlinker -rpath -Xlinker ''`
+emit an empty `DT_RUNPATH`; `-Wl,-rpath` is a missing-argument error. Repeated
+options preserve empty components too: `-Wl,-rpath,,-rpath,/after` records
+`:/after`. Buster does not silently remove or reject these requested bytes.
+
+The loader interprets the result. In glibc, a wholly empty `DT_RUNPATH` or
+`DT_RPATH` is ignored, whereas an empty component in a nonempty colon-separated
+path searches the current working directory. These are different cases in
+[`decompose_rpath` and `fillin_rpath`](https://sources.debian.org/src/glibc/2.44-1/elf/dl-load.c/).
+Build recipes that do not intend a current-directory search should omit empty
+components when constructing a runtime path, or omit the option altogether
+when no path is wanted.
 
 ## Raw linker and writer
 

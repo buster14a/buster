@@ -2167,10 +2167,11 @@ static bool check_units_lane_ready(CheckUnitsLane* lane, const CheckDriverComman
     return lane->ready;
 }
 
-// A lane's memory that the link doesn't read, its file cache, intern table and three arenas, released when it has
-// compiled its units (#778): into its pool (arena_pool), when its caller set one, whose MADV_DONTNEED frees an arena's
-// pages under the address space's lock for reading, so that the lanes free theirs at once, at the end of their run,
-// where the calling thread would free every lane's after it, one after another. The links it kept stay in their arenas.
+// A lane's memory that the link doesn't read, its file cache, intern table, three arenas and its functions' lane 0's
+// writer's columns, released when it has compiled its units (#778): into its pool (arena_pool), when its caller set
+// one, whose MADV_DONTNEED frees an arena's pages under the address space's lock for reading, so that the lanes free
+// theirs at once, at the end of their run, where the calling thread would free every lane's after it, one after another.
+// The links it kept stay in their arenas.
 // A lane whose setup failed releases what it reserved before the failure, which its table and cache keep as their
 // initializers left them (a lane that took no unit, or released them already, has them zero, which their releases take).
 // Then it gives back what it held of the run's memory (check_units_memory_give).
@@ -2182,15 +2183,17 @@ static void check_units_lane_release(CheckUnitsLane* lane)
     arena_release(&lane->output);
     arena_release(&lane->scratch);
     arena_release(&lane->arena);
+    check_program_lanes_release(&lane->functions);
     check_units_memory_give(lane);
 }
 
 // A unit, on the lane that took it: compiled by check_driver_unit with the lane's intern table and file cache, its
 // functions on the lane alone, its diagnostics into its own stream, and with a link to make, its link kept. The arenas
 // it reserves start with BUSTER_CHECK_UNITS_SMALL_BYTES of base pages unless its source is large. The lane's three
-// arenas are emptied after it, their pages kept for the next unit with the bytes the unit left there: the compile
-// reads nothing in them it didn't write, which --poison-arenas checks (arena_poison: a pattern in place of those bytes;
-// docs/translation-units.md, "Memory", has why and what reserving or clearing them again costs).
+// arenas, and its functions' lane 0's writer's columns (#442), are emptied after it, their pages kept for the next unit
+// with the bytes the unit left there: the compile reads nothing in them it didn't write, which --poison-arenas checks
+// (arena_poison: a pattern in place of those bytes; docs/translation-units.md, "Memory", has why and what reserving or
+// clearing them again costs).
 static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, CheckUnitsUnit* unit)
 {
     const CheckDriverCommand* command = run->command;
@@ -2213,7 +2216,9 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
         options.files = &lane->cache;
         options.diagnostics = errors;
         unit->kept = (CheckUnitsKept){ .arena = &lane->kept, .bytes = &lane->kept_bytes };
-        // On the board, the unit's functions as parts that the lanes without units may take (#777).
+        // On the board, the unit's functions as parts that the lanes without units may take (#777). Lane 0's writer's
+        // columns stay the lane's from one unit to the next, as its three arenas do (check_program_lanes_settle, #442).
+        const Arena columns = lane->functions.arenas[0].scratch;
         lane->functions = (CheckProgramLanes){
             .lanes = run->board != NULL ? run->board->lanes : 1,
             .board = run->board,
@@ -2230,6 +2235,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             .units_lane = lane,
             .helper_forms = command->helper_forms,
         };
+        lane->functions.arenas[0].scratch = columns;
         lane->memory = run->memory;
         lane->run = run;
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
@@ -2303,8 +2309,8 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             __atomic_fetch_add(&report->row_moves, unit_report->row_moves, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->inlined_calls, unit_report->inlined_calls, __ATOMIC_RELAXED);
         }
-        check_program_lanes_release(&lane->functions);
-        Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena };
+        check_program_lanes_settle(&lane->functions);
+        Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena, &lane->functions.arenas[0].scratch };
         for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(arenas); a += 1)
         {
             if (command->poison_arenas)
@@ -2550,9 +2556,18 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             ready = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize();
         }
+        // And the lowering's runtime functions' names' lengths and hashes (#442), which every unit's lowering reads, before
+        // the lanes start: a lowering that finds them unmade measures and hashes the names itself, as the emission's
+        // backend setup leaves it to.
+        if (ready && emitting && !check_lower_runtime_names_ready)
+        {
+            check_lower_runtime_names_initialize();
+        }
+        // A baked executable starts with the semantics tables built (baked.h, #590), and x86_semantics_initialize rebuilds
+        // them unconditionally, writing the baked pages: only an executable that isn't baked runs it (#1571).
         if (ready && command->mixed_inputs)
         {
-            ready = x86_encoder_initialize() && x86_semantics_initialize();
+            ready = x86_encoder_initialize() && (x86_semantics_initialized || x86_semantics_initialize());
         }
         if (ready && emitting && command->unwind_tables && !unwind_ready)
         {

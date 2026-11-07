@@ -78,12 +78,17 @@ requirements. [Command index](README.md).
   first-argument selection with later arguments checked but not evaluated, nested comma expressions, scalar and
   aggregate conversions, static bytes, deduction and invalid forms. These checks remain in the default suite too.
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
-  wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes.
+  wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes; and
+  #1376's clears (`c_check_program_clear_test.c`): each path's shape (memset past 128 bytes, no loop, no clear before
+  a whole object's copy, compound literals in place, a volatile object's stores) and native runs on a dirtied stack.
   `--program-vectors` selects the vector, x86 builtin and half-precision programs alone (`c_check_program_vector_test.c`,
   `c_check_program_x86_test.c`, `c_check_program_vector_builtins_test.c`, `c_check_program_fp16_test.c`,
   `c_check_program_half_test.c`), run against clang -O0's code where the host has their features.
   Byte funnel shifts of 16-byte vectors require XOP: these tests compile/link everywhere and execute only where
   XOP is present; `test-x86-intrinsics` also checks their emitted expressions against Clang, including `_mm_rot_epi8`.
+  Required constant evaluation folds `_Float16` and `__bf16` arithmetic in the source format after each operation
+  (#1497); runtime half-precision chains retain their target's excess-precision behavior. The constant-source and
+  floating-action fixtures cover that distinction, ties, subnormals and negative zero.
   `--program-library` selects the library builtins' tables, constant folds and programs alone
   (`c_check_program_library_test.c`).
   `--transitions` selects the memoized transitions' fixtures, classes, static words and table limits alone (`c_check_transitions_test.c`).

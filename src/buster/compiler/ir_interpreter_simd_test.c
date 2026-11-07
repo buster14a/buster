@@ -2,8 +2,82 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Shared-interpreter SIMD tests, independent of the typed adapter and straight-line SIMD executor.
 
+static void ir_interpreter_test_splats(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
+{
+    static const IrType scalars[] = { IR_I8, IR_I16, IR_I32, IR_I64, IR_F32, IR_F64 };
+    // Integer boundaries and raw floating encodings, including both zero signs, denormals and signaling/quiet NaNs.
+    // No floating operation computes the expectation: a splat must not quiet a NaN or change its payload.
+    static const uint64_t patterns[] = {
+        0, 1, UINT64_MAX, UINT64_C(0x8000000000000081), UINT64_C(0x80000000),
+        UINT64_C(0x7f800001), UINT64_C(0x7fc12345), UINT64_C(0x7ff0000000000001),
+        UINT64_C(0x7ff8123456789abc), UINT64_C(0x8000000000000000),
+    };
+    const uint64_t mark = memory->length;
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t scalar = 0; scalar < BUSTER_ARRAY_LENGTH(scalars); scalar += 1)
+        {
+            const IrType type = scalars[scalar];
+            const uint32_t scalar_bytes = ir_type_bits[type] / 8;
+            const uint32_t bytes = 16u << width;
+            IrFunction function = {0};
+            const IrSizes sizes = {
+                .instruction_count = 5,
+                .block_count = 1,
+                .parameter_count = 2,
+            };
+            const bool created = ir_create(memory, &sizes, &function) == IR_OK;
+            ir_interpreter_test_expect(tally, created, "scalar splat execution fixture allocation");
+            if (created)
+            {
+                uint8_t actual[80];
+                uint8_t expected[80];
+                function.parameter_types[0] = IR_PTR;
+                function.parameter_types[1] = (uint8_t)type;
+                function.block_offsets[1] = 5;
+                ir_interpreter_test_instruction(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_interpreter_test_instruction(&function, 1, IR_PARAM, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_interpreter_test_instruction(&function, 2, IR_INTRINSIC, (IrType)(IR_V4I32 + width), 1, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_SPLAT);
+                ir_interpreter_test_instruction(&function, 3, IR_STORE, IR_VOID, 0, 2, BUSTER_IR_NONE);
+                ir_interpreter_test_instruction(&function, 4, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_interpreter_test_expect(tally, ir_verify_complete(&function, execution, false).error == IR_OK &&
+                                                 ir_verify_complete(&function, execution, true).error == IR_OK,
+                                           "both complete verifiers accept a splat's single scalar use");
+                const InterpreterBinding object = { .symbol = 2, .bytes = actual, .size = sizeof(actual), .writable = true };
+                const IrInterpreterFunction binding = { .symbol = 71, .function = &function };
+                const IrInterpreterProgram program = { .functions = &binding, .function_count = 1, .bindings = &object, .binding_count = 1 };
+                for (uint32_t pattern = 0; pattern < BUSTER_ARRAY_LENGTH(patterns); pattern += 1)
+                {
+                    const uint64_t bits = patterns[pattern];
+                    const InterpreterValue arguments[] = { { .low = (uintptr_t)(actual + 8) }, { .low = bits } };
+                    memset(actual, 0xa5, sizeof(actual));
+                    memset(expected, 0xa5, sizeof(expected));
+                    for (uint32_t byte = 0; byte < bytes; byte += 1)
+                    {
+                        expected[8 + byte] = (uint8_t)(bits >> (8 * (byte % scalar_bytes)));
+                    }
+                    ir_interpreter_test_run(tally, &program, 71, arguments, 2, 0, execution, INTERPRETER_OK, (InterpreterValue){0},
+                                            "scalar splats execute without an absent second operand");
+                    ir_interpreter_test_expect(tally, memcmp(actual, expected, sizeof(actual)) == 0,
+                                               "every scalar splat lane preserves the source bits and exact-width canaries");
+                }
+                function.op[1] = IR_UNDEF;
+                function.a[1] = BUSTER_IR_NONE;
+                const InterpreterValue arguments[] = { { .low = (uintptr_t)(actual + 8) }, {0} };
+                memset(actual, 0xa5, sizeof(actual));
+                memset(expected, 0xa5, sizeof(expected));
+                ir_interpreter_test_run(tally, &program, 71, arguments, 2, 0, execution, INTERPRETER_UNDEFINED, (InterpreterValue){0},
+                                        "a scalar splat consumes its undefined source");
+                ir_interpreter_test_expect(tally, memcmp(actual, expected, sizeof(actual)) == 0, "undefined splats refuse before their store");
+            }
+            arena_pop_to(memory, mark);
+        }
+    }
+}
+
 static void ir_interpreter_test_simd(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
 {
+    ir_interpreter_test_splats(tally, memory, execution);
     const uint64_t mark = memory->length;
     for (uint32_t width = 0; width < 3; width += 1)
     {

@@ -16,7 +16,7 @@ source basename with `.o` is used, including for a default executable link.
 `-MM` / `-MMD` exclude system-header observations and their system-context
 children. `-MT TARGET` inserts a raw Make target, `-MQ TARGET` quotes a filename,
 and repeated targets retain their command-line order. `-MP` adds empty rules for
-selected headers, not the source. Joined `-MFfile`, `-MTtarget` and `-MQtarget`
+selected headers, not the source, each on the next line with no blank line before it. Joined `-MFfile`, `-MTtarget` and `-MQtarget`
 operands work too. `-MF -` explicitly sends dependencies to stdout.
 
 ```sh
@@ -49,8 +49,10 @@ conservatively rejected. Publication replaces a regular-file symlink itself;
 it does not promise to preserve that link. A new depfile gets the mode `fopen`
 would give it (`0666` less the umask), and one replacing a regular file keeps
 that file's permission bits, as clang's truncation does.
-`/dev/null` works as a sink and is never replaced. Other special destinations are
-refused. Stdout writes are checked but cannot be rolled back.
+A symlink is not replaced: the bytes are written through it, so the target
+changes and `lstat` still reports the link. `/dev/null` works as a sink and is
+never replaced. Other special destinations are refused. Stdout writes are
+checked but cannot be rolled back.
 
 ## Standard input and information probes
 
@@ -59,6 +61,13 @@ memory. The source is named `<stdin>` for diagnostics, and replay reads the same
 bytes. It contributes no filesystem dependency; included headers still do.
 Compilation requires an explicit language for stdin. Repeated `-` inputs are
 rejected rather than racing or reading an exhausted stream.
+
+A primary input that is a character device, FIFO, socket, or `/dev/fd/N` pipe
+is read the same way, once, with `read()` until EOF. `/dev/null` is an empty
+translation unit, so `-dM -E -x c /dev/null` prints the predefines. The bytes
+are cached on the command for a replay and for `--id-order`'s second pass.
+Include search does not change: a speculative probe of a FIFO stays
+non-blocking and still is not a regular file.
 
 ```sh
 printf 'int value;\n' | ./build/compiler -x c -c -MMD - -o build/stdin.o
@@ -71,10 +80,12 @@ is a successful information probe. `--version` and `-dumpmachine` remain support
 Buster development driver, not a spoofed Clang release.
 
 `-print-file-name=NAME` searches explicit `-L` directories and the actual runtime
-library paths; unknown names are returned unchanged. `-print-prog-name=NAME`
+library paths; unknown names are returned unchanged. An empty `-print-file-name=`
+prints a blank line, not a directory. `-print-prog-name=NAME`
 searches PATH for an executable, without claiming the integrated compiler invokes
 that program. `-print-search-dirs` reports the executable installation directory,
-PATH and runtime search directories. These probes do not import runtime snapshots.
+PATH and runtime search directories. Giving both print options prints the
+directories and then the file path. These probes do not import runtime snapshots.
 Option operands that happen to spell actions (`-MF -E`, `-MT --version`) are not
 reinterpreted as driver actions. `--` ends option recognition.
 
@@ -100,6 +111,7 @@ a universal drop-in CC for CMake/autotools projects.
 `c_driver_compatibility_test.c` is called by `test-checker-driver`. Its original
 fixtures run the real compiler executable, compare short dependency rules with
 Clang (ignoring only empty physical lines around phony rules), exercise stdin,
+symlinked depfiles, non-regular sources, combined `-print-*` probes,
 parallel-unit publication, aliases and failure preservation, consume escaping
 through GNU Make, and execute all three link kinds with TLS and libc. ELF type
 and interpreter headers independently verify the link mode. It can also be built

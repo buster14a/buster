@@ -895,6 +895,20 @@ static bool ssa_source_execution_tests(SsaSourceArenas* arenas, const char* work
         bool left_out;
         bool native_only;
     };
+    // Some dynamic C runtimes keep atexit in a hidden nonshared entry, which the existing host lookup cannot bind.
+    // That case must fail cleanly at symbol resolution; a bound atexit must reach the callback guard instead.
+    void* atexit_symbol = dlsym(RTLD_DEFAULT, "atexit");
+    atexit_symbol = atexit_symbol != 0 ? atexit_symbol : test_libm("atexit");
+    if (atexit_symbol == 0 && !BUSTER_HOST_STATIC_EXECUTABLE)
+    {
+        void* gcc_s = dlopen("libgcc_s.so.1", RTLD_NOW | RTLD_LOCAL);
+        atexit_symbol = gcc_s != 0 ? dlsym(gcc_s, "atexit") : 0;
+        if (gcc_s != 0)
+        {
+            dlclose(gcc_s);
+        }
+    }
+    const InterpreterStatus atexit_result = atexit_symbol != 0 ? INTERPRETER_NATIVE : INTERPRETER_SYMBOL;
     const SsaSourceControl controls[] = {
         {
             .name = "normal-return",
@@ -938,6 +952,39 @@ static bool ssa_source_execution_tests(SsaSourceArenas* arenas, const char* work
             .limits = { .timeout = 10, .steps = BUSTER_SSA_SOURCE_STEPS },
             .exit_status = 255,
             .passed = true,
+        },
+        // Bound callback registrations and synchronous callbacks are refused before entering libc. Each execution is
+        // a child, and the signal fixture only registers a handler: it never sends a signal, even if refusal regresses.
+        {
+            .name = "host-qsort-callback-refused",
+            .source = "extern void qsort(void *, unsigned long, unsigned long, int (*)(const void *, const void *));\n"
+                      "static int compare(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }\n"
+                      "int main(void) { int a[3] = {3, 1, 2}; qsort(a, 3, sizeof(int), compare); return 0; }\n",
+            .limits = { .timeout = 10, .steps = BUSTER_SSA_SOURCE_STEPS },
+            .exit_status = 255,
+            .recorded = true,
+            .result = INTERPRETER_NATIVE,
+            .functions = 2,
+        },
+        {
+            .name = "host-atexit-callback-refused",
+            .source = "extern int atexit(void (*)(void)); static void handler(void) {}\n"
+                      "int main(void) { return atexit(handler); }\n",
+            .limits = { .timeout = 10, .steps = BUSTER_SSA_SOURCE_STEPS },
+            .exit_status = 255,
+            .recorded = true,
+            .result = atexit_result,
+            .functions = 2,
+        },
+        {
+            .name = "host-signal-callback-refused",
+            .source = "typedef void (*Handler)(int); extern Handler signal(int, Handler); static void handler(int s) { (void)s; }\n"
+                      "int main(void) { signal(10, handler); return 0; }\n",
+            .limits = { .timeout = 10, .steps = BUSTER_SSA_SOURCE_STEPS },
+            .exit_status = 255,
+            .recorded = true,
+            .result = INTERPRETER_NATIVE,
+            .functions = 2,
         },
         // Aliases (#147) whose names the C library has too: called, through a pointer and read, each must reach the
         // unit's definition, not the library's getpagesize and opterr, in every form.

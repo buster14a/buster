@@ -170,15 +170,49 @@ the contract, publication guarantees and the remaining compatibility limits,
 and `test-checker-driver`'s `c_driver_compatibility_test.c` exercises real
 executable invocations against Clang and GNU Make.
 
+## Response files
+
+Source commands expand `@file` before information probes and selection of
+preprocessing, compilation or linking (#1476). Arguments replace that word in
+place, including after `--`; write `./@name.c` to name a literal source
+whose basename starts with `@`. Nested paths and source/output paths use the
+process's working directory. Utility commands, the private worker guardian and
+libFuzzer retain their own arguments; Make's dry run reads no response files.
+
+The byte grammar uses ASCII whitespace as separators, single or double quotes
+to keep whitespace inside a word, and backslash to quote the next byte inside
+or outside either quote. Quoted and unquoted portions join; empty quoted words
+remain arguments. A bare `@` stays literal. There is no shell or environment
+expansion. These are the GNU-style response-file conventions described in
+[GCC 7.1's overall options](https://gcc.gnu.org/onlinedocs/gcc-7.1.0/gcc/Overall-Options.html);
+malformed-input behavior is this driver's explicit refusal, not a claim of
+complete GCC/Clang compatibility.
+
+Expansion admits regular files only, at most 32 active files, 4,096 file
+occurrences, 16 MiB of aggregate response bytes and 65,536 expanded operands.
+Active device/inode pairs detect cycles, while repeated sibling files are
+allowed and charged again. Missing/nonregular files, read errors, changed file
+sizes, embedded NULs, unfinished quotes/escapes and exhausted budgets fail
+before source/output access. Successful argument storage lives until process
+exit, as the original `argv` does. The CC compatibility suite compares valid
+cases with Clang and checks that refusals preserve an existing object.
+
 ## Mixed inputs
 
 The implicit compile/link driver classifies each positional input before opening
 it (#1120). `.c`, `.h` and `.i` are C; `.s` is assembly; `.S` is preprocessed
-assembly. `.o`, `.a`, `.so` and versioned `.so.*` are linker inputs. Other suffixes
-are also linker inputs, with a warning; the foreign reader diagnoses their
-actual format. `-x c`, `-x assembler` and `-x assembler-with-cpp` override the
+assembly. `.o`, `.a`, `.so` and versioned `.so.*` are linker inputs. Known
+unsupported source suffixes, including C++ (`.cpp`, `.cc`, `.cxx`, `.C`, `.ii`
+and C++ headers and module sources), Objective-C (`.m`, `.mi`, `.mm`, `.M`, `.mii`),
+CUDA/HIP/SYCL, OpenCL, HLSL, LLVM IR (`.ll`, `.bc`), precompiled headers and ASTs,
+Ada (`.ads`, `.adb`), Fortran and `.asm`, are diagnosed before any
+source or output is opened (#1472). Other suffixes remain linker inputs, with
+a warning; the foreign reader diagnoses their actual format.
+`-x c`, `-x assembler` and `-x assembler-with-cpp` override the
 suffix for following inputs only; `-x none` restores suffix inference. Joined
 `-xLANG` works too. Stdin requires an explicit language at that operand.
+A non-regular C or preprocessed-assembly source (`/dev/null`, a FIFO, `/dev/fd/N`)
+is read to EOF once, like stdin. Include probes still refuse those files.
 
 C-only commands retain the existing direct path. Mixed commands compile C and
 assembly on the unit scheduler's lanes, retain their ELF objects in memory,

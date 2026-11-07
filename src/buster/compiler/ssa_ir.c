@@ -604,7 +604,9 @@ static void ssa_ir_fill(const SsaIrWork* work, IrFunction* f)
     f->block_offsets[f->block_count] = instruction;
 }
 
-static IrCheck ssa_ir_verify_output(const SsaIrWork* work, const IrFunction* f)
+// The promoted function's full verification, with promotion's dominance, on the path the promotion took (#1379): the
+// two verifiers are twins, which the IR tests compare, so a compile checks its output once, not by both.
+static IrCheck ssa_ir_verify_output(const SsaIrWork* work, const IrFunction* f, bool vector)
 {
     uint32_t* enter = ssa_allocate(work->scratch, f->block_count, 4);
     uint32_t* leave = ssa_allocate(work->scratch, f->block_count, 4);
@@ -624,11 +626,7 @@ static IrCheck ssa_ir_verify_output(const SsaIrWork* work, const IrFunction* f)
             .leave = leave,
             .block_count = f->block_count,
         };
-        check = ir_verify(f, work->scratch, &dominance);
-        if (check.error == IR_OK)
-        {
-            check = ir_verify_scalar(f, work->scratch, &dominance);
-        }
+        check = BUSTER_VECTOR_PATH(vector) ? ir_verify(f, work->scratch, &dominance) : ir_verify_scalar(f, work->scratch, &dominance);
     }
     return check;
 }
@@ -641,7 +639,10 @@ static IrCheck ssa_ir_verify_output(const SsaIrWork* work, const IrFunction* f)
 // function's faster path 35.32); every bound from 8,192 to 32,768 cells came within -0.28% to +0.26% of it.
 #define BUSTER_SSA_IR_VECTOR_CELLS (UINT64_C(1) << 14)
 
-static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result, bool vector, SsaCheck* verified)
+// `input_verified`: the caller's input is a function a full verification has passed since its last change (the
+// lowering's or GVN's result, #1379), whose verification promotion then doesn't repeat; every other caller's is verified.
+static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result, bool vector, SsaCheck* verified,
+                                   bool input_verified)
 {
     (void)vector;
 
@@ -661,7 +662,7 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
         .scratch = scratch,
     };
     IrFunction candidate = { 0 };
-    if (check.error == IR_OK)
+    if (check.error == IR_OK && !input_verified)
     {
         check = ir_verify_path(input, scratch, 0, BUSTER_VECTOR_PATH(vector));
     }
@@ -734,7 +735,7 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     if (check.error == IR_OK)
     {
         ssa_ir_fill(&work, &candidate);
-        check = ssa_ir_verify_output(&work, &candidate);
+        check = ssa_ir_verify_output(&work, &candidate, vector);
     }
     if (check.error == IR_OK)
     {
@@ -786,17 +787,23 @@ static IrCheck ssa_ir_promote(const IrFunction* input, Arena* output, Arena* scr
 #if !BUSTER_HOST_VECTOR
     return ssa_ir_promote_scalar(input, output, scratch, result);
 #else
-    return ssa_ir_promote_path(input, output, scratch, result, true, 0);
+    return ssa_ir_promote_path(input, output, scratch, result, true, 0, false);
 #endif
 }
 
 static IrCheck ssa_ir_promote_scalar(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ssa_ir_promote_path(input, output, scratch, result, false, 0);
+    return ssa_ir_promote_path(input, output, scratch, result, false, 0, false);
+}
+
+// ssa_ir_promote's or its scalar twin's, of a function a full verification has passed since its last change (#1379).
+static __attribute__((unused)) IrCheck ssa_ir_promote_verified_input(const IrFunction* input, bool vector, Arena* output, Arena* scratch, IrFunction* result)
+{
+    return ssa_ir_promote_path(input, output, scratch, result, BUSTER_VECTOR_PATH(vector), 0, true);
 }
 
 static IrCheck ssa_ir_promote_verified(const IrFunction* input, bool vector, Arena* output, Arena* scratch, IrFunction* result, SsaCheck* verified)
 {
     *verified = (SsaCheck){ .error = SSA_OK, .instruction = BUSTER_SSA_NONE };
-    return ssa_ir_promote_path(input, output, scratch, result, BUSTER_VECTOR_PATH(vector), verified);
+    return ssa_ir_promote_path(input, output, scratch, result, BUSTER_VECTOR_PATH(vector), verified, false);
 }

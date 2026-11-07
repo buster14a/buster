@@ -564,8 +564,9 @@ static bool check_action_float_supported(const TypeTable* table, TypeId type)
 }
 
 // The half-precision formats: _Float16's and __fp16's IEEE binary16 and __bf16's bfloat16. A constant of one is folded
-// where its value is exact or rounded once, as clang folds it: a conversion to one, a negation, a unary + and a compare.
-// Its arithmetic isn't: clang computes it in float at run time (excess precision, c_check_program_half.c), which a
+// where its value is exact or rounded once: a conversion, a negation, a unary + and a compare. Required constant
+// evaluation also rounds arithmetic after each operation, as clang's APFloat evaluator does. The runtime graph must
+// not fold that arithmetic: clang computes its chains in float (excess precision, c_check_program_half.c), which a
 // constant rounded per operation wouldn't be.
 typedef enum CheckHalf
 {
@@ -1415,7 +1416,7 @@ static uint32_t check_action_fold_integer(CheckIntegerFold fold, CheckValue* val
     return check_action_fold_integer_result(fold, value, answer, fault);
 }
 
-static void check_action_fold_floating(CheckOp op, const CheckValue* a, const CheckValue* b, CheckValue* value, uint32_t node)
+static void check_action_fold_floating(CheckOp op, const CheckValue* a, const CheckValue* b, CheckValue* value, uint32_t node, bool constant_evaluated)
 {
     long double number = 0;
     bool integer = op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
@@ -1466,10 +1467,22 @@ static void check_action_fold_floating(CheckOp op, const CheckValue* a, const Ch
     {
         BUSTER_CHECK_REAL_OPERATION(long double);
     }
-    else if (check_action_half_format(a->type) != CHECK_HALF_NONE && (op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || integer))
+    else if (check_action_half_format(a->type) != CHECK_HALF_NONE && (op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || integer || constant_evaluated))
     {
-        // A half-precision constant's exact operations (CheckHalf): its arithmetic is clang's at run time.
+        // Only required constant evaluation rounds each arithmetic node to its half format. Runtime chains keep
+        // their excess precision. x87's precision and exponent range suffice for both formats' finite operations.
         BUSTER_CHECK_REAL_OPERATION(long double);
+        if (!integer && isnan(number))
+        {
+            // APFloat keeps the first NaN operand's sign/payload, quieted; an invalid operation on non-NaNs makes
+            // a positive canonical NaN. x87 can choose another operand or make its negative indefinite NaN.
+            number = isnan(a->floating) ? a->floating : isnan(b->floating) ? b->floating : __builtin_nanl("");
+            uint64_t significand = 0;
+            memcpy(&significand, &number, sizeof(significand));
+            significand |= UINT64_C(1) << 62;
+            memcpy(&number, &significand, sizeof(significand));
+        }
+        number = integer ? number : check_action_round_float(a->type, number);
     }
     else
     {
@@ -1625,7 +1638,7 @@ static void check_action_arithmetic(TypeTable* table, const CheckAction* action,
                 }
                 else if (left.constant_kind == CHECK_CONSTANT_FLOATING && (unary || right.constant_kind == CHECK_CONSTANT_FLOATING))
                 {
-                    check_action_fold_floating(op, &left, &right, &result->value, action->node);
+                    check_action_fold_floating(op, &left, &right, &result->value, action->node, action->context.constant_evaluated);
                 }
                 else if (left.constant_kind == CHECK_CONSTANT_COMPLEX && (unary || right.constant_kind == CHECK_CONSTANT_COMPLEX))
                 {
