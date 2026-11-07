@@ -2046,6 +2046,26 @@ What the lowering covers past scalars (#145's programs):
   would cost 2 to 4.5 times the stores. `sqlite3.c`'s compile time doesn't
   change (+0.0007% instructions); the compiler's own `main.c` makes 171 more
   memset calls and 1.9% less text.
+  A whole-object initializer whose one value is a call (`T x = f(...);`)
+  can use `x` as the call's hidden result object (#1549), removing the separate
+  temporary and copy before either backend sees the stream. The result and
+  destination must be the same unqualified record type, with matching sizes,
+  no volatile part and enough alignment for the result's canonical ABI type.
+  Register returns retain their previous path. The immutable source binding
+  column is scanned only across that initializer, 16 tokens at a time on the
+  vector path with a scalar tail and twin: any reference to `x`, even inside
+  another argument's call, retains the temporary. Bodies with source labels
+  or a reference to a known returns-twice function retain it too, because
+  reentry can find a destination whose address escaped after an earlier
+  initialization. The first candidate scans that body's bindings and
+  intrinsic IDs once and caches the latter decision, before any argument
+  tasks run, so an initializer's nested `__builtin_setjmp` is covered too.
+  The existing declaration pass records `returns_twice` by object when it
+  occurs, so a later redeclaration cannot hide an earlier attribute.
+  The destination is an explicit argument to this call's lowering, so nested
+  argument and callee calls retain their own result objects. Assignments
+  continue to evaluate into a separate result and copy afterwards. This is a
+  code-shape change; the #1376 measurements above do not measure this change.
   Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
   plans use a readonly byte image and one call to the target C library's
   `memcpy` (#598). The call returns the destination and discards it, which is the
