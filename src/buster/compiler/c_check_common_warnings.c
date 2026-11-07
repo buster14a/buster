@@ -2522,51 +2522,40 @@ static const uint64_t* check_common_initializer_roots(const Parser* parser, Prep
                                                            const uint8_t* evaluated, bool* source_contexts, uint32_t* result_count, Arena* scratch)
 {
     const CheckInitializers* initializers = program != NULL ? program->initializers : NULL;
-    uint64_t capacity = 0;
     uint32_t count = 0;
     uint64_t* keys = NULL;
     uint64_t* temporary = NULL;
-    for (uint32_t pass = 0; pass < 2 && !pp->fatal; pass += 1)
+    // One pass over the plans; only one with a floating value part (CheckInitializer.floating_values) has its parts read,
+    // and the first that converts one takes room for every plan after it.
+    for (uint32_t i = 0; initializers != NULL && i < initializers->count && !pp->fatal; i += 1)
     {
-        for (uint32_t i = 0; initializers != NULL && i < initializers->count; i += 1)
+        const CheckInitializer* plan = initializers->plans + i;
+        const uint32_t declaration = initializers->declaration_tokens[i];
+        const bool scalar = !plan->floating_values ||
+                            (declaration < input->token_count && check_common_sparse_get(input->initializer_nodes, declaration) < input->graph.count);
+        bool converted = false;
+        uint32_t first = BUSTER_CHECK_NONE;
+        for (uint32_t p = 0; !scalar && p < plan->count; p += 1)
         {
-            const uint32_t declaration = initializers->declaration_tokens[i];
-            const bool scalar = declaration < input->token_count && check_common_sparse_get(input->initializer_nodes, declaration) < input->graph.count;
-            const CheckInitializer* plan = initializers->plans + i;
-            bool converted = false;
-            uint32_t first = BUSTER_CHECK_NONE;
-            for (uint32_t p = 0; !scalar && p < plan->count; p += 1)
-            {
-                const CheckInitPart* part = plan->parts + p;
-                const bool literal = check_common_initializer_literal(parser, input, stream, types, part);
-                converted |= literal;
-                *source_contexts |= literal && evaluated != NULL && evaluated[part->node] == 0;
-                first = part->kind == CHECK_INIT_VALUE && part->node < first ? part->node : first;
-            }
-            if (converted && first < input->graph.count)
-            {
-                if (pass == 0)
-                {
-                    capacity += 1;
-                }
-                else
-                {
-                    keys[count++] = (uint64_t)first << 32 | i;
-                }
-            }
+            const CheckInitPart* part = plan->parts + p;
+            const bool literal = check_common_initializer_literal(parser, input, stream, types, part);
+            converted |= literal;
+            *source_contexts |= literal && evaluated != NULL && evaluated[part->node] == 0;
+            first = part->kind == CHECK_INIT_VALUE && part->node < first ? part->node : first;
         }
-        if (pass == 0 && capacity == 0)
+        if (converted && first < input->graph.count && keys == NULL)
         {
-            break;
-        }
-        if (pass == 0 && capacity != 0)
-        {
-            keys = capacity <= UINT32_MAX ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, capacity) : NULL;
+            const uint64_t capacity = (uint64_t)initializers->count - i;
+            keys = CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, capacity);
             temporary = keys != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, capacity) : NULL;
             if (temporary == NULL)
             {
                 check_common_exhausted(pp);
             }
+        }
+        if (converted && first < input->graph.count && temporary != NULL)
+        {
+            keys[count++] = (uint64_t)first << 32 | i;
         }
     }
     const uint32_t varying = input->graph.count != 0 ? UINT32_MAX >> __builtin_clz(input->graph.count) : 0;
@@ -2740,6 +2729,25 @@ static uint32_t check_common_next_reach(const uint8_t* reach, uint32_t count, ui
     return result;
 }
 
+// The scan's next node below `count` that isn't evaluated (`evaluated`'s zero), or `count`: the vector path tests 64 nodes at
+// a time; the scalar path, its twin, gives every node, so that its caller tests each.
+static uint32_t check_common_next_unevaluated(const uint8_t* evaluated, uint32_t count, CheckCommonScan* scan, bool vector)
+{
+    while (scan->pending == 0 && scan->next < count)
+    {
+        const uint32_t first = scan->next;
+        const uint32_t live = count - first < 64 ? count - first : 64;
+        const uint64_t lanes = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
+        const __m512i bytes = vector ? _mm512_maskz_loadu_epi8((__mmask64)lanes, evaluated + first) : _mm512_setzero_si512();
+        const uint64_t selected = vector ? _mm512_mask_testn_epi8_mask((__mmask64)lanes, bytes, bytes) : lanes;
+        scan->base = first;
+        scan->next = first + live;
+        scan->pending = selected;
+    }
+    const uint32_t result = check_common_scan_take(scan, count);
+    return result;
+}
+
 static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                         TypeTable* types, CheckWarningSpelling* spell, const CheckProgram* program, const CheckCommonFacts* facts, Arena* scratch)
 {
@@ -2749,18 +2757,13 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
     bool source_contexts = false;
     if (evaluated != NULL)
     {
-        // Only conversion, call and truth-context nodes can need a literal-only source context. The vector path skips
-        // other operators in batches; the scalar twin visits all nodes and applies the same tests.
-        static const CheckOp context_ops[] =
-        {
-            CHECK_OP_INITIALIZE, CHECK_OP_ASSIGN, CHECK_OP_CONVERT, CHECK_OP_CALL, CHECK_OP_NOT, CHECK_OP_LOGICAL_AND, CHECK_OP_LOGICAL_OR, CHECK_OP_CONDITION,
-            CHECK_OP_CONDITIONAL,
-        };
-        const CheckCommonOps set = check_common_ops(context_ops, BUSTER_ARRAY_LENGTH(context_ops));
+        // Only an unevaluated conversion, call or truth-context node can need a literal-only source context. Unevaluated
+        // nodes are few: the vector path skips the evaluated ones 64 at a time; the scalar twin visits all nodes and applies
+        // the same tests.
         const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
         CheckCommonScan scan = { 0 };
-        for (uint32_t node = check_common_next_op(graph, &set, &scan, vector); node < graph->count && !source_contexts;
-             node = check_common_next_op(graph, &set, &scan, vector))
+        for (uint32_t node = check_common_next_unevaluated(evaluated, graph->count, &scan, vector); node < graph->count && !source_contexts;
+             node = check_common_next_unevaluated(evaluated, graph->count, &scan, vector))
         {
             const CheckOp op = graph->ops[node];
             if (evaluated[node] == 0 && (op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || op == CHECK_OP_CONVERT))
