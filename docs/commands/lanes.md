@@ -45,6 +45,13 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   takes its place without it at once, since either holds the CPU the late lane
   needs; two lanes on the process's own CPUs, where it has more than one, read
   theirs as not sharing them;
+- thread counts, which the teams and sessions checks compare: a thread in
+  `/proc/self/task` counts unless its stat's flags say it has begun to exit
+  (`PF_EXITING`), as a thread just joined may still be listed there. The
+  flags are read from stat texts whose command holds spaces and parentheses,
+  and from none that stop short of them; this thread reads as live; and 512
+  threads are started and joined, the count after each join the count before
+  them;
 - command-owned teams: stable worker identities across repeated operations
   and changing active counts, exact participation, shared-write visibility,
   per-operation worker scratch cleanup (or with `lane_team_keep_scratch` the
