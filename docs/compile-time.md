@@ -1252,6 +1252,67 @@ Since no fault maps those pages, every later load there costs the same again.
 The gated loads now read `check_input_rare_line`'s static line of zeros
 instead, and the classes' pass takes 0.43 ms.
 
+### The preprocessor's output before the backend (#628)
+
+After the change above, the backend's end was the compile's peak. A map on the
+VM (main `6b4e178f`, instrumented as in "Partly used huge pages", whose peak
+it kept within 0.1 MB), with huge pages and one lane (the 9700X's runs are pinned
+to a CPU; the VM's four CPUs give four lanes, whose arenas add 28.7 MB at the
+backend's `lanes` stage), put the stages' ends at:
+
+| stage's end | resident (KiB) |
+| --- | ---: |
+| the reader | 240,196 |
+| `static-data` | 237,516 |
+| `check-program` | 233,552 |
+| `lower` | 249,840 |
+| `emit-setup`, the peak | 251,888 |
+
+At the peak, the pushes' pages were the checker's graph (34 MB from
+`check_graph_initialize`, 29.6 MB from `check_graph_run`), the program
+(28.4 MB), the reader's output (24.6 MB), the parser's token and tree columns
+(16 MB) and the preprocessor's output (12.5 MB). Each made unreadable before
+the selection, in turn, showed what the backend reads: the selection reads the
+tree's parents and lowering the parser's token columns, but nothing reads the
+preprocessor's output but `-g`'s line table and the diagnostics.
+
+So a unit without errors whose history is still deferred gives the output
+back before the backend (`pp_release_output`, `docs/c-preprocessor.md`'s
+"Deferred history"), and a reader asks for it first (`pp_output_ensure`): a
+diagnostic records the history, whose replay gives it back, and one that
+doesn't, as an undefined reference's system-header test, has it from a replay
+without history. The tests, run with every unit's output unreadable, found
+the readers that didn't ask: the unparsed literals' diagnostics of a failed
+parse, which the release now leaves alone, and the undefined reference's
+test.
+
+On the VM, the same build and options: the peak is 251,968 → 239,848 KiB, and
+the reader's end is the compile's peak again, the backend's end 1 MB below
+it. The objects are the same bytes, with `-Wall -Wextra`, `-g` and `--lanes
+8` too. With `-Wall -Wextra`, `sqlite3.c`'s 25 warnings record the history,
+and its peak (272,208 KiB) is the replay's; `-g` records it from the start.
+
+On the 9700X, main `73fcf006` against the change, each compile under its own
+grant of the lock, the order alternating by round
+([the record](https://github.com/buster14a/buster-performance/tree/dfef704959b5b7079e77724bdf7897bef2ff531d/docs/measurements/output-release-628-2026-11-07)), every object the same bytes in six modes
+and the diagnostics too (medians):
+
+| measure | main | the change |
+| --- | ---: | ---: |
+| peak RSS, the step's options (9 rounds) | 248,644 KiB | 239,824 KiB |
+| task clock | 120.46 ms | 120.49 ms |
+| user cycles | 581.98 M | 581.99 M |
+| kernel cycles | 84.97 M | 84.97 M |
+| page faults | 6,656 | 6,655 |
+| peak RSS, `-w` (5 rounds) | 248,640 KiB | 239,816 KiB |
+| task clock, `-w` | 105.19 ms | 105.10 ms |
+| kernel cycles, `-w` | 84.15 M | 84.26 M |
+
+The peak falls 8.8 MB, to the reader's end. The time and the kernel's cycles
+are the same, within the rounds' spread: the release only gives the pages back
+earlier than the exit would, and the backend faults in nothing it wouldn't
+have.
+
 ## The checker's graph and program passes (#530)
 
 **Measured against `main` on the 9700X.** Medians of 15 interleaved
