@@ -10,8 +10,8 @@
 // the direct-action API's current-table contract. A supplied history is bounded, including when the table already
 // contains tags completed later in the source. Type interning may grow the table, but not these borrowed histories.
 //
-// constant_evaluated authorizes source initializer-receipt reads only. It is NOT an operand-evaluation mask or proof
-// that a known value is an ICE. Unevaluated/unselected operands, discarded-value evaluation, runtime effects and
+// constant_evaluated authorizes source initializer-receipt reads and source-format half-precision arithmetic folding.
+// It is NOT an operand-evaluation mask or proof that a known value is an ICE. Unevaluated/unselected operands, discarded-value evaluation, runtime effects and
 // source provenance retain their separate graph/action contracts. In particular, copying a context must not turn
 // a runtime atomic/volatile load into a constant or make a computed zero a literal zero.
 #ifndef BUSTER_C_CHECK_CONTEXT_INCLUDED

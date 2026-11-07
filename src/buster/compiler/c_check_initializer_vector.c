@@ -441,7 +441,7 @@ static bool check_init_vector_fold(CheckInitWalker* walker, uint32_t node, uint8
             }
             else
             {
-                check_action_fold_floating(op, &a, &b, &answer, node);
+                check_action_fold_floating(op, &a, &b, &answer, node, false);
             }
         }
         else

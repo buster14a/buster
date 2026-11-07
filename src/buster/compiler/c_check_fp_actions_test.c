@@ -263,11 +263,150 @@ static void check_test_fp_graph(CheckTest* test, TypeTable* table)
     arena_release(&storage);
 }
 
+// Source constant evaluation and executable half arithmetic have different rounding boundaries (#1497).
+// Keep an independent expected value for each operation and ensure runtime action batches never acquire it.
+static void check_test_half_constant_actions(CheckTest* test, TypeTable* table)
+{
+    const TypeId formats[] = { BUSTER_TYPE_FLOAT16, BUSTER_TYPE_BF16 };
+    const CheckOp operations[] = { CHECK_OP_ADD, CHECK_OP_SUBTRACT, CHECK_OP_MULTIPLY, CHECK_OP_DIVIDE };
+    const long double expected[] = { 3, 1, 2, 2 };
+    for (uint32_t format = 0; format < BUSTER_ARRAY_LENGTH(formats); format += 1)
+    {
+        for (uint32_t op = 0; op < BUSTER_ARRAY_LENGTH(operations); op += 1)
+        {
+            CheckAction action = {
+                .op = operations[op],
+                .operands = { check_test_float(formats[format], 2), check_test_float(formats[format], 1) },
+                .context = { .constant_evaluated = true },
+            };
+            const CheckActionResult constant = check_test_action(test, table, action);
+            check_test_expect(test, constant.diagnostic == CHECK_DIAG_NONE && constant.value.fault == CHECK_FAULT_NONE &&
+                                   constant.value.constant_kind == CHECK_CONSTANT_FLOATING && constant.value.floating == expected[op],
+                              "half required constant arithmetic has the source-format result");
+            action.context.constant_evaluated = false;
+            const CheckActionResult runtime = check_test_action(test, table, action);
+            check_test_expect(test, runtime.diagnostic == CHECK_DIAG_NONE && runtime.value.fault == CHECK_FAULT_UNSUPPORTED_CONSTANT,
+                              "half runtime arithmetic retains its excess-precision lowering");
+        }
+        const long double midpoint = format == 0 ? 2048 : 256;
+        CheckAction action = {
+            .op = CHECK_OP_ADD,
+            .operands = { check_test_float(formats[format], midpoint), check_test_float(formats[format], 1) },
+            .context = { .constant_evaluated = true },
+        };
+        const CheckActionResult rounded = check_test_action(test, table, action);
+        action.op = CHECK_OP_SUBTRACT;
+        action.operands[0] = rounded.value;
+        action.operands[1] = check_test_float(formats[format], midpoint);
+        const CheckActionResult difference = check_test_action(test, table, action);
+        check_test_expect(test, rounded.value.floating == midpoint && difference.value.fault == CHECK_FAULT_NONE &&
+                               difference.value.constant_kind == CHECK_CONSTANT_FLOATING && difference.value.floating == 0,
+                          "half required constant chains round every operation instead of preserving float excess precision");
+        action.op = CHECK_OP_MULTIPLY;
+        action.operands[0] = check_test_float(formats[format], 0);
+        action.operands[1] = check_test_float(formats[format], -1);
+        const CheckActionResult zero = check_test_action(test, table, action);
+        check_test_expect(test, zero.value.fault == CHECK_FAULT_NONE && zero.value.constant_kind == CHECK_CONSTANT_FLOATING &&
+                               zero.value.floating == 0 && signbit(zero.value.floating),
+                          "half required constant multiplication preserves negative zero");
+        const long double tiny = format == 0 ? 0x1p-24L : 0x1p-133L;
+        action.op = CHECK_OP_ADD;
+        action.operands[0] = check_test_float(formats[format], tiny);
+        action.operands[1] = action.operands[0];
+        const CheckActionResult subnormal = check_test_action(test, table, action);
+        check_test_expect(test, subnormal.value.fault == CHECK_FAULT_NONE && subnormal.value.constant_kind == CHECK_CONSTANT_FLOATING &&
+                               subnormal.value.floating == 2 * tiny,
+                          "half required constant arithmetic retains subnormal results");
+        action.op = CHECK_OP_MULTIPLY;
+        action.operands[0] = check_test_float(formats[format], format == 0 ? 65504 : 0x1.fep127L);
+        action.operands[1] = check_test_float(formats[format], 2);
+        const CheckActionResult overflow = check_test_action(test, table, action);
+        check_test_expect(test, overflow.value.fault == CHECK_FAULT_NONE && overflow.value.constant_kind == CHECK_CONSTANT_FLOATING &&
+                               isinf(overflow.value.floating) && !signbit(overflow.value.floating),
+                          "half required constant arithmetic rounds overflow to positive infinity");
+        action.op = CHECK_OP_ADD;
+        action.operands[0] = check_test_float(formats[format], __builtin_infl());
+        action.operands[1] = check_test_float(formats[format], -__builtin_infl());
+        const CheckActionResult invalid = check_test_action(test, table, action);
+        const CheckHalf half = format == 0 ? CHECK_HALF_IEEE : CHECK_HALF_BRAIN;
+        const uint16_t canonical = format == 0 ? 0x7e00u : 0x7fc0u;
+        check_test_expect(test, invalid.value.fault == CHECK_FAULT_NONE && invalid.value.constant_kind == CHECK_CONSTANT_FLOATING &&
+                               check_action_half_bits(half, invalid.value.floating) == canonical,
+                          "half required invalid constant arithmetic makes Clang's positive canonical NaN");
+        action.operands[0] = check_test_float(formats[format], -__builtin_nanl(""));
+        action.operands[1] = check_test_float(formats[format], __builtin_nanl(""));
+        const CheckActionResult propagated = check_test_action(test, table, action);
+        check_test_expect(test, propagated.value.fault == CHECK_FAULT_NONE && propagated.value.constant_kind == CHECK_CONSTANT_FLOATING &&
+                               check_action_half_bits(half, propagated.value.floating) == (uint16_t)(canonical | 0x8000u),
+                          "half required NaN arithmetic preserves the first NaN operand's sign");
+    }
+}
+
+// A required arithmetic context is independent of the optional const-object receipts. Shared leaves do not
+// turn a neighboring runtime chain into a constant, through any graph schedule or transition-cache request.
+static void check_test_half_constant_graph(CheckTest* test, TypeTable* table)
+{
+    Arena storage = arena_reserve(65536);
+    Arena output = arena_reserve(262144);
+    Arena scratch = arena_reserve(65536);
+    CheckGraph graph;
+    const bool ready = check_graph_initialize(&graph, &storage, 32, 32);
+    check_test_expect(test, ready, "half constant graph allocation");
+    if (ready)
+    {
+        const TypeId formats[] = { BUSTER_TYPE_FLOAT16, BUSTER_TYPE_BF16 };
+        uint32_t required[2];
+        uint32_t runtime[2];
+        for (uint32_t format = 0; format < BUSTER_ARRAY_LENGTH(formats); format += 1)
+        {
+            const long double midpoint = format == 0 ? 2048 : 256;
+            const uint32_t large = check_test_leaf(&graph, 1, check_test_float(formats[format], midpoint));
+            const uint32_t one = check_test_leaf(&graph, 2, check_test_float(formats[format], 1));
+            const uint32_t constant_sum = check_graph_add(&graph, CHECK_OP_ADD, 3, large, one, BUSTER_CHECK_NONE);
+            required[format] = check_graph_add(&graph, CHECK_OP_SUBTRACT, 4, constant_sum, large, BUSTER_CHECK_NONE);
+            graph.contexts[required[format]] = BUSTER_CHECK_CONTEXT_STATIC;
+            const uint32_t runtime_sum = check_graph_add(&graph, CHECK_OP_ADD, 5, large, one, BUSTER_CHECK_NONE);
+            runtime[format] = check_graph_add(&graph, CHECK_OP_SUBTRACT, 6, runtime_sum, large, BUSTER_CHECK_NONE);
+        }
+        CheckStream scalar;
+        const CheckOptions options = { .scalar = true };
+        const bool checked = check_graph_run(table, &graph, &output, &scratch, &options, &scalar);
+        check_test_expect(test, graph.const_values == NULL && checked && scalar.report_count == 0,
+                          "required half arithmetic needs no optional const-object receipt table");
+        if (checked)
+        {
+            for (uint32_t format = 0; format < BUSTER_ARRAY_LENGTH(formats); format += 1)
+            {
+                const CheckValue constant = check_stream_value(&scalar, required[format]);
+                const CheckValue ordinary = check_stream_value(&scalar, runtime[format]);
+                check_test_expect(test, constant.fault == CHECK_FAULT_NONE && constant.constant_kind == CHECK_CONSTANT_FLOATING &&
+                                       constant.floating == 0 && ordinary.fault == CHECK_FAULT_UNSUPPORTED_CONSTANT,
+                                  "required half graph chains round each operation without folding neighboring runtime chains");
+            }
+            const uint64_t mark = output.length;
+            for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
+            {
+                CheckStream vector;
+                const CheckOptions partition = { .batch_size = batch, .regions = batch != 0, .transitions = batch == 0 };
+                check_test_expect(test, check_graph_run(table, &graph, &output, &scratch, &partition, &vector) &&
+                                       check_test_stream_equal(&scalar, &vector, graph.argument_count),
+                                  "half required contexts and runtime chains agree across graph schedules and transition requests");
+                arena_pop_to(&output, mark);
+            }
+        }
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&storage);
+}
+
 static __attribute__((noinline)) void check_test_fp_actions(CheckTest* test, TypeTable* table)
 {
     check_test_pragma_extensions(test);
     check_test_fp_action_guards(test, table);
     check_test_fp_action_values(test, table);
+    check_test_half_constant_actions(test, table);
+    check_test_half_constant_graph(test, table);
     check_test_fp_evaluation_actions(test, table);
     check_test_fp_graph(test, table);
 }
