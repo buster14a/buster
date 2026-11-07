@@ -1,29 +1,32 @@
 // Copyright (c) 2026 David Gonzalez Martin
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
-// Exact scalar/vector agreement, bounded reads/writes, fail-closed operand cases, and executable harness checks.
-// These tests deliberately do not assert that a table's own fixtures prove coverage of a future compiler emitter.
+// test-x86-zen5 and benchmark-x86-zen5 (#181): exact scalar/vector lookups over every byte ID, length and guarded tail;
+// each record's operand kind (zero idioms, LEA's shapes, memory with and without an index) and what doesn't change it
+// (immediates, decorations, segment overrides, fixups); the table's completeness (every case accounts for every
+// column); and the harness: every case's fixtures resolve to the case, validate, encode alike by both encoders, and run
+// where the host's target allows them. These tests check no timing: measure-x86-zen5 --check reproduces the table.
 
+// Every byte ID of every column, every count through 256, with synthetic distinct entries in all 256 slots so that a
+// swapped bank or lane shows; then tails that end at a guard page.
 static bool x86_zen5_test_lookup(void)
 {
     uint8_t ids[256];
     uint16_t scalar[256];
     uint16_t vector[256];
-    uint16_t saved[X86_COST_COLUMN_COUNT][BUSTER_X86_COST_CAPACITY];
+    static uint16_t saved[X86_COST_COLUMN_COUNT][BUSTER_X86_COST_CAPACITY];
     memcpy(saved, x86_zen5_columns, sizeof(saved));
-    // Real costs share many values. Distinct synthetic entries catch swapped lanes/banks even where two real
-    // instructions happen to have the same measured cost. Restore the actual model before the case checks.
     for (uint32_t column = 0; column < X86_COST_COLUMN_COUNT; column += 1)
     {
-        for (uint32_t id = 1; id < BUSTER_X86_COST_CAPACITY; id += 1)
+        for (uint32_t id = 0; id < BUSTER_X86_COST_CAPACITY; id += 1)
         {
-            x86_zen5_columns[column][id] = column * 1000 + id * 7;
+            x86_zen5_columns[column][id] = (uint16_t)(column * 1000 + id * 7 + 1);
         }
     }
     bool valid = true;
     for (uint32_t i = 0; i < 256; i += 1)
     {
-        ids[i] = i;
+        ids[i] = (uint8_t)(i * 37 + 11);
     }
     for (uint32_t column = 0; column < X86_COST_COLUMN_COUNT; column += 1)
     {
@@ -31,12 +34,12 @@ static bool x86_zen5_test_lookup(void)
         {
             memset(scalar, 0x5a, sizeof(scalar));
             memset(vector, 0x5a, sizeof(vector));
-            x86_zen5_lookup_scalar(ids, count, column, scalar);
-            x86_zen5_lookup(ids, count, column, vector);
+            x86_zen5_lookup_scalar(ids, count, (X86CostColumn)column, scalar);
+            x86_zen5_lookup(ids, count, (X86CostColumn)column, vector);
             valid &= memcmp(scalar, vector, sizeof(scalar)) == 0;
             for (uint32_t i = 0; i < count; i += 1)
             {
-                valid &= vector[i] == x86_zen5_columns[column][i < X86_COST_COUNT ? i : 0];
+                valid &= vector[i] == x86_zen5_columns[column][ids[i]];
             }
         }
     }
@@ -48,19 +51,16 @@ static bool x86_zen5_test_lookup(void)
     {
         const bool writable = mprotect(input + page, page, PROT_READ | PROT_WRITE) == 0 && mprotect(output + page, page, PROT_READ | PROT_WRITE) == 0;
         valid &= writable;
-        if (writable)
+        for (uint32_t column = 0; writable && column < X86_COST_COLUMN_COUNT; column += 1)
         {
-            for (uint32_t column = 0; column < X86_COST_COLUMN_COUNT; column += 1)
+            for (uint32_t count = 0; count <= 256; count += 1)
             {
-                for (uint32_t count = 0; count <= 256; count += 1)
-                {
-                    uint8_t* source = input + 2 * page - count;
-                    uint16_t* destination = (uint16_t*)(output + 2 * page - count * 2);
-                    memcpy(source, ids, count);
-                    x86_zen5_lookup_scalar(source, count, column, scalar);
-                    x86_zen5_lookup(source, count, column, destination);
-                    valid &= memcmp(scalar, destination, count * 2) == 0;
-                }
+                uint8_t* source = input + 2 * page - count;
+                uint16_t* destination = (uint16_t*)(output + 2 * page - count * 2);
+                memcpy(source, ids, count);
+                x86_zen5_lookup_scalar(source, count, (X86CostColumn)column, scalar);
+                x86_zen5_lookup(source, count, (X86CostColumn)column, destination);
+                valid &= memcmp(scalar, destination, count * 2) == 0;
             }
         }
     }
@@ -77,53 +77,84 @@ static bool x86_zen5_test_lookup(void)
     return valid;
 }
 
+static bool x86_zen5_test_expect(bool condition, const char* what)
+{
+    if (!condition)
+    {
+        printf("  failed: %s\n", what);
+    }
+    return condition;
+}
+
+// The ID of `record`, as the case (form, operand kind) whose row it should take.
+static bool x86_zen5_test_kind(X86Instruction record, uint32_t form, uint32_t operands, const char* what)
+{
+    const uint32_t c = x86_zen5_case_find(form, operands);
+    return x86_zen5_test_expect(c != X86_COST_CASE_NONE && x86_zen5_id(&record) == x86_zen5_case_ids[c], what);
+}
+
 static bool x86_zen5_test_cases(void)
 {
-    bool valid = true;
-    for (uint32_t id = 1; id < X86_COST_COUNT; id += 1)
+    bool valid = x86_zen5_test_expect(x86_zen5_id_count > 1 && x86_zen5_id_count <= BUSTER_X86_COST_CAPACITY, "the rows fit the byte IDs");
+    // Every case has its dense ID, and its form's ID for its kind is it.
+    for (uint32_t c = 1; c < X86_COST_CASE_COUNT; c += 1)
     {
-        const X86CostCase* entry = &x86_zen5_cases[id];
-        X86Instruction instruction = x86_zen5_fixture(id, X86_REGISTER_RAX, X86_REGISTER_R14, false);
-        valid &= x86_validate(&instruction, 1) == 1 && x86_zen5_id(&instruction) == id;
-        const uint32_t observed = (1u << X86_COST_THROUGHPUT) | (1u << X86_COST_RETIRED_OPS);
-        valid &= x86_zen5_missing(&instruction, 1, observed) == 0;
-        valid &= entry->throughput != 0 && entry->retired_ops != 0;
-        // A repeated destination is not an input dependency for zeroing XOR or an immediate move. Their measured
-        // throughput must not turn into a fabricated fractional GPR latency when refreshing the observations.
-        const bool dependency = entry->operands != X86_COST_ZERO && entry->form != X86_FORM_MOV_R32_IMM32 && entry->form != X86_FORM_MOV_R64_IMM64;
-        valid &= x86_zen5_missing(&instruction, 1, 1u << X86_COST_GPR_LATENCY) == !dependency;
-        valid &= x86_zen5_missing(&instruction, 1, 1u << X86_COST_FLAGS_LATENCY) == 1;
-        valid &= x86_zen5_missing(&instruction, 1, 1u << X86_COST_LOAD_EXTRA) == 1;
-        valid &= x86_zen5_missing(&instruction, 1, 1u << X86_COST_PIPES) == 1;
-        valid &= x86_zen5_missing(&instruction, 1, 1u << X86_COST_EXECUTED_UOPS) == 1;
-        for (uint32_t column = 0; column < X86_COST_COLUMN_COUNT; column += 1)
-        {
-            valid &= ((x86_zen5_measured_fields[id] & (1u << column)) != 0) == (x86_zen5_columns[column][id] != BUSTER_X86_COST_UNKNOWN);
-        }
-        instruction.form += BUSTER_X86_FORM_FS;
-        valid &= x86_zen5_id(&instruction) == 0;
-        instruction.form = x86_zen5_cases[id].form | BUSTER_X86_FORM_FIXUP;
-        valid &= x86_zen5_id(&instruction) == 0;
+        const X86CostCase* entry = &x86_zen5_cases[c];
+        valid &= x86_zen5_test_expect(x86_zen5_case_ids[c] != 0 && x86_zen5_form_ids[entry->form][entry->operands] == x86_zen5_case_ids[c], entry->name);
     }
-    const X86Instruction unsupported[] = {
+    // Zero idioms: two sources one register; another register is the ordinary case.
+    valid &= x86_zen5_test_kind((X86Instruction){ .form = X86_FORM_XOR_RM32_R32, .reg = 3, .rm = 3 }, X86_FORM_XOR_RM32_R32, X86_COST_ZERO, "xor r32, r32 is a zero idiom");
+    valid &= x86_zen5_test_kind((X86Instruction){ .form = X86_FORM_XOR_RM32_R32, .reg = 3, .rm = 2 }, X86_FORM_XOR_RM32_R32, X86_COST_REGISTER, "xor of two registers");
+    valid &= x86_zen5_test_kind((X86Instruction){ .form = X86_FORM_VPXORD_X_X_XM128, .reg = 0, .vvvv = 5, .rm = 5 }, X86_FORM_VPXORD_X_X_XM128, X86_COST_ZERO,
+                                "vpxord's vvvv and rm one register");
+    valid &= x86_zen5_test_kind((X86Instruction){ .form = X86_FORM_VPXORD_X_X_XM128, .reg = 5, .vvvv = 5, .rm = 4 }, X86_FORM_VPXORD_X_X_XM128, X86_COST_REGISTER,
+                                "vpxord's destination is no source");
+    // LEA's shapes: RBP and R13 force a displacement, a third component.
+    X86Instruction lea = { .form = X86_FORM_LEA_R64_M, .reg = 0, .rm = 3, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 16 };
+    valid &= x86_zen5_test_kind(lea, X86_FORM_LEA_R64_M, X86_COST_LEA_BASE, "lea [base + disp]");
+    lea.mode = BUSTER_X86_MEMORY_RIP;
+    valid &= x86_zen5_test_kind(lea, X86_FORM_LEA_R64_M, X86_COST_LEA_BASE, "lea [rip + disp]");
+    lea = (X86Instruction){ .form = X86_FORM_LEA_R64_M, .reg = 0, .rm = 3, .index = 2, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0) };
+    valid &= x86_zen5_test_kind(lea, X86_FORM_LEA_R64_M, X86_COST_LEA_INDEX, "lea [base + index]");
+    lea.rm = X86_REGISTER_RBP;
+    valid &= x86_zen5_test_kind(lea, X86_FORM_LEA_R64_M, X86_COST_LEA_THREE, "lea [rbp + index]");
+    lea.rm = X86_REGISTER_R13;
+    valid &= x86_zen5_test_kind(lea, X86_FORM_LEA_R64_M, X86_COST_LEA_THREE, "lea [r13 + index]");
+    lea.rm = 3;
+    lea.mode = BUSTER_X86_MEMORY_BASE_INDEX(2);
+    valid &= x86_zen5_test_kind(lea, X86_FORM_LEA_R64_M, X86_COST_LEA_SCALED, "lea [base + index * 4]");
+    lea.displacement = -8;
+    valid &= x86_zen5_test_kind(lea, X86_FORM_LEA_R64_M, X86_COST_LEA_THREE, "lea [base + index * 4 + disp]");
+    lea.mode = BUSTER_X86_MEMORY_INDEX(2);
+    valid &= x86_zen5_test_expect(x86_zen5_id(&lea) == 0, "lea [index * 4 + disp] has no row");
+    // Memory kinds; what doesn't change a case.
+    X86Instruction load = { .form = X86_FORM_MOV_R64_RM64, .reg = 0, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 24 };
+    valid &= x86_zen5_test_kind(load, X86_FORM_MOV_R64_RM64, X86_COST_MEMORY, "a load from [rsp + disp]");
+    load.mode = BUSTER_X86_MEMORY_RIP;
+    valid &= x86_zen5_test_kind(load, X86_FORM_MOV_R64_RM64, X86_COST_MEMORY, "a RIP-relative load");
+    load.form |= BUSTER_X86_FORM_FIXUP;
+    valid &= x86_zen5_test_kind(load, X86_FORM_MOV_R64_RM64, X86_COST_MEMORY, "a fixup mark");
+    load.form = X86_FORM_MOV_R64_RM64 + BUSTER_X86_FORM_FS;
+    load.mode = BUSTER_X86_MEMORY_BASE;
+    valid &= x86_zen5_test_kind(load, X86_FORM_MOV_R64_RM64, X86_COST_MEMORY, "an FS override");
+    load.form = X86_FORM_MOV_R64_RM64;
+    load.mode = BUSTER_X86_MEMORY_BASE_INDEX(3);
+    load.index = 2;
+    valid &= x86_zen5_test_kind(load, X86_FORM_MOV_R64_RM64, X86_COST_MEMORY_INDEX, "a load with an index");
+    load.mode = BUSTER_X86_MEMORY_INDEX(3);
+    valid &= x86_zen5_test_expect(x86_zen5_id(&load) == 0, "a load with an index and no base has no row");
+    load.mode = BUSTER_X86_MEMORY_BASE | BUSTER_X86_MODE_ADDRESS_SIZE;
+    valid &= x86_zen5_test_expect(x86_zen5_id(&load) == 0, "a 32-bit address has no row");
+    valid &= x86_zen5_test_kind((X86Instruction){ .form = X86_FORM_SHL_RM64_IMM8, .rm = 2, .immediate = 0 }, X86_FORM_SHL_RM64_IMM8, X86_COST_REGISTER, "shl by 0");
+    valid &= x86_zen5_test_kind((X86Instruction){ .form = X86_FORM_SHL_RM64_IMM8, .rm = 2, .immediate = 63 }, X86_FORM_SHL_RM64_IMM8, X86_COST_REGISTER, "shl by 63");
+    valid &= x86_zen5_test_kind((X86Instruction){ .form = X86_FORM_VPADDD_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = 3, .decorations = 4 | BUSTER_X86_DECORATION_ZEROING },
+                                X86_FORM_VPADDD_Z_Z_ZM512, X86_COST_REGISTER, "an opmask and zeroing");
+    const X86Instruction unknown[] = {
         { .form = X86_FORM_NONE },
         { .form = UINT16_MAX },
-        { .form = X86_FORM_ADD_RM64_R64, .mode = BUSTER_X86_MEMORY_BASE },
-        { .form = X86_FORM_SUB_RM64_R64, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX },
-        { .form = X86_FORM_SHL_RM64_IMM8, .immediate = 0 },
-        { .form = X86_FORM_SHL_RM64_IMM8, .immediate = 64 },
-        { .form = X86_FORM_LEA_R64_M, .mode = BUSTER_X86_MEMORY_RIP },
-        { .form = X86_FORM_LEA_R64_M, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0), .rm = X86_REGISTER_RBP, .index = X86_REGISTER_RDX },
-        { .form = X86_FORM_LEA_R64_M, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0), .rm = X86_REGISTER_R13, .index = X86_REGISTER_RDX },
-        { .form = X86_FORM_MOV_R64_RM64, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 1 },
-        { .form = X86_FORM_MOV_R64_IMM64, .immediate = 4660, .displacement = 1 },
-        { .form = X86_FORM_IMUL_RM64 },
+        { .form = X86_FORM_RDRAND_R64 },
     };
-    valid &= x86_zen5_missing(unsupported, sizeof(unsupported) / sizeof(unsupported[0]), 1u << X86_COST_THROUGHPUT) == sizeof(unsupported) / sizeof(unsupported[0]);
-    X86Instruction zero = { .form = X86_FORM_XOR_RM64_R64, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX };
-    valid &= x86_zen5_id(&zero) == X86_COST_XOR_RM64_R64_ZERO;
-    zero.reg = X86_REGISTER_RDX;
-    valid &= x86_zen5_id(&zero) == X86_COST_XOR_RM64_R64_REGISTER;
+    valid &= x86_zen5_test_expect(x86_zen5_missing(unknown, BUSTER_ARRAY_LENGTH(unknown), 0) == BUSTER_ARRAY_LENGTH(unknown), "forms without rows are missing");
     uint64_t parsed = 123;
     valid &= !x86_zen5_number("18446744073709551616", 1, BUSTER_X86_COST_MAX_ITERATIONS, &parsed) && parsed == 123;
     valid &= !x86_zen5_number("-1", 1, BUSTER_X86_COST_MAX_ITERATIONS, &parsed);
@@ -132,68 +163,105 @@ static bool x86_zen5_test_cases(void)
     valid &= !x86_zen5_number("1x", 1, BUSTER_X86_COST_MAX_ITERATIONS, &parsed);
     valid &= x86_zen5_number("10000000", 1, BUSTER_X86_COST_MAX_ITERATIONS, &parsed) && parsed == 10000000;
     valid &= !x86_zen5_number("10000001", 1, BUSTER_X86_COST_MAX_ITERATIONS, &parsed);
-    // The branch experiment's cases: 35, the logic operations, add and sub of 3, inc, dec, neg and shr and sar by one;
-    // not an add of 4660 at 32 bits (which overflows), a multiply, a shift by 3 (OF undefined), shl by one, not, lea or
-    // mov (no flags written).
-    uint32_t branch_cases = 0;
-    for (uint32_t id = 0; id < X86_COST_COUNT; id += 1)
-    {
-        branch_cases += x86_zen5_branch_case((uint8_t)id);
-    }
-    valid &= branch_cases == 35 && !x86_zen5_branch_case(X86_COST_NONE);
-    static const uint8_t branched[] = { X86_COST_INC_RM32_REGISTER, X86_COST_DEC_RM32_REGISTER, X86_COST_ADD_RM32_IMM8_REGISTER, X86_COST_SUB_RM32_IMM8_REGISTER,
-                                        X86_COST_INC_RM64_REGISTER, X86_COST_DEC_RM64_REGISTER, X86_COST_ADD_RM64_IMM8_REGISTER, X86_COST_SUB_RM64_IMM8_REGISTER,
-                                        X86_COST_ADD_RM64_IMM32_REGISTER, X86_COST_XOR_RM32_R32_ZERO, X86_COST_NEG_RM32_REGISTER, X86_COST_SHR_RM64_1_REGISTER };
-    static const uint8_t unbranched[] = { X86_COST_ADD_RM32_IMM32_REGISTER, X86_COST_IMUL_R32_RM32_REGISTER, X86_COST_IMUL_R64_RM64_IMM8_REGISTER, X86_COST_SHL_RM32_IMM8_REGISTER,
-                                          X86_COST_SAR_RM64_IMM8_REGISTER, X86_COST_SHL_RM64_1_REGISTER, X86_COST_NOT_RM32_REGISTER, X86_COST_LEA_R64_M_LEA_SIMPLE,
-                                          X86_COST_MOV_R64_IMM64_REGISTER, X86_COST_MOV_R64_RM64_L1_LOAD };
-    for (uint32_t i = 0; i < sizeof(branched); i += 1)
-    {
-        valid &= x86_zen5_branch_case(branched[i]);
-    }
-    for (uint32_t i = 0; i < sizeof(unbranched); i += 1)
-    {
-        valid &= !x86_zen5_branch_case(unbranched[i]);
-    }
-    printf("Zen 5 operand cases and unknown coverage: %u cases, %s\n", X86_COST_COUNT - 1, valid ? "pass" : "FAIL");
+    printf("Zen 5 operand kinds: %u cases in %u IDs, %s\n", X86_COST_CASE_COUNT - 1, x86_zen5_id_count - 1, valid ? "pass" : "FAIL");
     return valid;
 }
 
-static bool x86_zen5_test_programs(void)
+// Every case accounts for every column: measured, derived or absent, as measure-x86-zen5 --table writes them. A
+// column measured or derived holds a value; an absent or unknown one doesn't. A throughput, retired ops and the pipes
+// exist for every case that runs.
+static bool x86_zen5_test_table(void)
 {
     bool valid = true;
-    for (uint32_t id = 0; valid && id < X86_COST_COUNT; id += 1)
+    uint32_t incomplete = 0;
+    const char* first = 0;
+    for (uint32_t c = 1; c < X86_COST_CASE_COUNT; c += 1)
     {
-        for (uint32_t experiment = 0; valid && experiment < X86_COST_EXPERIMENT_COUNT; experiment += 1)
+        const X86CostCase* entry = &x86_zen5_cases[c];
+        const uint32_t accounted = (uint32_t)entry->measured | entry->derived | entry->absent;
+        bool complete = accounted == BUSTER_X86_COST_ALL_COLUMNS;
+        for (uint32_t column = 0; column < X86_COST_COLUMN_COUNT; column += 1)
         {
-            X86CostProgram program = {0};
-            // The branch experiment is the cases' whose jo is never taken: the program of any other is refused.
-            const bool built = x86_zen5_program(id, experiment, &program);
-            const bool wanted = experiment != X86_COST_BRANCH || x86_zen5_branch_case((uint8_t)id);
-            valid = built == wanted && (built || program.code == 0);
-            if (built)
+            const bool known = ((entry->measured | entry->derived) & (1u << column)) != 0;
+            complete &= known == (entry->values[column] != BUSTER_X86_COST_UNKNOWN);
+        }
+        X86CostShape shape;
+        x86_zen5_shape(entry->form, entry->operands, &shape);
+        const uint32_t always = (1u << X86_COST_THROUGHPUT) | (1u << X86_COST_RETIRED_OPS) | (1u << X86_COST_PIPES);
+        complete &= shape.special == X86_COST_TRAP || (entry->absent & always) == 0;
+        first = !complete && first == 0 ? entry->name : first;
+        incomplete += !complete;
+    }
+    valid = incomplete == 0;
+    printf("Zen 5 table: %u cases, %u incomplete%s%s: %s\n", X86_COST_CASE_COUNT - 1, incomplete, first != 0 ? ", the first " : "", first != 0 ? first : "", valid ? "pass" : "FAIL");
+    return valid;
+}
+
+// Every case's fixtures and the references: built, their targets the case, validated and encoded alike, and run (twice
+// through the loop) where the host allows every record.
+static bool x86_zen5_test_programs(void)
+{
+    static X86CostHost host;
+    x86_zen5_host(&host);
+    bool valid = true;
+    uint32_t built = 0;
+    uint32_t ran = 0;
+    X86CostShape shape;
+    x86_zen5_shape(X86_FORM_NOP, X86_COST_REGISTER, &shape);
+    x86_zen5_fill(&shape);
+    for (uint32_t r = X86_COST_REFERENCE_EMPTY; valid && r < X86_COST_REFERENCE_COUNT; r += 1)
+    {
+        X86CostProgram program = { 0 };
+        valid = x86_zen5_program(&shape, X86_COST_INDEPENDENT, r, &host, &program);
+        if (valid && program.runnable)
+        {
+            x86_zen5_execute(&program, 2);
+            ran += 1;
+        }
+        built += valid;
+        x86_zen5_release(&program, 1);
+    }
+    for (uint32_t c = 1; valid && c < X86_COST_CASE_COUNT; c += 1)
+    {
+        const X86CostCase* entry = &x86_zen5_cases[c];
+        x86_zen5_shape(entry->form, entry->operands, &shape);
+        valid = shape.special == X86_COST_TRAP ? shape.experiments == 0 : (shape.experiments & (1u << X86_COST_INDEPENDENT)) != 0;
+        x86_zen5_fill(&shape);
+        for (uint32_t e = 0; valid && e < X86_COST_EXPERIMENT_COUNT; e += 1)
+        {
+            if (shape.experiments & (1u << e))
             {
-                x86_zen5_execute(&program, 2);
-                const uint32_t expected = id == 0 ? 0 : BUSTER_X86_COST_BLOCK * (experiment >= X86_COST_MIX_ADD ? 2 : 1);
-                valid &= program.body_count == expected;
-                munmap(program.code, BUSTER_X86_COST_CODE_SIZE);
-            }
-            if (!valid)
-            {
-                printf("  failed harness %s experiment %u\n", x86_zen5_cases[id].name, experiment);
+                X86CostProgram program = { 0 };
+                valid = x86_zen5_program_targets(&shape, (X86CostExperiment)e) && x86_zen5_program(&shape, (X86CostExperiment)e, X86_COST_REFERENCE_NONE, &host, &program);
+                if (valid && program.runnable)
+                {
+                    x86_zen5_execute(&program, 2);
+                    ran += 1;
+                }
+                built += valid;
+                x86_zen5_release(&program, 1);
+                if (!valid)
+                {
+                    printf("  failed harness %s experiment %s\n", entry->name, x86_zen5_experiment_names[e]);
+                }
             }
         }
+        if (!valid && shape.experiments == 0)
+        {
+            printf("  failed harness %s: no experiment\n", entry->name);
+        }
     }
-    printf("Zen 5 harness: all generated loops validated, encoders agree, execute/return: %s\n", valid ? "pass" : "FAIL");
+    printf("Zen 5 harness: %u programs built, their targets the cases, validated and encoded alike; %u run on this host: %s\n", built, ran, valid ? "pass" : "FAIL");
     return valid;
 }
 
 static int run_x86_zen5_tests(void)
 {
-    bool valid = x86_encoder_initialize() && x86_zen5_initialize();
+    bool valid = x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize();
     valid &= x86_zen5_test_lookup();
     valid &= x86_zen5_test_cases();
     valid &= x86_zen5_test_programs();
+    valid &= x86_zen5_test_table();
     return valid ? 0 : 1;
 }
 
@@ -207,12 +275,12 @@ static uint64_t x86_zen5_nanoseconds(void)
 static int run_x86_zen5_benchmark(int argc, char** argv)
 {
     enum { count = 65536, repeats = 1024, passes = 21 };
-    uint8_t ids[count];
-    uint16_t scalar[count];
-    uint16_t vector[count];
+    static uint8_t ids[count];
+    static uint16_t scalar[count];
+    static uint16_t vector[count];
     uint64_t times[2][passes];
     uint64_t core_cycles[2][passes];
-    X86CostCounters counters = { .fd = { -1, -1, -1 } };
+    X86CostCounters counters = { .fd = { -1, -1, -1, -1, -1 } };
     bool valid = x86_zen5_initialize();
     uint64_t conditioning = 0;
     int only = -1;
@@ -233,9 +301,10 @@ static int run_x86_zen5_benchmark(int argc, char** argv)
             valid = false;
         }
     }
+    // IDs over every row, as a selection's records would carry them.
     for (uint32_t i = 0; i < count; i += 1)
     {
-        ids[i] = (i * 37u + i / 17) % X86_COST_COUNT;
+        ids[i] = (uint8_t)((i * 37u + i / 17) % x86_zen5_id_count);
     }
     x86_zen5_lookup_scalar(ids, count, X86_COST_THROUGHPUT, scalar);
     x86_zen5_lookup(ids, count, X86_COST_THROUGHPUT, vector);
@@ -248,7 +317,7 @@ static int run_x86_zen5_benchmark(int argc, char** argv)
             for (uint32_t j = 0; valid && j < 2; j += 1)
             {
                 const uint32_t implementation = (pass + j) & 1;
-                if (only >= 0 && implementation != only)
+                if (only >= 0 && implementation != (uint32_t)only)
                 {
                     continue;
                 }
@@ -274,16 +343,16 @@ static int run_x86_zen5_benchmark(int argc, char** argv)
                     __asm__ volatile("" : : "m"(scalar), "m"(vector) : "memory");
                 }
                 times[implementation][pass] = x86_zen5_nanoseconds() - start;
-                X86CostSample sample = {0};
+                X86CostSample sample = { 0 };
                 valid &= ioctl(counters.fd[0], PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP) == 0;
                 valid &= read(counters.fd[0], &sample, sizeof(sample)) == sizeof(sample);
-                valid &= sample.count == 3 && sample.running != 0 && sample.enabled == sample.running && sample.values[0] != 0;
+                valid &= sample.count == BUSTER_X86_COST_COUNTERS && sample.running != 0 && sample.enabled == sample.running && sample.values[0] != 0;
                 core_cycles[implementation][pass] = sample.values[0];
             }
         }
         for (uint32_t implementation = 0; valid && implementation < 2; implementation += 1)
         {
-            if (only >= 0 && implementation != only)
+            if (only >= 0 && implementation != (uint32_t)only)
             {
                 continue;
             }
@@ -291,18 +360,12 @@ static int run_x86_zen5_benchmark(int argc, char** argv)
             const uint64_t cycles = x86_zen5_median(core_cycles[implementation], passes);
             const double denominator = (double)count * repeats;
             printf("Zen 5 %s lookup: %.4f ns/ID [%.4f, %.4f], %.4f cycles/ID, %u passes, after-scalar %lu ms; excludes record-to-ID resolution\n",
-                implementation == 0 ? "scalar" : "AVX-512", median / denominator, times[implementation][0] / denominator,
-                times[implementation][passes - 1] / denominator, cycles / denominator, passes, conditioning);
+                   implementation == 0 ? "scalar" : "AVX-512", median / denominator, times[implementation][0] / denominator,
+                   times[implementation][passes - 1] / denominator, cycles / denominator, passes, conditioning);
         }
         valid &= memcmp(scalar, vector, sizeof(scalar)) == 0;
     }
-    for (uint32_t i = 0; i < 3; i += 1)
-    {
-        if (counters.fd[i] >= 0)
-        {
-            close(counters.fd[i]);
-        }
-    }
+    x86_zen5_counters_close(&counters);
     if (!valid)
     {
         fprintf(stderr, "benchmark-x86-zen5 failed: check options, lookup agreement and perf counters\n");

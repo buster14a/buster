@@ -693,8 +693,10 @@ whose `TIER1_RULE_DIVIDE` costs 8 against the others' 1, 2, 5 and 7, always did.
 The current cost is a **structural upper bound on record count**, including
 possible copies and operand-overlap repairs. It is not a measured latency,
 throughput, encoded-byte count, or guarantee about final runtime. Allocation
-can remove copies from either path. The measured Zen 5 model is not complete
-enough to replace this bound for every operand case. One rule departs from it: a
+can remove copies from either path. The Zen 5 model (#181, `x86_zen5.c`) has a
+row for every case the selector emits, which its tests check, but the cover's
+cost doesn't read it: replacing the bound is a decision of its own, to be
+measured on generated programs. One rule departs from it: a
 division by a constant's reciprocal costs 7, below `div`'s 8, though its records
 (up to 13) may outnumber `div`'s, since `div`'s and `idiv`'s latency, which no
 count of records sees, is the larger.
@@ -1346,12 +1348,11 @@ record includes form, mnemonic, all memory/register/immediate fields, model ID
 and each cost column. Summaries report unknown IDs and missing fields for each
 origin separately; UINT16_MAX denotes a missing field. Summaries go to stderr.
 This observed emitter inventory is generated independently of the model's case
-table. Unknown IDs stay unknown. Its coverage
-is only the bounded generated fixtures, not a claim of complete Tier 1 emitter
-or corpus coverage for [#181](https://github.com/buster14a/buster/issues/181).
-In particular, the plan-origin inventory currently lacks compare, select and
-conditional-branch families covered by direct expansion tests. Expansion rows
-do not establish coverage of those complete planner paths.
+table. Every record of the plans and expansions must have a complete Zen 5 row
+(#181, `x86_zen5_accounts`), which the test checks after the semantics'
+coverage; the wrappers' records are the test's own. The emitters' tests
+(`test-tier1-emit`, `test-tier1-masks`, `test-tier1-pipeline`) check every
+complete function's records the same way.
 
 `test-tier1-emit` executes real pressure plans through liveness, allocation,
 frame planning, fragment emission, branch sizing and encoding. Original

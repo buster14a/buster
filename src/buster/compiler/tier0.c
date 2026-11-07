@@ -3409,9 +3409,9 @@ static BUSTER_BAKED_UNIT uint16_t tier0_inc_dec;
 
 static bool tier0_inc_dec_costs_no_more(void)
 {
-    static const uint8_t steps[] = { X86_COST_INC_RM32_REGISTER, X86_COST_DEC_RM32_REGISTER, X86_COST_INC_RM64_REGISTER, X86_COST_DEC_RM64_REGISTER };
-    static const uint8_t originals[] = { X86_COST_ADD_RM32_IMM8_REGISTER, X86_COST_SUB_RM32_IMM8_REGISTER, X86_COST_ADD_RM64_IMM8_REGISTER,
-                                         X86_COST_SUB_RM64_IMM8_REGISTER };
+    static const uint16_t steps[] = { X86_COST_CASE_INC_RM32_REGISTER, X86_COST_CASE_DEC_RM32_REGISTER, X86_COST_CASE_INC_RM64_REGISTER, X86_COST_CASE_DEC_RM64_REGISTER };
+    static const uint16_t originals[] = { X86_COST_CASE_ADD_RM32_IMM8_REGISTER, X86_COST_CASE_SUB_RM32_IMM8_REGISTER, X86_COST_CASE_ADD_RM64_IMM8_REGISTER,
+                                          X86_COST_CASE_SUB_RM64_IMM8_REGISTER };
     bool cheaper = true;
     for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(steps); s += 1)
     {
@@ -3420,10 +3420,13 @@ static bool tier0_inc_dec_costs_no_more(void)
         {
             const X86CostCase* step = &x86_zen5_cases[steps[s]];
             const X86CostCase* original = &x86_zen5_cases[originals[o]];
-            const bool known = step->latency != BUSTER_X86_COST_UNKNOWN && step->throughput != BUSTER_X86_COST_UNKNOWN &&
-                               step->retired_ops != BUSTER_X86_COST_UNKNOWN && original->latency != BUSTER_X86_COST_UNKNOWN &&
-                               original->throughput != BUSTER_X86_COST_UNKNOWN && original->retired_ops != BUSTER_X86_COST_UNKNOWN;
-            cheaper &= known && step->latency <= original->latency && step->throughput <= original->throughput && step->retired_ops <= original->retired_ops;
+            static const uint8_t columns[] = { X86_COST_LATENCY, X86_COST_THROUGHPUT, X86_COST_RETIRED_OPS };
+            for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(columns); c += 1)
+            {
+                const uint16_t mine = step->values[columns[c]];
+                const uint16_t theirs = original->values[columns[c]];
+                cheaper &= mine != BUSTER_X86_COST_UNKNOWN && theirs != BUSTER_X86_COST_UNKNOWN && mine <= theirs;
+            }
         }
     }
     return cheaper;

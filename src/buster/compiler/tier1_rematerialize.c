@@ -151,7 +151,7 @@ static void tier1_rematerialization_model_cost(const Tier1RematerializationInput
 {
     Tier1Rematerialized copy = { 0 };
     const bool built = tier1_rematerialize(input, i, X86_REGISTER_RAX, frame_base, 0, &copy);
-    const uint16_t latency = built ? x86_zen5_columns[X86_COST_GPR_LATENCY][x86_zen5_id(&copy.instruction)] : BUSTER_X86_COST_UNKNOWN;
+    const uint16_t latency = built ? x86_zen5_columns[X86_COST_LATENCY][x86_zen5_id(&copy.instruction)] : BUSTER_X86_COST_UNKNOWN;
     costs[i] = latency != BUSTER_X86_COST_UNKNOWN ? latency : 0;
     reload_costs[i] = built ? reload : 0;
 }
@@ -169,7 +169,7 @@ static __attribute__((unused)) bool tier1_rematerialization_model_costs(const Ti
     uint8_t dummy = 0;
     const bool valid = tier1_rematerialization_input_valid(input, &dummy) && input->costs == 0 && (input->count == 0 || (costs != 0 && reload_costs != 0));
     const X86Instruction load = { .form = X86_FORM_MOV_R64_RM64, .reg = X86_REGISTER_RAX, .rm = frame_base, .mode = BUSTER_X86_MEMORY_BASE };
-    const uint16_t measured = x86_zen5_columns[X86_COST_GPR_LATENCY][x86_zen5_id(&load)];
+    const uint16_t measured = x86_zen5_columns[X86_COST_LATENCY][x86_zen5_id(&load)];
     const uint16_t reload = measured != BUSTER_X86_COST_UNKNOWN ? measured : 0;
     if (valid && input->count != 0)
     {

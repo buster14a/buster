@@ -439,7 +439,7 @@ static __attribute__((unused)) Tier1ScheduleStatus tier1_schedule_block(Tier1Sch
             {
                 const uint8_t id = x86_zen5_id(&input.instructions[i]);
                 graph->cost_ids[i] = id;
-                stats.unknown_cases += id == X86_COST_NONE;
+                stats.unknown_cases += id == 0;
                 for (uint32_t column = 0; column < X86_COST_COLUMN_COUNT; column += 1)
                 {
                     stats.missing_columns[column] += x86_zen5_columns[column][id] == BUSTER_X86_COST_UNKNOWN;
@@ -447,11 +447,11 @@ static __attribute__((unused)) Tier1ScheduleStatus tier1_schedule_block(Tier1Sch
             }
             if (BUSTER_VECTOR_PATH(vector))
             {
-                x86_zen5_lookup(graph->cost_ids, input.count, X86_COST_GPR_LATENCY, graph->latencies);
+                x86_zen5_lookup(graph->cost_ids, input.count, X86_COST_LATENCY, graph->latencies);
             }
             else
             {
-                x86_zen5_lookup_scalar(graph->cost_ids, input.count, X86_COST_GPR_LATENCY, graph->latencies);
+                x86_zen5_lookup_scalar(graph->cost_ids, input.count, X86_COST_LATENCY, graph->latencies);
             }
             // A measured GPR latency where the model has one for the record's operand case, its class's weight where
             // it hasn't (tier1_schedule_weight).

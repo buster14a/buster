@@ -28,6 +28,9 @@ struct Tier1SelectTest
     uint64_t uncovered[3];
     uint16_t uncovered_form;
     uint64_t missing_columns[3][X86_COST_COLUMN_COUNT];
+    // #181: the records without a Zen 5 row that accounts for every column (x86_zen5_accounts), and the first's form.
+    uint64_t incomplete[3];
+    uint16_t incomplete_form;
     bool manifest;
 };
 
@@ -143,7 +146,7 @@ static bool tier1_select_test_compare(uint32_t condition, uint32_t width, uint64
 }
 
 static const char* const tier1_select_test_origins[] = {"plan", "expansion", "wrapper"};
-static const char* const tier1_select_test_cost_columns[] = {"gpr_latency", "throughput", "retired_ops", "flags_latency", "load_extra", "executed_uops", "pipes"};
+static const char* const tier1_select_test_cost_columns[] = {"latency", "throughput", "retired_ops", "flags_latency", "load_extra", "fp_ops", "pipes"};
 
 // The records [selected_first, selected_end) are the selection's, the others the test's wrapper around them.
 static bool tier1_select_test_load_records(Tier1SelectTest* test, const X86Instruction* records, uint32_t count, uint32_t selected_first, uint32_t selected_end, bool plan)
@@ -159,6 +162,9 @@ static bool tier1_select_test_load_records(Tier1SelectTest* test, const X86Instr
         test->uncovered[origin] += !covered;
         const uint8_t id = x86_zen5_id(&records[i]);
         test->unknown_costs[origin] += id == 0;
+        const bool complete = x86_zen5_accounts(id, BUSTER_X86_COST_ALL_COLUMNS);
+        test->incomplete_form = !complete && origin != 2 && test->incomplete[0] + test->incomplete[1] == 0 ? records[i].form : test->incomplete_form;
+        test->incomplete[origin] += !complete;
         uint16_t costs[X86_COST_COLUMN_COUNT];
         for (uint32_t column = 0; column < X86_COST_COLUMN_COUNT; column += 1)
         {
@@ -5052,7 +5058,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             x86_target_forms(&target, test.allowed);
             if (manifest)
             {
-                printf("origin,record,form,mnemonic,mode,reg,rm,index,vvvv,decorations,immediate,displacement,cost_id,gpr_latency,throughput,retired_ops,flags_latency,load_extra,executed_uops,pipes\n");
+                printf("origin,record,form,mnemonic,mode,reg,rm,index,vvvv,decorations,immediate,displacement,cost_id,latency,throughput,retired_ops,flags_latency,load_extra,fp_ops,pipes\n");
             }
             tier1_select_test_patterns(&test);
             tier1_select_test_memory(&test);
@@ -5097,6 +5103,13 @@ static int run_tier1_select_tests(int argc, char** argv)
             snprintf(coverage, sizeof(coverage), "every emitted record has a covered form: %" PRIu64 " uncovered, the first %s", uncovered,
                      uncovered != 0 ? x86_form_description(test.uncovered_form)->mnemonic : "none");
             tier1_select_test_expect(&test, uncovered == 0, coverage);
+            // #181: every record the selections emitted (not the test's wrappers) has a complete Zen 5 row, as test-tier0
+            // checks Tier 0's.
+            const uint64_t incomplete = test.incomplete[0] + test.incomplete[1];
+            char zen5[192];
+            snprintf(zen5, sizeof(zen5), "every emitted record has a complete Zen 5 row: %" PRIu64 " without, the first %s", incomplete,
+                     incomplete != 0 ? x86_form_description(test.incomplete_form)->mnemonic : "none");
+            tier1_select_test_expect(&test, incomplete == 0, zen5);
             FILE* report = manifest ? stderr : stdout;
             fprintf(report, "tier1 selection: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
             for (uint32_t origin = 0; origin < 3; origin += 1)

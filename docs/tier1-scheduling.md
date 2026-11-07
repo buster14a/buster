@@ -122,16 +122,20 @@ rewrite.
 A register's or a flag's RAW edge carries the writer's weight into the path of
 its readers: a movable record's priority is its weight plus the largest
 priority among those successors, and a barrier's is zero (a priority, not a
-latency). The weight is the measured GPR latency of the record's operand case
-where `x86_zen5.c` has one, and otherwise its class's (`tier1_schedule_weight`):
-the measured rows' classes for the integer forms (an ALU operation 1 cycle, a
-multiplication 3, a scaled `lea` 2, an L1 load 4, the load taking a move's place
-and adding to any other form's), and for the floating forms, which the model
-hasn't measured yet (#181), weights of their usual order (an addition,
-multiplication, compare or conversion 3, a fused multiply-add 4, a division 13,
-a square root 15). Weights order a block's ready records; they are not cycle
-predictions. The model's coverage is still counted as before: an unmeasured case
-is `unknown_cases`, and `missing_columns` the columns it lacks.
+latency). The weight is the latency of the record's case in `x86_zen5.c`
+(#181: its register result's from its longest source, a memory kind's from its
+address), which the model has for every case Tier 1 emits that has such a path,
+and otherwise its class's (`tier1_schedule_weight`): a case without the path (a
+constant's move, a store, a compare whose result is the flags alone) or a form
+without a row (an ALU operation 1 cycle, a multiplication 3, a scaled `lea` 2,
+an L1 load 4, the load taking a move's place and adding to any other form's;
+for the floating forms an addition, multiplication, compare or conversion 3, a
+fused multiply-add 4, a division 13, a square root 15). Weights order a block's
+ready records; they are not cycle predictions. `unknown_cases` counts the
+records without a row and `missing_columns` the columns their rows lack (an
+absent path's included). The measurement below weighed the records by the model
+of 2026-10-22, before #181 measured every case Tier 1 emits; the variants
+remain to measure it with this one.
 
 The vector implementation obtains effects in eight-record batches and model
 latencies by the existing 32-ID in-register lookup. It compares each record's

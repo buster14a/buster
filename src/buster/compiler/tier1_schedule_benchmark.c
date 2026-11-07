@@ -186,7 +186,7 @@ static bool tier1_schedule_bench_check(Tier1ScheduleBench* bench, uint64_t* move
         valid = x86_validate(records, bench->count) == bench->count &&
                 tier1_schedule_block(input, &bench->graph, scalar_order, bench->count, false, &stats) == TIER1_SCHEDULE_OK;
         *moved += stats.moved;
-        *missing += stats.missing_columns[X86_COST_GPR_LATENCY];
+        *missing += stats.missing_columns[X86_COST_LATENCY];
         valid = valid && tier1_schedule_verify(input, scalar_order) &&
                 tier1_schedule_block(input, &bench->graph, bench->order, bench->count, true, 0) == TIER1_SCHEDULE_OK &&
                 memcmp(scalar_order, bench->order, bench->count * sizeof(scalar_order[0])) == 0 && tier1_schedule_verify(input, bench->order);
