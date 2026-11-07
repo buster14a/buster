@@ -1470,6 +1470,10 @@ struct ParseMeanings
     uint32_t capacity;
     // The scalar parser reads attribute spellings only where they decide declaration versus statement syntax.
     const InternTable* table;
+    // availability's and external_source_symbol's names, and their keyword spellings (#1447), found once in `table` where the
+    // meanings are made (0 for a name the unit doesn't have): parse_flag_custom_attributes reads these, not the table, which
+    // a caller may have released by then (the parser benchmark's is).
+    IdentId custom_attributes[4];
 };
 
 typedef struct ParseScalar ParseScalar;
@@ -4370,6 +4374,14 @@ static bool parse_scalar_type_argument_attribute(const ParseScalar* parser, Iden
     return result;
 }
 
+// clang's attributes whose arguments its parser reads its own way, as no expressions (#1447): availability's
+// (ParseAvailabilityAttribute) and external_source_symbol's (ParseExternalSourceSymbolAttribute), by their GNU names, a
+// keyword's underscores too. Their arguments are a balanced run of tokens, which the checker reads as clang's parser does.
+static bool parse_scalar_custom_attribute(const ParseScalar* parser, IdentId name)
+{
+    return parse_scalar_attribute_spelled(parser, name, true, "availability") || parse_scalar_attribute_spelled(parser, name, true, "external_source_symbol");
+}
+
 // An expression parse failure inside a GNU attribute can follow an earlier malformed string slot. Clang's
 // ParseAttributeArgsCommon diagnoses that slot before parsing expressions (section(1,), for example). Only this
 // already-failed path consults the shared generated argument/fact rows; ordinary attribute parsing pays no lookup.
@@ -4827,6 +4839,15 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
         frame->mode = PARSE_MODE_OPERAND;
         frame->flags |= BUSTER_PARSE_FRAME_EMPTY_OK;
         frame->argument += 1;
+    }
+    else if (kind == PARSE_KIND_L_PAREN && group == PARSE_ROLE_OPEN_ATTRIBUTE_LIST && parse_scalar_custom_attribute(parser, parser->names[(int64_t)i - 1]))
+    {
+        // availability's and external_source_symbol's arguments, which clang's parser reads its own way (#1447): a balanced
+        // run of tokens, as a C23 attribute's arguments are, which the checker reads as clang's parser does
+        // (c_check_attribute_checks_input.c).
+        ParseFrame* call = parse_scalar_open(parser, i, PARSE_ROLE_OPEN_CALL, PARSE_MODE_ATTRIBUTE_TOKENS, PARSE_MODE_OPERATOR, false, step);
+        call->flags |= BUSTER_PARSE_FRAME_ATTRIBUTE;
+        call->closer_role = PARSE_ROLE_CLOSE_CALL;
     }
     else if (kind == PARSE_KIND_L_PAREN)
     {
@@ -12618,6 +12639,37 @@ static bool parse_statements_vector(ParseKernels* kernels, uint32_t count, Parse
     return result;
 }
 
+// The kernels read a GNU attribute's arguments as an expression's, where the scalar parser reads availability's and
+// external_source_symbol's as a balanced run of tokens (#1447, parse_scalar_custom_attribute): a top-level declaration
+// with either name before a `(` goes to the scalar parser, its first token flagged. A unit whose names have neither
+// (nearly every one: the interner finds no such name) looks at no token; one that has them, 16 tokens a compare.
+static void parse_flag_custom_attributes(ParseKernels* kernels, const ParseInput* input)
+{
+    IdentId names[4] = { 0, 0, 0, 0 };
+    bool any = false;
+    for (uint32_t s = 0; input->meanings != NULL && s < 4; s += 1)
+    {
+        names[s] = input->meanings->custom_attributes[s];
+        any |= names[s] != 0;
+    }
+    const uint32_t count = input->count;
+    for (uint32_t block = 0; any && block < count; block += 16)
+    {
+        const __mmask16 live = count - block < 16 ? (__mmask16)((1u << (count - block)) - 1) : (__mmask16)0xffff;
+        const __m512i loaded = _mm512_maskz_loadu_epi32(live, input->names + block);
+        __mmask16 found = 0;
+        for (uint32_t s = 0; s < 4; s += 1)
+        {
+            found |= names[s] != 0 ? _mm512_mask_cmpeq_epi32_mask(live, loaded, _mm512_set1_epi32((int32_t)names[s])) : 0;
+        }
+        for (uint32_t selected = found; selected != 0; selected &= selected - 1)
+        {
+            const uint32_t t = block + (uint32_t)__builtin_ctz(selected);
+            kernels->flags[t] |= t + 1 < count && input->kinds[t + 1] == PARSE_KIND_L_PAREN ? 1u : 0u;
+        }
+    }
+}
+
 // Every kernel in AVX-512 in turn, then the fallback, into kernels->parents: the data-parallel parser.
 static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* input, const IdentId* predeclared, ParseVectorBuffers* buffers)
 {
@@ -12651,6 +12703,7 @@ static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* i
     if (!result.everything)
     {
         parse_check_avx512(kernels, names, input->flags, count, buffers->typed, &buffers->check_twins);
+        parse_flag_custom_attributes(kernels, input);
         for (uint32_t block = 0; block < count; block += 64)
         {
             const __mmask64 live = count - block < 64 ? (((__mmask64)1 << (count - block)) - 1) : ~(__mmask64)0;
@@ -13042,22 +13095,21 @@ static bool parse_tree_columns_reserve(Parser* parser, ParseTree* tree)
     return parse_columns(parser, 5, BUSTER_ARRAY_LENGTH(columns), entries, sizes, columns);
 }
 
-// Whether token `t` is a number where a C23 attribute's identifier goes: before `::` (the two colons of one `::` token, a
-// scope's), right after `[[`, or after a comma. The last is only a candidate: the sparse history/context walk below
-// proves that it is an attribute's name, rather than an expression or an attribute argument.
+// Whether token `t` is a number where a C23 attribute's identifier goes: right after `[[`, or after a comma. The last is
+// only a candidate: the sparse history/context walk below proves that it is an attribute's name, rather than an
+// expression or an attribute argument. A scope's place is one of these: a number before `::` elsewhere, in a GNU list
+// (`__attribute__((__clang__::x))`), stays a number, where clang's GNU list ends with "expected ')'" (#147).
 // `attributes`: whether a `[[` comes before `t` in the unit, without which a comma at `t` is no attribute list's.
 BUSTER_INLINE bool parse_clang_scope_place(const ParseTokens* tokens, uint32_t t, bool attributes)
 {
-    const bool scope = tokens->kinds[t + 1] == PARSE_KIND_COLON && tokens->kinds[t + 2] == PARSE_KIND_COLON &&
-                       (tokens->flags[t + 2] & BUSTER_PARSE_COLONCOLON_SECOND) != 0;
     const bool name = tokens->kinds[(int64_t)t - 1] == PARSE_KIND_L_SQUARE && tokens->kinds[(int64_t)t - 2] == PARSE_KIND_L_SQUARE;
     const bool comma = attributes && tokens->kinds[(int64_t)t - 1] == PARSE_KIND_COMMA;
-    return tokens->kinds[t] == PARSE_KIND_NUMBER && (tokens->flags[t] & BUSTER_PP_FROM_MACRO) != 0 && (scope || name || comma);
+    return tokens->kinds[t] == PARSE_KIND_NUMBER && (tokens->flags[t] & BUSTER_PP_FROM_MACRO) != 0 && (name || comma);
 }
 
 // clang's reading of `__clang__`'s expansion where a C23 attribute's identifier goes (#147, clang's
 // TryParseCXX11AttributeIdentifier): a number the macro's own expansion made, outside any other macro's and its arguments,
-// before `::`, right after `[[`, or after a comma in that list, is `_Clang`, with clang's warning, which the checker gives it (it knows such a token by
+// right after `[[` or after a comma in that list, is `_Clang`, with clang's warning, which the checker gives it (it knows such a token by
 // its source, a number). The token becomes that identifier before the names' meanings are sized. The places are found 64
 // tokens at a time, as masks of the kinds around each token (the columns' padding covers the edges), and each one's
 // expansion is looked up, the history recorded first where it was deferred; the scalar path tests each token, the twin.
@@ -13088,17 +13140,11 @@ static bool parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
         {
             const __mmask64 live = _bzhi_u64(~UINT64_C(0), length);
             const __m512i kinds = _mm512_loadu_si512(tokens->kinds + first);
-            const __m512i after = _mm512_loadu_si512(tokens->kinds + first + 1);
-            const __m512i second = _mm512_loadu_si512(tokens->kinds + first + 2);
             const __m512i before = _mm512_loadu_si512(tokens->kinds + (int64_t)first - 1);
             const __m512i earlier = _mm512_loadu_si512(tokens->kinds + (int64_t)first - 2);
-            const __m512i flags = _mm512_loadu_si512(tokens->flags + first + 2);
             const __m512i own_flags = _mm512_loadu_si512(tokens->flags + first);
             const __mmask64 number = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_NUMBER)) &
                                      _mm512_test_epi8_mask(own_flags, _mm512_set1_epi8(BUSTER_PP_FROM_MACRO));
-            const __mmask64 scope = _mm512_cmpeq_epi8_mask(after, _mm512_set1_epi8(PARSE_KIND_COLON)) &
-                                    _mm512_cmpeq_epi8_mask(second, _mm512_set1_epi8(PARSE_KIND_COLON)) &
-                                    _mm512_test_epi8_mask(flags, _mm512_set1_epi8((char)BUSTER_PARSE_COLONCOLON_SECOND));
             const __mmask64 name = _mm512_cmpeq_epi8_mask(before, _mm512_set1_epi8(PARSE_KIND_L_SQUARE)) &
                                    _mm512_cmpeq_epi8_mask(earlier, _mm512_set1_epi8(PARSE_KIND_L_SQUARE));
             const __mmask64 comma = _mm512_cmpeq_epi8_mask(before, _mm512_set1_epi8(PARSE_KIND_COMMA));
@@ -13106,7 +13152,7 @@ static bool parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
             const __mmask64 opened = live & name;
             const uint64_t past = attributes ? ~UINT64_C(0) : opened != 0 ? ~((UINT64_C(1) << _tzcnt_u64(opened)) - 1) : 0;
             attributes |= opened != 0;
-            places = live & number & (scope | name | (comma & past));
+            places = live & number & (name | (comma & past));
         }
         else
 #endif
@@ -13176,6 +13222,11 @@ static bool parse_prepare_meanings(Parser* parser, InternTable* table)
     parser->meanings.meanings = !result ? 0 : capacity <= parser->meaning_room ? parser->meaning_column : parse_column(parser, 9, capacity, 1);
     parser->meanings.capacity = capacity;
     parser->meanings.table = table;
+    static const char* const custom_spellings[4] = { "availability", "__availability__", "external_source_symbol", "__external_source_symbol__" };
+    for (uint32_t s = 0; s < 4; s += 1)
+    {
+        parser->meanings.custom_attributes[s] = intern_find(table, (const uint8_t*)custom_spellings[s], (uint32_t)strlen(custom_spellings[s]));
+    }
     result = result && parser->meanings.meanings != 0;
     if (result)
     {

@@ -324,6 +324,127 @@ static void ir_simd_typed_test_intrinsics(IrTestTally* tally)
     printf("  IR SIMD rows: %u of the front end's scalar BMI rows decode to intrinsics\n", rows);
 }
 
+// The bit builtins' rows (#1374, check_lower_bits_row), written out here: tzcnt, bsf, lzcnt, bsr and popcnt of each
+// integer class of 32 and 64 bits into an int's result (and of the operand's own class), and a byte swap's move and bswap
+// of its class, each decoding to its intrinsic of its operand, its features exactly x86_target_requirement's for its form
+// (none for bsf, bsr and bswap), refused as TARGET without them, the result untouched. Then each row changed one way: a
+// decoration, a displacement, an immediate, memory, a destination by number, the other width's form, the result's class
+// 8 bytes over an operand of 4, a second operand, a second record of a count, a byte swap's move of the other width, and
+// its swap of the operand's register: each not the bits' decoder's, so at most the IR's machine row.
+static void ir_simd_typed_test_bits(IrTestTally* tally)
+{
+    static const struct
+    {
+        uint16_t forms[2];
+        uint8_t intrinsic;
+        const char* name;
+    } counts[] = {
+        { { X86_FORM_TZCNT_R32_RM32, X86_FORM_TZCNT_R64_RM64 }, BUSTER_IR_INTRINSIC_TZCNT, "tzcnt" },
+        { { X86_FORM_BSF_R32_RM32, X86_FORM_BSF_R64_RM64 }, BUSTER_IR_INTRINSIC_BSF, "bsf" },
+        { { X86_FORM_LZCNT_R32_RM32, X86_FORM_LZCNT_R64_RM64 }, BUSTER_IR_INTRINSIC_LZCNT, "lzcnt" },
+        { { X86_FORM_BSR_R32_RM32, X86_FORM_BSR_R64_RM64 }, BUSTER_IR_INTRINSIC_BSR, "bsr" },
+        { { X86_FORM_POPCNT_R32_RM32, X86_FORM_POPCNT_R64_RM64 }, BUSTER_IR_INTRINSIC_POPCNT, "popcnt" },
+        { { X86_FORM_BSWAP_R32, X86_FORM_BSWAP_R64 }, BUSTER_IR_INTRINSIC_BSWAP, "bswap" },
+    };
+    static const uint8_t classes[] = { BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_U32, BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_U64 };
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    uint32_t rows = 0;
+    for (uint32_t k = 0; tables && k < BUSTER_ARRAY_LENGTH(counts); k += 1)
+    {
+        const bool swap = counts[k].intrinsic == BUSTER_IR_INTRINSIC_BSWAP;
+        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(classes); c += 1)
+        {
+            for (uint32_t own = 0; own < 2; own += 1)
+            {
+                const uint8_t operand = classes[c];
+                const bool wide = tier0_class_bytes(operand) == 8;
+                const uint8_t result = swap || own != 0 ? operand : BUSTER_TYPED_CLASS_I32;
+                Tier0Operation row;
+                memset(&row, 0, sizeof(row));
+                const uint8_t r = BUSTER_TIER0_ROLE_INTEGER_RESULT;
+                const uint8_t i0 = BUSTER_TIER0_ROLE_INTEGER(0);
+                if (swap)
+                {
+                    row.records[0] = (X86Instruction){ .form = wide ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32, .reg = r, .rm = i0, .mode = BUSTER_X86_REGISTER_DIRECT };
+                    row.records[1] = (X86Instruction){ .form = counts[k].forms[wide], .rm = r, .mode = BUSTER_X86_REGISTER_DIRECT };
+                    row.record_count = 2;
+                }
+                else
+                {
+                    row.records[0] = (X86Instruction){ .form = counts[k].forms[wide], .reg = r, .rm = i0, .mode = BUSTER_X86_REGISTER_DIRECT };
+                    row.record_count = 1;
+                }
+                row.operand_count = 1;
+                row.operand_classes[0] = operand;
+                row.result_class = result;
+                char description[192];
+                snprintf(description, sizeof(description), "%s of a %u-byte class into class %u: a row Tier 0 takes", counts[k].name, tier0_class_bytes(operand), result);
+                ir_test_expect(tally, tier0_operation_valid(&row), description);
+                const uint64_t features = x86_target_requirement(counts[k].forms[wide]) & ~BUSTER_X86_TARGET_KNOWN;
+                IrSimdTypedOperation decoded;
+                memset(&decoded, 0xa5, sizeof(decoded));
+                const IrSimdTypedStatus status = ir_simd_typed_row(&row, features, &decoded);
+                snprintf(description, sizeof(description), "%s of a %u-byte class into class %u: its intrinsic of its operand, its features its form's", counts[k].name,
+                         tier0_class_bytes(operand), result);
+                ir_test_expect(tally, status == IR_SIMD_TYPED_OK && decoded.intrinsic == counts[k].intrinsic + 1 && decoded.operand_count == 1 &&
+                                          decoded.operand_classes[0] == operand && decoded.required_features == features && decoded.mask_bytes == 0 && !decoded.machine,
+                               description);
+                rows += status == IR_SIMD_TYPED_OK;
+                if (features != 0)
+                {
+                    IrSimdTypedOperation without;
+                    memset(&without, 0x5a, sizeof(without));
+                    const IrSimdTypedOperation before = without;
+                    const IrSimdTypedStatus refused = ir_simd_typed_row(&row, ~features, &without);
+                    snprintf(description, sizeof(description), "%s: refused as the target's without its feature, the result untouched", counts[k].name);
+                    ir_test_expect(tally, refused == IR_SIMD_TYPED_TARGET && memcmp(&without, &before, sizeof(without)) == 0, description);
+                }
+                for (uint32_t m = 0; m < 10; m += 1)
+                {
+                    Tier0Operation changed = row;
+                    X86Instruction* last = &changed.records[changed.record_count - 1];
+                    switch (m)
+                    {
+                    case 0: last->decorations = 1; break;
+                    case 1: last->displacement = 8; break;
+                    case 2: last->immediate = 1; break;
+                    case 3: last->mode = BUSTER_X86_MEMORY_BASE; break;
+                    case 4: last->rm = X86_REGISTER_RAX; break;
+                    case 5: last->form = counts[k].forms[!wide]; break;
+                    case 6:
+                        changed.result_class = wide ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_U64;
+                        break;
+                    case 7:
+                        changed.operand_count = 2;
+                        changed.operand_classes[1] = operand;
+                        break;
+                    case 8:
+                        changed.records[changed.record_count] = changed.records[0];
+                        changed.record_count += 1;
+                        break;
+                    default: changed.records[0].form = changed.records[0].form == X86_FORM_MOV_R64_RM64 ? X86_FORM_MOV_R32_RM32 : changed.records[0].form == X86_FORM_MOV_R32_RM32 ? X86_FORM_MOV_R64_RM64 : X86_FORM_NONE; break;
+                    }
+                    IrSimdTypedOperation mutated;
+                    memset(&mutated, 0x3c, sizeof(mutated));
+                    // A 64-bit row's count narrowed to an int is the bits' (6 is no change there for a count).
+                    const bool same = m == 6 && wide && !swap;
+                    const IrSimdTypedStatus mutated_status = ir_simd_typed_bits(&changed, UINT64_MAX, &mutated);
+                    snprintf(description, sizeof(description), "%s of a %u-byte class: its row changed one way (%u) isn't the bits' row", counts[k].name, tier0_class_bytes(operand), m);
+                    ir_test_expect(tally, same ? mutated_status == IR_SIMD_TYPED_OK : mutated_status == IR_SIMD_TYPED_UNSUPPORTED, description);
+                    if (!same)
+                    {
+                        const IrSimdTypedStatus row_status = ir_simd_typed_row(&changed, UINT64_MAX, &mutated);
+                        ir_test_expect(tally, ir_simd_typed_test_undecoded(row_status, &mutated), description);
+                    }
+                }
+            }
+        }
+    }
+    ir_test_expect(tally, rows == BUSTER_ARRAY_LENGTH(counts) * BUSTER_ARRAY_LENGTH(classes) * 2, "every bit builtin's row decodes");
+    printf("  IR SIMD rows: %u of the bit builtins' rows decode to intrinsics\n", rows);
+}
+
 // The machine rows (#141, ir_simd_typed_machine_row): rows the IR's own operations don't take decode as the row itself,
 // with their operands' classes and bytes and their features: the union of their forms' (x86_target_requirement's) and
 // of their vectors' and masks' moves' (AVX512F, VL below 64 bytes, DQ for a byte mask, BW for a doubleword or a
@@ -929,6 +1050,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
                    "missing typed operation input is rejected before indexing a record");
     ir_simd_typed_test_masks(tally);
     ir_simd_typed_test_intrinsics(tally);
+    ir_simd_typed_test_bits(tally);
     ir_simd_typed_test_compare_masks(tally);
     type_test_table_close(&table);
 }

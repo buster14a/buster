@@ -1090,7 +1090,7 @@ static __attribute__((noinline)) void check_test_update_actions(CheckTest* test,
     check_test_expect(test, result.diagnostic == CHECK_DIAG_MODIFIABLE_REQUIRED, "increment checks const before lvalue conversion");
     action.operands[0].type = type_array(table, BUSTER_TYPE_INT, 3);
     result = check_test_action(test, table, action);
-    check_test_expect(test, result.diagnostic == CHECK_DIAG_MODIFIABLE_REQUIRED, "increment rejects arrays before decay");
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED, "increment refuses an array by its type, before its modifiability, as clang does");
     action.operands[0] = (CheckValue){
         .type = type_pointer(table, BUSTER_TYPE_VOID),
         .category = CHECK_LVALUE

@@ -700,6 +700,9 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     input->warning_events = (CheckWarningEvents){ 0 };
     reader->deferred = 0;
     reader->lane = true;
+    // A lane's walks step through every link: the hops are the top level's (CheckInputReader.walk_ends).
+    reader->walk_ends = NULL;
+    reader->walk_counts = NULL;
     // Token columns are shared over disjoint bodies; interval summaries have shared ancestors and must be private.
     reader->warning_index_ready = false;
     reader->warning_index = valid ? check_deferred_copy(&arenas->output, 0, 0, (uint64_t)reader->warning_index_base * 2, sizeof(uint16_t)) : 0;

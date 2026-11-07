@@ -59,9 +59,11 @@
 // own; a void one's last statement is ordinary code, which a dead statement before it skips. The
 // library builtins' noreturn merges into the user's declaration whatever its result type, but longjmp's named types
 // must be file-scope typedefs before the declaration in effect at the call. A switch
-// on a constant emits just the case the value takes where its scan can skip the rest — no label a skipped statement
-// holds, no declaration at the body's scope, no case range the list's order puts first, no kept statement's own break
-// — and the whole body where it can't (docs/x86-target.md), an unlabeled statement after a dead one skipped either way.
+// on a constant emits just the case the value takes where its scan can find that case through compounds and case
+// labels and skip the rest — no label a skipped statement holds, no declaration at the body's scope, no case range
+// the list's order puts first, no kept statement's own break — and the whole body where it can't (docs/x86-target.md).
+// A whole switch emits the enclosing controls of each case, not just its target; named labels likewise retain every
+// enclosing statement in the active body or statement expression. An unlabeled statement after a dead one stays dead.
 //
 // The pass is cold and scalar: it runs in a unit with a target attribute (CheckProgram.attribute_keys) or an x86
 // builtin's call, and walks only a body that refers to a callee that may fail or calls a builtin that fails, whose call
@@ -169,7 +171,7 @@ struct CheckTargetFeatureMaps
 typedef struct CheckTargetFeatureEmission CheckTargetFeatureEmission;
 
 // CheckTargetFeatureEmission.subtree_bits: the subtree holds a label, a case of a switch outside it is implied by
-// min_case_owner, and it holds a `do` (check_target_feature_label_root's terminator test).
+// min_case_owner, and it holds a `do` (check_target_feature_label_roots's terminator test).
 #define BUSTER_CHECK_TARGET_FEATURE_LABEL 1u
 #define BUSTER_CHECK_TARGET_FEATURE_DO 2u
 
@@ -597,13 +599,19 @@ struct CheckTargetFeatureEmission
     uint32_t* min_case_owner;
     // A prefix count of the unit's labels (check_target_feature_label_between's ranges are arbitrary, not subtrees).
     uint32_t* label_prefix;
+    // A statement head's first control, in its body's numbering, or BUSTER_CHECK_NONE until found. A source head
+    // belongs to one body, including its appended regions. Several labels can share its ancestor chain; cache the
+    // control lookup rather than rescan that body for each label and each ancestor.
+    uint32_t* starts;
+    // Default labels are absent from the CASE controls; map each switch head to its default's syntax token.
+    uint32_t* defaults;
     // Per expression, whether its subtree holds a label: a statement expression's whose block does
     // (check_target_feature_labeled's answer, memoized over the graph, whose operands precede their node). A `sizeof`
     // or `__alignof__` operand's labels count, as ContainsLabel is syntactic.
     uint8_t* node_labeled;
-    // The typedefs the library builtins' types need (clang's LookupNecessaryTypesForBuiltin): `jmp_buf` for longjmp's
-    // and `sigjmp_buf` for siglongjmp's, each its first file-scope name token's declaration, or BUSTER_CHECK_NONE
-    // where the unit declares none. BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES entries.
+    // The typedefs the library builtins' types need (clang's LookupNecessaryTypesForBuiltin): `jmp_buf` and `sigjmp_buf`,
+    // each its first file-scope name token's declaration, or BUSTER_CHECK_NONE where the unit declares none.
+    // BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES entries.
     uint32_t* type_names;
     // The unit's options, for the library builtins' gate (check_target_feature_library_noreturn).
     const PPOptions* options;
@@ -931,6 +939,8 @@ static bool check_target_feature_columns(CheckProgram* program, CheckTargetFeatu
         emission->subtree_bits = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, slots);
         emission->min_case_owner = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
         emission->label_prefix = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+        emission->starts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+        emission->defaults = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
         emission->type_names = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES);
         emission->node_labeled = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, input->graph.count);
         // The postorder and the positions column parse_tree_links writes are this fill's alone: the kept columns
@@ -941,7 +951,7 @@ static bool check_target_feature_columns(CheckProgram* program, CheckTargetFeatu
         uint32_t* last_children = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
         valid = emission->extent_first != NULL && emission->ends != NULL && emission->first_child != NULL &&
                 emission->next_child != NULL && emission->subtree_bits != NULL && emission->min_case_owner != NULL &&
-                emission->label_prefix != NULL && emission->type_names != NULL && emission->node_labeled != NULL &&
+                emission->label_prefix != NULL && emission->starts != NULL && emission->defaults != NULL && emission->type_names != NULL && emission->node_labeled != NULL &&
                 postorder != NULL && positions != NULL && last_children != NULL;
         if (valid)
         {
@@ -956,6 +966,16 @@ static bool check_target_feature_columns(CheckProgram* program, CheckTargetFeatu
         {
             memset(emission->subtree_bits, 0, (uint64_t)count + 1);
             memset(emission->min_case_owner, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+            memset(emission->starts, 0xff, slots * sizeof(uint32_t));
+            memset(emission->defaults, 0xff, slots * sizeof(uint32_t));
+            for (uint32_t i = 0; i < program->case_count; i += 1)
+            {
+                const CheckProgramCase* item = program->cases + i;
+                if (item->fallback && item->owner < count)
+                {
+                    emission->defaults[item->owner] = item->token;
+                }
+            }
             memset(emission->type_names, 0xff, BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES * sizeof(uint32_t));
             memset(emission->node_labeled, 0, input->graph.count);
             // The postorder computes the subtree answers bottom up: a token's children all precede it.
@@ -1068,9 +1088,9 @@ static uint32_t check_target_feature_start(const CheckTargetFeatureEmission* emi
     const uint8_t* roles = parser->tree.roles;
     const uint32_t* parents = parser->tree.parents;
     const CheckControl* controls = program->controls + body->first;
-    const uint32_t count = body->entry_count;
-    uint32_t start = BUSTER_CHECK_NONE;
-    if (roles[head] == PARSE_ROLE_TERMINATOR)
+    const uint32_t count = body->count;
+    uint32_t start = emission->starts[head];
+    if (start == BUSTER_CHECK_NONE && roles[head] == PARSE_ROLE_TERMINATOR)
     {
         // A do statement's `;`: its body's start is the condition's branch's target. Any other statement's `;` (or a
         // declaration's) starts at its own first control.
@@ -1096,7 +1116,7 @@ static uint32_t check_target_feature_start(const CheckTargetFeatureEmission* emi
             }
         }
     }
-    else
+    else if (start == BUSTER_CHECK_NONE)
     {
         for (uint32_t i = 0; start == BUSTER_CHECK_NONE && i < count; i += 1)
         {
@@ -1125,55 +1145,79 @@ static uint32_t check_target_feature_start(const CheckTargetFeatureEmission* emi
                 start = i;
             }
         }
+        if (start == BUSTER_CHECK_NONE && roles[head] == PARSE_ROLE_CLOSE_FOR)
+        {
+            // A for with no condition has no BRANCH_FALSE. Its first actual statement control still includes the
+            // initializer. CASE entries in an enclosing switch's dispatch table are not statement controls even
+            // when their source tokens lie in this for's body.
+            const uint32_t low = emission->extent_first[head];
+            const uint32_t high = emission->ends[head];
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                if (controls[i].kind != CHECK_CONTROL_CASE && low <= controls[i].token && controls[i].token <= high)
+                {
+                    start = i;
+                    break;
+                }
+            }
+        }
     }
+    emission->starts[head] = start;
     return start != BUSTER_CHECK_NONE ? start : index;
 }
 
-// The control where clang's emission of the statement that holds the body's control `position` — a label's — starts
-// (ContainsLabel's whole statements): the outermost control statement it is in — an if, while, for, do or switch — is
-// emitted from its start; a block, a label, a case or a statement expression holds it only through the statement that
-// does, and a plain statement's from its first control.
-static uint32_t check_target_feature_label_root(const CheckTargetFeatureEmission* emission, const CheckProgram* program,
-                                                const CheckProgramBody* body, uint32_t position)
+// Each statement enclosing a label emits from its start, not just the outermost one: a return or noreturn call can
+// separate two enclosing controls. Start at the label's syntax token, not the first control after it, which can be
+// outside its statement when the labeled statement is empty. A case stops at its owning switch; a named label's
+// caller bounds the active body or statement expression by its control interval. Syntax labels inside sizeof still
+// make an enclosing statement contain a label, but their own region's controls must not become roots of its parent.
+static void check_target_feature_label_roots(CheckX86DiagnosticWalk* walk, const CheckTargetFeatureEmission* emission, uint32_t token,
+                                             uint32_t limit, uint32_t first, uint32_t count)
 {
+    const CheckProgram* program = walk->program;
     const Parser* parser = program->parser;
     const uint8_t* roles = parser->tree.roles;
     const uint32_t* parents = parser->tree.parents;
-    const CheckInput* input = program->input;
-    const CheckControl* controls = program->controls + body->first;
-    const uint32_t count = parser->tokens.count;
-    uint32_t outermost = BUSTER_CHECK_NONE;
-    uint32_t statement = BUSTER_CHECK_NONE;
-    const uint32_t token = position < body->count ? controls[position].token : BUSTER_CHECK_NONE;
-    for (uint32_t ancestor = token, steps = 0; ancestor < count && steps++ < count; ancestor = parents[ancestor])
+    const uint32_t tokens = parser->tokens.count;
+    for (uint32_t ancestor = token, steps = 0; ancestor < tokens && ancestor != limit && steps++ < tokens; ancestor = parents[ancestor])
     {
         const uint8_t role = roles[ancestor];
-        if (role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR)
+        if (role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR || role == PARSE_ROLE_TERMINATOR)
         {
-            outermost = ancestor;
-            statement = statement == BUSTER_CHECK_NONE ? ancestor : statement;
-        }
-        else if (role == PARSE_ROLE_TERMINATOR)
-        {
-            if ((emission->subtree_bits[ancestor] & BUSTER_CHECK_TARGET_FEATURE_DO) != 0)
+            const uint32_t start = check_target_feature_start(emission, program, walk->body, ancestor, BUSTER_CHECK_NONE);
+            if (start >= first && start - first < count)
             {
-                outermost = ancestor;
+                check_x86_diagnostic_push(walk, start, true);
             }
-            statement = statement == BUSTER_CHECK_NONE ? ancestor : statement;
         }
         else if (role == PARSE_ROLE_CLOSE_BODY)
         {
             break;
         }
-        else if (role == PARSE_ROLE_CLOSE_GROUP && input->expression_regions[ancestor] != 0)
+    }
+}
+
+// ContainsLabel is syntactic, while activation is per emitted body/region. The label's syntax, rather than a
+// label_positions control's token, also retains enclosing conditions for labels on null statements. The subtree
+// bit avoids a token scan in the usual unlabeled scope. No new roots enter #487's range-warning walk.
+static void check_target_feature_named_roots(CheckX86DiagnosticWalk* walk, const CheckTargetFeatureEmission* emission, uint32_t scope,
+                                             uint32_t first, uint32_t count)
+{
+    const Parser* parser = walk->program->parser;
+    const uint32_t tokens = parser->tokens.count;
+    if (scope < tokens && (emission->subtree_bits[scope] & BUSTER_CHECK_TARGET_FEATURE_LABEL) != 0)
+    {
+        const uint8_t* roles = parser->tree.roles;
+        const uint32_t low = emission->extent_first[scope];
+        const uint32_t high = emission->ends[scope];
+        for (uint32_t token = low; token <= high; token += 1)
         {
-            // A statement expression's labels are its statement's to hold, not the expression's.
-            continue;
+            if (roles[token] == PARSE_ROLE_LABEL)
+            {
+                check_target_feature_label_roots(walk, emission, token, scope, first, count);
+            }
         }
     }
-    return outermost != BUSTER_CHECK_NONE ? check_target_feature_start(emission, program, body, outermost, position) :
-           statement != BUSTER_CHECK_NONE ? check_target_feature_start(emission, program, body, statement, position) :
-           position;
 }
 
 // The loop whose condition the body's BRANCH_FALSE control `index` is, by the back edge where it branches to: 1 for a
@@ -1235,15 +1279,17 @@ static bool check_target_feature_emission_prepare(CheckX86DiagnosticWalk* walk, 
             emission->first[control->target] = extra;
         }
     }
+    if (valid && body->opening < parser->tokens.count)
+    {
+        check_target_feature_named_roots(walk, emission, parser->tree.parents[body->opening], 0, body->entry_count);
+    }
     for (uint32_t l = 0; valid && l < body->label_count; l += 1)
     {
         const uint32_t position = program->label_positions[body->label_first + l];
         if (position < body->entry_count)
         {
-            // The statement that holds the label emits from its start, as clang's ContainsLabel emits a statement that
-            // holds one (check_target_feature_label_root); and the label's own block emits wherever the code before it
-            // stopped — EmitLabel's block always stands, a predecessor or not.
-            check_x86_diagnostic_push(walk, check_target_feature_label_root(emission, program, body, position), true);
+            // EmitLabel's block always stands, a predecessor or not. Its enclosing statements were rooted by their
+            // syntax above; the first control after an empty labeled statement need not be inside that statement.
             check_x86_diagnostic_push(walk, position, true);
         }
         else if (position < body->count)
@@ -1328,6 +1374,25 @@ static bool check_target_feature_top_level(const Parser* parser, uint32_t token,
     return top;
 }
 
+// FindCaseStatementsForValue's collector descends compounds and case labels, not ifs, loops, ordinary labels or
+// attributed statements. Finding a matching value in the switch's case table is not sufficient: the collector must
+// actually find that label in the body. Include the body's own role, since a switch body need not be a compound.
+static bool check_target_feature_collectable_case(const Parser* parser, uint32_t token, uint32_t body)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint8_t* roles = parser->tree.roles;
+    const uint32_t* parents = parser->tree.parents;
+    bool found = false;
+    bool collectable = true;
+    for (uint32_t ancestor = token, steps = 0; collectable && !found && ancestor < count && steps++ < count; ancestor = parents[ancestor])
+    {
+        const uint8_t role = roles[ancestor];
+        collectable = role == PARSE_ROLE_CLOSE_CASE || role == PARSE_ROLE_CLOSE_BLOCK;
+        found = collectable && ancestor == body;
+    }
+    return found;
+}
+
 // The switch's emission where its dispatch's value is a constant (clang's FindCaseStatementsForValue in
 // EmitSwitchStmt): the statements of the case it selects, the default's where none does, or nothing at all — but
 // where a statement the selection skips holds a label (one a jump could enter, ContainsLabel) or is a declaration
@@ -1351,12 +1416,20 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, CheckTarge
     {
         next += 1;
     }
+    const uint32_t fallback_token = emission->defaults[entry->token];
     if (!known)
     {
-        // No constant: every case's and the fallback's, as #487's walk pushes them.
+        // Each case opens a block, and every statement enclosing it inside this switch emits from its own start.
+        // Rooting only the targets misses the condition of an if/loop that contains a case before the first block.
         for (uint32_t i = index + 1; i < next; i += 1)
         {
-            check_x86_diagnostic_push(walk, program->cases[controls[i].target].target, true);
+            const CheckProgramCase* item = program->cases + controls[i].target;
+            check_target_feature_label_roots(walk, emission, item->token, entry->token, 0, walk->body->count);
+            check_x86_diagnostic_push(walk, item->target, true);
+        }
+        if (fallback_token != BUSTER_CHECK_NONE)
+        {
+            check_target_feature_label_roots(walk, emission, fallback_token, entry->token, 0, walk->body->count);
         }
         check_x86_diagnostic_push(walk, next, true);
         return;
@@ -1385,16 +1458,10 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, CheckTarge
         }
     }
     // The control after the case table jumps to the default label or the switch's end.
-    const CheckProgramCase* fallback = NULL;
-    for (uint32_t i = index + 1; i < next; i += 1)
-    {
-        const CheckProgramCase* item = program->cases + controls[i].target;
-        fallback = item->fallback && item->owner == entry->token ? item : fallback;
-    }
-    if (!whole && selected == BUSTER_CHECK_NONE && fallback != NULL)
+    if (!whole && selected == BUSTER_CHECK_NONE && fallback_token != BUSTER_CHECK_NONE)
     {
         selected = controls[next].target;
-        selected_token = fallback->token;
+        selected_token = fallback_token;
     }
     // The body's statements, from the control after the table's jump.
     const uint32_t statements = next + 1;
@@ -1417,6 +1484,7 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, CheckTarge
         end = controls[i].token >= low && controls[i].token <= high ? i + 1 : end;
     }
     uint32_t kept_control_end = end;
+    whole = whole || (selected != BUSTER_CHECK_NONE && !check_target_feature_collectable_case(parser, selected_token, body));
     if (!whole)
     {
         if (selected == BUSTER_CHECK_NONE)
@@ -1476,32 +1544,19 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, CheckTarge
     }
     if (whole)
     {
-        // The collection failed: the whole body emits as code generation's dispatch does — a block at each case, the
-        // default's or the block after the switch, and the statements a label can enter from their start. An unlabeled
-        // statement after one whose code stopped is skipped (EmitStmt's insertion point), so only the first reachable
-        // control and the case labels' targets go on the walk.
-        uint32_t first_target = end;
-        uint32_t first_case_token = high;
+        // The collection failed. Cases and their enclosing statements are emission roots, bounded at this switch
+        // so an inner dispatch cannot revive code outside it. Named-label roots are activated with their containing
+        // body/region. Do not start the whole compound linearly: an ordinary pre-case prefix and unlabeled code
+        // after a return/noreturn statement remain dead.
         for (uint32_t i = index + 1; i < next; i += 1)
         {
             const CheckProgramCase* item = program->cases + controls[i].target;
-            first_target = item->target < first_target ? item->target : first_target;
-            first_case_token = item->token < first_case_token ? item->token : first_case_token;
+            check_target_feature_label_roots(walk, emission, item->token, entry->token, 0, walk->body->count);
+            check_x86_diagnostic_push(walk, item->target, true);
         }
-        uint32_t from = first_target;
-        for (uint32_t l = 0; l < walk->body->label_count; l += 1)
+        if (fallback_token != BUSTER_CHECK_NONE)
         {
-            const uint32_t position = program->label_positions[walk->body->label_first + l];
-            if (position < walk->body->entry_count && controls[position].token < first_case_token)
-            {
-                const uint32_t root = check_target_feature_label_root(emission, program, walk->body, position);
-                from = root < from ? root : from;
-            }
-        }
-        check_x86_diagnostic_push(walk, from, true);
-        for (uint32_t i = index + 1; i < next; i += 1)
-        {
-            check_x86_diagnostic_push(walk, program->cases[controls[i].target].target, true);
+            check_target_feature_label_roots(walk, emission, fallback_token, entry->token, 0, walk->body->count);
         }
         check_x86_diagnostic_push(walk, controls[next].target, true);
     }
@@ -1651,6 +1706,11 @@ static void check_target_feature_expression(CheckX86DiagnosticWalk* walk, CheckT
         const uint32_t region = program->input->expression_regions[graph->tokens[node]];
         const uint32_t type = check_stream_type(program->stream, node);
         const bool valued = type != 0 && type_kind(program->types, type_strip_aligned(program->types, type)) != BUSTER_TYPE_KIND_VOID;
+        if (region != 0 && region <= program->region_count)
+        {
+            const CheckProgramRegion* item = program->regions + region - 1;
+            check_target_feature_named_roots(walk, emission, program->input->regions[region - 1].block, item->first, item->count);
+        }
         if (valued && region != 0 && region <= program->region_count && program->input->regions[region - 1].final_statement != BUSTER_CHECK_NONE)
         {
             // EmitCompoundStmtWithoutScope's value: EnsureInsertPoint gives the last expression a block of its own

@@ -140,6 +140,56 @@ not grant AVX-512, POPCNT, LZCNT or TZCNT to output code. Zero arguments to clz
 or ctz remain undefined by the source contract, independently of the sequence's
 incidental numeric result. Zero ffs returns zero.
 
+### The bit builtins' instructions (#1374)
+
+The source producer doesn't take the recipes for the byte swaps and counts
+where an instruction computes them: `check_lower_bits_row`
+(`c_check_program_lower.c`) lowers `__builtin_bswap16` to `__builtin_ffsll`
+to an `X86` row of one instruction, as clang -O0's code does, by the function's
+own target (its `-march` and `target` attribute), and keeps
+`c_builtin_lower.c`'s recipe (whose module and tests are unchanged) for
+popcount and parity at a target without POPCNT alone:
+
+| builtin | x86-64 | with the feature |
+| --- | --- | --- |
+| `ctz` | `bsf` | `tzcnt` (BMI) |
+| `clz` | `bsr`, then `xor` with the width less one | `lzcnt` (LZCNT) |
+| `popcount` | the recipe | `popcnt` (POPCNT) |
+| `parity` | the recipe | `popcnt`, then `and 1` |
+| `ffs` | `bsf`, plus one, times whether the operand isn't 0 | `tzcnt`, likewise |
+| `bswap16/32/64` | the operand moved into the result's register and `bswap` there (`bswap16`'s 32-bit swap shifted right by 16) | |
+
+`bsf`, `bsr`, `tzcnt` and `lzcnt` agree on every operand but 0, whose ctz and
+clz the source leaves undefined; `ffs`'s product makes its 0 whatever the
+count's instruction gives. A row's operand is the parameter's class (`bswap16`'s
+zero-extended to 32 bits), its result an int's, or the byte swap's unsigned
+class, and the steps after it (the `xor`, the `and`, the sum and product, the
+shift) are ordinary typed entries, which Tier 0 fuses as any. A function with
+such a row is one with vectors (`Tier0Function.vectors`), as any function with
+an `X86` entry is. The IR takes each row as its intrinsic (`tzcnt`, `bsf`,
+`lzcnt`, `bsr`, `popcnt`, `bswap`: [the IR guide](ir.md)'s "Intrinsics"), a
+pure operation rather than a row call, and the typed stream's interpreter
+evaluates the rows by the same intrinsics' semantics (`ir_intrinsic_bits`).
+`test-checker --program-bits` runs every one of them of boundary values at
+`x86-64`, `x86-64-v2`, `x86-64-v3` and `znver5` by both paths against clang -O0's
+build at the same `-march`, and checks that the rows' forms are the target's;
+`test-checker-driver`'s Tier 1 fixture of them does so for `--tier1` at the
+first three.
+
+On the 9700X (CPU 2 under the lock, best of five repetitions per process, the
+median of three rounds), the issue's kernel (`__builtin_popcountl(x) +
+__builtin_ctzl(x | 1) + __builtin_clzl(x | 1)`, 20 M calls from a clang -O2
+loop of a xorshift generator, which alone takes 21.6 ms) went from 90.8 ms
+(Tier 0) and 84.2 ms (Tier 1) to 21.9 ms and 21.6 ms at `x86-64-v3` and
+`znver5`, clang -O0's 22.2 ms and -O2's 21.6 ms, and to 35.7 ms and 33.6 ms
+at `x86-64`, whose popcount stays the recipe (clang -O0: 29.7 ms). The byte swaps
+of #1374's comment went from 44.2–44.4 ms and 42.9 ms to 21.6–21.8 ms at every
+level, clang's time. The kernel is 16 instructions by Tier 0 and 11 by Tier 1 at
+`x86-64-v3`, where it was 188 and 120. sqlite3.c's `-c` is unchanged (132.57 and
+132.46 ms, its one `__builtin_clzll`). [The
+record](https://github.com/buster14a/buster-performance/tree/28689ea8be9e0bbbe4e6b91a0371ed36093510b6/docs/measurements/bit-builtins-1374-2026-11-07)
+has the commands, receipts and limitations.
+
 Tier 0 can consume the complete ordinary-width recipes. The current separate
 Tier 1 pipeline only supports a subset: straight-line 32/64-bit integer and
 pointer operations, fixed shifts and 32/64-bit memory accesses. Narrow stores,

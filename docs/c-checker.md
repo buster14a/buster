@@ -5555,9 +5555,9 @@ change, it refused such a declaration by name.
   (`SimpleTypoCorrection`); only that one is tried, so `alignd`'s closest,
   `align` (a declspec's), gives no suggestion. The lists are clang's
   `AttributeSpellingList.inc` (the end of `c_check_attribute_clang.inc`).
-- **`__clang__`.** Where a C23 attribute's scope goes (before `::`), or its
-  name after `[[` or a comma, the number the predefined `__clang__` expands to is
-  clang's `_Clang`, with its `-Wignored-attributes` warning "'__clang__' is a
+- **`__clang__`.** Where a C23 attribute's scope or name goes, right after
+  `[[` or after a comma in that list, the number the predefined `__clang__`
+  expands to is clang's `_Clang`, with its `-Wignored-attributes` warning "'__clang__' is a
   predefined macro name, not an attribute scope specifier; did you mean
   '_Clang' instead?" (clang's `TryParseCXX11AttributeIdentifier`). The parser
   makes such a number the identifier `_Clang` before it reads the unit
@@ -5568,6 +5568,8 @@ change, it refused such a declaration by name.
   error at the same token. A direct expansion's definition note is at line 2
   of `<built-in>`; wrapped and redefined macros keep their recorded expansion
   provenance.
+  In a GNU list, `__attribute__((__clang__::x))`, the number stays one, where
+  clang's list ends with "expected ')'" at it.
 - **Statements.** C23 attributes alone before a statement are the
   statement's where the next token starts no declaration, as clang's
   `isDeclarationStatement` decides (`[[x]] y += 1;`): the parser reads them so
@@ -6209,7 +6211,8 @@ arguments against the function. The checker now gives these as clang does.
   parameters only for the attributes clang parses in the function's scope or
   after the declaration (`enable_if`, `diagnose_if`, the thread-safety
   analysis's). An attribute whose arguments clang parses its own way
-  (`availability`, `counted_by` and the like) is its own.
+  (`availability`, `external_source_symbol`, `counted_by` and the like) is
+  its own.
 
   Five have rules of their own, with their handlers' checks and effects:
   - `lifetimebound` changes nothing in C. On a parameter of a function that
@@ -6358,6 +6361,85 @@ arguments against the function. The checker now gives these as clang does.
   read, a call of other than a const or pure function; an operand of sizeof or
   typeof aside: `check_input_assume_effects`). Left: clang's -Wunused-value
   warnings inside it, which come from its expression's walk.
+
+  clang's checks-only attributes (#1447) change nothing on Linux past their
+  handlers' checks, which are clang's (`check_input_attribute_checks`,
+  `c_check_attribute_checks_input.c`), and are taken in each spelling (GNU's,
+  its keyword's underscores and `clang::`) but where said:
+  - `availability`'s arguments are read as clang's parser reads them
+    (`check_input_availability_parse`): a platform, then `introduced`,
+    `deprecated` and `obsoleted` with versions, `unavailable`, `strict`,
+    `message`, `replacement` and `environment` (clang's error in C), each
+    malformed one clang's error at the token it names ("expected a version of
+    the form 'major[.minor[.subminor]]'", "redundant 'introduced'
+    availability change", "'x' is not an availability stage" and the
+    others). Its handler's checks follow (`check_input_availability_handle`),
+    with platforms named as clang names them: an unknown platform, stages out
+    of order ("feature cannot be deprecated in macOS version 10.2 before it
+    was introduced in version 10.4; attribute ignored"), `unavailable`
+    overriding the others, mixed version separators, an Apple platform's
+    version that its release numbering skipped
+    (`-Winvalid-version-availability`, noted with the version clang takes
+    instead), and anyAppleOS's, swift's and fuchsia's versions. A
+    redeclaration's attribute for a platform its earlier declarations have
+    with other versions is "availability does not match previous
+    declaration", noted at the earlier one
+    (`check_input_availability_redeclaration`). No platform is Linux's, so no
+    use is deprecated or unavailable by it.
+  - `external_source_symbol`'s clauses (`language`, `defined_in`,
+    `generated_declaration`, `USR`), each once, are read as clang's parser
+    reads them (`check_input_external_source_parse`), with its errors at the
+    token or the offset it names.
+  - `enforce_tcb` and `enforce_tcb_leaf` name a TCB by a string; both kinds
+    with one name on a function, on a declaration or across its
+    redeclarations, are "attributes ... are mutually exclusive", noted at the
+    other. In the body of a function its `enforce_tcb` attributes put in TCBs
+    (its own and its earlier declarations', in the order clang merges them, a
+    duplicate twice), each call of a function its callee names directly
+    (through parentheses and `&`, an implicit declaration too) that isn't a
+    library builtin is `-Wtcb-enforcement`'s "calling 'g' is a violation of
+    trusted computing base 'x'" for each of those TCBs the callee's own
+    attributes don't name, at the call's first token once the call is
+    complete (`check_input_tcb_calls`). Operands of `sizeof`, `typeof` and
+    `_Alignof` and a `_Generic`'s controlling expression aren't evaluated,
+    and a call through a pointer names no function.
+  - `callback`'s arguments are its callee and its payload among the
+    function's parameters, by name or index (`__` an unknown one, `__this`
+    unavailable in C): one callee, a parameter of function pointer type, not
+    variadic, whose parameter count is the payload's, with clang's errors in
+    its order (`check_input_attribute_callback`). It is LLVM's metadata, which
+    -O0's code doesn't need.
+  - `swift_async`'s kind (`none`, `swift_private`, `not_swift_private`) and,
+    but for `none`, its completion handler's parameter index, a parameter
+    that must be a block pointer returning void: no C parameter is, so that
+    is its error.
+  - `ns_error_domain`'s identifier, on an enum, must name a variable.
+  - `modular_format`'s identifier and its aspects' strings (each once); its
+    function needs `format` ("'modular_format' attribute requires 'format'
+    attribute", once its declaration's attributes are merged), and a
+    redeclaration's other arguments are "attribute 'modular_format' is
+    already applied with different arguments". It is an optimization's hint.
+  - `objc_ownership` and `objc_gc` are a declarator's type's, applied as
+    clang's GetFullTypeForDeclarator distributes them
+    (`check_input_attribute_objc`): the specifiers' to the declarator's
+    outermost pointer, a chunk's from its pointer or its group outward, one
+    after the declarator to the innermost pointer outside its outermost
+    function, in type names too. Where no pointer takes one it is "'X' only
+    applies to (Objective-C object or block) pointer types; type here is 'T'",
+    naming the type where it stopped, before the declaration's attributes'
+    checks. Where a pointer takes it, its argument must be an identifier;
+    `objc_ownership(none)` and `(weak)` (named `__weak`) warn that C has no
+    Objective-C object, `strong` and `autoreleasing` change nothing outside
+    ARC, and another argument is "argument not supported". On a declaration
+    of no declarator `objc_ownership` is "only applies to variables", and on a
+    statement both are "cannot be applied to a statement", a wrong count's
+    error first, as neither has subjects. `objc_gc(weak)` and
+    `objc_gc(strong)` on a pointer make a garbage-collection qualifier that
+    changes the type (`int *__weak`, which redeclarations, `_Generic` and the
+    types' spellings see): they are refused by name, and so are both
+    attributes' C23
+    spellings, which apply to other types than GNU's (clang 23 crashes on
+    `[[clang::objc_gc(weak)]]`).
 
   Other targets' calling conventions (`aarch64_sve_pcs`,
   `aarch64_vector_pcs`, `m68k_rtd`, `pcs`) are conventions x86-64 hasn't, as
@@ -6839,6 +6921,20 @@ arguments against the function. The checker now gives these as clang does.
     printed.
   - `-Wduplicate-decl-specifier` (`inline inline;`) isn't made, and
     `__private_extern__` is refused by name, with or without a declarator.
+  - The checks-only attributes (#1447): through a macro, `objc_ownership`'s
+    warning on a pointer is at the attribute with the macro's notes, where
+    clang puts it at the macro's immediate expansion, and clang names either
+    attribute `__weak` or `__strong` when the outermost macro is spelled so;
+    `objc_gc(weak)`, `objc_gc(strong)` and both C23 spellings are refused (see
+    above). In a `_Generic` association's type their warnings aren't made,
+    and a `typeof` type name that starts with a GNU attribute isn't read as
+    one, as for every attribute there. `availability` on a tag's
+    redeclaration isn't compared with the earlier one's. As everywhere, a
+    declaration's first error ends the unit: a shared specifiers'
+    `objc_ownership` with a count's error warns and errs for the first
+    declarator alone, and a TCB function's call clang declares implicitly
+    with an error (C99 and later) has no `-Wtcb-enforcement` warning after
+    it.
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
   counts and five rows, and conflicting conventions on a function and on
   another type (`c_check_attribute_test.c`). `test-checker-driver` compares
@@ -6894,6 +6990,56 @@ arguments against the function. The checker now gives these as clang does.
   `c_check_attribute_effects_driver_test.c` covers complete
   thread-safety expressions with their warning option, loader diagnostics and
   loader section bytes and flags, through the scalar and vector paths.
+  `c_check_attribute_checks_driver_test.c` compares the whole output of the
+  checks-only attributes (#1447) in their valid uses, wrong subjects and wrong
+  arguments, TCB calls, availability's merges and the Objective-C pointer
+  attributes' types, with the warnings' options and GNU C89's implicit calls.
+
+## Operand errors (#147)
+
+- **Increments and decrements.** As clang's `CheckIncrementDecrementOperand`,
+  the operand's type is tested before its modifiability
+  (`check_action_steppable`). A real type (a complete enumeration's), a pointer
+  or a complex type is stepped. Any other is "cannot increment value of type
+  T" (or "decrement"), an array's and a const record's too; a vector's, a
+  record's and a function's are among them. T is the operand's type with its
+  qualifiers, an `_Atomic` one's value type, spelled with the typedef its
+  object was declared with (`check_semantic_operand_spelling`, through
+  dereferences, subscripts and members).
+- **Vector typedefs' a.k.a.** Clang's desugaring stops at a vector type's own
+  typedef: a typedef of `v4si` prints `'w4si' (aka 'v4si')`, and `v4si` itself
+  `'v4si' (vector of 4 'int' values)` (`check_driver_warning_type_at`).
+- **A failed initializer conversion.** A scalar initializer's INITIALIZE is at
+  its declarator, outside the initializer's tokens. When its conversion fails,
+  that error is the only one: the initializers' walk doesn't check that
+  initializer again (`check_initializers_diagnose_warnings`). A static
+  object's still gets clang's second, non-constant error at the initializer
+  after a conversion clang warns of and makes (`-Wint-conversion`'s and
+  `-Wincompatible-pointer-types`'), where the converted value is no constant:
+  an object's value read, or an address converted to an integer narrower
+  than a pointer (`check_init_converted_nonconstant`); an absolute address
+  (`(int *)5`) stays a constant.
+- **Differences left.**
+  - `++` and `--` of a complex type are refused ("arithmetic operands
+    required"), where clang takes them.
+  - Arithmetic on a pointer to an incomplete type is "incomplete type is not
+    permitted here", where clang's is "arithmetic on a pointer to an incomplete
+    type" with a "forward declaration" note.
+  - A vector type reached through a pointer typedef (`typedef v4si *pv;`)
+    prints without its typedef's name, and so does a member's type
+    (`x.f++` of a member `uu f` prints `'struct u'` where clang's is
+    `'uu' (aka 'struct u')`): a record's members keep no declaration.
+  - A braced scalar initializer's failed conversion (`static long x = { p };`)
+    is still "invalid initializer", with no non-constant error.
+  - `(*p)++` of a `void *p` lacks clang's `-Wvoid-ptr-dereference` warning
+    before its error, and `c++` of a const variable clang's "variable 'c'
+    declared const here" note.
+  - Conversion errors other than an initializer's pointer and integer ones are
+    "incompatible operand or conversion types": an assignment's, a return's, an
+    argument's, an integer converted to a pointer and a record or floating
+    value converted to a scalar it can't be. Clang's fix-it suffixes ("; dereference
+    with *", "; take the address with &", "; remove *", "; remove &") are
+    missing everywhere.
 
 ## Ignorable and unsupported pragmas
 

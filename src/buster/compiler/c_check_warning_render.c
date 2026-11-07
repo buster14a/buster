@@ -97,6 +97,28 @@ static String8 check_warning_string_value(const Parser* parser, Preprocessor* pp
     return decoded.valid && decoded.byte_count != 0 ? (String8){ (char*)decoded.bytes, decoded.byte_count - 1 } : (String8){ 0 };
 }
 
+// A run of string literals from `token`, decoded and concatenated, as clang's messages print an attribute's string
+// (#1447: a TCB's, an aspect's), in `scratch`; empty where it decodes to nothing.
+static String8 check_warning_strings_value(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t end = token;
+    while (end < count && parser->tokens.kinds[end] == PARSE_KIND_STRING)
+    {
+        end += 1;
+    }
+    CheckStringPart* parts = end > token ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckStringPart, end - token) : NULL;
+    bool valid = parts != NULL;
+    for (uint32_t i = token; valid && i < end; i += 1)
+    {
+        const String8 spelling = check_warning_string_spelling(parser, pp, i, scratch);
+        parts[i - token] = (CheckStringPart){ .bytes = (const uint8_t*)spelling.pointer, .length = spelling.length };
+        valid = spelling.length != 0;
+    }
+    const CheckStringLiteral decoded = valid ? check_literal_strings(parts, end - token, pp->options.language.standard >= 2023, scratch) : (CheckStringLiteral){ 0 };
+    return decoded.valid && decoded.byte_count != 0 ? (String8){ (char*)decoded.bytes, decoded.byte_count - 1 } : (String8){ "", 0 };
+}
+
 // One publication pass's name views for type_print (#992): the identifier table's spelling columns and, where
 // the unit has unnamed tags, a `file:line:col` or typedef-name text by tag index. Both are built once before the
 // pass's events take their marks, so per-event release cannot invalidate them; `anonymous` stays empty where
@@ -430,12 +452,30 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
             const bool contextual = check_driver_warning_parentheses(parser, types, declaration, declared, scratch, &names);
             const String8 sugared = contextual ? type_print(types, scratch, type, (String8){ 0 }, &names, options) : (String8){ 0 };
             String8 canonical = { 0 };
-            if (names.alias_count != 0)
+            // clang's desugaring stops at a vector type's own typedef, the one whose underlying type is the vector
+            // (desugarForDiagnostic: "People want their vec4"): a typedef of that typedef's a.k.a. is that one's name,
+            // and that one has none. The chain of typedef specifiers from the alias's declaration leads to it.
+            const uint8_t alias_kind = alias_type != 0 ? type_kind(types, type_strip_aligned(types, alias_type)) : 0;
+            uint32_t vector_name = alias_kind == BUSTER_TYPE_KIND_VECTOR || alias_kind == BUSTER_TYPE_KIND_EXT_VECTOR ? spelling : 0;
+            for (uint32_t steps = 0; vector_name != 0 && steps < 64; steps += 1)
+            {
+                const uint32_t inner = check_input_typedef_spelling(input, parser, vector_name);
+                const bool same = inner != 0 && inner < input->token_count && input->declared_types[inner] == alias_type;
+                vector_name = same ? inner : vector_name;
+                steps = same ? steps : 64;
+            }
+            TypeId vector_type = vector_name != 0 ? input->declared_types[vector_name] : 0;
+            const uint32_t vector_identifier = vector_name != 0 ? parser->tokens.names[vector_name] : 0;
+            String8 vector_alias = vector_name != 0 ? (String8){ .pointer = (char*)intern_bytes(pp->table, vector_identifier),
+                                                                 .length = intern_length(pp->table, vector_identifier) } : (String8){ 0 };
+            if (names.alias_count != 0 && vector_name != spelling)
             {
                 // clang's `(aka '...')`: the same type with the typedef sugar expanded — an anonymous record's
-                // typedef stays, since it is that record's own name.
+                // typedef stays, since it is that record's own name; a vector's own typedef stays too.
                 TypeNames expand = names;
-                expand.alias_count = 0;
+                expand.alias_count = vector_name != 0 ? 1 : 0;
+                expand.alias_types = &vector_type;
+                expand.alias_names = &vector_alias;
                 expand.parenthesis_count = 0;
                 canonical = type_print(types, scratch, type, (String8){ 0 }, &expand, options);
             }
@@ -724,6 +764,18 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                                            (int)type.length, type.pointer) : NULL;
             break;
         }
+        case CHECK_WARNING_EVENT_OBJC_POINTER_TYPE:
+        case CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE:
+        case CHECK_WARNING_EVENT_OBJC_WEAK_TYPE:
+        {
+            const String8 type = check_driver_warning_type_at(parser, pp, input, types, spell, scratch, payload->first_type, payload->data,
+                                                              payload->token, payload->second_type);
+            const String8 named = event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? (String8){ "__weak", 6 } : name;
+            result = type.length != 0 ? check_warning_text(scratch, "'%.*s' only applies to %s types; type here is %.*s", (int)named.length, named.pointer,
+                                                           event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE ? "pointer" : "Objective-C object or block pointer",
+                                                           (int)type.length, type.pointer) : NULL;
+            break;
+        }
         case CHECK_WARNING_EVENT_NONSTRING_TYPE:
         {
             // clang's handleNonStringAttr's warning: the attribute named as the subject warning names it (its scope's token
@@ -842,6 +894,55 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_NODEREF_CONVERSION:
             result = "casting to dereferenceable pointer removes 'noderef' attribute";
             break;
+        case CHECK_WARNING_EVENT_AVAILABILITY_PLATFORM:
+        {
+            const uint32_t at = payload->token < parser->tokens.count ? parser->tokens.names[payload->token] : 0;
+            const String8 platform = check_driver_warning_name(pp, at);
+            result = check_warning_text(scratch, "unknown platform '%.*s' in availability macro", (int)platform.length, platform.pointer);
+            break;
+        }
+        case CHECK_WARNING_EVENT_AVAILABILITY_UNAVAILABLE:
+            result = "'unavailable' availability overrides all other availability information";
+            break;
+        case CHECK_WARNING_EVENT_AVAILABILITY_SWIFT:
+            result = "only 'unavailable' and 'deprecated' are supported for Swift availability";
+            break;
+        case CHECK_WARNING_EVENT_AVAILABILITY_FUCHSIA:
+            result = "Fuchsia API Level prohibits specifying a minor or sub-minor version";
+            break;
+        case CHECK_WARNING_EVENT_AVAILABILITY_MISMATCH:
+            result = "availability does not match previous declaration";
+            break;
+        case CHECK_WARNING_EVENT_AVAILABILITY_VERSION:
+        case CHECK_WARNING_EVENT_AVAILABILITY_ORDERING:
+        {
+            // The platform's pretty name (or its name as written), and the versions as VersionTuple prints them.
+            static const char* const stages[] = { "introduced", "deprecated", "obsoleted" };
+            const CheckInputAvailabilityText* text = payload->data < input->availability_text_count ? input->availability_texts + payload->data : NULL;
+            const uint32_t at = text != NULL && text->platform < parser->tokens.count ? parser->tokens.names[text->platform] : 0;
+            const String8 written = check_driver_warning_name(pp, at);
+            bool xros = false;
+            const uint32_t platform = check_availability_attribute_platform((const uint8_t*)written.pointer, (uint32_t)written.length, &xros);
+            const String8 named = platform < BUSTER_ARRAY_LENGTH(check_availability_pretty) ?
+                                  (String8){ (char*)check_availability_pretty[platform], strlen(check_availability_pretty[platform]) } : written;
+            char first[48];
+            char second[48];
+            check_version_print(text != NULL ? text->first : (CheckVersionTuple){ 0 }, first, sizeof(first));
+            check_version_print(text != NULL ? text->second : (CheckVersionTuple){ 0 }, second, sizeof(second));
+            result = text == NULL ? NULL :
+                     event->kind == CHECK_WARNING_EVENT_AVAILABILITY_VERSION ?
+                     check_warning_text(scratch, "invalid %.*s version '%s' in availability attribute", (int)named.length, named.pointer, first) :
+                     check_warning_text(scratch, "feature cannot be %s in %.*s version %s before it was %s in version %s; attribute ignored",
+                                        stages[text->first_stage % 3], (int)named.length, named.pointer, first, stages[text->second_stage % 3], second);
+            break;
+        }
+        case CHECK_WARNING_EVENT_TCB_VIOLATION:
+        {
+            const String8 tcb = check_warning_strings_value(parser, pp, payload->token, scratch);
+            result = check_warning_text(scratch, "calling '%.*s' is a violation of trusted computing base '%.*s'", (int)name.length, name.pointer, (int)tcb.length,
+                                        tcb.pointer);
+            break;
+        }
         case CHECK_WARNING_EVENT_EXCESSIVE_REGSAVE:
             result = payload->data == 0 ?
                      "interrupt service routine should only call a function with attribute 'no_caller_saved_registers' or be compiled with '-mgeneral-regs-only'" :
@@ -928,6 +1029,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_INDEPENDENT_POINTER:
         case CHECK_WARNING_EVENT_CAPTURE_DEPRECATED:
         case CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED:
+        case CHECK_WARNING_EVENT_OBJC_UNSUPPORTED:
         case CHECK_WARNING_EVENT_ASSUME_SIDE_EFFECTS:
         case CHECK_WARNING_EVENT_DIFFERENT_ARGUMENTS:
         case CHECK_WARNING_EVENT_NO_CALLS:
@@ -949,7 +1051,8 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             uint32_t length = 0;
             const uint32_t count = parser->tokens.count;
             const bool argued = event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED || event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED ||
-                                event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED || event->kind == CHECK_WARNING_EVENT_CAPTURE_DEPRECATED ||
+                                event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED || event->kind == CHECK_WARNING_EVENT_OBJC_UNSUPPORTED ||
+                                event->kind == CHECK_WARNING_EVENT_CAPTURE_DEPRECATED ||
                                 event->kind == CHECK_WARNING_EVENT_UNKNOWN_SANITIZER || event->kind == CHECK_WARNING_EVENT_SANITIZER_GLOBAL;
             for (uint32_t token = payload->token; argued && token < count &&
                  (parser->tokens.kinds[token] == PARSE_KIND_STRING || (token == payload->token && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER));
@@ -996,7 +1099,8 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                 event->kind == CHECK_WARNING_EVENT_SANITIZER_GLOBAL ?
                 check_warning_text(scratch, "'%.*s%s%.*s' attribute argument '%s' not supported on a global variable", (int)scope.length, scope.pointer,
                                    scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer, argument) :
-                event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED || event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED ?
+                event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED || event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED ||
+                event->kind == CHECK_WARNING_EVENT_OBJC_UNSUPPORTED ?
                 check_warning_text(scratch, event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED ? "'%.*s%s%.*s' attribute argument not supported: %s" :
                                                                                                      "'%.*s%s%.*s' attribute argument not supported: '%s'",
                                    (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer, argument) :
@@ -1121,6 +1225,15 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
         case CHECK_WARNING_NOTE_USED_HERE: result = "used here"; break;
         case CHECK_WARNING_NOTE_PREVIOUS_DEFINITION: result = "previous definition is here"; break;
         case CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE: result = "conflicting attribute is here"; break;
+        case CHECK_WARNING_NOTE_PREVIOUS_ATTRIBUTE: result = "previous attribute is here"; break;
+        case CHECK_WARNING_NOTE_IMPLICIT_VERSION:
+        {
+            const CheckInputAvailabilityText* text = note->payload.data < input->availability_text_count ? input->availability_texts + note->payload.data : NULL;
+            char canonical[48];
+            check_version_print(text != NULL ? text->second : (CheckVersionTuple){ 0 }, canonical, sizeof(canonical));
+            result = text != NULL ? check_warning_text(scratch, "implicitly treating version as '%s'", canonical) : NULL;
+            break;
+        }
         case CHECK_WARNING_NOTE_DEPRECATED_HERE:
         {
             // An anonymous tag's name is its type's spelling, which carries its own quotes (BUSTER_CHECK_DEPRECATED_TYPE_NAME).
@@ -1187,6 +1300,8 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                   (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || event->kind == CHECK_WARNING_EVENT_ORDERED_POINTER_INTEGER ||
                    event->kind == CHECK_WARNING_EVENT_VARIABLE_SIZED_MEMBER || event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE ||
                    event->kind == CHECK_WARNING_EVENT_NONSTRING_TYPE || event->kind == CHECK_WARNING_EVENT_TRANSPARENT_UNION ||
+                   event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE ||
+                   event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ||
                    event->kind == CHECK_WARNING_EVENT_COUNTED_BY_ELEMENT ||
                    event->kind == CHECK_WARNING_EVENT_THREAD_CAPABILITY || event->kind == CHECK_WARNING_EVENT_THREAD_POINTER ||
                    (event->kind == CHECK_WARNING_EVENT_DEPRECATED_USE && event->note_count != 0 && event->note_first < view->note_count &&
@@ -1275,8 +1390,11 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         // An implicit attribute's warning, which clang gives no location (#147: interrupt's used).
                         pp_diagnose_unlocated_notes(pp, disposition, boundary, notes, event->note_count, "%s%s", message, suffix);
                     }
-                    else if (event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE || event->kind == CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED)
+                    else if (event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE || event->kind == CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED ||
+                             event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE ||
+                             event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_UNSUPPORTED)
                     {
+                        // A declarator's type's warnings precede its declaration's attributes' checks at the same boundary.
                         pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);
                     }
                     else if ((event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER) &&

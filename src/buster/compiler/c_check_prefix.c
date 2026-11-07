@@ -490,7 +490,8 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
         view->tokens.pragma_count = original->tokens.pragma_count;
         view->tokens.pragma_sources = original->tokens.pragma_sources;
         view->tokens.pragma_positions = view->tokens.pragma_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, view->tokens.pragma_count) : 0;
-        view->meanings = (ParseMeanings){ .meanings = meanings, .capacity = original->meanings.capacity, .table = original->meanings.table };
+        view->meanings = original->meanings;
+        view->meanings.meanings = meanings;
         more = view->tokens.kinds != 0 && view->tokens.names != 0 && view->tokens.sources != 0 && view->tokens.flags != 0 && view->tree.roles != 0 &&
                view->tree.parents != 0 && view->tree.depths != 0 && view->diagnostics != 0 && (view->tokens.pragma_count == 0 || view->tokens.pragma_positions != 0);
     }

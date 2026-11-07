@@ -528,11 +528,36 @@ static void tier1_select_test_node(IrFunction* function, uint32_t i, uint8_t op,
 
 // An intrinsic of BMI (#141) of operands of `bits` bits, as the instructions' pseudocode has it, independently of the IR's
 // interpreter: pdep and pext through the mask's set bits from its lowest, bzhi and bextr by the bits of the control's
-// bytes they keep.
+// bytes they keep; the bit operations (#1374) bit by bit and byte by byte, bsf's and bsr's of 0 the width, as the
+// others' (which the fixtures' operands never are).
 static uint64_t tier1_select_test_intrinsic(uint32_t operation, uint32_t bits, uint64_t a, uint64_t b)
 {
     uint64_t result = 0;
-    if (operation == BUSTER_IR_INTRINSIC_PDEP || operation == BUSTER_IR_INTRINSIC_PEXT)
+    if (operation >= BUSTER_IR_INTRINSIC_TZCNT && operation <= BUSTER_IR_INTRINSIC_BSR)
+    {
+        const bool trailing = operation == BUSTER_IR_INTRINSIC_TZCNT || operation == BUSTER_IR_INTRINSIC_BSF;
+        uint32_t zeros = 0;
+        while (zeros < bits && ((a >> (trailing ? zeros : bits - 1 - zeros)) & 1) == 0)
+        {
+            zeros += 1;
+        }
+        result = operation == BUSTER_IR_INTRINSIC_BSR && zeros < bits ? bits - 1 - zeros : zeros;
+    }
+    else if (operation == BUSTER_IR_INTRINSIC_POPCNT)
+    {
+        for (uint32_t bit = 0; bit < bits; bit += 1)
+        {
+            result += (a >> bit) & 1;
+        }
+    }
+    else if (operation == BUSTER_IR_INTRINSIC_BSWAP)
+    {
+        for (uint32_t byte = 0; byte < bits / 8; byte += 1)
+        {
+            result |= ((a >> (8 * byte)) & 0xff) << (bits - 8 - 8 * byte);
+        }
+    }
+    else if (operation == BUSTER_IR_INTRINSIC_PDEP || operation == BUSTER_IR_INTRINSIC_PEXT)
     {
         uint64_t bit = 1;
         for (uint64_t mask = b; mask != 0; mask &= mask - 1)
@@ -659,7 +684,7 @@ static uint64_t tier1_select_test_interpret(const IrFunction* function, uint64_t
             // of them (#1059).
             break;
         case IR_INTRINSIC:
-            values[i] = tier1_select_test_intrinsic(third, bits, values[left] & mask, values[right] & mask);
+            values[i] = tier1_select_test_intrinsic(third, bits, values[left] & mask, right != BUSTER_IR_NONE ? values[right] & mask : 0);
             break;
         case IR_ATOMIC_RMW:
         {
@@ -1066,6 +1091,63 @@ static void tier1_select_test_intrinsics(Tier1SelectTest* test)
                         }
                         arena_pop_to(&input, 0);
                     }
+                }
+            }
+        }
+        // The bit operations (#1374), of a parameter or-ed with 1 (never 0, for bsf and bsr), into a destination apart
+        // from its operand's register and into that register (bswap's in place there, moved elsewhere), run by both covers
+        // against the independent evaluator; tzcnt, lzcnt and popcnt refused at x86-64's baseline as the target's.
+        static const uint8_t bits[] = { BUSTER_IR_INTRINSIC_TZCNT, BUSTER_IR_INTRINSIC_BSF, BUSTER_IR_INTRINSIC_LZCNT, BUSTER_IR_INTRINSIC_BSR,
+                                        BUSTER_IR_INTRINSIC_POPCNT, BUSTER_IR_INTRINSIC_BSWAP };
+        static const uint8_t bit_destinations[] = { X86_REGISTER_RAX, X86_REGISTER_RDI, X86_REGISTER_RSI };
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(bits); k += 1)
+        {
+            for (uint32_t width = 4; width <= 8; width += 4)
+            {
+                for (uint32_t d = 0; d < BUSTER_ARRAY_LENGTH(bit_destinations); d += 1)
+                {
+                    const uint8_t type = width == 4 ? IR_I32 : IR_I64;
+                    const IrSizes sizes = {
+                        .instruction_count = 5,
+                        .block_count = 1,
+                        .constant_count = 1,
+                        .parameter_count = 1,
+                    };
+                    IrFunction function;
+                    const IrError created = ir_create(&input, &sizes, &function);
+                    tier1_select_test_expect(test, created == IR_OK, "create bit intrinsic IR fixture");
+                    if (created == IR_OK)
+                    {
+                        function.block_offsets[1] = 5;
+                        function.result_type = type;
+                        function.parameter_types[0] = type;
+                        function.constants[0].low = 1;
+                        uint8_t registers[5] = { X86_REGISTER_RDI, X86_REGISTER_RCX, X86_REGISTER_RDI, bit_destinations[d], X86_REGISTER_RAX };
+                        tier1_select_test_node(&function, 0, IR_PARAM, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                        tier1_select_test_node(&function, 1, IR_CONST, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                        tier1_select_test_node(&function, 2, IR_OR, type, 0, 1, BUSTER_IR_NONE);
+                        tier1_select_test_node(&function, 3, IR_INTRINSIC, type, 2, BUSTER_IR_NONE, bits[k]);
+                        tier1_select_test_node(&function, 4, IR_RET, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                        const bool verified = ir_verify_scalar(&function, &scratch, 0).error == IR_OK && ir_verify(&function, &scratch, 0).error == IR_OK;
+                        tier1_select_test_expect(test, verified, "bit intrinsic IR fixture verifies by both paths");
+                        uint8_t* const baseline = test->allowed;
+                        test->allowed = allowed;
+                        test->native_allowed = native;
+                        tier1_select_test_plan_execute(test, &function, registers, &output, &scratch);
+                        test->allowed = baseline;
+                        test->native_allowed = 0;
+                        Tier1SelectPlan plan;
+                        Tier1SelectCode code;
+                        uint32_t node = 0;
+                        const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, false, &plan, &node);
+                        const Tier1SelectError emitted = planned == TIER1_SELECT_OK ? tier1_select_emit(&plan, registers, test->allowed, &output, &code, &node) : planned;
+                        const bool needs = bits[k] == BUSTER_IR_INTRINSIC_TZCNT || bits[k] == BUSTER_IR_INTRINSIC_LZCNT || bits[k] == BUSTER_IR_INTRINSIC_POPCNT;
+                        tier1_select_test_expect(test, planned == TIER1_SELECT_OK && plan.patterns[3].rule == TIER1_RULE_INTRINSIC &&
+                                                     (needs ? emitted == TIER1_SELECT_ERROR_TARGET && node == 3 : emitted == TIER1_SELECT_OK),
+                                                 "x86-64's baseline refuses tzcnt, lzcnt and popcnt as the target's, and takes bsf, bsr and bswap");
+                        arena_pop_to(&output, 0);
+                    }
+                    arena_pop_to(&input, 0);
                 }
             }
         }

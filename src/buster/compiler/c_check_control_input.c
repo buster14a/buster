@@ -164,7 +164,11 @@ static void check_input_label_attributes(CheckInputReader* reader, uint32_t firs
     CheckInputAttributes* attributes = 0;
     bool valid = refused == BUSTER_CHECK_NONE && after > first && after < count && check_input_read_attributes(reader, &cursor, after, &attributes) && cursor == after;
     // A label's subject as clang's attributes name it (#147): the warning for those that apply elsewhere.
+    // The label's name: before its colon, or after the attributes before it.
+    const bool colon = first >= 2 && parser->tokens.kinds[first - 1] == PARSE_KIND_COLON;
+    reader->attribute_declaration = colon ? first - 1 : after + 1;
     valid = valid && check_input_attribute_subjects(reader, attributes, BUSTER_CHECK_SUBJECT_LABEL, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+    reader->attribute_declaration = 0;
     for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
     {
         const CheckInputAttribute* attribute = attributes->records + i;
@@ -859,8 +863,23 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
         }
         else
         {
+            // An Objective-C pointer type attribute (#1447): clang's parser's error at a later argument that names
+            // nothing, then, as it has no subjects, its count's before the statement's.
+            const bool objc = check_input_objc_kind(reader, attribute) != 0;
+            const uint32_t undeclared = objc ? check_input_objc_undeclared(reader, attribute) : BUSTER_CHECK_NONE;
             valid = false;
-            check_input_report(reader, attribute->first, CHECK_INPUT_STATEMENT_ATTRIBUTE);
+            if (undeclared != BUSTER_CHECK_NONE)
+            {
+                check_input_report(reader, undeclared, CHECK_INPUT_UNDECLARED);
+            }
+            else if (objc && attribute->count_check != BUSTER_CHECK_COUNT_NONE)
+            {
+                check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, attribute->count_check | attribute->count_bound << 8);
+            }
+            else
+            {
+                check_input_report(reader, attribute->first, CHECK_INPUT_STATEMENT_ATTRIBUTE);
+            }
         }
     }
     return valid;

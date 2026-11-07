@@ -265,8 +265,8 @@ struct CheckInputAttribute
     // `constants` the Nth's (its value in `argument_values`). Bit N of `wide` is where the GPU kernels' Nth (bit 0 the
     // first's) needs more than 32 bits (check_input_constant_u32), its value then those bits as clang prints them.
     bool constant_argument;
-    uint8_t constants;
-    uint8_t wide;
+    uint32_t constants;
+    uint32_t wide;
     // An argument's error clang's handler gives once the attribute's subject takes it (#147: tls_model's model, constructor's,
     // destructor's and assume_aligned's integers), which the attributes' reader made and moved here
     // (check_input_attribute_defer), for check_input_attribute_subjects to give; or NULL.
@@ -276,6 +276,28 @@ struct CheckInputAttribute
     TypeId argument_type;
     // Thread-safety arguments' checked expression types, retained once for the subject's handler.
     TypeId* expression_types;
+    // An availability attribute's arguments as clang's parser reads them (#1447, check_input_availability_parse), or NULL.
+    struct CheckInputAvailabilityParse* availability;
+    // A specifiers' objc_gc or objc_ownership that a declarator moved to its pointer, which its later declarators don't see
+    // (#1447, check_input_attribute_objc).
+    bool objc_moved;
+};
+
+// An availability attribute's arguments as clang's parser reads them (#1447, check_input_availability_parse): its platform's
+// token and its index of check_availability_platforms (check_availability_attribute_platform, UINT32_MAX for an unknown
+// one); its stages' (introduced, deprecated, obsoleted) keywords and versions' tokens (BUSTER_CHECK_NONE for one not given,
+// or cleared by unavailable) and versions; unavailable's keyword (or introduced=NA's) and environment's name, or
+// BUSTER_CHECK_NONE.
+typedef struct CheckInputAvailabilityParse CheckInputAvailabilityParse;
+struct CheckInputAvailabilityParse
+{
+    uint32_t platform;
+    uint32_t platform_index;
+    uint32_t keywords[3];
+    uint32_t version_tokens[3];
+    CheckVersionTuple versions[3];
+    uint32_t unavailable;
+    uint32_t environment;
 };
 
 // An attribute's count of arguments against clang's (CheckInputAttribute.count_check): none wrong, another than exactly
@@ -523,6 +545,14 @@ static bool check_input_attribute_text_equal(String8 a, String8 b)
     return a.length == b.length && (a.length == 0 || memcmp(a.pointer, b.pointer, a.length) == 0);
 }
 
+// Which Objective-C pointer type attribute a record is (#1447): 1 for GNU's objc_gc, 2 for GNU's objc_ownership, else 0.
+static uint32_t check_input_objc_kind(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    const String8 name = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && !attribute->standard ? check_input_attribute_name(reader, attribute->name) :
+                                                                                                                      (String8){ 0 };
+    return check_input_attribute_equal(name, "objc_gc") ? 1u : check_input_attribute_equal(name, "objc_ownership") ? 2u : 0u;
+}
+
 static void check_input_attribute_error(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t first, uint32_t end, CheckInputAttributeError error)
 {
     if (attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
@@ -698,6 +728,66 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_ANNOTATE_CONSTANT,
     CHECK_ARGUMENT_TARGET_CLONES_DEFAULT,
     CHECK_ARGUMENT_SELECTANY_LINKAGE,
+    // clang's checks-only attributes' (#1447, check_input_attribute_checks): enforce_tcb's and enforce_tcb_leaf's of one TCB,
+    // "attributes 'X("T")' and 'Y("T")' are mutually exclusive" (Y's name token in CheckInputReport.value's low half, the
+    // TCB's string token in its high half); callback's "'callback' attribute specifies no callback callee", "'callback'
+    // attribute argument 'A' is not a known function parameter" (A's token in the value), "'callback' argument at position N
+    // references unavailable implicit 'this'", "... specifies invalid callback callee", "... callee does not have function
+    // type", "'X' attribute references function of type 'T' which expects N arguments but attribute specifies M parameter
+    // index arguments" (CheckInputReport.type, M in the value), "... callee may not be variadic" and "multiple 'callback'
+    // attributes specified"; swift_async's kind, "first argument to 'swift_async' must be either 'none', 'swift_private', or
+    // 'not_swift_private'", and its completion handler, "'swift_async' completion handler parameter must have block type
+    // returning 'void', type here is 'T'", at the parameter; ns_error_domain's "domain argument 'D' does not refer to global
+    // constant" (N 1, D's token in the value; N 0 without it); modular_format's "duplicate aspect 'A' in 'modular_format'
+    // attribute" (A's string token in the value), "attribute 'X' is already applied with different arguments" and
+    // "'modular_format' attribute requires 'format' attribute", at the function's name.
+    CHECK_ARGUMENT_TCB_CONFLICT,
+    CHECK_ARGUMENT_CALLBACK_NO_CALLEE,
+    CHECK_ARGUMENT_CALLBACK_UNKNOWN,
+    CHECK_ARGUMENT_CALLBACK_THIS,
+    CHECK_ARGUMENT_CALLBACK_INVALID_CALLEE,
+    CHECK_ARGUMENT_CALLBACK_NOT_FUNCTION,
+    CHECK_ARGUMENT_CALLBACK_COUNT,
+    CHECK_ARGUMENT_CALLBACK_VARIADIC,
+    CHECK_ARGUMENT_CALLBACK_MULTIPLE,
+    CHECK_ARGUMENT_SWIFT_ASYNC_KIND,
+    CHECK_ARGUMENT_SWIFT_ASYNC_BLOCK,
+    CHECK_ARGUMENT_ERROR_DOMAIN,
+    CHECK_ARGUMENT_DUPLICATE_ASPECT,
+    CHECK_ARGUMENT_DIFFERENT_ARGUMENTS,
+    CHECK_ARGUMENT_REQUIRES_FORMAT,
+    // The availability and external_source_symbol attributes' parser's errors (#1447, check_input_availability_parse and
+    // check_input_external_source_parse), and availability's Sema's: "expected a platform name, e.g., 'macos'", "expected
+    // ','" (after the token, its end), "expected 'introduced', 'deprecated', or 'obsoleted'", "redundant 'K' availability
+    // change; only the last specified change will be used", "expected '=' after 'K'", "expected string literal for optional
+    // message in 'availability' attribute", "expected an environment name, e.g., 'compute'", "expected a version of the
+    // form 'major[.minor[.subminor]]'", "version number must have non-zero major, minor, or sub-minor version", "'K' is not
+    // an availability stage; use 'introduced', 'deprecated', or 'obsoleted'" (K's token in the value), "invalid anyAppleOS
+    // version 'V' in availability attribute" (at V), "unexpected parameter 'environment' in availability attribute, not
+    // permitted in C/C++"; "expected 'language', 'defined_in', 'generated_declaration', or 'USR'", "duplicate 'K' clause
+    // in an 'external_source_symbol' attribute" (K's token in the value), "expected '=' after K" (after the token, its
+    // end) and "expected string literal for N in 'external_source_symbol' attribute" (N language name, source container
+    // name or USR, by the number).
+    CHECK_ARGUMENT_AVAILABILITY_PLATFORM,
+    CHECK_ARGUMENT_AVAILABILITY_COMMA,
+    CHECK_ARGUMENT_AVAILABILITY_CHANGE,
+    CHECK_ARGUMENT_AVAILABILITY_REDUNDANT,
+    CHECK_ARGUMENT_AVAILABILITY_EQUAL,
+    CHECK_ARGUMENT_AVAILABILITY_MESSAGE,
+    CHECK_ARGUMENT_AVAILABILITY_ENVIRONMENT_NAME,
+    CHECK_ARGUMENT_AVAILABILITY_VERSION,
+    CHECK_ARGUMENT_AVAILABILITY_ZERO,
+    CHECK_ARGUMENT_AVAILABILITY_STAGE,
+    CHECK_ARGUMENT_AVAILABILITY_ANY_APPLE,
+    CHECK_ARGUMENT_AVAILABILITY_ENVIRONMENT,
+    CHECK_ARGUMENT_SOURCE_KEYWORD,
+    CHECK_ARGUMENT_SOURCE_DUPLICATE,
+    CHECK_ARGUMENT_SOURCE_EQUAL,
+    CHECK_ARGUMENT_SOURCE_STRING,
+    // A `;` just before the `)` of their arguments, "unexpected ';' before ')'"; objc_ownership on a declaration of no
+    // declarator, "'X' attribute only applies to variables", at its first token.
+    CHECK_ARGUMENT_UNEXPECTED_SEMI,
+    CHECK_ARGUMENT_OBJC_VARIABLES,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -2365,6 +2455,16 @@ static bool check_input_type_argument(CheckInputReader* reader, const CheckInput
     return check_input_attribute_equal(name, "vec_type_hint") || check_input_attribute_equal(name, "preferred_type");
 }
 
+// What clang's parser makes of a custom attribute's arguments (#1447): an error, the attribute kept, or dropped without a
+// word.
+#define BUSTER_CHECK_CUSTOM_ERROR 0u
+#define BUSTER_CHECK_CUSTOM_KEPT 1u
+#define BUSTER_CHECK_CUSTOM_DROPPED 2u
+
+static uint32_t check_input_availability_parse(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute);
+static uint32_t check_input_external_source_parse(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute);
+static bool check_input_availability_handle(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute);
+
 static const CheckInputFactRow* check_input_attribute_gnu_fact(CheckInputReader* reader, uint32_t name);
 static const CheckInputArgumentsRow* check_input_attribute_gnu_arguments(CheckInputReader* reader, uint32_t name);
 
@@ -2411,8 +2511,26 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
                 const uint32_t strings = row != NULL ? row->strings : 0;
                 const bool typed = (flags & BUSTER_CHECK_ARGUMENTS_TYPE) != 0 || (alignas && arguments_first < arguments_end &&
                                                                                  check_constant_type_start(parser, arguments_first));
+                // availability's and external_source_symbol's arguments, which clang's parser reads its own way (#1447).
+                const String8 spelled = known && argued ? check_input_attribute_name(reader, parser->tokens.names[name]) : (String8){ 0 };
+                const bool availability = check_input_attribute_equal(spelled, "availability");
+                const bool custom = availability || check_input_attribute_equal(spelled, "external_source_symbol");
+                if (pass == 0 && valid && custom)
+                {
+                    CheckInputAttributes holder = { 0 };
+                    CheckInputAttribute item = {
+                        .first = name,
+                        .name_token = name,
+                        .name = parser->tokens.names[name],
+                        .end = items_end,
+                        .argument_first = arguments_first,
+                        .argument_end = arguments_end,
+                    };
+                    valid = (availability ? check_input_availability_parse(reader, &holder, &item) : check_input_external_source_parse(reader, &holder, &item)) !=
+                            BUSTER_CHECK_CUSTOM_ERROR;
+                }
                 uint32_t index = 0;
-                for (uint32_t argument = arguments_first; pass == 0 && valid && !typed && argument < arguments_end; index += 1)
+                for (uint32_t argument = arguments_first; pass == 0 && valid && !typed && !custom && argument < arguments_end; index += 1)
                 {
                     uint32_t stop = argument;
                     bool literals = true;
@@ -2973,7 +3091,9 @@ static const CheckInputThreadRow* check_input_thread_row(String8 name)
 // whose subject's diagnostic is all clang gives in C); and these, whose handlers change nothing in C past their subjects,
 // counts and arguments' kinds (#147): btf_decl_tag (BPF's debug information), randomize_layout and no_randomize_layout (without
 // -frandomize-layout-seed), Objective-C's boxable and bridge_mutable, Fuchsia's handles (the analyzer's), suppress, Swift's
-// bridge, unsafe_buffer_usage and AMDGPU's max_num_work_groups (a kernel's alone).
+// bridge, unsafe_buffer_usage and AMDGPU's max_num_work_groups (a kernel's alone); and clang's checks-only attributes
+// (#1447: enforce_tcb, enforce_tcb_leaf, callback, swift_async, ns_error_domain and modular_format), whose handlers check
+// what check_input_attribute_checks does and change nothing in C past TCB's warnings at calls.
 static bool check_input_attribute_generic(String8 name, const CheckInputFactRow* fact, bool subjectless)
 {
     static const char* const unchanged[] = {
@@ -3004,6 +3124,11 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         // A bit-field's preferred type, whose type check_input_attribute_annotations checks; MSVC's forceinline and
         // forceinline_calls, which it ignores off MSVC's ABI.
         "preferred_type", "forceinline", "forceinline_calls",
+        // clang's checks-only attributes (#1447), whose handlers' checks are check_input_attribute_checks', their
+        // redeclarations' check_input_attribute_merge_checks' and TCB's calls check_input_tcb_calls'.
+        "enforce_tcb", "enforce_tcb_leaf", "callback", "swift_async", "ns_error_domain", "modular_format", "availability", "external_source_symbol",
+        // Objective-C's pointer type attributes, which change no C type but objc_gc's qualifier (check_input_attribute_objc).
+        "objc_gc", "objc_ownership",
     };
     const bool simple = fact != NULL && (fact->flags & (BUSTER_CHECK_FACT_SIMPLE | BUSTER_CHECK_FACT_TYPE)) == BUSTER_CHECK_FACT_SIMPLE;
     const bool effect = check_input_attribute_equal(name, "selectany");
@@ -3296,6 +3421,16 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                 }
             }
         }
+        // availability's and external_source_symbol's arguments in parentheses, which clang's parser reads its own way
+        // (#1447, check_input_availability_parse and check_input_external_source_parse), with its errors and warnings, before
+        // their place decides anything; one it drops without a word (an empty version) is ignored.
+        const bool parenthesized = attribute.argument_first == attribute.name_token + 2;
+        const bool availability = valid && known && custom && parenthesized && check_input_attribute_equal(name, "availability");
+        const bool external_source = valid && known && custom && parenthesized && check_input_attribute_equal(name, "external_source_symbol");
+        const uint32_t custom_parse = availability ? check_input_availability_parse(reader, attributes, &attribute) :
+                                      external_source ? check_input_external_source_parse(reader, attributes, &attribute) : BUSTER_CHECK_CUSTOM_KEPT;
+        valid &= custom_parse != BUSTER_CHECK_CUSTOM_ERROR;
+        const bool dropped = custom_parse == BUSTER_CHECK_CUSTOM_DROPPED;
         // A type argument's (ParseTypeName's): an identifier that names no type is "unknown type name"; any other start of
         // no type "expected a type" and, in a GNU list, "expected ')'" there; a type followed by a `,` is "expected ')'"
         // at it, with its note at the `(` in a GNU list (a C23 list's arguments clang reads as a balanced run then).
@@ -3387,7 +3522,11 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         const uint32_t type_name_end = gnu_fact != NULL && (gnu_fact->flags & BUSTER_CHECK_FACT_TYPE) == 0 ?
                                        check_input_attribute_type_name_end(parser, attribute.first) : BUSTER_CHECK_NONE;
         const bool type_name = type_name_end != BUSTER_CHECK_NONE;
-        if (valid && chunk_gnu && !typed)
+        if (valid && dropped)
+        {
+            unknown = true;
+        }
+        else if (valid && chunk_gnu && !typed)
         {
             check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_TYPE_POSITION);
             unknown = true;
@@ -3558,8 +3697,32 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             const uint32_t count = check_input_attribute_count(parser, &attribute);
             const CheckInputThreadRow* thread = check_input_thread_row(name);
             attribute.kind = thread != NULL ? CHECK_ATTRIBUTE_THREAD_SAFETY : CHECK_ATTRIBUTE_UNKNOWN;
+            // TCB's attributes, whose calls' warnings come once the unit's bindings are resolved (check_input_tcb_calls),
+            // and those whose redeclarations clang merges (check_input_attribute_merge_checks): their entities'
+            // declarations, as a body's lane can't read them, are read in source order.
+            const bool tcb = check_input_attribute_equal(name, "enforce_tcb") || check_input_attribute_equal(name, "enforce_tcb_leaf");
+            const bool merged = tcb || check_input_attribute_equal(name, "modular_format") || check_input_attribute_equal(name, "availability");
+            reader->tcb_attributes |= tcb;
+            reader->merged_attributes |= merged;
+            // Objective-C's pointer type attributes are a declarator's or a type name's (check_input_attribute_objc); C23's
+            // spellings, which apply to other types than GNU's do, are refused by name.
+            const bool objc = check_input_attribute_equal(name, "objc_gc") || check_input_attribute_equal(name, "objc_ownership");
+            reader->objc_attributes |= objc;
+            if (objc && standard)
+            {
+                check_input_attribute_error(reader, attributes, attribute.name_token, attribute.end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+                valid = false;
+            }
+            check_input_lane_refuse(reader, reader->lane && merged, "a body declares an attribute its entity's redeclarations merge");
             attribute.argument_count = count;
             attribute.count_check = check_input_attribute_count_check(generic_fact, count, &attribute.count_bound);
+            // Without parentheses, availability's handler's checkExactlyNumArgs(1) and external_source_symbol's
+            // checkAtLeastNumArgs(1), which clang's parser's reading of its arguments always passes.
+            if (!parenthesized && (check_input_attribute_equal(name, "availability") || check_input_attribute_equal(name, "external_source_symbol")))
+            {
+                attribute.count_check = check_input_attribute_equal(name, "availability") ? BUSTER_CHECK_COUNT_EXACT : BUSTER_CHECK_COUNT_LEAST;
+                attribute.count_bound = 1;
+            }
             // A thread-safety handler's own count of at least one, after the facts' (checkAtLeastNumArgs), and abi_tag's;
             // preferred_type's type, which its optional argument must give (handlePreferredTypeAttr), exactly one.
             if (attribute.count_check == BUSTER_CHECK_COUNT_NONE && count == 0 &&
@@ -5554,6 +5717,541 @@ static bool check_input_attribute_annotations(CheckInputReader* reader, CheckInp
     return valid;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// clang's checks-only attributes (#1447): enforce_tcb, enforce_tcb_leaf, callback, swift_async, ns_error_domain and
+// modular_format, whose handlers in C on x86-64 Linux check their subjects, arguments and redeclarations and change
+// nothing a program does, but TCB's warnings at calls. check_input_attribute_checks makes a declaration's own checks;
+// c_check_attribute_checks_input.c its redeclarations' (check_input_attribute_merge_checks), modular_format's format
+// (check_input_modular_format) and TCB's calls (check_input_tcb_calls).
+
+// The end of an attribute's argument that starts at `first`, before `end`: its next comma at its top level, or `end`.
+static uint32_t check_input_checks_argument_end(const Parser* parser, uint32_t first, uint32_t end)
+{
+    uint32_t stop = first;
+    while (stop < end && parser->tokens.kinds[stop] != PARSE_KIND_COMMA)
+    {
+        stop = check_input_attribute_after_group(parser, stop, end);
+    }
+    return stop < end ? stop : end;
+}
+
+// Whether the identifier `name` is spelled `text`, as written (no keyword's underscores stripped).
+static bool check_input_checks_spelled(const CheckInputReader* reader, uint32_t name, const char* text)
+{
+    const uint64_t length = strlen(text);
+    return reader->pp != NULL && name != 0 && intern_length(reader->pp->table, name) == length && memcmp(intern_bytes(reader->pp->table, name), text, length) == 0;
+}
+
+// A string literal argument from `first` to `end`, decoded, or an empty one where it is none.
+static String8 check_input_checks_string(CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    String8 text = { "", 0 };
+    const bool string = first < end && reader->parser->tokens.kinds[first] == PARSE_KIND_STRING;
+    if (!(string && check_input_attribute_string(reader, first, end, &text)))
+    {
+        text = (String8){ "", 0 };
+    }
+    return text;
+}
+
+// Whether `attribute` is a kept record of a generic attribute named `name` (its keyword's underscores stripped).
+static bool check_input_checks_named(CheckInputReader* reader, const CheckInputAttribute* attribute, const char* name)
+{
+    const bool kept = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && !attribute->ignored && !attribute->subject_ignored &&
+                      attribute->count_check == BUSTER_CHECK_COUNT_NONE;
+    return kept && check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), name);
+}
+
+// A TCB attribute's kind: 1 for a kept enforce_tcb, 2 for a kept enforce_tcb_leaf, 0 for anything else.
+static uint32_t check_input_tcb_kind(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    return check_input_checks_named(reader, attribute, "enforce_tcb") ? 1u : check_input_checks_named(reader, attribute, "enforce_tcb_leaf") ? 2u : 0u;
+}
+
+// A TCB attribute's TCB, its string decoded.
+static String8 check_input_tcb_name(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    return check_input_checks_string(reader, attribute->argument_first, attribute->argument_end);
+}
+
+// The conflict of TCB attributes (#1447, clang's err_tcb_conflicting_attributes) at `attribute`, which `other` of the other
+// kind and the same TCB is: the declaration's first attribute error, `other`'s name in the report's value, the TCB's
+// string token above it; and its note at `note` where it has one (a redeclaration's).
+static void check_input_tcb_conflict(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute, const CheckInputAttribute* other,
+                                     uint32_t note)
+{
+    const uint32_t before = reader->output->report_count;
+    check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_TCB_CONFLICT, 0);
+    if (reader->output->report_count > before)
+    {
+        reader->output->reports[before].value = (uint64_t)other->name_token | (uint64_t)attribute->argument_first << 32;
+        reader->output->reports[before].note_token = note;
+        reader->output->reports[before].note_kind = note != BUSTER_CHECK_NONE ? CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE : CHECK_INPUT_NOTE_NONE;
+    }
+}
+
+// A second error of an attribute's argument, after the declaration's first (check_input_attribute_argument_error), at
+// `token`, ordered as at `sort` (0: its own token), which the driver keeps with the first.
+static void check_input_checks_second_error(CheckInputReader* reader, const CheckInputAttribute* attribute, uint32_t token, CheckAttributeArgumentError error,
+                                            uint32_t number, uint32_t sort)
+{
+    const uint32_t before = reader->output->report_count;
+    check_input_report_argument(reader, token, CHECK_INPUT_ATTRIBUTE_ARGUMENT, (uint32_t)error | number << 8);
+    if (reader->output->report_count > before)
+    {
+        reader->output->reports[before].attribute = attribute->first;
+        reader->output->reports[before].repeated = true;
+        reader->output->reports[before].sort = sort;
+    }
+}
+
+// callback's checks (#1447, clang's handleCallbackAttr), on a function of type `function` whose declarator's named
+// parameters CheckInputReader.attribute_parameters links: each argument a parameter's name (`__` the unknown callee -1,
+// `this` 0, a parameter of either name taking it over) or an index as clang's checkUInt32Argument reads it, from -1 to
+// the parameters' count, not 0 (C has no implicit object parameter); the first's (not -1) a parameter of a pointer to a
+// function with a prototype that takes the others' count and isn't variadic; and no callback before it on the
+// declaration. An argument of no integer constant, or of more than 32 bits, is two errors, the second "out of bounds".
+// Whether the declaration goes on.
+static bool check_input_attribute_callback(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, TypeId function)
+{
+    const Parser* parser = reader->parser;
+    TypeTable* types = reader->types;
+    const bool prototyped = (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
+    uint32_t parameter_count = 0;
+    const TypeId* parameter_types = type_parameters(types, function, &parameter_count);
+    const int64_t bound = prototyped ? (int64_t)parameter_count : 0;
+    const uint32_t names = reader->attribute_parameters != 0 ? reader->attribute_parameters - 1 : BUSTER_CHECK_NONE;
+    // A definition's identifier list names parameters its type doesn't count, which clang reads past its type's, and more
+    // than 32 arguments (CheckInputAttribute.constants' bits): refused by name.
+    bool valid = (prototyped || names == BUSTER_CHECK_NONE) && attribute->argument_count <= 32;
+    if (!valid)
+    {
+        check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+    }
+    int64_t callee = 0;
+    uint32_t first = attribute->argument_first;
+    for (uint32_t i = 0; valid && i < attribute->argument_count; i += 1)
+    {
+        const uint32_t stop = check_input_checks_argument_end(parser, first, attribute->argument_end);
+        const bool lone = stop == first + 1 && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER;
+        int64_t index = 0;
+        if (lone)
+        {
+            const uint32_t word = parser->tokens.names[first];
+            bool known = check_input_checks_spelled(reader, word, "__") || check_input_checks_spelled(reader, word, "this");
+            index = check_input_checks_spelled(reader, word, "__") ? -1 : 0;
+            for (uint32_t parameter = names; parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(reader->parameter_next, parameter))
+            {
+                const bool named = parser->tokens.names[parameter] == word;
+                index = named ? (int64_t)check_sparse_get(reader->parameters, parameter) + 1 : index;
+                known |= named;
+            }
+            if (!known)
+            {
+                const uint32_t before = reader->output->report_count;
+                check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_CALLBACK_UNKNOWN, 0);
+                if (reader->output->report_count > before)
+                {
+                    reader->output->reports[before].value = first;
+                }
+                valid = false;
+            }
+        }
+        else
+        {
+            const bool evaluated = i < 32 && ((attribute->constants >> i) & 1u) != 0 && attribute->argument_values != NULL;
+            const bool wide = i < 32 && ((attribute->wide >> i) & 1u) != 0;
+            const uint32_t location = check_input_expression_location(parser, first, stop);
+            if (!evaluated)
+            {
+                check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PARAMETER_INTEGER, i + 1);
+                check_input_checks_second_error(reader, attribute, attribute->first, CHECK_ARGUMENT_OUT_OF_BOUNDS, i + 1, 0);
+                valid = false;
+            }
+            else if (wide)
+            {
+                check_input_attribute_too_large(reader, attributes, attribute, first, stop, attribute->argument_values[i]);
+                check_input_checks_second_error(reader, attribute, attribute->first, CHECK_ARGUMENT_OUT_OF_BOUNDS, i + 1, location + 1);
+                valid = false;
+            }
+            index = valid ? (int64_t)(int32_t)(uint32_t)attribute->argument_values[i] : 0;
+            if (valid && (index < -1 || index > bound))
+            {
+                check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_OUT_OF_BOUNDS, i + 1);
+                valid = false;
+            }
+        }
+        if (valid && index == 0)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_CALLBACK_THIS, i + 1);
+            valid = false;
+        }
+        callee = i == 0 ? index : callee;
+        first = stop + 1;
+    }
+    // The callee's parameter: a pointer to a function with a prototype.
+    const TypeId parameter = valid && callee >= 1 && callee <= (int64_t)parameter_count ? type_unqualified(type_strip_aligned(types, parameter_types[callee - 1])) : 0;
+    const TypeId pointee = parameter != 0 && type_kind(types, parameter) == BUSTER_TYPE_KIND_POINTER ?
+                           type_unqualified(type_strip_aligned(types, types->types.base[type_index(parameter)])) : 0;
+    const bool callable = pointee != 0 && type_kind(types, pointee) == BUSTER_TYPE_KIND_FUNCTION &&
+                          (types->types.flags[type_index(pointee)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
+    uint32_t callee_count = 0;
+    if (callable)
+    {
+        type_parameters(types, pointee, &callee_count);
+    }
+    const CheckInputAttribute* earlier = NULL;
+    for (const CheckInputAttribute* other = attributes->records; earlier == NULL && other < attribute; other += 1)
+    {
+        earlier = check_input_checks_named(reader, other, "callback") ? other : NULL;
+    }
+    if (valid && callee < 1)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_CALLBACK_INVALID_CALLEE, 0);
+        valid = false;
+    }
+    else if (valid && !callable)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_CALLBACK_NOT_FUNCTION, 0);
+        valid = false;
+    }
+    else if (valid && callee_count != attribute->argument_count - 1)
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_CALLBACK_COUNT, callee_count);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].type = pointee;
+            reader->output->reports[before].value = attribute->argument_count - 1;
+        }
+        valid = false;
+    }
+    else if (valid && (types->types.flags[type_index(pointee)] & BUSTER_TYPE_FLAG_VARIADIC) != 0)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_CALLBACK_VARIADIC, 0);
+        valid = false;
+    }
+    else if (valid && earlier != NULL)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_CALLBACK_MULTIPLE, 0);
+        valid = false;
+    }
+    return valid;
+}
+
+// Where clang places a function's parameter (`index`, from 0) whose declarator `name` names (#1447, ParmVarDecl's
+// location): its name, or an unnamed one's place for it, after its specifiers, pointers and qualifiers, inside a grouping
+// declarator's parentheses (the token there: `,`, `)`, `[` or a function declarator's `(`). BUSTER_CHECK_NONE where
+// the function's parameter list isn't found.
+static uint32_t check_input_checks_parameter_place(CheckInputReader* reader, uint32_t name, uint32_t index)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t open = name + 1;
+    while (open < count && parser->tokens.kinds[open] == PARSE_KIND_R_PAREN)
+    {
+        open += 1;
+    }
+    const uint32_t close = open < count && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN ? parser->tree.parents[open] : count;
+    uint32_t first = open + 1;
+    for (uint32_t i = 0; close < count && i < index && first < close; i += 1)
+    {
+        first = check_input_checks_argument_end(parser, first, close) + 1;
+    }
+    const uint32_t end = close < count && first <= close ? check_input_checks_argument_end(parser, first, close) : count;
+    uint32_t result = BUSTER_CHECK_NONE;
+    for (uint32_t t = first; result == BUSTER_CHECK_NONE && end < count && t < end; t += 1)
+    {
+        result = check_sparse_get(reader->parameters, t) == index && parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER &&
+                 reader->declaration_kinds[t] == C_BINDING_OBJECT ? t : BUSTER_CHECK_NONE;
+    }
+    // Unnamed: past the specifiers (keywords, typedef names, a tag's name and body, attributes, a keyword's group).
+    uint32_t t = result == BUSTER_CHECK_NONE && end < count ? first : end;
+    bool specifiers = true;
+    while (result == BUSTER_CHECK_NONE && end < count && specifiers && t < end)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const bool keyword = kind == PARSE_KIND_TYPE || kind == PARSE_KIND_QUALIFIER || kind == PARSE_KIND_STORAGE || kind == PARSE_KIND_ATOMIC ||
+                             kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_EXTENSION;
+        const bool grouped = (kind == PARSE_KIND_ATOMIC || kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_ATTRIBUTE) &&
+                             t + 1 < end && parser->tokens.kinds[t + 1] == PARSE_KIND_L_PAREN;
+        const bool tag = kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM;
+        const bool typedef_name = kind == PARSE_KIND_IDENTIFIER && parser->tree.roles[t] == PARSE_ROLE_SPECIFIER;
+        if (grouped)
+        {
+            t = check_input_attribute_after_group(parser, t + 1, end);
+        }
+        else if (tag)
+        {
+            t += 1;
+            t += t < end && parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER ? 1u : 0u;
+            t = t < end && parser->tokens.kinds[t] == PARSE_KIND_L_BRACE ? check_input_attribute_after_group(parser, t, end) : t;
+        }
+        else
+        {
+            specifiers = keyword || typedef_name;
+            t += specifiers ? 1u : 0u;
+        }
+    }
+    // Then the declarator's pointers and qualifiers, and grouping parentheses' insides.
+    bool walking = result == BUSTER_CHECK_NONE && end < count;
+    while (walking && t < end)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const uint8_t next = t + 1 < end ? parser->tokens.kinds[t + 1] : PARSE_KIND_END;
+        const bool grouping = kind == PARSE_KIND_L_PAREN && (next == PARSE_KIND_STAR || next == PARSE_KIND_L_PAREN || next == PARSE_KIND_L_SQUARE);
+        walking = kind == PARSE_KIND_STAR || kind == PARSE_KIND_QUALIFIER || grouping;
+        t += walking ? 1u : 0u;
+    }
+    result = result == BUSTER_CHECK_NONE && end < count ? t : result;
+    return result;
+}
+
+// swift_async's checks (#1447, clang's SemaSwift::handleAsyncAttr), on a function of type `function` named at `name`: its
+// first argument an identifier of its kinds (none, swift_private, not_swift_private); none alone, any other with a
+// completion handler's index, as checkFunctionOrMethodParameterIndex reads it ("parameter 2"), whose parameter must be a
+// block pointer, which C has none of: always its error there, at the parameter, naming its type. Whether the declaration
+// goes on.
+static bool check_input_attribute_swift_async(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, TypeId function, uint32_t name)
+{
+    const Parser* parser = reader->parser;
+    TypeTable* types = reader->types;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t first_end = check_input_checks_argument_end(parser, attribute->argument_first, attribute->argument_end);
+    const bool lone = first_end == attribute->argument_first + 1 && parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_IDENTIFIER;
+    const uint32_t word = lone ? parser->tokens.names[attribute->argument_first] : 0;
+    const bool none = check_input_checks_spelled(reader, word, "none");
+    const bool kind = none || check_input_checks_spelled(reader, word, "swift_private") || check_input_checks_spelled(reader, word, "not_swift_private");
+    const bool prototyped = (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
+    uint32_t parameter_count = 0;
+    const TypeId* parameter_types = type_parameters(types, function, &parameter_count);
+    const int64_t bound = prototyped ? (int64_t)parameter_count : 0;
+    const bool evaluated = ((attribute->constants >> 1) & 1u) != 0 && attribute->argument_values != NULL && attribute->argument_count >= 2;
+    const int64_t index = evaluated ? attribute->argument_values[1] : 0;
+    bool valid = false;
+    if (!lone)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PARAMETER_IDENTIFIER, 1);
+    }
+    else if (!kind)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_SWIFT_ASYNC_KIND, 0);
+    }
+    else if (none && attribute->argument_count != 1)
+    {
+        check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, BUSTER_CHECK_COUNT_EXACT | 1u << 8);
+    }
+    else if (!none && attribute->argument_count != 2)
+    {
+        check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, BUSTER_CHECK_COUNT_EXACT | 2u << 8);
+    }
+    else if (!none && !evaluated)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PARAMETER_INTEGER, 2);
+    }
+    else if (!none && (index < 1 || index > bound))
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_OUT_OF_BOUNDS, 2);
+    }
+    else if (!none)
+    {
+        // The completion handler's parameter, at its name (or where an unnamed one's would be), its type as declared there.
+        const uint32_t place = name < count ? check_input_checks_parameter_place(reader, name, (uint32_t)index - 1) : BUSTER_CHECK_NONE;
+        const TypeId parameter = parameter_types[index - 1];
+        const bool named = place < count && parser->tokens.kinds[place] == PARSE_KIND_IDENTIFIER && reader->declaration_kinds[place] == C_BINDING_OBJECT;
+        const TypeId declared = named ? reader->declared_types[place] : 0;
+        // (A parameter's own typedef names it, where its adjustment didn't change it.)
+        const bool spelled = named && declared != 0 && type_unqualified(type_strip_aligned(types, declared)) == type_unqualified(type_strip_aligned(types, parameter));
+        if (place >= count)
+        {
+            check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+        }
+        else
+        {
+            const uint32_t before = reader->output->report_count;
+            check_input_attribute_argument_error(reader, attributes, attribute, place, CHECK_ARGUMENT_SWIFT_ASYNC_BLOCK, 0);
+            if (reader->output->report_count > before)
+            {
+                reader->output->reports[before].type = spelled ? declared : parameter;
+                reader->output->reports[before].type_spelling = spelled ? check_input_typedef_spelling(reader->output, parser, place) : 0;
+            }
+        }
+    }
+    else
+    {
+        valid = true;
+    }
+    if (!valid && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+    {
+        attributes->error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+        attributes->error_first = attribute->first;
+        attributes->error_end = attribute->end;
+    }
+    return valid;
+}
+
+// Whether two modular_format attributes have the same arguments (#1447): their implementation's name, its string, and
+// their aspects as sets (clang keeps them sorted; each attribute's are distinct).
+static bool check_input_modular_same(CheckInputReader* reader, const CheckInputAttribute* a, const CheckInputAttribute* b)
+{
+    const Parser* parser = reader->parser;
+    bool same = a->argument_count == b->argument_count && parser->tokens.names[a->argument_first] == parser->tokens.names[b->argument_first];
+    uint32_t a_first = check_input_checks_argument_end(parser, a->argument_first, a->argument_end) + 1;
+    uint32_t b_first = check_input_checks_argument_end(parser, b->argument_first, b->argument_end) + 1;
+    const uint32_t a_stop = check_input_checks_argument_end(parser, a_first, a->argument_end);
+    const uint32_t b_stop = check_input_checks_argument_end(parser, b_first, b->argument_end);
+    same = same && check_input_attribute_text_equal(check_input_checks_string(reader, a_first, a_stop), check_input_checks_string(reader, b_first, b_stop));
+    a_first = a_stop + 1;
+    b_first = b_stop + 1;
+    for (uint32_t i = 2; same && i < a->argument_count && a_first < a->argument_end; i += 1)
+    {
+        const uint32_t stop = check_input_checks_argument_end(parser, a_first, a->argument_end);
+        const String8 aspect = check_input_checks_string(reader, a_first, stop);
+        bool found = false;
+        for (uint32_t other = b_first; !found && other < b->argument_end;)
+        {
+            const uint32_t other_stop = check_input_checks_argument_end(parser, other, b->argument_end);
+            found = check_input_attribute_text_equal(aspect, check_input_checks_string(reader, other, other_stop));
+            other = other_stop + 1;
+        }
+        same = found;
+        a_first = stop + 1;
+    }
+    return same;
+}
+
+// clang's checks-only attributes' handlers (#1447), past their subjects and counts: enforce_tcb's and enforce_tcb_leaf's
+// TCB, which no earlier attribute of the declaration has of the other kind (err_tcb_conflicting_attributes, at the later);
+// callback's (check_input_attribute_callback) and swift_async's (check_input_attribute_swift_async); ns_error_domain's
+// argument, a variable's name where the attribute is (SemaObjC's handleNSErrorDomain: an ordinary lookup, which a
+// function, a typedef or an enumerator fails, at the name, as any other argument does at it); modular_format's
+// implementation's name, its aspects (no two the same, at the second), and its arguments, those of an earlier one of
+// the declaration (err_attribute_already_applied... at it, with its note at the earlier). Whether the declaration goes on.
+static bool check_input_attribute_checks(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, uint32_t declaration, TypeId type,
+                                         uint32_t name, uint32_t begin)
+{
+    const Parser* parser = reader->parser;
+    const String8 spelled = check_input_attribute_name(reader, attribute->name);
+    const TypeId bare = type != 0 ? type_unqualified(type_strip_aligned(reader->types, type)) : 0;
+    const bool function = bare != 0 && type_kind(reader->types, bare) == BUSTER_TYPE_KIND_FUNCTION;
+    const uint32_t tcb = check_input_tcb_kind(reader, attribute);
+    bool valid = true;
+    if (attribute->count_check != BUSTER_CHECK_COUNT_NONE || attribute->ignored || attribute->subject_ignored)
+    {
+        // Its count's error comes first (check_input_attribute_subjects), and an ignored one has no handler.
+    }
+    else if (tcb != 0)
+    {
+        const String8 own = check_input_tcb_name(reader, attribute);
+        const CheckInputAttribute* conflict = NULL;
+        for (const CheckInputAttribute* other = attributes->records; conflict == NULL && other < attribute; other += 1)
+        {
+            const uint32_t kind = check_input_tcb_kind(reader, other);
+            conflict = kind != 0 && kind != tcb && check_input_attribute_text_equal(own, check_input_tcb_name(reader, other)) ? other : NULL;
+        }
+        if (conflict != NULL)
+        {
+            check_input_tcb_conflict(reader, attributes, attribute, conflict, BUSTER_CHECK_NONE);
+            valid = false;
+        }
+    }
+    else if (check_input_attribute_equal(spelled, "availability") && attribute->availability != NULL)
+    {
+        valid = check_input_availability_handle(reader, attributes, attribute);
+    }
+    else if (check_input_attribute_equal(spelled, "objc_ownership") && !attribute->standard && attribute->count_check == BUSTER_CHECK_COUNT_NONE &&
+             (declaration & (BUSTER_CHECK_SUBJECT_STRUCT | BUSTER_CHECK_SUBJECT_UNION | BUSTER_CHECK_SUBJECT_ENUM | BUSTER_CHECK_SUBJECT_ENUMERATOR |
+                             BUSTER_CHECK_SUBJECT_LABEL)) != 0)
+    {
+        // A declaration of no declarator (handleObjCOwnershipAttr, after the common count check): clang's error at its
+        // first token, a tag's keyword, a label's or an enumerator's name.
+        const uint32_t first = reader->attribute_declaration != 0 ? reader->attribute_declaration - 1 : begin;
+        check_input_attribute_argument_error(reader, attributes, attribute, first, CHECK_ARGUMENT_OBJC_VARIABLES, 0);
+        valid = false;
+    }
+    else if (check_input_attribute_equal(spelled, "callback") && attribute->argument_count == 0)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_CALLBACK_NO_CALLEE, 0);
+        valid = false;
+    }
+    else if (check_input_attribute_equal(spelled, "callback") && function)
+    {
+        valid = check_input_attribute_callback(reader, attributes, attribute, bare);
+    }
+    else if (check_input_attribute_equal(spelled, "swift_async") && function)
+    {
+        valid = check_input_attribute_swift_async(reader, attributes, attribute, bare, name);
+    }
+    else if (check_input_attribute_equal(spelled, "ns_error_domain") && attribute->argument_count == 1)
+    {
+        const uint32_t argument = attribute->argument_first;
+        const bool lone = argument + 1 == attribute->argument_end && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
+        const uint32_t handle = lone ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[argument]) : 0;
+        if (handle == 0 || reader->bindings.kind[handle - 1] != C_BINDING_OBJECT)
+        {
+            const uint32_t before = reader->output->report_count;
+            check_input_attribute_argument_error(reader, attributes, attribute, argument, CHECK_ARGUMENT_ERROR_DOMAIN, lone ? 1u : 0u);
+            if (reader->output->report_count > before)
+            {
+                reader->output->reports[before].value = argument;
+            }
+            valid = false;
+        }
+    }
+    else if (check_input_attribute_equal(spelled, "modular_format") && attribute->argument_count >= 2)
+    {
+        const uint32_t first_end = check_input_checks_argument_end(parser, attribute->argument_first, attribute->argument_end);
+        const bool lone = first_end == attribute->argument_first + 1 && parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_IDENTIFIER;
+        uint32_t duplicate = BUSTER_CHECK_NONE;
+        uint32_t aspect = check_input_checks_argument_end(parser, first_end + 1, attribute->argument_end) + 1;
+        const uint32_t aspects = aspect;
+        while (lone && duplicate == BUSTER_CHECK_NONE && aspect < attribute->argument_end)
+        {
+            const uint32_t stop = check_input_checks_argument_end(parser, aspect, attribute->argument_end);
+            const String8 text = check_input_checks_string(reader, aspect, stop);
+            for (uint32_t earlier = aspects; duplicate == BUSTER_CHECK_NONE && earlier < aspect;)
+            {
+                const uint32_t earlier_stop = check_input_checks_argument_end(parser, earlier, attribute->argument_end);
+                duplicate = check_input_attribute_text_equal(text, check_input_checks_string(reader, earlier, earlier_stop)) ? aspect : BUSTER_CHECK_NONE;
+                earlier = earlier_stop + 1;
+            }
+            aspect = stop + 1;
+        }
+        const CheckInputAttribute* applied = NULL;
+        for (const CheckInputAttribute* other = attributes->records; applied == NULL && other < attribute; other += 1)
+        {
+            applied = check_input_checks_named(reader, other, "modular_format") ? other : NULL;
+        }
+        if (!lone)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PARAMETER_IDENTIFIER, 1);
+            valid = false;
+        }
+        else if (duplicate != BUSTER_CHECK_NONE)
+        {
+            const uint32_t before = reader->output->report_count;
+            check_input_attribute_argument_error(reader, attributes, attribute, duplicate, CHECK_ARGUMENT_DUPLICATE_ASPECT, 0);
+            if (reader->output->report_count > before)
+            {
+                reader->output->reports[before].value = duplicate;
+            }
+            valid = false;
+        }
+        else if (applied != NULL && !check_input_modular_same(reader, applied, attribute))
+        {
+            const uint32_t before = reader->output->report_count;
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_DIFFERENT_ARGUMENTS, 0);
+            if (reader->output->report_count > before)
+            {
+                reader->output->reports[before].note_token = applied->first;
+                reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE;
+            }
+            valid = false;
+        }
+    }
+    return valid;
+}
+
 // A function's GPU kernel attributes where it has no kernel's convention (amdgpu_kernel, device_kernel, nvptx_kernel), as
 // clang's ProcessDeclAttributeList ends (#147): the first of reqd_work_group_size, work_group_size_hint, vec_type_hint and
 // intel_reqd_sub_group_size, "attribute 'X' can only be applied to an OpenCL kernel function"; then the first of AMDGPU's
@@ -6067,6 +6765,10 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         if (valid && generic && !attribute->ignored && !attribute->subject_ignored)
         {
             valid = check_input_attribute_annotations(reader, attributes, attribute, declaration, type, name, begin);
+        }
+        if (valid && generic && !attribute->ignored && !attribute->subject_ignored)
+        {
+            valid = check_input_attribute_checks(reader, attributes, attribute, declaration, type, name, begin);
         }
         // x86's interrupt where its subjects take it (#147): its handler's checks of the function's type. One that fails
         // them is no handler, as clang's handleAnyX86InterruptAttr returns before adding the attribute: no direct call's

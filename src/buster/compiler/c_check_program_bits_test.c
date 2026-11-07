@@ -356,11 +356,57 @@ static __attribute__((noinline)) void check_test_bits_stdc_library_sources(Check
     }
 }
 
+// The classic bit builtins (#1374, check_lower_bits_row: __builtin_bswap16 to __builtin_ffsll) of boundary values and their
+// shifts, ffs's of 0 among them, at the targets their rows' forms depend on: x86-64's bsf, bsr and bswap beside the
+// popcount recipe, x86-64-v2's popcnt, x86-64-v3's tzcnt and lzcnt, and znver5's. Each runs natively against clang -O0's
+// build at the same -march where the host has the target's features, by both paths, and its lowering's rows are the
+// target's forms (check_test_program_source_native_bounds' "bits-classic" check).
+static __attribute__((noinline)) void check_test_bits_classic(CheckTest* test, const char* clang)
+{
+    static const char* const marches[] = { "-march=x86-64", "-march=x86-64-v2", "-march=x86-64-v3", "-march=znver5" };
+    static const char* const source =
+        "static const unsigned long long values[]={0,1,2,3,0x7f,0x80,0xff,0x100,0x7fff,0x8000,0xffff,0x12345678,0x7fffffff,0x80000000,0xffffffff,"
+        "0x100000000ull,0x123456789abcdef0ull,0x7fffffffffffffffull,0x8000000000000000ull,0xffffffffffffffffull,0x5555555555555555ull,37};"
+        "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}"
+        "int tested(int n){h=(unsigned)n;for(unsigned i=0;i<sizeof values/sizeof values[0];i++)for(unsigned s=0;s<64;s+=7){"
+        "unsigned long long v=values[i]^(values[(i+(unsigned)n)%22]<<s);unsigned u=(unsigned)v;unsigned long l=v;unsigned short w=(unsigned short)v;"
+        "mix(__builtin_bswap16(w));mix(__builtin_bswap32(u));mix(__builtin_bswap64(l));"
+        "if(u){mix(__builtin_clz(u));mix(__builtin_ctz(u));}"
+        "if(l){mix(__builtin_clzl(l));mix(__builtin_ctzl(l));mix(__builtin_clzll(l));mix(__builtin_ctzll(l));}"
+        "mix(__builtin_popcount(u));mix(__builtin_popcountl(l));mix(__builtin_popcountll(l));"
+        "mix(__builtin_parity(u));mix(__builtin_parityl(l));mix(__builtin_parityll(l));"
+        "mix(__builtin_ffs((int)u));mix(__builtin_ffsl((long)l));mix(__builtin_ffsll((long long)l));mix((unsigned)__builtin_ffs((int)(u&0xff00)));"
+        "mix((unsigned char)__builtin_clz(u|1)+__builtin_ctzll(l|0x8000000000000000ull)+__builtin_popcount((unsigned)__builtin_bswap16(w)));}"
+        "return (int)(h^(h>>32));}";
+    const X86Target native = x86_target_native();
+    for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(marches); t += 1)
+    {
+        const char* name = marches[t] + strlen("-march=");
+        X86Target target = { 0 };
+        const bool parsed = x86_target_parse(name, (uint32_t)strlen(name), &target);
+        check_test_expect(test, parsed, "a classic bit builtins program's target");
+        if (parsed)
+        {
+            const bool run_native = (native.features & target.features) == target.features;
+            if (!run_native)
+            {
+                printf("  classic bit builtins for %s: native execution skipped (the host lacks the target's features); the programs compile and link\n", name);
+            }
+            check_test_program_build_release();
+            check_test_program_march = marches[t];
+            check_test_program_source_native_limits(test, source, "bits-classic-boundary-values", clang, false, -1, 0, &target, run_native);
+            check_test_program_build_release();
+            check_test_program_march = "-march=x86-64";
+        }
+    }
+}
+
 static __attribute__((noinline)) void check_test_bits(CheckTest* test, const char* clang)
 {
     check_test_bits_sources(test, clang);
     check_test_bits_stdc_library_sources(test, clang);
     check_test_bits_programs(test, clang);
+    check_test_bits_classic(test, clang);
 }
 
 #endif

@@ -443,10 +443,25 @@ range the list's order puts first, or a kept statement's own break means it
 can't; then the whole body's code goes, as a switch without a constant's. In
 either, an unlabeled statement after one whose code stopped is skipped, as
 `EmitStmt`'s insertion point skips it, while a case label or a value block
-still emits. It still differs for a `case` inside a nested `if`: clang's scan
-doesn't reach the case, so clang emits the whole body, the enclosing `if`'s
-condition included, where the check starts at the case and misses that
-enclosing code; and for `goto` into a label inside one.
+still emits. Finding a matching value in the case table is not sufficient:
+clang's collector must reach the selected label through compounds and case
+labels. A selected `case` or `default` inside an `if` or loop fails that
+collection, so the check emits the whole switch instead (#891). A whole
+switch, including one with a runtime selector, keeps each case's enclosing
+controls from their starts; those roots stop at their owning switch. It does
+not revive ordinary statements before the first case in a plain compound.
+
+Named labels similarly retain every enclosing statement, not just the
+outermost one: a return or noreturn call between two enclosing controls must
+not hide the inner condition. The source label token supplies the ancestry,
+including a label on a null statement whose following control is outside its
+scope. The check activates roots only in the emitted body's or statement
+expression's control interval; a label in an unevaluated region can make an
+outer statement syntactically contain a label without emitting the region's
+own code. Statement-head lookups are cached within the cold emission analysis.
+The shared Sema/range-warning walk and the no-attribute/no-builtin gate are
+unchanged; this describes the implementation, not an instruction-count or
+performance measurement.
 
 Clang's errors are unrecoverable. It emits the functions it must emit where the
 unit defines them (`ASTContext::DeclMustBeEmitted`: an external definition, by
@@ -526,6 +541,21 @@ only a goto after the call names, and after a `return`), and cleanups after
 calls that don't return. C23 fixtures compare the ignored late unscoped
 standard spellings with effective earlier standard, late GNU, scoped GNU and
 keyword spellings, including a mixed attribute list and shared declarators.
+
+The nested-entry fixtures in `c_check_target_feature_emission_test.c` run
+through the same driver's CC compatibility harness and its standalone entry.
+The normal compiler build links this test as a separate translation unit after
+the existing units, keeping its strings out of the production checker's string
+pool. Its small callback interface uses the harness's existing process helpers,
+private directory and counters; the standalone build includes the same test.
+For Clang, default Buster and scalar Buster, they require syntax-only
+acceptance and compare object-emission status, explicit error counts, and
+every error's line, column, complete message and order. They cover selected
+and default cases hidden inside controls, runtime switches, nested switches,
+all loop forms, named labels and null statements, noreturn-separated
+controls, cleanup and builtin errors, evaluated and unevaluated statement
+expressions, and ordinary dead-prefix and dead-tail controls. These are
+original source fixtures; no fixture's generated machine code is executed.
 
 An x86 builtin's call is checked too (#148, `err_builtin_needs_feature`): the
 builtin's required features, clang's expression of them from its definition
