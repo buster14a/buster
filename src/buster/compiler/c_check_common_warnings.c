@@ -1426,6 +1426,49 @@ static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node)
     }
 }
 
+// A discarded selection's or query builtin's marker (check_common_stmt_marker's, #1447), out of line as rare: a _Generic's
+// or a __builtin_choose_expr's result is its chosen operand's, and a __builtin_offsetof's or a
+// __builtin_types_compatible_p's constant reports at its keyword.
+static __attribute__((noinline)) void check_common_selected_marker(CheckCommonEmission* emission, uint32_t node)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    const Parser* parser = emission->parser;
+    const uint32_t token = graph->tokens[node];
+    const uint32_t count = parser->tokens.count;
+    const CheckOp op = graph->ops[node];
+    if (op == CHECK_OP_SELECT)
+    {
+        // A _Generic's or a __builtin_choose_expr's result is its chosen operand's (#1447): a call's whose result warns,
+        // or one without an effect's, at it.
+        uint32_t chosen = graph->operand0[node];
+        for (uint32_t steps = 0; chosen < graph->count && graph->ops[chosen] == CHECK_OP_SELECT && steps < graph->count; steps += 1)
+        {
+            chosen = graph->operand0[chosen];
+        }
+        const uint32_t at = chosen < graph->count ? graph->tokens[chosen] : count;
+        const uint8_t chosen_role = at < count ? parser->tree.roles[at] : PARSE_ROLE_NONE;
+        if (at < count && !check_common_ignored_call(emission, chosen) && !check_common_node_effect(graph, chosen) && graph->ops[chosen] != CHECK_OP_CONDITIONAL &&
+            graph->ops[chosen] != CHECK_OP_COMMA && check_common_effect_role(chosen_role) && chosen_role != PARSE_ROLE_ASSIGN &&
+            !(chosen_role == PARSE_ROLE_CLOSE_CAST && check_common_void_cast(parser, emission->pp, emission->input, emission->stream, emission->types, at)))
+        {
+            check_common_report_unused(parser, emission->pp, emission->input, chosen_role == PARSE_ROLE_MEMBER_OPERATOR && at + 1 < count ? at + 1 : at,
+                                       CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused", NULL, 0, emission->scratch);
+        }
+    }
+    else
+    {
+        // A __builtin_offsetof's or a __builtin_types_compatible_p's constant, at its keyword (#1447).
+        const uint32_t open = check_common_ignored_opener(parser, token);
+        const uint32_t keyword = open != BUSTER_CHECK_NONE && open > 0 ? open - 1 : count;
+        const uint32_t name = keyword < count ? parser->tokens.names[keyword] : 0;
+        if (name == C_NAME_BUILTIN_OFFSETOF || name == C_NAME_BUILTIN_TYPES_COMPATIBLE_P)
+        {
+            check_common_report_unused(parser, emission->pp, emission->input, keyword, CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused", NULL, 0,
+                                       emission->scratch);
+        }
+    }
+}
+
 // The discard marker for an expression that ends a statement or a for clause: a bare comparison keeps its
 // eager comparison warning and an arm that carries an effect keeps the conditional quiet.
 static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t node)
@@ -1471,36 +1514,9 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
             }
         }
     }
-    else if (discarded && op == CHECK_OP_SELECT)
+    else if (discarded && (op == CHECK_OP_SELECT || (op == CHECK_OP_VALUE && role == PARSE_ROLE_CLOSE_KEYWORD)))
     {
-        // A _Generic's or a __builtin_choose_expr's result is its chosen operand's (#1447): a call's whose result warns,
-        // or one without an effect's, at it.
-        uint32_t chosen = graph->operand0[node];
-        for (uint32_t steps = 0; chosen < graph->count && graph->ops[chosen] == CHECK_OP_SELECT && steps < graph->count; steps += 1)
-        {
-            chosen = graph->operand0[chosen];
-        }
-        const uint32_t at = chosen < graph->count ? graph->tokens[chosen] : count;
-        const uint8_t chosen_role = at < count ? parser->tree.roles[at] : PARSE_ROLE_NONE;
-        if (at < count && !check_common_ignored_call(emission, chosen) && !check_common_node_effect(graph, chosen) && graph->ops[chosen] != CHECK_OP_CONDITIONAL &&
-            graph->ops[chosen] != CHECK_OP_COMMA && check_common_effect_role(chosen_role) && chosen_role != PARSE_ROLE_ASSIGN &&
-            !(chosen_role == PARSE_ROLE_CLOSE_CAST && check_common_void_cast(parser, emission->pp, emission->input, emission->stream, emission->types, at)))
-        {
-            check_common_report_unused(parser, emission->pp, emission->input, chosen_role == PARSE_ROLE_MEMBER_OPERATOR && at + 1 < count ? at + 1 : at,
-                                       CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused", NULL, 0, emission->scratch);
-        }
-    }
-    else if (discarded && op == CHECK_OP_VALUE && role == PARSE_ROLE_CLOSE_KEYWORD)
-    {
-        // A __builtin_offsetof's or a __builtin_types_compatible_p's constant, at its keyword (#1447).
-        const uint32_t open = check_common_ignored_opener(parser, token);
-        const uint32_t keyword = open != BUSTER_CHECK_NONE && open > 0 ? open - 1 : count;
-        const uint32_t name = keyword < count ? parser->tokens.names[keyword] : 0;
-        if (name == C_NAME_BUILTIN_OFFSETOF || name == C_NAME_BUILTIN_TYPES_COMPATIBLE_P)
-        {
-            check_common_report_unused(parser, emission->pp, emission->input, keyword, CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused", NULL, 0,
-                                       emission->scratch);
-        }
+        check_common_selected_marker(emission, node);
     }
     else if (discarded && op != CHECK_OP_INITIALIZE && op != CHECK_OP_CONVERT && op != CHECK_OP_CONDITION &&
              check_common_effect_role(role) && role != PARSE_ROLE_ASSIGN && role != PARSE_ROLE_EQUALITY &&

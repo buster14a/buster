@@ -109,7 +109,7 @@ static uint8_t check_common_ignored_kinds(const CheckInputAttributes* attributes
 
 // The unit's marks (CheckCommonIgnored), from the tokens that have attributes, in source order; false where scratch can't
 // hold them.
-static bool check_common_ignored_prepare(CheckCommonIgnored* ignored, const Parser* parser, const Preprocessor* pp, const CheckInput* input,
+static __attribute__((noinline)) bool check_common_ignored_prepare(CheckCommonIgnored* ignored, const Parser* parser, const Preprocessor* pp, const CheckInput* input,
                                          const TypeTable* types, Arena* scratch)
 {
     const uint32_t count = parser->tokens.count < input->token_count ? parser->tokens.count : input->token_count;
@@ -137,8 +137,10 @@ static bool check_common_ignored_prepare(CheckCommonIgnored* ignored, const Pars
             for (uint32_t selected = check_input_attributed_group(input->attributes, first, count, scalar); selected != 0; selected &= selected - 1)
             {
                 const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
+                const CheckInputAttributes* attributes = check_input_attributes_at(input, d);
                 const CheckInputAttribute* result = NULL;
-                const uint8_t kinds = check_common_ignored_kinds(check_input_attributes_at(input, d), &result);
+                // (Most lists have none of these attributes: CheckInputAttributes.results skips them.)
+                const uint8_t kinds = attributes != NULL && attributes->results ? check_common_ignored_kinds(attributes, &result) : 0u;
                 const uint8_t kind = parser->tokens.kinds[d];
                 // A declarator's name's binding (C_BINDING_TYPEDEF is 0, every other token's too); a tag's keyword has none.
                 const uint8_t binding = kinds != 0 && kind == PARSE_KIND_IDENTIFIER && input->declaration_kinds != NULL ? input->declaration_kinds[d] : C_BINDING_KINDS;
@@ -241,7 +243,7 @@ static uint8_t check_common_ignored_marks(const CheckCommonIgnored* ignored, uin
 // A builtin's kinds by its name's identifier (BUSTER_CHECK_IGNORED_*), from clang's builtin table's attributes: c const,
 // U pure, g const where floating-point exceptions are ignored (the default), e const without errno too (never, as clang's
 // default -fmath-errno has it), f a plain library function's row. Found once an identifier.
-static uint8_t check_common_ignored_builtin(CheckCommonIgnored* ignored, const Preprocessor* pp, uint32_t name)
+static __attribute__((noinline)) uint8_t check_common_ignored_builtin(CheckCommonIgnored* ignored, const Preprocessor* pp, uint32_t name)
 {
     uint8_t result = 0;
     if (ignored->builtins != NULL && name != 0 && name < ignored->builtin_count)
@@ -310,7 +312,7 @@ static uint32_t check_common_ignored_typedef(const Parser* parser, const CheckIn
 
 // What the call `node`'s discarded result warns of (CheckCommonIgnoredResult), or false: a call of a function or a
 // builtin whose result isn't void.
-static bool check_common_ignored_of(CheckCommonEmission* emission, uint32_t node, CheckCommonIgnoredResult* out)
+static __attribute__((noinline)) bool check_common_ignored_of(CheckCommonEmission* emission, uint32_t node, CheckCommonIgnoredResult* out)
 {
     CheckCommonIgnored* ignored = emission->ignored;
     const CheckGraph* graph = &emission->input->graph;
@@ -412,7 +414,7 @@ static bool check_common_ignored_macro(const Parser* parser, Preprocessor* pp, u
 // The warning of a discarded call's result (CheckCommonIgnoredResult), at once, as clang's DiagnoseUnusedExprResult
 // gives it: the callee's warn_unused_result, then its return type's, then (outside a macro's body) its pure, then its
 // const.
-static void check_common_ignored_report(CheckCommonEmission* emission, const CheckCommonIgnoredResult* found)
+static __attribute__((noinline)) void check_common_ignored_report(CheckCommonEmission* emission, const CheckCommonIgnoredResult* found)
 {
     const Parser* parser = emission->parser;
     Preprocessor* pp = emission->pp;
@@ -452,7 +454,7 @@ static void check_common_ignored_report(CheckCommonEmission* emission, const Che
 }
 
 // The discarded call `node`'s warning, if its result warns of one (check_common_ignored_of): whether it does.
-static bool check_common_ignored_call(CheckCommonEmission* emission, uint32_t node)
+static __attribute__((noinline)) bool check_common_ignored_call(CheckCommonEmission* emission, uint32_t node)
 {
     CheckCommonIgnoredResult found;
     const bool result = emission->ignored != NULL && check_common_ignored_of(emission, node, &found);
