@@ -8681,6 +8681,142 @@ static bool check_input_starts_implicit_declaration(const CheckInputReader* read
     return candidate && (direct || declarator);
 }
 
+// The walk in source order's tokens of no ordinary scope's identifier, which its later steps ignore: a label's name, a
+// goto's, and an address of a label's (GNU C's &&label), and the keywords of labels, gotos, switches and cases. A label's
+// name is right before its colon, whose child it is but after attributes (`[[x]] l:`, #147), whose closer the parser
+// makes its parent. Without branches (#1175): a token without a parent reads its own role and kind instead, and the last
+// token its own role for the next one's, which the tests then ignore.
+static inline __attribute__((always_inline)) void check_input_resolve_ignored(CheckInputReader* reader, uint32_t i, uint8_t role, uint8_t kind, uint32_t parent)
+{
+    const Parser* parser = reader->parser;
+    const bool has_parent = parent < parser->tokens.count;
+    const bool has_next = i + 1 < parser->tokens.count;
+    const uint32_t above = has_parent ? parent : i;
+    const uint32_t next = has_next ? i + 1 : i;
+    const uint8_t parent_role = parser->tree.roles[above];
+    const uint8_t parent_kind = parser->tokens.kinds[above];
+    const bool label_name = (role == PARSE_ROLE_OPERAND) & has_parent &
+                            ((parent_role == PARSE_ROLE_LABEL) | (parent_kind == PARSE_KIND_GOTO) |
+                             ((parent_role == PARSE_ROLE_PREFIX) & (parent_kind == PARSE_KIND_AMPAMP)) |
+                             ((kind == PARSE_KIND_IDENTIFIER) & has_next & (parser->tree.roles[next] == PARSE_ROLE_LABEL)));
+    reader->ignored[i] |= label_name | (role == PARSE_ROLE_LABEL) | (kind == PARSE_KIND_GOTO) | (kind == PARSE_KIND_SWITCH) |
+                          (role == PARSE_ROLE_OPEN_CASE);
+}
+
+// The walk in source order's step at a name (an identifier other than a member's, a tag's or a designator's) that no
+// earlier step ignored: a builtin's call, an intrinsic's, an implicit function's declaration, or the name's use in the
+// bindings. Both the walk's general visit and its plain names' (check_input_resolve_range, #1671) take it.
+static inline __attribute__((always_inline)) void check_input_resolve_name(CheckInputReader* reader, uint32_t i, uint8_t role)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t identifier = parser->tokens.names[i];
+    if (__builtin_expect(reader->output->overload_heads != 0, 0))
+    {
+        const uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier);
+        reader->output->overload_heads[i] = handle != 0 ? reader->output->overload_heads[reader->bindings.declaration[handle - 1]] : 0;
+    }
+    const uint16_t builtin = check_input_builtin_id(reader, i);
+    const uint32_t bound = __builtin_expect(builtin != CBUILTIN_NONE, 0) ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier) : 0;
+    // A catalog builtin's name that no declaration binds, or a call of the unit's declaration of a <stdbit.h>
+    // function that clang makes the builtin.
+    const bool claimed = cbuiltin_stdc_library(builtin) ? check_input_stdc_library_call(reader, i, bound, builtin) : bound == 0;
+    if (__builtin_expect(builtin != CBUILTIN_NONE, 0) && role == PARSE_ROLE_OPERAND && claimed)
+    {
+        // The callee may be the name in parentheses, which clang's call looks through (check_input_callee_end): they
+        // are dropped with it.
+        uint32_t group = i;
+        const uint32_t end = check_input_callee_end(parser, i, &group);
+        const uint32_t close = parser->tree.parents[end];
+        const bool call = close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL &&
+                          end + 1 < close && parser->tree.roles[end + 1] == PARSE_ROLE_OPEN_CALL;
+        if (call && builtin == CBUILTIN_INVOKE)
+        {
+            // __builtin_invoke(f, a...) is the call f(a...) in C (#148), as clang's Sema builds it: the name goes, with
+            // its parentheses, and the call's first operand is its callee, its others its arguments. With none,
+            // clang's "too few arguments" is at the name.
+            for (uint32_t t = group; t <= end; t += 1)
+            {
+                reader->ignored[t] = true;
+            }
+            if (end + 2 == close)
+            {
+                check_input_report(reader, i, CHECK_INPUT_INVOKE_ARGUMENTS);
+            }
+        }
+        else if (call)
+        {
+            if (builtin == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING || builtin == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING)
+            {
+                // Its value points to clang's predeclared __NSConstantString record (#148).
+                (void)check_input_ns_constant_string(reader);
+            }
+            check_input_rare_claim(reader, &reader->builtins[close]);
+            reader->builtins[close] = builtin;
+            for (uint32_t t = group; t <= end; t += 1)
+            {
+                reader->ignored[t] = true;
+            }
+            if (check_input_vararg_id(builtin))
+            {
+                check_input_vararg_prepare(reader, end, builtin);
+            }
+        }
+        else
+        {
+            // A builtin's name that no call takes (its address, a value of it): clang's error at it.
+            check_input_report(reader, i, CHECK_INPUT_BUILTIN_NOT_CALLED);
+        }
+    }
+    else if (reader->output->declarations[i] == BUSTER_CHECK_NONE)
+    {
+        const CheckInputIntrinsicStatus intrinsic = check_input_intrinsic_prepare(reader, i);
+        if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && role == PARSE_ROLE_OPERAND)
+        {
+            check_input_implicit_function(reader, i);
+        }
+        if (intrinsic == CHECK_INPUT_INTRINSIC_PREPARED)
+        {
+            const uint32_t close = parser->tree.parents[i];
+            const CheckInputIntrinsicCall* call = reader->output->intrinsic_calls + reader->output->intrinsic_ids[close] - 1;
+            const CheckInputIntrinsicDeclaration* declaration = reader->output->intrinsic_declarations + call->declaration;
+            reader->ignored[i] = true;
+            reader->query_types[close] = declaration->types.function_type;
+            const uint64_t required = declaration->types.ice_parameters | check_graph_x86_ice_mask(declaration->info, false);
+            for (uint32_t argument = 0; argument < call->argument_count && argument < 64; argument += 1)
+            {
+                if ((required & (UINT64_C(1) << argument)) != 0)
+                {
+                    for (uint32_t token = call->arguments[argument].first; token < call->arguments[argument].end; token += 1)
+                    {
+                        reader->constant_contexts[token] |= 1;
+                    }
+                }
+            }
+        }
+        else if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && reader->output->declarations[i] == BUSTER_CHECK_NONE &&
+                 c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, identifier, i, i) == 0)
+        {
+            reader->output->resource = true;
+        }
+        if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && __builtin_expect(reader->specifier_query_depth != 0 || i < reader->inference_end, 0))
+        {
+            // The suspended type query consumes this expression before the final batch replay. Capture
+            // its declaration while the source scope is active; the replay still verifies the same event.
+            const uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier);
+            if (handle != 0)
+            {
+                const uint32_t declaration = reader->bindings.declaration[handle - 1];
+                reader->output->declarations[i] = declaration;
+                reader->declared_types[i] = reader->declared_types[declaration];
+            }
+            else if (reader->specifier_query_depth != 0)
+            {
+                check_input_report(reader, i, CHECK_INPUT_UNDECLARED);
+            }
+        }
+    }
+}
+
 // The walk from token `begin` to `end`, where it stops (the unit's count, for the whole unit). A lane's walk of a body
 // (CheckInputReader.lane) starts at its opening brace, whose activations the top level made, and ends at the token
 // after its closing brace, where its scopes end and nothing else of the token is its. The vector path visits only the
@@ -8696,6 +8832,9 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
 {
     const Parser* parser = reader->parser;
     const bool scalar = parser->options.scalar;
+    // C89's implicit declarations start at a name (check_input_starts_implicit_declaration), which a plain name's visit
+    // leaves to the general one.
+    const bool modern = parser->language.standard >= 1999;
     uint32_t visits = 0;
     for (uint32_t i = begin; i <= end && reader->output->report_count == 0 && !reader->output->resource; i = check_input_resolve_next(reader, i, end))
     {
@@ -8768,6 +8907,24 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             i = parser->tree.parents[i];
             continue;
         }
+        const uint8_t role = parser->tree.roles[i];
+        const uint8_t kind = parser->tokens.kinds[i];
+        const uint32_t parent = parser->tree.parents[i];
+        const uint8_t syntax = reader->syntax[i];
+        // A plain name's visit, half of them on sqlite3.c (#1671): an identifier operand of no syntax bit, marked for its
+        // syntax alone, in C99 or later. Each of the walk's other tests is false at it: those of the other marks' reasons by
+        // its mark, those of roles, kinds and syntax bits by its own, and C89's implicit declaration by the standard. So it
+        // takes the label's test and the name's step alone, where the general visit below makes every test; the scalar
+        // path, which visits every token and makes every test, is its twin.
+        if (!scalar && mark == BUSTER_CHECK_RESOLVE_SYNTAX && kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND && syntax == 0 && modern)
+        {
+            check_input_resolve_ignored(reader, i, role, kind, parent);
+            if (!reader->ignored[i])
+            {
+                check_input_resolve_name(reader, i, role);
+            }
+            continue;
+        }
         if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->designator_valid[i] == 2 && !check_input_initializer_designator(reader, i))
         {
             break;
@@ -8807,30 +8964,11 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 check_input_report(reader, job->keyword, CHECK_INPUT_DECLARATION);
             }
         }
-        const uint8_t role = parser->tree.roles[i];
-        const uint8_t kind = parser->tokens.kinds[i];
-        const uint32_t parent = parser->tree.parents[i];
-        const uint8_t syntax = reader->syntax[i];
         // The tests of the token's syntax, of a token its syntax marks on the vector path.
         const bool syntactic = check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_SYNTAX);
         if (syntactic)
         {
-            // A label's name, a goto's, and an address of a label's (GNU C's &&label): no identifier of the ordinary scopes. A
-            // label's name is right before its colon, whose child it is but after attributes (`[[x]] l:`, #147), whose closer
-            // the parser makes its parent. Without branches (#1175): a token without a parent reads its own role and kind
-            // instead, and the last token its own role for the next one's, which the tests then ignore.
-            const bool has_parent = parent < parser->tokens.count;
-            const bool has_next = i + 1 < parser->tokens.count;
-            const uint32_t above = has_parent ? parent : i;
-            const uint32_t next = has_next ? i + 1 : i;
-            const uint8_t parent_role = parser->tree.roles[above];
-            const uint8_t parent_kind = parser->tokens.kinds[above];
-            const bool label_name = (role == PARSE_ROLE_OPERAND) & has_parent &
-                                    ((parent_role == PARSE_ROLE_LABEL) | (parent_kind == PARSE_KIND_GOTO) |
-                                     ((parent_role == PARSE_ROLE_PREFIX) & (parent_kind == PARSE_KIND_AMPAMP)) |
-                                     ((kind == PARSE_KIND_IDENTIFIER) & has_next & (parser->tree.roles[next] == PARSE_ROLE_LABEL)));
-            reader->ignored[i] |= label_name | (role == PARSE_ROLE_LABEL) | (kind == PARSE_KIND_GOTO) | (kind == PARSE_KIND_SWITCH) |
-                                  (role == PARSE_ROLE_OPEN_CASE);
+            check_input_resolve_ignored(reader, i, role, kind, parent);
         }
         if (__builtin_expect(role == PARSE_ROLE_OPEN_GROUP, 0) && syntactic && !reader->ignored[i] && i + 1 < parser->tokens.count &&
             parser->tree.roles[i + 1] == PARSE_ROLE_OPEN_BLOCK)
@@ -9109,112 +9247,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         }
         if (syntactic && !reader->ignored[i] && kind == PARSE_KIND_IDENTIFIER && role != PARSE_ROLE_MEMBER && role != PARSE_ROLE_TAG && role != PARSE_ROLE_LEAF_RIGHT)
         {
-            const uint32_t identifier = parser->tokens.names[i];
-            if (__builtin_expect(reader->output->overload_heads != 0, 0))
-            {
-                const uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier);
-                reader->output->overload_heads[i] = handle != 0 ? reader->output->overload_heads[reader->bindings.declaration[handle - 1]] : 0;
-            }
-            const uint16_t builtin = check_input_builtin_id(reader, i);
-            const uint32_t bound = __builtin_expect(builtin != CBUILTIN_NONE, 0) ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier) : 0;
-            // A catalog builtin's name that no declaration binds, or a call of the unit's declaration of a <stdbit.h>
-            // function that clang makes the builtin.
-            const bool claimed = cbuiltin_stdc_library(builtin) ? check_input_stdc_library_call(reader, i, bound, builtin) : bound == 0;
-            if (__builtin_expect(builtin != CBUILTIN_NONE, 0) && role == PARSE_ROLE_OPERAND && claimed)
-            {
-                // The callee may be the name in parentheses, which clang's call looks through (check_input_callee_end): they
-                // are dropped with it.
-                uint32_t group = i;
-                const uint32_t end = check_input_callee_end(parser, i, &group);
-                const uint32_t close = parser->tree.parents[end];
-                const bool call = close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL &&
-                                  end + 1 < close && parser->tree.roles[end + 1] == PARSE_ROLE_OPEN_CALL;
-                if (call && builtin == CBUILTIN_INVOKE)
-                {
-                    // __builtin_invoke(f, a...) is the call f(a...) in C (#148), as clang's Sema builds it: the name goes, with
-                    // its parentheses, and the call's first operand is its callee, its others its arguments. With none,
-                    // clang's "too few arguments" is at the name.
-                    for (uint32_t t = group; t <= end; t += 1)
-                    {
-                        reader->ignored[t] = true;
-                    }
-                    if (end + 2 == close)
-                    {
-                        check_input_report(reader, i, CHECK_INPUT_INVOKE_ARGUMENTS);
-                    }
-                }
-                else if (call)
-                {
-                    if (builtin == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING || builtin == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING)
-                    {
-                        // Its value points to clang's predeclared __NSConstantString record (#148).
-                        (void)check_input_ns_constant_string(reader);
-                    }
-                    check_input_rare_claim(reader, &reader->builtins[close]);
-                    reader->builtins[close] = builtin;
-                    for (uint32_t t = group; t <= end; t += 1)
-                    {
-                        reader->ignored[t] = true;
-                    }
-                    if (check_input_vararg_id(builtin))
-                    {
-                        check_input_vararg_prepare(reader, end, builtin);
-                    }
-                }
-                else
-                {
-                    // A builtin's name that no call takes (its address, a value of it): clang's error at it.
-                    check_input_report(reader, i, CHECK_INPUT_BUILTIN_NOT_CALLED);
-                }
-            }
-            else if (reader->output->declarations[i] == BUSTER_CHECK_NONE)
-            {
-                const CheckInputIntrinsicStatus intrinsic = check_input_intrinsic_prepare(reader, i);
-                if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && role == PARSE_ROLE_OPERAND)
-                {
-                    check_input_implicit_function(reader, i);
-                }
-                if (intrinsic == CHECK_INPUT_INTRINSIC_PREPARED)
-                {
-                    const uint32_t close = parser->tree.parents[i];
-                    const CheckInputIntrinsicCall* call = reader->output->intrinsic_calls + reader->output->intrinsic_ids[close] - 1;
-                    const CheckInputIntrinsicDeclaration* declaration = reader->output->intrinsic_declarations + call->declaration;
-                    reader->ignored[i] = true;
-                    reader->query_types[close] = declaration->types.function_type;
-                    const uint64_t required = declaration->types.ice_parameters | check_graph_x86_ice_mask(declaration->info, false);
-                    for (uint32_t argument = 0; argument < call->argument_count && argument < 64; argument += 1)
-                    {
-                        if ((required & (UINT64_C(1) << argument)) != 0)
-                        {
-                            for (uint32_t token = call->arguments[argument].first; token < call->arguments[argument].end; token += 1)
-                            {
-                                reader->constant_contexts[token] |= 1;
-                            }
-                        }
-                    }
-                }
-                else if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && reader->output->declarations[i] == BUSTER_CHECK_NONE &&
-                         c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, identifier, i, i) == 0)
-                {
-                    reader->output->resource = true;
-                }
-                if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && __builtin_expect(reader->specifier_query_depth != 0 || i < reader->inference_end, 0))
-                {
-                    // The suspended type query consumes this expression before the final batch replay. Capture
-                    // its declaration while the source scope is active; the replay still verifies the same event.
-                    const uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier);
-                    if (handle != 0)
-                    {
-                        const uint32_t declaration = reader->bindings.declaration[handle - 1];
-                        reader->output->declarations[i] = declaration;
-                        reader->declared_types[i] = reader->declared_types[declaration];
-                    }
-                    else if (reader->specifier_query_depth != 0)
-                    {
-                        check_input_report(reader, i, CHECK_INPUT_UNDECLARED);
-                    }
-                }
-            }
+            check_input_resolve_name(reader, i, role);
         }
         if (__builtin_expect((syntax & BUSTER_CHECK_SYNTAX_STRING) != 0, 0) && syntactic && !reader->ignored[i])
         {
