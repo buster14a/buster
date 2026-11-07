@@ -27,7 +27,13 @@ requirements. [Command index](README.md).
   them natively against clang -O0's build, and the classic ones (`ctz` to
   `bswap64`, #1374: one instruction each by the target, the guide's "The bit
   builtins' instructions") at `x86-64`, `x86-64-v2`, `x86-64-v3` and `znver5`,
-  checking that their rows are the target's forms. The overflow builtins
+  checking that their rows are the target's forms. The generic/C23 bit counts,
+  `clrsb*` and `bswapg` reuse those rows (#1652), with narrow-width corrections
+  and defined zero/fallback results, including 65–128-bit operands split into
+  limbs. The same checker target matrix checks their rows and boundary values;
+  `test-checker-driver`'s Tier 1 fixture checks narrow and wide forms at the
+  first three targets, and `tests/ir-source/bit-builtins.c` checks the IR
+  lowering under command-line and per-function targets. The overflow builtins
   (#1385, the guide's "The overflow builtins' instructions") are signed longs'
   rows of the operation and `seto` and the other classes' cheapest recipes:
   `test-builtin-lowering` runs every recipe natively against clang's builtins,

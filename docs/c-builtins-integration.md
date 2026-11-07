@@ -195,6 +195,56 @@ level, clang's time. The kernel is 16 instructions by Tier 0 and 11 by Tier 1 at
 record](https://github.com/buster14a/buster-performance/tree/28689ea8be9e0bbbe4e6b91a0371ed36093510b6/docs/measurements/bit-builtins-1374-2026-11-07)
 has the commands, receipts and limitations.
 
+### Generic and C23 bit instructions (#1652)
+
+The generic bit builtins, `clzs`/`ctzs`, `clrsb*`, `bswapg`, and C23's
+`stdc_*` counts and rounding operations use the same primitive rows as the
+classic builtins. `check_lower_bits_operation` constructs each row from the
+function's own target; `check_lower_miscellaneous_bits` supplies the required
+32- and 64-bit row indices to `c_builtin_bits_lower.c`'s recipe. The optional
+`CBuiltinBitsRows` descriptor stores each index plus one, with zero retaining
+the recipe, and identifies counts whose instructions define the zero result.
+The recipe appends those indices through its existing transactional scalar
+and vector copies. The IR recognizes each row as the existing pure intrinsic.
+
+- `popcountg`, `stdc_count_ones`, `stdc_count_zeros` and `stdc_has_single_bit`
+  use POPCNT where enabled. Targets without it retain the SWAR population
+  count.
+- Leading counts use LZCNT where enabled. Values below the instruction's
+  width are zero-extended and their excess leading zeros subtracted. Baseline
+  BSR reads `x | 1`, then computes `width - 1 - index + (x == 0)`; no zero
+  reaches the undefined intrinsic, including when the other limb of a wide
+  value is nonzero.
+- Trailing counts use TZCNT where enabled and BSF otherwise. A narrow value
+  receives a sentinel bit just above its width, giving that width for zero.
+  A full-width baseline BSF receives the top bit and adds one for zero.
+- Defined zero counts remain the source width. `clzg`/`ctzg` then select their
+  supplied fallback, which is evaluated once even for a nonzero operand.
+  `clrsb*` counts the leading zeros after complementing a negative operand and
+  subtracts its sign bit. The first-one/first-zero and complemented counts
+  retain their existing corrections.
+- `stdc_bit_width`, `stdc_bit_floor` and `stdc_bit_ceil` use leading counts.
+  Their variable shifts are masked to a count below 64, and a separate range
+  test clears an absent or overflowing bit; the IR never receives an
+  out-of-range shift. Byte swaps use BSWAP, shifted down when the value is
+  narrower than its machine form.
+
+Operands of 65–128 bits still split into two limbs. Counts combine the two
+defined limb counts; population counts add them. Byte swaps reverse the two
+64-bit limbs, exchange them and remove the bits beyond the declared width.
+Argument evaluation, signed-result extension, rotations, carry chains and
+bit reversals retain their existing recipes.
+
+`test-checker --program-bits` checks generic/C23 instruction forms and results
+at `x86-64`, `x86-64-v2`, `x86-64-v3` and `znver5`, on both paths. Its boundary
+fixture includes bools, enums, bit-fields, widths around 32 and 64, 65/96/100/127
+and 128-bit operands, all-zero and one-zero limbs, and both extreme `int`
+fallbacks. The Tier 1 driver fixture compares both paths and rematerialization
+choices with Clang, including the wide forms. The existing IR-source fixture
+also exercises generic rows under per-function target feature overrides.
+These checks establish semantics and instruction selection; no additional
+throughput measurement is claimed here.
+
 ### The overflow builtins' instructions (#1385)
 
 `__builtin_add_overflow`, `sub_overflow` and `mul_overflow`, and clang's typed
@@ -1519,8 +1569,9 @@ carry is an effect, never folds. A `_BitInt` past 128 bits, which clang takes,
 is refused by name.
 
 `c_builtin_bits_lower.c`'s recipes compute them on U64 temporaries, a value
-zero-extended from its width, as clang's code computes on its `iN`: SWAR
-popcounts (a smear for leading zeros), reversals by masked swaps of halves,
+zero-extended from its width, as clang's code computes on its `iN`: the
+target-selected counts and byte swaps described above, SWAR population counts
+where POPCNT is absent, reversals by masked swaps of halves,
 selections by multiplying with a compare's 0 or 1, without branches. A rotation
 masks its count for a width that is a power of two and takes a remainder for
 another `_BitInt`'s. A carry chain adds or subtracts twice, each carry a
