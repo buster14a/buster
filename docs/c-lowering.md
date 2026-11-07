@@ -1818,3 +1818,53 @@ not #418's. The whole compiler gains less: `-c --lanes 1` of all 220 programs at
 less than main at `ec5f0f6b` (8 of 8 paired runs), as a small unit's compile is mostly its checking. Every object, of
 c-testsuite's programs by `-c`, `-c -g`, `-funsigned-char`, `--scalar` and the units' path, and `main.c`'s, is byte for
 byte main's.
+
+### The definitions' selection and a small unit's rest (#1629)
+
+[#1629](https://github.com/buster14a/buster/issues/1629) took what #442 left: the units under 300 tokens, about 240 ns a
+file over main before #418, and the synthetic units of 2,000 definitions, whose selection took about twice main before
+#418's ([the record](https://github.com/buster14a/buster-performance/tree/c83998671d62edf619b720c0fe5fa507f26a8684/docs/measurements/lowering-definitions-1629-2026-11-07)).
+
+- **The definitions' selection.** Each definition searched the data's declared objects for its object
+  (`check_data_declared_index`, 12 dependent loads for 4,000 static objects), and each block-scope static the bodies for
+  the one holding it (`check_program_token_body`). The declared objects' places are now written at their objects in a
+  column that the read checks, so nothing clears it (#877's way: `check_program_declared_fill` and
+  `check_program_declared_at`), and the statics' bodies are taken by a cursor that walks forward in the definitions'
+  token order, searching only for a token before the last one asked (`check_program_token_body_next`).
+- **The runtime functions' names.** The preparation tested each of the library's 394 entries against the x86 builtins'
+  calls in turn, which took as long as the probes of a unit that calls none; it now steps from one called library
+  function to the next by the set bits of `called` (`check_lower_runtime_called_next`).
+- **The emission's clears.** One lane's emission cleared its 6.3 KB lane state twice, all lanes' before the run and lane
+  0's again for the run alone, which writes every field of it; the lanes' are cleared only for a run on lanes. Each
+  writer cleared 3.5 KB of its lane's `runtime_symbols` and `runtime_order`, which only the program's lowering numbers
+  (`check_lower_finish`); they are `CheckProgramLowered`'s last fields, which a lane's copy leaves unwritten. And its
+  `runtimes` list, which its count bounds, is a column of its scratch.
+- **The object's classes.** With descriptors, as every `-c` compile's object has (`check_program_sections`), the object
+  writer grouped the atoms of each of its 14 classes, even those without atoms, most of a small unit's; a class without
+  atoms now takes no groups.
+
+On the 9700X, pinned to CPU 2, c-testsuite's 220 programs, each file's least run minimum over 4 rounds of 101 passes,
+summed:
+
+| | Main before #418 (ns) | Main at `53854a7c` | #1629 |
+| --- | ---: | ---: | ---: |
+| All 220 | 1,860,108 | −23.5% | −25.4% |
+| Under 300 tokens (154) | 475,585 | +5.9% | +0.1% |
+| 3,000 tokens or more (60) | 1,307,328 | −33.9% | −34.5% |
+
+Against main, −179 ns a file under 300 tokens (paired rounds −3.9 to −6.3%) and −2.2% in all (−1.6 to −3.1%). Under 300
+tokens the selection is −6.8% against main before #418 and the emission −2.8%; what stays over it is the setup main has
+added since: the publication, +27% (+1.5 µs over the 154 programs), and the object, +35% (+9.9 µs), the definitions'
+named sections (#619) among it. On the synthetic units of 2,000 definitions the selection is now below main before
+#418's on every unit (statics 108,123 ns against 113,423; main's 256,481), and their totals +0.5 to +8.0% over it
+(main's +6.8 to +17.2%), and literals −15.9%; what keeps them over it is the publication, about +25%, and the object,
++14 to +16%, per-definition work that main had already added and this leaves as it was. The whole compiler shows none
+of it: `-c --lanes 1` of all 220 programs took 72.4 ms against main's 72.3 (+0.19%, 3 of 8 paired runs faster), the 35
+µs saved being under the runs' spread. Every object, of c-testsuite's programs and the synthetic units by `-c`, `-c -g`,
+`--scalar` and `-funsigned-char`, and `main.c`'s, is byte for byte main's.
+
+Three more changes were measured and not kept. A lookup of each runtime name by its home bucket alone, without a
+branch, meant to overlap the names' loads, cost +141 ns a file under 300 tokens: the lookups' count of the names found,
+which places each result, then waited on every load, where the branchy lookup's predicted absence starts the next
+lookups' loads at once. Prefetching the names' home buckets before the lookups, and making the helpers' key table only
+for a unit with builtins, showed no gain.

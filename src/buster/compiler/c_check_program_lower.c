@@ -243,6 +243,25 @@ static BUSTER_BAKED_UNIT uint64_t check_lower_runtime_hashes[CHECK_LOWER_RUNTIME
 static BUSTER_BAKED_UNIT uint8_t check_lower_runtime_lengths[CHECK_LOWER_RUNTIMES];
 static BUSTER_BAKED_UNIT bool check_lower_runtime_names_ready;
 
+// The first runtime function from `from` on whose name a unit's lowering looks up: each one's before the library's, and
+// of the library's those whose bits `called` has (the x86 builtins' calls); CHECK_LOWER_RUNTIMES past the last. The
+// library's are found a word of bits at a time.
+static uint32_t check_lower_runtime_called_next(const uint64_t* called, uint32_t from)
+{
+    uint32_t next = from;
+    if (from >= CHECK_LOWER_RUNTIME_LIBRARY)
+    {
+        next = CHECK_LOWER_RUNTIMES;
+        for (uint32_t word = from >> 6; next == CHECK_LOWER_RUNTIMES && word < (CHECK_LOWER_RUNTIMES + 63) / 64; word += 1)
+        {
+            const uint64_t bits = called[word] & (word == from >> 6 ? ~UINT64_C(0) << (from & 63) : ~UINT64_C(0));
+            next = bits != 0 ? word * 64 + (uint32_t)__builtin_ctzll(bits) : next;
+        }
+        next = next < CHECK_LOWER_RUNTIMES ? next : CHECK_LOWER_RUNTIMES;
+    }
+    return next;
+}
+
 // Makes check_lower_runtime_hashes and check_lower_runtime_lengths, once: before any lane may read them.
 static bool check_lower_runtime_names_initialize(void)
 {
@@ -332,11 +351,6 @@ struct CheckProgramLowered
     CheckLowerInitializers initializers;
     SymbolId errno_symbol;
     TypeId errno_pointer_type;
-    // The runtime's functions the lowering calls (CHECK_LOWER_RUNTIME_*): each one's SymbolId, 0 while nothing calls it,
-    // a declaration's of the unit where its program has a symbol of the name with linkage, else one of the lowering's own
-    // after the program's and the helpers': `runtime_symbol_count` of those, which `runtime_order` names in their order.
-    SymbolId runtime_symbols[CHECK_LOWER_RUNTIMES];
-    uint16_t runtime_order[CHECK_LOWER_RUNTIMES];
     // Each function's entries' source tokens (the parser's), when check_program_lower is asked for them: entry e's, the
     // token of the expression, statement or initializer whose lowering wrote it (a function's first entries the
     // declaration's, its last its closing brace's), for source rows (#395). Null otherwise.
@@ -378,6 +392,12 @@ struct CheckProgramLowered
     uint32_t table_count;
     uint32_t case_symbol_count;
     SymbolId case_symbol_base;
+    // The runtime's functions the lowering calls (CHECK_LOWER_RUNTIME_*): each one's SymbolId, 0 while nothing calls it,
+    // a declaration's of the unit where its program has a symbol of the name with linkage, else one of the lowering's own
+    // after the program's and the helpers': `runtime_symbol_count` of those, which `runtime_order` names in their order.
+    // The last fields: a lane's copy (check_lower_writer_begin) leaves them unwritten.
+    SymbolId runtime_symbols[CHECK_LOWER_RUNTIMES];
+    uint16_t runtime_order[CHECK_LOWER_RUNTIMES];
 };
 
 typedef enum CheckLowerTaskKind
@@ -827,13 +847,13 @@ struct CheckLowerWriter
     uint32_t label_symbol_used;
     // The runtime's functions (check_lower_runtime): each one's symbol where the unit declares it, 0 for none
     // (CheckLowerShared.declared_runtimes); the first of the provisional symbols that a call of one of the lowering's own
-    // takes; and the ones the writer's part calls first, in the order it does (`runtimes`, `runtime_mask` their bits in
-    // words), which check_lower_finish numbers in source order's order (#151).
+    // takes; and the ones the writer's part calls first, in the order it does (`runtimes`, a column of room for every one,
+    // `runtime_mask` their bits in words), which check_lower_finish numbers in source order's order (#151).
     const SymbolId* declared_runtimes;
     SymbolId provisional_runtimes;
     uint64_t runtime_mask[(CHECK_LOWER_RUNTIMES + 63) / 64];
     uint32_t runtime_count;
-    uint16_t runtimes[CHECK_LOWER_RUNTIMES];
+    uint16_t* runtimes;
     // The first token where clang's code may classify a function's type (check_lower_first_classification), plus one: 0
     // until the writer first asks.
     uint64_t first_classification;
@@ -14013,20 +14033,21 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         uint16_t spelled_runtimes[CHECK_LOWER_RUNTIMES];
         uint32_t spelled = 0;
         // The names' lengths and hashes, made once (check_lower_runtime_names_ready), so that a unit's lookups are its
-        // table's probes alone.
+        // table's probes alone: every runtime function's before the library's, then the library functions the x86 builtins
+        // call, from the set bits of `called` (#1629: the test of each of the library's 394 entries in turn took as long
+        // as the probes of a unit that calls none).
         const bool hashed = check_lower_runtime_names_ready;
-        for (uint32_t r = CHECK_LOWER_RUNTIME_ERRNO + 1; program->parser != NULL && program->identifiers != NULL && r < CHECK_LOWER_RUNTIMES; r += 1)
+        const bool spelling = program->parser != NULL && program->identifiers != NULL;
+        for (uint32_t r = CHECK_LOWER_RUNTIME_ERRNO + 1; spelling && r < CHECK_LOWER_RUNTIMES;)
         {
-            if (r < CHECK_LOWER_RUNTIME_LIBRARY || (called[r >> 6] & (UINT64_C(1) << (r & 63))) != 0)
-            {
-                const uint8_t* name = (const uint8_t*)check_lower_runtime_names[r];
-                const uint32_t length = hashed ? check_lower_runtime_lengths[r] : (uint32_t)strlen((const char*)name);
-                const uint64_t hash = hashed ? check_lower_runtime_hashes[r] : intern_hash_bytes(name, length);
-                const IdentId identifier = intern_find_hashed(program->identifiers, name, length, hash);
-                identifiers[spelled] = identifier;
-                spelled_runtimes[spelled] = (uint16_t)r;
-                spelled += identifier != 0;
-            }
+            const uint8_t* name = (const uint8_t*)check_lower_runtime_names[r];
+            const uint32_t length = hashed ? check_lower_runtime_lengths[r] : (uint32_t)strlen((const char*)name);
+            const uint64_t hash = hashed ? check_lower_runtime_hashes[r] : intern_hash_bytes(name, length);
+            const IdentId identifier = intern_find_hashed(program->identifiers, name, length, hash);
+            identifiers[spelled] = identifier;
+            spelled_runtimes[spelled] = (uint16_t)r;
+            spelled += identifier != 0;
+            r = check_lower_runtime_called_next(called, r + 1);
         }
         // On the vector path, the runtimes' declarations are found in the locals' first pass below, which loads the same
         // declaring tokens' columns (#1048: 0.02 ms of sqlite3.c's preparation on the 9700X); the scalar path's own pass
@@ -14130,14 +14151,15 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     const uint32_t argument_capacity = shared->argument_capacity;
     const bool track = program->region_count != 0 || shared->terminal;
     bool valid = true;
-    *status = (CheckProgramLowered){
-        .helpers = shared->lowered->helpers,
-        .asms = shared->lowered->asms,
-        .initializers = shared->lowered->initializers,
-        .errno_symbol = shared->lowered->errno_symbol,
-        .errno_pointer_type = shared->lowered->errno_pointer_type,
-        .token = BUSTER_CHECK_NONE,
-    };
+    // The lane's copy of the lowering, but its runtime_symbols and runtime_order, which only the program's numbers
+    // (check_lower_finish): 3.5 KB of its 3.8 KB, which each emission's writer cleared before (#1629).
+    memset(status, 0, __builtin_offsetof(CheckProgramLowered, runtime_symbols));
+    status->helpers = shared->lowered->helpers;
+    status->asms = shared->lowered->asms;
+    status->initializers = shared->lowered->initializers;
+    status->errno_symbol = shared->lowered->errno_symbol;
+    status->errno_pointer_type = shared->lowered->errno_pointer_type;
+    status->token = BUSTER_CHECK_NONE;
     *abi = (CheckLowerAbi){ .capacity = abi_capacity, .argument_capacity = argument_capacity };
 #define BUSTER_CHECK_LOWER_ABI(field, type, length) abi->field = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, type, length) : 0; valid &= abi->field != 0
     BUSTER_CHECK_LOWER_ABI(results, TypeId, abi_capacity);
@@ -14225,6 +14247,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     BUSTER_CHECK_LOWER_COLUMN(table_jumps, uint32_t, (uint64_t)shared->lowered->table_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(lifetime_entries, uint32_t, (uint64_t)program->lifetime_event_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(lifetime_locals, uint32_t, (uint64_t)program->lifetime_event_count + 1);
+    BUSTER_CHECK_LOWER_COLUMN(runtimes, uint16_t, CHECK_LOWER_RUNTIMES);
     // #1048's node templates (c_check_program_templates.c): columns for a body's range of nodes, at most
     // BUSTER_CHECK_LOWER_TEMPLATE_NODES of them, and its scratch entries. Address space alone until a body touches it.
     writer->templates = valid && shared->templates;
