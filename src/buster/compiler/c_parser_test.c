@@ -973,6 +973,8 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "__attribute__((unused)) _Static_assert(1, \"\");\n", "1:1: an attribute list cannot appear here", 0 },
     { "__attribute__((unused)) __extension__ __extension__ _Static_assert(1, \"\");\n", "1:1: an attribute list cannot appear here", 0 },
     { "[[gnu::unused]] _Static_assert(1, \"\");\n", "1:1: an attribute list cannot appear here", "c23" },
+    // `__extension__`s before a static assertion, at file scope and in a block, which clang takes (#1447).
+    { "__extension__ _Static_assert(1, \"\");\nvoid f(void) { __extension__ __extension__ _Static_assert(1, \"\"); }\n", "", 0 },
     // Attribute applicability belongs to semantic checking; the parser retains even an invalid statement attribute.
     { "void f(void) { __attribute__((unused)); }\n", "", 0, true },
     // #1127's places and messages. A GNU attribute list's and its arguments' `)` and its second `(` are expected after the

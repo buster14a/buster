@@ -228,8 +228,11 @@ specifier, or after a list that follows an `__extension__`, one is clang's
 list cannot appear here", at the first list. In a block, attributes before an
 `__extension__` stay the error they are in clang. The checker takes
 `__extension__;` and lists and `__extension__`s alone before a file-scope `;`
-as clang's extra `;`, without "declaration does not declare anything".
-`__extension__ _Static_assert(...)`, which clang takes, is still refused.
+as clang's extra `;`, without "declaration does not declare anything" (a C23
+list keeps its ignored-attribute warning). `__extension__`s before a static
+assertion, at file scope and in a block, are its statement's markers
+(`parse_scalar_extension_assertion`), specifiers of no declaration to the
+checker (`check_input_extension_assertion`).
 
 It is the fallback for what the vector path flags, the oracle every kernel is
 tested against, and the parser of a unit with errors: the vector path sends the

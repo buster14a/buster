@@ -2825,6 +2825,18 @@ static uint8_t parse_keyword_argument(IdentId keyword, uint8_t kind, uint32_t ar
     return result;
 }
 
+// Whether the `__extension__` at `i` is one of those before a static assertion, which clang's ParseExternalDeclaration
+// and its statement reader pass over (#1447): `__extension__`s alone from it to a `_Static_assert`.
+static bool parse_scalar_extension_assertion(const ParseScalar* parser, uint32_t i)
+{
+    uint32_t at = i;
+    while (parser->kinds[at] == PARSE_KIND_EXTENSION)
+    {
+        at += 1;
+    }
+    return parser->kinds[at] == PARSE_KIND_STATIC_ASSERT;
+}
+
 static void parse_scalar_item(ParseScalar* parser, uint32_t i, ParseFrame* frame, ParseStep* step)
 {
     const uint8_t kind = parser->kinds[i];
@@ -3091,6 +3103,11 @@ static void parse_scalar_item(ParseScalar* parser, uint32_t i, ParseFrame* frame
             step->role = PARSE_ROLE_LEAF_RIGHT;
             frame->mode = PARSE_MODE_KEYWORD_PAREN;
         }
+        else if (kind == PARSE_KIND_EXTENSION && parse_scalar_extension_assertion(parser, i))
+        {
+            // An `__extension__` before a static assertion (#1447), which clang takes: a marker of its statement.
+            step->role = PARSE_ROLE_SPECIFIER;
+        }
         else if (parse_scalar_starts_declaration(parser, i, false) || parse_scalar_standard_attribute(parser, i))
         {
             parse_scalar_begin_declaration(frame, BUSTER_PARSE_FRAME_NAME_REQUIRED, step);
@@ -3260,6 +3277,11 @@ static void parse_scalar_item(ParseScalar* parser, uint32_t i, ParseFrame* frame
         {
             step->role = PARSE_ROLE_LEAF_RIGHT;
             frame->mode = PARSE_MODE_KEYWORD_PAREN;
+        }
+        else if (kind == PARSE_KIND_EXTENSION && !waiting && parse_scalar_extension_assertion(parser, i))
+        {
+            // An `__extension__` before a static assertion (#1447), which clang takes: a marker of its statement.
+            step->role = PARSE_ROLE_SPECIFIER;
         }
         else if (parse_scalar_starts_declaration(parser, i, true) || parse_scalar_standard_attribute(parser, i))
         {
