@@ -825,15 +825,17 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
             for (uint32_t flags = 0; flags < (shape == 2 || shape >= 5 ? 2 : 1); flags += 1)
             {
                 test->terms = shape;
-                IrFunction function;
+                IrFunction function = { 0 };
                 const bool created = tier1_emit_test_object_fixture(test, shape, &function);
                 tier1_emit_test_expect(test, created, "construct original object IR");
                 Tier1SelectPlan plan;
                 uint32_t node = BUSTER_IR_NONE;
-                uint32_t dominance_enter[2] = {0, 1};
-                uint32_t dominance_leave[2] = {2, 2};
-                const IrDominance preheader = { .enter = dominance_enter, .leave = dominance_leave, .block_count = 2 };
-                const Tier1SelectError selected = created ? tier1_select_plan(&function, shape == 4 ? &preheader : 0, &test->output, &test->scratch, vector != 0, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+                // Every non-entry block is an immediate child of entry: the preheader's one successor or the two
+                // comparison exits. Cross-block uses, including the exits' returned parameters, need this proof.
+                uint32_t dominance_enter[3] = { 0, 1, 2 };
+                uint32_t dominance_leave[3] = { function.block_count, 2, 3 };
+                const IrDominance dominance = { .enter = dominance_enter, .leave = dominance_leave, .block_count = function.block_count };
+                const Tier1SelectError selected = created ? tier1_select_plan(&function, function.block_count > 1 ? &dominance : 0, &test->output, &test->scratch, vector != 0, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
                 tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select real object IR");
                 if (selected == TIER1_SELECT_OK)
                 {
