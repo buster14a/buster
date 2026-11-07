@@ -3061,9 +3061,11 @@ What the lowering covers past scalars (#145's programs):
   (`check_lower_quad_constant` writes a folded constant's bits), and after the
   operand where it has (`check_lower_aggregate_zero`).
   The checker folds no `__float128` constant (`check_action_float_supported`):
-  a static one with an initializer is refused as not constant, an increment by
-  name ("increments of __float128 values"), and the `q` suffix's literals as
-  invalid. `test-checker`'s `float128` program, against clang -O0's build of
+  a static one with an initializer is refused as not constant, and the `q`
+  suffix's literals as invalid. An increment or a decrement (#147) is
+  `__addtf3`'s or `__subtf3`'s of a constant 1.0, as clang -O0's is
+  (`check_lower_quad_update_emit`, a postfix one's value a copy of the object
+  before it). `test-checker`'s `float128` program, against clang -O0's build of
   it, has each of them, clean under clang's UBSan on every input.
 - **Complex values of aggregate parts (#137).** `_Complex __float128`, and
   the complex `_BitInt`s past 128 bits that the usual arithmetic conversions
@@ -7043,8 +7045,8 @@ arguments against the function. The checker now gives these as clang does.
   or a complex type is stepped: a complex one's real part by one, as C2y's and
   clang's are (`check_lower_complex_update_emit`, a postfix one's value a copy
   of the object before it; a complex of aggregate parts, past 128 bits, stays
-  "increments of complex values" in lowering, as a `__float128`'s increment
-  is "increments of __float128 values"). Any other is "cannot increment value of type
+  "increments of complex values" in lowering; a `__float128` is stepped with
+  `__addtf3` or `__subtf3`, `check_lower_quad_update_emit`). Any other is "cannot increment value of type
   T" (or "decrement"), an array's and a const record's too; a vector's, a
   record's and a function's are among them. T is the operand's type with its
   qualifiers, an `_Atomic` one's value type, spelled with the typedef its

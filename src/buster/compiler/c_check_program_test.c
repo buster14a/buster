@@ -4815,6 +4815,17 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "return (int)(h%1000003)^cmp^(int)(du%1000033)^(int)(fu%1000037)^(int)(lu%1000039)^(int)l^(int)(ul%1000081)^(int)(i128%1000099)^(int)u^sc^bo^"
             "(int)(b40%1009)^(int)(b100%1013)^ii^(int)(dd*1e6);}",
             "float128", clang);
+        // A __float128's increments and decrements (#147): libgcc's __addtf3 and __subtf3 of 1.0, a prefix one's value the
+        // object after it and a postfix one's a copy from before it, of locals, a global and through a pointer.
+        check_test_program_source(test,
+            "typedef __float128 Q;"
+            "static unsigned long fold(unsigned long h,Q q){unsigned long w[2];__builtin_memcpy(w,&q,16);return ((h^w[0])*1099511628211ul)^(w[1]*31u);}\n"
+            "#define FOLD(q) h=fold(h,(q))\n"
+            "Q gq;"
+            "int tested(int n){unsigned long h=2166136261u;Q a=n,c=a/3,*p=&c;Q b=a++;Q d=++a;Q e=c--;Q f=--c;(*p)++;++*p;gq=n;gq++;--gq;--gq;"
+            "FOLD(a);FOLD(b);FOLD(c);FOLD(d);FOLD(e);FOLD(f);FOLD(gq);FOLD(a++);FOLD(--c);FOLD(a);FOLD(c);Q big=1e40;big++;FOLD(big);"
+            "Q half=0.5;Q g=half--;FOLD(g);FOLD(half);return (int)(h%1000003)+(int)(a*4)+(int)(c*4);}",
+            "float128-increments", clang);
         // A __float128's __imag__ (#837's review): zero, folded where its operand has no effect and a frame object of zeros
         // after the operand where it has, returned directly and passed as arguments. Before the fix, the folded one was
         // refused and the other was an address of 0.
@@ -5331,8 +5342,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         // A promoted K&R parameter now converts from double to its declared float on entry.
         check_test_program_boundary(test, "float half(x)float x;{return x/2;}int tested(int n){return (int)half(n);}", "kr-promoted-parameter", true, true, 1, 0);
         check_test_program_boundary(test, "__float128 g;int tested(int n){__float128 x=n;g=x*x;return g>1;}", "float128-lowering", true, true, 1, 1);
-        check_test_program_boundary_reason(test, "int tested(int n){__float128 x=n;x++;return x>1;}", "float128-increment", true, false, 0, 1,
-                                           "increments of __float128 values");
+        check_test_program_boundary(test, "int tested(int n){__float128 x=n;x++;return x>1;}", "float128-increment", true, true, 0, 1);
         check_test_program_boundary(test, "int tested(int n){_Complex __float128 z=n;return __real__ z>1;}", "complex-float128", true, true, 0, 1);
         check_test_program_boundary(test, "int tested(int n){_Complex _Float16 z=n;return __real__ z>1;}", "complex-float16", true, true, 0, 1);
     }
