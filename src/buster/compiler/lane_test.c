@@ -581,6 +581,45 @@ static bool lane_test_arenas(void)
         }
         arena_release(&discarded);
     }
+    // arena_discard_huge (#777): the same from the first huge page boundary past the length, but only to the last one at or
+    // below the peak, so that no huge page is freed in part: the bytes past it keep what was written, the length and the
+    // peak stay, and a push past the length takes the freed pages again, zero.
+    for (uint64_t l = 0; l < BUSTER_ARRAY_LENGTH(discard_lengths); l += 1)
+    {
+        Arena discarded = arena_reserve(64ull << 20);
+        uint8_t* bytes = discarded.base != 0 ? arena_push(&discarded, written_bytes, 64) : 0;
+        lane_test_expect(&tally, bytes == discarded.base && bytes != 0, "an arena to discard in whole huge pages couldn't be pushed");
+        if (bytes != 0)
+        {
+            memset(bytes, 0x5a, written_bytes);
+            const uint64_t length = discard_lengths[l];
+            arena_pop_to(&discarded, length);
+            const uint64_t peak = discarded.peak;
+            arena_discard_huge(&discarded);
+            const uintptr_t boundary = ((uintptr_t)bytes + length + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+            const uintptr_t last = ((uintptr_t)bytes + peak) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+            const uint64_t cut = boundary - (uintptr_t)bytes;
+            const uint64_t stop = last > boundary ? last - (uintptr_t)bytes : cut;
+            bool kept = true;
+            bool zeroed = true;
+            for (uint64_t i = 0; i < written_bytes; i += 1)
+            {
+                const bool freed = i >= cut && i < stop;
+                kept &= freed || bytes[i] == 0x5a;
+                zeroed &= !freed || bytes[i] == 0;
+            }
+            lane_test_expect(&tally, stop > cut && kept && zeroed && discarded.length == length && discarded.peak == peak,
+                             "a discard in whole huge pages freed part of one, missed a whole one, or moved the length or the peak");
+            const uint8_t* again = arena_push(&discarded, stop - length, 1);
+            bool fresh = again == bytes + length;
+            for (uint64_t i = cut; fresh && i < stop; i += 1)
+            {
+                fresh = bytes[i] == 0;
+            }
+            lane_test_expect(&tally, fresh, "a push past a discard in whole huge pages didn't take its pages again, zero");
+        }
+        arena_release(&discarded);
+    }
     uint8_t borrowed_bytes[2 * BUSTER_ARENA_PAGE_BYTES];
     memset(borrowed_bytes, 0x77, sizeof(borrowed_bytes));
     Arena borrowed = { .base = borrowed_bytes, .capacity = sizeof(borrowed_bytes), .peak = sizeof(borrowed_bytes) };
