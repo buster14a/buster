@@ -1390,6 +1390,27 @@ struct CheckInputUnionTokens
     uint32_t tokens[];
 };
 
+// A GNU attribute name's rows in the attribute tables (check_input_attribute_gnu_rows, c_check_attribute.c), kept by its
+// IdentId in one of a reader's slots: a unit's attributes repeat a few names.
+typedef struct CheckInputSubjectRow CheckInputSubjectRow;
+typedef struct CheckInputGnuRows CheckInputGnuRows;
+struct CheckInputGnuRows
+{
+    // The name plus one; 0 for an empty slot.
+    uint32_t key;
+    // Its rule (check_input_attribute_rules), its facts' row (check_input_fact_gnu) and its arguments' row
+    // (check_input_arguments_rows), each its index plus one or 0 for none.
+    uint16_t rule;
+    uint16_t fact;
+    uint16_t arguments;
+    // Whether clang knows the spelling (check_input_attribute_clang_knows).
+    bool known;
+    // Its subjects' row (check_input_subject_row), or null.
+    const CheckInputSubjectRow* subject;
+};
+
+#define BUSTER_CHECK_GNU_ROW_BITS 7u
+
 struct CheckInputReader
 {
     CheckInput* output;
@@ -1524,6 +1545,8 @@ struct CheckInputReader
     IdentId library_names[BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS];
     uint64_t library_names_mask;
     bool library_names_known;
+    // The GNU attribute names' rows by name (check_input_attribute_gnu_rows), which a reader's copy keeps its own of.
+    CheckInputGnuRows gnu_rows[1u << BUSTER_CHECK_GNU_ROW_BITS];
     CheckOverloadCandidate* overload_candidates;
     uint32_t overload_capacity;
     CheckOverloadIndex overload_index;

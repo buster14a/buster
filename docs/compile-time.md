@@ -1527,6 +1527,46 @@ builds of `main` (`92252c30`) and of that change, which wrote the same object:
 | `check_program`, inclusive | 148.2 M | 145.1 M | -3.1 M |
 | `check_lower_prepare`, inclusive | 51.0 M | 49.0 M | -2.0 M |
 
+## The reader's growth since the common warnings (#1489)
+
+On the frozen sqlite3.c, [#1489](https://github.com/buster14a/buster/issues/1489) found `check-input` at 59.2 ms on
+the 9700X, against 45.0 ms before #1049 (`aca9e53a`). A `cycles:u` profile against that build put most of the
+growth in three places. Each change keeps both paths' objects and diagnostics byte for byte.
+
+- **The deprecated-use pass.** It runs in every unit that reads a `deprecated` or `unavailable` attribute, and glibc's
+  headers have some (`getwd`, `readdir_r`). It walked every token twice, a dispatch over a dozen columns per token:
+  25 M cycles of `-c sqlite3.c`. The vector path now visits only the tokens a step can act at (the identifiers whose
+  key is marked, by gathers 16 at a time, the tag keywords and names, the bodies' and scopes' braces). It counts the
+  bracket levels between those tokens from 64-token masks by popcount. The scalar path keeps both walks, and the two
+  run the same step at each token they visit (the checker guide's "Deprecated and unavailable uses").
+  `test-checker`'s deprecated walks compare the paths with each source shifted by 0 to 66 tokens.
+- **#823's unused-declaration facts** (`check_input_binding_answers`). The pass read each binding event's facts
+  (its body, parameter mark, function flags and file, through a binary search) before it tested whether the event
+  was an ordinary object's or function's declaration. It now reads them for those declarations alone. The
+  definitions' parameters are found from the bodies' openings (`check_sparse_next`) rather than from every token, and
+  a use's incomplete array type is read before its initializer's end.
+- **The attribute lookups.** Each GNU attribute item looked its name up again in the rules, clang's vocabulary, the
+  facts, the subjects and the arguments' rows. Those are binary searches with a `memcmp` per step, and a `strlen` per
+  step for the arguments. `check_input_attribute_gnu_rows` keeps a name's rows in one of 128 slots of the reader, by
+  the name's `IdentId`. A C23 spelling's lookups, which its scope changes, run each time as before.
+
+These are the medians of 11 rotated rounds on CPU 2, under the lock, with `perf stat -r 5` for the counters. The
+[measurement record](https://github.com/buster14a/buster-performance/tree/15b45a96ca6ba84320fbc180f20d1ed3c80614e7/docs/measurements/check-input-1489-2026-11-06)
+has the method, the receipts and the profiles.
+
+| | before #1049 | main `6b3a7ebd` | #1489's change |
+| --- | ---: | ---: | ---: |
+| check-input | 44.99 ms | 59.24 ms | 50.42 ms |
+| total | 105.93 ms | 138.99 ms | 130.00 ms |
+| instructions:u | 1,155.7 M | 1,636.8 M | 1,393.1 M |
+| cycles:u | 503.0 M | 674.7 M | 624.5 M |
+
+The compiler's own preprocessed main.c checks in 1,885 ms rather than 1,958 ms, with `check-input` at 1,111 ms
+rather than 1,192 ms.
+
+About 5.5 ms of the growth remains in the reader. The largest parts are the expressions' coded walk (#1038), the
+binding answers' other per-event loops, the declarations' steps, the intrinsics' setup (#893) and the controls.
+
 ## The compiler's own code and a profile (#880)
 
 [#880](https://github.com/buster14a/buster/issues/880) found the 9700X's front end starved: op cache misses 2 to 2.6

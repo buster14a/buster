@@ -965,6 +965,17 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
     }
 }
 
+// Clang's self-assignment check asks whether the operator or either bare identifier is a macro location.
+// Body tokens and substituted arguments both retain this flag; no expansion-history replay is needed.
+static bool check_common_from_macro(const Parser* parser, const Preprocessor* pp, uint32_t token)
+{
+    const uint32_t source = parser != NULL && parser->tokens.sources != NULL && token < parser->tokens.count ?
+                               parser->tokens.sources[token] : BUSTER_PP_NONE;
+    const bool result = pp != NULL && pp->output.flags != NULL && source < pp->output.count &&
+                        (pp->output.flags[source] & BUSTER_PP_FROM_MACRO) != 0;
+    return result;
+}
+
 // The warning a node carries at its own root: a lost value in an initializer, assignment, conversion or
 // call argument, a self-assignment, or a constant subscript past its bound. A conditional has no warning
 // of its own — its arms report at its slot instead.
@@ -1008,7 +1019,8 @@ static void check_common_own(CheckCommonEmission* emission, uint32_t node)
                                        graph->ops[left] == CHECK_OP_VALUE && graph->ops[right] == CHECK_OP_VALUE;
             if (!volatile_object && plain_lvalues && left_value.category == CHECK_LVALUE &&
                 right_value.category == CHECK_LVALUE && left_value.object != 0 && left_value.object == right_value.object &&
-                left_value.offset == 0 && right_value.offset == 0)
+                left_value.offset == 0 && right_value.offset == 0 && !check_common_from_macro(parser, pp, token) &&
+                !check_common_from_macro(parser, pp, graph->tokens[left]) && !check_common_from_macro(parser, pp, graph->tokens[right]))
             {
                 const String8 type_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, left_value.type, 0);
                 if (type_name.length != 0)
@@ -1657,6 +1669,35 @@ static uint32_t check_common_next_op(const CheckGraph* graph, const CheckCommonO
     return result;
 }
 
+// The comparison is already a direct child of the bitwise operator. Climb from the adjacent token on
+// the other side to that operand's source root. Group/cast/generic wrappers remain explicit, and enum
+// initializers need no retained runtime graph. A nested bitwise root ends the climb before its subtree.
+static bool check_common_bitwise_precedence(const Parser* parser, uint32_t comparison, uint32_t bitwise)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t at = comparison < bitwise ? bitwise + 1 : bitwise != 0 ? bitwise - 1 : count;
+    uint8_t role = PARSE_ROLE_NONE;
+    bool found = false;
+    for (uint32_t steps = 0; at < count && steps < count; steps += 1)
+    {
+        const uint32_t parent = parser->tree.parents[at];
+        if (parent == bitwise)
+        {
+            role = parser->tree.roles[at];
+            found = true;
+            break;
+        }
+        if (parent >= count || parent == at)
+        {
+            break;
+        }
+        at = parent;
+    }
+    const bool other_bitwise = role == PARSE_ROLE_BITWISE_AND || role == PARSE_ROLE_BITWISE_OR || role == PARSE_ROLE_BITWISE_XOR;
+    const bool result = found && !check_common_comparison_role(role) && !other_bitwise;
+    return result;
+}
+
 static void check_common_parentheses(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                      Arena* scratch)
 {
@@ -1688,7 +1729,7 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
         }
         else if (parent_role == PARSE_ROLE_BITWISE_AND || parent_role == PARSE_ROLE_BITWISE_OR || parent_role == PARSE_ROLE_BITWISE_XOR)
         {
-            if (role == PARSE_ROLE_EQUALITY || role == PARSE_ROLE_RELATIONAL)
+            if (check_common_comparison_role(role) && check_common_bitwise_precedence(parser, token, parent))
             {
                 const char* lower = check_common_operator_spelling(parser, parent);
                 const char* upper = check_common_operator_spelling(parser, token);

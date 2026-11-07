@@ -6023,7 +6023,19 @@ arguments against the function. The checker now gives these as clang does.
   `deprecated` or `unavailable` attribute was read: the uses are the tokens
   bound to another declaration, and each marked declaration is found once by
   the declaration its uses count by (its object's first, its tag's first),
-  chained in source order to the next of the same one.
+  chained in source order to the next of the same one. The scalar path walks
+  every token twice, for the contexts and for the uses. The vector path visits
+  only the tokens where a step can do anything (#1489):
+  - the identifiers whose key is marked, found 16 at a time by gathers
+    (`check_input_deprecated_marked`);
+  - the tag keywords and names, the functions' names and the marked members'
+    names;
+  - the bodies' and scopes' braces;
+  - every identifier, where a tag is marked.
+
+  It counts each visited token's bracket levels and parameter lists from
+  64-token masks by popcount. Both paths run the same step at each token they
+  visit (`check_input_availability_token`, `check_input_deprecated_use`).
 - **Deprecated and unavailable members** (`check_input_member_uses`). A
   struct's or union's member that such an attribute marks is recorded when
   its record is completed, by its index in the type table's members

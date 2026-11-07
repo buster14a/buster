@@ -6330,6 +6330,7 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
 #include "c_check_ms_struct_driver_test.c"
 #include "c_check_ignored_pragma_driver_test.c"
 #include "c_check_implicit_driver_test.c"
+#include "c_check_self_assign_driver_test.c"
 #include "c_check_kr_driver_test.c"
 #include "c_check_return_driver_test.c"
 #include "c_check_return_call_driver_test.c"
@@ -8222,6 +8223,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_large_function(&test, clang, executable, directory);
+            check_test_driver_large_asm(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
@@ -8358,6 +8360,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy)
             {
                 check_test_driver_return_calls(&test, clang, executable, directory);
+            }
+            if (!lazy)
+            {
+                check_test_driver_self_assign_macros(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

@@ -40,10 +40,12 @@ static const char* const check_input_binding_mode_names[CHECK_INPUT_BINDING_MODE
     "parser-batch",
 };
 
+// The incomplete array type a use inside its declaration's initializer sees, or 0: the type is read first, which most
+// declarations haven't, so that a use reads the initializer's end alone where there is one (#1489).
 static TypeId check_input_binding_incomplete(const CheckInputReader* reader, uint32_t declaration, uint32_t token)
 {
-    return reader->incomplete_array_types != 0 && declaration < reader->parser->tokens.count &&
-           token < check_sparse_get(reader->output->initializer_ends, declaration) ? reader->incomplete_array_types[declaration] : 0;
+    const TypeId incomplete = reader->incomplete_array_types != 0 && declaration < reader->parser->tokens.count ? reader->incomplete_array_types[declaration] : 0;
+    return incomplete != 0 && token < check_sparse_get(reader->output->initializer_ends, declaration) ? incomplete : 0;
 }
 
 // Whether a declared type is const-qualified, through an array's element type as Clang's -Wunused-const-variable sees it.
@@ -92,12 +94,17 @@ static bool check_input_unused_suppressed(const CheckInput* input, uint32_t toke
     return result;
 }
 
-// The definition parameters, whose uses alone decide -Wunused-parameter: a prototype's names never warn.
+// The definition parameters, whose uses alone decide -Wunused-parameter: a prototype's names never warn. The vector path
+// visits the bodies' openings alone (check_sparse_next), a few thousand of sqlite3.c's 716,158 tokens (#1489); the
+// scalar path, its twin, every token.
 static bool check_input_parameter_marks(const CheckInput* input, const Parser* parser, uint8_t* marks)
 {
     bool valid = parser != NULL && marks != NULL && check_sparse_present(input->body_declarations) &&
                  check_sparse_present(input->parameters) && check_sparse_present(input->parameter_next);
-    for (uint32_t opening = 0; valid && opening < parser->tokens.count; opening += 1)
+    const uint32_t count = valid ? parser->tokens.count : 0;
+    const bool vector = valid && BUSTER_VECTOR_PATH(!parser->options.scalar);
+    for (uint32_t opening = check_sparse_next(input->body_declarations, 0, count, vector); valid && opening < count;
+         opening = check_sparse_next(input->body_declarations, opening + 1, count, vector))
     {
         const uint32_t declaration = check_sparse_get(input->body_declarations, opening);
         valid = declaration == BUSTER_CHECK_NONE || declaration < parser->tokens.count;
@@ -201,6 +208,13 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
     {
         const uint32_t token = events->declaration[event];
         const uint32_t kind = events->kind[event];
+        // Only an ordinary object's or function's declaration can be unused (check_input_unused_suppressed), once: the
+        // facts below are read for those alone, not for every use and restore (#1489).
+        if (events->operation[event] != C_BINDING_DECLARE || events->key[event] / events->name_capacity != C_BINDING_ORDINARY || token >= count ||
+            (kind != C_BINDING_OBJECT && kind != C_BINDING_FUNCTION) || reported[token])
+        {
+            continue;
+        }
         const bool local = token < count && check_sparse_get(output->declaration_bodies, token) < count;
         const uint32_t parameter = token < count && parameters != NULL && parameters[token] != 0;
         const bool implicit = token < count && output->function_flags != NULL &&

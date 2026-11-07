@@ -124,6 +124,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
   `--requests` selects #1057's request tests (`c_check_request_test.c`) and the source benchmarks' preparation tests.
+  `c_check_self_assign_driver_test.c` checks #1391's macro self-assignment boundary. The warning is suppressed
+  when the assignment operator or either variable-name use comes from a macro body or substituted argument;
+  macro-produced parentheses or declarations alone do not suppress an ordinary source assignment. Original
+  fixtures compare independent counts, severity and complete diagnostic lines with Clang through default,
+  scalar and deferred reader routes, including warning flags and source diagnostic pragmas.
   `c_check_noderef_driver_test.c`, in the attribute-effects driver section,
   compares original GNU `noderef` placement, propagation, conversion,
   address-cancellation and unevaluated-expression fixtures with pinned Clang
@@ -134,6 +139,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   and GNU range initialization, including preservation and removal of marks.
   Each body has at most one warned dereference because Clang's delayed warning
   order for multiple accesses is unstable across invocations.
+  Bitwise/comparison `-Wparentheses` diagnostics distinguish a single bare comparison from eager logical
+  comparison pairs and unparenthesized bitwise chains (#1390). Parenthesized operands retain their explicit
+  grouping. Original default-warning fixtures compare complete diagnostics and independent counts against
+  pinned Clang through scalar/vector and one/three-lane readers, including warning promotion and suppression.
   Explicit void casts on a conditional arm's value path suppress the conditional's unused-result marker (#1390).
   The existing postorder conditional/comma and selected-value facts carry that discard intent through nested
   arms and transparent GNU/generic wrappers, while inner comma and division diagnostics still run.
