@@ -41,8 +41,9 @@ requirements. [Command index](README.md).
   xmm15, machine rows' roles below 16 too (#1281). Run
   `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit`,
   `test-tier1-pipeline --cross-check` and `test-tier1-masks` (hand-written mask and vector IR
-  natively against the IR's interpreter; Tier 0's mask programs and every `_k*`
-  builtin's row through the IR, SSA and the optimizer to Tier 1's native code) for bounded typed-stream/native
+  natively against the IR's interpreter; Tier 0's mask programs, every `_k*`
+  builtin's row and every comparison into a mask (#1623) through the IR, SSA and
+  the optimizer to Tier 1's native code) for bounded typed-stream/native
   validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
   pipeline's fixtures by Tier 1, Tier 0 and clang `-O0`/`-O2` (bounded kernels,
   not programs; under the 9700X's lock, CPU 2), and `benchmark-tier1-select-source
