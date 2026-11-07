@@ -4,11 +4,13 @@
 //
 // measure-compile (#518): whole compiles, each a process of its own, and where their time goes.
 //
-//   build/compiler measure-compile [--runs N] [--warmups N] [--reference PATH] [--directory DIR] [--keep] -- ARGUMENT...
+//   build/compiler measure-compile [--runs N] [--warmups N] [--reference PATH | --variant OPTION] [--directory DIR] [--keep]
+//                                  -- ARGUMENT...
 //
 // Runs this executable on ARGUMENT... -o DIR/default.o, the default compile, and on --time-stages ARGUMENT...
 // -o DIR/stages.o, whose report (c_check_clock.c) says where its time went; and with --reference, PATH on ARGUMENT...
-// -o DIR/reference.o (`tcc` with `-c ...`, say), a name without a slash looked up in PATH as a shell does. The warm-ups run in that order, then `--runs` rounds (11) in an order
+// -o DIR/reference.o (`tcc` with `-c ...`, say), a name without a slash looked up in PATH as a shell does; or with
+// --variant, this executable on OPTION ARGUMENT... -o DIR/reference.o (#172's `--variant --tier1-schedule=post`). The warm-ups run in that order, then `--runs` rounds (11) in an order
 // that rotates by round (profile_ab_tree's), so that no compile always follows the same one. Each process's wall time
 // is from fork to wait4's return. Its rusage peak includes pre-exec memory and can include waited descendants;
 // it is not an executable-only peak. Only --time-stages supplies a separate approximate post-exec RSS report.
@@ -32,6 +34,8 @@ struct MeasureCompile
     char* const* arguments;
     uint32_t argument_count;
     const char* reference;
+    // --variant's option: the reference is this executable with it.
+    const char* variant;
     uint32_t runs;
     uint32_t warmups;
     char directory[PATH_MAX];
@@ -50,6 +54,10 @@ static ProfileTimed measure_compile_one(const MeasureCompile* m, uint32_t c, cha
     if (c == 1)
     {
         argv[count++] = "--time-stages";
+    }
+    if (c == 2 && m->variant != NULL)
+    {
+        argv[count++] = (char*)m->variant;
     }
     for (uint32_t a = 0; a < m->argument_count; a += 1)
     {
@@ -355,9 +363,15 @@ static int run_measure_compile_command(int argc, char** argv)
             m.warmups = (uint32_t)value;
             i += 2;
         }
-        else if (strcmp(argv[i], "--reference") == 0 && i + 1 < argc)
+        else if (strcmp(argv[i], "--reference") == 0 && i + 1 < argc && m.variant == NULL)
         {
             m.reference = argv[i + 1];
+            i += 2;
+        }
+        else if (strcmp(argv[i], "--variant") == 0 && i + 1 < argc && m.reference == NULL)
+        {
+            m.variant = argv[i + 1];
+            m.reference = "/proc/self/exe";
             i += 2;
         }
         else if (strcmp(argv[i], "--directory") == 0 && i + 1 < argc)
@@ -384,7 +398,7 @@ static int run_measure_compile_command(int argc, char** argv)
     int result = 1;
     if (!valid)
     {
-        fprintf(stderr, "usage: measure-compile [--runs N] [--warmups N] [--reference PATH] [--directory DIR] [--keep] -- ARGUMENT...\n");
+        fprintf(stderr, "usage: measure-compile [--runs N] [--warmups N] [--reference PATH | --variant OPTION] [--directory DIR] [--keep] -- ARGUMENT...\n");
     }
     else if (!made)
     {
@@ -397,7 +411,8 @@ static int run_measure_compile_command(int argc, char** argv)
             snprintf(m.outputs[c], sizeof(m.outputs[c]), "%s/%s.o", m.directory, measure_compile_names[c]);
         }
         snprintf(m.errors, sizeof(m.errors), "%s/errors.txt", m.directory);
-        printf("measure-compile: %u warm-ups, %u runs, reference %s, in %s\n", m.warmups, m.runs, m.reference != NULL ? m.reference : "none", m.directory);
+        printf("measure-compile: %u warm-ups, %u runs, reference %s%s%s, in %s\n", m.warmups, m.runs, m.reference != NULL ? m.reference : "none",
+               m.variant != NULL ? " " : "", m.variant != NULL ? m.variant : "", m.directory);
         result = measure_compile_run(&arena, &m) == 0 ? 0 : 1;
         if (!keep)
         {
