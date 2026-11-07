@@ -18809,6 +18809,17 @@ static void pp_history_record(Preprocessor* pp, bool report)
         {
             pp_diagnostic_take(pp, replay);
         }
+        // The replay's output is the unit's, token for token (pp_tokens_same), and nothing reads it after that comparison:
+        // its history and diagnostics name the unit's tokens, which the unit's own output holds. Its columns go now rather
+        // than at pp_release, so that a unit with a diagnostic doesn't keep a second output to its end (#628: 12 MB of
+        // sqlite3.c's, in the backend's peak). Its origins stay, which a collected diagnostic's group may own.
+        arena_release(&replay->output.columns);
+        replay->output.kinds = NULL;
+        replay->output.flags = NULL;
+        replay->output.values = NULL;
+        replay->output.locations = NULL;
+        replay->output.count = 0;
+        replay->output.capacity = 0;
     }
     else
     {
