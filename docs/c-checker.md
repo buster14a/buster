@@ -3957,7 +3957,14 @@ arm a `_Generic` or `__builtin_choose_expr` selects. A dereference, a
 comparison, a comma's left operand, a `?:` condition (a GNU `?:` included), a
 selection's controlling expression and its other arms consume it or don't
 return it. `-Wempty-body` leaves an `if` that has an
-`else` alone, and `-Wparentheses` covers a `for` condition as well as an `if`,
+`else` alone. A loop and its following statement use their outer macro
+invocations' columns, including an argument-first or nested expansion (#1339).
+Only an enabled candidate whose position comes from a macro requests deferred
+expansion history; file-spelled positions and units without empty-body candidates keep
+that history deferred. The driver tests compare quiet, indented and same-line
+body, object, argument, nested and pasted macro cases with Clang on both paths,
+and check that file-spelled candidates and suppressed warnings do not replay history.
+`-Wparentheses` covers a `for` condition as well as an `if`,
 `while` or `?:` condition; a write in that condition is a use of the parameter,
 not an unused-but-set statement write. The `-Wswitch` definition is the one its
 selector's tag type names, so a fixed underlying type and a shadowing tag in
