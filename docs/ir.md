@@ -123,7 +123,7 @@ column comparisons deterministic.
 | `param` | `a` indexes `parameter_types` |
 | Unary / conversion | `a` is the source value |
 | Binary arithmetic | `a,b` are values; result/operand types agree |
-| `intrinsic` | `c` the operation (`BUSTER_IR_INTRINSIC_*`, printed after the operands). Binary scalar kinds use `a,b` of the result's type, `i32` or `i64`: `mulhu` (an `i64`'s high unsigned product), `pdep`, `pext`, `bzhi` and `bextr` with BMI semantics. Unary `splat` uses scalar `a` (`i8`, `i16`, `i32`, `i64`, `f32` or `f64`), absent `b` and a vector result, repeating the scalar's raw bits. All kinds have zero flags; see [Intrinsics](#intrinsics-141) and [scalar splats](ir-simd.md#scalar-splats-1450). |
+| `intrinsic` | `c` the operation (`BUSTER_IR_INTRINSIC_*`, printed after the operands). Binary scalar kinds use `a,b` of the result's type, `i32` or `i64`: `mulhu` (an `i64`'s high unsigned product), `pdep`, `pext`, `bzhi` and `bextr` with BMI semantics. Unary `splat` uses scalar `a` (`i8`, `i16`, `i32`, `i64`, `f32` or `f64`), absent `b` and a vector result, repeating the scalar's raw bits. The unary bit operations (#1374), `tzcnt`, `bsf`, `lzcnt`, `bsr`, `popcnt` and `bswap`, use `a` of the result's type, `i32` or `i64`, and absent `b`. All kinds have zero flags; see [Intrinsics](#intrinsics-141) and [scalar splats](ir-simd.md#scalar-splats-1450). |
 | Shifts | `a` matches the result; `b` has an integer type |
 | `icmp`, `fcmp` | `a,b` are equally typed; `c` is `IrPredicate`; result is `i1` |
 | `select` | `a:i1`, `b,c` match the result type |
@@ -611,6 +611,26 @@ each against values a Zen 5's instructions give (an index, a start or a length
 at and past the width, of zero, and of the control's bytes alone), and
 `test-checker-driver`'s Tier 1 fixture of the builtins runs both units' code by
 `-march=x86-64-v3` against clang's.
+
+The bit operations (#1374) are six more unary kinds, of one `a` of the result's
+type, `i32` or `i64`, and absent `b` (`%2 = intrinsic.i64 %0 tzcnt`), each its x86
+instruction's value: `tzcnt` and `lzcnt` the counts of trailing and leading zero
+bits, the width for 0; `bsf` and `bsr` the indices of the lowest and the highest
+set bit, unspecified for 0, which only a producer whose 0 is undefined or masked
+writes (the interpreters give the width); `popcnt` the count of set bits; and
+`bswap` the bytes reversed. The C producer's bit builtins reach them through their
+rows ([the integration guide](c-builtins-integration.md)'s "The bit builtins'
+instructions"): `ir_simd_typed_bits` decodes one record of the count's form, an
+operand of 32 or 64 bits and a result of 32 bits or of the operand's width (a
+64-bit count is then the intrinsic of the operand's `i64`, truncated), or the
+byte swap's move and `bswap` of one class, and needs the features its form does
+(BMI, LZCNT and POPCNT; none for `bsf`, `bsr` and `bswap`). Tier 1 selects each
+as its one instruction (`bswap` after a move into its destination where that
+isn't its operand's register). They keep the BMI kinds' optimization boundary:
+GVN and LICM don't take them, SCCP doesn't fold them. `tests/ir/bit-intrinsics.ir`
+reads each of both widths back, `test-ir-interpreter` checks each at the width's
+boundaries and at 0, and `test-ir`'s fixtures refuse a second operand, a result
+of another type and a type other than `i32` and `i64`.
 
 ### Machine rows (#141)
 

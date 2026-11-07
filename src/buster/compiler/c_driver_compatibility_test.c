@@ -4,6 +4,7 @@
 // Real CC invocations for #1113, shared by test-checker-driver and a standalone developer harness. No production
 // helpers are reused as the oracle: Clang supplies dependency rules, GNU make consumes escaping, and ELF headers
 // plus execution check the requested link modes. Each process has a private fixture directory and bounded captures.
+// #891's separately compiled target-feature fixtures compare complete Clang diagnostics for nested emission entry points.
 #ifdef BUSTER_DRIVER_COMPAT_STANDALONE
 #define _GNU_SOURCE
 #endif
@@ -23,23 +24,7 @@
 #include <sys/wait.h>
 #include <elf.h>
 
-typedef struct CCCompatibilityTest CCCompatibilityTest;
-struct CCCompatibilityTest
-{
-    char directory[PATH_MAX];
-    char compiler[PATH_MAX];
-    const char* clang;
-    uint32_t checks;
-    uint32_t failures;
-};
-
-typedef struct CCCompatibilityRun CCCompatibilityRun;
-struct CCCompatibilityRun
-{
-    int status;
-    char* output;
-    char* errors;
-};
+#include "c_driver_compatibility_test.h"
 
 static void cc_compat_expect(CCCompatibilityTest* test, bool good, const char* name)
 {
@@ -138,6 +123,10 @@ static void cc_compat_release(CCCompatibilityRun* run)
     free(run->errors);
     *run = (CCCompatibilityRun){ .status = -1 };
 }
+
+#ifdef BUSTER_DRIVER_COMPAT_STANDALONE
+#include "c_check_target_feature_emission_test.c"
+#endif
 
 // GCC inserts empty lines before -MP rules while Clang does not. Ignore only empty physical lines at line starts;
 // preserve every other byte, notably escaped filename spaces/tabs and raw -MT expressions. These bounded oracle
@@ -722,6 +711,13 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
     cc_compat_expect(&test, ready, "prepare private CC fixtures");
     if (ready)
     {
+        const CCCompatibilityHelpers helpers = {
+            .expect = cc_compat_expect,
+            .write = cc_compat_write,
+            .run = cc_compat_run,
+            .release = cc_compat_release,
+        };
+        cc_compat_target_feature_emission(&test, &helpers);
         const char* directories[] = { "sys", "inc", "out" };
         bool files = true;
         for (uint32_t d = 0; d < 3; d += 1)

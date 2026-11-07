@@ -158,7 +158,9 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
     {
         valid = valid && check_input_read_attributes(reader, &i, frame->close, &attributes);
         // An enumerator's subject as clang's attributes name it (#147).
+        reader->attribute_declaration = name + 1;
         valid = valid && check_input_attribute_subjects(reader, attributes, BUSTER_CHECK_SUBJECT_ENUMERATOR, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        reader->attribute_declaration = 0;
         for (uint32_t a = 0; valid && attributes != 0 && a < attributes->count; a += 1)
         {
             CheckInputAttribute* attribute = attributes->records + a;

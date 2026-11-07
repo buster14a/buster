@@ -1316,8 +1316,12 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         const uint64_t value = end ? 0 : function->values[i];
         frame->entry += !end;
         // Validate the dispatch domain before classifying effects. Machine rows, frame addresses and tail-call
-        // intrinsics have no model here. Indirect jumps use this function's label tokens, without executing code bytes.
-        if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || kind == BUSTER_TYPED_X86 ||
+        // intrinsics have no model here, but a bit builtin's row (#1374, ir_simd_typed_bits), its intrinsic's value.
+        // Indirect jumps use this function's label tokens, without executing code bytes.
+        IrSimdTypedOperation bits = { 0 };
+        const bool bit_row = kind == BUSTER_TYPED_X86 && value < function->operation_count &&
+                             ir_simd_typed_bits(function->operations + value, UINT64_MAX, &bits) == IR_SIMD_TYPED_OK && function->operations[value].result_class == class;
+        if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || (kind == BUSTER_TYPED_X86 && !bit_row) ||
             kind == BUSTER_TYPED_FRAME_ADDRESS || kind == BUSTER_TYPED_TAIL_CALL || (class > BUSTER_TYPED_CLASS_U128 && class != BUSTER_TYPED_CLASS_MASK))
         {
             result->status = INTERPRETER_INVALID;
@@ -1388,6 +1392,10 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         else if (kind == BUSTER_TYPED_LOAD)
         {
             shape = classes[top - 1] == BUSTER_TYPED_CLASS_U64;
+        }
+        else if (kind == BUSTER_TYPED_X86)
+        {
+            shape = classes[top - 1] == bits.operand_classes[0];
         }
         else if (kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET)
         {
@@ -1588,6 +1596,10 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         case BUSTER_TYPED_NOT:
             stack[top - 1] = tier0_class_int128(class) ? interpreter_value_from_integer(~interpreter_value_integer(stack[top - 1]), IR_I128) :
                             (InterpreterValue){ .low = interpreter_typed_normalize(class, ~stack[top - 1].low) };
+            break;
+        case BUSTER_TYPED_X86:
+            stack[top - 1] = (InterpreterValue){ .low = interpreter_typed_normalize(class, ir_intrinsic_bits(bits.intrinsic - 1u, 8 * tier0_class_bytes(operand), stack[top - 1].low)) };
+            classes[top - 1] = (uint8_t)class;
             break;
         case BUSTER_TYPED_CONVERT:
             stack[top - 1] = interpreter_typed_convert_value(class, operand, stack[top - 1], &result->status);

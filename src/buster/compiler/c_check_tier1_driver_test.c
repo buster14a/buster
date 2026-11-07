@@ -2845,6 +2845,106 @@ static void check_test_driver_tier1_bmi(CheckTest* test, const char* clang, cons
                                   check_test_tier1_bmi_other_source, "-march=x86-64-v3", host, 0);
 }
 
+// The classic bit builtins' fixture (#1374, check_lower_bits_row): every one of them alone, a chain of them whose values
+// stay live across each other, and a loop that iterates a word's set bits by ctz, each count's IR intrinsic (bsf, bsr,
+// tzcnt, lzcnt, popcnt, bswap) by the target's form, on the other unit's (clang -O2's) operands, never 0 for ctz and clz.
+static const char check_test_tier1_bits_header[] =
+    "unsigned b_bswap16(unsigned short x);\n"
+    "unsigned b_bswap32(unsigned x);\n"
+    "unsigned long b_bswap64(unsigned long x);\n"
+    "int b_clz(unsigned x);\n"
+    "int b_clzl(unsigned long x);\n"
+    "int b_clzll(unsigned long long x);\n"
+    "int b_ctz(unsigned x);\n"
+    "int b_ctzl(unsigned long x);\n"
+    "int b_ctzll(unsigned long long x);\n"
+    "int b_popcount(unsigned x);\n"
+    "int b_popcountl(unsigned long x);\n"
+    "int b_parity(unsigned x);\n"
+    "int b_parityll(unsigned long long x);\n"
+    "int b_ffs(int x);\n"
+    "int b_ffsl(long x);\n"
+    "int b_ffsll(long long x);\n"
+    "unsigned long b_chain(unsigned long a, unsigned b);\n"
+    "unsigned long b_bits(unsigned long a);\n";
+
+static const char check_test_tier1_bits_source[] =
+    "#include \"tier1-bits.h\"\n"
+    "unsigned b_bswap16(unsigned short x) { return __builtin_bswap16(x); }\n"
+    "unsigned b_bswap32(unsigned x) { return __builtin_bswap32(x); }\n"
+    "unsigned long b_bswap64(unsigned long x) { return __builtin_bswap64(x); }\n"
+    "int b_clz(unsigned x) { return __builtin_clz(x); }\n"
+    "int b_clzl(unsigned long x) { return __builtin_clzl(x); }\n"
+    "int b_clzll(unsigned long long x) { return __builtin_clzll(x); }\n"
+    "int b_ctz(unsigned x) { return __builtin_ctz(x); }\n"
+    "int b_ctzl(unsigned long x) { return __builtin_ctzl(x); }\n"
+    "int b_ctzll(unsigned long long x) { return __builtin_ctzll(x); }\n"
+    "int b_popcount(unsigned x) { return __builtin_popcount(x); }\n"
+    "int b_popcountl(unsigned long x) { return __builtin_popcountl(x); }\n"
+    "int b_parity(unsigned x) { return __builtin_parity(x); }\n"
+    "int b_parityll(unsigned long long x) { return __builtin_parityll(x); }\n"
+    "int b_ffs(int x) { return __builtin_ffs(x); }\n"
+    "int b_ffsl(long x) { return __builtin_ffsl(x); }\n"
+    "int b_ffsll(long long x) { return __builtin_ffsll(x); }\n"
+    "unsigned long b_chain(unsigned long a, unsigned b)\n"
+    "{\n"
+    "    unsigned long s = __builtin_bswap64(a);\n"
+    "    int t = __builtin_ctzl(a | 1) + __builtin_clz(b | 1);\n"
+    "    unsigned u = __builtin_bswap32(b) ^ (unsigned)__builtin_popcountl(s);\n"
+    "    int v = __builtin_ffsl((long)(a & s)) + __builtin_parity(u) + __builtin_clzl(s | 2);\n"
+    "    return s * 3 + (unsigned long)t * 5 + u * 7 + (unsigned long)v + __builtin_bswap16((unsigned short)(t + v));\n"
+    "}\n"
+    "unsigned long b_bits(unsigned long a)\n"
+    "{\n"
+    "    unsigned long sum = 0;\n"
+    "    for (unsigned long m = a; m != 0; m &= m - 1)\n"
+    "    {\n"
+    "        sum = sum * 67 + (unsigned long)__builtin_ctzl(m) + (unsigned long)__builtin_popcountl(m) * 131;\n"
+    "    }\n"
+    "    return sum;\n"
+    "}\n";
+
+static const char check_test_tier1_bits_other_source[] =
+    "#include <stdio.h>\n"
+    "#include \"tier1-bits.h\"\n"
+    "static unsigned long long state = 0x9e3779b97f4a7c15ull;\n"
+    "static unsigned long long next(void) { state ^= state << 13; state ^= state >> 7; state ^= state << 17; return state; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned long long hash = 0;\n"
+    "    for (int i = 0; i < 4096; i += 1)\n"
+    "    {\n"
+    "        unsigned long long a = next() >> (i % 61);\n"
+    "        unsigned long long n = a | (1ull << (i % 64));\n"
+    "        unsigned m = (unsigned)n | (1u << (i % 32));\n"
+    "        hash = hash * 31 + b_bswap16((unsigned short)a) + b_bswap32((unsigned)a) + b_bswap64(a);\n"
+    "        hash = hash * 31 + (unsigned)(b_clz(m) + b_clzl(n) + b_clzll(n) + b_ctz(m) + b_ctzl(n) + b_ctzll(n));\n"
+    "        hash = hash * 31 + (unsigned)(b_popcount((unsigned)a) + b_popcountl(a) + b_parity((unsigned)a) + b_parityll(a));\n"
+    "        hash = hash * 31 + (unsigned)(b_ffs((int)a) + b_ffsl((long)a) + b_ffsll((long long)a) + b_ffs(0) + b_ffsl((long)(a << 40)));\n"
+    "        hash = hash * 31 + b_chain(a, (unsigned)(a >> 17)) + b_bits(a);\n"
+    "        if (i < 2) printf(\"%llx %x %d %d %lx %lx\\n\", a, b_bswap32((unsigned)a), b_ctzl(n), b_clzl(n), b_chain(a, (unsigned)a), b_bits(a));\n"
+    "    }\n"
+    "    printf(\"%llx\\n\", hash);\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds, by x86-64's baseline (bsf, bsr and the popcount recipe), x86-64-v2's popcnt and x86-64-v3's tzcnt and lzcnt,
+// each run where the host has the target's features.
+static void check_test_driver_tier1_bits(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const marches[] = { "-march=x86-64", "-march=x86-64-v2", "-march=x86-64-v3" };
+    for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(marches); t += 1)
+    {
+        const char* level = marches[t] + strlen("-march=");
+        X86Target target = { 0 };
+        const bool parsed = x86_target_parse(level, (uint32_t)strlen(level), &target);
+        const bool host = parsed && (x86_target_native().features & target.features) == target.features;
+        check_test_expect(test, parsed, "the bit builtins' fixture's target");
+        check_test_driver_tier1_units(test, clang, executable, directory, "tier1-bits", "classic bit builtins'", check_test_tier1_bits_header, check_test_tier1_bits_source,
+                                      check_test_tier1_bits_other_source, marches[t], host, 0);
+    }
+}
+
 // The wide vectors' fixture (#1624): GNU C's 32- and 64-byte vectors at targets whose registers are narrower (x86-64's
 // and x86-64-v2's 16 bytes, x86-64-v3's 32), which ir_vector_split.c splits into the target's widest: the scalar host's
 // emulations' shape (host_scalar_vectors.h: a union of a vector and its lanes, the lanes computed, the vector returned),

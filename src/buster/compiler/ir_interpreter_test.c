@@ -146,6 +146,22 @@ static void ir_interpreter_test_numbers(IrInterpreterTestTally* tally, Arena* me
         { IR_INTRINSIC, IR_I32, IR_I32, { UINT32_MAX, 0 }, { 0xff1c, 0 }, BUSTER_IR_INTRINSIC_BEXTR, { 0xf, 0 }, INTERPRETER_OK, "bextr's field past the width has zeros" },
         { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_C(0xf000000000000000), 0 }, { 0xa3c, 0 }, BUSTER_IR_INTRINSIC_BEXTR, { 0xf, 0 }, INTERPRETER_OK, "bextr reaches bit 63" },
         { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_MAX, 0 }, { 4, 0 }, BUSTER_IR_INTRINSIC_BEXTR, { 0, 0 }, INTERPRETER_OK, "bextr of length 0 is zero" },
+        // The bit operations (#1374), of one operand: tzcnt's and lzcnt's 0 the width, as bsf's and bsr's unspecified one.
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0x80000000, 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_TZCNT, { 31, 0 }, INTERPRETER_OK, "tzcnt counts to bit 31" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0, 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_TZCNT, { 32, 0 }, INTERPRETER_OK, "tzcnt of 0 is the width" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_C(0x10000000000), 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_TZCNT, { 40, 0 }, INTERPRETER_OK, "tzcnt reaches past 32 bits" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { 0, 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_TZCNT, { 64, 0 }, INTERPRETER_OK, "tzcnt of a long's 0 is 64" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0x60, 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_BSF, { 5, 0 }, INTERPRETER_OK, "bsf indexes the lowest set bit" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_C(0x8000000000000000), 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_BSF, { 63, 0 }, INTERPRETER_OK, "bsf reaches bit 63" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 1, 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_LZCNT, { 31, 0 }, INTERPRETER_OK, "lzcnt of 1 is the width less one" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0, 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_LZCNT, { 32, 0 }, INTERPRETER_OK, "lzcnt of 0 is the width" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { 0x80000000, 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_LZCNT, { 32, 0 }, INTERPRETER_OK, "lzcnt counts a long's high half" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0x80000001, 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_BSR, { 31, 0 }, INTERPRETER_OK, "bsr indexes the highest set bit" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { 0x123, 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_BSR, { 8, 0 }, INTERPRETER_OK, "bsr of a long" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { UINT32_MAX, 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_POPCNT, { 32, 0 }, INTERPRETER_OK, "popcnt of every bit" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_C(0x8000000100000001), 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_POPCNT, { 3, 0 }, INTERPRETER_OK, "popcnt of a long" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0x12345678, 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_BSWAP, { 0x78563412, 0 }, INTERPRETER_OK, "bswap of an int" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_C(0x0102030405060708), 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_BSWAP, { UINT64_C(0x0807060504030201), 0 }, INTERPRETER_OK, "bswap of a long" },
     };
     for (uint32_t t = 0; t < sizeof(cases) / sizeof(cases[0]); t += 1)
     {
@@ -167,7 +183,7 @@ static void ir_interpreter_test_numbers(IrInterpreterTestTally* tally, Arena* me
             function.block_offsets[1] = 4;
             ir_interpreter_test_instruction(&function, 0, IR_CONST, test.source, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
             ir_interpreter_test_instruction(&function, 1, IR_CONST, test.source, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            const uint8_t operands = ir_operand_table[test.op] | (test.op == IR_INTRINSIC ? 2 : 0);
+            const uint8_t operands = ir_operand_table[test.op] | (test.op == IR_INTRINSIC && test.predicate < BUSTER_IR_INTRINSIC_TZCNT ? 2 : 0);
             const uint32_t b = (operands & 2) != 0 ? 1 : BUSTER_IR_NONE;
             const uint32_t c = test.op == IR_ICMP || test.op == IR_FCMP || test.op == IR_INTRINSIC ? test.predicate : BUSTER_IR_NONE;
             ir_interpreter_test_instruction(&function, 2, test.op, test.type, 0, b, c);

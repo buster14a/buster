@@ -7546,6 +7546,114 @@ static bool check_lower_builtin_between(const TypeTable* types, TypeId type)
     return check_action_integer_type(types, type, &width, &sign) && width > 64 && width < 128;
 }
 
+// The classic bit builtins (#1374, __builtin_bswap16 to __builtin_ffsll) as an X86 row of the instruction that computes
+// each, as clang -O0's code does, in place of c_builtin_lower.c's recipe, which stays for popcount and parity at a target
+// without POPCNT. The row takes the operand at its parameter's class, of 32 or 64 bits (bswap16's zero-extended to 32),
+// and gives an int, or a byte swap's unsigned value:
+// - ctz: tzcnt with BMI, bsf without; the two agree on every operand but 0, whose count the builtin leaves undefined;
+// - clz: lzcnt with LZCNT; without, bsr's index of the highest set bit, then xored with the width less one;
+// - popcount: popcnt, with POPCNT; parity: its count's low bit;
+// - ffs: ctz's row, plus one, times whether the operand (stored in a local) isn't 0: 0 for 0, whatever the row gives;
+// - bswap: the operand moved into the result's register and swapped there; bswap16's 32-bit swap, shifted right by 16.
+// The IR takes each row as its intrinsic (ir_simd_typed_bits). Whether it lowered the call: where not, the recipe does
+// (check_lower_builtin_prepare).
+static bool check_lower_bits_row(CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckProgram* program = writer->program;
+    const CBuiltinId id = (CBuiltinId)program->input->graph.members[node];
+    const TypeId parameter = program->stream->conversions[node].operands[0].type;
+    const uint8_t class = check_lower_class(writer, parameter);
+    const uint64_t features = writer->target.features;
+    const bool swap = id >= CBUILTIN_BSWAP16 && id <= CBUILTIN_BSWAP64;
+    const bool leading = id >= CBUILTIN_CLZ && id <= CBUILTIN_CLZLL;
+    const bool ffs = id >= CBUILTIN_FFS && id <= CBUILTIN_FFSLL;
+    const bool trailing = (id >= CBUILTIN_CTZ && id <= CBUILTIN_CTZLL) || ffs;
+    const bool parity = id >= CBUILTIN_PARITY && id <= CBUILTIN_PARITYLL;
+    const bool count = (id >= CBUILTIN_POPCOUNT && id <= CBUILTIN_POPCOUNTLL) || parity;
+    const bool narrow = id == CBUILTIN_BSWAP32 || (id >= CBUILTIN_CLZ && id <= CBUILTIN_FFSLL && (id - CBUILTIN_CLZ) % 3 == 0);
+    const bool wide = id != CBUILTIN_BSWAP16 && !narrow;
+    const uint8_t expected = id == CBUILTIN_BSWAP16 ? BUSTER_TYPED_CLASS_U16 :
+                             ffs                    ? (wide ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_I32) :
+                                                      (wide ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_U32);
+    const bool lowered = (swap || leading || trailing || count) && class == expected && (!count || (features & BUSTER_X86_FEATURE(POPCNT)) != 0) &&
+                         writer->output->status == CHECK_PROGRAM_OK;
+    if (lowered)
+    {
+        const uint8_t result = swap ? (wide ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_U32) : BUSTER_TYPED_CLASS_I32;
+        const uint8_t operand = id == CBUILTIN_BSWAP16 ? BUSTER_TYPED_CLASS_U32 : class;
+        const uint8_t value = swap ? expected : BUSTER_TYPED_CLASS_I32;
+        const uint8_t r = BUSTER_TIER0_ROLE_INTEGER_RESULT;
+        const uint8_t i0 = BUSTER_TIER0_ROLE_INTEGER(0);
+        Tier0Operation row;
+        memset(&row, 0, sizeof(row));
+        if (swap)
+        {
+            row.records[0] = check_vector_lower_record(wide ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32, r, 0, i0);
+            row.records[1] = check_vector_lower_record(wide ? X86_FORM_BSWAP_R64 : X86_FORM_BSWAP_R32, 0, 0, r);
+            row.record_count = 2;
+        }
+        else
+        {
+            const bool lzcnt = (features & BUSTER_X86_FEATURE(LZCNT)) != 0;
+            const bool tzcnt = (features & BUSTER_X86_FEATURE(BMI)) != 0;
+            const uint32_t form = leading  ? (lzcnt ? (wide ? X86_FORM_LZCNT_R64_RM64 : X86_FORM_LZCNT_R32_RM32) : (wide ? X86_FORM_BSR_R64_RM64 : X86_FORM_BSR_R32_RM32)) :
+                                  trailing ? (tzcnt ? (wide ? X86_FORM_TZCNT_R64_RM64 : X86_FORM_TZCNT_R32_RM32) : (wide ? X86_FORM_BSF_R64_RM64 : X86_FORM_BSF_R32_RM32)) :
+                                             (wide ? X86_FORM_POPCNT_R64_RM64 : X86_FORM_POPCNT_R32_RM32);
+            row.records[0] = check_vector_lower_record(form, r, 0, i0);
+            row.record_count = 1;
+        }
+        row.operand_count = 1;
+        row.operand_classes[0] = operand;
+        row.result_class = result;
+        const uint32_t index = check_lower_operation_add(writer, &row);
+        const uint32_t local = ffs ? check_lower_temporary(writer, class) : BUSTER_CHECK_NONE;
+        // The tasks run in the reverse of their pushes: the call's value at its own class, after the row's consumers.
+        const uint8_t call = check_lower_value_class(writer, check_stream_type(program->stream, node));
+        if (call != value)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_CONVERT, call, 0);
+        }
+        if (id == CBUILTIN_BSWAP16)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U16, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, 16);
+        }
+        else if (leading && (features & BUSTER_X86_FEATURE(LZCNT)) == 0)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, wide ? 63 : 31);
+        }
+        else if (parity)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 1);
+        }
+        else if (ffs)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, class, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, local);
+            check_lower_instruction(writer, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 1);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_X86, result, index);
+        if (id == CBUILTIN_BSWAP16)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U32, 0);
+        }
+        else if (ffs)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_STORE_LOCAL, class, local);
+        }
+        check_lower_operand(writer, node, 0, false, parameter);
+        // An X86 entry makes the function one with vectors (Tier0Function.vectors), whatever its values' classes.
+        writer->vectors = true;
+    }
+    return lowered;
+}
+
 static void check_lower_builtin_prepare(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -11309,7 +11417,10 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_BUILTIN_UNARY || op == CHECK_OP_BUILTIN_OVERFLOW)
     {
-        check_lower_builtin_prepare(writer, node);
+        if (op == CHECK_OP_BUILTIN_OVERFLOW || !check_lower_bits_row(writer, node))
+        {
+            check_lower_builtin_prepare(writer, node);
+        }
     }
     else if (op == CHECK_OP_BUILTIN_MISC)
     {

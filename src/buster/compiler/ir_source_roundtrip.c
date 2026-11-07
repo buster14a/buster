@@ -565,6 +565,7 @@ static bool ir_source_text_tests(Arena* sources, Arena* original_output, Arena* 
         "tests/ir/atomics.ir",
         "tests/ir/wide.ir",
         "tests/ir/intrinsics.ir",
+        "tests/ir/bit-intrinsics.ir",
         "tests/ir/splats.ir",
     };
     IrSourceTextTests tests = { 0 };

@@ -1977,6 +1977,45 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         }
         if (lowered)
         {
+            if (strcmp(name, "bits-classic-boundary-values") == 0)
+            {
+                // The classic bit builtins' rows (#1374, check_lower_bits_row): each count's form the target's, on both paths.
+                const uint64_t features = target != NULL ? target->features : 0;
+                static const uint16_t forms[][2] = {
+                    { X86_FORM_TZCNT_R32_RM32, X86_FORM_TZCNT_R64_RM64 }, { X86_FORM_BSF_R32_RM32, X86_FORM_BSF_R64_RM64 },
+                    { X86_FORM_LZCNT_R32_RM32, X86_FORM_LZCNT_R64_RM64 }, { X86_FORM_BSR_R32_RM32, X86_FORM_BSR_R64_RM64 },
+                    { X86_FORM_POPCNT_R32_RM32, X86_FORM_POPCNT_R64_RM64 }, { X86_FORM_BSWAP_R32, X86_FORM_BSWAP_R64 },
+                };
+                const bool bmi = (features & BUSTER_X86_FEATURE(BMI)) != 0;
+                const bool lzcnt = (features & BUSTER_X86_FEATURE(LZCNT)) != 0;
+                const bool popcnt = (features & BUSTER_X86_FEATURE(POPCNT)) != 0;
+                const bool expected[BUSTER_ARRAY_LENGTH(forms)] = { bmi, !bmi, lzcnt, !lzcnt, popcnt, true };
+                for (uint32_t p = 0; p < 2; p += 1)
+                {
+                    uint32_t found[BUSTER_ARRAY_LENGTH(forms)][2] = { { 0 } };
+                    for (uint32_t b = 0; b < lower[p].count; b += 1)
+                    {
+                        const Tier0Function* function = lower[p].functions + b;
+                        for (uint32_t r = 0; r < function->operation_count; r += 1)
+                        {
+                            for (uint32_t k = 0; k < function->operations[r].record_count; k += 1)
+                            {
+                                for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(forms); f += 1)
+                                {
+                                    found[f][0] += function->operations[r].records[k].form == forms[f][0];
+                                    found[f][1] += function->operations[r].records[k].form == forms[f][1];
+                                }
+                            }
+                        }
+                    }
+                    bool exact = true;
+                    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(forms); f += 1)
+                    {
+                        exact &= expected[f] ? found[f][0] != 0 && found[f][1] != 0 : found[f][0] == 0 && found[f][1] == 0;
+                    }
+                    check_test_expect(test, exact, "the classic bit builtins' rows are the target's forms, of both widths, on both paths");
+                }
+            }
             if (strcmp(name, "unsigned-power-two-divmod") == 0)
             {
                 uint32_t divides = 0;

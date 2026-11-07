@@ -180,14 +180,24 @@ typedef enum IrOp
 #define BUSTER_IR_RMW_ADD 0x20u
 #define BUSTER_IR_RMW_COMPARE 0x40u
 // An IR_INTRINSIC's operation (#141), its `c`: mulhu an I64's alone, BMI operations an I32's or an I64's; splat's
-// result a vector, its only operand an I8, I16, I32, I64, F32 or F64 whose bit pattern is repeated in every lane.
+// result a vector, its only operand an I8, I16, I32, I64, F32 or F64 whose bit pattern is repeated in every lane. The bit
+// operations (#1374, from TZCNT on) take one operand, an I32 or an I64 of their result's type, as their x86 instructions
+// give them: tzcnt's and lzcnt's counts of trailing and leading zero bits, the width for 0; bsf's index of the lowest set
+// bit and bsr's of the highest, unspecified for 0 (the interpreter gives the width), which only a producer whose 0 is
+// undefined or masked takes; popcnt's count of set bits; and bswap's bytes reversed.
 #define BUSTER_IR_INTRINSIC_MULHU 0u
 #define BUSTER_IR_INTRINSIC_PDEP 1u
 #define BUSTER_IR_INTRINSIC_PEXT 2u
 #define BUSTER_IR_INTRINSIC_BZHI 3u
 #define BUSTER_IR_INTRINSIC_BEXTR 4u
 #define BUSTER_IR_INTRINSIC_SPLAT 5u
-#define BUSTER_IR_INTRINSIC_COUNT 6u
+#define BUSTER_IR_INTRINSIC_TZCNT 6u
+#define BUSTER_IR_INTRINSIC_BSF 7u
+#define BUSTER_IR_INTRINSIC_LZCNT 8u
+#define BUSTER_IR_INTRINSIC_BSR 9u
+#define BUSTER_IR_INTRINSIC_POPCNT 10u
+#define BUSTER_IR_INTRINSIC_BSWAP 11u
+#define BUSTER_IR_INTRINSIC_COUNT 12u
 
 // ICMP EQ/NE accept pointers too; the other integer predicates require integer operands. FCMP uses EQ through GE:
 // ordered comparisons, except NE, which is true for unordered inputs, as in C.
@@ -582,6 +592,12 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "bzhi",
     "bextr",
     "splat",
+    "tzcnt",
+    "bsf",
+    "lzcnt",
+    "bsr",
+    "popcnt",
+    "bswap",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -879,6 +895,26 @@ static IrSimdShape ir_simd_shape(uint32_t type)
 static bool ir_splat_scalar_type(uint32_t type)
 {
     return (type >= IR_I8 && type <= IR_I64) || type == IR_F32 || type == IR_F64;
+}
+
+// A bit operation's value (#1374, BUSTER_IR_INTRINSIC_TZCNT to BUSTER_IR_INTRINSIC_BSWAP) of `a`'s low `bits`, 32 or 64,
+// which the interpreters of the IR and of the typed stream share: bsf's and bsr's of 0, unspecified, are the width, as
+// tzcnt's and lzcnt's are.
+static uint64_t ir_intrinsic_bits(uint32_t operation, uint32_t bits, uint64_t a)
+{
+    const uint64_t x = bits == 64 ? a : a & ((UINT64_C(1) << bits) - 1);
+    uint64_t result = 0;
+    switch (operation)
+    {
+        case BUSTER_IR_INTRINSIC_TZCNT:
+        case BUSTER_IR_INTRINSIC_BSF: result = x == 0 ? bits : (uint64_t)__builtin_ctzll(x); break;
+        case BUSTER_IR_INTRINSIC_LZCNT: result = x == 0 ? bits : (uint64_t)__builtin_clzll(x) - (64 - bits); break;
+        case BUSTER_IR_INTRINSIC_BSR: result = x == 0 ? bits : 63 - (uint64_t)__builtin_clzll(x); break;
+        case BUSTER_IR_INTRINSIC_POPCNT: result = (uint64_t)__builtin_popcountll(x); break;
+        case BUSTER_IR_INTRINSIC_BSWAP: result = __builtin_bswap64(x) >> (64 - bits); break;
+        default: break;
+    }
+    return result;
 }
 
 // A splat copies bits, never evaluates a floating value. The independent lane model writes every lane and keeps
@@ -1359,6 +1395,10 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 if (c == BUSTER_IR_INTRINSIC_SPLAT)
                 {
                     valid = ir_vector_type(type) && ir_splat_scalar_type(ta) && b == BUSTER_IR_NONE;
+                }
+                else if (c >= BUSTER_IR_INTRINSIC_TZCNT && c < BUSTER_IR_INTRINSIC_COUNT)
+                {
+                    valid = (type == IR_I32 || type == IR_I64) && ta == type && b == BUSTER_IR_NONE;
                 }
                 else if (b >= f->instruction_count || f->type[b] == IR_VOID || f->type[b] >= IR_TYPE_COUNT)
                 {

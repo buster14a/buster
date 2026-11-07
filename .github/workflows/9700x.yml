@@ -208,6 +208,7 @@ jobs:
         run: |
           bash tests/ci/nightly.sh
           bash tests/ci/caches.sh
+          bash tests/ci/build-benchmarks.sh
 
       - name: Decide reuse and hardware admission
         id: decide
@@ -882,27 +883,14 @@ jobs:
           printf 'Selected host path: vector (%s)\n' "$BUSTER_HOST_ARCH"
 
       - name: Build the external Clang pragma oracle and the Zen 5 executable
-        run: |
-          oracle="$RUNNER_TEMP/preprocessor-pragma-oracle"
-          # The official libclang-cpp includes its LLVM dependencies. Link directly
-          # to it, avoiding llvm-config's Ubuntu-specific static system-library paths.
-          flags=$(llvm-config --cxxflags --ldflags)
-          read -r -a flags_array <<< "${flags//$'\n'/ }"
-          # The oracle builds beside the compiler, whose build ends with its longest unit alone (main_unit_checker.c,
-          # 35 s of 35.3) while the other CPUs idle: built first, the oracle's 2.3 s came before it.
-          taskset -c 0-7 clang++ -O2 -Wall -Werror tools/preprocessor_pragma_oracle.cpp \
-            "${flags_array[@]}" -lclang-cpp -o "$oracle" &
-          oracle_build=$!
-          taskset -c 0-7 ./build.sh --config Release
-          wait "$oracle_build"
-          "$oracle" --version
-          printf 'BUSTER_PPF_PRAGMA_ORACLE=%s\n' "$oracle" >> "$GITHUB_ENV"
-          # Correctness runs the Release configuration's own executable (BUSTER_COMPILER); the benchmarks run
-          # build/compiler, the compatibility path, which is that same file.
-          compiler=$(./build.sh print-output --config Release)
-          test build/compiler -ef "$compiler"
-          printf 'BUSTER_COMPILER=%s\n' "$compiler" >> "$GITHUB_ENV"
-          clang -dM -E -march="$BUSTER_HOST_ARCH" -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
+        id: compiler_builds
+        # The required PR-base compiler and checker placements are prepared here too (#1662). One physical-core
+        # budget covers both revisions and the oracle; every process finishes before measurements. See docs/ci-builds.md.
+        env:
+          AB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          AB_CHECKER: ${{ github.event_name == 'pull_request' && needs.changes.outputs.checker != 'false' }}
+          AB_TIER1: ${{ github.event_name == 'pull_request' && needs.changes.outputs.tier1_programs != 'false' }}
+        run: bash tools/ci/build-benchmarks.sh
 
       - name: Fetch and verify frozen corpus inputs for native correctness
         run: |
@@ -1522,20 +1510,10 @@ jobs:
           sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
           printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite/sqlite3.c" | sha256sum --check
           options=(-c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sqlite" "$sqlite/sqlite3.c")
-          ab="$RUNNER_TEMP/check-expressions-ab"
-          rm -rf "$ab"
-          mkdir -p "$ab"
-          # The shallow checkout may lack the base: fetch that public commit alone, without credentials, into a
-          # worktree of its own, which leaves this checkout as it is.
-          if ! git cat-file -e "${AB_BASE_SHA}^{commit}" 2>/dev/null; then
-              GIT_TERMINAL_PROMPT=0 timeout 60s git -c credential.helper= -c http.extraHeader= fetch \
-                  --no-tags --no-recurse-submodules --depth=1 https://github.com/buster14a/buster.git "$AB_BASE_SHA"
-          fi
-          git worktree add --detach "$ab/base" "$AB_BASE_SHA"
-          trap 'git worktree remove --force "$ab/base"' EXIT
+          ab="${BUSTER_BENCHMARK_BUILDS:?}"
+          test "$(git -C "$ab/base" rev-parse HEAD)" = "$AB_BASE_SHA"
+          # The early build barrier prepared both revisions and every placement; do not compile during measurement.
           shifts=(0 1088 2112 3136)
-          (cd "$ab/base" && taskset -c 0-7 ./build.sh shifts --config Release "$ab/main" main_unit_checker.c "${shifts[@]}")
-          taskset -c 0-7 ./build.sh shifts --config Release "$ab/head" main_unit_checker.c "${shifts[@]}"
           "$ab/main/compiler-0" "${options[@]}" -o "$ab/main.o"
           "$ab/head/compiler-0" "${options[@]}" -o "$ab/head.o"
           if ! cmp -s "$ab/main.o" "$ab/head.o"; then
@@ -1976,18 +1954,10 @@ jobs:
           base=()
           if [ -n "$AB_BASE_SHA" ]; then
               [[ "$AB_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
-              ab="$RUNNER_TEMP/tier1-rows-ab"
-              rm -rf "$ab"
-              mkdir -p "$ab"
-              # The shallow checkout may lack the base: fetch that public commit alone, without credentials, into a
-              # worktree of its own, which leaves this checkout as it is.
-              if ! git cat-file -e "${AB_BASE_SHA}^{commit}" 2>/dev/null; then
-                  GIT_TERMINAL_PROMPT=0 timeout 60s git -c credential.helper= -c http.extraHeader= fetch \
-                      --no-tags --no-recurse-submodules --depth=1 https://github.com/buster14a/buster.git "$AB_BASE_SHA"
-              fi
-              git worktree add --detach "$ab/base" "$AB_BASE_SHA"
-              trap 'git worktree remove --force "$ab/base"' EXIT
-              (cd "$ab/base" && taskset -c 0-7 ./build.sh --config Release)
+              ab="${BUSTER_BENCHMARK_BUILDS:?}"
+              test "$(git -C "$ab/base" rev-parse HEAD)" = "$AB_BASE_SHA"
+              test -x "$ab/base/build/compiler"
+              # Reuse the same regular base executable that the early placement build also produces.
               base=(--base "$ab/base/build/compiler")
           fi
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
@@ -2031,6 +2001,12 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-optimize --only vector --after-scalar 200
           taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes --only vector --after-scalar 200
+
+      - name: Remove the comparison build worktree
+        if: ${{ always() && steps.compiler_builds.outputs.directory != '' }}
+        env:
+          BUILD_DIRECTORY: ${{ steps.compiler_builds.outputs.directory }}
+        run: bash tools/ci/build-benchmarks.sh cleanup "$BUILD_DIRECTORY"
 
   agent-guide-size:
     # Fold the guide budget into the existing required context, so a separate

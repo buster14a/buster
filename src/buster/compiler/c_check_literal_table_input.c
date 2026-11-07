@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #658's bounded file-scope integer and float/double tables. Prove the complete literal/comma grammar and every warning-free
+// #658's bounded file-scope integer and float/double tables, and block-scope statics' (#1383). Prove the complete literal/comma grammar and every warning-free
 // conversion before changing reader state. One retained bytes part replaces the elements' graph and plans.
 // Unsupported syntax, formats, widths, excess elements and conversions keep the ordinary source path exactly.
 // The SIMD grammar reads bounded 64-token blocks; small literals decode 16 spellings and stores narrow 8 values.
@@ -799,7 +799,14 @@ static bool check_input_literal_table_prepare(CheckInputReader* reader, uint32_t
     const uint32_t end = check_sparse_get(input->initializer_ends, declaration);
     TypeId type = reader->declared_types[declaration];
     const uint32_t kind = type_kind(reader->types, type);
-    bool eligible = !reader->literal_tables_disabled && reader->function_body == BUSTER_CHECK_NONE && !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) &&
+    // A block-scope static (#1383) has a file-scope table's grammar and payload; its object keeps its block-scope name and
+    // no linkage. Only the source-order reader takes it: the tables are kept in declaration order for the initializers'
+    // merge (check_initializers), which a deferred unit's lanes, whose tables aren't the top level's, would break.
+    const bool block_static = reader->function_body != BUSTER_CHECK_NONE && reader->deferred == NULL && !reader->lane &&
+                              check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) &&
+                              !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL);
+    bool eligible = !reader->literal_tables_disabled && (reader->function_body == BUSTER_CHECK_NONE || block_static) &&
+                    !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) &&
                     (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY) && begin < end && end <= parser->tokens.count &&
                     end - begin >= 2 * BUSTER_CHECK_LITERAL_TABLE_MINIMUM && parser->tokens.kinds[begin] == PARSE_KIND_L_BRACE &&
                     parser->tree.parents[begin] == end - 1 && parser->tokens.kinds[end - 1] == PARSE_KIND_R_BRACE;

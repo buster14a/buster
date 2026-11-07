@@ -14149,17 +14149,92 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
     scratch_end(scratch);
 }
 
+// The escape sequences clang refuses in an unevaluated string literal (check_literal_unevaluated_escapes), which
+// pp_decode_file_name diagnoses; c_preprocessor_literal.c includes it again for its constants.
+#include "c_check_literal_diagnostic.c"
+
 // A #line's or line marker's file name from its string literal's spelling (quotes included, line splices removed), read as
-// clang reads an unevaluated string literal: a simple escape or a UCN (as UTF-8) stands for its character, and an octal or
-// hex escape is an error. Writes the name to `out` (room for the spelling's length) and returns its length, or
-// BUSTER_PP_NONE after a diagnostic.
-static uint32_t pp_decode_file_name(Preprocessor* pp, const uint8_t* spelling, uint32_t length, char* out, uint32_t location)
+// clang reads an unevaluated string literal (#147): a simple escape or a UCN (as UTF-8) stands for its character, and any
+// other escape sequence is clang's error at its backslash (check_literal_unevaluated_escapes), from the token at
+// `string_location`, after which clang drops the directive. Writes the name to `out` (room for the spelling's length) and
+// returns its length, or BUSTER_PP_NONE after a diagnostic.
+static uint32_t pp_decode_file_name(Preprocessor* pp, const uint8_t* spelling, uint32_t length, char* out, uint32_t location, uint32_t string_location)
 {
     static const char simple[] = "'\"?\\abfnrtv";
     static const char meaning[] = "'\"?\\\a\b\f\n\r\t\v";
     uint32_t result = 0;
     bool valid = length >= 2 && spelling[0] == '"' && spelling[length - 1] == '"';
     bool reported = false;
+    bool counted_error = false;
+    const uint32_t escapes = valid ? check_literal_unevaluated_escapes(spelling, length, pp->options.language.standard >= 2023, NULL, &counted_error) : 0;
+    if (escapes != 0)
+    {
+        Scratch scratch = scratch_begin(0);
+        CheckEscapeDiagnostic* diagnostics = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length));
+        bool had_error = false;
+        const uint32_t count = diagnostics != NULL ? check_literal_unevaluated_escapes(spelling, length, pp->options.language.standard >= 2023, diagnostics, &had_error) : 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const CheckEscapeDiagnostic* diagnostic = diagnostics + i;
+            const uint32_t at = pp_spelling_offset_location(pp, string_location, diagnostic->offset);
+            const uint8_t character = diagnostic->character;
+            switch (diagnostic->kind)
+            {
+                case CHECK_ESCAPE_DIAGNOSTIC_UNKNOWN:
+                    // As the preprocessor's other warnings, and its pragmas' strings' unknown escapes (pp_string_value).
+                    if (character >= 0x20 && character < 0x7f)
+                    {
+                        pp_diagnose(pp, PP_SEVERITY_WARNING, at, "unknown escape sequence '\\%c'", (char)character);
+                    }
+                    else
+                    {
+                        pp_diagnose(pp, PP_SEVERITY_WARNING, at, "unknown escape sequence '\\x%X'", (unsigned)(int32_t)(int8_t)character);
+                    }
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_HEX_DIGITS:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "\\x used with no following hex digits");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_HEX_RANGE:
+                case CHECK_ESCAPE_DIAGNOSTIC_OCTAL_RANGE:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "%s escape sequence out of range", diagnostic->kind == CHECK_ESCAPE_DIAGNOSTIC_HEX_RANGE ? "hex" : "octal");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_EMPTY:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "delimited escape sequence cannot be empty");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_DIGIT:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "invalid digit '%c' in escape sequence", (char)character);
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_OPEN_BRACE:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "expected '{' after '\\%c' escape sequence", (char)character);
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_CLOSE_BRACE:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "expected '}'");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_DIGITS:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "\\%c used with no following hex digits", (char)character);
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_INCOMPLETE:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "incomplete universal character name");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_INVALID:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "invalid universal character");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_CONTROL:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "universal character name refers to a control character");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_BASIC:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "character '%c' cannot be specified by a universal character name", (char)character);
+                    break;
+                default:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "invalid escape sequence '%.*s' in an unevaluated string literal", (int)diagnostic->length,
+                                (const char*)spelling + diagnostic->offset);
+                    break;
+            }
+        }
+        scratch_end(scratch);
+        valid = false;
+        reported = true;
+    }
     for (uint32_t i = 1; valid && i + 1 < length; i += 1)
     {
         uint8_t c = spelling[i];
@@ -14349,7 +14424,7 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
         {
             memcpy(copy, body, body_length);
         }
-        name_length = raw ? body_length : length >= 2 ? pp_decode_file_name(pp, spelling, length, copy, location) : BUSTER_PP_NONE;
+        name_length = raw ? body_length : length >= 2 ? pp_decode_file_name(pp, spelling, length, copy, location, tokens->locations[begin + 1]) : BUSTER_PP_NONE;
         name_reported = length >= 2 && name_length == BUSTER_PP_NONE;
         valid = valid && name_length != BUSTER_PP_NONE;
         name = valid ? copy : 0;
