@@ -2,6 +2,10 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Assembly input/output boundary; the reusable frontend itself does no I/O.
 
+#if __has_feature(memory_sanitizer)
+#include <sanitizer/msan_interface.h>
+#endif
+
 static Object asm_object(AsmResult* result, String8 name, Arena* arena)
 {
     ObjectUnits units;
@@ -109,6 +113,12 @@ static ssize_t asm_print_write(void* cookie, const char* bytes, size_t count)
     if (result)
     {
         memcpy(source->pointer + length, bytes, count);
+#if __has_feature(memory_sanitizer)
+        // libc initializes a cookie write's payload but its internal buffer's stores are not instrumented. Mark
+        // only the appended copy: fwrite checks its original input after returning, so touching bytes' shadow
+        // could hide a genuine uninitialized caller input when libc forwards that same pointer (#1605).
+        __msan_unpoison(source->pointer + length, count);
+#endif
         source->length = length + count;
         source->pointer[source->length] = 0;
     }
