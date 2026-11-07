@@ -6256,6 +6256,7 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
 #include "c_check_implicit_driver_test.c"
 #include "c_check_kr_driver_test.c"
 #include "c_check_return_driver_test.c"
+#include "c_check_return_call_driver_test.c"
 #include "c_check_fortify_driver_test.c"
 #include "c_check_library_driver_test.c"
 #include "c_check_transparent_driver_test.c"
@@ -8276,6 +8277,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_returns(&test, clang, executable, directory);
+            }
+            if (!lazy)
+            {
+                check_test_driver_return_calls(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
