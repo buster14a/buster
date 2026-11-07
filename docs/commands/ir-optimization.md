@@ -27,3 +27,26 @@ requirements. [Command index](README.md).
   and `benchmark-ir-optimize-passes` include preparation and rewriting costs.
   [The optimization guide](../../docs/ir-optimization.md) records supported inputs
   and the source-corpus and target measurements still required for #139.
+
+## Dominator path policy (#1352)
+
+The AUTO transformation heuristic still chooses scalar SCCP/DCE/CFG kernels
+for small or branchy functions. It no longer forces their dominator analysis
+onto the scalar solver: preparation and final verification use the caller's
+explicit scalar control, otherwise the dominator analyzer's AUTO policy.
+Explicit SCALAR and AUTO with `scalar=true` retain scalar analysis; explicit
+VECTOR ignores that Boolean as before. Other internal preparation callers
+retain their scalar argument's meaning.
+
+The existing 64 MiB matrix budget and scalar fallback are unchanged. That budget
+is a memory limit, not a measured crossover. This bounded change does not
+replace the depth-dependent scalar solver or establish linear scaling beyond
+the budget. It may increase temporary matrix storage for functions previously
+selected by the transformation heuristic. Small-unit latency, branchy-function
+scaling and all-core memory costs require approved-host qualification; no
+measured improvement is claimed here.
+
+The verified-handoff fixtures check preparation and retained-analysis path
+selection, explicit overrides, empty graphs and the independently known diamond
+relation. Every existing fixture still compares ordinary/verified optimized IR
+and all dominance relations against a fresh scalar rebuild.
