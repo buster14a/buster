@@ -2121,6 +2121,9 @@ jobs:
           persist-credentials: false
       - name: Exercise Git hooks in isolated repositories
         run: sh .githooks/test-sign-off.sh
+      # The sessions' tailnet hook may stop a daemon: its fixtures check which ones, with stand-ins for the daemon.
+      - name: Exercise the tailnet session hook with stand-in daemons
+        run: bash .claude/hooks/test-join-tailnet.sh
 
   dco-audit:
     # Informational: the pull request's own commits' sign-off trailers, pinned to its head, in the job summary
