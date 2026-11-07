@@ -17,7 +17,7 @@ static void check_data_test_string_storage(CheckTest* test, TypeTable* types)
     const TypeId chars = type_array(types, BUSTER_TYPE_CHAR, sizeof(text));
     const TypeId readonly = type_qualify(types, chars, BUSTER_TYPE_CONST);
     const TypeId pointer = type_pointer(types, BUSTER_TYPE_CHAR);
-    const CheckInitPart copied = {
+    CheckInitPart copied = {
         .kind = CHECK_INIT_BYTES,
         .type = chars,
         .bytes = text,
@@ -28,7 +28,7 @@ static void check_data_test_string_storage(CheckTest* test, TypeTable* types)
         .parts = &copied,
         .count = 1,
     };
-    const CheckInitPart address = {
+    CheckInitPart address = {
         .kind = CHECK_INIT_VALUE,
         .type = pointer,
         .value = {
