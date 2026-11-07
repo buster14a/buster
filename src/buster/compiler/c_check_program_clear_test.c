@@ -4,11 +4,14 @@
 // #1376: an automatic object's zeros past BUSTER_CHECK_LOWER_FILL_UNROLLED bytes are one call of memset, as clang -O0's
 // code clears them, rather than a loop of 8-byte stores; a volatile object keeps its stores; an aggregate's copy that
 // writes the object whole needs no clear before it; and a compound literal of the object's size initializes the object
-// in place, without its own object's clear and copy. Include after c_check_program_copy_test.c. Clang is the oracle of
-// the fixtures' results.
+// in place, without its own object's clear and copy. #1549: `T x = f(...);` of a struct or union that comes back through
+// a hidden pointer passes the object's own address as that pointer, as clang's code does at -O0, rather than an object
+// of the call's own whose bytes a COPY (or memmove) then moves. Include after c_check_program_copy_test.c. Clang is the
+// oracle of the fixtures' results.
 
 // What a unit's lowering makes of its functions, by each path: whether it calls memset (`clears`) and memmove (`moves`),
-// its largest function's typed entries, and how many of its jumps and branches go back (a loop's).
+// its largest function's typed entries, how many of its jumps and branches go back (a loop's), its COPY entries, and its
+// largest function's object bytes (Tier0Function.local_sizes', which a call's result object is one of).
 typedef struct CheckTestClearShape CheckTestClearShape;
 struct CheckTestClearShape
 {
@@ -16,6 +19,8 @@ struct CheckTestClearShape
     bool moves;
     uint32_t entries;
     uint32_t backward;
+    uint32_t copies;
+    uint32_t objects;
 };
 
 static bool check_test_program_clear_lower(const char* source, bool scalar, CheckTestClearShape* shape)
@@ -61,7 +66,14 @@ static bool check_test_program_clear_lower(const char* source, bool scalar, Chec
             const uint8_t kind = function->kinds[i];
             const bool branch = kind == BUSTER_TYPED_JUMP || kind == BUSTER_TYPED_BRANCH_TRUE || kind == BUSTER_TYPED_BRANCH_FALSE;
             shape->backward += branch && function->values[i] <= i;
+            shape->copies += kind == BUSTER_TYPED_COPY;
         }
+        uint32_t objects = 0;
+        for (uint32_t l = 0; function->local_sizes != NULL && l < function->local_count; l += 1)
+        {
+            objects += function->local_sizes[l];
+        }
+        shape->objects = objects > shape->objects ? objects : shape->objects;
     }
     parse_release(&parser);
     check_test_types_close(&types);
@@ -94,6 +106,107 @@ static void check_test_program_clear_shape(CheckTest* test, const char* source, 
     char description[192];
     snprintf(description, sizeof(description), "%s: both paths lower the same shape", name);
     check_test_expect(test, memcmp(shapes, shapes + 1, sizeof(shapes[0])) == 0, description);
+}
+
+// #1549: a unit's `T x = f(...);` by both paths, which must agree: whether it copies the call's result (a COPY entry or a
+// call of memmove) and its largest function's object bytes, the declared object's alone where the call writes it in
+// place (`objects` its size) and the call's own result object's too where a copy moves the result.
+static void check_test_program_return_shape(CheckTest* test, const char* source, const char* name, bool copies, uint32_t objects)
+{
+    CheckTestClearShape shapes[2] = { 0 };
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        char description[256];
+        snprintf(description, sizeof(description), "%s: lowers and emits by the %s path", name, path == 0 ? "scalar" : "vector");
+        check_test_expect(test, check_test_program_clear_lower(source, path == 0, shapes + path), description);
+        const bool copied = shapes[path].copies != 0 || shapes[path].moves;
+        snprintf(description, sizeof(description), "%s: a copy %u, %u object bytes (%s path: %u COPY entries, memmove %u, %u object bytes)", name, copies,
+                 objects, path == 0 ? "scalar" : "vector", shapes[path].copies, shapes[path].moves, shapes[path].objects);
+        check_test_expect(test, copied == copies && shapes[path].objects == objects, description);
+    }
+    char description[192];
+    snprintf(description, sizeof(description), "%s: both paths lower the same shape", name);
+    check_test_expect(test, memcmp(shapes, shapes + 1, sizeof(shapes[0])) == 0, description);
+}
+
+// #1549's fixtures: `T x = f(...);` in place at each size of a hidden-pointer result (past 16 bytes), below and past
+// BUSTER_TIER0_MAX_COPY_BYTES, of a struct, a union and an aligned typedef's; and the copies that stay: a 16-byte
+// result's (in registers, which the call stores in its own object), an assignment's, a volatile object's and an object
+// less aligned than the call's result; then a unit of them run against clang on a stack a call left dirty, with a
+// declaration a backward goto reaches again, whose callee reads the object's earlier value through a pointer.
+static void check_test_program_returns(CheckTest* test, const char* clang, const char* dirty)
+{
+    static const uint32_t sizes[] = { 17, 24, 128, 129, 256, 257, 4096 };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sizes); i += 1)
+    {
+        char source[512];
+        char name[96];
+        snprintf(source, sizeof(source), "struct S{unsigned char c[%u];};struct S make(int);int read(const struct S*,int);"
+                                         "int returned(int n){struct S s=make(n);return read(&s,n);}", sizes[i]);
+        snprintf(name, sizeof(name), "initializer-return-in-place-%u", sizes[i]);
+        check_test_program_return_shape(test, source, name, false, sizes[i]);
+    }
+    check_test_program_return_shape(test, "union U{long l[40];char c[3];};union U make(int);int read(const union U*,int);"
+                                          "int returned(int n){union U u=make(n);return read(&u,n);}",
+                                    "initializer-return-in-place-union", false, 320);
+    check_test_program_return_shape(test, "struct S{long a[40];};typedef struct S __attribute__((aligned(64))) A;A make(int);int read(const A*,int);"
+                                          "int returned(int n){A a=make(n);return read(&a,n);}",
+                                    "initializer-return-in-place-aligned", false, 320);
+    check_test_program_return_shape(test, "struct S{long a[40];int flags;};struct S make(int);int read(const struct S*,int);"
+                                          "int returned(int n){const struct S s=make(n);return read(&s,n);}",
+                                    "initializer-return-in-place-const", false, 328);
+    check_test_program_return_shape(test, "struct S{long x,y;};struct S make(int);int read(const struct S*,int);"
+                                          "int returned(int n){struct S s=make(n);return read(&s,n);}",
+                                    "initializer-return-registers-copy", true, 32);
+    check_test_program_return_shape(test, "struct S{long a[40];int flags;};struct S make(int);int read(const struct S*,int);"
+                                          "int returned(int n){struct S s;s=make(n);return read(&s,n);}",
+                                    "initializer-return-assignment-copy", true, 656);
+    check_test_program_return_shape(test, "struct S{long a[40];int flags;};struct S make(int);int read(const volatile struct S*,int);"
+                                          "int returned(int n){volatile struct S s=make(n);return read(&s,n);}",
+                                    "initializer-return-volatile-copy", true, 656);
+    check_test_program_return_shape(test, "struct S{long a[40];};typedef struct S __attribute__((aligned(64))) A;A make(int);int read(const struct S*,int);"
+                                          "int returned(int n){struct S s=make(n);return read(&s,n);}",
+                                    "initializer-return-underaligned-copy", true, 640);
+
+    char source[8192];
+    snprintf(source, sizeof(source),
+             "%s"
+             "struct B{long a[40];int flags;};struct T{unsigned char c[17];};union U{long l[20];char c[3];};"
+             "typedef struct B __attribute__((aligned(64))) A;struct L{struct L*self;char pad[200];};struct O{struct B in;};"
+             "__attribute__((noinline)) static struct B make(int n){struct B b;for(int i=0;i<40;i++)b.a[i]=n+i;b.flags=n^5;return b;}"
+             "__attribute__((noinline)) static struct B again(int k,struct B in){struct B b=in;b.flags+=k;b.a[0]=k;return b;}"
+             "__attribute__((noinline)) static struct T odd(int n){struct T t;for(int i=0;i<17;i++)t.c[i]=(unsigned char)(n+i);return t;}"
+             "__attribute__((noinline)) static union U mixed(int n){union U u;for(int i=0;i<20;i++)u.l[i]=n*i;return u;}"
+             "__attribute__((noinline)) static A aligned(int n){A a;for(int i=0;i<40;i++)a.a[i]=n-i;a.flags=n;return a;}"
+             "__attribute__((noinline)) static struct L linked(struct L*p,int n){struct L l;l.self=p;for(int i=0;i<200;i++)l.pad[i]=(char)(n+i);return l;}"
+             "__attribute__((noinline)) static struct B listed(int n,...){struct B b;for(int i=0;i<40;i++)b.a[i]=n*2+i;b.flags=n;return b;}"
+             "static struct B(*volatile pointer)(int)=make;"
+             "static long sum(const struct B*b){long s=b->flags;for(int i=0;i<40;i++)s=s*31+b->a[i];return s;}"
+             "static int expect(const struct B*b,int n){int bad=b->flags!=(n^5);for(int i=0;i<40;i++)bad|=b->a[i]!=n+i;return bad;}"
+             "__attribute__((noinline)) static int plain(int n){struct B b=make(n);int bad=expect(&b,n);b.a[n&31]=n;return bad|(b.a[n&31]!=n);}"
+             "__attribute__((noinline)) static int nested(int n){struct B b=again(make(n).flags,make(n+1));"
+             "return b.a[0]!=(n^5)||b.flags!=((n+1)^5)+(n^5)||b.a[1]!=n+2;}"
+             "__attribute__((noinline)) static int looped(int n){int bad=0;for(int k=0;k<4;k++){struct B b=make(n+k);bad|=expect(&b,n+k);b.flags=-1;b.a[3]=0;}return bad;}"
+             "__attribute__((noinline)) static int jumped(int n){int bad=0;int k=0;top:;struct B b=make(n+k);bad|=expect(&b,n+k);b.a[7]=-1;if(++k<3)goto top;return bad;}"
+             "__attribute__((noinline)) static struct B carry(const struct B*p,int n){long old=p?p->a[1]:-1;struct B b;for(int i=0;i<40;i++)b.a[i]=n+i;"
+             "b.flags=(int)old;return b;}"
+             "__attribute__((noinline)) static int revisited(int n){const struct B*p=0;int k=0;int bad=0;top:;struct B b=carry(p,n+k);"
+             "bad|=b.flags!=(p?n+k:-1)||b.a[39]!=n+k+39;p=&b;if(++k<3)goto top;return bad;}"
+             "__attribute__((noinline)) static int self(int n){struct L l=linked(&l,n);int bad=l.self!=&l;for(int i=0;i<200;i++)bad|=l.pad[i]!=(char)(n+i);return bad;}"
+             "__attribute__((noinline)) static int through(int n){struct B b=pointer(n);return expect(&b,n);}"
+             "__attribute__((noinline)) static int variadic(int n){struct B b=listed(n,1.5,n,\"x\");return b.flags!=n||b.a[39]!=n*2+39;}"
+             "__attribute__((noinline)) static int short_(int n){struct T t=odd(n);int bad=0;for(int i=0;i<17;i++)bad|=t.c[i]!=(unsigned char)(n+i);return bad;}"
+             "__attribute__((noinline)) static int unions(int n){union U u=mixed(n);int bad=0;for(int i=0;i<20;i++)bad|=u.l[i]!=n*i;return bad;}"
+             "__attribute__((noinline)) static int realigned(int n){A a=aligned(n);int bad=((unsigned long)&a&63)!=0||a.flags!=n;"
+             "for(int i=0;i<40;i++)bad|=a.a[i]!=n-i;struct B b=aligned(n+1);return bad|(b.a[2]!=n-1);}"
+             "__attribute__((noinline)) static int wrapped(int n){struct B one[1]={make(n)};struct O o={make(n+1)};return expect(one,n)|expect(&o.in,n+1);}"
+             "__attribute__((noinline)) static int kept(int n){struct B b;b=make(n);b=again(b.a[2],b);volatile struct B v=make(n+2);"
+             "return b.a[0]!=n+2||b.flags!=(n^5)+n+2||v.flags!=((n+2)^5)||v.a[39]!=n+41;}"
+             "int tested(int n){int bad=0;dirty(n);bad|=plain(n);dirty(n);bad|=nested(n)<<1;dirty(n);bad|=looped(n)<<2;dirty(n);bad|=jumped(n)<<3;"
+             "dirty(n);bad|=self(n)<<4;dirty(n);bad|=through(n)<<5;dirty(n);bad|=variadic(n)<<6;dirty(n);bad|=short_(n)<<7;dirty(n);bad|=unions(n)<<8;"
+             "dirty(n);bad|=realigned(n)<<9;dirty(n);bad|=wrapped(n)<<10;dirty(n);bad|=kept(n)<<11;dirty(n);bad|=revisited(n)<<12;struct B s=make(n);return bad?123456+bad:(int)(sum(&s)&0xffff);}",
+             dirty);
+    check_test_program_source(test, source, "initializer-returns-in-place-on-dirty-stack", clang);
 }
 
 static void check_test_program_clears(CheckTest* test, const char* clang)
@@ -207,4 +320,5 @@ static void check_test_program_clears(CheckTest* test, const char* clang)
              "dirty(n);bad|=constant(n)<<6;dirty(n);bad|=volatiles(n)<<7;return bad?123456+bad:n;}",
              dirty);
     check_test_program_source(test, source, "initializer-copies-and-literals-on-dirty-stack", clang);
+    check_test_program_returns(test, clang, dirty);
 }

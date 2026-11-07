@@ -695,6 +695,11 @@ struct CheckLowerWriter
     // __builtin_call_with_static_chain's node while its call lowers (#148): check_lower_call_body passes its chain, the
     // builtin's second argument, as the call's argument 0 in r10 (check_lower_chain_location).
     uint32_t chain;
+    // The call node that initializes a declared object whole while its call lowers (#1549, check_lower_init_call), plus
+    // one, or 0, and that object's local: check_lower_call_body passes the object's own address as the call's hidden
+    // result pointer, rather than an object of the call's own whose bytes a COPY then moves.
+    uint32_t into_call;
+    uint32_t into_local;
     CBuiltinLowerCall* builtins;
     CheckLowerBuiltinOperands* builtin_operands;
     CBuiltinLowerScratch builtin_scratch;
@@ -6087,7 +6092,11 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
         const uint32_t call = writer->call_count++;
         const uint8_t result_class = check_lower_class(writer, result);
         const bool object_result = !tail && (aggregate_result || wide_result);
+        // A declaration's call (`T x = f(...);`, check_lower_init_call) writes its result into the declared object
+        // itself, through the hidden pointer, and leaves no value: nothing copies it.
+        const bool into = object_result && aggregate_result && writer->into_call != 0 && writer->into_call == node + 1;
         const uint32_t object = !object_result ? BUSTER_CHECK_NONE :
+                                into             ? writer->into_local :
                                 aggregate_result ? check_lower_object(writer, type_size(types, result), declared > canonical ? declared : canonical) :
                                                    check_lower_temporary_of(writer, result);
         writer->call_targets[call] = builtin ? check_lower_runtime(writer, runtime) : direct ? writer->program->object_symbols[value.object] : 0;
@@ -6153,7 +6162,7 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
             writer->aggregates |= aggregate || wide || vector != 0;
             writer->argument_classes[writer->argument_count++] = class;
         }
-        if (aggregate_result && object_result)
+        if (aggregate_result && object_result && !into)
         {
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
         }
@@ -12462,6 +12471,50 @@ static uint32_t check_lower_init_literal(const CheckLowerWriter* writer, const C
     return literal != NULL && literal->object_size == size && !check_lower_init_volatile_object(writer, literal, declared) ? selected : 0;
 }
 
+// The call that initializes automatic object `local` whole as plan `plan`'s one part, plus one, or 0: `T x = f(...);`,
+// whose struct or union result comes back through a hidden pointer (BUSTER_ABI_RESULT_MEMORY) and is of the object's
+// size, and the object aligned at least as the call's own result object would be (check_lower_call_body's). The call
+// then passes the object's own address as that pointer, as clang's code does even at -O0, rather than an object of its
+// own whose bytes a COPY then moves into the object (#1549). Clang's code takes the object as no other pointer's while it
+// initializes (its slot IsNotAliased), `T x = f(&x);`'s and one a backward goto reaches again, its earlier value kept
+// until then, too: the same pointer passed, a callee that reads the object through another reads what it would read
+// under clang's code. An object with a volatile part keeps the copy, which keeps a volatile copy's accesses, and so
+// does an _Atomic one. An assignment's call (`x = f();`) is no initializer's and keeps its copy, as clang's does: `f`
+// may read `x` through another pointer before it returns, whose value the hidden pointer's stores must not have changed
+// yet.
+static uint32_t check_lower_init_call(const CheckLowerWriter* writer, const CheckInitializer* plan, uint32_t local, TypeId destination)
+{
+    const CheckProgram* program = writer->program;
+    const CheckStream* stream = program->stream;
+    const TypeTable* types = program->types;
+    const CheckInitPart* part = plan->count == 1 ? plan->parts : NULL;
+    const uint32_t node = part != NULL ? part->node : BUSTER_CHECK_NONE;
+    const bool single = part != NULL && part->kind == CHECK_INIT_VALUE && part->bit_offset == 0 && part->bit_width == 0 && part->overload_candidate == 0 &&
+                        node < stream->count && program->input->graph.ops[node] == CHECK_OP_CALL &&
+                        (!writer->overloads || check_stream_overload_head(stream, node) == 0);
+    const TypeId result = single ? check_stream_type(stream, node) : 0;
+    const uint8_t kind = single ? check_action_kind(types, result) : 0;
+    const uint32_t declared = single ? type_alignment_log2(types, result) : 0;
+    const uint32_t canonical = single ? type_alignment_log2(types, type_strip_aligned(types, result)) : 0;
+    const bool record = (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && check_lower_aggregate(writer, result) &&
+                        type_unqualified(type_strip_aligned(types, result)) == type_unqualified(type_strip_aligned(types, part->type)) &&
+                        check_action_kind(types, plan->type) != BUSTER_TYPE_KIND_ATOMIC && check_action_kind(types, destination) != BUSTER_TYPE_KIND_ATOMIC;
+    const bool into = record && type_size(types, result) == writer->local_sizes[local] && writer->local_alignments[local] >= (declared > canonical ? declared : canonical) &&
+                      writer->abi_table->results[type_index(result)].kind == BUSTER_ABI_RESULT_MEMORY && !check_lower_init_volatile_object(writer, plan, destination);
+    return into ? node + 1 : 0;
+}
+
+// Call `node`, which initializes automatic object `local` whole (check_lower_init_call), lowered now as its expression's
+// task would lower it (check_lower_expand's CHECK_OP_CALL), with the object its result's: its tasks run in reverse.
+static void check_lower_call_into(CheckLowerWriter* writer, uint32_t node, uint32_t local)
+{
+    writer->into_call = node + 1;
+    writer->into_local = local;
+    writer->token = node | BUSTER_CHECK_LOWER_TOKEN_NODE;
+    check_lower_call(writer, node);
+    writer->into_call = 0;
+}
+
 static void check_lower_initializer(CheckLowerWriter* writer, CheckControl control)
 {
     const CheckProgram* program = writer->program;
@@ -12490,6 +12543,8 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
         const uint32_t pool = object ? check_lower_init_pool(&writer->output->initializers, target, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
         const uint8_t class = check_lower_class(writer, plan->type);
         const bool library = object && check_lower_init_library(writer, plan, destination);
+        // `T x = f(...);` of a hidden-pointer result: the call writes the object itself (check_lower_init_call).
+        const uint32_t call = object && pool == BUSTER_CHECK_NONE ? check_lower_init_call(writer, plan, local, destination) : 0;
         if (local == BUSTER_CHECK_NONE || (!object && class == UINT8_MAX))
         {
             check_lower_unsupported(writer, "initializers of this type");
@@ -12509,7 +12564,11 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
             const CheckInitPart* write = &plan->parts[part];
             writer->token = write->token;
             check_lower_source(writer, write->token);
-            if (object)
+            if (call != 0)
+            {
+                check_lower_call_into(writer, call - 1, local);
+            }
+            else if (object)
             {
                 check_lower_object_part(writer, target, part, local, destination);
             }
@@ -14604,6 +14663,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->tails = false;
         writer->tail = BUSTER_CHECK_NONE;
         writer->chain = BUSTER_CHECK_NONE;
+        writer->into_call = 0;
         writer->track = body.count != body.entry_count || shared->terminal;
         writer->body = program->bodies + b;
         // The function's instruction set (CheckProgram.body_targets), and so the classes it takes.

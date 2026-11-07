@@ -124,7 +124,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes; and
   #1376's clears (`c_check_program_clear_test.c`): each path's shape (memset past 128 bytes, no loop, no clear before
-  a whole object's copy, compound literals in place, a volatile object's stores) and native runs on a dirtied stack.
+  a whole object's copy, compound literals in place, a volatile object's stores) and native runs on a dirtied stack;
+  and #1549's in-place results: `T x = f();` of a hidden-pointer result with no copy and no object of the call's own
+  at each size, the copies a register result, an assignment, a volatile object and an under-aligned one keep, and a
+  native run of them against clang on a dirtied stack.
   `--program-vectors` selects the vector, x86 builtin and half-precision programs alone (`c_check_program_vector_test.c`,
   `c_check_program_x86_test.c`, `c_check_program_vector_builtins_test.c`, `c_check_program_fp16_test.c`,
   `c_check_program_half_test.c`), run against clang -O0's code where the host has their features.

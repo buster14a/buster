@@ -2038,7 +2038,16 @@ What the lowering covers past scalars (#145's programs):
   initializes it whole (`T x = (T){ ... };`, as many literals deep as there
   are) writes its parts into the object itself, as clang's code initializes it
   in place, rather than into its own object, cleared, filled and then copied;
-  neither may have a volatile part. The [9700X record](https://github.com/buster14a/buster-performance/tree/c0fddb73e121b6a8a5c30d1364954be2ccc3879e/docs/measurements/zero-initializers-1376-2026-11-06)
+  neither may have a volatile part. A call whose struct or union result comes
+  back through a hidden pointer and initializes the object whole
+  (`T x = f(...);`) is passed the object's own address as that pointer, as
+  clang's code is even at `-O0` (#1549, `check_lower_init_call`), rather than
+  an object of the call's own whose bytes a copy (memmove past 256 bytes) then
+  moves; the object must be at least as aligned as the call's result object
+  would be. A volatile or `_Atomic` object, an assignment's call (`x = f();`,
+  where `f` may read `x` before it returns), a result in registers (16 bytes
+  or fewer) and a call under a cast, a comma, a conditional or `__extension__`
+  keep the copy. The [9700X record](https://github.com/buster14a/buster-performance/tree/c0fddb73e121b6a8a5c30d1364954be2ccc3879e/docs/measurements/zero-initializers-1376-2026-11-06)
   compares `2dc50258` with `ba2e80ab`: `int a[256] = { 0 };` takes 26.3 → 4.3 ns
   a call in Tier 0 and 26.8 → 3.4 ns in Tier 1 (clang `-O0`: 4.3), and
   `struct Big b = (struct Big){ .flags = i };` 19.0 → 2.6 ns (clang `-O0`:
