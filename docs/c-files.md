@@ -208,7 +208,13 @@ names once that pays:
   run, after its listing. The cache already keeps every path's answer for the
   whole run, as #653 says, so no unit could have seen it after looking once.
   A process out of descriptors gets "not found" for a ruled-out name, where an
-  `open` would have failed with EMFILE: as clang's search, which `stat`s, does.
+  `open` would have failed with EMFILE: as clang's search, which `stat`s, does,
+  and as the cache already answers a path it looked up before. The search then
+  goes on, and the next directory's probe fails with EMFILE and is the one
+  reported. Keeping EMFILE exact would take a call that allocates a descriptor
+  for every ruled-out name, about as dear as the probe it replaces.
+  `test-preprocessor`'s `pp_test_listing_descriptors` pins this contract
+  (#1564's review).
 - **What a lookup pays.** A unit keeps its search directories'
   `FileCacheDirectory` pointers (`Preprocessor.directory_entries`). A lookup
   finds a directory by its path only after a probe failed there, or once some
