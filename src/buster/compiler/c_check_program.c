@@ -3008,12 +3008,8 @@ static bool check_program_plans(CheckProgram* program, const Parser* parser, con
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
     bool compound_initializers = false;
-    if (initializers != NULL && initializers->count != 0)
-    {
-        // The caller lends its not-yet-live `seen` column. It is cleared before its later object/flow uses, so the
-        // shared declarators' parent paths cost linear work without another token column surviving this phase (#1378).
-        memcpy(parents, parser->tree.parents, (uint64_t)count * sizeof(uint32_t));
-    }
+    uint64_t work = 0;
+    bool cached = false;
     for (uint32_t i = initializers != 0 ? initializers->count : 0; i-- > 0;)
     {
         const uint32_t declaration = initializers->declaration_tokens[i];
@@ -3021,7 +3017,14 @@ static bool check_program_plans(CheckProgram* program, const Parser* parser, con
         uint32_t token = declaration < count && check_sparse_get(input->initializer_begins, declaration) != 0 ? check_sparse_get(input->initializer_begins, declaration) - 1 : BUSTER_CHECK_NONE;
         if (!compound)
         {
-            token = check_input_cached_ancestor(parser, token, parents, false);
+            if (!cached && count != 0 && work >= count)
+            {
+                // Only copy after the uncached walks paid a token-wide pass. The caller lends not-yet-live `seen`
+                // scratch, cleared before its later uses: no extra retained column or copy for cheap queries (#1378).
+                memcpy(parents, parser->tree.parents, (uint64_t)count * sizeof(uint32_t));
+                cached = true;
+            }
+            token = check_input_cached_ancestor(parser, token, cached ? parents : NULL, false, &work);
         }
         if (compound)
         {

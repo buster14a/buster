@@ -187,6 +187,65 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
     arena_release(&sparse);
 }
 
+// The cache is earned by accumulated work, not by a single initializer. One and two long walks end before the next
+// query could activate it; the third crosses that boundary. Poison distinguishes no-copy from a copied parent column.
+static void check_test_program_plan_cache(CheckTest* test)
+{
+    enum { count = 257, plans = 65, words = (count + 64) / 64 };
+    uint32_t parents[count];
+    uint8_t roles[count];
+    uint8_t declaration_bits[count] = { 0 };
+    uint32_t initializer_begins[count];
+    uint32_t declarations[plans];
+    for (uint32_t token = 0; token < count; token += 1)
+    {
+        parents[token] = token + 1;
+        roles[token] = token + 1 == count ? PARSE_ROLE_TERMINATOR : PARSE_ROLE_SEPARATOR;
+        initializer_begins[token] = token + 1;
+    }
+    for (uint32_t i = 0; i < plans; i += 1)
+    {
+        declarations[i] = i;
+    }
+    Parser parser = { 0 };
+    parser.tokens.count = count;
+    parser.tree.parents = parents;
+    parser.tree.roles = roles;
+    Arena arena = arena_reserve(UINT64_C(1) << 20);
+    CheckInput input = { .token_count = count, .declaration_bits = declaration_bits };
+    input.initializer_begins = check_sparse_from_values(&arena, initializer_begins, count);
+    const uint32_t sizes[] = { 1, 2, 3, plans };
+    for (uint32_t variant = 0; variant < BUSTER_ARRAY_LENGTH(sizes); variant += 1)
+    {
+        const uint32_t size = sizes[variant];
+        uint32_t cached[count + 1];
+        uint32_t first[count + 1];
+        uint32_t next[plans + 1];
+        uint64_t planned[words] = { 0 };
+        for (uint32_t token = 0; token <= count; token += 1)
+        {
+            cached[token] = 0xa5a5a5a5u;
+            first[token] = 0xa5a5a5a5u;
+        }
+        const CheckInitializers initializers = { .declaration_tokens = declarations, .count = size, .token_count = count };
+        CheckProgram program = { .input = &input, .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
+        const bool compound = check_program_plans(&program, &parser, &initializers, first, planned, next, cached);
+        bool same = check_sparse_present(input.initializer_begins) && !compound && program.status == CHECK_PROGRAM_OK && first[count - 1] == 0;
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            same &= parents[token] == token + 1 && (size > 2 || cached[token] == 0xa5a5a5a5u);
+            same &= check_program_bit(planned, token) == (token + 1 == count);
+        }
+        for (uint32_t i = 0; i < size; i += 1)
+        {
+            same &= next[i] == (i + 1 < size ? i + 1 : BUSTER_CHECK_NONE);
+        }
+        same &= size <= 2 || cached[0] == count - 1;
+        check_test_expect(test, same && cached[count] == 0xa5a5a5a5u, "initializer ancestry leaves cheap scratch untouched and activates compression only after its raw-walk budget");
+    }
+    arena_release(&arena);
+}
+
 // #530's scans in check_program against their exact twins, their `scalar` paths: at every count to 129 tokens, each column
 // they read ending at a PROT_NONE page, random columns around the values each test separates. The bodies' openings and the
 // initializers' tokens, with their bitset; the initializer plans' statements (check_test_program_plans, #877); the
@@ -195,6 +254,7 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
 // check_test_program_declaring); and at 64 and 128 tokens, the cases' marks, against a test of each token.
 static void check_test_program_scans(CheckTest* test)
 {
+    check_test_program_plan_cache(test);
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     uint8_t* mappings[BUSTER_CHECK_TEST_SCAN_COLUMNS] = { 0 };
     bool ready = page >= (BUSTER_CHECK_TEST_SCAN_TOKENS + 1) * sizeof(uint32_t);

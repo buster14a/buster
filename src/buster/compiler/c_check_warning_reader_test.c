@@ -49,7 +49,9 @@ static void check_test_cached_ancestors(CheckTest* test)
                         break;
                     }
                 }
-                same &= check_input_cached_ancestor(&parser, token, cached, scope != 0) == expected;
+                uint64_t work = 0;
+                same &= check_input_cached_ancestor(&parser, token, cached, scope != 0, NULL) == expected &&
+                        check_input_cached_ancestor(&parser, token, NULL, scope != 0, &work) == expected && work <= size;
             }
             check_test_expect(test, same && cached[size] == 0xa5a5a5a5u, "ancestor caches match independent walks through random parents, cycles and missing ancestors");
         }
@@ -64,11 +66,15 @@ static void check_test_cached_ancestors(CheckTest* test)
             roles[token] = PARSE_ROLE_SEPARATOR;
         }
         roles[count - 1] = PARSE_ROLE_TERMINATOR;
-        bool same = check_input_cached_ancestor(&parser, 0, cached, false) == count - 1;
+        uint64_t work = 0;
+        bool same = check_input_cached_ancestor(&parser, count - 1, NULL, false, &work) == count - 1 && work == 0;
+        same &= check_input_cached_ancestor(&parser, 0, NULL, false, &work) == count - 1 && work == count - 1;
+        same &= check_input_cached_ancestor(&parser, 1, NULL, false, &work) == count - 1 && work == 2 * count - 3;
+        same &= check_input_cached_ancestor(&parser, 0, cached, false, &work) == count - 1 && work == 2 * count - 3;
         for (uint32_t token = 0; token + 1 < count; token += 1)
         {
             same &= cached[token] == count - 1 && original[token] == token + 1 &&
-                    check_input_cached_ancestor(&parser, token, cached, false) == count - 1;
+                    check_input_cached_ancestor(&parser, token, cached, false, NULL) == count - 1;
         }
         check_test_expect(test, same, "4096 declarators share one compressed path while the parser's chain remains immutable");
     }
