@@ -275,12 +275,16 @@ decodes 16 instructions at a time (`ir_uses_batch`):
 
 - One byte permute of the opcode tables gives every instruction's `a`, `b` and
   `c` masks. One compare per column finds the optional operands that are present.
-- Two permutes per vector interleave the three columns into `ir_operand`'s
-  order (instruction by instruction, then `a`, `b`, `c`).
-- A compress by the `pdep`-spread masks keeps the operands that are values. The
-  count and fill loops then walk that stream with no per-operand decode.
+- `pdep` spreads the three column masks into one 48-bit mask. Bit `3 * lane +
+  column` is set where that instruction has that operand, so ascending bits run
+  in `ir_operand`'s order: instruction by instruction, then `a`, `b`, `c`.
+- The count and fill loops walk that mask with `tzcnt` and read each operand
+  straight from its column, with no per-operand decode and no staging buffer.
+  A first version interleaved and compressed the operands through a stack
+  buffer. On the 9700X its overlapping vector stores and scalar reloads made
+  32-instruction functions 14% to 19% slower, so it was dropped.
 - A phi's inputs or a call's arguments follow that instruction's own fixed
-  operands, so the stream is cut at each phi or call.
+  operands, so the mask is walked in segments that end at each phi or call.
 
 Both twins allocate the same arrays and build identical lists. The optimizer's
 preparation uses the scalar twin on its scalar path. Placing a use is still
