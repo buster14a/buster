@@ -678,6 +678,38 @@ static void check_test_literal_tables(CheckTest* test, const char* clang)
             check_test_program_source(test, source, "literal-table-native", clang);
         }
     }
+    // Arrays of structs of integer members (#1383), whose padding the table leaves zero, at file scope and as block-scope
+    // statics, sized and not; a struct with a double member and one with a bit-field keep the ordinary path. Each runs
+    // against clang's build.
+    for (uint32_t form = 0; form < 5; form += 1)
+    {
+        static const char* const records[] = {
+            "struct R{int a;unsigned char b;long c;short d;signed char e;};",
+            "struct R{int a;unsigned char b;long c;short d;signed char e;};",
+            "struct R{int a;unsigned char b;long c;short d;signed char e;};",
+            "struct R{int a;unsigned char b;double c;short d;signed char e;};",
+            "struct R{int a;unsigned char b:3;long c;short d;signed char e;};",
+        };
+        int used = snprintf(source, sizeof(source), "%s%sR table[%s]={", records[form], form == 1 ? "int tested(int n){static const struct " : "const struct ",
+                            form == 2 ? "" : "40");
+        for (uint32_t i = 0; i < 40 && used > 0 && (uint64_t)used < sizeof(source); i += 1)
+        {
+            used += snprintf(source + used, sizeof(source) - (uint64_t)used, "{%d,%u,%s%u,-%u,0x%x},", (int)(i * 37) - 700, (i * 13) & 7,
+                             i % 3 == 0 ? "-" : "", i * 100003, i % 300, i % 100);
+        }
+        if (used > 0 && (uint64_t)used < sizeof(source))
+        {
+            used += snprintf(source + used, sizeof(source) - (uint64_t)used,
+                             "};%s{const struct R*r=&table[(unsigned)n%%40];return r->a+r->b+(int)((long)r->c%%1000)+r->d+r->e+(int)sizeof table;}%s\n",
+                             form == 1 ? "" : "int tested(int n)", form == 1 ? "}" : "");
+        }
+        const bool fits = used > 0 && (uint64_t)used < sizeof(source);
+        check_test_expect(test, fits, "struct literal table native fixture fits");
+        if (fits)
+        {
+            check_test_program_source(test, source, "literal-table-records", clang);
+        }
+    }
     check_test_literal_table_rows_shapes(test);
     {
         typedef struct
