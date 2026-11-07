@@ -125,9 +125,86 @@ static void check_test_query_conversion_proofs(CheckTest* test, TypeTable* table
     }
 }
 
+// The replay's skip (#1628) against the replay itself: units whose constant_p queries keep the first evaluation's results
+// (no FENV_ACCESS) take the skip, and every node's value, diagnostic and warnings, and every query effect, must be the
+// replay's, by both paths. Queries nest, their results reach conditionals and other queries, and object sizes and glibc's
+// style of string builtins sit beside them.
+static void check_test_query_replay(CheckTest* test)
+{
+    static const char* const sources[] = {
+        "extern int next(void);int f(int n,double x,const char*s){int r=__builtin_constant_p(n)+__builtin_constant_p(4)+__builtin_constant_p(n*0);"
+        "r+=__builtin_constant_p(r)?1:2;r+=__builtin_constant_p(__builtin_constant_p(n))*3;double d=__builtin_constant_p(1.5)+__builtin_constant_p(x)+x;"
+        "r+=(int)__builtin_object_size(s,0)+__builtin_constant_p(\"ab\")+__builtin_constant_p(s);return r+(int)d+(__builtin_constant_p(next())?5:6);}\n",
+        "static inline int g(int x){return __builtin_constant_p(x)?x*2:x+1;}int h(int y){return g(3)+g(y)+__builtin_constant_p(g(1));}\n"
+        "enum{E=__builtin_constant_p(7)};int k[__builtin_constant_p(2)+1];int m(void){return E+(int)sizeof k;}\n",
+    };
+    for (uint32_t index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        InternTable identifiers = { 0 };
+        Preprocessor pp = { 0 };
+        const PPOptions pp_options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+        const bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
+                                  pp_run_source(&pp, "query-replay.c", (const uint8_t*)sources[index], (uint32_t)strlen(sources[index]));
+        for (uint32_t path = 0; preprocessed && path < 2; path += 1)
+        {
+            Parser parser = { 0 };
+            CheckTestTypes types = { 0 };
+            Arena storage = arena_reserve(UINT64_C(1) << 21);
+            Arena outputs[2] = { arena_reserve(UINT64_C(1) << 20), arena_reserve(UINT64_C(1) << 20) };
+            Arena scratch = arena_reserve(UINT64_C(1) << 21);
+            const ParseOptions parse_options = { .scalar = path == 0 };
+            bool ready = parse_initialize(&parser, &parse_options, pp_options.language) && parse_translation_unit(&parser, &pp) && check_test_types_open(&types);
+            CheckInputReport reports[16];
+            CheckInput input = { .reports = reports, .report_capacity = BUSTER_ARRAY_LENGTH(reports) };
+            ready = ready && check_input(&input, &parser, &pp, &types.table, &storage, &scratch);
+            CheckStream streams[2] = { 0 };
+            for (uint32_t replay = 0; ready && replay < 2; replay += 1)
+            {
+                const CheckOptions options = { .scalar = path == 0, .batch_size = BUSTER_CHECK_BATCH, .replay_queries = replay != 0 };
+                ready = check_graph_run(&types.table, &input.graph, &outputs[replay], &scratch, &options, &streams[replay]);
+            }
+            const CheckStream* skipped = &streams[0];
+            const CheckStream* replayed = &streams[1];
+            bool same = ready && skipped->report_count == 0 && replayed->report_count == 0 && skipped->query_count != 0 &&
+                        skipped->query_count == replayed->query_count && skipped->statistics.query_replay_nodes == 0 &&
+                        replayed->statistics.query_replay_nodes != 0;
+            for (uint32_t node = 0; same && node < input.graph.count; node += 1)
+            {
+                const CheckValue a = check_stream_value(skipped, node);
+                const CheckValue b = check_stream_value(replayed, node);
+                same = check_query_same_value(&a, &b) && skipped->diagnostics[node] == replayed->diagnostics[node] &&
+                       skipped->warnings[node] == replayed->warnings[node];
+            }
+            for (uint32_t q = 0; same && q < skipped->query_count; q += 1)
+            {
+                const CheckBuiltinQueryEffect* a = skipped->queries + q;
+                const CheckBuiltinQueryEffect* b = replayed->queries + q;
+                same = a->node == b->node && check_query_same_value(&a->runtime_value, &b->runtime_value) && a->evaluated_operands == b->evaluated_operands &&
+                       a->warnings == b->warnings && a->known == b->known && a->source_proof == b->source_proof && a->runtime_plan == b->runtime_plan &&
+                       a->runtime_effects.flags == b->runtime_effects.flags && a->runtime_effects.fault == b->runtime_effects.fault &&
+                       a->runtime_effects.fault_node == b->runtime_effects.fault_node && a->unsupported == b->unsupported;
+            }
+            char description[160];
+            snprintf(description, sizeof(description), "constant_p replay skip %u, %s path: the replay's values, warnings and query effects", index,
+                     path == 0 ? "scalar" : "vector");
+            check_test_expect(test, same, description);
+            arena_release(&scratch);
+            arena_release(&outputs[1]);
+            arena_release(&outputs[0]);
+            arena_release(&storage);
+            check_test_types_close(&types);
+            parse_release(&parser);
+        }
+        check_test_expect(test, preprocessed, "constant_p replay skip source preprocessing");
+        pp_release(&pp);
+        intern_release(&identifiers);
+    }
+}
+
 static __attribute__((noinline)) void check_test_query_runtime(CheckTest* test, TypeTable* table, const char* clang)
 {
     check_test_query_conversion_proofs(test, table);
+    check_test_query_replay(test);
     const CheckQueryFixture fixtures[] = {
         { "1.0/2.0", 1, 1, 0, false },
         { "1.0/3.0", 1, 0, 1, true },

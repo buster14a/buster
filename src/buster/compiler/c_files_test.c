@@ -1113,6 +1113,164 @@ static bool files_test_rounds(const char* directory, const uint32_t* lanes, uint
     return result;
 }
 
+// The listings check's headers: a root includes <h0.h> to <h49.h>, each of which includes <g0.h> to <g49.h>'s one of
+// its number, all in a second search directory after a first that holds only two headers. Round 1's searches fail 50
+// probes in the first, which lists it (file_cache_count_miss); round 2's then rule out its candidates there.
+#define BUSTER_FILES_TEST_LISTED 50u
+
+// The options of the listings check's walks and units: its two search directories.
+static PPOptions files_test_listing_options(const char* const* directories, FileCache* cache)
+{
+    PPOptions options = {
+        .language = {
+            .standard = 2017,
+            .gnu = true,
+        },
+        .no_standard_includes = true,
+        .include_directories = directories,
+        .include_directory_count = 2,
+        .quiet = true,
+        .files = cache,
+    };
+    return options;
+}
+
+// One walk of `root` on `lanes` lanes, into a cache that lists directories at `listing_misses` failed probes (0:
+// never), with the candidates the walk's listings ruled out.
+static bool files_test_listed_walk(const char* root, const char* const* directories, uint32_t lanes, uint32_t listing_misses, const char* directory, FileCache* cache,
+                                   InternTable* table, uint64_t* listed)
+{
+    static Preprocessor search;
+    PPOptions options = files_test_listing_options(directories, 0);
+    bool result = intern_initialize(table) && file_cache_initialize(cache, table, pp_prepare_options(&options));
+    cache->listing_misses = listing_misses;
+    options.files = cache;
+    result = result && pp_initialize(&search, &options, table);
+    const char* roots[1] = { root };
+    FilesRun run = { 0 };
+    result = result && files_run_initialize(&run, cache, &search, roots, 1, true, lanes);
+    char path[4200];
+    const int saved = files_test_quiet_begin(directory, path, sizeof(path));
+    result = result && lane_run(lanes, files_run_lane, &run, 0) && !run.failed;
+    const uint64_t written = files_test_quiet_end(saved, path);
+    *listed = 0;
+    for (uint32_t l = 0; run.lanes != 0 && l < run.lane_count; l += 1)
+    {
+        *listed += run.lanes[l].counts.listed;
+    }
+    if (run.cache != 0)
+    {
+        files_run_release(&run);
+    }
+    pp_release(&search);
+    return result && written == 0;
+}
+
+// A unit of `root` through a cache a walk filled, with the paths it then opened.
+static bool files_test_listed_unit(const char* root, const char* const* directories, FileCache* cache, InternTable* table, uint64_t* opened)
+{
+    static Preprocessor unit;
+    const PPOptions options = files_test_listing_options(directories, cache);
+    const bool result = pp_initialize(&unit, &options, table) && pp_run(&unit, root) && unit.errors == 0;
+    *opened = unit.probes.opens;
+    pp_release(&unit);
+    return result;
+}
+
+// The walk's listings (#653): on every lane count, a walk whose second round's candidates a listing rules out leaves
+// the cache the same paths, each with a file or none and the same error, as a walk with listings off, before any unit
+// runs; and a unit of the root then opens no path through either cache.
+static bool files_test_listings(const char* directory, const uint32_t* lanes, uint32_t lane_count)
+{
+    char first[4200];
+    char second[4200];
+    char root[4200];
+    char path[4400];
+    char text[96];
+    snprintf(first, sizeof(first), "%s/listing-first", directory);
+    snprintf(second, sizeof(second), "%s/listing-second", directory);
+    snprintf(root, sizeof(root), "%s/listing.c", directory);
+    bool result = mkdir(first, 0700) == 0 && mkdir(second, 0700) == 0;
+    snprintf(path, sizeof(path), "%s/a.h", first);
+    result = result && files_test_write(path, "int a;\n");
+    snprintf(path, sizeof(path), "%s/b.h", first);
+    result = result && files_test_write(path, "int b;\n");
+    FILE* file = result ? fopen(root, "w") : 0;
+    result = file != 0;
+    for (uint32_t h = 0; result && h < BUSTER_FILES_TEST_LISTED; h += 1)
+    {
+        fprintf(file, "#include <h%u.h>\n", h);
+        snprintf(path, sizeof(path), "%s/h%u.h", second, h);
+        snprintf(text, sizeof(text), "#ifndef H%u\n#define H%u\n#include <g%u.h>\n#endif\n", h, h, h);
+        result = files_test_write(path, text);
+        snprintf(path, sizeof(path), "%s/g%u.h", second, h);
+        snprintf(text, sizeof(text), "int g%u;\n", h);
+        result = result && files_test_write(path, text);
+    }
+    if (file != 0)
+    {
+        result = fclose(file) == 0 && result;
+    }
+    const char* const directories[2] = { first, second };
+    for (uint32_t l = 0; result && l < lane_count; l += 1)
+    {
+        static InternTable tables[2];
+        static FileCache caches[2];
+        uint64_t listed[2] = { 0 };
+        uint64_t opened[2] = { 0 };
+        for (uint32_t way = 0; way < 2; way += 1)
+        {
+            result = files_test_listed_walk(root, directories, lanes[l], way == 0 ? BUSTER_FILE_CACHE_LISTING_MISSES : 0, directory, &caches[way], &tables[way],
+                                            &listed[way]) &&
+                     result;
+        }
+        // The caches as the walks left them, before any unit adds a path.
+        result = result && listed[0] != 0 && listed[1] == 0 && caches[0].path_count == caches[1].path_count;
+        for (uint32_t p = 0; result && p < caches[0].path_count; p += 1)
+        {
+            const FileCachePath* on = &caches[0].paths[p];
+            const FileCachePath* off = file_cache_find_path(&caches[1], on->path, on->length, on->hash);
+            result = off != 0 && (on->record != BUSTER_PP_NONE) == (off->record != BUSTER_PP_NONE) &&
+                     (on->record != BUSTER_PP_NONE || on->probe.error == off->probe.error);
+            if (!result)
+            {
+                printf("listings: on %u lanes, %s: %s against %s\n", lanes[l], on->path, on->record != BUSTER_PP_NONE ? "a file" : strerror(on->probe.error),
+                       off == 0 ? "no entry" : off->record != BUSTER_PP_NONE ? "a file" : strerror(off->probe.error));
+            }
+        }
+        for (uint32_t way = 0; result && way < 2; way += 1)
+        {
+            result = files_test_listed_unit(root, directories, &caches[way], &tables[way], &opened[way]) && opened[way] == 0;
+        }
+        if (!result)
+        {
+            printf("listings: on %u lanes: %lu and %lu candidates ruled out, %u and %u paths, the unit opened %lu and %lu\n", lanes[l], (unsigned long)listed[0],
+                   (unsigned long)listed[1], caches[0].path_count, caches[1].path_count, (unsigned long)opened[0], (unsigned long)opened[1]);
+        }
+        for (uint32_t way = 0; way < 2; way += 1)
+        {
+            file_cache_release(&caches[way]);
+            intern_release(&tables[way]);
+        }
+    }
+    printf("listings: %s (the walk's ruled-out candidates' paths in the cache as without listings, on every lane count)\n", result ? "as expected" : "WRONG");
+    for (uint32_t h = 0; h < BUSTER_FILES_TEST_LISTED; h += 1)
+    {
+        snprintf(path, sizeof(path), "%s/h%u.h", second, h);
+        unlink(path);
+        snprintf(path, sizeof(path), "%s/g%u.h", second, h);
+        unlink(path);
+    }
+    snprintf(path, sizeof(path), "%s/a.h", first);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/b.h", first);
+    unlink(path);
+    unlink(root);
+    rmdir(first);
+    rmdir(second);
+    return result;
+}
+
 #define BUSTER_FILES_TEST_DEEP_LEVELS 10
 #define BUSTER_FILES_TEST_DEEP_NAME 250
 #define BUSTER_FILES_TEST_LONG_NAME 2400
@@ -1567,6 +1725,58 @@ static uint32_t files_test_lanes(const char* text, uint32_t* lanes)
     return valid ? result : 0;
 }
 
+// Regular .c and .h files, in path order. A symbolic link is not a file the walk opens, and a directory
+// entry that disappears is not read as a regular file.
+static bool files_test_sources(const char* directory)
+{
+    char root[PATH_MAX];
+    char sub[PATH_MAX];
+    char source_c[PATH_MAX];
+    char source_h[PATH_MAX];
+    char other[PATH_MAX];
+    char nested[PATH_MAX];
+    char link_path[PATH_MAX];
+    snprintf(root, sizeof(root), "%s/list", directory);
+    snprintf(sub, sizeof(sub), "%s/sub", root);
+    snprintf(source_c, sizeof(source_c), "%s/a.c", root);
+    snprintf(source_h, sizeof(source_h), "%s/b.h", root);
+    snprintf(other, sizeof(other), "%s/skip.txt", root);
+    snprintf(nested, sizeof(nested), "%s/c.c", sub);
+    snprintf(link_path, sizeof(link_path), "%s/z.c", root);
+    const bool ready = mkdir(root, 0700) == 0 && mkdir(sub, 0700) == 0 && files_test_write(source_c, "int a;\n") && files_test_write(source_h, "int b;\n") &&
+                       files_test_write(other, "no\n") && files_test_write(nested, "int c;\n") && symlink("a.c", link_path) == 0;
+    FilesSources sources = { 0 };
+    const bool listed = ready && files_list_sources(&sources, root);
+    const char* const expect[] = { source_c, source_h, nested };
+    bool names = listed && sources.count == BUSTER_ARRAY_LENGTH(expect);
+    for (uint32_t i = 0; names && i < sources.count; i += 1)
+    {
+        names = strcmp(sources.paths[i], expect[i]) == 0;
+    }
+    if (!names)
+    {
+        printf("files_list_sources: %u paths, expected a.c, b.h and sub/c.c\n", sources.count);
+    }
+    uint32_t slots = 0;
+    const bool slots_fit = files_table_slots(0, &slots) && slots == 16 && files_table_slots(8, &slots) && slots == 16 && files_table_slots(9, &slots) && slots == 32 &&
+                           files_table_slots(1u << 30, &slots) && slots == (1u << 31);
+    const uint64_t lane_cap = (uint64_t)BUSTER_LANE_MAX_COUNT * BUSTER_FILES_MAX_REQUESTS;
+    const bool slots_refuse = !files_table_slots(lane_cap, &slots) && !files_table_slots((uint64_t)1 << 32, &slots);
+    if (!slots_fit || !slots_refuse)
+    {
+        printf("files_table_slots: a lane-cap sum must not wrap a 32-bit request total\n");
+    }
+    arena_release(&sources.arena);
+    unlink(link_path);
+    unlink(nested);
+    unlink(other);
+    unlink(source_h);
+    unlink(source_c);
+    rmdir(sub);
+    rmdir(root);
+    return names && slots_fit && slots_refuse;
+}
+
 static int run_files_tests(int argument_count, char** arguments)
 {
     uint32_t lanes[BUSTER_FILES_TEST_MAX_LANES] = { 1, 2, 3, 8 };
@@ -1680,6 +1890,7 @@ static int run_files_tests(int argument_count, char** arguments)
     }
     if (passed_all && file_count == 0)
     {
+        passed_all &= files_test_sources(directory);
         for (uint32_t way = 0; way < 4; way += 1)
         {
             passed_all &= files_test_tree(directory, lanes, lane_count, way < 2, (way & 1) != 0, id_order);
@@ -1693,6 +1904,7 @@ static int run_files_tests(int argument_count, char** arguments)
         passed_all &= files_test_contexts(directory, lanes, lane_count, id_order);
         passed_all &= files_test_dollars(directory, lanes, lane_count, id_order);
         passed_all &= files_test_rounds(directory, lanes, lane_count);
+        passed_all &= files_test_listings(directory, lanes, lane_count);
         passed_all &= files_test_special(directory, lanes, lane_count, id_order);
         passed_all &= files_test_memory(directory, seed);
         signal(SIGALRM, SIG_DFL);

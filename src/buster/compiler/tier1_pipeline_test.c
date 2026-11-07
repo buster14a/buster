@@ -1440,7 +1440,7 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                         ok = ok && tier1_pipeline_expect(test, plan.vector || tier1_select_test_plan_costs(&plan, &test->arenas[TIER1_PIPELINE_SCRATCH]) == 0,
                                                          "each computed node's cost is its pattern's subtree cost, by the scalar path");
                         const uint64_t mismatches = test->burs.mismatches + test->burs.uncovered;
-                        tier1_burs_check_function(&test->burs, &function, &test->arenas[TIER1_PIPELINE_SCRATCH]);
+                        tier1_burs_check_function(&test->burs, &function, &dominance, &test->arenas[TIER1_PIPELINE_SCRATCH]);
                         ok = ok && tier1_pipeline_expect(test, test->burs.mismatches + test->burs.uncovered == mismatches,
                                                          "the bottom-up rewrite's twins classify, label and choose alike, every covered class with a candidate");
                     }
@@ -1471,6 +1471,7 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                         }
                         const uint32_t call_slots = (uint32_t)__builtin_popcount(emitted->prepared.call_save_mask);
                         tier1_pipeline_expect(test, emitted->frame.count == emitted->allocation.spill_count + call_slots + ((emitted->cfg.temp_slots & 1u) != 0), "spill values, caller-save values and the temporary slot have complete frame rows");
+                        tier1_pipeline_expect(test, tier1_emit_test_general_rows_used(emitted), "the CFG consumer's call-save rows are those its calls and fixed registers' sequences store to (#177)");
                         test->general += 1;
                         test->edge_moves += emitted->edge_moves;
                         test->edge_stubs += emitted->edge_stubs;
@@ -1492,6 +1493,7 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                         tier1_pipeline_expect(test, tier1_allocation_verify(&emitted->prepared.allocation, &emitted->allocation), "independent allocation verifier accepts actual fragments");
                         const uint32_t call_slots = (uint32_t)__builtin_popcount(emitted->prepared.call_save_mask);
                         tier1_pipeline_expect(test, emitted->frame.count == emitted->allocation.spill_count + call_slots, "spill values and reserved caller-save values have complete frame rows");
+                        tier1_pipeline_expect(test, tier1_emit_test_general_rows_used(emitted), "the straight-line consumer's call-save rows are those its calls and fixed registers' sequences store to (#177)");
                     }
                     if (ok)
                     {
@@ -1683,6 +1685,8 @@ static void tier1_pipeline_clang(Tier1PipelineTest* test, const char* clang)
     }
 }
 
+#include "buster/compiler/tier1_pipeline_boundary_test.c"
+
 static int run_tier1_pipeline_tests(int argc, char** argv)
 {
     uint64_t seed = UINT64_C(0xb138134177);
@@ -1741,6 +1745,7 @@ static int run_tier1_pipeline_tests(int argc, char** argv)
             tier1_pipeline_mutation_regression(&test);
             tier1_pipeline_deadline_regression(&test);
             tier1_pipeline_supported(&test);
+            tier1_pipeline_boundaries(&test);
             if (cross_check && test.failures == 0)
             {
                 tier1_pipeline_clang(&test, clang);

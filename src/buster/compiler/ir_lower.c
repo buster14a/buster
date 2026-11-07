@@ -108,6 +108,9 @@ struct IrTypedPlan
     uint32_t indirect;
     // Whether a call argument is one the convention ignores (#141, ir_typed_ignored_arguments).
     bool ignored_arguments;
+    // The vectors' widths a whole-vector aggregate parameter's entry copy may take (#1282, ir_typed_vector_whole): bit 0
+    // 16 bytes, bit 1 32, bit 2 64; none in a function without vectors, or for a target without AVX-512.
+    uint8_t vector_copies;
     uint32_t error_entry;
     const char* error;
     IrError error_code;
@@ -441,17 +444,31 @@ static const uint8_t ir_typed_types[16] = {
     IR_I128,
 };
 
-// Which classes are signed and which floating, as byte tables both classifications read: Tier 0's own predicates leave
-// out the memory classes (I128 signed, F80 floating), which it compiles apart.
+// A vector's type is its width's container: v4i32, v8i32 or v16i32, and for an SSE carrier of 4 or 8 bytes (#1280: the
+// narrow vectors of shuffles and conversions, MMX's __m64) f32 or f64, its bits in the vector class's registers. No new
+// type for them: the f32 and f64 values' loads, stores, constants, copies, phis and spills are bit moves already (movss
+// and movsd, movaps, xorps, vmovd and vmovq), the IR's passes have no floating arithmetic to fold them by, and the
+// lowering gives them no floating operation (only a row reads one), so their bits stay exact. A new type would have
+// taken its own moves and spills, and a place in the type masks and the SIMD model's shapes. A row reads one
+// zero-extended into its role, as Tier 0's (tier1_emit_cfg_row), whatever made it.
 static IrType ir_typed_stack_type(uint8_t class)
 {
+    static const uint8_t vectors[17] = {
+        [1] = IR_F32,
+        [2] = IR_F64,
+        [4] = IR_V4I32,
+        [8] = IR_V8I32,
+        [16] = IR_V16I32,
+    };
     // A mask's (#179) m8 to m64 by its bytes, 1 to 8 (tier0_stack_mask's order).
-    const IrType type = tier0_stack_is_mask(class)            ? (IrType)(IR_M8 + (class - BUSTER_TIER0_STACK_MASKS)) :
-                        class >= BUSTER_TYPED_CLASS_LIMIT     ? class == BUSTER_TIER0_STACK_VECTOR(16) ? IR_V4I32 : class == BUSTER_TIER0_STACK_VECTOR(32) ? IR_V8I32 : IR_V16I32 :
-                                                                (IrType)ir_typed_types[class];
+    const IrType type = tier0_stack_is_mask(class)        ? (IrType)(IR_M8 + (class - BUSTER_TIER0_STACK_MASKS)) :
+                        class >= BUSTER_TYPED_CLASS_LIMIT ? (IrType)vectors[class - BUSTER_TYPED_CLASS_LIMIT] :
+                                                            (IrType)ir_typed_types[class];
     return type;
 }
 
+// Which classes are signed and which floating, as byte tables both classifications read: Tier 0's own predicates leave
+// out the memory classes (I128 signed, F80 floating), which it compiles apart.
 static const uint8_t ir_typed_signed_classes[16] = {
     [BUSTER_TYPED_CLASS_I8] = 1,
     [BUSTER_TYPED_CLASS_I16] = 1,
@@ -649,7 +666,18 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_constant(I
     return ir_typed_emit(sink, IR_VCONST, type, constant, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
 }
 
-static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands)
+// A vector operation's lanes (#141's element types) onto instruction `id`, its flags, which start zeroed (I32's).
+static __attribute__((always_inline)) inline void ir_typed_lanes(IrTypedSink* sink, uint32_t id, IrSimdLane lane)
+{
+    if (sink->output != 0)
+    {
+        sink->output->flags[id] = (uint8_t)lane;
+    }
+}
+
+// `unmasked`: a comparison into a mask alone (#1623, IrSimdTypedOperation.compare_mask) whose writemask the typed stream
+// gives every lane of (ir_typed_unmasked), so that its mask is the vcmp's alone, with no AND.
+static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands, bool unmasked)
 {
     static const uint8_t ops[IR_SIMD_OPERATION_COUNT] = {
         [IR_SIMD_ADD] = IR_ADD,
@@ -659,29 +687,70 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         [IR_SIMD_OR] = IR_OR,
         [IR_SIMD_XOR] = IR_XOR,
         [IR_SIMD_NOT] = IR_NOT,
+        [IR_SIMD_SHL] = IR_SHL,
+        [IR_SIMD_LSHR] = IR_LSHR,
+        [IR_SIMD_ASHR] = IR_ASHR,
+        [IR_SIMD_FADD] = IR_FADD,
+        [IR_SIMD_FSUB] = IR_FSUB,
+        [IR_SIMD_FMUL] = IR_FMUL,
+        [IR_SIMD_FDIV] = IR_FDIV,
     };
     uint32_t value = BUSTER_IR_NONE;
-    if (operation->expand_mask)
+    if (operation->compare_mask)
     {
-        const IrType mask_type = type == IR_V16I32 ? IR_M16 : IR_M8;
+        // The lanes' mask, `type` (the decoder made the row's result bytes the lanes' mask's), and the writemask's AND.
+        const uint32_t mask = ir_typed_emit(sink, IR_VCMP, type, operands[0], operands[1], operation->predicate, 0);
+        ir_typed_lanes(sink, mask, operation->lane);
+        value = unmasked ? mask : ir_typed_emit(sink, IR_AND, type, mask, operands[2], BUSTER_IR_NONE, 0);
+    }
+    else if (operation->expand_mask)
+    {
+        // The comparison's mask, a bit per lane, and -1 or 0 in each lane by it, at the same lanes' width.
+        const IrType mask_type = (IrType)ir_lane_mask(type, operation->lane);
         const uint32_t mask = ir_typed_emit(sink, IR_VCMP, mask_type, operands[0], operands[1], operation->predicate, 0);
+        ir_typed_lanes(sink, mask, operation->lane);
         const uint64_t zero[8] = {0};
         const uint64_t ones[8] = { UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX };
         const uint32_t active = ir_typed_vector_constant(sink, type, ones);
         const uint32_t inactive = ir_typed_vector_constant(sink, type, zero);
         value = ir_typed_emit(sink, IR_VSELECT, type, mask, active, inactive, 0);
+        ir_typed_lanes(sink, value, operation->lane);
     }
     else
     {
         value = ir_typed_emit(sink, (IrOp)ops[operation->operation], type, operands[0], operation->operand_count == 2 ? operands[1] : BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        ir_typed_lanes(sink, value, operation->lane);
     }
     return value;
+}
+
+// Whether entry `i`, a comparison into a mask alone (#1623), has a writemask of every lane: a constant whose bits for
+// the lanes are all set, converted to the mask, just before it, as the comparison intrinsics' rows without a mask
+// operand have it (_mm512_cmpeq_epi8_mask's -1). The typed stream decides it, so both lowering passes agree.
+static bool ir_typed_unmasked(const Tier0Function* input, const IrSimdTypedOperation* operation, uint32_t i)
+{
+    const uint32_t lanes = operation->compare_mask ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) : 0;
+    const uint64_t every = lanes >= 64 ? UINT64_MAX : (UINT64_C(1) << lanes) - 1;
+    return lanes != 0 && i >= 2 && input->kinds[i - 1] == BUSTER_TYPED_CONVERT && input->classes[i - 1] == BUSTER_TYPED_CLASS_MASK && input->kinds[i - 2] == BUSTER_TYPED_CONST &&
+           input->classes[i - 2] >= BUSTER_TYPED_CLASS_I8 && input->classes[i - 2] <= BUSTER_TYPED_CLASS_U64 && (input->values[i - 2] & every) == every;
 }
 
 // A scalar BMI instruction's row (#141, ir_simd_typed_intrinsic) as its IR intrinsic of the operands its record places.
 static __attribute__((always_inline)) inline uint32_t ir_typed_intrinsic(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands)
 {
     return ir_typed_emit(sink, IR_INTRINSIC, type, operands[operation->intrinsic_operands[0]], operands[operation->intrinsic_operands[1]], operation->intrinsic - 1u, 0);
+}
+
+static __attribute__((always_inline)) inline uint32_t ir_typed_splat(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, uint32_t scalar)
+{
+    const IrType source = (IrType)ir_typed_types[operation->operand_classes[0]];
+    const uint32_t bits = 8u * operation->splat_bytes;
+    if (ir_type_bits[source] != bits)
+    {
+        const IrType narrowed = bits == 8 ? IR_I8 : bits == 16 ? IR_I16 : IR_I32;
+        scalar = ir_typed_emit(sink, IR_TRUNC, narrowed, scalar, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    }
+    return ir_typed_emit(sink, IR_INTRINSIC, type, scalar, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_SPLAT, 0);
 }
 
 // Any other X86 row (#141, ir_simd_typed_machine_row) as a row call of the operands on the stack, in their order: the row
@@ -860,7 +929,7 @@ static uint8_t ir_typed_alignment(uint8_t class)
     const bool mask = tier0_stack_is_mask(class);
     const bool vector = class >= BUSTER_TYPED_CLASS_LIMIT && !mask;
     const uint32_t bytes = vector ? (class - BUSTER_TYPED_CLASS_LIMIT) * 4u : mask ? 0 : tier0_class_bytes(class);
-    return mask ? (uint8_t)(class - BUSTER_TIER0_STACK_MASKS) : vector ? (bytes == 64 ? 6 : bytes == 32 ? 5 : 4) : bytes == 8 ? 3 : bytes == 4 ? 2 : bytes == 2 ? 1 : 0;
+    return mask ? (uint8_t)(class - BUSTER_TIER0_STACK_MASKS) : vector ? (bytes == 64 ? 6 : bytes == 32 ? 5 : bytes == 8 ? 3 : bytes == 4 ? 2 : 4) : bytes == 8 ? 3 : bytes == 4 ? 2 : bytes == 2 ? 1 : 0;
 }
 
 // A conversion between an integer class and a mask's stack class (#179), as Tier 0's CONVERT is: to a mask, the integer
@@ -1031,6 +1100,21 @@ static __attribute__((always_inline)) inline void ir_typed_copy_pointers(IrTyped
     }
 }
 
+// The vector type that copies an aggregate of `size` bytes at `location` whole (#1282): one that a vector register holds
+// whole (REGISTERS, a vector register alone, neither eightbyte alone: tier1_select_parts_of's "whole"), of 16, 32 or 64
+// bytes, a width `allowed` (IrTypedPlan.vector_copies) has; else IR_VOID, for a copy by integers. Its bytes are a
+// vector's, or a struct's whose high eightbyte is padding, which the copy keeps as padding: either way, one load and one
+// store of a vector move them, where eight of i64 each kept every aggregate parameter of a vector in memory.
+static IrType ir_typed_vector_whole(AbiLocation location, uint64_t size, uint8_t allowed)
+{
+    const bool whole = location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] != BUSTER_ABI_REGISTER_NONE &&
+                       (location.registers[0] & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && location.registers[1] == BUSTER_ABI_REGISTER_NONE &&
+                       (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0;
+    const uint32_t width = size == 16 ? 0 : size == 32 ? 1 : size == 64 ? 2 : 3;
+    const IrType types[4] = { IR_V4I32, IR_V8I32, IR_V16I32, IR_VOID };
+    return whole && width < 3 && ((allowed >> width) & 1) != 0 ? types[width] : IR_VOID;
+}
+
 static __attribute__((always_inline)) inline void ir_typed_copy(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint64_t bytes)
 {
     const uint32_t destination = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, destination_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
@@ -1050,10 +1134,11 @@ static bool ir_typed_own_records(const Tier0Function* input)
     return own;
 }
 
-// Whether any of the function's call arguments is one the convention ignores (#141: an empty struct, of no bytes), whose
-// call then has ABI records (ir_typed_aggregate_call): once a function, so that no call reads its arguments' locations
-// where none is. The vector path tests the kinds of 8 locations a load (AbiLocation's byte 6, IGNORE 0); its scalar twin
-// one at a time, which must agree.
+// Whether any of the function's call arguments is one the convention ignores (#141: an empty struct, of no bytes) or a
+// static chain in r10 (#148, __builtin_call_with_static_chain's), whose call then has ABI records (ir_typed_aggregate_call):
+// once a function, so that no call reads its arguments' locations where none is. The vector path tests the kinds of 8
+// locations a load (AbiLocation's byte 6, IGNORE 0), and their kinds with their first registers (bytes 6 and 4) for
+// REGISTERS in r10; its scalar twin one at a time, which must agree.
 static bool ir_typed_ignored_arguments(const Tier0Function* input, bool vector)
 {
     (void)vector;
@@ -1067,14 +1152,18 @@ static bool ir_typed_ignored_arguments(const Tier0Function* input, bool vector)
             const uint32_t lanes = count - first < 8 ? count - first : 8;
             const __mmask8 active = (__mmask8)((1u << lanes) - 1);
             const __m512i locations = _mm512_maskz_loadu_epi64(active, input->argument_locations + first);
-            ignored = (_mm512_mask_testn_epi64_mask(active, locations, _mm512_set1_epi64((int64_t)UINT64_C(0x00ff000000000000))) != 0);
+            const __m512i chain = _mm512_set1_epi64((int64_t)((uint64_t)BUSTER_ABI_LOCATION_REGISTERS << 48 | (uint64_t)BUSTER_ABI_R10 << 32));
+            const __m512i kind_register = _mm512_and_si512(locations, _mm512_set1_epi64((int64_t)UINT64_C(0x00ff00ff00000000)));
+            ignored = (_mm512_mask_testn_epi64_mask(active, locations, _mm512_set1_epi64((int64_t)UINT64_C(0x00ff000000000000))) != 0) ||
+                      (_mm512_mask_cmpeq_epi64_mask(active, kind_register, chain) != 0);
         }
     }
     else
     {
         for (uint32_t a = 0; !ignored && a < count; a += 1)
         {
-            ignored = input->argument_locations[a].kind == BUSTER_ABI_LOCATION_IGNORE;
+            const AbiLocation location = input->argument_locations[a];
+            ignored = location.kind == BUSTER_ABI_LOCATION_IGNORE || (location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] == BUSTER_ABI_R10);
         }
     }
     return ignored;
@@ -1082,15 +1171,18 @@ static bool ir_typed_ignored_arguments(const Tier0Function* input, bool vector)
 
 // Whether call `call` passes or returns an aggregate by value (Tier0Function.argument_sizes, call_result_objects): its
 // IR call then has ABI records. So does one that passes an aggregate the convention ignores (#141: an empty struct, of
-// no bytes), which a call without records would place by its type, in a register of its own; only a function with one
-// (`ignored`, ir_typed_ignored_arguments) reads its calls' locations.
+// no bytes), which a call without records would place by its type, in a register of its own, and one that passes a
+// static chain in r10 (#148), which a call without records would place in the next argument register; only a function
+// with one (`ignored`, ir_typed_ignored_arguments) reads its calls' locations.
 static bool ir_typed_aggregate_call(const Tier0Function* input, uint32_t call, bool ignored)
 {
     bool aggregate = input->call_result_objects != 0 && input->call_result_objects[call] != 0;
     for (uint32_t a = 0; (input->argument_sizes != 0 || ignored) && a < input->call_argument_counts[call]; a += 1)
     {
         const uint32_t argument = input->call_first[call] + a;
-        aggregate |= (input->argument_sizes != 0 && input->argument_sizes[argument] != 0) || (ignored && input->argument_locations[argument].kind == BUSTER_ABI_LOCATION_IGNORE);
+        const AbiLocation location = ignored ? input->argument_locations[argument] : (AbiLocation){ .kind = BUSTER_ABI_LOCATION_REGISTERS };
+        aggregate |= (input->argument_sizes != 0 && input->argument_sizes[argument] != 0) || location.kind == BUSTER_ABI_LOCATION_IGNORE ||
+                     (location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] == BUSTER_ABI_R10);
     }
     return aggregate;
 }
@@ -1206,7 +1298,10 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_labels(IrTypedSin
 // ---------------------------------------------------------------------------------------------------------------------
 // Entry points
 
-static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector, uint64_t target_features)
+// `pieces`: a vector wider than the target moves whole (ir_typed_vector_piece) is taken as its pieces' moves would be, for
+// a caller that splits it into them before selection (#1624, ir_vector_split.c); otherwise it is refused.
+static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector, uint64_t target_features,
+                                          bool pieces)
 {
     (void)vector;
 
@@ -1242,11 +1337,12 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.instruction = entry;
         }
     }
-    if (check.error == IR_OK && (input->unwind_init || input->returns_twice))
+    if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input)))
     {
-        // __builtin_unwind_init's frame, which saves every callee-saved register (Tier0Function.unwind_init), and
-        // __builtin_setjmp's, which keeps nothing in one (Tier0Function.returns_twice), are Tier 0's: ordinary Tier 1 falls
-        // back to them.
+        // __builtin_unwind_init's frame, which saves every callee-saved register (Tier0Function.unwind_init),
+        // __builtin_setjmp's, which keeps nothing in one (Tier0Function.returns_twice), and a preserving function's, which
+        // keeps registers for its caller past them (#147, Tier0Function.preserve_general), are Tier 0's: ordinary Tier 1
+        // falls back to them.
         check.error = IR_ERROR_UNSUPPORTED;
     }
     if (check.error == IR_OK)
@@ -1275,6 +1371,15 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.error = IR_ERROR_OPERAND;
             check.instruction = i;
         }
+        else if (kind == BUSTER_TYPED_CALL && input->call_targets[value] == 0 && input->call_variadic[value] != 0 && input->call_argument_counts[value] != 0 &&
+                 input->argument_locations[input->call_first[value]].kind == BUSTER_ABI_LOCATION_REGISTERS &&
+                 input->argument_locations[input->call_first[value]].registers[0] == BUSTER_ABI_R10)
+        {
+            // An indirect variadic call with a static chain (#148): its chain takes r10, the moves' scratch r11 and its al
+            // rax, which Tier 1 calls through otherwise (tier1_select_callee_register); Tier 1 falls back to Tier 0.
+            check.error = IR_ERROR_UNSUPPORTED;
+            check.instruction = i;
+        }
         else if (kind == BUSTER_TYPED_FRAME_ADDRESS || kind == BUSTER_TYPED_TAIL_CALL)
         {
             // These are valid typed operations, but this adapter does not lower them. Refuse before planning so
@@ -1299,11 +1404,16 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         else if (input->classes[i] == BUSTER_TYPED_CLASS_VECTOR)
         {
             const uint32_t bytes = ir_typed_vector_bytes(input, i);
-            const uint64_t required = BUSTER_X86_FEATURE(AVX512F) | (bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0);
-            // DUP, DISCARD and JUMP_VALUE have no own width; their source has already been admitted. All real
-            // transports must be full 128/256/512-bit values. In particular, the 4/8-byte SSE carrier forms refuse.
+            // Tier 1's moves of it (ir_typed_vector_moves, #1281): AVX512F's of a zmm register; of an xmm or a ymm one, or
+            // an SSE carrier's, VL's EVEX ones, or else AVX's VEX ones. A vector wider than the target moves whole, where
+            // the caller splits it (#1624), its pieces' (ir_typed_vector_piece: x86-64's xmm, AVX's ymm).
+            const uint32_t piece = ir_typed_vector_piece(target_features);
+            const uint64_t required = ir_typed_vector_moves(pieces && bytes > piece && bytes <= 64 ? piece : bytes, target_features);
+            // DUP, DISCARD and JUMP_VALUE have no own width; their source has already been admitted. Every real
+            // transport is a full 128/256/512-bit value or an SSE carrier of 4 or 8 bytes (#1280), an f32 or f64 of its
+            // bits (ir_typed_stack_type).
             const bool inherited = kind == BUSTER_TYPED_DUP || kind == BUSTER_TYPED_DISCARD || kind == BUSTER_TYPED_JUMP_VALUE;
-            if (!inherited && bytes != 16 && bytes != 32 && bytes != 64)
+            if (!inherited && bytes != 4 && bytes != 8 && bytes != 16 && bytes != 32 && bytes != 64)
             {
                 check.error = IR_ERROR_UNSUPPORTED;
                 check.detail = IR_SIMD_TYPED_UNSUPPORTED;
@@ -1341,6 +1451,11 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         plan = ir_typed_plan(input, scratch);
         plan.operations = operations;
         plan.ignored_arguments = ir_typed_ignored_arguments(input, BUSTER_VECTOR_PATH(vector));
+        // A function with vectors copies its whole-vector aggregate parameters by vectors of the widths its target has
+        // (#1282): the lowering admits those widths alone (AVX-512F, and VL for 16 and 32 bytes, as a vector entry's).
+        const uint64_t evex = BUSTER_X86_FEATURE(AVX512F);
+        const uint64_t narrow = evex | BUSTER_X86_FEATURE(AVX512VL);
+        plan.vector_copies = !input->vectors || (target_features & evex) != evex ? 0 : (target_features & narrow) == narrow ? 7 : 4;
         if (plan.error == 0 && !ir_typed_plan_depth_slots(&plan, scratch))
         {
             plan.error = "no scratch memory for the depth slots";
@@ -1403,7 +1518,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
 // Preserve scalar clients of the internal path as well as the public entry points.
 static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, vector, 0);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, vector, 0, false);
 }
 
 // The legacy typed stream erases pointer categories into U64, so its i64 values
@@ -1422,13 +1537,13 @@ static __attribute__((unused)) IrCheck ir_lower_typed(const Tier0Function* input
 #if !BUSTER_HOST_VECTOR
     return ir_lower_typed_scalar(input, result_type, symbol_count, output, scratch, result);
 #else
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, true, 0);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, true, 0, false);
 #endif
 }
 
 static __attribute__((unused)) IrCheck ir_lower_typed_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, 0);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, 0, false);
 }
 
 // Output features are explicit. The old entry points intentionally grant none: a vector producer must retain its
@@ -1436,10 +1551,18 @@ static __attribute__((unused)) IrCheck ir_lower_typed_scalar(const Tier0Function
 // unsupported forms from missing target features on IR_ERROR_UNSUPPORTED.
 static __attribute__((unused)) IrCheck ir_lower_typed_target(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, BUSTER_HOST_VECTOR != 0, target_features);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, BUSTER_HOST_VECTOR != 0, target_features, false);
 }
 
 static __attribute__((unused)) IrCheck ir_lower_typed_target_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, target_features);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, target_features, false);
+}
+
+// The C driver's --tier1 (#1624): ir_lower_typed_target, but a vector wider than the target moves whole is taken, for
+// ir_vector_split to split into the target's widest vectors after promotion; by the vector path, or by its scalar twin.
+static __attribute__((unused)) IrCheck ir_lower_typed_target_pieces(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch,
+                                                                    IrFunction* result, bool scalar)
+{
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, !scalar && BUSTER_HOST_VECTOR != 0, target_features, true);
 }

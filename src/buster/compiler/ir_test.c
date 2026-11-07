@@ -86,6 +86,27 @@ static bool ir_test_simple(Arena* arena, IrFunction* function)
     return ok;
 }
 
+// #1634: the use-list twins build the same lists, offset for offset and use for use, or fail alike.
+static void ir_test_uses_twins(IrTestTally* tally, const IrFunction* function, Arena* memory, Arena* scratch)
+{
+    const uint64_t mark = memory->length;
+    const uint64_t scratch_mark = scratch->length;
+    IrUses vector = { 0 };
+    IrUses scalar = { 0 };
+    const IrError vector_error = ir_uses_validated(function, memory, scratch, &vector);
+    const IrError scalar_error = ir_uses_validated_scalar(function, memory, scratch, &scalar);
+    bool same = vector_error == scalar_error;
+    if (same && vector_error == IR_OK)
+    {
+        // arena_bytes is left out: it counts the alignment before each build, and the second starts after the first.
+        same = vector.value_count == scalar.value_count && vector.use_count == scalar.use_count &&
+               memcmp(vector.offsets, scalar.offsets, ((uint64_t)vector.value_count + 1) * sizeof(uint32_t)) == 0 &&
+               (vector.use_count == 0 || memcmp(vector.uses, scalar.uses, (uint64_t)vector.use_count * sizeof(IrUse)) == 0);
+    }
+    ir_test_expect(tally, same && scratch->length == scratch_mark, "the use-list twins disagreed or retained scratch");
+    arena_pop_to(memory, mark);
+}
+
 static void ir_test_printer(IrTestTally* tally, const IrFunction* function, Arena* memory, Arena* scratch)
 {
     FILE* first = tmpfile();
@@ -123,6 +144,7 @@ static void ir_test_printer(IrTestTally* tally, const IrFunction* function, Aren
         ir_test_expect(tally, scratch->length == scratch_mark, "printing or derived-array rebuild retained scratch");
     }
     ir_test_expect(tally, ok, "stable printer failed or changed after rebuilding CFG and uses");
+    ir_test_uses_twins(tally, function, memory, scratch);
     if (first != 0)
     {
         fclose(first);
@@ -1461,6 +1483,13 @@ static void ir_test_allocations(IrTestTally* tally, Arena* memory, Arena* scratc
             {
                 ir_test_expect(tally, small.length == 13 && memcmp(saved_uses, &uses, sizeof(uses)) == 0, "use-list allocation failure changed output or arena");
             }
+            // The scalar twin needs the same memory, so it fails at the same capacities (#1634).
+            const uint64_t built_length = small.length;
+            small.length = 13;
+            IrUses twin;
+            memset(&twin, 0x5a, sizeof(twin));
+            const IrError twin_error = ir_uses_validated_scalar(&function, &small, scratch, &twin);
+            ir_test_expect(tally, twin_error == use_error && small.length == built_length && scratch->length == scratch_mark, "the use-list twins failed at different capacities");
         }
     }
     arena_pop_to(memory, mark);
@@ -1543,6 +1572,7 @@ static void ir_test_guards(IrTestTally* tally, Arena* memory, Arena* scratch)
                     0
                 };
                 ir_test_expect(tally, ir_build_cfg(&function, memory, scratch, &cfg) == IR_OK && ir_build_uses(&function, memory, scratch, &uses) == IR_OK, "derived arrays failed on guarded tails");
+                ir_test_uses_twins(tally, &function, memory, scratch);
                 if (count >= 3)
                 {
                     const uint32_t id = count - 2;
@@ -1615,6 +1645,336 @@ static void ir_test_dominance_tails(IrTestTally* tally, Arena* memory, Arena* sc
             function.a[count + 3] = 2;
             ir_test_pair(tally, &function, scratch, &dominance, false, "unreachable definition passed a partial dominance batch");
             ir_test_pair(tally, &function, scratch, 0, true, "structural verifier unexpectedly required cross-block dominance");
+        }
+        arena_pop_to(memory, mark);
+    }
+}
+
+// #786's operand types in a function of more than 128 instructions: a copy's operand in the 128 types that end with its
+// batch, in the function's first 64 and in neither, before and after it, of an i64 (valid) and of a fence (void: an
+// operand error at that copy, which both paths must report).
+static void ir_test_operand_windows(IrTestTally* tally, Arena* memory, Arena* scratch)
+{
+    const uint64_t mark = memory->length;
+    const uint32_t count = 300;
+    const IrSizes sizes = {
+        .instruction_count = count,
+        .block_count = 1,
+        .constant_count = 1,
+    };
+    IrFunction function = { 0 };
+    const bool created = ir_create(memory, &sizes, &function) == IR_OK;
+    ir_test_expect(tally, created, "operand window fixture allocation failed");
+    if (created)
+    {
+        function.result_type = IR_I64;
+        function.block_offsets[1] = count;
+        ir_test_instruction(&function, 0, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        uint32_t last = 0;
+        for (uint32_t i = 1; i + 1 < count; i += 1)
+        {
+            const bool fence = i == 10 || i == 100 || i == 250 || i == 286;
+            ir_test_instruction(&function, i, fence ? IR_FENCE : IR_COPY, fence ? IR_VOID : IR_I64, fence ? 0 : last, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            last = fence ? last : i;
+        }
+        ir_test_instruction(&function, count - 1, IR_RET, IR_VOID, last, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_pair(tally, &function, scratch, 0, true, "operand window fixture rejected");
+        const uint32_t uses[] = {
+            200,
+            255,
+            290,
+        };
+        const uint32_t values[] = {
+            5,
+            10,
+            99,
+            100,
+            249,
+            250,
+            285,
+            286,
+        };
+        for (uint32_t u = 0; u < sizeof(uses) / sizeof(uses[0]); u += 1)
+        {
+            const uint32_t use = uses[u];
+            const uint32_t saved = function.a[use];
+            for (uint32_t v = 0; v < sizeof(values) / sizeof(values[0]); v += 1)
+            {
+                const uint32_t value = values[v];
+                function.a[use] = value;
+                const bool void_value = function.type[value] == IR_VOID;
+                const IrCheck vector = ir_verify(&function, scratch, 0);
+                const IrCheck scalar = ir_verify_scalar(&function, scratch, 0);
+                // An i64 before the copy is valid; one after it is a forward use, a dominance error, after the rows.
+                const IrError expected = void_value ? IR_ERROR_OPERAND : value < use ? IR_OK : IR_ERROR_DOMINANCE;
+                ir_test_expect(tally, vector.error == expected && (expected == IR_OK || vector.instruction == use) && scalar.error == vector.error && scalar.instruction == vector.instruction && scalar.detail == vector.detail, "operand window lookup gave another type");
+            }
+            function.a[use] = saved;
+        }
+    }
+    arena_pop_to(memory, mark);
+}
+
+// A generated value of `type` for an operand of instruction `use` in the block starting at `start`: mostly an earlier
+// value of the block, then any earlier value, then, in `forward` samples, any value at all.
+static uint32_t ir_test_value(uint64_t* state, const uint32_t* values, uint32_t count, uint32_t start, uint32_t use, bool forward)
+{
+    uint32_t local = 0;
+    uint32_t earlier = 0;
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        local += values[k] >= start && values[k] < use;
+        earlier += values[k] < use;
+    }
+    const uint32_t roll = (uint32_t)(ir_test_random(state) % 100);
+    uint32_t result = values[ir_test_random(state) % count];
+    if (roll < 75 && local != 0)
+    {
+        uint32_t pick = (uint32_t)(ir_test_random(state) % local);
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            if (values[k] >= start && values[k] < use)
+            {
+                result = pick == 0 ? values[k] : result;
+                pick -= 1;
+            }
+        }
+    }
+    else if ((roll < 97 || !forward) && earlier != 0)
+    {
+        result = values[ir_test_random(state) % earlier];
+    }
+    return result;
+}
+
+// #786's vector dominance check, and its scalar twin, against an independent oracle: generated functions of up to 40
+// blocks, whose terminators, phis, types and metadata are valid, so that where each value is used decides the result.
+// Operands are mostly earlier values of their block, some of earlier blocks and, in half the samples, some of any
+// instruction; the dominator view is none, a chain in which each block dominates the later ones (some unreachable), or
+// random intervals. The oracle enumerates each operation's operands from its own list, not the IR's tables: a, b and c
+// where it reads them (an address's index where it has one), a phi's incoming values at their predecessors' ends.
+static void ir_test_dominance_generated(IrTestTally* tally, Arena* memory, Arena* scratch, uint64_t count)
+{
+    uint64_t state = (tally->seed != 0 ? tally->seed : 1) * 786u + 1;
+    for (uint64_t sample = 0; sample < count * 4; sample += 1)
+    {
+        const uint64_t mark = memory->length;
+        const uint32_t blocks = 1 + (uint32_t)(ir_test_random(&state) % (sample % 4 == 3 ? 40 : 12));
+        const bool forward = (sample & 1) != 0;
+        uint8_t kinds[40];
+        uint32_t targets[40][2];
+        uint32_t bodies[40];
+        uint32_t phis[40] = { 0 };
+        uint32_t preds[40][40];
+        uint32_t instructions = 0;
+        uint32_t extras = 0;
+        for (uint32_t b = 0; b < blocks; b += 1)
+        {
+            kinds[b] = (uint8_t)(ir_test_random(&state) % 3);
+            targets[b][0] = (uint32_t)(ir_test_random(&state) % blocks);
+            targets[b][1] = (uint32_t)(ir_test_random(&state) % blocks);
+            bodies[b] = (b == 0 ? 3 : 0) + 1 + (uint32_t)(ir_test_random(&state) % (sample % 8 == 7 ? 64 : 12));
+        }
+        for (uint32_t b = 0; b < blocks; b += 1)
+        {
+            for (uint32_t edge = 0; edge < (kinds[b] == 0 ? 1u : kinds[b] == 1 ? 2u : 0u); edge += 1)
+            {
+                const uint32_t target = targets[b][edge];
+                if (target != 0 && (phis[target] == 0 || preds[target][phis[target] - 1] != b))
+                {
+                    preds[target][phis[target]] = b;
+                    phis[target] += 1;
+                }
+            }
+        }
+        for (uint32_t b = 0; b < blocks; b += 1)
+        {
+            instructions += phis[b] + bodies[b] + 1;
+            extras += phis[b] * phis[b] * 2;
+        }
+        const IrSizes sizes = {
+            .instruction_count = instructions,
+            .block_count = blocks,
+            .extra_count = extras,
+            .constant_count = 1,
+            .address_count = 1,
+            .parameter_count = 1,
+        };
+        IrFunction function = { 0 };
+        const bool created = ir_create(memory, &sizes, &function) == IR_OK;
+        uint32_t* block_of = arena_push_array(memory, instructions, 4, 64);
+        uint32_t* by_type = arena_push_array(memory, (uint64_t)instructions * 3, 4, 64);
+        ir_test_expect(tally, created && block_of != 0 && by_type != 0, "generated dominance fixture allocation failed");
+        if (created && block_of != 0 && by_type != 0)
+        {
+            function.result_type = IR_I64;
+            function.parameter_types[0] = IR_PTR;
+            function.addresses[0].scale = 1;
+            uint32_t* const values[3] = {
+                by_type,
+                by_type + instructions,
+                by_type + (uint64_t)instructions * 2,
+            };
+            uint32_t value_counts[3] = { 0 };
+            // First the operations and their types, so that operands may name any value of theirs, then the operands.
+            uint32_t id = 0;
+            for (uint32_t b = 0; b < blocks; b += 1)
+            {
+                function.block_offsets[b] = id;
+                for (uint32_t k = 0; k < phis[b] + bodies[b] + 1; k += 1)
+                {
+                    const uint32_t body = k - phis[b];
+                    IrOp op = IR_PHI;
+                    if (k >= phis[b] + bodies[b])
+                    {
+                        op = kinds[b] == 0 ? IR_BR : kinds[b] == 1 ? IR_CBR : IR_RET;
+                    }
+                    else if (k >= phis[b])
+                    {
+                        const IrOp operations[] = {
+                            IR_ADD,
+                            IR_COPY,
+                            IR_ICMP,
+                            IR_SELECT,
+                            IR_STORE,
+                            IR_ADDRESS,
+                            IR_ADD,
+                            IR_SUB,
+                        };
+                        op = operations[ir_test_random(&state) % 8];
+                        op = b != 0 || body > 2 ? op : body == 0 ? IR_PARAM : body == 1 ? IR_CONST : IR_ICMP;
+                    }
+                    const IrType type = op == IR_ICMP ? IR_I1 : op == IR_PARAM || op == IR_ADDRESS ? IR_PTR : op == IR_STORE || op == IR_BR || op == IR_CBR || op == IR_RET ? IR_VOID : IR_I64;
+                    function.op[id] = (uint8_t)op;
+                    function.type[id] = (uint8_t)type;
+                    block_of[id] = b;
+                    const uint32_t list = type == IR_I64 ? 0 : type == IR_I1 ? 1 : 2;
+                    if (type != IR_VOID)
+                    {
+                        values[list][value_counts[list]] = id;
+                        value_counts[list] += 1;
+                    }
+                    id += 1;
+                }
+            }
+            function.block_offsets[blocks] = instructions;
+            uint32_t extra = 0;
+            for (uint32_t i = 0; i < instructions; i += 1)
+            {
+                const uint32_t b = block_of[i];
+                const uint32_t start = function.block_offsets[b];
+                const uint32_t op = function.op[i];
+                uint32_t a = BUSTER_IR_NONE;
+                uint32_t second = BUSTER_IR_NONE;
+                uint32_t third = BUSTER_IR_NONE;
+                if (op == IR_PHI)
+                {
+                    a = extra;
+                    second = phis[b];
+                    for (uint32_t p = 0; p < phis[b]; p += 1)
+                    {
+                        function.extra[extra] = preds[b][p];
+                        const uint32_t predecessor = preds[b][p];
+                        function.extra[extra + 1] = ir_test_value(&state, values[0], value_counts[0], function.block_offsets[predecessor], function.block_offsets[predecessor + 1] - 1, forward);
+                        extra += 2;
+                    }
+                }
+                else if (op == IR_PARAM || op == IR_CONST)
+                {
+                    a = 0;
+                }
+                else if (op == IR_BR)
+                {
+                    a = targets[b][0];
+                }
+                else if (op == IR_CBR)
+                {
+                    a = ir_test_value(&state, values[1], value_counts[1], start, i, forward);
+                    second = targets[b][0];
+                    third = targets[b][1];
+                }
+                else if (op == IR_ADDRESS)
+                {
+                    a = ir_test_value(&state, values[2], value_counts[2], start, i, forward);
+                    second = ir_test_random(&state) % 2 == 0 ? BUSTER_IR_NONE : ir_test_value(&state, values[0], value_counts[0], start, i, forward);
+                    third = 0;
+                }
+                else if (op == IR_STORE)
+                {
+                    a = ir_test_value(&state, values[2], value_counts[2], start, i, forward);
+                    second = ir_test_value(&state, values[0], value_counts[0], start, i, forward);
+                }
+                else if (op == IR_SELECT)
+                {
+                    a = ir_test_value(&state, values[1], value_counts[1], start, i, forward);
+                    second = ir_test_value(&state, values[0], value_counts[0], start, i, forward);
+                    third = ir_test_value(&state, values[0], value_counts[0], start, i, forward);
+                }
+                else if (op == IR_ICMP)
+                {
+                    a = ir_test_value(&state, values[0], value_counts[0], start, i, forward);
+                    second = ir_test_value(&state, values[0], value_counts[0], start, i, forward);
+                    third = IR_EQ;
+                }
+                else
+                {
+                    a = ir_test_value(&state, values[0], value_counts[0], start, i, forward);
+                    second = op == IR_COPY || op == IR_RET ? BUSTER_IR_NONE : ir_test_value(&state, values[0], value_counts[0], start, i, forward);
+                }
+                function.a[i] = a;
+                function.b[i] = second;
+                function.c[i] = third;
+            }
+            uint32_t enter[40] = { 0 };
+            uint32_t leave[40] = { 0 };
+            const uint32_t view = (uint32_t)(sample % 3);
+            for (uint32_t b = 0; b < blocks; b += 1)
+            {
+                const bool unreachable = b != 0 && ir_test_random(&state) % (view == 1 ? 32 : 8) == 0;
+                enter[b] = view == 1 ? b : (uint32_t)(ir_test_random(&state) % 64);
+                leave[b] = view == 1 ? 2 * blocks - b : enter[b] + 1 + (uint32_t)(ir_test_random(&state) % 64);
+                enter[b] = unreachable ? 0 : enter[b];
+                leave[b] = unreachable ? 0 : leave[b];
+            }
+            const IrDominance tree = {
+                .enter = enter,
+                .leave = leave,
+                .block_count = blocks,
+            };
+            const IrDominance* dominance = view == 0 ? 0 : &tree;
+            IrCheck expected = ir_check(IR_OK, BUSTER_IR_NONE, 0);
+            for (uint32_t i = 0; expected.error == IR_OK && i < instructions; i += 1)
+            {
+                const uint32_t op = function.op[i];
+                const uint32_t uses = op == IR_PHI ? function.b[i] : op == IR_SELECT ? 3 : op == IR_ADD || op == IR_SUB || op == IR_ICMP || op == IR_STORE ? 2 : op == IR_ADDRESS ? 1 + (function.b[i] != BUSTER_IR_NONE) : op == IR_COPY || op == IR_CBR || op == IR_RET ? 1 : 0;
+                for (uint32_t p = 0; expected.error == IR_OK && p < uses; p += 1)
+                {
+                    const uint32_t value = op == IR_PHI ? function.extra[function.a[i] + p * 2 + 1] : p == 0 ? function.a[i] : p == 1 ? function.b[i] : function.c[i];
+                    const uint32_t use_block = op == IR_PHI ? function.extra[function.a[i] + p * 2] : block_of[i];
+                    const uint32_t position = op == IR_PHI ? function.block_offsets[use_block + 1] - 1 : i;
+                    const uint32_t definition = block_of[value];
+                    bool invalid = value >= position;
+                    if (definition != use_block)
+                    {
+                        invalid = dominance != 0 && (leave[definition] == 0 || leave[use_block] == 0 || enter[definition] > enter[use_block] || leave[definition] < leave[use_block]);
+                    }
+                    if (invalid)
+                    {
+                        expected = ir_check(IR_ERROR_DOMINANCE, i, op == IR_PHI ? 3 + p : p);
+                    }
+                }
+            }
+            const IrCheck vector = ir_verify(&function, scratch, dominance);
+            const IrCheck scalar = ir_verify_scalar(&function, scratch, dominance);
+            const bool vector_valid = vector.error == expected.error && vector.instruction == expected.instruction && vector.detail == expected.detail && vector.dominance_checked == (expected.error == IR_OK && dominance != 0);
+            const bool scalar_valid = scalar.error == expected.error && scalar.instruction == expected.instruction && scalar.detail == expected.detail && scalar.dominance_checked == (expected.error == IR_OK && dominance != 0);
+            ir_test_expect(tally, vector_valid, "vector dominance check disagreed with the oracle on a generated function");
+            ir_test_expect(tally, scalar_valid, "scalar dominance check disagreed with the oracle on a generated function");
+            // A dominance error leaves the function's rows valid, which is all the use lists read (#1634).
+            if (vector.error == IR_OK || vector.error == IR_ERROR_DOMINANCE)
+            {
+                ir_test_uses_twins(tally, &function, memory, scratch);
+            }
         }
         arena_pop_to(memory, mark);
     }
@@ -1795,6 +2155,7 @@ static void ir_test_operand_order(IrTestTally* tally, Arena* memory, Arena* scra
             operands += expected;
         }
         ir_test_expect(tally, operands == 38, "operand order fixture didn't reach every operand");
+        ir_test_uses_twins(tally, &function, memory, scratch);
     }
     arena_pop_to(memory, mark);
 }
@@ -1998,6 +2359,8 @@ static int run_ir_tests(int argc, char** argv)
             ir_test_dominance_tails(&tally, &memory, &scratch);
             ir_test_operand_order(&tally, &memory, &scratch);
             ir_test_generated(&tally, &memory, &scratch, count);
+            ir_test_dominance_generated(&tally, &memory, &scratch, count);
+            ir_test_operand_windows(&tally, &memory, &scratch);
             bool preserved = scratch.length == 19;
             for (uint32_t byte = 0; byte < 19; byte += 1)
             {

@@ -218,6 +218,9 @@ struct CheckProgramAsms
     // The names the templates define and refer to, each once.
     CheckAsmName* names;
     uint32_t name_count;
+    // The most placed statements in one selected body, each of at most one machine-operation row. A lane reuses
+    // its operation table between bodies; helper and naked statements add no row to that table (#1359).
+    uint32_t row_capacity;
     CheckProgramStatus status;
     uint32_t token;
 };
@@ -2695,6 +2698,7 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
     }
     for (uint32_t b = 0; valid && statements != 0 && b < program->body_count; b += 1)
     {
+        uint32_t rows = 0;
         // A naked body's statements are its code, which its plan has.
         for (uint32_t i = 0; valid && (result->naked == 0 || !result->naked[b].planned) && i < program->bodies[b].count; i += 1)
         {
@@ -2718,8 +2722,10 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
                 }
                 result->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_RESOURCE;
                 result->token = valid ? BUSTER_CHECK_NONE : control.token;
+                rows += valid && result->plans[s].row != NULL;
             }
         }
+        result->row_capacity = rows > result->row_capacity ? rows : result->row_capacity;
     }
     if (valid && count != 0)
     {

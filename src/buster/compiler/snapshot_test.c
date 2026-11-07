@@ -66,7 +66,7 @@
 // misaligned, one running past the end, one shorter than its column, the index's bits past 31, the names run past the
 // data, a region starting past the end, more crt objects' records than the table has, the members' names before the
 // crt objects' end, and the directory's end before its last region's.
-#define BUSTER_SNAPSHOT_TEST_HEADER_CHANGES 15
+#define BUSTER_SNAPSHOT_TEST_HEADER_CHANGES 17
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The tally
@@ -1232,6 +1232,16 @@ static bool snapshot_test_invalid(const ExecutableTestDirectory* directory, cons
             header->directory_bytes -= BUSTER_SNAPSHOT_ALIGNMENT;
             header->regions[BUSTER_SNAPSHOT_PIECE_REGIONS].offset -= BUSTER_SNAPSHOT_ALIGNMENT;
             break;
+        case 15:
+            // A header path whose offset is past the strings. The hash is recomputed, so only the bound catches it.
+            header->paths[0].offset = header->regions[SNAPSHOT_REGION_STRINGS].bytes + 1;
+            header->paths[0].length = 1;
+            break;
+        case 16:
+            // A header path that starts in the strings and runs past them, including its trailing NUL.
+            header->paths[0].offset = 1;
+            header->paths[0].length = header->regions[SNAPSHOT_REGION_STRINGS].bytes;
+            break;
         default:
         {
             // Even a matching hash cannot make a noncanonical bool safe to read.
@@ -1245,6 +1255,25 @@ static bool snapshot_test_invalid(const ExecutableTestDirectory* directory, cons
         Runtime loaded;
         const SnapshotStatus status = copied ? snapshot_load(&loaded, path, kind, compiler, 0) : SNAPSHOT_STATUS_LOADED;
         snapshot_test_expect(&tally, status == SNAPSHOT_STATUS_INVALID, "a header the hash passes, invalid", change);
+        if (status == SNAPSHOT_STATUS_LOADED)
+        {
+            runtime_release(&loaded);
+        }
+        cases += 1;
+    }
+    // A probe path is not in the header. Its offset is still an index into the strings, rebased before stat.
+    if (edited != 0 && file >= 0 && ((const SnapshotHeader*)bytes)->counts.probes != 0)
+    {
+        memcpy(edited, bytes, good.length);
+        SnapshotHeader* header = (SnapshotHeader*)edited;
+        const SnapshotPlace probes = header->regions[SNAPSHOT_REGION_PROBES];
+        const uint64_t bad = header->regions[SNAPSHOT_REGION_STRINGS].bytes + 1;
+        memcpy(edited + probes.offset + offsetof(RuntimeProbe, path), &bad, sizeof(bad));
+        snapshot_hash(edited, header->directory_bytes, header->hash);
+        const bool copied = snapshot_test_pwrite(file, edited, header->directory_bytes, 0);
+        Runtime loaded;
+        const SnapshotStatus status = copied ? snapshot_load(&loaded, path, kind, compiler, 0) : SNAPSHOT_STATUS_LOADED;
+        snapshot_test_expect(&tally, status == SNAPSHOT_STATUS_INVALID, "a probe path outside the strings, invalid", 0);
         if (status == SNAPSHOT_STATUS_LOADED)
         {
             runtime_release(&loaded);

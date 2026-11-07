@@ -4,8 +4,86 @@
 // Original reader controls, including source-spelling and missing-name insertion points that a resolved TypeId
 // cannot establish. The independent Clang 23.1.4 witnesses have these counts; scalar/vector are additional checks.
 
+// Independent bounded parent walks, including cycles and backward parents: cached answers must retain the nearest
+// matching role rather than a later scope, and a cache for one predicate must never affect the parser or another cache.
+static void check_test_cached_ancestors(CheckTest* test)
+{
+    enum { count = 4097 };
+    Arena arena = arena_reserve(UINT64_C(1) << 20);
+    uint32_t* original = BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, count);
+    uint32_t* cached = BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, count + 1);
+    uint8_t* roles = BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, count);
+    bool ready = original != NULL && cached != NULL && roles != NULL;
+    check_test_expect(test, ready, "ancestor cache fixture resources");
+    Parser parser = { 0 };
+    parser.tree.parents = original;
+    parser.tree.roles = roles;
+    for (uint32_t size = 0; ready && size <= 129; size += 1)
+    {
+        parser.tokens.count = size;
+        for (uint32_t token = 0; token < size; token += 1)
+        {
+            const uint32_t draw = check_test_random(test);
+            original[token] = draw % (size + 2);
+            roles[token] = draw % 7 == 0 ? PARSE_ROLE_TERMINATOR : draw % 7 == 1 ? PARSE_ROLE_CLOSE_BLOCK :
+                           draw % 7 == 2 ? PARSE_ROLE_CLOSE_BODY : draw % 7 == 3 ? PARSE_ROLE_CLOSE_COMPOUND_BODY : PARSE_ROLE_CLOSE_STRUCT;
+        }
+        for (uint32_t scope = 0; scope < 2; scope += 1)
+        {
+            memcpy(cached, original, (uint64_t)size * sizeof(uint32_t));
+            cached[size] = 0xa5a5a5a5u;
+            bool same = true;
+            for (uint32_t token = 0; token <= size; token += 1)
+            {
+                bool seen[129] = { 0 };
+                uint32_t expected = BUSTER_CHECK_NONE;
+                for (uint32_t at = token; at < size && !seen[at]; at = original[at])
+                {
+                    seen[at] = true;
+                    const uint8_t role = roles[at];
+                    const bool match = scope ? role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_COMPOUND_BODY :
+                                               role == PARSE_ROLE_TERMINATOR;
+                    if (match)
+                    {
+                        expected = at;
+                        break;
+                    }
+                }
+                uint64_t work = 0;
+                same &= check_input_cached_ancestor(&parser, token, cached, scope != 0, NULL) == expected &&
+                        check_input_cached_ancestor(&parser, token, NULL, scope != 0, &work) == expected && work <= size;
+            }
+            check_test_expect(test, same && cached[size] == 0xa5a5a5a5u, "ancestor caches match independent walks through random parents, cycles and missing ancestors");
+        }
+    }
+    if (ready)
+    {
+        parser.tokens.count = count;
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            original[token] = token + 1;
+            cached[token] = token + 1;
+            roles[token] = PARSE_ROLE_SEPARATOR;
+        }
+        roles[count - 1] = PARSE_ROLE_TERMINATOR;
+        uint64_t work = 0;
+        bool same = check_input_cached_ancestor(&parser, count - 1, NULL, false, &work) == count - 1 && work == 0;
+        same &= check_input_cached_ancestor(&parser, 0, NULL, false, &work) == count - 1 && work == count - 1;
+        same &= check_input_cached_ancestor(&parser, 1, NULL, false, &work) == count - 1 && work == 2 * count - 3;
+        same &= check_input_cached_ancestor(&parser, 0, cached, false, &work) == count - 1 && work == 2 * count - 3;
+        for (uint32_t token = 0; token + 1 < count; token += 1)
+        {
+            same &= cached[token] == count - 1 && original[token] == token + 1 &&
+                    check_input_cached_ancestor(&parser, token, cached, false, NULL) == count - 1;
+        }
+        check_test_expect(test, same, "4096 declarators share one compressed path while the parser's chain remains immutable");
+    }
+    arena_release(&arena);
+}
+
 static void check_test_warning_reader(CheckTest* test)
 {
+    check_test_cached_ancestors(test);
     static const struct
     {
         const char* source;
@@ -66,6 +144,8 @@ static void check_test_warning_reader(CheckTest* test)
         { "int*p;int f(void){return sizeof(int[0&&(p=1-1)]);}\n", CHECK_WARNING_ID_NON_LITERAL_NULL, 1 },
         { "int*p;typedef __typeof__(p<2) T;T x;\n", CHECK_WARNING_ID_ORDERED_POINTER_INTEGER, 1 },
         { "int*p;int f(void){return sizeof(p<2);}\n", CHECK_WARNING_ID_ORDERED_POINTER_INTEGER, 1 },
+        { "void f(int n){int a=1,b=2;{struct S{int m;} x={3},y={4};}for(int i=0,j=0;i<n;i++){} }\n", CHECK_WARNING_ID_UNUSED_VARIABLE, 5 },
+        { "static int a=1,b=2;void f(void){int x=3,y=4;{int z=5,w=6;}}\n", CHECK_WARNING_ID_UNUSED_VARIABLE, 6 },
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
@@ -92,6 +172,7 @@ static void check_test_warning_reader(CheckTest* test)
             uint32_t count = 0;
             uint32_t notes = 0;
             uint32_t suppressed = 0;
+            bool completions = true;
             for (uint32_t i = 0; ready && i < input.warning_events.count; i += 1)
             {
                 const CheckWarningEvent* event = input.warning_events.events + i;
@@ -100,11 +181,33 @@ static void check_test_warning_reader(CheckTest* test)
                     count += (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) == 0;
                     notes += event->note_count;
                     suppressed += (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0;
+                    if (cases[c].id == CHECK_WARNING_ID_UNUSED_VARIABLE)
+                    {
+                        uint32_t expected = BUSTER_CHECK_NONE;
+                        const bool local = check_sparse_get(input.declaration_bodies, event->token) < parser.tokens.count;
+                        for (uint32_t at = event->token, steps = 0; local && at < parser.tokens.count && steps < parser.tokens.count; steps += 1)
+                        {
+                            const uint32_t parent = parser.tree.parents[at];
+                            if (parent >= parser.tokens.count || parent == at)
+                            {
+                                break;
+                            }
+                            at = parent;
+                            const uint8_t role = parser.tree.roles[at];
+                            if (role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_COMPOUND_BODY)
+                            {
+                                expected = at;
+                                break;
+                            }
+                        }
+                        completions &= event->completion == expected && event->completion_kind ==
+                            (expected < parser.tokens.count ? CHECK_WARNING_COMPLETE_AFTER_DELIMITER : CHECK_WARNING_COMPLETE_TU_END);
+                    }
                 }
             }
             char message[160];
             snprintf(message, sizeof(message), "reader warning fixture %u (%s) has its independent source count and attached-note count", c, scalar ? "scalar" : "vector");
-            check_test_expect(test, ready && !input.resource && count == cases[c].count && notes == cases[c].notes && suppressed == cases[c].suppressed, message);
+            check_test_expect(test, ready && !input.resource && count == cases[c].count && notes == cases[c].notes && suppressed == cases[c].suppressed && completions, message);
             parse_release(&parser);
             pp_release(&pp);
             intern_release(&identifiers);
@@ -114,3 +217,4 @@ static void check_test_warning_reader(CheckTest* test)
         }
     }
 }
+

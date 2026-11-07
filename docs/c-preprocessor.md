@@ -413,6 +413,15 @@ makes its own; with one, the units and lanes that share it read each file once
     tells `pp_without_splices` to leave them alone, so `S(??\`, a line
     splice, then `=)` stays `"??="`. Pastes and `_Pragma`'s text are lexed
     again, so their line splices and trigraphs still come out (`pp_scratch`).
+  - `pp_remove_splices` copies a spelling only when the printer's rule
+    (`pp_print_unspliced`, below) says it may hold a splice: a backslash
+    before a byte up to `' '` or at its end, or with trigraphs any `?`
+    (`pp_splice_possible_vector`, 64 bytes at a time, or its scalar twin with
+    `--scalar`). The scalar lexer's characters give any other backslash back
+    as written, so a literal with escapes keeps its bytes rather than a copy
+    (#1388). `test-preprocessor` checks both against each other, and the
+    cleaning against the bytes wherever the rule finds no splice, on 40,000
+    random spellings ending at a `PROT_NONE` page.
 
 - **Directive tables** (#118). A vectorized scan (`pp_scan_directives_vector`)
   finds every `#` that starts a line (the lexer's start-of-line bit), with its
@@ -507,6 +516,13 @@ makes its own; with one, the units and lanes that share it read each file once
   2.1% less (the floor −0.9% to +0.5%), and its `-fsyntax-only` and `-c` were
   within the floor's spread. Putting the stacks' columns and the cache among
   the tables alone, each table with its huge pages, was no faster than main.
+  A unit's own file cache keeps its four arrays among the unit's tables too
+  (records, identity slots, paths and path slots, `file_cache_start`), as
+  zero as the cache itself, so a unit neither writes the cache's 120 KB
+  (`file_cache_initialize`'s `*cache = (FileCache){ 0 }`, 30 pages of it the
+  lanes' arenas) nor reserves an arena for each array. A cache that units
+  share (`PPOptions.files`) is still made with `file_cache_initialize`, its
+  arrays in arenas of their own.
 - **Small files read** (#261). A unit reads each file of up to 16 KB that it
   opens into its lane's bytes arena in the cache
   (`BUSTER_FILE_CACHE_READ_LIMIT`), as `c_files.c`'s lanes read theirs, and maps
@@ -1324,7 +1340,10 @@ decisions in #154 and on #117's configuration):
   `section`, `target`, `transparent_union`, `used`, `vector_size`, `visibility`
   and `weak`. Paired underscores are normalized. C attribute queries accept
   the corresponding `gnu::` names (`ext_vector_type` and `overloadable` use
-  `clang::`) and return **201910** for standard `fallthrough`.
+  `clang::`) and return **201910** for standard `fallthrough`. Standard
+  `deprecated` and `maybe_unused` return **201904** and **202106** now that
+  the checker implements their diagnostics (#1475), including their paired
+  underscore spellings and their extension use in earlier C modes.
   `c_alignas`, `c_alignof`, `c_atomic`, `c_generic_selections`, `c_static_assert`
   and `c_thread_local` are features from C11; `c_fixed_enum` from C23.
   `__has_extension` also exposes these implemented constructs in older modes.
@@ -1391,12 +1410,10 @@ tag names, variable array bounds and unsupported calling conventions still
 refuse by name unless an explicit asm label supplies the ABI name. Advertising
 these implemented paths does not remove their argument, subject or ABI limits.
 
-Accepted but unimplemented attributes remain zero, including `always_inline`,
-`noinline`, `format`, `noreturn`, `unused`, `nodiscard`,
-`maybe_unused` and `deprecated`. The last three have parsed records but no
-implemented diagnostic consumer; reporting their C23 date codes would falsely
-advertise that consumer. The unpublished common symbols' effect also
-remains zero. Generic GNU atomic load/store/exchange/compare-exchange,
+Standard `nodiscard` remains zero: its parsed record has no discarded-result
+diagnostic consumer yet (#1394). The `deprecated` and `maybe_unused` query fix
+does not enable other attribute spellings or promise that consumer; #1475's
+`nodiscard` request remains open. Generic GNU atomic load/store/exchange/compare-exchange,
 GNU lock-free queries and test-and-set/clear remain unadvertised; scalar GNU atomics and
 implemented C11 atomics are advertised.
 The query fix does not implement these outstanding semantics.
@@ -1487,6 +1504,16 @@ preprocessing: the 9700X's clang is 23.1.1, whose `__clang_patchlevel__` and
 `-ffp-eval-method=double` and `extended`, and 2 when SSE is off (x87 math).
 Under `-E`, clang's `#pragma clang fp eval_method` doesn't change it, and it
 doesn't here.
+
+Semantic preprocessing retains each expansion's original location and macro
+origin, output boundary and preceding pragma ordinal. The checker joins these
+cold records to its lexical evaluation history: expansion is an error inside
+a scope containing an accepted evaluation pragma, even when the expansion is
+consumed by `#if` or follows `eval_method(source)`. Adjacent pragmas and uses
+can share a C-token position without losing their order. Closing the compound
+restores permission from its enclosing scope. The numeric expansion remains
+available for parsing; diagnostics are published after constructing the
+ordinary semantic graph, with their original preprocessing provenance.
 
 `-E -dM` prints every macro defined at the end instead of the tokens, as
 `clang -dM -E` does (`pp_print_macros`): sorted by name, the parameters as
@@ -2052,6 +2079,33 @@ the drivers' statuses (`parse` checks the preprocessor's fatal error after its
 own diagnostics, which may have recorded the history). It takes the files the
 run read from the cache the run filled, as a later unit with that cache does.
 The unit preprocesses nothing more after its run.
+
+Nothing reads the files' token columns after the run either: the parser, the
+checker and the diagnostics read the output, the ranges, and the files' bytes
+and line tables. So the checker's driver gives them back once the run is over
+(`pp_release_file_columns`, #628): a unit with a file cache of its own empties
+the columns' arenas (the kinds, starts and values, 9 bytes a token, and the
+leading-space words: 11.5 MB of `sqlite3.c`'s, which stayed to the backend)
+and marks its records unprepared. A replay then prepares each file again
+through the same cache, as the first unit to read it would. A unit whose replay
+ran with the run (its own diagnostics) keeps them, since the replay's files
+read them, and so does a cache that units share (`PPOptions.files`). With the
+driver's `--poison-arenas` the pages stay mapped but unreadable, and later
+pushes go past them, so that a reader left behind faults.
+
+A reader that needs only where an output token's outermost invocation starts
+can often have it without the history. `pp_output_invocation_place` finds
+the file tokens that the output has before and after the token's run of
+tokens from macros, and lexes the file's bytes between them (at most 2 KB, 256
+tokens each way). If they hold one invocation alone, a plainly spelled name
+(no `_Pragma`) with at most one balanced argument list, and no directive, all
+of the run's tokens are that invocation's, and it starts at the name, as
+clang's `getExpansionLoc` puts it. Anything else returns 0, and the history
+answers. `-Wempty-body`'s indentation check asks it first: on `sqlite3.c`,
+an `assert` after a `for (...);` replayed the whole unit only for that.
+`test-preprocessor` checks it against `pp_output_expansion_begin` at the
+edges of every run of tokens from macros in each file it compiles, and with a
+fixture of the invocations it places and those it leaves to the history.
 
 `-E`, `parse` and the checker's driver defer the history. The checker judges
 whether a token is in a system header by where its expansion is, as clang

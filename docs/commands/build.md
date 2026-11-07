@@ -86,6 +86,10 @@ own; switching between them builds nothing that is up to date.
   `BUSTER_BUILD_DEFINES`. CMake's own defaults take no part: no `-DNDEBUG`
   (`assert` stays), no other optimization, no PIE, and `CFLAGS` and `LDFLAGS`,
   which CMake would read once and keep, are ignored as before.
+  The policy applies before CMake enables C, including its compiler probes,
+  for `build.sh`, direct CMake and presets. Cached or `-D` overrides of
+  `CMAKE_C_FLAGS*` and `CMAKE_EXE_LINKER_FLAGS*` are also cleared; select the
+  flags through the `BUSTER_*` settings below.
 - **Debug** is the same flags with `-O0 -g` in place of the debug information
   and optimization: the same language and aliasing contracts, host ISA,
   sanitizers and definitions, with every variable readable in a debugger.
@@ -133,7 +137,7 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 | `BUSTER_HOST_ARCH` | `native` | `-march`: `x86-64` for the scalar baseline, `znver5` for benchmark builds |
 | `BUSTER_HOST_RUNTIME` | none | links CI's emulated old CPU's runtime from that root (`x86-64` alone) |
 | `BUSTER_DEBUG_INFO` | `1` | `0` leaves `-g` out of Release, a fifth of its build time |
-| `BUSTER_LINKER` | `auto` | `auto` (wild, then mold, then clang's), `system`, `wild`, `mold`, `lld`, `bfd` or a path |
+| `BUSTER_LINKER` | `auto` | `auto` (wild, then mold, then clang's; for a static link lld, then mold, then clang's), `system`, `wild`, `mold`, `lld`, `bfd` or a path; lld links at `-O0` |
 | `BUSTER_BUILD_DEFINES` | none | whitespace-separated arguments every unit's compile adds |
 | `BUSTER_SANITIZER` | `none` | `address` (with UBSan and bounds), `undefined`, `thread`, `memory`: a PIE |
 | `BUSTER_SANITIZER_OPTIMIZATION` | `3` | a sanitizer build's Release optimization, `1` to `3` |
@@ -190,10 +194,41 @@ a PIE, its pointer tables' 366,684 relative relocations made every start take 8
 to 13 ms of page faults, which `link-foreign` and the tests pay per process
 (#86). The sanitizers' builds are PIEs.
 
+It is also linked statically (`-static`, #652): the dynamic loader took 8% to
+12% of a small compile's task-clock on the 9700X. The sanitizers' PIEs, a
+fuzzing build (libFuzzer's runtime needs C++'s shared libraries) and
+`BUSTER_HOST_RUNTIME`'s explicit runtime stay dynamic, and so does a link by
+wild: wild 0.10.0's static executables fault in glibc's `__ctype_init`, at
+their first TLS access, against Ubuntu's glibc, so a static build's `auto`
+linker is lld, then mold (or clang's default without either), and an explicit
+`BUSTER_LINKER=wild` links dynamically. lld links at `-O0`, which keeps each
+object's strings in its order rather than merging the objects' in their hashes'
+order: a compile's comparisons of its options against their names then read a
+few pages of the pool, which took 7% to 14% off a small compile from a cold
+start on the 9700X, for 1.8 MB more of the executable. The configure step's status line
+says which (`static: TRUE`), and the units see it as `BUSTER_HOST_STATIC`. A static executable's `dlsym(RTLD_DEFAULT, ...)`
+finds nothing, so the host functions that the interpreter's programs and the
+tests' libm oracles name come from `test_libm.c`'s table there and nothing else:
+a `dlopen`ed library would bring a C library of its own, whose `tmpfile`'s
+`FILE` this one's `fclose` can't free. Nothing can be preloaded into it either:
+the tests that count a command's threads read the count its lanes write at exit
+to the file `BUSTER_TEST_THREADS` names (`lane_threads_report`), which a
+dynamic executable's preloaded counter of `pthread_create` must match. Its start doesn't register its
+`.eh_frame` with libgcc's unwinder, as `crtbeginT.o` would where glibc's
+`pthread_exit` links the unwinder in: libgcc 13 and later sort every FDE at
+that registration, 1.16 million instructions of an empty file's 1.41 million.
+The link wraps `__register_frame_info` and `__deregister_frame_info` into
+`main.c`'s functions that do nothing (`--wrap`), libgcc finds the frames
+through `_dl_find_object` instead, as in a dynamic executable, and `test-lanes`
+checks that `backtrace` walks them. The compiler needs no libm either way
+(`host_math.h`); a dynamic link takes it only as needed.
+
 The post-link step has each executable write itself with the backend's tables
 built (`bake-tables`, `baked.c`, #590): the state that `x86_encoder_initialize`,
 `x86_semantics_initialize`, `x86_zen5_initialize`, `tier0_initialize`,
-`unwind_initialize` and `tier1_select_initialize` write is in a section of its own (`buster_baked`:
+`unwind_initialize`, `tier1_select_initialize` and
+`check_lower_runtime_names_initialize` (the lowering's runtime functions' names'
+lengths and hashes, #442) write is in a section of its own (`buster_baked`:
 `BUSTER_BAKED` for state main.c's units share, `BUSTER_BAKED_UNIT` for a
 module's statics, baked in the checker's unit, the C driver's), so a compile
 starts with them built; the file's build ID is recomputed over the baked
@@ -203,8 +238,9 @@ tracking arrays fill. PIEs (the sanitizers' builds) and `BUSTER_BAKE=0` build
 them when they run; `test-baked-tables` checks either kind and fails, rather
 than skips, when the section is missing (the compile-time guide's "Baked
 tables"). The stack-protector policy is pinned (#916): `-fno-stack-protector`,
-and the step fails an executable that references `__stack_chk_fail`, which the
-toolchain's configured default would have added back.
+and the step fails an executable whose objects reference `__stack_chk_fail`,
+which the toolchain's configured default would have added back (in the
+objects, since a static link's libc.a defines and calls it itself).
 
 `BUSTER_DEBUG_INFO=0` builds without `-g`, which took a fifth of the build's
 time; CI builds so, since nothing there reads it (clang's code then differs in
@@ -290,7 +326,10 @@ their code's placements (#509, "Comparing two versions" in
 9700X. The padding is a section of its own, `.text.buster_shift_padding`,
 with the source's `.text`'s alignment and `SHF_GNU_RETAIN`, which the linkers
 place right before the source's objects; the step fails when the linker dropped
-it.
+it. The padding moves units' `.text`, never the page-aligned `.text.buster_checker`
+that holds the checker's own code. To place that code, build with
+`BUSTER_BUILD_DEFINES=-DBUSTER_CHECKER_OFFSET=N` (`main.c`, a multiple of 16 below
+4,096), one full build per offset (#1233).
 
 ## Regressions and timings
 
@@ -298,9 +337,15 @@ it.
 checks a fresh, an unchanged, an edited, a failed, an interrupted, a
 terminated and a switched build, an invalid setting, a configuration's clean,
 a clean and a `clean --all` during a build,
-the settings that change one step, the presets, the print commands, shifts and
-a lexer variant: what runs, what is published and what is left behind, not how
+the settings that change one step, hostile inherited/cached flags, the presets,
+the print commands, shifts and a lexer variant: what runs, what is published and what is left behind, not how
 long it takes. Its `clean --all` check removes every tree under `build/cmake`
-first. The build's clean, unchanged and edited timings come from the
+first. `build-regression --flags-only` runs just the fresh-tree flag checks:
+independent hostile `CFLAGS` and `LDFLAGS` through `build.sh`, direct CMake and
+a preset, plus hostile global and Debug/Release cache flags. It checks compiler
+probe logs, the generated compile/link commands and real unit compiles in both
+configurations; the full harness also builds the executable with both hostile
+environment variables. The focused mode cleans the selected `build.sh` tree.
+The build's clean, unchanged and edited timings come from the
 9700X under its lock, with their raw records in
 [buster-performance](https://github.com/buster14a/buster-performance).

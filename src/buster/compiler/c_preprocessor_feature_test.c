@@ -23,7 +23,9 @@ static bool pp_test_source_feature_matrix(void)
         { "gnu::section", 1 }, { "gnu::visibility", 1 }, { "clang::ext_vector_type", 1 },
         { "gnu::cleanup", 1 }, { "gnu::constructor", 1 }, { "gnu::destructor", 1 }, { "gnu::weak", 1 }, { "clang::overloadable", 1 },
         { "gnu::alias", 1 }, { "gnu::ifunc", 1 }, { "gnu::weakref", 1 }, { "gnu::retain", 1 }, { "gnu::common", 1 }, { "gnu::nocommon", 1 },
-        { "nodiscard", 0 }, { "maybe_unused", 0 }, { "deprecated", 0 },
+        { "nodiscard", 0 },
+        { "maybe_unused", 202106 },
+        { "deprecated", 201904 },
         { "other::aligned", 0 }, { "aligned", 0 }, { "gnu::packed_typo", 0 }, { "gnu::overloadable", 0 },
     };
     // Independent of the admission table: these exact calls have ordinary checked signatures and Tier 0 consumers.
@@ -107,6 +109,15 @@ static bool pp_test_source_feature_matrix(void)
         { "__builtin_ia32_palignr256", true }, { "__builtin_ia32_pblendw128", true }, { "__builtin_ia32_permdi256", true },
         { "__builtin_ia32_pshufd256", true }, { "__builtin_ia32_shufpd", true },
         { "__builtin_ia32_pblendw256", true }, { "__builtin_ia32_pshufd257", false },
+        { "__builtin_ia32_pcmpestri128", true }, { "__builtin_ia32_pcmpestria128", true }, { "__builtin_ia32_pcmpestric128", true },
+        { "__builtin_ia32_pcmpestrio128", true }, { "__builtin_ia32_pcmpestris128", true }, { "__builtin_ia32_pcmpestriz128", true },
+        { "__builtin_ia32_pcmpestrm128", true }, { "__builtin_ia32_pcmpistri128", true }, { "__builtin_ia32_pcmpistria128", true },
+        { "__builtin_ia32_pcmpistric128", true }, { "__builtin_ia32_pcmpistrio128", true }, { "__builtin_ia32_pcmpistris128", true },
+        { "__builtin_ia32_pcmpistriz128", true }, { "__builtin_ia32_pcmpistrm128", true },
+        { "__builtin_ia32_extrqi", true }, { "__builtin_ia32_insertqi", true },
+        { "__builtin_ia32_vcvtps2ph_mask", true }, { "__builtin_ia32_vcvtps2ph256_mask", true }, { "__builtin_ia32_vcvtps2ph512_mask", true },
+        { "__builtin_ia32_readeflags_u32", true }, { "__builtin_ia32_writeeflags_u32", true },
+        { "__builtin_ia32_pcmpistrm128_", false }, { "__builtin_ia32_readeflags_u32_", false },
         // EMMS has both a shared SYSTEM lowering row and a declaration in the frozen source scope.
         { "__builtin_ia32_emms", true }, { "__builtin_ia32_tilezero", false }, { "__rdtscx", false },
     };
@@ -245,6 +256,8 @@ static bool pp_test_builtin_targets(const char* directory)
                 const char* answer = line + 3 + info->name_length + 1;
                 result = index < count && (size_t)(end - line) > 3 + info->name_length && memcmp(line + 3, info->name, info->name_length) == 0;
                 const bool clang_yes = result && *answer != '0';
+                // clang's answer's value: 1, or a version (201802, __builtin_operator_new's and __builtin_operator_delete's).
+                const unsigned long clang_value = result ? strtoul(answer, NULL, 10) : 0;
                 const uint8_t* name = (const uint8_t*)info->name;
                 const CBuiltinLibraryPlain* plain = cbuiltin_library_plain(info->name, info->name_length);
                 const bool implemented = cbuiltin_has_capability(name, info->name_length, BUSTER_CBUILTIN_CAP_SOURCE) ||
@@ -265,10 +278,10 @@ static bool pp_test_builtin_targets(const char* directory)
                 // buster's).
                 const bool pinned = result && !reference && plain != NULL && (ours != 0) != clang_yes &&
                                     cbuiltin_library_table_differs(pp_test_clang_version, info->name, info->name_length);
-                const bool right = ((implemented ? (ours != 0) == clang_yes : ours == 0) || pinned) && (ours_constant == 0 || clang_constant);
+                const bool right = ((implemented ? ours == clang_value : ours == 0) || pinned) && (ours_constant == 0 || clang_constant);
                 if (result && !right)
                 {
-                    printf("builtin targets: %s under %s: %u %u, clang %s %s\n", info->name, configurations[c], ours, ours_constant, clang_yes ? "1" : "0",
+                    printf("builtin targets: %s under %s: %u %u, clang %lu %s\n", info->name, configurations[c], ours, ours_constant, clang_value,
                            clang_constant ? "1" : "0");
                 }
                 if (pinned)

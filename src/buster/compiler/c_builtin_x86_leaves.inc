@@ -138,5 +138,26 @@
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_TPAUSE, BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_tpause", 3, true, cbuiltin_x86_helper_tpause, BUSTER_X86_EXTENSION(WAITPKG), 0, 0, 0,
                                                                        0))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_XBEGIN, BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_xbegin", 0, true, cbuiltin_x86_helper_xbegin, BUSTER_X86_EXTENSION(RTM), 0, 0, 0, 0))
+    // #1029: the immediate is part of the leaf's identity. The checked immediate argument stays in its SysV
+    // signature, but only the specialized instruction reads its value.
+#define BUSTER_CBUILTIN_X86_STRING(id, builtin, parameters, vector_bits, instruction_record) \
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_##id, "__builtin_ia32_" #builtin "128", sizeof("__builtin_ia32_" #builtin "128") - 1, \
+        parameters, true, cbuiltin_x86_helper_##builtin, BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_##builtin), BUSTER_X86_FEATURE(SSE42), \
+        "string comparison builtins without SSE4.2", 0, false, vector_bits, .immediate_argument = parameters, .immediate_record = instruction_record)
+    BUSTER_CBUILTIN_X86_STRING(PCMPESTRI, pcmpestri, 5, 0x05, 2)
+    BUSTER_CBUILTIN_X86_STRING(PCMPESTRIA, pcmpestria, 5, 0x05, 2)
+    BUSTER_CBUILTIN_X86_STRING(PCMPESTRIC, pcmpestric, 5, 0x05, 2)
+    BUSTER_CBUILTIN_X86_STRING(PCMPESTRIO, pcmpestrio, 5, 0x05, 2)
+    BUSTER_CBUILTIN_X86_STRING(PCMPESTRIS, pcmpestris, 5, 0x05, 2)
+    BUSTER_CBUILTIN_X86_STRING(PCMPESTRIZ, pcmpestriz, 5, 0x05, 2)
+    BUSTER_CBUILTIN_X86_STRING(PCMPESTRM, pcmpestrm, 5, 0x05 | BUSTER_CBUILTIN_X86_VECTOR_RESULT, 2)
+    BUSTER_CBUILTIN_X86_STRING(PCMPISTRI, pcmpistri, 3, 0x03, 0)
+    BUSTER_CBUILTIN_X86_STRING(PCMPISTRIA, pcmpistria, 3, 0x03, 0)
+    BUSTER_CBUILTIN_X86_STRING(PCMPISTRIC, pcmpistric, 3, 0x03, 0)
+    BUSTER_CBUILTIN_X86_STRING(PCMPISTRIO, pcmpistrio, 3, 0x03, 0)
+    BUSTER_CBUILTIN_X86_STRING(PCMPISTRIS, pcmpistris, 3, 0x03, 0)
+    BUSTER_CBUILTIN_X86_STRING(PCMPISTRIZ, pcmpistriz, 3, 0x03, 0)
+    BUSTER_CBUILTIN_X86_STRING(PCMPISTRM, pcmpistrm, 3, 0x03 | BUSTER_CBUILTIN_X86_VECTOR_RESULT, 0)
+#undef BUSTER_CBUILTIN_X86_STRING
 #undef BUSTER_CBUILTIN_X86_EXTENSION_HELPER
 #undef BUSTER_CBUILTIN_X86_HELPER

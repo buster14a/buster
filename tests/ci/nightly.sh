@@ -19,23 +19,43 @@ expect_line() { grep -Fx -- "$2" "$1" > /dev/null || { cat "$1" >&2; fail "$3"; 
 expect_match() { grep -E -- "$2" "$1" > /dev/null || { cat "$1" >&2; fail "$3"; }; }
 expect_no_match() { if grep -E -- "$2" "$1" > /dev/null; then cat "$1" >&2; fail "$3"; fi; }
 
+for binary in "$work/nightly" "$work/nightly-sanitize"; do
+    "$binary" worker-window < tools/ci/nightly.c > "$work/worker-current.tsv"
+    expect_line "$work/worker-current.tsv" $'worker-window\t2\t8' 'the source reader recognizes the actual current worker'
+    printf 'unknown historical source\n' | "$binary" worker-window > "$work/worker-unknown.tsv"
+    expect_line "$work/worker-unknown.tsv" $'worker-window\t-\t-' 'unrecognized historical source stays unknown'
+done
+
 # The fake `gh`: each endpoint answers from $FIXTURES, or with nothing found; every call is logged.
 mkdir "$work/bin" "$work/fixtures"
 cat > "$work/bin/gh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$FIXTURES/calls.log"
+printf '%s %s\n' "${GH_TOKEN:-none}" "$*" >> "$FIXTURES/tokens.log"
+# An expired branch token: GitHub rejects every call made with it. One without access to the repository: every call,
+# the repository's own included, is a 404.
+if [ "${GH_TOKEN:-}" = expired-token ]; then
+    printf '{"message":"Bad credentials","status":"401"}\n'
+    printf 'gh: Bad credentials (HTTP 401)\n' >&2
+    exit 1
+fi
+if [ "${GH_TOKEN:-}" = outsider-token ]; then
+    printf '{"message":"Not Found","status":"404"}\n'
+    printf 'gh: Not Found (HTTP 404)\n' >&2
+    exit 1
+fi
 if [ "$1" = workflow ]; then
     exit 0
 fi
 [ "$1" = api ]
 shift
-method=GET jq_filter='' endpoint=''
+method=GET jq_filter='' endpoint='' fields=''
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --paginate) shift ;;
         -X) method=$2; shift 2 ;;
-        -f) shift 2 ;;
+        -f) fields="$fields $2"; shift 2 ;;
         --jq) jq_filter=$2; shift 2 ;;
         *) endpoint=$1; shift ;;
     esac
@@ -69,7 +89,35 @@ case "$method $endpoint" in
         fixture="$FIXTURES/refs.json"; empty='[]' ;;
     "GET repos/buster14a/buster/git/ref/heads/nightly/"*)
         fixture="$FIXTURES/ref-${endpoint##*/}.json" ;;
-    "POST repos/buster14a/buster/git/refs"|"POST repos/buster14a/buster/actions/runs/"*/cancel|"DELETE repos/buster14a/buster/git/refs/heads/nightly/"*)
+    "POST repos/buster14a/buster/git/refs")
+        # $FIXTURES/refuse-SHA: the workflow token may not create that commit's branch, as GitHub refused some on
+        # 2026-11-05.
+        sha=${fields##* sha=}
+        if [ -f "$FIXTURES/refuse-${sha%% *}" ] && [ "${GH_TOKEN:-}" != branch-token ]; then
+            printf '{"message":"Resource not accessible by integration","status":"403"}\n'
+            printf 'gh: Resource not accessible by integration (HTTP 403)\n' >&2
+            exit 1
+        fi
+        # $FIXTURES/flaky-SHA: one transient failure, then success.
+        if [ -f "$FIXTURES/flaky-${sha%% *}" ]; then
+            rm -f "$FIXTURES/flaky-${sha%% *}"
+            printf '{"message":"Server Error","status":"502"}\n'
+            printf 'gh: Server Error (HTTP 502)\n' >&2
+            exit 1
+        fi
+        printf '{}\n'; exit 0 ;;
+    "GET repos/buster14a/buster")
+        printf '{"id":1421805693}\n' > "$FIXTURES/repository.json"
+        answer "$FIXTURES/repository.json"; exit 0 ;;
+    "DELETE repos/buster14a/buster/git/refs/heads/nightly/"*)
+        # $FIXTURES/gone-SHA: someone else deleted that branch first.
+        if [ -f "$FIXTURES/gone-${endpoint##*/}" ]; then
+            printf '{"message":"Not Found","status":"404"}\n'
+            printf 'gh: Not Found (HTTP 404)\n' >&2
+            exit 1
+        fi
+        printf '{}\n'; exit 0 ;;
+    "POST repos/buster14a/buster/actions/runs/"*/cancel)
         printf '{}\n'; exit 0 ;;
     *)
         printf 'fake gh: unexpected %s %s\n' "$method" "$endpoint" >&2; exit 1 ;;
@@ -102,6 +150,8 @@ SH
 chmod +x "$work/bin/gh"
 export FIXTURES="$work/fixtures"
 export NIGHTLY_GH="$work/bin/gh"
+# The workflow's own token, as the fake gh logs it beside each call (the branch token's calls log theirs).
+export GH_TOKEN=workflow-token
 export GITHUB_REPOSITORY=buster14a/buster
 fixtures="$work/fixtures"
 : > "$fixtures/calls.log"
@@ -123,7 +173,7 @@ mkdir -p "$history/tools/ci" "$history/src" "$history/docs"
 echo root > "$history/README.md"
 git -C "$history" add -A
 commit_at 1793700000 commit -q -m root
-echo tool > "$history/tools/ci/nightly.c"
+printf '#define BUSTER_NIGHTLY_WINDOW_START_HOUR 4\n#define BUSTER_NIGHTLY_WINDOW_END_HOUR 7\n' > "$history/tools/ci/nightly.c"
 git -C "$history" add -A
 commit_at 1793700100 commit -q -m epoch
 epoch=$(git -C "$history" rev-parse HEAD)
@@ -143,6 +193,8 @@ git -C "$history" add -A
 commit_at 1793700500 commit -q -m docs
 docs=$(git -C "$history" rev-parse HEAD)
 echo code > "$history/src/c.c"
+# The later state has the widened window; old commits keep their own worker declarations.
+printf '#define BUSTER_NIGHTLY_WINDOW_START_HOUR 2\n#define BUSTER_NIGHTLY_WINDOW_END_HOUR 8\n' > "$history/tools/ci/nightly.c"
 git -C "$history" add -A
 commit_at 1793700600 commit -q -m code
 head=$(git -C "$history" rev-parse HEAD)
@@ -194,28 +246,35 @@ expect_line "$GITHUB_OUTPUT" 'scope=full' 'the daily run runs every row'
 expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'and is admitted'
 
 # Landed merges, documentation-only revisions and direct pushes all get full hosted CI in either nightly mode (#1271).
-# Each checkout and GITHUB_SHA must agree, as the workflow's do. Pushes always run their own native correctness (#1272).
+# Each checkout and GITHUB_SHA must agree, as the workflow's do. In the nightly mode a push keeps off the 9700X, its
+# native correctness and measurements deferred to the window; before it, a push qualifies on hardware (#1272).
 for revision in "$merge" "$docs" "$head"; do
     git -C "$history" worktree add -q --detach "$work/main-push" "$revision"
-    for mode in on ''; do
-        GITHUB_EVENT_NAME=push GITHUB_SHA=$revision EVIDENCE_NIGHTLY=$mode run_evidence "$work/main-push"
-        expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'a main push qualifies on hardware'
-    done
+    GITHUB_EVENT_NAME=push GITHUB_SHA=$revision EVIDENCE_NIGHTLY=on run_evidence "$work/main-push"
+    expect_line "$GITHUB_OUTPUT" 'scope=full' 'a main push runs every hosted row in the nightly mode'
+    expect_line "$GITHUB_OUTPUT" 'hosted=run' 'its own'
+    expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'and keeps off the 9700X'
+    expect_line "$GITHUB_OUTPUT" 'hardware_reason=deferred' 'deferring it to the window'
+    GITHUB_EVENT_NAME=push GITHUB_SHA=$revision EVIDENCE_NIGHTLY='' run_evidence "$work/main-push"
+    expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'before the nightly mode a main push qualifies on hardware'
     git -C "$history" worktree remove "$work/main-push"
 done
 
-# A push to main runs its own native correctness, needing no pull request's native evidence, and reads no API.
+# A push to main needs no pull request's native evidence, and reads no API: before the nightly mode it runs its own
+# native correctness; in it, none here.
 tree=$(git -C "$history" rev-parse "$head^{tree}")
 other=$(printf 'other' | sha1sum | cut -c 1-40)
 now=$(madrid '2026-11-04 12:00')
 export NIGHTLY_NOW=$now
 : > "$fixtures/calls.log"
-for nightly in on ''; do
-    GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY=$nightly run_evidence "$history"
-    expect_line "$GITHUB_OUTPUT" 'native=run' "a push runs native correctness (nightly mode '$nightly')"
-    expect_line "$GITHUB_OUTPUT" 'hardware=admit' "and is admitted (nightly mode '$nightly')"
-    expect_line "$GITHUB_OUTPUT" 'native_source=' 'reusing no pull request'"'"'s run'
-done
+GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY='' run_evidence "$history"
+expect_line "$GITHUB_OUTPUT" 'native=run' 'before the nightly mode a push runs native correctness'
+expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'and is admitted'
+expect_line "$GITHUB_OUTPUT" 'native_source=' 'reusing no pull request'"'"'s run'
+GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY=on run_evidence "$history"
+expect_line "$GITHUB_OUTPUT" 'native=-' 'in the nightly mode a push runs no native correctness here'
+expect_line "$GITHUB_OUTPUT" 'measurement=-' 'and no measurements'
+expect_line "$GITHUB_OUTPUT" 'native_source=' 'reusing no pull request'"'"'s run either'
 expect_no_match "$fixtures/calls.log" 'pulls|actions/' 'a push looks up no pull request run'
 
 # A nightly backlog dispatch: its commit's push run passed the plain rows, and the window decides.
@@ -236,11 +295,11 @@ expect_line "$GITHUB_OUTPUT" 'hosted=reused' 'a backlog run reuses its commit'"'
 expect_line "$GITHUB_OUTPUT" 'hosted_source=800' 'naming the run'
 expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'inside the window it is admitted'
 expect_line "$GITHUB_OUTPUT" 'scope=plain' 'a backlog run is in the plain scope'
-expect_line "$GITHUB_OUTPUT" "window_start=$(madrid '2026-11-04 04:00')" 'the cycle'"'"'s window opens at 04:00 Madrid'
-expect_line "$GITHUB_OUTPUT" "window_deadline=$(madrid '2026-11-04 07:00')" 'and closes at 07:00'
+expect_line "$GITHUB_OUTPUT" "window_start=$(madrid '2026-11-04 02:00')" 'the cycle'"'"'s window opens at 02:00 Madrid'
+expect_line "$GITHUB_OUTPUT" "window_deadline=$(madrid '2026-11-04 08:00')" 'and closes at 08:00'
 expect_line "$GITHUB_OUTPUT" 'window_override=false' 'without an override'
-NIGHTLY_NOW=$(madrid '2026-11-04 06:40') GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$merge EVIDENCE_PURPOSE=backlog EVIDENCE_HARDWARE=admit EVIDENCE_SNAPSHOT=$head run_evidence "$history"
-expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'too late to finish by 07:00, it is not'
+NIGHTLY_NOW=$(madrid '2026-11-04 07:40') GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$merge EVIDENCE_PURPOSE=backlog EVIDENCE_HARDWARE=admit EVIDENCE_SNAPSHOT=$head run_evidence "$history"
+expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'too late to finish by 08:00, it is not'
 expect_line "$GITHUB_OUTPUT" 'hardware_reason=window' 'and says why'
 NIGHTLY_NOW=$(madrid '2026-11-04 13:00') GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$merge EVIDENCE_PURPOSE=backlog EVIDENCE_HARDWARE=admit EVIDENCE_SNAPSHOT=$head EVIDENCE_OVERRIDE='manual check' run_evidence "$history"
 expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'an override admits outside the window'
@@ -273,19 +332,19 @@ window_case()
     : > "$GITHUB_OUTPUT"
     FAKE_NOW=$1 WINDOW_START=$2 WINDOW_DEADLINE=$3 WINDOW_OVERRIDE=$4 BOUND=$5 PATH="$work/clock:$PATH" bash "$window_step" > /dev/null
 }
-start_epoch=$(madrid '2026-11-04 04:00')
-deadline_epoch=$(madrid '2026-11-04 07:00')
+start_epoch=$(madrid '2026-11-04 02:00')
+deadline_epoch=$(madrid '2026-11-04 08:00')
 window_case $((start_epoch + 600)) "$start_epoch" "$deadline_epoch" false 25 || fail 'the window step admits inside the window'
 expect_line "$GITHUB_OUTPUT" 'window=open' 'and says so'
 if window_case $((deadline_epoch - 20 * 60)) "$start_epoch" "$deadline_epoch" false 25; then
-    fail 'a lock taken at 06:40 admitted a 25-minute bound'
+    fail 'a lock taken at 07:40 admitted a 25-minute bound'
 fi
 expect_line "$GITHUB_OUTPUT" 'window=closed' 'a lock taken too late closes the window'
 if window_case $((deadline_epoch + 3600)) "$start_epoch" "$deadline_epoch" false 25; then
-    fail 'a lock taken after 07:00 admitted'
+    fail 'a lock taken after 08:00 admitted'
 fi
 if window_case $((start_epoch - 60)) "$start_epoch" "$deadline_epoch" false 25; then
-    fail 'a lock taken before 04:00 admitted'
+    fail 'a lock taken before 02:00 admitted'
 fi
 if window_case $((start_epoch + 600)) '' '' false 25; then
     fail 'missing instants admitted'
@@ -438,7 +497,7 @@ sequence_case()
     done
 }
 sequence_case $((deadline_epoch + 600))
-expect_line "$GITHUB_OUTPUT" 'window=closed' 'a job that took the lock after 07:00 refuses'
+expect_line "$GITHUB_OUTPUT" 'window=closed' 'a job that took the lock after 08:00 refuses'
 test ! -s "$sequence/work.log" || { cat "$sequence/work.log" >&2; fail 'and queries no package and hashes nothing first'; }
 expect_no_match "$GITHUB_OUTPUT" '^host=' 'nor records an identity'
 sequence_case $((start_epoch + 600))
@@ -485,6 +544,9 @@ handed() { sed -n 's/^pending=//p' "$GITHUB_OUTPUT"; }
 rm -f "$fixtures/runs-head-"*.json
 GITHUB_RUN_ID=9100 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') run_coordinator "$work/dry" prepare dry-run
 expect_line "$work/dry/states.tsv" "state	$epoch	$(git -C "$history" rev-parse "$epoch^1")	1793700100" 'the epoch is the first state'
+expect_line "$work/dry/states.tsv" $'worker-window\t4\t7' 'historical workers retain their 04:00-07:00 declaration'
+expect_line "$work/dry/states.tsv" $'worker-window\t2\t8' 'later workers declare the expanded window'
+test "$(find "$work/dry/worker-windows" -name '*.tsv' | wc -l)" -eq 2 || fail 'worker metadata is cached once per source blob'
 expect_no_match "$work/dry/states.tsv" "$inside" 'a merged branch'"'"'s own commits are not states'
 expect_match "$work/dry/report.md" '\| not-required \| 1 \|' 'the documentation change needs nothing'
 expect_match "$work/dry/plan.tsv" "^would-dispatch	snapshot	defer	$head	20261104\.9100\.1\.defer	$head$" 'the dry run would prepare the snapshot'
@@ -562,6 +624,30 @@ expect_match "$work/window/ledger.tsv" "^run	900	.*	ok	skip	full	blocked-hosted	
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$head -f purpose=snapshot -f hardware=admit .*-f request=20261104\.9200\.100[0-9][0-9]\.admit$" 'the comprehensive run is admitted first'
 test "$(grep -E -c '^workflow run .*hardware=admit' "$fixtures/calls.log")" -eq 1 || fail 'one hardware run at a time'
 expect_line "$work/window/ledger.tsv" "cycle	2026-11-04	$head	9200	$(madrid '2026-11-03 22:10')" 'the window keeps the prepare job'"'"'s pin'
+expect_line "$GITHUB_OUTPUT" 'continue=closed' 'a window job with time left hands over nothing'
+# The night the clocks go back, the window is 7 hours: longer than one job's 345 minutes, within two.
+autumn=$("$work/nightly" window-times --now 1792886400)
+autumn_length=$(( $(awk -F '\t' '$1 == "deadline" { print $2 }' <<< "$autumn") - $(awk -F '\t' '$1 == "start" { print $2 }' <<< "$autumn") ))
+test "$autumn_length" -eq 25200 || fail "the fall-back night's window is 7 hours ($autumn_length s)"
+test "$autumn_length" -gt 20700 && test "$autumn_length" -le $((2 * 20700)) || fail 'it needs one continuation job, and one is enough'
+# A window job out of time (345 minutes since its start) while it still waits inside the window hands over: the pin and
+# its pending dispatches, as the prepare job does, and the continuation job, with requests from 20001, repeats none.
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 04:10') NIGHTLY_STARTED=$(( $(madrid '2026-11-04 04:10') - 20700 )) NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$prepared run_coordinator "$work/window-out" window run
+expect_line "$GITHUB_OUTPUT" 'continue=reachable' 'a window job out of time hands over to its continuation'
+expect_line "$GITHUB_OUTPUT" "snapshot=$head" 'with the pin'
+expect_match "$work/coordinate.log" 'the continuation job takes over' 'and says so'
+continued=$(handed)
+pending_count=$(awk '{ print $2 }' <<< "$continued")
+[[ "$continued" == "buster-nightly-pending-1 "* ]] && test "$pending_count" -ge 1 || fail "and its pending dispatches: $continued"
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*-f purpose=snapshot -f hardware=admit .*-f request=20261104\.9200\.100[0-9][0-9]\.admit$" 'it admitted the comprehensive run before handing over'
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 04:11') NIGHTLY_SEQUENCE=20001 NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$continued run_coordinator "$work/window-continued" window run
+expect_no_match "$fixtures/calls.log" '^workflow run .*hardware=admit' 'the continuation repeats no dispatch the runs don'"'"'t show yet'
+expect_no_match "$fixtures/calls.log" 'request=20261104\.9200\.100' 'and makes none with the window job'"'"'s request numbers'
+# Out of time after the window closed: nothing to hand over.
+GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 08:10') NIGHTLY_STARTED=$(( $(madrid '2026-11-04 08:10') - 20700 )) NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$none_pending run_coordinator "$work/window-late" window run
+expect_line "$GITHUB_OUTPUT" 'continue=closed' 'after 08:00 there is nothing to continue'
 # A manual run's override admits outside the window, through the coordinator and its dispatch, and says so.
 : > "$fixtures/calls.log"
 GITHUB_RUN_ID=9300 NIGHTLY_NOW=$(madrid '2026-11-04 13:00') NIGHTLY_OVERRIDE='validating the coordinator' run_coordinator "$work/override-prepare" prepare run
@@ -608,6 +694,95 @@ expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epo
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$merge -f purpose=backlog -f hardware=defer .*request=20261104\.9600\.3\.defer$" 'the next step refills the slot its completion freed'
 expect_line "$GITHUB_OUTPUT" 'window=reachable' 'and the job still waits for the window'
 rm -f "$fixtures/runs-workflow_dispatch.json.2" "$fixtures"/count-*
+# A branch the workflow token may not create (GitHub refused those of merges whose pull request's head lacked main's
+# workflow changes): it warns, dispatches nothing for that state, and the job plans again at once, without the wait
+# (a `sleep` on PATH logs any), giving the slot to the next state.
+mkdir -p "$work/sleeping"
+printf '#!/bin/sh\necho "sleep $*" >> "$FIXTURES/calls.log"\n' > "$work/sleeping/sleep"
+chmod +x "$work/sleeping/sleep"
+: > "$fixtures/refuse-$epoch"
+: > "$fixtures/calls.log"
+PATH="$work/sleeping:$PATH" GITHUB_RUN_ID=9650 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=2 NIGHTLY_SLEEP=300 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/refused-branch" prepare run
+expect_match "$work/coordinate.log" "::warning title=Nightly branch::GitHub refused the workflow token nightly/$epoch" 'a refused branch warns'
+expect_no_match "$fixtures/calls.log" "^workflow run .*--ref nightly/$epoch " 'and nothing is dispatched for its state'
+test "$(grep -c "^api -X POST repos/buster14a/buster/git/refs -f ref=refs/heads/nightly/$epoch " "$fixtures/calls.log")" -eq 1 || fail 'its branch is tried once a job'
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$merge -f purpose=backlog -f hardware=defer .*request=20261104\.9650\.3\.defer$" 'the next step prepares the next state in its place'
+expect_no_match "$fixtures/calls.log" '^sleep ' 'and plans it at once, without waiting'
+expect_match "$work/refused-branch/report.md" 'Branch refused' 'and the report names the skipped state'
+rm -f "$fixtures/refuse-$epoch" "$fixtures"/count-*
+# Any other failure to create a branch (here a 502) is not a refusal: the state isn't skipped, the next step, after the
+# usual wait, tries again, and dispatches it.
+: > "$fixtures/flaky-$epoch"
+: > "$fixtures/calls.log"
+PATH="$work/sleeping:$PATH" GITHUB_RUN_ID=9660 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=2 NIGHTLY_SLEEP=300 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/flaky-branch" prepare run
+expect_match "$work/coordinate.log" "::warning title=Nightly branch::nightly/$epoch could not be created \\(gh: Server Error \\(HTTP 502\\)\\); a later step tries again" 'a transient failure warns, with its reason'
+test "$(grep -c "^api -X POST repos/buster14a/buster/git/refs -f ref=refs/heads/nightly/$epoch " "$fixtures/calls.log")" -eq 2 || fail 'and its branch is tried again'
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epoch -f purpose=backlog -f hardware=defer" 'and its state is dispatched once it is made'
+expect_match "$fixtures/calls.log" '^sleep 300$' 'after the usual wait'
+expect_no_match "$work/flaky-branch/report.md" 'Branch refused' 'and it is not reported as refused'
+rm -f "$fixtures/flaky-$epoch" "$fixtures"/count-*
+# A nightly branch that already points at another commit is never dispatched, and the state is skipped for the job
+# (it stays wrong until a person fixes it), at once: the next state is prepared without the wait.
+printf '{"object":{"sha":"%s"}}\n' "$merge" > "$fixtures/ref-$epoch.json"
+: > "$fixtures/calls.log"
+PATH="$work/sleeping:$PATH" GITHUB_RUN_ID=9665 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=2 NIGHTLY_SLEEP=300 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/mispointed-branch" prepare run
+expect_match "$work/coordinate.log" "::error title=Nightly branch::nightly/$epoch points at $merge; refusing to dispatch it" 'a branch at another commit is an error'
+expect_no_match "$fixtures/calls.log" "^workflow run .*--ref nightly/$epoch |-X POST repos/buster14a/buster/git/refs -f ref=refs/heads/nightly/$epoch " 'and is neither dispatched nor made again'
+test "$(grep -c "^api repos/buster14a/buster/git/ref/heads/nightly/$epoch " "$fixtures/calls.log")" -eq 1 || fail 'it is looked up once a job'
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$merge -f purpose=backlog -f hardware=defer .*request=20261104\.9665\.3\.defer$" 'the next state is prepared in its place'
+expect_no_match "$fixtures/calls.log" '^sleep ' 'at once'
+rm -f "$fixtures/ref-$epoch.json" "$fixtures"/count-*
+# With the nightly-ledger environment's branch token, the branches are made and deleted with it, and a state the
+# workflow token was refused is dispatched; every other call keeps the workflow's token.
+: > "$fixtures/refuse-$epoch"
+: > "$fixtures/calls.log"
+: > "$fixtures/tokens.log"
+NIGHTLY_BRANCH_TOKEN=branch-token GITHUB_RUN_ID=9668 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=1 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/branch-token" prepare run
+expect_match "$fixtures/tokens.log" "^branch-token api -X POST repos/buster14a/buster/git/refs -f ref=refs/heads/nightly/$epoch " 'the branch token makes the branches'
+expect_no_match "$fixtures/tokens.log" '^branch-token (workflow|api repos|api --paginate|api -X POST repos/buster14a/buster/actions)' 'and nothing else'
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epoch -f purpose=backlog -f hardware=defer" 'so the state the workflow token was refused is dispatched'
+expect_no_match "$work/coordinate.log" "Nightly branch::" 'without a warning'
+rm -f "$fixtures/refuse-$epoch" "$fixtures"/count-*
+# An expired branch token is rejected once, warned about once, and the job makes its branches with the workflow
+# token, as without one: a branch the workflow token may have is made and dispatched, one it is refused is skipped.
+: > "$fixtures/refuse-$merge"
+: > "$fixtures/calls.log"
+: > "$fixtures/tokens.log"
+PATH="$work/sleeping:$PATH" NIGHTLY_BRANCH_TOKEN=expired-token GITHUB_RUN_ID=9669 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=2 NIGHTLY_SLEEP=300 NIGHTLY_PREPARATIONS=3 run_coordinator "$work/expired-token" prepare run
+test "$(grep -c '^expired-token ' "$fixtures/tokens.log")" -eq 1 || { cat "$fixtures/tokens.log" >&2; fail 'an expired branch token is tried once a job'; }
+test "$(grep -c '::warning title=Nightly branch token::GitHub rejected BUSTER_NIGHTLY_BRANCH_TOKEN (gh: Bad credentials (HTTP 401))' "$work/coordinate.log")" -eq 1 || fail 'and warned about once'
+expect_match "$fixtures/tokens.log" "^workflow-token api -X POST repos/buster14a/buster/git/refs -f ref=refs/heads/nightly/$epoch " 'the workflow token makes the branches instead'
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epoch -f purpose=backlog -f hardware=defer" 'a branch it may have is dispatched'
+expect_match "$work/coordinate.log" "::warning title=Nightly branch::GitHub refused the workflow token nightly/$merge" 'one it is refused is skipped, as without a branch token'
+rm -f "$fixtures/refuse-$merge" "$fixtures"/count-*
+# A branch someone else deleted before the prune: a 404 to a valid branch token, which keeps it, so the next branch
+# the workflow token would be refused is still made with it and dispatched. A token without access to the repository
+# (a 404 there too) is rejected, as an expired one is.
+gone=1111111111111111111111111111111111111111
+printf '[{"ref":"refs/heads/nightly/%s"}]\n' "$gone" > "$fixtures/refs.json"
+: > "$fixtures/gone-$gone"
+: > "$fixtures/refuse-$epoch"
+: > "$fixtures/calls.log"
+: > "$fixtures/tokens.log"
+NIGHTLY_BRANCH_TOKEN=branch-token GITHUB_RUN_ID=9671 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=2 NIGHTLY_SLEEP=0 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/pruned-404" prepare run
+expect_match "$fixtures/tokens.log" "^branch-token api -X DELETE repos/buster14a/buster/git/refs/heads/nightly/$gone$" 'the prune of a branch already gone is a 404'
+expect_no_match "$work/coordinate.log" 'Nightly branch token::' 'which doesn'"'"'t reject a valid branch token'
+expect_match "$fixtures/tokens.log" "^branch-token api -X POST repos/buster14a/buster/git/refs -f ref=refs/heads/nightly/$epoch " 'so a later branch is still made with it'
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epoch -f purpose=backlog -f hardware=defer" 'and its state dispatched'
+: > "$fixtures/calls.log"
+: > "$fixtures/tokens.log"
+NIGHTLY_BRANCH_TOKEN=outsider-token GITHUB_RUN_ID=9672 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=2 NIGHTLY_SLEEP=0 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/outsider-token" prepare run
+test "$(grep -c '::warning title=Nightly branch token::GitHub rejected BUSTER_NIGHTLY_BRANCH_TOKEN (gh: Not Found (HTTP 404))' "$work/coordinate.log")" -eq 1 || fail 'a branch token without access to the repository is rejected once'
+expect_match "$fixtures/tokens.log" "^workflow-token api -X DELETE repos/buster14a/buster/git/refs/heads/nightly/$gone$" 'and the workflow token takes over'
+rm -f "$fixtures/refs.json" "$fixtures/gone-$gone" "$fixtures/refuse-$epoch" "$fixtures"/count-*
+# A branch another step made meanwhile (the POST fails, the branch is then there at the commit) is used as it is.
+printf '{"object":{"sha":"%s"}}\n' "$epoch" > "$fixtures/ref-$epoch.json.2"
+: > "$fixtures/refuse-$epoch"
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9670 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=1 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/raced-branch" prepare run
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epoch -f purpose=backlog -f hardware=defer" 'a branch made meanwhile is dispatched'
+expect_no_match "$work/coordinate.log" "Nightly branch::" 'without a warning'
+rm -f "$fixtures/refuse-$epoch" "$fixtures/ref-$epoch.json.2" "$fixtures"/count-*
 # The handoff from the prepare job to the window job: a prepare step inside the window admits no hardware, and the
 # window job, handed the prepare job's pending dispatches as its output, repeats none that aren't visible yet, whether
 # or not the ledger's artifact can be read.
@@ -657,6 +832,83 @@ GITHUB_RUN_ID=9700 NIGHTLY_NOW=$(madrid '2026-11-04 04:06') NIGHTLY_SNAPSHOT=$he
 expect_match "$fixtures/calls.log" "^workflow run .*-f purpose=snapshot -f hardware=defer " 'a valid empty list plans: the hidden dispatch, not handed over, is made again'
 mv "$fixtures/artifact-9701.zip.away" "$fixtures/artifact-9701.zip"
 rm -f "$fixtures/artifacts-9700.json"
+
+# Historical requests do not consume the 64 active pending slots. Retain unseen admissions and preparations across
+# the window-to-continuation handoff, including a timestamp ahead of this job's clock. The 600-second grace is exact.
+pending_now=$(madrid '2026-11-04 04:06')
+: > "$work/pending-history.tsv"
+for i in $(seq 1 70); do
+    printf 'pending\t20261104.9720.%s.admit\tbacklog\tadmit\t%s\t%s\n' "$i" "$epoch" "$((pending_now - 600))" >> "$work/pending-history.tsv"
+done
+{
+    printf 'pending\t20261104.9720.101.defer\tsnapshot\tdefer\t%s\t%s\n' "$head" "$pending_now"
+    printf 'pending\t20261104.9720.102.admit\tbacklog\tadmit\t%s\t%s\n' "$epoch" "$((pending_now - 599))"
+    printf 'pending\t20261104.9720.103.defer\tbacklog\tdefer\t%s\t%s\n' "$merge" "$((pending_now + 60))"
+} > "$work/pending-active.tsv"
+cat "$work/pending-history.tsv" "$work/pending-active.tsv" > "$work/pending-long.tsv"
+long_handoff="buster-nightly-pending-1 73$(awk -F '\t' '{ printf " %s,%s,%s,%s,%s", $2, $3, $4, $5, $6 }' "$work/pending-long.tsv")"
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9720 NIGHTLY_NOW=$pending_now NIGHTLY_STARTED=$((pending_now - 20700)) NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$long_handoff run_coordinator "$work/handoff-compacted" window run
+expect_no_match "$fixtures/calls.log" '^workflow run' 'historical pending rows cannot hide a still-unseen dispatch'
+cmp "$work/pending-active.tsv" "$work/handoff-compacted/pending.tsv" || fail 'the handoff keeps exactly the three unseen active requests'
+expect_match "$GITHUB_OUTPUT" '^pending=buster-nightly-pending-1 3 ' 'the continuation receives the compacted handoff'
+expect_line "$GITHUB_OUTPUT" 'continue=reachable' 'the compacted window job can hand over normally'
+
+# Recent requests visible in the facts also leave the pending file. A queued admission must still block the planner
+# after compaction, through its run facts rather than its pending row. Exercise this with both instrumentations.
+: > "$work/pending-visible.tsv"
+: > "$work/pending-facts.tsv"
+for i in $(seq 1 70); do
+    flavor=defer status=completed conclusion=success
+    if [ "$i" -eq 70 ]; then flavor=admit status=queued conclusion=-; fi
+    request="20261104.9730.$i.$flavor"
+    printf 'pending\t%s\tbacklog\t%s\t%s\t%s\n' "$request" "$flavor" "$epoch" "$pending_now" >> "$work/pending-visible.tsv"
+    printf 'run\t%s\t1\tworkflow_dispatch\t%s\t%s\t%s\t.github/workflows/9700x.yml\tnightly/%s\t%s\t%s\t1421805693\tNightly backlog (%s) of %s [%s]\n' \
+        "$i" "$status" "$conclusion" "$epoch" "$epoch" "$pending_now" "$pending_now" "$flavor" "$epoch" "$request" >> "$work/pending-facts.tsv"
+done
+grep -v $'\tadmit\t' "$work/pending-active.tsv" > "$work/pending-unseen.tsv"
+plan_pending()
+{
+    local binary=$1 facts=$2 pending=$3
+    shift 3
+    "$binary" plan --states "$work/handoff-window/states.tsv" --ledger "$work/handoff-window/ledger.tsv" \
+        --facts "$facts" --now "$pending_now" --main "$head" --mode run --coordinator 9740 \
+        --pending "$pending" --report "$work/pending-report.md" "$@"
+}
+for binary in "$work/nightly" "$work/nightly-sanitize"; do
+    cat "$work/pending-visible.tsv" "$work/pending-unseen.tsv" > "$work/pending-input.tsv"
+    ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 plan_pending "$binary" "$work/pending-facts.tsv" "$work/pending-input.tsv" > "$work/pending-plan.tsv"
+    cmp "$work/pending-unseen.tsv" "$work/pending-input.tsv" || fail 'visible requests leave only the unseen preparations pending'
+    expect_no_match "$work/pending-plan.tsv" $'^dispatch\t[^\t]+\tadmit\t' 'a visible queued admission still prevents a second hardware dispatch'
+    expect_line "$work/pending-plan.tsv" $'wait\ta hardware run is in flight' 'the visible queued facts retain the hardware guard'
+done
+
+# Invalid historical data, another invalid input, an invalid option, or more than 64 still-active requests rejects
+# the whole plan without replacing the original handoff. Stale rows must not hide an active overflow.
+: > "$work/pending-empty-facts.tsv"
+printf 'not-a-commit\n' > "$work/pending-bad-refs.tsv"
+for broken in malformed refs option overflow; do
+    cat "$work/pending-history.tsv" "$work/pending-active.tsv" > "$work/pending-input.tsv"
+    arguments=()
+    case "$broken" in
+        malformed)
+            printf 'pending\t20261104.9740.1.admit\tbacklog\tadmit\tnot-a-sha\t%s\n' "$((pending_now - 600))" >> "$work/pending-input.tsv" ;;
+        refs) arguments=(--refs "$work/pending-bad-refs.tsv") ;;
+        option) arguments=(--attempts invalid) ;;
+        overflow)
+            cat "$work/pending-history.tsv" > "$work/pending-input.tsv"
+            for i in $(seq 1 65); do
+                printf 'pending\t20261104.9740.%s.admit\tbacklog\tadmit\t%s\t%s\n' "$i" "$epoch" "$pending_now" >> "$work/pending-input.tsv"
+            done ;;
+    esac
+    cp "$work/pending-input.tsv" "$work/pending-before.tsv"
+    if plan_pending "$work/nightly" "$work/pending-empty-facts.tsv" "$work/pending-input.tsv" "${arguments[@]}" > "$work/pending-plan.tsv" 2> "$work/pending-error.log"; then
+        fail "invalid pending plan ($broken) succeeded"
+    fi
+    cmp "$work/pending-before.tsv" "$work/pending-input.tsv" || fail "invalid pending plan ($broken) changed the handoff"
+    test ! -s "$work/pending-plan.tsv" || fail "invalid pending plan ($broken) emitted actions"
+done
+
 # Main moves on between the prepare job and the window job: the window job's dispatches still name the cycle's pinned
 # snapshot, which the worker checks ancestry against and records, not main's new head.
 rm -f "$fixtures"/count-*
@@ -672,4 +924,45 @@ git -C "$history" -c push.negotiate=false push -q "$remote" main
 GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 04:10') NIGHTLY_PENDING=$none_pending run_coordinator "$work/moved" window run
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$head -f purpose=snapshot -f hardware=admit -f snapshot=$head -f request=" 'after main moves on, the worker gets the cycle'"'"'s pinned snapshot'
 expect_no_match "$fixtures/calls.log" "snapshot=$later" 'and never main'"'"'s new head'
-printf 'nightly glue: evidence, records, first-parent states, the ledger, the window step, dry and real coordination, overrides, failed polls, refilled preparations, the prepare-to-window handoff and a pin that main moved past checked\n'
+
+# A mixed old/new backlog after the daily snapshot completed: early and late steps skip old workers, while an inside
+# step admits the oldest. A new job rebuilds the same windows from Git, independently of its pending handoff.
+export FIXTURES="$work/worker-fixtures"
+fixtures=$FIXTURES
+mkdir -p "$fixtures" "$work/worker-ledger"
+{
+    printf '# buster-nightly-ledger 1\ncycle\t2026-11-04\t%s\t9800\t%s\n' "$later" "$(madrid '2026-11-03 22:10')"
+    for state in "$epoch" "$merge" "$head"; do
+        case "$state" in "$epoch") run=9811 ;; "$merge") run=9812 ;; "$head") run=9813 ;; esac
+        printf 'run\t%s\t1\t%s\tpush\tpush\t-\t1793701000\t1793702000\tok\tskip\ttargeted\tdeferred\t-\t-\t-\n' "$run" "$state"
+    done
+    printf 'run\t9814\t1\t%s\tworkflow_dispatch\tsnapshot\t20261104.9800.1.defer\t1793740200\t1793743800\tok\tskip\tfull\tdeferred\t-\t-\t-\n' "$later"
+    printf 'run\t9815\t1\t%s\tworkflow_dispatch\tsnapshot\t20261104.9800.2.admit\t1793754000\t1793754300\tok\tadmit\tfull\tcomplete\t-\t-\t-\n' "$later"
+} > "$work/worker-ledger/ledger.tsv"
+(cd "$work/worker-ledger" && zip -q "$fixtures/artifact-98001.zip" ledger.tsv)
+printf '{"artifacts":[{"id":98001,"name":"nightly-ledger-prepare-1","expired":false}]}\n' > "$fixtures/artifacts-9800.json"
+: > "$fixtures/calls.log"
+early=$(madrid '2026-11-04 02:10')
+GITHUB_RUN_ID=9800 NIGHTLY_NOW=$early NIGHTLY_STARTED=$((early - 20700)) NIGHTLY_PENDING=$none_pending run_coordinator "$work/worker-early" window run
+expect_match "$fixtures/calls.log" "^workflow run .*--ref nightly/$head -f purpose=backlog -f hardware=admit" 'a later worker can use the added early hours'
+expect_no_match "$fixtures/calls.log" "--ref nightly/($epoch|$merge) .*hardware=admit" 'the old 04:00 workers are never admitted early'
+expect_match "$work/worker-early/report.md" 'worker window 04:00-07:00 Europe/Madrid' 'the report explains the old workers still pending'
+expect_line "$GITHUB_OUTPUT" 'continue=reachable' 'a job that hands over does so normally with worker constraints'
+worker_handoff=$(handed)
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9800 NIGHTLY_NOW=$((early + 60)) NIGHTLY_SEQUENCE=20001 NIGHTLY_PENDING=$worker_handoff run_coordinator "$work/worker-continued" window run
+expect_no_match "$fixtures/calls.log" '^workflow run .*hardware=admit' 'the continuation duplicates no pending hardware dispatch'
+cmp "$work/worker-early/states.tsv" "$work/worker-continued/states.tsv" || fail 'the continuation rebuilds exactly the same immutable worker windows'
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9800 NIGHTLY_NOW=$(madrid '2026-11-04 04:00') NIGHTLY_PENDING=$none_pending run_coordinator "$work/worker-open" window run
+expect_match "$fixtures/calls.log" "^workflow run .*--ref nightly/$epoch -f purpose=backlog -f hardware=admit" 'at 04:00 the oldest worker becomes eligible'
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9800 NIGHTLY_NOW=$(madrid '2026-11-04 07:10') NIGHTLY_PENDING=$none_pending run_coordinator "$work/worker-late" window run
+expect_match "$fixtures/calls.log" "^workflow run .*--ref nightly/$head -f purpose=backlog -f hardware=admit" 'a later worker can use the added late hour'
+expect_no_match "$fixtures/calls.log" "--ref nightly/($epoch|$merge) .*hardware=admit" 'the old workers are never admitted after their cutoff'
+expect_match "$work/worker-late/ledger.tsv" "^run.*$epoch.*targeted.deferred" 'skipping a closed worker does not mark its coverage complete'
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9800 NIGHTLY_NOW=$(madrid '2026-11-04 07:36') NIGHTLY_PENDING=$none_pending run_coordinator "$work/worker-cutoff" window run
+expect_no_match "$fixtures/calls.log" '^workflow run .*hardware=admit' 'no new worker bypasses the global bound and 08:00 cutoff'
+
+printf 'nightly glue: evidence, records, first-parent states, the ledger, worker windows, the window step, dry and real coordination, overrides, failed polls, refilled preparations, refused, failed and raced branches, pending compaction, the prepare-to-window handoff and a pin that main moved past checked\n'

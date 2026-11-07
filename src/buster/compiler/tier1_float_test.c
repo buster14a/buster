@@ -556,6 +556,7 @@ static void tier1_float_compile(Tier1EmitTest* test, uint32_t fixture, bool vect
         tier1_emit_test_expect(test, emitted.general, "a floating value takes the CFG consumer");
         tier1_emit_test_expect(test, tier1_emit_test_saves_loaded(&emitted) && tier1_emit_test_saves_seen(&emitted),
                                "every value a call stores, a floating one's xmm row among them, is loaded back (#1116)");
+        tier1_emit_test_expect(test, tier1_emit_test_general_rows_used(&emitted), "a general call-save row is a register some call stores (#177)");
         test->vector_saves += emitted.prepared.vector_save_mask != 0;
         // Every floating value's register is an xmm one of the allowed: its fragments' registers are its class's.
         bool classes = true;

@@ -69,6 +69,14 @@ that thread. Valgrind's address manager can report `EINVAL` for a layout it
 cannot represent. These are admission ceilings, not guarantees that an arbitrary
 workload or number of threads will fit.
 
+A compile's commands (the driver's, `check` and `parse`) read the limit once,
+before they start any thread (`arena_limits_fix`, #652): they never change it,
+and without a pool each reservation read it again, about 30 `getrlimit` calls
+for an empty file's `-fsyntax-only`. A later `setrlimit` in such a process
+changes no reservation's share. Every other process, the tests that lower
+`RLIMIT_AS` in-process or in a forked child among them, still reads it at each
+reservation, or once per pool.
+
 **The returned `Arena.capacity` is authoritative**, and can be less than the
 requested ceiling. Allocations exceeding it fail; no data is truncated and no
 published pointer moves. Fixed-size tables whose producer has already published

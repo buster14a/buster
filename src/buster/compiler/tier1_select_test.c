@@ -697,8 +697,8 @@ static bool tier1_select_test_plans_equal(const Tier1SelectPlan* a, const Tier1S
         const Tier1SelectPattern* q = &b->patterns[node];
         equal = p->immediate == q->immediate && memcmp(p->values, q->values, sizeof(p->values)) == 0 && p->displacement == q->displacement &&
                 p->stack_object == q->stack_object && p->rule == q->rule && p->operation == q->operation && p->width == q->width &&
-                p->source_width == q->source_width && p->condition == q->condition && p->scale == q->scale && p->fold_count == q->fold_count &&
-                p->intrinsic_cost == q->intrinsic_cost && p->compare_immediate == q->compare_immediate && p->nops == q->nops;
+                p->source_width == q->source_width && p->storage_width == q->storage_width && p->condition == q->condition && p->scale == q->scale && p->fold_count == q->fold_count &&
+                p->intrinsic_cost == q->intrinsic_cost && p->compare_immediate == q->compare_immediate && p->sign_result == q->sign_result && p->nops == q->nops;
         equal = equal && a->covered[node] == b->covered[node] && a->costs[node] == b->costs[node] && a->effective_use_offsets[node] == b->effective_use_offsets[node];
     }
     equal = equal && a->effective_use_offsets[count] == b->effective_use_offsets[count];
@@ -881,6 +881,112 @@ static void tier1_select_test_plans(Tier1SelectTest* test)
 // values seldom are), into a register of their own or an operand's. Emitted for x86-64-v3 (BMI1 and BMI2), both paths'
 // code runs natively against the test's evaluator where this machine has both; x86-64's baseline, which has neither,
 // refuses each as the target's.
+// Every form a vector operation's lanes select (#141's element types: tier1_select_lane_forms, _compares and _blends)
+// is one x86 semantics covers, whose effects the code certificate decodes (#939): an uncovered form's conservative
+// effects would read and write every register and fail --verify.
+static void tier1_select_test_lane_forms(Tier1SelectTest* test)
+{
+    uint32_t forms = 0;
+    uint32_t uncovered = 0;
+    for (uint32_t encoding = 0; encoding < 3; encoding += 1)
+    {
+        for (uint32_t operation = 0; operation < BUSTER_TIER1_VECTOR_OPERATIONS; operation += 1)
+        {
+            for (uint32_t lane = 0; lane < IR_SIMD_LANE_COUNT; lane += 1)
+            {
+                for (uint32_t width = 0; width < 3; width += 1)
+                {
+                    const uint16_t form = tier1_select_lane_forms[encoding][operation][lane][width];
+                    forms += form != X86_FORM_NONE;
+                    if (form != X86_FORM_NONE && x86_effects(form)->operation == X86_OPERATION_NONE)
+                    {
+                        fprintf(stderr, "uncovered lane form %s (%u)\n", x86_form_description(form)->mnemonic, form);
+                        uncovered += 1;
+                    }
+                }
+            }
+        }
+    }
+    for (uint32_t lane = 0; lane < IR_SIMD_LANE_COUNT; lane += 1)
+    {
+        for (uint32_t width = 0; width < 3; width += 1)
+        {
+            const uint16_t candidates[3] = { tier1_select_lane_compares[lane][0][width], tier1_select_lane_compares[lane][1][width], tier1_select_lane_blends[lane][width] };
+            for (uint32_t k = 0; k < 3; k += 1)
+            {
+                forms += candidates[k] != X86_FORM_NONE;
+                if (candidates[k] != X86_FORM_NONE && x86_effects(candidates[k])->operation == X86_OPERATION_NONE)
+                {
+                    fprintf(stderr, "uncovered lane form %s (%u)\n", x86_form_description(candidates[k])->mnemonic, candidates[k]);
+                    uncovered += 1;
+                }
+            }
+        }
+    }
+    tier1_select_test_expect(test, forms != 0 && uncovered == 0, "every form a vector operation's lanes select is one x86 semantics covers");
+}
+
+// A 16-byte vector's NOT, COMPARE and SELECT at a target without AVX (#1425's review): a NOT is pcmpeqd's every bit and
+// pxor, in the destination where the operand is elsewhere and in xmm15 where it is the destination; a COMPARE's and a
+// SELECT's records are AVX-512's, which the baseline's allow-list refuses, so that emission refuses the function rather
+// than give no records.
+static void tier1_select_test_sse_vectors(Tier1SelectTest* test)
+{
+    uint8_t* baseline = malloc(X86_FORM_COUNT);
+    if (baseline != NULL)
+    {
+        const X86Target base = { .architecture = X86_ARCH_BASELINE };
+        x86_target_forms(&base, baseline);
+        Tier1SelectHoles complement = {
+            .rule = TIER1_RULE_VECTOR,
+            .width = 16,
+            .scale = BUSTER_TIER1_VECTOR_NOT,
+            .sse = true,
+            .destination = 1,
+            .left = 2,
+        };
+        const Tier1SelectRecords apart = tier1_select_expand(&complement);
+        tier1_select_test_expect(test, apart.count == 2 && apart.records[0].form == X86_FORM_PCMPEQD_X_XM128 && apart.records[0].reg == 1 && apart.records[0].rm == 1 &&
+                                     apart.records[1].form == X86_FORM_PXOR_X_XM128 && apart.records[1].reg == 1 && apart.records[1].rm == 2,
+                                 "an SSE vector NOT into another register is pcmpeqd of the destination and pxor of the operand");
+        complement.left = 1;
+        const Tier1SelectRecords same = tier1_select_expand(&complement);
+        tier1_select_test_expect(test, same.count == 2 && same.records[0].form == X86_FORM_PCMPEQD_X_XM128 && same.records[0].reg == BUSTER_TIER1_SELECT_FLOAT_SCRATCH &&
+                                     same.records[0].rm == BUSTER_TIER1_SELECT_FLOAT_SCRATCH && same.records[1].form == X86_FORM_PXOR_X_XM128 && same.records[1].reg == 1 &&
+                                     same.records[1].rm == BUSTER_TIER1_SELECT_FLOAT_SCRATCH,
+                                 "an SSE vector NOT in place is pcmpeqd of xmm15 and pxor of it");
+        bool allowed = true;
+        for (uint32_t r = 0; r < 2; r += 1)
+        {
+            allowed &= x86_target_form_allowed(baseline, apart.records[r].form) && x86_target_form_allowed(baseline, same.records[r].form);
+        }
+        tier1_select_test_expect(test, allowed, "an SSE vector NOT's records are the baseline's");
+        const uint32_t kinds[2] = { BUSTER_TIER1_VECTOR_COMPARE, BUSTER_TIER1_VECTOR_SELECT };
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            const Tier1SelectHoles masked = {
+                .rule = TIER1_RULE_VECTOR,
+                .width = 16,
+                .scale = (uint8_t)kinds[k],
+                .sse = true,
+                .destination = 1,
+                .left = 2,
+                .right = 3,
+                .third = 4,
+                .condition = IR_LT,
+            };
+            const Tier1SelectRecords records = tier1_select_expand(&masked);
+            bool refused = records.count != 0;
+            for (uint32_t r = 0; r < records.count; r += 1)
+            {
+                refused &= !x86_target_form_allowed(baseline, records.records[r].form);
+            }
+            tier1_select_test_expect(test, refused, k == 0 ? "an SSE vector COMPARE's records are none the baseline allows" : "an SSE vector SELECT's records are none the baseline allows");
+        }
+        free(baseline);
+    }
+}
+
 static void tier1_select_test_intrinsics(Tier1SelectTest* test)
 {
     Arena input = arena_reserve(1u << 20);
@@ -975,8 +1081,11 @@ static void tier1_select_test_intrinsics(Tier1SelectTest* test)
     arena_release(&input);
 }
 
+#include "tier1_address_arithmetic_test.c"
+
 static void tier1_select_test_memory_plans(Tier1SelectTest* test)
 {
+    tier1_select_test_address_arithmetic(test);
     Arena input = arena_reserve(1u << 20);
     Arena output = arena_reserve(1u << 20);
     Arena scratch = arena_reserve(1u << 20);
@@ -2045,7 +2154,7 @@ static void tier1_select_test_conversions(Tier1SelectTest* test)
                                 const uint32_t first = plan->effective_use_offsets[converted];
                                 if (from == 0)
                                 {
-                                    // A comparison's truth value as an integer is the comparison's own setcc and movzx.
+                                    // A comparison's truth value as an integer is the comparison's canonical result.
                                     tier1_select_test_expect(test, plan->patterns[converted].rule == TIER1_RULE_COMPARE_IMMEDIATE && plan->patterns[converted].condition == IR_NE &&
                                                                        plan->effective_use_offsets[converted + 1] == first + 1 && plan->effective_use_values[first] == 0 &&
                                                                        plan->covered[1] && plan->covered[2] && !plan->covered[converted],
@@ -2053,7 +2162,10 @@ static void tier1_select_test_conversions(Tier1SelectTest* test)
                                 }
                                 else
                                 {
-                                    tier1_select_test_expect(test, plan->effective_use_offsets[converted + 1] == first + 1 && plan->effective_use_values[first] == converted - 1 && !plan->covered[converted], "conversion preserves its exact selected source use");
+                                    const bool projected = op == IR_SEXT && from < 4;
+                                    const uint32_t source = projected ? 0 : converted - 1;
+                                    tier1_select_test_expect(test, plan->effective_use_offsets[converted + 1] == first + 1 && plan->effective_use_values[first] == source && !plan->covered[converted] &&
+                                                               (!projected || plan->covered[converted - 1]), "conversion preserves its exact source use, projecting low bits past a single-use register truncation");
                                     const bool narrow_copy = op == IR_ZEXT && (from == 1 || from == 2);
                                     if (narrow_copy)
                                     {
@@ -2185,6 +2297,464 @@ static void tier1_select_test_copy_elision(Tier1SelectTest* test)
     }
 }
 
+// #1219: native values, including unspecified ABI upper halves and no-write identities, alongside selected shapes.
+// Deliberately coalesce the whole conversion chain in RDI: moving it to another 32-bit register would hide a bad proof.
+static void tier1_select_test_known_bits(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(1u << 20);
+    Arena scratch = arena_reserve(1u << 20);
+    const uint64_t samples[] = { 0, 1, 0x7f, 0x80, 0xff, 0x100, 0x7fff, 0x8000, 0xffff, INT32_MAX, UINT32_MAX, UINT64_C(0xa55a120080000000), UINT64_MAX };
+    uint64_t random = UINT64_C(0x1219b175a55a9001);
+    for (uint32_t shape = 0; shape < 31; shape += 1)
+    {
+        const bool load = (shape >= 15 && shape <= 18) || shape == 24 || shape == 25 || shape == 29;
+        const bool wide = shape == 1 || shape == 11 || shape == 12 || shape == 13 || shape == 14 || shape == 23 || shape == 26;
+        const bool dynamic = shape == 9;
+        const IrSizes sizes = { .instruction_count = 10, .block_count = 1, .constant_count = shape == 30 ? 3 : shape >= 27 ? 2 : !dynamic, .parameter_count = 1 + dynamic };
+        IrFunction function;
+        const bool created = ir_create(&input, &sizes, &function) == IR_OK;
+        tier1_select_test_expect(test, created, "create known-bit regression");
+        if (created)
+        {
+            function.result_type = IR_I64;
+            function.parameter_types[0] = load ? IR_PTR : wide ? IR_I64 : IR_I32;
+            tier1_select_test_node(&function, 0, IR_PARAM, function.parameter_types[0], 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            if (dynamic)
+            {
+                function.parameter_types[1] = IR_I32;
+                tier1_select_test_node(&function, 1, IR_PARAM, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            else
+            {
+                function.constants[0].low = shape == 30 ? UINT32_C(0x1ffffff) : shape == 2 || shape == 11 || shape == 22 || shape == 27 || shape == 28 ? 255 : shape == 3 ? UINT64_C(0x80000000) : shape == 12 || shape >= 19 ? 65535 : shape == 5 || shape == 10 ? 0 : 1;
+                tier1_select_test_node(&function, 1, IR_CONST, wide ? IR_I64 : IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            const uint32_t op = shape == 0 ? IR_COPY : shape == 1 || shape == 13 || shape == 14 || shape == 23 || shape == 26 ? IR_TRUNC : shape == 2 || shape == 3 || shape == 11 || shape == 12 || (shape >= 19 && shape <= 22) || shape == 27 || shape == 28 || shape == 30 ? IR_AND :
+                                shape == 4 || shape == 5 || dynamic ? IR_LSHR : shape == 10 ? IR_SHL : shape == 6 ? IR_ADD : load ? IR_LOAD : IR_MUL;
+            const uint32_t narrow = shape == 16 || shape == 25 || shape == 26 ? IR_I16 : shape == 17 || shape == 29 ? IR_I32 : IR_I8;
+            const uint32_t type = load || shape == 13 || shape == 14 || (shape >= 23 && shape <= 26) ? narrow : shape == 11 || shape == 12 ? IR_I64 : IR_I32;
+            tier1_select_test_node(&function, 2, (uint8_t)op, (uint8_t)type, shape == 8 ? 1 : 0, shape == 8 ? 0 : op == IR_TRUNC || op == IR_LOAD || op == IR_COPY ? BUSTER_IR_NONE : 1, BUSTER_IR_NONE);
+            function.flags[2] = shape == 18 ? BUSTER_IR_VOLATILE : 0;
+            uint32_t converted = 3;
+            if (shape == 11 || shape == 12)
+            {
+                tier1_select_test_node(&function, 3, IR_TRUNC, shape == 11 ? IR_I8 : IR_I16, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                converted = 4;
+            }
+            else if (shape == 13)
+            {
+                tier1_select_test_node(&function, 3, IR_SEXT, IR_I32, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 4, IR_TRUNC, IR_I8, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                converted = 5;
+            }
+            else if (shape >= 19 && shape <= 22)
+            {
+                tier1_select_test_node(&function, 3, shape == 19 ? IR_ADD : shape == 20 ? IR_SUB : IR_MUL, IR_I32, 2, 2, BUSTER_IR_NONE);
+                converted = 4;
+            }
+            else if (shape >= 23 && shape <= 26)
+            {
+                tier1_select_test_node(&function, 3, IR_SEXT, IR_I32, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                converted = 4;
+            }
+            else if (shape >= 27)
+            {
+                function.constants[1].low = shape == 30 ? UINT32_C(0xffffff) : shape == 28 ? (uint32_t)-127 : 127;
+                tier1_select_test_node(&function, 3, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 4, shape == 28 ? IR_ADD : IR_SUB, IR_I32, 2, 3, BUSTER_IR_NONE);
+                converted = 5;
+                if (shape == 30)
+                {
+                    function.constants[2].low = 1;
+                    tier1_select_test_node(&function, 5, IR_CONST, IR_I32, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 6, IR_ADD, IR_I32, 4, 5, BUSTER_IR_NONE);
+                    converted = 7;
+                }
+            }
+            const bool sign = shape == 2 || shape == 3 || shape == 4 || shape == 12 || shape >= 13;
+            tier1_select_test_node(&function, converted, sign ? IR_SEXT : IR_ZEXT, shape == 13 ? IR_I32 : IR_I64, converted - 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            uint32_t returned = converted;
+            if (shape == 13)
+            {
+                returned += 1;
+                tier1_select_test_node(&function, returned, IR_ZEXT, IR_I64, converted, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            tier1_select_test_node(&function, returned + 1, IR_RET, IR_VOID, returned, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            function.instruction_count = returned + 2;
+            function.block_offsets[1] = function.instruction_count;
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                Tier1SelectPlan plan;
+                uint32_t failed = BUSTER_IR_NONE;
+                const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, path != 0, &plan, &failed);
+                tier1_select_test_expect(test, planned == TIER1_SELECT_OK, "known-bit regression selects by both paths");
+                if (planned == TIER1_SELECT_OK)
+                {
+                    const uint32_t rule = shape == 20 ? TIER1_RULE_REGISTER : shape == 27 || shape == 28 || shape == 30 ? TIER1_RULE_LEA_ADD : load && shape != 18 && shape != 29 ? TIER1_RULE_LOAD_ADDRESS : shape == 2 || shape == 4 || shape == 6 || shape == 11 || shape == 13 || shape == 19 || shape == 22 ? TIER1_RULE_COPY :
+                                          sign ? TIER1_RULE_SIGN_EXTEND : TIER1_RULE_ZERO_EXTEND;
+                    tier1_select_test_expect(test, plan.patterns[converted].rule == rule, "range and physical-storage proofs choose the required extension");
+                    if (plan.patterns[converted].rule != rule)
+                    {
+                        fprintf(stderr, "  known-bit shape=%u path=%u rule=%u expected=%u\n", shape, path, plan.patterns[converted].rule, rule);
+                    }
+                    if (shape == 20)
+                    {
+                        tier1_select_test_expect(test, plan.covered[3] && plan.patterns[converted].width == 8 && plan.patterns[converted].values[0] == 2 && plan.patterns[converted].values[1] == 2,
+                                                 "the bounded masked difference computes its exact zero directly from both signed-64 operands");
+                    }
+                    if (shape >= 23 && shape <= 26)
+                    {
+                        tier1_select_test_expect(test, plan.covered[3] && (load ? plan.covered[2] != 0 : plan.patterns[converted].values[0] == 2),
+                                                 "successive sign extensions read the original narrow value or its exact-width load");
+                    }
+                    if (shape == 27 || shape == 28 || shape == 30)
+                    {
+                        tier1_select_test_expect(test, plan.covered[4] && plan.patterns[converted].values[0] == 2 && plan.patterns[converted].width == 8,
+                                                 "a proven nonoverflowing signed offset is computed once at 64 bits");
+                    }
+                    uint8_t registers[10];
+                    memset(registers, X86_REGISTER_RDI, sizeof(registers));
+                    registers[1] = dynamic ? X86_REGISTER_RSI : X86_REGISTER_R9;
+                    Tier1SelectCode code;
+                    const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &failed);
+                    tier1_select_test_expect(test, dynamic ? emitted == TIER1_SELECT_ERROR_UNSUPPORTED && failed == 2 : emitted == TIER1_SELECT_OK,
+                                             "known-bit regression emits, with a variable shift reserved for the CFG consumer");
+                    if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
+                    {
+                        for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(samples) + 64; s += 1)
+                        {
+                            const uint64_t value = s < BUSTER_ARRAY_LENGTH(samples) ? samples[s] : tier1_select_test_random(&random);
+                            uint64_t memory = value;
+                            const uint32_t w = (uint32_t)value;
+                            uint64_t expected = w;
+                            switch (shape)
+                            {
+                            case 2:
+                            case 11:
+                                expected = w & 255;
+                                break;
+                            case 3:
+                                expected = (uint64_t)(int64_t)(int32_t)(w & UINT32_C(0x80000000));
+                                break;
+                            case 4:
+                                expected = w >> 1;
+                                break;
+                            case 6:
+                                expected = (uint32_t)(w + 1);
+                                break;
+                            case 12:
+                            case 16:
+                                expected = (uint64_t)(int64_t)(int16_t)value;
+                                break;
+                            case 13:
+                                expected = (uint32_t)(int32_t)(int8_t)value;
+                                break;
+                            case 14:
+                            case 15:
+                            case 18:
+                            case 23:
+                            case 24:
+                                expected = (uint64_t)(int64_t)(int8_t)value;
+                                break;
+                            case 17:
+                                expected = (uint64_t)(int64_t)(int32_t)value;
+                                break;
+                            case 19:
+                                expected = 2 * (w & 65535);
+                                break;
+                            case 20:
+                                expected = 0;
+                                break;
+                            case 21:
+                                expected = (uint64_t)(int64_t)(int32_t)((w & 65535) * (w & 65535));
+                                break;
+                            case 22:
+                                expected = (w & 255) * (w & 255);
+                                break;
+                            case 25:
+                            case 26:
+                                expected = (uint64_t)(int64_t)(int16_t)value;
+                                break;
+                            case 27:
+                            case 28:
+                                expected = (uint64_t)((int64_t)(w & 255) - 127);
+                                break;
+                            case 29:
+                                expected = (uint64_t)(int64_t)(int32_t)(w - 127);
+                                break;
+                            case 30:
+                                expected = (uint64_t)((int64_t)(w & UINT32_C(0x1ffffff)) - UINT32_C(0xffffff) + 1);
+                                break;
+                            default:
+                                break;
+                            }
+                            const uint64_t actual = tier1_select_test_call(test, load ? (uint64_t)(uintptr_t)&memory : value, s & 31, 0);
+                            tier1_select_test_expect(test, actual == expected, "known-bit code preserves signed boundaries and poisoned ABI upper bits");
+                        }
+                    }
+                }
+                arena_pop_to(&output, 0);
+            }
+        }
+        arena_pop_to(&input, 0);
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
+// The arithmetic transfers whose bounds drive widening elision: a bounded negative value survives truncation and
+// signed widening, and unsigned division/remainder leave a nonnegative I32 with physically zero upper bits.
+static void tier1_select_test_known_arithmetic(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(1u << 20);
+    Arena scratch = arena_reserve(1u << 20);
+    const uint64_t samples[] = { 0, 1, 127, 128, 255, 32767, 32768, INT32_MAX, UINT32_C(0x80000000), UINT32_MAX, UINT64_C(0xa55a120080000000), UINT64_MAX };
+    uint64_t random = UINT64_C(0x1219a117beef9001);
+    const uint8_t operations[] = { IR_NEG, IR_UDIV, IR_UREM };
+    for (uint32_t shape = 0; shape < BUSTER_ARRAY_LENGTH(operations); shape += 1)
+    {
+        const IrSizes sizes = { .instruction_count = 9, .block_count = 1, .constant_count = 2, .parameter_count = 1 };
+        IrFunction function;
+        const bool created = ir_create(&input, &sizes, &function) == IR_OK;
+        tier1_select_test_expect(test, created, "create bounded negation and unsigned division regressions");
+        if (created)
+        {
+            function.result_type = IR_I64;
+            function.parameter_types[0] = IR_I32;
+            function.constants[0].low = shape == 0 ? 127 : 65535;
+            function.constants[1].low = shape == 1 ? 4 : 8;
+            tier1_select_test_node(&function, 0, IR_PARAM, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 1, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 2, shape == 2 ? IR_COPY : IR_AND, IR_I32, 0, shape == 2 ? BUSTER_IR_NONE : 1, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 3, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 4, operations[shape], IR_I32, 2, shape == 0 ? BUSTER_IR_NONE : 3, BUSTER_IR_NONE);
+            const uint32_t converted = shape == 0 ? 6 : 5;
+            const uint32_t returned = shape == 0 ? 7 : 5;
+            if (shape == 0)
+            {
+                tier1_select_test_node(&function, 5, IR_TRUNC, IR_I16, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 6, IR_SEXT, IR_I32, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 7, IR_ZEXT, IR_I64, 6, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            else
+            {
+                tier1_select_test_node(&function, 5, IR_SEXT, IR_I64, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            tier1_select_test_node(&function, returned + 1, IR_RET, IR_VOID, returned, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            function.instruction_count = returned + 2;
+            function.block_offsets[1] = function.instruction_count;
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                Tier1SelectPlan plan;
+                uint32_t failed = BUSTER_IR_NONE;
+                const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, path != 0, &plan, &failed);
+                tier1_select_test_expect(test, planned == TIER1_SELECT_OK, "bounded arithmetic selects by both paths");
+                if (planned == TIER1_SELECT_OK)
+                {
+                    tier1_select_test_expect(test, plan.patterns[converted].rule == TIER1_RULE_COPY && plan.patterns[converted].values[0] == 4,
+                                             "negation's signed bound and unsigned division/remainder bounds remove the redundant widening");
+                    tier1_select_test_expect(test, shape != 0 || plan.covered[5], "a bounded negative value bypasses its intermediate truncation");
+                    uint8_t registers[9];
+                    memset(registers, X86_REGISTER_RDI, sizeof(registers));
+                    registers[1] = X86_REGISTER_R9;
+                    registers[3] = X86_REGISTER_R9;
+                    Tier1SelectCode code;
+                    const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &failed);
+                    tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "bounded arithmetic emits with coalesced registers");
+                    if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
+                    {
+                        for (uint32_t sample = 0; sample < BUSTER_ARRAY_LENGTH(samples) + 64; sample += 1)
+                        {
+                            const uint64_t value = sample < BUSTER_ARRAY_LENGTH(samples) ? samples[sample] : tier1_select_test_random(&random);
+                            const uint32_t low = (uint32_t)value;
+                            const uint64_t expected = shape == 0 ? (uint32_t)(0 - (low & 127)) : shape == 1 ? (low & 65535) / 4 : low % 8;
+                            tier1_select_test_expect(test, tier1_select_test_call(test, value, 0, 0) == expected,
+                                                     "bounded negative, quotient and remainder values preserve zero, signed boundaries and poisoned ABI upper bits");
+                        }
+                    }
+                }
+                arena_pop_to(&output, 0);
+            }
+        }
+        arena_pop_to(&input, 0);
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
+static void tier1_select_test_known_tails(Tier1SelectTest* test)
+{
+    const long page = sysconf(_SC_PAGESIZE);
+    uint8_t* memory = page > 0 ? mmap(0, (size_t)page * 4, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+    const bool guarded = memory != MAP_FAILED && mprotect(memory + page, (size_t)page, PROT_NONE) == 0 && mprotect(memory + 3 * page, (size_t)page, PROT_NONE) == 0;
+    tier1_select_test_expect(test, guarded, "guard known-bit inputs and outputs at their logical tails");
+    if (guarded)
+    {
+        uint8_t operations[65];
+        uint8_t void_types[65] = { 0 };
+        uint8_t storage[65] = { 0 };
+        uint32_t operands[65] = { 0 };
+        uint32_t parameter_requests[65] = { 0 };
+        const uint8_t types[] = { IR_I1, IR_I8, IR_I16, IR_I32, IR_I64, IR_PTR, IR_F32 };
+        const uint8_t widths[] = { 1, 8, 16, 32, 64, 64, 64 };
+        memset(operations, IR_PARAM, sizeof(operations));
+        for (uint32_t count = 0; count <= 65; count += 1)
+        {
+            uint8_t* type = memory + page - count;
+            uint16_t* known = (uint16_t*)(memory + 3 * page - count * sizeof(uint16_t));
+            for (uint32_t n = 0; n < count; n += 1)
+            {
+                type[n] = types[n % BUSTER_ARRAY_LENGTH(types)];
+            }
+            const IrFunction function = { .instruction_count = count, .op = operations, .type = type, .a = operands, .b = operands };
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                tier1_select_known_bits(&function, 0, 0, 0, known, path != 0);
+                tier1_select_sign_requests(&function, known, storage, parameter_requests, path != 0);
+                IrFunction scan = function;
+                scan.block_count = 2;
+                tier1_select_test_expect(test, !tier1_select_induction_bounds(&scan, 0, operands, 0, known, path != 0),
+                                         "guarded type tails admit no induction certificate without a phi");
+                scan.op = type;
+                scan.type = void_types;
+                tier1_select_sign_requests(&scan, known, storage, parameter_requests, path != 0);
+                tier1_select_test_expect(test, !tier1_select_induction_bounds(&scan, 0, operands, 0, known, path != 0),
+                                         "guarded opcode tails admit no induction certificate without an integer phi");
+                for (uint32_t n = 0; n < count; n += 1)
+                {
+                    const uint32_t width = widths[n % BUSTER_ARRAY_LENGTH(types)];
+                    tier1_select_test_expect(test, known[n] == (width | width << 8), "unknown incoming values keep their full semantic range, including every SIMD tail");
+                }
+                uint32_t* parents = (uint32_t*)(memory + 3 * page - count * sizeof(uint32_t));
+                tier1_select_storage_components(&function, storage, parents, path != 0);
+                tier1_select_storage_components(&scan, storage, parents, path != 0);
+            }
+        }
+        // Spill-width obligations must cross chains longer than the semantic proof budget, in either order. An
+        // opaque member acquires storage alone, never SIGN; a disconnected component must remain four bytes.
+        uint8_t word_types[65];
+        uint32_t firsts[65];
+        uint32_t counts[65];
+        uint32_t extra[130];
+        memset(word_types, IR_I32, sizeof(word_types));
+        for (uint32_t count = 2; count <= 65; count += 1)
+        {
+            const uint32_t offsets[] = { 0, count - 1, count };
+            const uint32_t entered[] = { 1, 2 };
+            const uint32_t left[] = { 4, 3 };
+            const IrDominance dominance = { .enter = (uint32_t*)entered, .leave = (uint32_t*)left };
+            uint8_t* guarded_column = memory + page - count;
+            uint32_t* parents = (uint32_t*)(memory + 3 * page - count * sizeof(uint32_t));
+            memset(operations, IR_PARAM, sizeof(operations));
+            operations[count - 2] = IR_BR;
+            operations[count - 1] = IR_RET;
+            memset(firsts, 0, sizeof(firsts));
+            firsts[count - 2] = 1;
+            memset(counts, 0, sizeof(counts));
+            for (uint32_t column = 0; column < 2; column += 1)
+            {
+                memcpy(guarded_column, column == 0 ? word_types : operations, count);
+                IrFunction function = { .instruction_count = count, .block_count = 2, .block_offsets = (uint32_t*)offsets,
+                                        .op = column == 0 ? operations : guarded_column, .type = column == 0 ? guarded_column : word_types, .a = firsts };
+                for (uint32_t path = 0; path < 2; path += 1)
+                {
+                    memset(storage, 0, sizeof(storage));
+                    tier1_select_scoped_ranges(&function, &dominance, counts, 0, storage, operands, parents, path != 0);
+                    for (uint32_t n = 0; n < count; n += 1)
+                    {
+                        tier1_select_test_expect(test, storage[n] == 0 && operands[n] == BUSTER_IR_NONE,
+                                                 "guarded scope scans read only logical opcode and type tails without inventing a guard");
+                    }
+                }
+            }
+        }
+        for (uint32_t count = 0; count <= 65; count += 1)
+        {
+            uint8_t* op = memory + page - count;
+            uint32_t* parents = (uint32_t*)(memory + 3 * page - count * sizeof(uint32_t));
+            for (uint32_t shape = 0; shape < 3; shape += 1)
+            {
+                const uint32_t seed = shape == 1 && count != 0 ? count - 1 : 0;
+                for (uint32_t n = 0; n < count; n += 1)
+                {
+                    const bool phi = shape == 0 ? n != 0 : shape == 1 ? n + 1 < count : n >= 2;
+                    op[n] = phi ? IR_PHI : IR_LOAD;
+                    firsts[n] = n * 2;
+                    counts[n] = phi;
+                    extra[n * 2] = 0;
+                    extra[n * 2 + 1] = shape == 1 ? n + 1 : n - (shape == 2 ? 2 : 1);
+                }
+                const IrFunction function = { .instruction_count = count, .op = op, .type = word_types, .a = firsts, .b = counts, .extra = extra };
+                for (uint32_t path = 0; path < 2; path += 1)
+                {
+                    for (uint32_t n = 0; n < count; n += 1)
+                    {
+                        storage[n] = n == seed ? BUSTER_TIER1_STORAGE_SIGN : shape == 2 && n == 1 ? BUSTER_TIER1_STORAGE_ZERO : 0;
+                    }
+                    tier1_select_storage_components(&function, storage, parents, path != 0);
+                    for (uint32_t n = 0; n < count; n += 1)
+                    {
+                        const uint32_t facts = n == seed ? BUSTER_TIER1_STORAGE_SIGN : shape == 2 && n == 1 ? BUSTER_TIER1_STORAGE_ZERO : 0;
+                        const bool wide = shape != 2 || (n & 1) == 0;
+                        tier1_select_test_expect(test, storage[n] == (facts | (wide ? BUSTER_TIER1_STORAGE_WIDE : 0)),
+                                                 "phi storage closes long chains without inventing upper-bit facts or crossing components");
+                    }
+                }
+            }
+        }
+    }
+    if (memory != MAP_FAILED)
+    {
+        munmap(memory, (size_t)page * 4);
+    }
+    {
+        const uint8_t op[] = { IR_CBR, IR_BR, IR_BR, IR_BR_INDIRECT, IR_RET };
+        const uint32_t offsets[] = { 0, 1, 2, 3, 4, 5 };
+        const uint32_t a[] = { 0, 3, 4, 0, 0 };
+        const uint32_t b[] = { 1, 0, 0, BUSTER_IR_NONE, 0 };
+        const uint32_t c[] = { 2, 0, 0, BUSTER_IR_NONE, 0 };
+        const uint32_t labels[] = { 3, BUSTER_IR_NONE };
+        uint32_t predecessors[5];
+        const IrFunction function = { .instruction_count = 5, .block_count = 5, .label_count = 2, .op = (uint8_t*)op,
+                                      .block_offsets = (uint32_t*)offsets, .a = (uint32_t*)a, .b = (uint32_t*)b, .c = (uint32_t*)c, .labels = (uint32_t*)labels };
+        tier1_select_test_expect(test, tier1_select_range_predecessors(&function, predecessors) && predecessors[1] == 0 && predecessors[2] == 0 &&
+                                 predecessors[3] == BUSTER_IR_NONE - 1 && predecessors[4] == 2,
+                                 "indirect branches poison every possible label but preserve unrelated unique edges");
+    }
+    // An unresolved phi cycle must not certify itself from its initial constant alone.
+    Arena input = arena_reserve(1u << 20);
+    const IrSizes sizes = { .instruction_count = 4, .block_count = 2, .constant_count = 1, .extra_count = 4 };
+    IrFunction loop;
+    const bool created = ir_create(&input, &sizes, &loop) == IR_OK;
+    tier1_select_test_expect(test, created, "create cyclic known-bit regression");
+    if (created)
+    {
+        loop.block_offsets[1] = 2;
+        loop.block_offsets[2] = 4;
+        loop.constants[0].low = 7;
+        loop.extra[0] = 0;
+        loop.extra[1] = 0;
+        loop.extra[2] = 1;
+        loop.extra[3] = 2;
+        tier1_select_test_node(&loop, 0, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&loop, 1, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&loop, 2, IR_PHI, IR_I32, 0, 2, BUSTER_IR_NONE);
+        tier1_select_test_node(&loop, 3, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t blocks[] = { 0, 0, 1, 1 };
+        uint16_t known[4];
+        uint8_t canonical[4];
+        uint32_t storage_workspace[4];
+        tier1_select_known_bits(&loop, 0, blocks, 0, known, true);
+        tier1_select_canonical(&loop, blocks, known, canonical, storage_workspace, true);
+        tier1_select_test_expect(test, known[2] == (32 | 32 << 8) && canonical[2] == 0, "a backedge does not invent a range or register-storage proof");
+    }
+    arena_release(&input);
+}
+
 static void tier1_select_test_narrow_memory(Tier1SelectTest* test)
 {
     Arena input = arena_reserve(1u << 20);
@@ -2247,7 +2817,12 @@ static void tier1_select_test_narrow_memory(Tier1SelectTest* test)
                     tier1_select_test_expect(test, planned == TIER1_SELECT_OK, "narrow volatile and ordinary memory selects");
                     if (planned == TIER1_SELECT_OK)
                     {
-                        tier1_select_test_expect(test, plan.patterns[4].width == bytes && plan.patterns[6].width == bytes && plan.covered[2] && plan.covered[5] && !plan.covered[4] && !plan.covered[6], "folded address retains exact narrow access width and memory operation");
+                        const bool extending_load = sign && function.flags[6] == 0;
+                        tier1_select_test_expect(test, plan.covered[3] && plan.patterns[4].values[2] == 1,
+                                                 "an exact-width store reads the original value without materializing its truncation");
+                        tier1_select_test_expect(test, plan.patterns[4].width == bytes && plan.patterns[extending_load ? 7 : 6].width == bytes && plan.covered[2] && plan.covered[5] &&
+                                                         !plan.covered[4] && (plan.covered[6] != 0) == extending_load && !plan.covered[7],
+                                                 "folded address and signed extension retain the exact memory width and access");
                         Tier1SelectCode code;
                         const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &failed);
                         tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "narrow memory emits baseline forms");
@@ -2787,7 +3362,7 @@ static void tier1_select_test_address_walk(Tier1SelectTest* test, uint32_t varia
 // A frame object's address in its users' memory operands: object 0 (8 bytes) and object 1 (200 bytes), each reached
 // directly (variant 0), through a 64-bit addition of 16 (1) or -8 after the typed stream's conversions (2), or of
 // 0x7fffffff (3, which folds) or 0x80000000 (4, past 32 bits, whose address keeps its lea). Variant 5 uses the address
-// twice, so both accesses share its lea, and variant 6 takes an over-aligned slot's address, which no pattern takes.
+// twice, so both accesses share its lea, and variant 6 takes a slot aligned past a page (#1450), which the frame realigns.
 // Variant 7 repeats variant 1 with the object in the entry block past the walk's block, as the producer's preheader
 // does. The
 // shape's access is a load returned (0), a store of the second parameter (1), or the pointer itself returned (2). A
@@ -2922,15 +3497,18 @@ static void tier1_select_test_stack_walk(Tier1SelectTest* test, uint32_t shape, 
     }
     if (created && variant == 6)
     {
+        // Past the frame planner's bound (1 << 30) a slot is no frame object, and its address selects nothing.
+        function.slots[2].alignment = UINT32_C(1) << 31;
         for (uint32_t path = 0; path < 2; path += 1)
         {
             uint32_t failed = BUSTER_IR_NONE;
             const Tier1SelectError error = tier1_select_plan(&function, 0, output, scratch, path == 0, &plans[path], &failed);
-            tier1_select_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED && failed == 2 && scratch->length == 0, "an over-aligned slot's address selects nothing");
+            tier1_select_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED && failed == 2 && scratch->length == 0, "a slot aligned past the frame's bound selects nothing");
         }
+        function.slots[2].alignment = 8192;
     }
     uint32_t planned = 0;
-    if (created && variant != 6)
+    if (created)
     {
         char where[128];
         snprintf(where, sizeof(where), "stack fixture selects (shape=%u variant=%u width=%u)", shape, variant, width);
@@ -3724,6 +4302,64 @@ static uint64_t tier1_select_test_variadic_oracle(uint32_t shape, const uint64_t
 // verification; and the uniform-register consumer, which has no frame to save the argument registers in, refusing it.
 // With its own ABI records (#789), its parameter's in rdi, it selects; with a record of a shape selection doesn't take, it
 // is refused whole.
+// A chained indirect call (#148) built as IR directly (#1411's review): its callee and its chain parameters, the call's
+// ABI record of the chain in r10. Selection takes it, through rax, but refuses it variadic, whose al would overwrite rax
+// before the call (tier1_select_call_supported), as the typed stream's adapter does.
+static void tier1_select_test_chained_variadic(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(8u << 20);
+    Arena scratch = arena_reserve(8u << 20);
+    const IrSizes sizes = {
+        .instruction_count = 4,
+        .block_count = 1,
+        .call_count = 1,
+        .call_type_count = 1,
+        .extra_count = 1,
+        .parameter_count = 2,
+        .abi_call_count = 1,
+        .passed_count = 1,
+    };
+    for (uint32_t variadic = 0; variadic < 2; variadic += 1)
+    {
+        IrFunction function;
+        const bool created = ir_create(&input, &sizes, &function) == IR_OK;
+        if (created)
+        {
+            function.result_type = IR_I64;
+            function.block_offsets[1] = 4;
+            function.parameter_types[0] = IR_PTR;
+            function.parameter_types[1] = IR_I64;
+            function.extra[0] = 1;
+            function.call_types[0] = IR_I64;
+            function.passed[0] = (IrPassed){ .location = { .registers = { BUSTER_ABI_R10, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS } };
+            function.abi_calls[0] = (IrAbiCall){ .call = { .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2,
+                                                           .result = { .kind = BUSTER_ABI_RESULT_REGISTERS, .registers = { BUSTER_ABI_RAX, BUSTER_ABI_REGISTER_NONE } } } };
+            function.calls[0] = (IrCall){ .argument_count = 1, .parameter_count = 1, .result_type = IR_I64, .variadic = variadic != 0, .abi = 1 };
+            uint32_t next = 0;
+            const uint32_t callee = tier1_select_test_append(&function, &next, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_append(&function, &next, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t called = tier1_select_test_append(&function, &next, IR_CALL_INDIRECT, IR_I64, callee, 0, BUSTER_IR_NONE);
+            tier1_select_test_append(&function, &next, IR_RET, IR_VOID, called, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        tier1_select_test_expect(test, created && ir_verify_scalar(&function, &scratch, 0).error == IR_OK, "the chained indirect call's fixture is valid IR");
+        const bool supported = created && tier1_select_call_supported(&function, 2);
+        tier1_select_test_expect(test, supported == (variadic == 0),
+                                 variadic == 0 ? "a chained indirect call selects, through rax" : "a chained indirect variadic call is refused, its al rax's");
+        Tier1SelectPlan plan;
+        uint32_t failed = 0;
+        const Tier1SelectError planned = created ? tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed) : TIER1_SELECT_ERROR_UNSUPPORTED;
+        tier1_select_test_expect(test, (planned == TIER1_SELECT_OK) == (variadic == 0),
+                                 variadic == 0 ? "a chained indirect call's function plans" : "a chained indirect variadic call's function is refused whole");
+        arena_pop_to(&input, 0);
+        arena_pop_to(&output, 0);
+        arena_pop_to(&scratch, 0);
+    }
+    arena_release(&input);
+    arena_release(&output);
+    arena_release(&scratch);
+}
+
 static void tier1_select_test_variadic(Tier1SelectTest* test)
 {
     Arena input = arena_reserve(1u << 20);
@@ -4341,6 +4977,8 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_branches(&test);
             tier1_select_test_plans(&test);
             tier1_select_test_intrinsics(&test);
+            tier1_select_test_lane_forms(&test);
+            tier1_select_test_sse_vectors(&test);
             tier1_select_test_memory_plans(&test);
             tier1_select_test_barrier_scan(&test);
             tier1_select_test_load_barriers(&test);
@@ -4351,6 +4989,9 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_calls(&test);
             tier1_select_test_call_barriers(&test);
             tier1_select_test_conversions(&test);
+            tier1_select_test_known_bits(&test);
+            tier1_select_test_known_arithmetic(&test);
+            tier1_select_test_known_tails(&test);
             tier1_select_test_copy_elision(&test);
             tier1_select_test_narrow_memory(&test);
             tier1_select_test_narrow_values(&test);
@@ -4362,6 +5003,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_indirect(&test);
             tier1_select_test_indirect_review(&test);
             tier1_select_test_variadic(&test);
+            tier1_select_test_chained_variadic(&test);
             tier1_select_test_burs(&test);
             if (manifest)
             {

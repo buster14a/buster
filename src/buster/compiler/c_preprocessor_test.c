@@ -52,6 +52,7 @@
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <sys/syscall.h>
+#include <sys/resource.h>
 
 #define BUSTER_PP_TEST_CONTEXT 6
 #define BUSTER_PP_TEST_MAX_OUTPUT (1ull << 32)
@@ -611,6 +612,12 @@ static bool pp_test_deferred_history(const PPOptions* options, const char* path,
         printf("%s: with its history deferred, a run counts different statistics\n", label);
         result = false;
     }
+    // A compile gives its files' token columns back after the run (pp_release_file_columns): the replay that records the
+    // deferred history then prepares the files again, and must give the same history.
+    if (ready[1])
+    {
+        pp_release_file_columns(&runs[1], false);
+    }
     const uint32_t count = runs[0].output.count;
     uint32_t probe = count;
     for (uint32_t i = 0; result && probe == count && i < count; i += 1)
@@ -720,6 +727,29 @@ static bool pp_test_system_levels(const Preprocessor* a, const Preprocessor* b, 
     return result;
 }
 
+// pp_output_invocation_place, the file's own place of an output token's invocation, against its twin by the expansion
+// history (pp_output_expansion_begin), on run `a`, which has its history: at the first and last token of each run of
+// tokens a macro made, where the file places one, the history must place it there too. Returns whether they agree.
+static bool pp_test_invocation_places(const Preprocessor* a, const char* label)
+{
+    bool result = true;
+    const PPTokens* output = &a->output;
+    for (uint32_t t = 0; result && t < output->count; t += 1)
+    {
+        const bool made = (output->flags[t] & BUSTER_PP_FROM_MACRO) != 0;
+        const bool edge = made && (t == 0 || t + 1 == output->count || (output->flags[t - 1] & BUSTER_PP_FROM_MACRO) == 0 ||
+                                   (output->flags[t + 1] & BUSTER_PP_FROM_MACRO) == 0);
+        const uint32_t place = edge ? pp_output_invocation_place(a, t) : 0;
+        const uint32_t twin = place != 0 ? pp_output_expansion_begin(a, t, pp_history_at(a, t)) : 0;
+        if (place != twin)
+        {
+            printf("%s: output token %u's invocation is at %u by the file and at %u by the history\n", label, t, place, twin);
+            result = false;
+        }
+    }
+    return result;
+}
+
 // Both kernels again as a compile runs them, without the expansion starts that -E's line markers need: the main loop
 // takes some direct paths only then (pp_expand_file_direct, pp_emit_simple), so the streams, the expansion history and
 // the statistics (but the timing ones) must agree in this configuration too, and the vectorized run's with its history
@@ -759,7 +789,7 @@ static bool pp_test_compile_kernels(const PPOptions* options, const char* path, 
         printf("%s: the vectorized and scalar kernels count different statistics\n", label);
         result = false;
     }
-    result = result && pp_test_system_levels(&runs[0], &runs[1], label);
+    result = result && pp_test_system_levels(&runs[0], &runs[1], label) && pp_test_invocation_places(&runs[0], label);
     for (uint32_t k = 0; k < 2; k += 1)
     {
         if (ready[k])
@@ -1304,6 +1334,11 @@ static const PPTestFile pp_test_files_stack[] = {
     { 0, 0 },
 };
 
+static const PPTestFile pp_test_files_conversion_system[] = {
+    { "sys/conversion.h", "#if -1 > 0u\ninside\n#endif\n" },
+    { 0, 0 },
+};
+
 // A file whose name is what a header name taken from the raw string literal R"(other.h)" would be.
 static const PPTestFile pp_test_files_raw_header[] = {
     { "\"(other.h)", "found_by_a_raw_string\n" },
@@ -1423,6 +1458,46 @@ static const PPTestFile pp_test_files_header_tails[] = {
 _Static_assert(sizeof(BUSTER_PP_TEST_A4096) == 4097, "BUSTER_PP_TEST_A4096 must be 4,096 letters");
 
 static const PPTestCase pp_test_cases[] = {
+    // Negative-to-unsigned conversions (#1291): all converting operators on both sides, live contexts, and
+    // controls. Both kernels check the warning counts; --clang checks the values and warning-policy outcomes.
+    { "#if negative conversions for each arithmetic, comparison and bitwise operator",
+      "#if -3 * 2u\ncase_0\n#endif\n#if 2u * -3\ncase_1\n#endif\n#if -3 / 2u\ncase_2\n#endif\n#if 2u / -3\ncase_3\n#endif\n"
+      "#if -3 % 2u\ncase_4\n#endif\n#if 2u % -3\ncase_5\n#endif\n#if -3 + 2u\ncase_6\n#endif\n#if 2u + -3\ncase_7\n#endif\n"
+      "#if -3 - 2u\ncase_8\n#endif\n#if 2u - -3\ncase_9\n#endif\n#if -3 < 2u\ncase_10\n#endif\n#if 2u < -3\ncase_11\n#endif\n"
+      "#if -3 <= 2u\ncase_12\n#endif\n#if 2u <= -3\ncase_13\n#endif\n#if -3 > 2u\ncase_14\n#endif\n#if 2u > -3\ncase_15\n#endif\n"
+      "#if -3 >= 2u\ncase_16\n#endif\n#if 2u >= -3\ncase_17\n#endif\n#if -3 == 2u\ncase_18\n#endif\n#if 2u == -3\ncase_19\n"
+      "#endif\n#if -3 != 2u\ncase_20\n#endif\n#if 2u != -3\ncase_21\n#endif\n#if -3 & 2u\ncase_22\n#endif\n#if 2u & -3\ncase_23\n"
+      "#endif\n#if -3 ^ 2u\ncase_24\n#endif\n#if 2u ^ -3\ncase_25\n#endif\n#if -3 | 2u\ncase_26\n#endif\n#if 2u | -3\ncase_27\n"
+      "#endif\n",
+      0, "c17", "case_0\ncase_1\ncase_2\ncase_4\ncase_5\ncase_6\ncase_7\ncase_8\ncase_9\ncase_11\ncase_13\ncase_14\ncase_16\ncase_20\ncase_21\ncase_24\ncase_25\ncase_26\ncase_27\n", false, 28 },
+    { "#if signed, nonnegative and already unsigned controls",
+      "#if -3 < 0\ncase_0\n#endif\n#if 3 < 4u\ncase_1\n#endif\n#if 0u < 18446744073709551615u\ncase_2\n#endif\n#if -1u > 0\ncase_3\n"
+      "#endif\n#if -1 + -2 == -3\ncase_4\n#endif\n#if ~0u > 0\ncase_5\n#endif\n#if (-8 >> 1u) == -4\ncase_6\n#endif\n#if (-1 && 1u)\n"
+      "case_7\n#endif\n#if (0u || -1)\ncase_8\n#endif\n#if (-1, 1u)\ncase_9\n#endif\n#if (1u, -1)\ncase_10\n#endif\n",
+      0, "c17", "case_0\ncase_1\ncase_2\ncase_3\ncase_4\ncase_5\ncase_6\ncase_7\ncase_8\ncase_9\ncase_10\n", false, 0 },
+    { "#if conditional common type without a conversion warning",
+      "#if (1 ? -1 : 0u) > 0\ncase_0\n#endif\n#if (0 ? 0u : -2) > 0\ncase_1\n#endif\n#if (0 ? -1 : 0u) == 0\ncase_2\n#endif\n"
+      "#if (1 ? 0u : -2) == 0\ncase_3\n#endif\n#if (0 ? 0u : (1 ? -1 : -2)) > 0\ncase_4\n#endif\n",
+      0, "c17", "case_0\ncase_1\ncase_2\ncase_3\ncase_4\n", false, 0 },
+    { "#if conversions in unevaluated operands stay silent",
+      "#if 0 && (-1 > 0u)\ncase_0\n#endif\n#if 1 || (0u < -2)\ncase_1\n#endif\n#if 0 ? (-1 + 1u) : 1\ncase_2\n#endif\n"
+      "#if 1 ? 1 : (1u + -1)\ncase_3\n#endif\n#if 0 && (1 ? (-1 > 0u) : (0u < -2))\ncase_4\n#endif\n#if 1 || (0 ? (0u < -1) : (-2 > 0u))\n"
+      "case_5\n#endif\n#if 0 && (1 / 0 + (-1 > 0u))\ncase_6\n#endif\n#if 1 || (1 / 0 + (0u < -2))\ncase_7\n#endif\n",
+      0, "c17", "case_1\ncase_2\ncase_3\ncase_5\ncase_7\n", false, 0 },
+    { "#if conversion liveness restored across precedence and conditional nesting",
+      "#if 0 && (-1 > 0u) || (-2 > 0u)\ncase_0\n#endif\n#if (0 && (-1 > 0u)) + (-3 > 0u)\ncase_1\n#endif\n#if 1 ? (-1 > 0u) : (-2 > 0u)\n"
+      "case_2\n#endif\n#if 0 ? (-1 > 0u) : (-2 > 0u)\ncase_3\n#endif\n#if 0 ? (-1 > 0u) : 1 ? (0u < -2) : (-3 > 0u)\ncase_4\n#endif\n"
+      "#if 1 ? (0 ? (-1 > 0u) : (-2 > 0u)) : (-3 > 0u)\ncase_5\n#endif\n#if (1 || (-1 > 0u)) && (0u < -2)\ncase_6\n#endif\n"
+      "#if ((0u < -1) ? -2 : 3) > 0u\ncase_7\n#endif\n#if (-1 > 0u) && (-2 > 0u)\ncase_8\n#endif\n#if -'A' > 0u\ncase_9\n#endif\n",
+      0, "c17", "case_0\ncase_1\ncase_2\ncase_3\ncase_4\ncase_5\ncase_6\ncase_7\ncase_8\ncase_9\n", false, 12 },
+    { "#if negative conversions become errors", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "", true, 0, "-Werror", .errors = 2 },
+    { "#if negative conversion warnings are suppressed by -w", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "int a;\nint b;\nint x;\n", false, 0, "-w -Werror", .errors = 0 },
+    { "#if negative conversion warnings can be demoted", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "int a;\nint b;\nint x;\n", false, 2, "-Werror -Wno-error", .errors = 0 },
+    { "#if promoted conversion in a system header is suppressed", "#include <conversion.h>\n", 0, "c17", "inside\n", false, 0, "-Werror -isystem %d/sys", pp_test_files_conversion_system },
+    { "#if promoted conversion with system warnings enabled", "#include <conversion.h>\n", 0, "c17", "", true, 0, "-Werror -Wsystem-headers -isystem %d/sys", pp_test_files_conversion_system, .errors = 1 },
+    { "#if negative conversions are not sign-compare warnings", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "int a;\nint b;\nint x;\n", false, 2, "-Wno-sign-compare -Wno-sign-conversion", .errors = 0 },
+    { "#if conversion macros and evaluated #elif", "#define NEG (-1)\n#define GT >\n#define COMPARE(a,b) ((a) > (b))\n#if NEG GT 0u\nmacro_left\n#endif\n#if COMPARE(0u, -2)\nmacro_right\n#endif\n#if 0\n#if -3 > 0u\nskipped\n#endif\n#elif 0u < -4\nelif_taken\n#elif -5 > 0u\nskipped_elif\n#endif\n", 0, "c17", "macro_left\nelif_taken\n", false, 3 },
+    { "#if dead conversion operand still checks syntax", "#if 0 && (-1 > 0u + )\nwrong\n#endif\n", 0, "c17", "", true, 0 },
     // The topics of C 6.10.4.5's examples, in cases of our own: rescanning and redefinitions, # and ## with indirection,
     // placemarkers, and variadic macros (the expected text is clang's output).
     { "rescanning, redefinitions and painting", "#define n 4\n#define twice(v) twice(n + (v))\n#undef n\n#define n 5\n#define alias twice\n#define box box{1}\n#define open alias(-\n#define call(f) f(k)\n#define k 7,8\n#define id(v) v\n#define kw() long\n#define one(v) v\n#define join(p,q) p ## q\n#define quote(v) # v\ntwice(a-1) * twice(twice(box)) + id(id(alias)(2) - id)(3);\nalias(n*(9,10)-k) & open 6) | call\n(twice)^call(call);\nkw() arr[one()] = { one(4), join(5,6), join(7,), join(,8), join(,) };\nchar s[2][4] = { quote(abc), quote() };\n",
@@ -1614,7 +1689,7 @@ static const PPTestCase pp_test_cases[] = {
       0, "c17", "#pragma STDC FP_CONTRACT ON\n#pragma omp parallel for\nafter\nX\n", false, 2 },
     { "#if arithmetic", "#if -1 < 0u\nunsigned\n#endif\n#if (2 || 1/0) && (0 ? 1/0 : 3) == 3 && 0x10 == 16 && 010 == 8 && 0b101 == 5 && 1'000 == 1000 && 'A' == 65 && '\\377' < 0\nok\n#endif\n"
                      "#if (-9223372036854775807 - 1) / -1 == (-9223372036854775807 - 1) && 18446744073709551615u == -1\nwraps\n#endif\n#if 1 ? 2 : 3 ? 4 : 5\nternary\n#endif\n",
-      0, "c23", "ok\nwraps\nternary\n", false },
+      0, "c23", "ok\nwraps\nternary\n", false, 2 },
     { "#elif chains and nesting", "#define A 2\n#if A == 1\none\n#elif A == 2\n#ifdef A\ntwo\n#else\nnot\n#endif\n#elif 1/0\nthree\n#else\nfour\n#endif\n#ifndef B\nb\n#elifdef A\nno\n#endif\n",
       0, "c23", "two\nb\n", false },
     // Argument scanning past its fast path's limits: an argument across two 64-token blocks, parentheses nested 70 deep,
@@ -1864,9 +1939,9 @@ static const PPTestCase pp_test_cases[] = {
     { "an unused definition whose # names no parameter", "#define F(x) # y\nOK\n",
       0, "c17", "", true, 0, 0, 0 },
     { "UTF-16, UTF-32 and wide character constants' signedness in #if", "#if u'a' < -1\nunsigned_char16\n#else\nwrong_signed_char16\n#endif\n#if U'a' < -1\nunsigned_char32\n#endif\n#if 'a' < -1\nwrong\n#else\nsigned_char\n#endif\n#if L'a' < -1\nwrong\n#else\nsigned_wchar\n#endif\n",
-      0, "gnu17", "unsigned_char16\nunsigned_char32\nsigned_char\nsigned_wchar\n", false, 0, 0, 0 },
+      0, "gnu17", "unsigned_char16\nunsigned_char32\nsigned_char\nsigned_wchar\n", false, 2, 0, 0 },
     { "UTF-8 character constants' signedness in #if (C23)", "#if u8'a' < -1\nunsigned_char8\n#else\nwrong_signed_char8\n#endif\n",
-      0, "c23", "unsigned_char8\n", false, 0, 0, 0 },
+      0, "c23", "unsigned_char8\n", false, 1, 0, 0 },
     { "standard features in C99", "__has_feature(c_alignas) __has_feature(c_alignof) __has_feature(c_atomic) __has_feature(c_generic_selections) __has_feature(c_static_assert) __has_feature(c_thread_local) __has_feature(c_fixed_enum)\n__has_extension(c_alignas) __has_extension(c_atomic) __has_extension(c_generic_selections) __has_extension(c_fixed_enum)\n",
       0, "c99", "0 0 0 0 0 0 0\n1 1 1 1\n", false, 0, 0, 0 },
     { "standard features in GNU17", "__has_feature(c_alignas) __has_feature(c_alignof) __has_feature(c_atomic) __has_feature(c_generic_selections) __has_feature(c_static_assert) __has_feature(c_thread_local) __has_feature(c_fixed_enum)\n__has_extension(c_alignas) __has_extension(c_atomic) __has_extension(c_generic_selections) __has_extension(c_fixed_enum)\n",
@@ -3171,7 +3246,7 @@ static bool pp_test_lookup_probes(const PPOptions* base, const char* missing_roo
                      pp->statistics.include_searches == BUSTER_ARRAY_LENGTH(cases) + 1 && pp->statistics.include_ticks != 0 && pp->input_tokens == 0 &&
                      pp->cache->prepared_records == 0 && pp->ticks[PP_PHASE_LEX] == 0 && pp->ticks[PP_PHASE_REFINE] == 0 && pp->ticks[PP_PHASE_DIRECTIVES] == 0;
             // A missing main-file path keeps ENOENT and has no fstat, whether first probed or cached by the other unit.
-            const uint32_t root = pp_lookup_path(pp, missing_root, (uint32_t)strlen(missing_root), BUSTER_PP_USER_FILE);
+            const uint32_t root = pp_lookup_path(pp, missing_root, (uint32_t)strlen(missing_root), BUSTER_PP_NONE, 0, BUSTER_PP_USER_FILE);
             result = result && root != BUSTER_PP_NONE && pp->files[root].data == BUSTER_PP_NONE && pp->files[root].error == ENOENT &&
                      pp->probes.opens == expected_opens + (u == 0 ? 1u : 0u) && pp->probes.fstats == expected_fstats &&
                      pp->statistics.include_opens == expected_opens && pp->statistics.include_fstats == expected_fstats;
@@ -3308,6 +3383,467 @@ static bool pp_test_lookup_accounting(const char* directory)
     rmdir(first);
     rmdir(second);
     printf("lookup accounting: %s (file and metadata attempts, unit/shared caches, scalar/vector and timing off)\n", result ? "as expected" : "WRONG");
+    return result;
+}
+
+// Whether two units' path tables are the same: every path each looked up, in the same order, with the same file found
+// or none and the same error.
+static bool pp_test_same_lookups(const Preprocessor* a, const Preprocessor* b)
+{
+    bool result = a->file_count == b->file_count;
+    for (uint32_t f = 0; result && f < a->file_count; f += 1)
+    {
+        const PPFile* x = &a->files[f];
+        const PPFile* y = &b->files[f];
+        result = x->path_length == y->path_length && memcmp(x->path, y->path, x->path_length) == 0 && (x->data != BUSTER_PP_NONE) == (y->data != BUSTER_PP_NONE) &&
+                 x->error == y->error;
+        if (!result)
+        {
+            printf("directory listings: path %u: %s (%s, error %d) against %s (%s, error %d)\n", f, x->path, x->data != BUSTER_PP_NONE ? "found" : "none", x->error,
+                   y->path, y->data != BUSTER_PP_NONE ? "found" : "none", y->error);
+        }
+    }
+    return result;
+}
+
+#include "c_preprocessor_directory_read_test.c"
+
+// A directory's listing (FileCacheDirectory, #653). After BUSTER_FILE_CACHE_LISTING_MISSES failed probes in a search
+// directory, the cache reads its names once. A path whose first component the listing doesn't have then gets ENOENT
+// without an open. Every search finds what it finds with listings off, the oracle: a cache whose listing_misses is 0
+// gives the same paths, files and errors. Names the listing can't rule out are still opened: one it has in another
+// case, a directory, a dangling link, "." and "..", a name past ASCII, and one longer than NAME_MAX (ENAMETOOLONG,
+// not ENOENT). A second unit that shares the cache uses the listing at once. A directory with a name past ASCII is never
+// listed, and one with more names than a first look reads (BUSTER_FILE_CACHE_SMALL_LISTING) is listed only at
+// BUSTER_FILE_CACHE_LARGE_LISTING times the failed probes. On a file system whose lookups a listing can't answer for
+// (file_cache_exact_names), nothing is listed and every candidate is opened.
+static bool pp_test_directory_listings(const char* directory)
+{
+    char first[4200];
+    char second[4200];
+    char latin[4200];
+    char large[4200];
+    char sub[4300];
+    char path[4400];
+    snprintf(first, sizeof(first), "%s/listing-first", directory);
+    snprintf(second, sizeof(second), "%s/listing-second", directory);
+    snprintf(latin, sizeof(latin), "%s/listing-latin", directory);
+    snprintf(large, sizeof(large), "%s/listing-large", directory);
+    snprintf(sub, sizeof(sub), "%s/sub", first);
+    bool result = mkdir(first, 0700) == 0 && mkdir(second, 0700) == 0 && mkdir(latin, 0700) == 0 && mkdir(large, 0700) == 0 && mkdir(sub, 0700) == 0;
+    snprintf(path, sizeof(path), "%s/Mixed.H", first);
+    result = result && pp_test_write_file(path, "int mixed;\n");
+    snprintf(path, sizeof(path), "%s/inner.h", sub);
+    result = result && pp_test_write_file(path, "int inner;\n");
+    snprintf(path, sizeof(path), "%s/dangling.h", first);
+    result = result && symlink("nowhere.h", path) == 0;
+    snprintf(path, sizeof(path), "%s/\xc3\xa9.h", latin);
+    result = result && pp_test_write_file(path, "int latin;\n");
+    for (uint32_t i = 0; result && i < 40; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/h%02u.h", second, i);
+        result = pp_test_write_file(path, "int header;\n");
+    }
+    // More names than a first look's buffer holds (each record is at least 24 bytes).
+    for (uint32_t i = 0; result && i < 64; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/large-%02u.h", large, i);
+        result = pp_test_write_file(path, "int large;\n");
+    }
+    // Whether this file system's lookups match its listings, so that `first` is listed at its
+    // BUSTER_FILE_CACHE_LISTING_MISSES-th miss (a listing is tried there either way).
+    struct statfs system;
+    const bool listable = result && statfs(first, &system) == 0 && file_cache_exact_names((uint64_t)system.f_type);
+    // The names after h00.h to h39.h, each with the opens it takes with `first` listed: its paths in `first` and
+    // `second`, but for one the listing rules out.
+    char long_name[301];
+    memset(long_name, 'a', 298);
+    memcpy(long_name + 298, ".h", 3);
+    static const struct
+    {
+        const char* name;
+        uint32_t opens;
+    } names[] = {
+        { "Mixed.H", 1 },
+        { "mixed.h", 2 },
+        { "MIXED.H", 2 },
+        { "sub/inner.h", 1 },
+        { "sub/absent.h", 2 },
+        { "SUB/inner.h", 2 },
+        { "nosub/x.h", 1 },
+        { "dangling.h", 2 },
+        { "./h00.h", 2 },
+        { "../listing-second/h01.h", 1 },
+        { "\xc3\xa9.h", 2 },
+        { "zz.h", 1 },
+        { "H02.h", 1 },
+        { 0, 2 },
+    };
+    const char* const directories[] = { first, second };
+    const char* const latin_directories[] = { latin, second };
+    const char* const large_directories[] = { large };
+    PPOptions options = {
+        .language = {
+            .standard = 2023,
+        },
+        .no_standard_includes = true,
+        .include_directories = directories,
+        .include_directory_count = BUSTER_ARRAY_LENGTH(directories),
+        .quiet = true,
+    };
+    // Units 0 (listings) and 1 (the oracle) search every name; unit 2 shares unit 0's cache, unit 3 searches `latin`
+    // first, and unit 4 `large` alone.
+    static InternTable tables[5];
+    static Preprocessor units[5];
+    for (uint32_t u = 0; u < 5; u += 1)
+    {
+        units[u] = (Preprocessor){ 0 };
+        options.files = u == 2 ? units[0].cache : 0;
+        options.include_directories = u == 3 ? latin_directories : u == 4 ? large_directories : directories;
+        options.include_directory_count = u == 4 ? 1 : 2;
+        result = result && intern_initialize(&tables[u]) && pp_initialize(&units[u], &options, u == 2 ? &tables[0] : &tables[u]);
+    }
+    if (result)
+    {
+        units[1].cache->listing_misses = 0;
+    }
+    uint64_t expected_opens = 0;
+    uint64_t expected_listed = 0;
+    const uint32_t misses = BUSTER_FILE_CACHE_LISTING_MISSES;
+    const uint32_t count = 40 + (uint32_t)BUSTER_ARRAY_LENGTH(names);
+    for (uint32_t c = 0; result && c < count; c += 1)
+    {
+        char header[64];
+        snprintf(header, sizeof(header), "h%02u.h", c);
+        const char* name = c < 40 ? header : names[c - 40].name != 0 ? names[c - 40].name : long_name;
+        const uint32_t probes = c < 40 ? 1 : names[c - 40].opens;
+        const uint32_t oracle_opens = c < 40 ? 2 : 2 - (c - 40 == 0 || c - 40 == 3 || c - 40 == 9);
+        const bool skips = listable && c >= misses && probes < oracle_opens;
+        expected_opens += skips ? probes : oracle_opens;
+        expected_listed += skips;
+        uint32_t found[2];
+        uint32_t files[2];
+        for (uint32_t u = 0; u < 2; u += 1)
+        {
+            files[u] = pp_find_include(&units[u], (const uint8_t*)name, (uint32_t)strlen(name), true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found[u],
+                                       BUSTER_PP_NONE);
+        }
+        result = (files[0] == BUSTER_PP_NONE) == (files[1] == BUSTER_PP_NONE) && found[0] == found[1] && units[0].probes.opens == expected_opens &&
+                 units[0].probes.listed == expected_listed && units[0].probes.listings == (c + 1 >= misses ? 1u : 0u) &&
+                 units[1].probes.listings == 0 && units[1].probes.listed == 0;
+        if (!result)
+        {
+            printf("directory listings: %s: found %u/%u in %u/%u, opens %lu/%lu, listed %lu/%lu, listings %lu\n", name, files[0] != BUSTER_PP_NONE,
+                   files[1] != BUSTER_PP_NONE, found[0], found[1], (unsigned long)units[0].probes.opens, (unsigned long)expected_opens,
+                   (unsigned long)units[0].probes.listed, (unsigned long)expected_listed, (unsigned long)units[0].probes.listings);
+        }
+    }
+    result = result && pp_test_same_lookups(&units[0], &units[1]);
+    // The unit that shares the cache: a header the cache knows makes no system call, and a name the listing rules out
+    // is opened in `second` alone.
+    if (result)
+    {
+        uint32_t found;
+        const uint32_t known = pp_find_include(&units[2], (const uint8_t*)"h05.h", 5, true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found, BUSTER_PP_NONE);
+        const uint32_t absent = pp_find_include(&units[2], (const uint8_t*)"yy.h", 4, true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found, BUSTER_PP_NONE);
+        result = known != BUSTER_PP_NONE && absent == BUSTER_PP_NONE && units[2].probes.opens == (listable ? 1u : 2u) && units[2].probes.listed == (listable ? 1u : 0u) &&
+                 units[2].files[units[2].file_count - 2].error == ENOENT;
+        if (!result)
+        {
+            printf("directory listings: the shared cache: opens %lu, listed %lu\n", (unsigned long)units[2].probes.opens, (unsigned long)units[2].probes.listed);
+        }
+    }
+    // A directory with a name past ASCII: its listing is tried once, and every path in it is still opened.
+    for (uint32_t c = 0; result && c < 40; c += 1)
+    {
+        char header[64];
+        snprintf(header, sizeof(header), "h%02u.h", c);
+        uint32_t found;
+        const uint32_t file = pp_find_include(&units[3], (const uint8_t*)header, (uint32_t)strlen(header), true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found,
+                                              BUSTER_PP_NONE);
+        result = file != BUSTER_PP_NONE && found == 1 && units[3].probes.opens == 2 * (c + 1) && units[3].probes.listed == 0 &&
+                 units[3].probes.listings == (c + 1 >= misses ? 1u : 0u);
+        if (!result)
+        {
+            printf("directory listings: %s after a name past ASCII: opens %lu, listed %lu, listings %lu\n", header, (unsigned long)units[3].probes.opens,
+                   (unsigned long)units[3].probes.listed, (unsigned long)units[3].probes.listings);
+        }
+    }
+    // A directory of 64 names: its first look puts it off, and it is read whole at BUSTER_FILE_CACHE_LARGE_LISTING times
+    // the misses.
+    const uint32_t later = misses * BUSTER_FILE_CACHE_LARGE_LISTING;
+    for (uint32_t c = 0; result && c < later + 12; c += 1)
+    {
+        char header[64];
+        snprintf(header, sizeof(header), "m%03u.h", c);
+        uint32_t found;
+        const uint32_t file = pp_find_include(&units[4], (const uint8_t*)header, (uint32_t)strlen(header), true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found,
+                                              BUSTER_PP_NONE);
+        const uint32_t opens = listable ? (c < later ? c + 1 : later) : c + 1;
+        const uint32_t looks = (c + 1 >= misses ? 1u : 0u) + (listable && c + 1 >= later ? 1u : 0u);
+        result = file == BUSTER_PP_NONE && units[4].probes.opens == opens && units[4].probes.listed == c + 1 - opens && units[4].probes.listings == looks;
+        if (!result)
+        {
+            printf("directory listings: %s in a large directory: opens %lu/%u, listed %lu, listings %lu/%u\n", header, (unsigned long)units[4].probes.opens, opens,
+                   (unsigned long)units[4].probes.listed, (unsigned long)units[4].probes.listings, looks);
+        }
+    }
+    for (uint32_t u = 5; u > 0; u -= 1)
+    {
+        pp_release(&units[u - 1]);
+    }
+    for (uint32_t u = 0; u < 5; u += 1)
+    {
+        intern_release(&tables[u]);
+    }
+    for (uint32_t i = 0; i < 64; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/large-%02u.h", large, i);
+        unlink(path);
+    }
+    for (uint32_t i = 0; i < 40; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/h%02u.h", second, i);
+        unlink(path);
+    }
+    snprintf(path, sizeof(path), "%s/Mixed.H", first);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/inner.h", sub);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/dangling.h", first);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/\xc3\xa9.h", latin);
+    unlink(path);
+    rmdir(sub);
+    rmdir(first);
+    rmdir(second);
+    rmdir(latin);
+    rmdir(large);
+    printf("directory listings: %s (%s; skipped opens, names a listing can't rule out, a shared cache, a name past ASCII, a large directory)\n",
+           result ? "as expected" : "WRONG",
+           listable ? "listed" : "this file system's directories aren't listed");
+    return result;
+}
+
+// The descriptors pp_test_exhaust_descriptors takes: as many as the lowered limit leaves, at most this many.
+#define BUSTER_PP_TEST_SPARE_DESCRIPTORS 16
+
+// What pp_test_exhaust_descriptors changed, for pp_test_restore_descriptors.
+typedef struct PPTestDescriptors PPTestDescriptors;
+struct PPTestDescriptors
+{
+    struct rlimit saved;
+    int taken[BUSTER_PP_TEST_SPARE_DESCRIPTORS + 1];
+    uint32_t count;
+    bool limited;
+};
+
+// Leaves the process no descriptor to open: lowers RLIMIT_NOFILE's soft limit to a few past the lowest free
+// descriptor, and takes every one below it, so that an open fails with EMFILE until pp_test_restore_descriptors.
+static bool pp_test_exhaust_descriptors(PPTestDescriptors* state)
+{
+    *state = (PPTestDescriptors){ 0 };
+    const int first = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    bool result = first >= 0 && getrlimit(RLIMIT_NOFILE, &state->saved) == 0;
+    if (first >= 0)
+    {
+        state->taken[state->count] = first;
+        state->count += 1;
+    }
+    struct rlimit lowered = state->saved;
+    lowered.rlim_cur = (rlim_t)first + BUSTER_PP_TEST_SPARE_DESCRIPTORS;
+    state->limited = result && lowered.rlim_cur < state->saved.rlim_cur && setrlimit(RLIMIT_NOFILE, &lowered) == 0;
+    result = state->limited;
+    int taken = result ? 0 : -1;
+    while (result && taken >= 0 && state->count <= BUSTER_PP_TEST_SPARE_DESCRIPTORS)
+    {
+        taken = fcntl(first, F_DUPFD_CLOEXEC, 0);
+        if (taken >= 0)
+        {
+            state->taken[state->count] = taken;
+            state->count += 1;
+        }
+    }
+    const int probe = result ? open("/dev/null", O_RDONLY | O_CLOEXEC) : -1;
+    result = result && probe < 0 && errno == EMFILE;
+    if (probe >= 0)
+    {
+        close(probe);
+    }
+    return result;
+}
+
+// Gives back what pp_test_exhaust_descriptors took: its descriptors, and the limit.
+static void pp_test_restore_descriptors(PPTestDescriptors* state)
+{
+    for (uint32_t i = 0; i < state->count; i += 1)
+    {
+        close(state->taken[i]);
+    }
+    if (state->limited)
+    {
+        setrlimit(RLIMIT_NOFILE, &state->saved);
+    }
+    *state = (PPTestDescriptors){ 0 };
+}
+
+// The index of the path a unit looked up as `prefix`/`name`, or BUSTER_PP_NONE if it never did.
+static uint32_t pp_test_looked_up(const Preprocessor* pp, const char* prefix, const char* name)
+{
+    char path[4400];
+    snprintf(path, sizeof(path), "%s/%s", prefix, name);
+    const uint32_t length = (uint32_t)strlen(path);
+    uint32_t result = BUSTER_PP_NONE;
+    for (uint32_t f = 0; result == BUSTER_PP_NONE && f < pp->file_count; f += 1)
+    {
+        result = pp->files[f].path_length == length && memcmp(pp->files[f].path, path, length) == 0 ? f : BUSTER_PP_NONE;
+    }
+    return result;
+}
+
+// #653's contract under descriptor exhaustion, which #1564's review asked to pin. Once a search directory is listed,
+// a name its listing rules out gets ENOENT without an open, even with no descriptor left, so the search goes on to the
+// next directory, whose probe fails with EMFILE and is the one reported. Without listings, the first directory's probe
+// fails with EMFILE and ends the search there. A name the listing has is probed as before and fails with EMFILE in the
+// first directory either way. The cache keeps each answer: after the descriptors come back, another unit sharing it
+// gets the listed directory's ENOENT and the probed directory's EMFILE for those paths, without an open.
+static bool pp_test_listing_descriptors(const char* directory)
+{
+    char first[4200];
+    char second[4200];
+    char path[4400];
+    snprintf(first, sizeof(first), "%s/descriptors-first", directory);
+    snprintf(second, sizeof(second), "%s/descriptors-second", directory);
+    bool result = mkdir(first, 0700) == 0 && mkdir(second, 0700) == 0;
+    snprintf(path, sizeof(path), "%s/listed.h", first);
+    result = result && pp_test_write_file(path, "int listed;\n");
+    for (uint32_t i = 0; result && i < 40; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/h%02u.h", second, i);
+        result = pp_test_write_file(path, "int header;\n");
+    }
+    struct statfs system;
+    const bool listable = result && statfs(first, &system) == 0 && file_cache_exact_names((uint64_t)system.f_type);
+    const char* const directories[] = { first, second };
+    PPOptions options = {
+        .language = {
+            .standard = 2023,
+        },
+        .no_standard_includes = true,
+        .include_directories = directories,
+        .include_directory_count = BUSTER_ARRAY_LENGTH(directories),
+        .quiet = true,
+    };
+    // Unit 0 lists, unit 1 never does, and unit 2 shares unit 0's cache after the descriptors come back.
+    static InternTable tables[3];
+    static Preprocessor units[3];
+    for (uint32_t u = 0; u < 2; u += 1)
+    {
+        units[u] = (Preprocessor){ 0 };
+        result = result && intern_initialize(&tables[u]) && pp_initialize(&units[u], &options, &tables[u]);
+    }
+    if (result)
+    {
+        units[1].cache->listing_misses = 0;
+    }
+    // Every h??.h fails in `first` and is found in `second`: `first` is listed at its BUSTER_FILE_CACHE_LISTING_MISSES-th.
+    for (uint32_t c = 0; result && c < 40; c += 1)
+    {
+        char name[16];
+        snprintf(name, sizeof(name), "h%02u.h", c);
+        for (uint32_t u = 0; result && u < 2; u += 1)
+        {
+            uint32_t found;
+            result = pp_find_include(&units[u], (const uint8_t*)name, (uint32_t)strlen(name), true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found, BUSTER_PP_NONE) !=
+                     BUSTER_PP_NONE;
+        }
+    }
+    const bool listed = units[0].cache->listed_directories != 0;
+    result = result && listed == listable && units[1].cache->listed_directories == 0;
+    // With no descriptor left: a name nowhere (`absent.h`), and one only `first` has (`listed.h`), each a reported search
+    // (an #include's) in both units.
+    PPTestDescriptors descriptors = { 0 };
+    const bool exhausted = result && pp_test_exhaust_descriptors(&descriptors);
+    uint64_t opens[2] = { units[0].probes.opens, units[1].probes.opens };
+    uint32_t absent[2] = { BUSTER_PP_NONE, BUSTER_PP_NONE };
+    bool fatal[2] = { false, false };
+    for (uint32_t u = 0; exhausted && u < 2; u += 1)
+    {
+        uint32_t found;
+        absent[u] = pp_find_include(&units[u], (const uint8_t*)"absent.h", 8, true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found, 0);
+        fatal[u] = units[u].fatal;
+    }
+    uint32_t has[2] = { BUSTER_PP_NONE, BUSTER_PP_NONE };
+    for (uint32_t u = 0; exhausted && u < 2; u += 1)
+    {
+        // A unit's fatal error ends its run; a search after it still looks the path up, which this checks.
+        uint32_t found;
+        has[u] = pp_find_include(&units[u], (const uint8_t*)"listed.h", 8, true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found, BUSTER_PP_NONE);
+    }
+    // Also what an exhaustion that failed part of the way took.
+    pp_test_restore_descriptors(&descriptors);
+    result = result && exhausted;
+    // `absent.h`: with the listing, `first`'s answer is ENOENT without an open and `second`'s probe fails with EMFILE;
+    // without it, `first`'s probe fails with EMFILE and the search ends there.
+    const uint32_t absent_first[2] = { pp_test_looked_up(&units[0], first, "absent.h"), pp_test_looked_up(&units[1], first, "absent.h") };
+    const uint32_t absent_second[2] = { pp_test_looked_up(&units[0], second, "absent.h"), pp_test_looked_up(&units[1], second, "absent.h") };
+    const int listed_error = listable ? ENOENT : EMFILE;
+    result = result && absent[0] == BUSTER_PP_NONE && absent[1] == BUSTER_PP_NONE && fatal[0] && fatal[1] && absent_first[0] != BUSTER_PP_NONE &&
+             units[0].files[absent_first[0]].error == listed_error && absent_first[1] != BUSTER_PP_NONE && units[1].files[absent_first[1]].error == EMFILE &&
+             absent_second[1] == BUSTER_PP_NONE &&
+             (listable ? absent_second[0] != BUSTER_PP_NONE && units[0].files[absent_second[0]].error == EMFILE : absent_second[0] == BUSTER_PP_NONE);
+    // `listed.h`: probed in `first` in both units, failing with EMFILE, which an unreported search treats as no file
+    // there and goes on past, to `second`, whose probe fails too.
+    const uint32_t has_first[2] = { pp_test_looked_up(&units[0], first, "listed.h"), pp_test_looked_up(&units[1], first, "listed.h") };
+    result = result && has[0] == BUSTER_PP_NONE && has[1] == BUSTER_PP_NONE && has_first[0] != BUSTER_PP_NONE && units[0].files[has_first[0]].error == EMFILE &&
+             has_first[1] != BUSTER_PP_NONE && units[1].files[has_first[1]].error == EMFILE;
+    // The opens each unit attempted under exhaustion: `absent.h`'s one (`second`'s with the listing, `first`'s without),
+    // and `listed.h`'s two.
+    const uint64_t made[2] = { units[0].probes.opens - opens[0], units[1].probes.opens - opens[1] };
+    result = result && made[0] == 3u && made[1] == 3u;
+    // Another unit through unit 0's cache, with descriptors again: the cached answers, and no open for them.
+    units[2] = (Preprocessor){ 0 };
+    options.files = units[0].cache;
+    const bool shared = result && pp_initialize(&units[2], &options, &tables[0]);
+    if (shared)
+    {
+        uint32_t found;
+        const uint32_t again = pp_find_include(&units[2], (const uint8_t*)"absent.h", 8, true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found, BUSTER_PP_NONE);
+        const uint32_t again_first = pp_test_looked_up(&units[2], first, "absent.h");
+        const uint32_t again_second = pp_test_looked_up(&units[2], second, "absent.h");
+        result = again == BUSTER_PP_NONE && units[2].probes.opens == (listable ? 0u : 1u) && again_first != BUSTER_PP_NONE &&
+                 units[2].files[again_first].error == listed_error &&
+                 (listable ? again_second != BUSTER_PP_NONE && units[2].files[again_second].error == EMFILE : true);
+    }
+    result = result && shared;
+    if (!result)
+    {
+        printf("listing descriptors: exhausted %u, listed %u (%u), absent.h fatal %u/%u, opens %lu/%lu\n", exhausted, listed, listable, fatal[0], fatal[1],
+               (unsigned long)made[0], (unsigned long)made[1]);
+    }
+    for (uint32_t u = 3; u > 0; u -= 1)
+    {
+        if (u - 1 != 2 || shared)
+        {
+            pp_release(&units[u - 1]);
+        }
+    }
+    for (uint32_t u = 0; u < 2; u += 1)
+    {
+        intern_release(&tables[u]);
+    }
+    for (uint32_t i = 0; i < 40; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/h%02u.h", second, i);
+        unlink(path);
+    }
+    snprintf(path, sizeof(path), "%s/listed.h", first);
+    unlink(path);
+    rmdir(first);
+    rmdir(second);
+    printf("listing descriptors: %s (%s; with no descriptor left, a ruled-out name is ENOENT and the next directory's EMFILE "
+           "is reported; without listings, the first's)\n",
+           result ? "as expected" : "WRONG", listable ? "listed" : "this file system's directories aren't listed");
     return result;
 }
 
@@ -3503,6 +4039,16 @@ static bool pp_test_scalar_reference(const char* directory)
         };
         Preprocessor* pp = &runs[k];
         result = stream != 0 && intern_initialize(&tables[k]) && pp_initialize(pp, &options, &tables[k]);
+        if (result)
+        {
+            const bool vectorized = BUSTER_HOST_VECTOR && !options.scalar;
+            result = pp_prepare_options(&options).vectorized == vectorized && pp->vectorized == vectorized &&
+                     pp->cache->prepare.vectorized == vectorized;
+            if (!result)
+            {
+                printf("scalar reference: run %u: preparation does not follow host and scalar option\n", k);
+            }
+        }
         uint32_t files[BUSTER_ARRAY_LENGTH(sources)];
         if (result)
         {
@@ -4934,7 +5480,8 @@ static bool pp_test_raw_recovery_failures(void)
 // #595's review: an argument expanded in place (pp_expand_argument_in_place) that runs out of room, as the history records
 // it, ends the run before anything is substituted from it. X's body is 1,100 tokens, past the 1,024 origins a stack
 // starts with, so expanding F(X)'s argument grows its origins first. The direct path expands in pp->arguments; the
-// scalar path first captures the expansion. Limit the buffer each path actually fills: each fault must give one
+// capture path — the scalar request, or every run on a scalar host — first captures the expansion. Limit the buffer
+// each path actually fills: each fault must give one
 // fatal error and no output token. The control, with nothing taken away, gives F's whole expansion in both modes.
 static bool pp_test_direct_argument_failures(void)
 {
@@ -4961,7 +5508,7 @@ static bool pp_test_direct_argument_failures(void)
         const uint32_t captures = initialized ? pp.captures.capacity : 0;
         pp.fail_origin_growth = initialized && fault == 0;
         pp.arguments.capacity = initialized && fault == 1 ? 64 : capacity;
-        pp.captures.capacity = initialized && fault == 1 && pp.options.scalar ? 64 : captures;
+        pp.captures.capacity = initialized && fault == 1 && !pp.vectorized ? 64 : captures;
         const bool ran = initialized && pp_run_source(&pp, "direct-argument-failure.c", (const uint8_t*)source, length);
         const bool passed = initialized && (fault == 2 ? ran && !pp.fatal && pp.output.count == PP_TEST_DIRECT_TOKENS + 2
                                                        : !ran && pp.fatal && pp.errors == 1 && pp.output.count == 0);
@@ -5120,6 +5667,8 @@ static bool pp_test_prelude_failures(void)
     printf("prelude failures: %s (%lu faults and controls)\n", result ? "pass" : "FAIL", (unsigned long)BUSTER_ARRAY_LENGTH(faults));
     return result;
 }
+
+#include "c_preprocessor_forced_include_test.c"
 
 // An option set of #281's families, or one beside them (%d stands for the test's directory): `refused` is in the message
 // of the option pp_parse_options must refuse, or null for a set it must take without a message.
@@ -6338,13 +6887,15 @@ static const char* const pp_test_clang_headers[] = { "immintrin", "x86intrin", "
 
 #define BUSTER_PP_TEST_HEADER_TEXT (1u << 20)
 
+#include "c_preprocessor_header_diagnostics_test.c"
+
 // buster's headers among the C library's and clang's other ones (pp_test_system_headers, pp_test_clang_headers), in
 // one mode, hosted or `freestanding`: two units, the others first and then buster's 11, and buster's first, each
 // followed by `checks` (the mode's check lines, whose #include lines then include nothing). clang preprocesses each
 // with its own headers, and with buster's in the search --buster-headers makes (-nobuiltininc -isystem `ours` -isystem
 // `links`: pp_test_buster_search), both with -Wsystem-headers, and:
-// - with buster's, clang warns about nothing in the headers (with its own, glibc's C23 widths in <limits.h> and the
-//   line comments of <stdckdint.h> in strict C89 give warnings), and gives the unit itself the same diagnostics;
+// - with buster's, clang adds no header warning beyond those with its own headers (including clang/glibc warnings
+//   such as glibc 2.39's __INT64_C redefinition), and gives the unit itself the same diagnostics;
 // - each compared macro expands to the same tokens with either. The declarations aren't compared: clang's freestanding
 //   <stdint.h> leaves helper macros defined (__int_least16_t and the like) that rename glibc's typedefs of those names
 //   after it;
@@ -6357,8 +6908,8 @@ static uint32_t pp_test_header_orders(const char* directory, const char* ours, c
     const bool strict_c89 = strcmp(mode, "-std=c89") == 0;
     char path[4096];
     snprintf(path, sizeof(path), "%s/header-orders.c", directory);
-    char* theirs[4];
-    char* mine[9];
+    char* theirs[6];
+    char* mine[11];
     int their_count = 0;
     int my_count = 0;
     theirs[their_count++] = (char*)mode;
@@ -6371,6 +6922,10 @@ static uint32_t pp_test_header_orders(const char* directory, const char* ours, c
     my_count += pp_test_buster_search(mine + my_count, ours, links);
     theirs[their_count++] = "-Wsystem-headers";
     mine[my_count++] = "-Wsystem-headers";
+    theirs[their_count++] = "-fno-caret-diagnostics";
+    mine[my_count++] = "-fno-caret-diagnostics";
+    theirs[their_count++] = "-fno-color-diagnostics";
+    mine[my_count++] = "-fno-color-diagnostics";
     theirs[their_count++] = "-P";
     mine[my_count++] = "-P";
     uint32_t result = 0;
@@ -6392,14 +6947,12 @@ static uint32_t pp_test_header_orders(const char* directory, const char* ours, c
         PPClangOutput their_text = same ? pp_test_clang_process("clang", theirs, their_count, path, false) : (PPClangOutput){ 0 };
         PPClangOutput my_text = same ? pp_test_clang_process("clang", mine, my_count, path, false) : (PPClangOutput){ 0 };
         same = same && their_text.status == PP_CLANG_ACCEPTED && my_text.status == PP_CLANG_ACCEPTED;
-        // No warning in the headers with buster's, and the unit's own diagnostics (ATOMIC_VAR_INIT is deprecated in
-        // C17) as with clang's.
-        uint32_t primary = 0;
-        uint32_t elsewhere = 0;
-        pp_test_count_diagnostics(my_text.diagnostics, path, &primary, &elsewhere);
-        if (same && elsewhere != 0)
+        // Subtract only identical reference header warnings, one occurrence at a time. The unit's own diagnostics
+        // (ATOMIC_VAR_INIT is deprecated in C17) still compare independently below; neither run may fail.
+        if (same && !pp_test_header_warnings(their_text.diagnostics, my_text.diagnostics, path))
         {
-            printf("%s: with ours, clang warns in the headers:\n%s", label, my_text.diagnostics);
+            printf("%s: with ours, clang adds header diagnostics:\nreference:\n%s\nours:\n%s", label,
+                   their_text.diagnostics != NULL ? their_text.diagnostics : "", my_text.diagnostics != NULL ? my_text.diagnostics : "");
             same = false;
         }
         static char their_diagnostics[1 << 16];
@@ -6502,7 +7055,7 @@ static bool pp_test_header_beside(void)
             search = strcmp(pp.directories[i], resource) == 0 ? i : search;
         }
         result = result && search != BUSTER_PP_NONE && (buster == 0 || search == pp.fallback_directory);
-        const uint32_t includer = result ? pp_lookup_path(&pp, includer_path, (uint32_t)strlen(includer_path), BUSTER_PP_SYSTEM_FILE) : BUSTER_PP_NONE;
+        const uint32_t includer = result ? pp_lookup_path(&pp, includer_path, (uint32_t)strlen(includer_path), BUSTER_PP_NONE, 0, BUSTER_PP_SYSTEM_FILE) : BUSTER_PP_NONE;
         result = includer != BUSTER_PP_NONE && pp.files[includer].data != BUSTER_PP_NONE;
         uint32_t found_in = BUSTER_PP_NONE;
         const uint32_t stddef = result ? pp_find_include(&pp, (const uint8_t*)"stddef.h", 8, false, false, includer, search, &found_in, BUSTER_PP_NONE) : BUSTER_PP_NONE;
@@ -7235,6 +7788,7 @@ static bool pp_test_buster_tree(void)
 static bool pp_test_headers(const char* directory)
 {
     char ours[PATH_MAX];
+    const bool diagnostics = pp_test_header_warning_fixtures() && pp_test_header_warning_oracle(directory);
     const bool trees = pp_test_buster_tree();
     bool result = pp_buster_headers_directory(ours, sizeof(ours), 0);
     if (!result)
@@ -7278,7 +7832,7 @@ static bool pp_test_headers(const char* directory)
            failures, sets, our_failures, (unsigned long)(2 * BUSTER_ARRAY_LENGTH(pp_test_header_modes)), order_failures,
            (unsigned long)(4 * BUSTER_ARRAY_LENGTH(pp_test_header_modes)), option_failures,
            beside ? "where they should be" : "elsewhere");
-    return trees && result && failures == 0 && our_failures == 0 && order_failures == 0 && option_failures == 0 && beside && file_failures == 0 && command;
+    return diagnostics && trees && result && failures == 0 && our_failures == 0 && order_failures == 0 && option_failures == 0 && beside && file_failures == 0 && command;
 }
 
 static bool pp_fuzz_checks(const PPFuzzOptions* options);
@@ -7378,12 +7932,20 @@ static bool pp_test_implemented_features(const char* directory)
         "G __has_attribute(cleanup) __has_builtin(__atomic_load) __has_c_attribute(nodiscard)\n"
         "I __has_attribute(__cleanup__) __has_attribute(__constructor__) __has_attribute(__destructor__) __has_attribute(__weak__) __has_attribute(__overloadable__) "
         "__has_c_attribute(gnu::__cleanup__) __has_c_attribute(gnu::__constructor__) __has_c_attribute(gnu::__destructor__) __has_c_attribute(gnu::__weak__) __has_c_attribute(clang::__overloadable__)\n"
-        "#define aligned packed_typo\n#define ATTR aligned\nH __has_attribute(aligned) __has_attribute(ATTR)\n";
+        "#define aligned packed_typo\n#define ATTR aligned\nH __has_attribute(aligned) __has_attribute(ATTR)\n"
+        // A version, not 1, as clang answers it (pp_implemented_builtin_query).
+        "J __has_builtin(__builtin_operator_new)\n"
+        "K __has_c_attribute(deprecated) __has_c_attribute(__deprecated__) __has_c_attribute(maybe_unused) __has_c_attribute(__maybe_unused__)\n"
+        "L __has_c_attribute(deprecated_typo) __has_c_attribute(other::maybe_unused)\n"
+        "#if __has_c_attribute(deprecated) == 201904L && __has_c_attribute(maybe_unused) == 202106L\n"
+        "diagnostic_attributes_available\n#else\n#error implemented diagnostic attributes unavailable\n#endif\n";
     static const char* const expected[2] =
     {
-        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 0 I 1 1 1 1 1 1 1 1 1 1 H 0 0\n",
+        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 0 I 1 1 1 1 1 1 1 1 1 1 H 0 0\nJ 201802L\n"
+        "K 201904L 201904L 202106L 202106L L 0 0 diagnostic_attributes_available\n",
         // The frozen Clang C-attribute oracle has no clang::overloadable entry; source capability is independent.
-        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 202003L I 1 1 1 1 1 1 1 1 1 0 H 0 0\n",
+        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 202003L I 1 1 1 1 1 1 1 1 1 0 H 0 0\nJ 201802L\n"
+        "K 201904L 201904L 202106L 202106L L 0 0 diagnostic_attributes_available\n",
     };
     static const uint32_t standards[] =
     {
@@ -7909,7 +8471,10 @@ static bool pp_test_implemented_features(const char* directory)
             const PPOptions defaults = { .language = { .standard = standards[mode], .gnu = true } };
             // clang makes __builtin_c23_va_start a builtin in C23 alone (#148).
             const bool language = inventory[i].id != CBUILTIN_C23_VA_START || standards[mode] >= 2023;
-            result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)name, length) == (inventory[i].source && language);
+            // operator_new's and operator_delete's answer is a version, as clang's (pp_implemented_builtin_query).
+            const bool version = inventory[i].id == CBUILTIN_OPERATOR_NEW || inventory[i].id == CBUILTIN_OPERATOR_DELETE;
+            const uint32_t answer = inventory[i].source && language ? (version ? 201802u : 1u) : 0u;
+            result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)name, length) == answer;
             result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, (const uint8_t*)name, length) == (inventory[i].constant && language);
         }
     }
@@ -8045,7 +8610,9 @@ static bool pp_test_implemented_features(const char* directory)
                 result &= cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR) == inventory[i].constant;
                 // In gnu17, where __builtin_c23_va_start is no builtin (#148).
                 const bool language = inventory[i].id != CBUILTIN_C23_VA_START;
-                result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, name, length) == (inventory[i].source && language);
+                const bool version = inventory[i].id == CBUILTIN_OPERATOR_NEW || inventory[i].id == CBUILTIN_OPERATOR_DELETE;
+                const uint32_t answer = inventory[i].source && language ? (version ? 201802u : 1u) : 0u;
+                result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, name, length) == answer;
                 result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, length) == (inventory[i].constant && language);
                 name[0] = '!';
                 result &= cbuiltin_resolve((const char*)name, length) == CBUILTIN_NONE;
@@ -8406,6 +8973,7 @@ static bool pp_test_sections(PPTestDeal* deal, const char* directory, bool with_
     passed &= PP_TEST_SECTION(deal, 1, pp_test_print_offsets());
     passed &= PP_TEST_SECTION(deal, 1, pp_test_print_spellings());
     passed &= PP_TEST_SECTION(deal, 1, pp_test_print_unspliced());
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_splice_possible());
     passed &= PP_TEST_SECTION(deal, 1, pp_test_print_batches(directory));
     passed &= PP_TEST_SECTION(deal, 3, pp_test_print_spelling_paths(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_print_lines(directory));
@@ -8414,6 +8982,9 @@ static bool pp_test_sections(PPTestDeal* deal, const char* directory, bool with_
     passed &= PP_TEST_SECTION(deal, 1, pp_test_embed_text(fuzz->seed));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_embed_lookups(directory, with_clang));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_lookup_accounting(directory));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_directory_reads(directory));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_directory_listings(directory));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_listing_descriptors(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_final_copy_accounting());
     passed &= PP_TEST_SECTION(deal, 1, pp_test_trailing_splices());
     passed &= PP_TEST_SECTION(deal, 1, pp_test_scalar_reference(directory));
@@ -8430,6 +9001,7 @@ static bool pp_test_sections(PPTestDeal* deal, const char* directory, bool with_
     passed &= PP_TEST_SECTION(deal, 1, pp_test_named_ucn_scaling(directory));
     passed &= PP_TEST_SECTION(deal, 2, pp_test_named_ucn_boundaries(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_prelude_failures());
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_raw_forced_include_contexts(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_direct_argument_failures());
     passed &= PP_TEST_SECTION(deal, 2, pp_test_nested_arguments());
     passed &= PP_TEST_SECTION(deal, 1, pp_test_argument_links());

@@ -84,6 +84,25 @@ take in lanes. It refuses a frame its records aren't (`UNSUPPORTED`), invalid
 inputs (`INVALID`) and sizes past the format's (`LIMIT`), each leaving the
 descriptor alone.
 
+A preserving frame (#147, `Tier0Code.frame_preserved`, the Tier 0 guide's
+"Preserving frames") has a frame pointer. It pushes caller-saved registers
+after the callee-saved ones, then reserves a block below them and stores its
+vector and mask registers there. The release steps over the block and the
+caller-saved registers are popped first. The reader checks each push, the
+block's sub, and each pop in place. It also compares each store and load
+whole with the emitter's record (`tier0_preserve_move`), so that a masked,
+partial move isn't described as a save. None is a transition, since rbp holds
+the CFA.
+
+The emission gives every kept register a rule at every boundary
+(`emitted_tier0_preserve_rows`): `same_value` from the entry, its slot after
+its save, and `same_value` after its reload. The row checker admits DWARF's
+vector and mask registers (17 to 32, 67 to 82, 118 to 125) for slots and
+caller's values, never `DW_CFA_restore` or another register's. The verifier
+proves their rules by their whole, undecorated stores and loads
+(`emitted_verify_saved_vectors`).
+Such a frame has no tail calls and no `eh_return`.
+
 ### Tail calls (#147)
 
 A function with tail calls (clang's `musttail`, the Tier 0 guide's "Tail calls")
@@ -141,15 +160,19 @@ functions. For any fixed shape's rows (a frame pointer's, tail calls', open
 ones) a row program is the fixed writer's bytes, which `test-emitted-code`
 checks for every descriptor `test-unwind` writes; so the driver's tables are the
 same bytes as before. A shape the fixed descriptor can't express, a probe loop's
-CFA in r11 between the loop's bound and its exit, is a row program only.
+CFA in r11 between the loop's bound and its exit, is a row program only: Tier 1's
+probed frames', and Tier 0's under `-fstack-clash-protection` without a frame
+pointer (#177), whose fixed reader checks the probed records and whose emission
+adds the loop's two rows (`emitted_tier0_probe_rows`).
 `unwind_rows_check` refuses rows the writer can't encode (a saved register's
 offset that isn't a multiple of the data alignment, a negative CFA offset, rsp's
 or the return address's own rule, states remembered deeper than 16), and
 `unwind_rows_canonical` drops rows at a function's end (a closed frame's last
-epilogue's restored state, with its remembering). Rows carry signed 32-bit
-values: a frame whose CFA would pass `INT32_MAX` (within 56 bytes of 2 GB) has no
-events, where the fixed descriptor took it; the emission refuses it as
-unsupported ([#1149](https://github.com/buster14a/buster/issues/1149)).
+epilogue's restored state, with its remembering). Rows carry signed 64-bit
+values (#1149), including CFA offsets past `INT32_MAX` for every supported
+imm32 allocation plus the pushes and return address. Those fixed shapes retain
+the fixed writer's bytes and vector lowering; larger row-only offsets use
+64-bit LEB operands and cannot narrow into a fixed allocation.
 
 ## Format and linker handoff
 

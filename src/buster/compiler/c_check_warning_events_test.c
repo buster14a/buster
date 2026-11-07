@@ -90,6 +90,17 @@ static void check_test_warning_events(CheckTest* test)
         invalid_completion.completion = 4;
         check_test_expect(test, !check_warning_append(&suffix, &invalid_completion, NULL, 0) && suffix.count == 2,
                           "a TU completion cannot silently reuse a parser-location boundary");
+        CheckWarningEvent symbol_pragma = late;
+        symbol_pragma.id = CHECK_WARNING_ID_WEAK_UNDECLARED;
+        symbol_pragma.kind = CHECK_WARNING_EVENT_PRAGMA;
+        symbol_pragma.flags = BUSTER_CHECK_WARNING_SYMBOL_PRAGMA;
+        symbol_pragma.payload.data = 1;
+        check_test_expect(test, check_warning_append(&suffix, &symbol_pragma, NULL, 0) && suffix.count == 3 &&
+                               suffix.events[2].flags == BUSTER_CHECK_WARNING_SYMBOL_PRAGMA && suffix.events[2].payload.data == 1,
+                          "a symbol pragma's history discriminator survives carrier validation and publication");
+        symbol_pragma.kind = CHECK_WARNING_EVENT_UNDEFINED_INTERNAL;
+        check_test_expect(test, !check_warning_append(&suffix, &symbol_pragma, NULL, 0) && suffix.count == 3,
+                          "a pragma history discriminator cannot be attached to an unrelated warning kind");
         // Force the next append to grow, then deny that allocation through a copied arena limit. The live arena and
         // the old event/note views remain valid regardless of which of the two arrays would otherwise grow first.
         bool ready = true;

@@ -85,10 +85,11 @@
 #include <x86intrin.h>
 #include <cpuid.h>
 
-// Resource-exhaustion fixtures must leave the detector runtime free to allocate
-// shadow/fake-stack memory and start its own threads. Diagnostic builds inject
-// the same compiler-owned reservation/start failures instead of limiting the OS.
-#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
+// Resource-exhaustion fixtures must leave sanitizer runtimes free to allocate
+// memory for diagnostics, map shadow/fake-stack memory and start their threads.
+// Even standalone UBSan can need allocations to report a forced stack overflow.
+// Inject compiler-owned reservation/start failures rather than limiting the OS.
+#if __has_feature(address_sanitizer) || __has_feature(undefined_behavior_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
 #define BUSTER_SANITIZER_RESOURCES 1
 static bool arena_test_reservation_allowed(uint64_t bytes);
 #else
@@ -237,8 +238,20 @@ static __attribute__((unused)) void arena_pool_release(ArenaPool* pool);
 // hypervisor bit), transparent huge pages off for the whole process (PR_SET_THP_DISABLE, which MADV_HUGEPAGE doesn't
 // override, and which the processes it starts inherit), so that the arenas take base pages. `setting`,
 // BUSTER_HUGE_PAGES's value, decides instead when it is "0" (off) or "1" (on, as the arenas ask, even where the process
-// that started this one turned them off). Elsewhere the process keeps what it was started with.
+// that started this one turned them off). Elsewhere the process keeps what it was started with, but on a busy host,
+// whose tasks runnable at the start are at least a quarter of its CPUs online (#672: arena_host_busy), its own arenas
+// take base pages (arena_pages_busy). That leaves the process's other memory, and the processes it starts, as they were.
 static __attribute__((unused)) void arena_page_policy(const char* setting);
+// Whether arena_page_policy found the host busy (#672): then every arena the process reserves is advised base pages
+// (MADV_NOHUGEPAGE over its mapping) and never huge ones, which --time-stages reports as `busy`. Set once, before the
+// process starts any thread; main.c's units share it. BUSTER_TEST_HOST_BUSY ("1" or "0") decides it instead, for tests.
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern bool arena_pages_busy;
+#elif defined(BUSTER_UNIT)
+bool arena_pages_busy;
+#else
+static bool arena_pages_busy;
+#endif
 // An arena that holds no memory, for measuring what pushes take: its pushes take room as from an arena reserved at a
 // page boundary, up to BUSTER_ARENA_MAX_CAPACITY, and its length after them is that room. Its base is past the
 // addresses the kernel maps a process's memory at unasked (BUSTER_ARENA_MAX_CAPACITY), so that reading or writing what a
@@ -271,11 +284,22 @@ static __attribute__((unused)) bool arena_untouched(const Arena* arena);
 // sqlite3.c's and the backend after them to 24 MB). Borrowed storage, and an arena whose writable extent is unknown, keep
 // their pages. The peak stays where it was: past the length, the pages up to the boundary still hold what was written.
 static __attribute__((unused)) void arena_discard(Arena* arena);
+// arena_discard in whole huge pages (#777): from the first huge page boundary past the length to the last one at or
+// below the peak, for an arena whose next user pushes as far again, a lane of the C driver's units with another unit to
+// compile. The huge page a discard frees part of is split by the kernel into base pages, which later pushes fault in
+// one at a time: by one lane, synth's units took 130 thousand faults more for them on the 9700X. That huge page is
+// kept, at most 2 MB: freeing it whole made each unit take a fresh one, cleared by the kernel, and synth's link by 8
+// lanes took 4.3% longer than with arena_discard, where keeping it took 2.2% less.
+static __attribute__((unused)) void arena_discard_huge(Arena* arena);
 // Keeps the executable's .bss in base pages (#652), for a compile's commands to call first: it is 220 MB of statics, the
 // tests' and benchmarks' arrays among them, of which a compile writes 11 pages whatever its size (an empty file's -c as
 // sqlite3.c's: the C driver's state, the parser's tables), in three 2 MB stretches. With transparent huge pages `always`,
 // as on the 9700X, the first write in two of them took a huge page each: 4 MB cleared for 44 KB of statics.
 static __attribute__((unused)) void arena_static_base_pages(void);
+// Reads the process's RLIMIT_AS once, for every later reservation and pool of the process (ArenaLimits, #652): for a
+// compile's commands to call first, before they start any thread. A setrlimit after it, or another process's prlimit,
+// changes no reservation's share.
+static __attribute__((unused)) void arena_limits_fix(void);
 
 // The bytes arena_reserve maps for `capacity`: whole pages, and past BUSTER_ARENA_SMALL_BYTES room to align the huge
 // pages, or else an inaccessible page on each side of them.
@@ -309,6 +333,25 @@ _Thread_local ArenaFailure arena_failure;
 #else
 static _Thread_local bool arena_compact;
 static _Thread_local ArenaFailure arena_failure;
+#endif
+
+// The RLIMIT_AS share each reservation admits (arena_address_share), read once for the rest of the process by
+// arena_limits_fix (#652). A compile's commands call it first: they don't change their limits, and their reservations
+// without a pool (about 30 for an empty file's -fsyntax-only) each made a getrlimit call before. Without it, as in the
+// tests that lower RLIMIT_AS in-process or in a forked child, every reservation reads the limit, and each pool reads it
+// once (arena_pool_limits). Written before the process starts any thread; main.c's units share it.
+typedef struct ArenaLimits ArenaLimits;
+struct ArenaLimits
+{
+    bool fixed;
+    uint64_t address_share;
+};
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern ArenaLimits arena_limits;
+#elif defined(BUSTER_UNIT)
+ArenaLimits arena_limits;
+#else
+static ArenaLimits arena_limits;
 #endif
 
 // The share of a finite RLIMIT_AS that one arena admits, or BUSTER_ARENA_MAX_CAPACITY.
@@ -347,10 +390,18 @@ static void arena_pool_limits(ArenaPool* pool)
 {
     if (!pool->limits)
     {
-        pool->address_share = arena_address_share();
+        pool->address_share = arena_limits.fixed ? arena_limits.address_share : arena_address_share();
         pool->keeps_commits = arena_commit_unbounded();
         pool->limits = true;
     }
+}
+
+static __attribute__((unused)) void arena_limits_fix(void)
+{
+    arena_limits = (ArenaLimits){
+        .fixed = true,
+        .address_share = arena_address_share(),
+    };
 }
 
 static uint64_t arena_reservation_limit(void)
@@ -364,7 +415,7 @@ static uint64_t arena_reservation_limit(void)
     }
     else
     {
-        share = arena_address_share();
+        share = arena_limits.fixed ? arena_limits.address_share : arena_address_share();
     }
     uint64_t result = arena_compact ? BUSTER_ARENA_COMPACT_BYTES : BUSTER_ARENA_MAX_CAPACITY;
     result = share < result ? share : result;
@@ -469,7 +520,12 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
                 offset = huge_begin - small - (uintptr_t)mapping;
             }
             const uint64_t base_pages = capacity > small ? small : mapping_bytes;
-            if (base_pages >= BUSTER_ARENA_HUGE_PAGE_BYTES)
+            if (arena_pages_busy && mapping_bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES)
+            {
+                // A busy host's arenas are base pages throughout: arena_commit advises none of them huge.
+                madvise(mapping, mapping_bytes, MADV_NOHUGEPAGE);
+            }
+            else if (base_pages >= BUSTER_ARENA_HUGE_PAGE_BYTES)
             {
                 madvise(mapping, offset + base_pages, MADV_NOHUGEPAGE);
             }
@@ -595,7 +651,7 @@ static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
             {
                 madvise(mapping + offset, bytes, MADV_NOHUGEPAGE);
             }
-            for (uint32_t i = 0; i < count; i += 1)
+            for (uint32_t i = 0; !arena_pages_busy && i < count; i += 1)
             {
                 if (ends[i] > smalls[i])
                 {
@@ -650,10 +706,62 @@ static Arena arena_reserve(uint64_t capacity)
     return arena_reserve_small(capacity, BUSTER_ARENA_SMALL_BYTES);
 }
 
+// A busy host is one whose tasks runnable now, this process's among them (/proc/loadavg's fourth field's first number),
+// are at least 1/BUSTER_ARENA_BUSY_SHARE of its CPUs online, and two or more.
+#define BUSTER_ARENA_BUSY_SHARE 4
+
+// The tasks runnable that `length` bytes of /proc/loadavg say ("LOAD1 LOAD5 LOAD15 RUNNABLE/TASKS LAST": the digits
+// before the slash), at most UINT32_MAX; 0 for text that doesn't say.
+static uint64_t arena_loadavg_runnable(const char* text, uint64_t length)
+{
+    const char* slash = length > 0 ? memchr(text, '/', length) : 0;
+    const char* digits = slash;
+    while (digits != 0 && digits > text && digits[-1] >= '0' && digits[-1] <= '9')
+    {
+        digits -= 1;
+    }
+    uint64_t runnable = 0;
+    for (const char* digit = digits; digit != 0 && digit < slash; digit += 1)
+    {
+        runnable = runnable * 10 + (uint64_t)(*digit - '0');
+        runnable = runnable < UINT32_MAX ? runnable : UINT32_MAX;
+    }
+    return runnable;
+}
+
+// Whether the host is busy: other processes run beside this one on enough of its cores that their memory traffic, more
+// than their faults, may bound what each does (#672). In that issue's exploratory record (unpaired rounds in a fixed
+// order), independent compiles of the frozen sqlite3.c on the 9700X, one per core (8 cores, 15 CPUs online), had
+// observed medians of 269.7 MB/s of source with base pages against 233.2 with huge pages on 8, about the same on 4,
+// and lower on 2 and 1 (104.8 against 117.8, 56.4 against 67.0). A huge page's first touch clears 2 MB at once, which
+// an arena may use little of, and which the other cores' traffic can evict before the arena writes it; a base page is
+// cleared as it is first written. Reads two small files, the second only where more than this process runs.
+static bool arena_host_busy(void)
+{
+    const char* forced = getenv("BUSTER_TEST_HOST_BUSY");
+    bool result = forced != 0 && strcmp(forced, "1") == 0;
+    char text[128];
+    const int file = forced == 0 ? open("/proc/loadavg", O_RDONLY | O_CLOEXEC) : -1;
+    const ssize_t length = file >= 0 ? read(file, text, sizeof(text)) : -1;
+    if (file >= 0)
+    {
+        close(file);
+    }
+    const uint64_t runnable = length > 0 ? arena_loadavg_runnable(text, (uint64_t)length) : 0;
+    if (forced == 0 && runnable >= 2)
+    {
+        const long online = sysconf(_SC_NPROCESSORS_ONLN);
+        result = online > 0 && runnable * BUSTER_ARENA_BUSY_SHARE >= (uint64_t)online;
+    }
+    return result;
+}
+
 // A huge page's first touch on a virtual machine made the host back all of it, whatever the arena used of it: on #1109's
 // 4-core VM a fault took about 1 ms, and the C driver's checking of main.c ran 2 to 4 times as long as with base pages, a
 // small unit 30% longer at the median and up to 7 times at the tail. On the 9700X a huge page clears in about 40 µs, and
-// a large unit's arenas fill theirs (docs/translation-units.md, "Memory").
+// a large unit's arenas fill theirs (docs/translation-units.md, "Memory"), but not where the other cores are busy
+// (arena_host_busy): then the arenas alone take base pages (arena_pages_busy), by their own advice, which no process this
+// one starts inherits. A process started with them off keeps them off.
 static void arena_page_policy(const char* setting)
 {
     uint32_t eax = 0;
@@ -663,6 +771,7 @@ static void arena_page_policy(const char* setting)
     const bool virtual_machine = __get_cpuid(1, &eax, &ebx, &ecx, &edx) != 0 && (ecx & (1u << 31)) != 0;
     const bool off = setting != 0 && strcmp(setting, "0") == 0;
     const bool on = setting != 0 && strcmp(setting, "1") == 0;
+    arena_pages_busy = !off && !on && !virtual_machine && prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) == 0 && arena_host_busy();
     if (off || (virtual_machine && !on))
     {
         prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
@@ -833,7 +942,7 @@ static bool arena_commit(Arena* arena, uint64_t end)
             // The pages past the base pages, advised huge as the first commit reaches them, before a push returns any
             // of their bytes (arena_reserve_policy).
             const uint64_t small_end = offset + arena->small;
-            if (!arena->huge && arena->capacity > arena->small && target > small_end)
+            if (!arena->huge && !arena_pages_busy && arena->capacity > arena->small && target > small_end)
             {
                 madvise(mapping + small_end, arena->mapping_bytes - small_end, MADV_HUGEPAGE);
                 arena->huge = true;
@@ -900,19 +1009,33 @@ static bool arena_untouched(const Arena* arena)
     return arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted && arena->peak <= arena->length;
 }
 
-static void arena_discard(Arena* arena)
+// The pages arena_discard gives back, past the length from the first huge page boundary past it: to the peak's page, or
+// with `whole` to the last huge page boundary at or below the peak (arena_discard_huge).
+static void arena_discard_to(Arena* arena, bool whole)
 {
     if (arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted)
     {
         const uintptr_t base = (uintptr_t)arena->base;
         const uintptr_t begin = (base + arena->length + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
         const uint64_t written = arena->committed > arena->mapping_offset ? arena->committed - arena->mapping_offset : 0;
-        const uintptr_t end = (base + (arena->peak < written ? arena->peak : written) + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+        const uintptr_t last = base + (arena->peak < written ? arena->peak : written);
+        const uintptr_t end = whole ? last & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1) :
+                                      (last + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
         if (end > begin)
         {
             madvise((void*)begin, end - begin, MADV_DONTNEED);
         }
     }
+}
+
+static void arena_discard(Arena* arena)
+{
+    arena_discard_to(arena, false);
+}
+
+static void arena_discard_huge(Arena* arena)
+{
+    arena_discard_to(arena, true);
 }
 
 static void arena_static_base_pages(void)
@@ -945,6 +1068,11 @@ static void arena_poison(Arena* arena, uint8_t value)
 // from the other. Each is reserved when it is first used.
 #define BUSTER_SCRATCH_ARENA_COUNT 2
 #define BUSTER_SCRATCH_ARENA_CAPACITY (64ull << 30)
+// The base pages each starts with (#672). A thread's temporaries are mostly a few kilobytes, and its larger ones mostly
+// room of which it touches the start: a large file's windowed preparation (pp_prepare_windows) pushes three arrays of a
+// word for every 64 of its bytes, 3.5 MB for sqlite3.c's 9.5 MB, and touches each one's start. On #672's cloud VM, in
+// huge pages those took two, 4 MB; in base pages the C driver's scratch held 1 MB at sqlite3.c's peak.
+#define BUSTER_SCRATCH_ARENA_SMALL_BYTES (4ull << 20)
 
 typedef struct LaneGroup LaneGroup;
 typedef struct LaneTeam LaneTeam;
@@ -1059,6 +1187,19 @@ struct LaneProcess
 extern LaneProcess lane_process;
 #elif defined(BUSTER_UNIT)
 LaneProcess lane_process = { .fail_at = UINT32_MAX };
+// The threads the process's lanes started (LaneProcess.threads_created), written at its exit to the file
+// BUSTER_TEST_THREADS names, for the tests that count a command's threads (#652): a library preloaded into a dynamic
+// executable counts its calls of pthread_create too, which a static one doesn't load.
+static __attribute__((destructor, unused)) void lane_threads_report(void)
+{
+    const char* path = getenv("BUSTER_TEST_THREADS");
+    FILE* file = path != 0 ? fopen(path, "w") : 0;
+    if (file != 0)
+    {
+        fprintf(file, "%llu\n", (unsigned long long)__atomic_load_n(&lane_process.threads_created, __ATOMIC_RELAXED));
+        fclose(file);
+    }
+}
 #else
 static LaneProcess lane_process = { .fail_at = UINT32_MAX };
 #endif
@@ -1085,7 +1226,7 @@ static Scratch scratch_begin(const Arena* conflict)
     }
     if (arena->base == 0)
     {
-        *arena = arena_reserve(BUSTER_SCRATCH_ARENA_CAPACITY);
+        *arena = arena_reserve_small(BUSTER_SCRATCH_ARENA_CAPACITY, BUSTER_SCRATCH_ARENA_SMALL_BYTES);
     }
     Scratch result = {
         .arena = arena,
@@ -1881,6 +2022,7 @@ static __attribute__((unused)) bool lane_run(uint32_t count, void (*entry)(void*
 #define BUSTER_LANE_SESSION_PARK_AT_END 1u
 #define BUSTER_LANE_SESSION_LAZY 2u
 #define BUSTER_LANE_SESSION_PER_CORE 4u
+#define BUSTER_LANE_SESSION_REQUIRE_START 8u
 
 // Runs entry(argument) on every lane of a new session of `capacity` lanes (#905), the process's outer flow: the calling
 // thread is lane 0, and the session creates capacity - 1 threads (none for one; with BUSTER_LANE_SESSION_PER_CORE, one
@@ -1889,7 +2031,8 @@ static __attribute__((unused)) bool lane_run(uint32_t count, void (*entry)(void*
 // itself to its CPU, and lane 0 waits for the pins; without, it waits for nothing but each thread's creation, or with
 // BUSTER_LANE_SESSION_LAZY for lane 1's alone. A failed creation or pin cancels every lane created, which the session
 // joins, and runs the flow on lane 0 alone: one lane, never a retry. Returns how many lanes ran it (0 if a session of
-// the calling thread's is live: sessions don't nest). The lanes are joined when the flow ends, but with
+// the calling thread's is live: sessions don't nest). With REQUIRE_START, a failed start returns 0 without running the
+// flow, rather than falling back to one lane. The lanes are joined when the flow ends, but with
 // BUSTER_LANE_SESSION_PARK_AT_END (`flags`).
 static __attribute__((unused)) uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const uint32_t* cpus, void (*entry)(void* argument),
                                                          void* argument, uint32_t flags);
@@ -2545,7 +2688,7 @@ static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const 
         session->park_at_end = (flags & BUSTER_LANE_SESSION_PARK_AT_END) != 0 && !BUSTER_SANITIZER_RESOURCES;
         session->per_core = (flags & BUSTER_LANE_SESSION_PER_CORE) != 0 && cpus == 0 && lanes > 1;
         // Lazily from 3 lanes, or from 2 counting the cores, which lane 1 then does.
-        session->lazy = (flags & BUSTER_LANE_SESSION_LAZY) != 0 && cpus == 0 && (lanes > 2 || session->per_core);
+        session->lazy = (flags & BUSTER_LANE_SESSION_LAZY) != 0 && (flags & BUSTER_LANE_SESSION_REQUIRE_START) == 0 && cpus == 0 && (lanes > 2 || session->per_core);
         if (session->per_core && !session->lazy)
         {
             const uint32_t cores = lane_core_count();
@@ -2624,7 +2767,11 @@ static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const 
         };
         thread_context.taken = 0;
         thread_context.running = true;
-        entry(argument);
+        const bool run_entry = started || (flags & BUSTER_LANE_SESSION_REQUIRE_START) == 0;
+        if (run_entry)
+        {
+            entry(argument);
+        }
         // A lazy flow that never met its lanes: they are lane 1's to start, and the session's to end.
         lane_session_settle();
         thread_context.running = false;
@@ -2639,7 +2786,7 @@ static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const 
         {
             syscall(SYS_sched_setaffinity, 0, sizeof(affinity), affinity);
         }
-        result = session->count;
+        result = run_entry ? session->count : 0;
     }
     return result;
 }

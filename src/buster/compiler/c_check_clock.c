@@ -215,6 +215,9 @@ struct CheckClock
     // command that never reached its flow).
     uint32_t lanes_asked;
     uint32_t lanes;
+    // Whether the process's arenas took base pages because the host was busy when it started (#672: lane.c's
+    // arena_pages_busy), which the driver copies in; the report says `busy` for them.
+    bool pages_busy;
     // Within the reader's stage (`check-input`), the TSC's ticks of its expressions' walk (CheckInput.expression_ticks,
     // #1038), which the report gives on a `time-check` line; its parts' (CheckInput.expression_part_ticks, in
     // check_clock_walk_parts' order), each on a `time-check expressions.PART` line; and the minor faults and system
@@ -235,6 +238,17 @@ struct CheckClock
     uint64_t transition_misses;
     uint64_t transition_folds;
     uint64_t transition_entries;
+    // The checker's deferred bodies (#151, check_input_deferred_compile): whether the unit's reading read them apart, the
+    // lanes its bodies took, and why the unit went to source order instead (null for none); `time-check deferred-*` lines.
+    bool deferred;
+    uint32_t deferred_lanes;
+    uint64_t deferred_expression_parts;
+    uint64_t deferred_expression_parallel_tokens;
+    uint64_t deferred_expression_serial_tokens;
+    uint64_t deferred_expression_worker_mask;
+    bool deferred_expression_retry;
+    uint64_t deferred_expression_ticks[4];
+    const char* deferred_reason;
 };
 
 // The expressions' walk's parts, as CheckInput.expression_part_ticks holds them (BUSTER_CHECK_EXPRESSION_PART_*).
@@ -389,7 +403,8 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
     for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
     {
         const double part = (double)stage_clock->expression_part_ticks[p] / ticks_per_millisecond;
-        fprintf(stream, "time-check\texpressions.%s\t%.3f\t%.1f\n", check_clock_walk_parts[p], part, total > 0 ? part * 100.0 / total : 0.0);
+        const bool parallel = stage_clock->deferred_expression_parts != 0 && !stage_clock->deferred_expression_retry;
+        fprintf(stream, "time-check\texpressions.%s%s\t%.3f\t%.1f\n", parallel ? "work." : "", check_clock_walk_parts[p], part, total > 0 ? part * 100.0 / total : 0.0);
     }
     if (stage_clock->expression_usage_failed)
     {
@@ -404,6 +419,21 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
     fprintf(stream, "time-check\ttransition-misses\t%llu\n", (unsigned long long)stage_clock->transition_misses);
     fprintf(stream, "time-check\ttransition-folds\t%llu\n", (unsigned long long)stage_clock->transition_folds);
     fprintf(stream, "time-check\ttransition-entries\t%llu\n", (unsigned long long)stage_clock->transition_entries);
+    if (stage_clock->deferred)
+    {
+        fprintf(stream, "time-check\tdeferred-lanes\t%u\n", stage_clock->deferred_lanes);
+        fprintf(stream, "time-check\tdeferred-merged\t%s\n", stage_clock->deferred_reason == NULL ? "yes" : stage_clock->deferred_reason);
+        fprintf(stream, "time-check\tdeferred-expression-parts\t%" PRIu64 "\n", stage_clock->deferred_expression_parts);
+        fprintf(stream, "time-check\tdeferred-expression-parallel-tokens\t%" PRIu64 "\n", stage_clock->deferred_expression_parallel_tokens);
+        fprintf(stream, "time-check\tdeferred-expression-serial-tokens\t%" PRIu64 "\n", stage_clock->deferred_expression_serial_tokens);
+        fprintf(stream, "time-check\tdeferred-expression-workers\t%u\n", (uint32_t)__builtin_popcountll(stage_clock->deferred_expression_worker_mask));
+        fprintf(stream, "time-check\tdeferred-expression-retry\t%s\n", stage_clock->deferred_expression_retry ? "yes" : "no");
+        const char* const phases[] = { "plan", "round", "serial", "publish" };
+        for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(phases); p += 1)
+        {
+            fprintf(stream, "time-check\tdeferred-expression.%s\t%.3f\n", phases[p], (double)stage_clock->deferred_expression_ticks[p] / ticks_per_millisecond);
+        }
+    }
     for (uint32_t p = 0; stage_clock->wrote && p < BUSTER_CHECK_CLOCK_WRITE_PHASES; p += 1)
     {
         fprintf(stream, "time-write\t%s\t%.3f\n", check_clock_write_names[p], (double)stage_clock->write_nanoseconds[p] / 1e6);
@@ -414,8 +444,10 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
         fprintf(stream, "time-process\tlanes-asked\t%u\n", stage_clock->lanes_asked);
         fprintf(stream, "time-process\tlanes\t%u\n", stage_clock->lanes);
     }
-    // Whether transparent huge pages were off for the process (#1109, arena_page_policy), or as the system has them.
-    fprintf(stream, "time-process\thuge-pages\t%s\n", prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) == 1 ? "off" : "system");
+    // Whether transparent huge pages were off for the process (#1109, arena_page_policy), off for its arenas alone because
+    // the host was busy when it started (#672), or as the system has them.
+    const bool pages_off = prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) == 1;
+    fprintf(stream, "time-process\thuge-pages\t%s\n", pages_off ? "off" : stage_clock->pages_busy ? "busy" : "system");
     fprintf(stream, "time-process\tstage-system-source\tgetrusage-rusage-self-ru-stime\n");
     fprintf(stream, "time-process\tstage-system-boundary\tresource-marks\n");
     fprintf(stream, "time-process\tstage-system-status\t%s\n", stage_clock->usage_available ? "available" : "unavailable");
@@ -450,17 +482,25 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
     }
 }
 
+// Whether the detailed expression counters sum lane work, rather than partition elapsed time.
+static __attribute__((unused)) bool check_clock_walk_work(const char* text)
+{
+    const char* row = "time-check\texpressions.work.classes\t";
+    return text != NULL && (strncmp(text, row, strlen(row)) == 0 || strstr(text, "\ntime-check\texpressions.work.classes\t") != NULL);
+}
+
 // Reads the expressions' walk's parts from a report check_clock_report wrote, in `text` among other lines: each part's
 // milliseconds (check_clock_walk_parts' order) into parts[0] to parts[BUSTER_CHECK_CLOCK_WALK_PARTS - 1], then the
 // walk's system milliseconds and minor faults (its `expressions.usage` line). Every row must occur once, nonnegative
 // but for the usage's unavailable pair, -1 and -1 together, and the parts may add up to no more than the walk's own row
 // (each rounded to a microsecond). check_clock_read reads the rest; a report's reader that wants the parts reads them
-// apart (measure-compile).
+// apart (measure-compile). Parallel readings use expressions.work.PART, whose sum may exceed the elapsed walk.
 static __attribute__((unused)) bool check_clock_read_walk(const char* text, double* parts)
 {
     uint32_t seen[BUSTER_CHECK_CLOCK_WALK_PARTS + 2] = { 0 };
     double walk = -1;
     bool valid = text != NULL;
+    const bool work = check_clock_walk_work(text);
     const char* at = text;
     while (valid && at != NULL && *at != 0)
     {
@@ -476,10 +516,13 @@ static __attribute__((unused)) bool check_clock_read_walk(const char* text, doub
         {
             char wanted[64];
             snprintf(wanted, sizeof(wanted), "expressions.%s", check_clock_walk_parts[p]);
-            const bool match = strcmp(name, wanted) == 0;
+            const bool elapsed = strcmp(name, wanted) == 0;
+            snprintf(wanted, sizeof(wanted), "expressions.work.%s", check_clock_walk_parts[p]);
+            const bool parallel = strcmp(name, wanted) == 0;
+            const bool match = elapsed || parallel;
             parts[p] = match ? first : parts[p];
             seen[p] += match;
-            valid = valid && (!match || first >= 0);
+            valid = valid && (!match || (first >= 0 && parallel == work));
         }
         const bool usage = fields == 3 && strcmp(name, "expressions.usage") == 0;
         parts[BUSTER_CHECK_CLOCK_WALK_PARTS] = usage ? first : parts[BUSTER_CHECK_CLOCK_WALK_PARTS];
@@ -497,19 +540,23 @@ static __attribute__((unused)) bool check_clock_read_walk(const char* text, doub
         valid = seen[i] == 1;
         sum += i < BUSTER_CHECK_CLOCK_WALK_PARTS ? parts[i] : 0;
     }
-    return valid && sum <= walk + 0.001 * BUSTER_CHECK_CLOCK_WALK_PARTS;
+    return valid && walk >= 0 && (work || sum <= walk + 0.001 * BUSTER_CHECK_CLOCK_WALK_PARTS);
 }
 
 // Prints measure-compile's rows of the expressions' walk's parts under its `check-input.expressions` row: `median`,
 // `low` and `high` hold each part's median and range over the runs (check_clock_walk_parts' order), then the usage's
 // system milliseconds and minor faults, as check_clock_read_walk reads them (-1 where unavailable); `span` is the median
 // span the parts' shares are of.
-static __attribute__((unused)) void check_clock_print_walk(FILE* stream, const double* median, const double* low, const double* high, double span)
+static __attribute__((unused)) void check_clock_print_walk(FILE* stream, const double* median, const double* low, const double* high, double span, bool work)
 {
+    if (work)
+    {
+        fprintf(stream, "      expression work sums lanes; its shares of elapsed time may exceed 100%%\n");
+    }
     for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
     {
         char name[64];
-        snprintf(name, sizeof(name), "expressions.%s", check_clock_walk_parts[p]);
+        snprintf(name, sizeof(name), "expressions.%s%s", work ? "work." : "", check_clock_walk_parts[p]);
         fprintf(stream, "      %-18s %9.3f  (%.3f to %.3f)  %5.1f%%\n", name, median[p], low[p], high[p], span > 0 ? median[p] * 100.0 / span : 0.0);
     }
     fprintf(stream, "      %-18s %9.3f  %7.0f  low-confidence system ms and minor faults across the walk (-1 unavailable)\n", "expressions.usage",

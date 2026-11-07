@@ -197,7 +197,7 @@ static void builtin_intrinsic_catalog_test_own_main(BuiltinIntrinsicCatalogTest*
         "the prototype scope is the x86 records and exactly the ten generic prototype-only names");
     builtin_intrinsic_catalog_test_expect(test, outside_info != NULL && strcmp(outside_info->shard, "x86") == 0 &&
         builtin_intrinsic_own_main_lookup(outside, sizeof(outside) - 1) == NULL && !builtin_intrinsic_own_main_x86_in_scope(outside, sizeof(outside) - 1),
-        "valid full-catalog lfence target is rejected because it is absent from the frozen workload");
+        "valid full-catalog eflags target is rejected because it is absent from the frozen workload");
     // The supplementary scope (c_builtin_supplementary_scope.inc): its names in strcmp's order, which its lookup's binary
     // search needs, each an x86 record of the full catalogue that the frozen inventory hasn't, or a generic one that is a
     // leaf (#148: __builtin_debugtrap and the others of c_builtin_x86_leaves.inc), admitted whole and not by a longer
@@ -223,7 +223,9 @@ static void builtin_intrinsic_catalog_test_own_main(BuiltinIntrinsicCatalogTest*
             "the supplementary scope's names are sorted catalogued x86 records or generic leaves past the inventory, admitted only whole");
     }
     builtin_intrinsic_catalog_test_expect(test, !builtin_intrinsic_supplementary_in_scope(NULL, 1) &&
-        !builtin_intrinsic_supplementary_in_scope(outside, sizeof(outside) - 1), "the supplementary scope rejects unrelated and null names");
+        builtin_intrinsic_supplementary_in_scope(outside, sizeof(outside) - 1) &&
+        !builtin_intrinsic_supplementary_in_scope("__builtin_ia32_readeflags_u32_", sizeof("__builtin_ia32_readeflags_u32_") - 1),
+        "the supplementary scope admits the diagnosed 32-bit-only name, rejecting null names and longer spellings");
     builtin_intrinsic_catalog_test_expect(test, builtin_intrinsic_own_main_lookup(suffix, sizeof(positive) - 1) == positive_info &&
         builtin_intrinsic_own_main_x86_in_scope(suffix, sizeof(positive) - 1) &&
         builtin_intrinsic_own_main_lookup(prefix + 1, sizeof(positive) - 1) == positive_info,

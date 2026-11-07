@@ -142,7 +142,11 @@ static void check_test_function_name_fixture(CheckTest* test, const CheckFunctio
             fprintf(stderr, "function names %s: ready %u adapted %u checked %u source %u graph %u\n", fixture->label, ready, adapted, checked, input.report_count, stream.report_count);
             for (uint32_t i = 0; i < input.report_count; i += 1)
             {
-                fprintf(stderr, "  token %u: %s\n", input.reports[i].token, check_input_messages[input.reports[i].message]);
+                const uint32_t message = input.reports[i].message;
+                // The positional table's first generic entries are aligned; later report kinds need not have an entry.
+                const char* text = message <= CHECK_INPUT_CONSTANT_INITIALIZER && message < BUSTER_ARRAY_LENGTH(check_input_messages) ?
+                    check_input_messages[message] : "unlisted semantic diagnostic";
+                fprintf(stderr, "  token %u: %s (kind %u)\n", input.reports[i].token, text, message);
             }
         }
         uint32_t found[3] = { 0 };
@@ -180,7 +184,7 @@ static void check_test_function_name_fixture(CheckTest* test, const CheckFunctio
             {
                 const uint32_t name = parser.tokens.names[token];
                 const uint32_t kind = name == C_NAME_FUNC ? 0 : name == C_NAME_FUNCTION ? 1 : 2;
-                const CheckValue value = *check_graph_leaf_of(&input.graph, i);
+                const CheckValue value = check_graph_leaf_value(&input.graph, i);
                 check_test_expect(test, value.category == CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS &&
                                   (value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0 && (objects[kind] == 0 || objects[kind] == value.object),
                                   "predefined array leaves have stable static object identity");

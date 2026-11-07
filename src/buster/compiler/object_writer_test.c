@@ -340,7 +340,8 @@ static const char* object_view_symbol_name(const ObjectView* view, uint64_t symb
 // Parses an ET_REL file and checks what every object the writer writes keeps (the orientation comment). Returns false
 // with a description in `error` at the first problem. With `foreign`, for GNU as's objects, a section's contents may
 // start anywhere: GNU as 2.42 starts them at a multiple of their alignment, as the writer does, but 2.47 doesn't always
-// (.rodata, aligned to 16, at an offset of 0x448).
+// (.rodata, aligned to 16, at an offset of 0x448). Clang 23.1.4 omits SHF_INFO_LINK on a COMDAT relocation section;
+// its sh_info still identifies the target and must satisfy the same bounds and group-membership checks.
 static bool object_view_open(ObjectView* view, const uint8_t* file, uint64_t length, bool foreign, char* error, uint64_t error_size)
 {
     *view = (ObjectView){
@@ -557,6 +558,60 @@ static bool object_view_open(ObjectView* view, const uint8_t* file, uint64_t len
         valid = false;
     }
 
+    // Group headers and membership are checked independently of the producer. Every flagged section belongs to
+    // exactly one preceding group, and a grouped section's relocations belong to that same group.
+    uint32_t* groups = valid ? calloc(view->section_count, sizeof(uint32_t)) : 0;
+    if (valid && groups == 0)
+    {
+        snprintf(error, error_size, "out of memory for the section group map");
+        valid = false;
+    }
+    for (uint64_t i = 1; valid && i < view->section_count; i += 1)
+    {
+        const Elf64_Shdr* section = &view->sections[i];
+        if (section->sh_type == SHT_GROUP)
+        {
+            valid = section->sh_flags == 0 && section->sh_link == view->symbol_table_index && section->sh_info != 0 && section->sh_info < view->symbol_count &&
+                    section->sh_addralign == 4 && section->sh_entsize == 4 && section->sh_size >= 8 && section->sh_size % 4 == 0;
+            const uint32_t* words = (const uint32_t*)(file + section->sh_offset);
+            if (valid)
+            {
+                const Elf64_Sym* entry = &view->symbols[section->sh_info];
+                const uint64_t defining = object_view_symbol_section(view, section->sh_info);
+                valid = ELF64_ST_TYPE(entry->st_info) != STT_SECTION || (defining != 0 && defining < view->section_count);
+                const char* signature = valid ? object_view_symbol_name(view, section->sh_info) : 0;
+                valid = valid && (words[0] & ~GRP_COMDAT) == 0 && signature != 0 && signature[0] != 0;
+            }
+            for (uint64_t j = 1; valid && j < section->sh_size / 4; j += 1)
+            {
+                const uint32_t member = words[j];
+                valid = member > i && member < view->section_count && groups[member] == 0 && (view->sections[member].sh_flags & SHF_GROUP) != 0;
+                if (valid)
+                {
+                    groups[member] = (uint32_t)i;
+                }
+            }
+            if (!valid)
+            {
+                snprintf(error, error_size, "section %llu has an invalid group header, signature or membership", (unsigned long long)i);
+            }
+        }
+    }
+    for (uint64_t i = 1; valid && i < view->section_count; i += 1)
+    {
+        const Elf64_Shdr* section = &view->sections[i];
+        valid = (groups[i] != 0) == ((section->sh_flags & SHF_GROUP) != 0);
+        if (valid && section->sh_type == SHT_RELA)
+        {
+            valid = section->sh_info < view->section_count && groups[i] == groups[section->sh_info];
+        }
+        if (!valid)
+        {
+            snprintf(error, error_size, "section %llu has inconsistent group membership", (unsigned long long)i);
+        }
+    }
+    free(groups);
+
     // Relocations: tied to the symbol table and a section with contents, in offset order without overlapping fields,
     // inside their section, against a symbol, of a type the writer writes, and over zero fields.
     for (uint64_t i = 1; valid && i < view->section_count; i += 1)
@@ -566,7 +621,7 @@ static bool object_view_open(ObjectView* view, const uint8_t* file, uint64_t len
         {
             const Elf64_Shdr* target = section->sh_info < view->section_count ? &view->sections[section->sh_info] : 0;
             valid = section->sh_link == view->symbol_table_index && target != 0 && section->sh_info != 0 && target->sh_type != SHT_NOBITS &&
-                    target->sh_type != SHT_RELA && (section->sh_flags & SHF_INFO_LINK) != 0 && section->sh_entsize == sizeof(Elf64_Rela) &&
+                    target->sh_type != SHT_RELA && (foreign || (section->sh_flags & SHF_INFO_LINK) != 0) && section->sh_entsize == sizeof(Elf64_Rela) &&
                     section->sh_size % sizeof(Elf64_Rela) == 0 && section->sh_size != 0 && section->sh_addralign == 8;
             if (!valid)
             {
@@ -2276,10 +2331,16 @@ static bool object_test_objects(uint64_t seed, Arena* arena)
         arena_release(&small);
     }
     arena_pop_to(arena, length);
-    // A link of one unit without atoms, as an empty translation unit's: an object all the same.
+    // A link of one unit without atoms, as an empty translation unit's: an object all the same. Its arrays are sized by
+    // its one unit and its atoms, part boundaries included (two, #1236): a page holds them, where BUSTER_LANE_MAX_PARTS
+    // + 1 boundaries took 128 KB, past an arena's base pages (-c's scratch arena took a huge page for them).
     Link empty;
     const LinkCapacity nothing = { 0 };
-    const bool empty_prepared = link_initialize(&empty, arena, arena, nothing) && object_prepare(&units, &empty, 1, arena) && object_map_symbols(&symbols, &empty, arena);
+    const bool empty_made = link_initialize(&empty, arena, arena, nothing);
+    const uint64_t empty_before = arena->length;
+    const bool empty_units = empty_made && object_prepare(&units, &empty, 1, arena);
+    object_test_expect(&tally, empty_units && arena->length - empty_before <= BUSTER_ARENA_PAGE_BYTES, "object_prepare of one unit within a page", 0);
+    const bool empty_prepared = empty_units && object_map_symbols(&symbols, &empty, arena);
     object_test_expect(&tally, empty_prepared && units.count == 1, "object_prepare on a link without atoms", 0);
     for (uint32_t sections = 0; empty_prepared && sections < 2; sections += 1)
     {
@@ -2836,12 +2897,33 @@ static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* 
 // section and value, and a relocation's target by where it points, but exactly where the form matters: the GOT, TLS and
 // size types, and into SHF_MERGE sections.
 
+// Group identity is the signature, not the section name: GCC -g3 emits many .debug_macro and .rela.debug_macro
+// sections, and every SHT_GROUP has the name .group. The reader above has already validated all indices and words.
+static const char* object_test_section_group(const ObjectView* view, uint64_t index)
+{
+    uint64_t group = view->sections[index].sh_type == SHT_GROUP ? index : 0;
+    for (uint64_t i = 1; group == 0 && (view->sections[index].sh_flags & SHF_GROUP) != 0 && i < view->section_count; i += 1)
+    {
+        const Elf64_Shdr* section = &view->sections[i];
+        if (section->sh_type == SHT_GROUP)
+        {
+            const uint32_t* words = (const uint32_t*)(view->file + section->sh_offset);
+            for (uint64_t j = 1; group == 0 && j < section->sh_size / 4; j += 1)
+            {
+                group = words[j] == index ? i : 0;
+            }
+        }
+    }
+    return group != 0 ? object_view_symbol_name(view, view->sections[group].sh_info) : 0;
+}
+
 // Where a relocation's symbol and addend point: the symbol's section by name (0 if undefined), its value, its name (0
 // for a section symbol or an unnamed one), the addend, whether it is a section symbol and whether its section merges.
 typedef struct ObjectTestTarget ObjectTestTarget;
 struct ObjectTestTarget
 {
     const char* section;
+    const char* group;
     const char* name;
     uint64_t value;
     int64_t addend;
@@ -2868,6 +2950,7 @@ static ObjectTestTarget object_test_target(const ObjectView* view, const Elf64_R
     const bool section_symbol = ELF64_ST_TYPE(entry->st_info) == STT_SECTION;
     ObjectTestTarget result = {
         .section = defined ? object_view_section_name(view, section) : 0,
+        .group = defined ? object_test_section_group(view, section) : 0,
         .name = section_symbol || object_test_unnamed(view, symbol) ? 0 : object_view_string(view->symbol_names, view->symbol_names_size, entry->st_name),
         .value = defined ? entry->st_value : 0,
         .addend = relocation->r_addend,
@@ -2887,7 +2970,7 @@ static bool object_test_same_target(uint32_t type, ObjectTestTarget a, ObjectTes
 {
     const bool exact = type == R_X86_64_GOTPCREL || type == R_X86_64_GOTPCRELX || type == R_X86_64_REX_GOTPCRELX || type == R_X86_64_GOTTPOFF ||
                        type == R_X86_64_TPOFF32 || type == R_X86_64_SIZE32 || type == R_X86_64_SIZE64 || a.merge || b.merge;
-    bool result = object_test_same_string(a.section, b.section);
+    bool result = object_test_same_string(a.section, b.section) && object_test_same_string(a.group, b.group);
     if (a.section == 0)
     {
         result = result && object_test_same_string(a.name, b.name) && a.addend == b.addend;
@@ -2924,9 +3007,47 @@ static uint64_t object_test_section_named(const ObjectView* view, const char* na
     return result;
 }
 
+static bool object_test_same_section_identity(const ObjectView* a, uint64_t i, const ObjectView* b, uint64_t j)
+{
+    return a->sections[i].sh_type == b->sections[j].sh_type &&
+           object_test_same_string(object_view_section_name(a, i), object_view_section_name(b, j)) &&
+           object_test_same_string(object_test_section_group(a, i), object_test_section_group(b, j));
+}
+
+static uint64_t object_test_matching_section(const ObjectView* view, const ObjectView* source, uint64_t index)
+{
+    uint64_t result = 0;
+    for (uint64_t i = 1; result == 0 && i < view->section_count; i += 1)
+    {
+        result = object_test_same_section_identity(view, i, source, index) ? i : 0;
+    }
+    return result;
+}
+
+// The group words contain section indices, so compare membership by identity rather than by on-disk numbering or
+// order. Uniqueness and the link/info/header constraints are independently checked by object_view_open.
+static bool object_test_same_group(const ObjectView* a, uint64_t i, const ObjectView* b, uint64_t j)
+{
+    const Elf64_Shdr* first = &a->sections[i];
+    const Elf64_Shdr* second = &b->sections[j];
+    const uint32_t* x = (const uint32_t*)(a->file + first->sh_offset);
+    const uint32_t* y = (const uint32_t*)(b->file + second->sh_offset);
+    bool result = first->sh_size == second->sh_size && x[0] == y[0];
+    for (uint64_t m = 1; result && m < first->sh_size / 4; m += 1)
+    {
+        bool found = false;
+        for (uint64_t n = 1; !found && n < second->sh_size / 4; n += 1)
+        {
+            found = object_test_same_section_identity(a, x[m], b, y[n]);
+        }
+        result = found;
+    }
+    return result;
+}
+
 // The index of the symbol (not a section's or a file's) named `name`, or for name 0 of an unnamed one in `section` (by
 // name) at `value`; 0 if none.
-static uint64_t object_test_symbol(const ObjectView* view, const char* name, const char* section, uint64_t value)
+static uint64_t object_test_group_symbol(const ObjectView* view, const char* name, const char* section, const char* group, uint64_t value)
 {
     uint64_t result = 0;
     for (uint64_t i = 1; result == 0 && i < view->symbol_count; i += 1)
@@ -2941,11 +3062,17 @@ static uint64_t object_test_symbol(const ObjectView* view, const char* name, con
         else if (match)
         {
             match = object_test_unnamed(view, i) && entry->st_shndx != SHN_UNDEF && entry->st_value == value &&
-                    strcmp(object_view_section_name(view, object_view_symbol_section(view, i)), section) == 0;
+                    strcmp(object_view_section_name(view, object_view_symbol_section(view, i)), section) == 0 &&
+                    object_test_same_string(object_test_section_group(view, object_view_symbol_section(view, i)), group);
         }
         result = match ? i : 0;
     }
     return result;
+}
+
+static uint64_t object_test_symbol(const ObjectView* view, const char* name, const char* section, uint64_t value)
+{
+    return object_test_group_symbol(view, name, section, 0, value);
 }
 
 // Where a symbol is: SHN_UNDEF, SHN_COMMON or SHN_ABS, which are no section, or 1 for any section.
@@ -2966,11 +3093,12 @@ static bool object_test_same_as(const ObjectView* ours, const ObjectView* theirs
         if (object_test_compared_section(ours, i))
         {
             const char* name = object_view_section_name(ours, i);
-            const uint64_t j = object_test_section_named(theirs, name, false);
+            const uint64_t j = object_test_matching_section(theirs, ours, i);
             const Elf64_Shdr* a = &ours->sections[i];
             const Elf64_Shdr* b = j != 0 ? &theirs->sections[j] : 0;
             result = b != 0 && a->sh_type == b->sh_type && a->sh_flags == b->sh_flags && a->sh_size == b->sh_size && a->sh_addralign == b->sh_addralign &&
-                     a->sh_entsize == b->sh_entsize && (a->sh_type == SHT_NOBITS || memcmp(ours->file + a->sh_offset, theirs->file + b->sh_offset, a->sh_size) == 0);
+                     a->sh_entsize == b->sh_entsize && (a->sh_type == SHT_NOBITS || (a->sh_type == SHT_GROUP ? object_test_same_group(ours, i, theirs, j) :
+                     memcmp(ours->file + a->sh_offset, theirs->file + b->sh_offset, a->sh_size) == 0));
             if (!result)
             {
                 snprintf(error, error_size, "section %s isn't GNU as's", name);
@@ -2983,7 +3111,7 @@ static bool object_test_same_as(const ObjectView* ours, const ObjectView* theirs
         {
             const char* name = object_view_section_name(theirs, j);
             const bool always = theirs->sections[j].sh_size == 0 && (strcmp(name, ".text") == 0 || strcmp(name, ".data") == 0 || strcmp(name, ".bss") == 0);
-            result = always || strcmp(name, ".note.gnu.property") == 0 || object_test_section_named(ours, name, false) != 0;
+            result = always || strcmp(name, ".note.gnu.property") == 0 || object_test_matching_section(ours, theirs, j) != 0;
             if (!result)
             {
                 snprintf(error, error_size, "GNU as has a section %s", name);
@@ -2998,7 +3126,7 @@ static bool object_test_same_as(const ObjectView* ours, const ObjectView* theirs
         if (a->sh_type == SHT_RELA)
         {
             const char* name = object_view_section_name(ours, a->sh_info);
-            const uint64_t j = object_test_section_named(theirs, name, true);
+            const uint64_t j = object_test_matching_section(theirs, ours, i);
             const Elf64_Shdr* b = j != 0 ? &theirs->sections[j] : 0;
             result = b != 0 && a->sh_size == b->sh_size;
             const Elf64_Rela* ours_relocations = (const Elf64_Rela*)(ours->file + a->sh_offset);
@@ -3014,8 +3142,23 @@ static bool object_test_same_as(const ObjectView* ours, const ObjectView* theirs
             {
                 const uint64_t theirs_count = b != 0 ? b->sh_size / sizeof(Elf64_Rela) : 0;
                 const uint64_t ours_count = a->sh_size / sizeof(Elf64_Rela);
-                snprintf(error, error_size, "%s's relocations aren't GNU as's: %llu against %llu, or relocation %llu differs", name, (unsigned long long)ours_count,
-                         (unsigned long long)theirs_count, (unsigned long long)(r == 0 ? 0 : r - 1));
+                if (b != 0 && ours_count == theirs_count && r != 0)
+                {
+                    const ObjectTestTarget actual = object_test_target(ours, &ours_relocations[r - 1]);
+                    const ObjectTestTarget expected = object_test_target(theirs, &theirs_relocations[r - 1]);
+                    const char* source_group = object_test_section_group(ours, a->sh_info);
+                    snprintf(error, error_size, "%s[%s] relocation %llu: %llu/%u %s[%s]+%lld; GNU %llu/%u %s[%s]+%lld", name,
+                             source_group != 0 ? source_group : "-", (unsigned long long)(r - 1),
+                             (unsigned long long)ours_relocations[r - 1].r_offset, (unsigned)ELF64_R_TYPE(ours_relocations[r - 1].r_info),
+                             actual.section != 0 ? actual.section : "undefined", actual.group != 0 ? actual.group : "-", (long long)actual.addend,
+                             (unsigned long long)theirs_relocations[r - 1].r_offset, (unsigned)ELF64_R_TYPE(theirs_relocations[r - 1].r_info),
+                             expected.section != 0 ? expected.section : "undefined", expected.group != 0 ? expected.group : "-", (long long)expected.addend);
+                }
+                else
+                {
+                    snprintf(error, error_size, "%s's relocations aren't GNU as's: %llu against %llu, or relocation %llu differs", name, (unsigned long long)ours_count,
+                             (unsigned long long)theirs_count, (unsigned long long)(r == 0 ? 0 : r - 1));
+                }
             }
             relocation_sections += 1;
         }
@@ -3044,10 +3187,11 @@ static bool object_test_same_as(const ObjectView* ours, const ObjectView* theirs
             const bool defined = place == 1;
             const char* name = object_view_string(theirs->symbol_names, theirs->symbol_names_size, b->st_name);
             const char* section = defined ? object_view_section_name(theirs, object_view_symbol_section(theirs, s)) : 0;
-            const uint64_t i = object_test_symbol(ours, unnamed ? 0 : name, section, b->st_value);
+            const char* group = defined ? object_test_section_group(theirs, object_view_symbol_section(theirs, s)) : 0;
+            const uint64_t i = object_test_group_symbol(ours, unnamed ? 0 : name, section, group, b->st_value);
             const Elf64_Sym* a = i != 0 ? &ours->symbols[i] : 0;
             result = a != 0 && ELF64_ST_BIND(a->st_info) == ELF64_ST_BIND(b->st_info) && object_test_symbol_place(a) == place && a->st_value == b->st_value &&
-                     (!defined || strcmp(object_view_section_name(ours, object_view_symbol_section(ours, i)), section) == 0);
+                     (!defined || object_test_same_section_identity(ours, object_view_symbol_section(ours, i), theirs, object_view_symbol_section(theirs, s)));
             result = result && (unnamed || (ELF64_ST_TYPE(a->st_info) == type && (a->st_other & 3) == (b->st_other & 3) && a->st_size == b->st_size));
             if (!result)
             {

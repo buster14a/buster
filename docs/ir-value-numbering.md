@@ -9,19 +9,68 @@ transactional rollback and explicit entry-phi refusal follow the
 [optimization contract](ir-optimization.md). Each stage rebuilds dominance
 after rewriting; no stale CFG or use list is published.
 
-The vector path starts with opcode, type, flags and semantic metadata classes,
-then repeatedly partitions each class by the classes of its operands. An old
-class is part of the next key, so refinement only splits. Phis compare their
-incoming values in CFG predecessor order, regardless of the side-table order.
-They may establish equivalent cyclic recurrences. Refinement ends when no
-class splits. After `sweep_limit` rounds (64 by default), scalar hashing and comparison sorting
+The vector path computes the coarsest congruence partition: two values are
+congruent when their opcode, type, flags and semantic metadata match and their
+operands are congruent position by position. Phis compare their incoming
+values in CFG predecessor order, regardless of the side-table order, and may
+establish equivalent cyclic recurrences. Values that reach no cycle of operand
+dependences are numbered once each in dependency order ("Acyclic numbering"
+below). The values that reach a cycle start from opcode, type, flags and
+metadata classes and are repeatedly partitioned by the classes of their
+operands. An old class is part of the next key, so refinement only splits.
+Refinement ends when no class splits. After `sweep_limit` rounds (64 by default), scalar hashing and comparison sorting
 complete the same fixed point; a limit never authorizes an unfinished
-optimistic substitution.
+optimistic substitution. `IrGvnOptions.complete` refines every instruction in
+those rounds instead, as the pass did before the acyclic numbering: it is that
+numbering's exact oracle.
+
+## Acyclic numbering (#866)
+
+Refinement needs as many rounds as the longest dependency chain whose links
+the static keys can't tell apart, and each round rekeyed, hashed and grouped
+every instruction. Two identical chains of `L` additions take `L + 1` rounds
+over their `2L + 4` instructions (one link splits off per round), and the frozen
+`sqlite3.c`'s lowered IR took 15,002 rounds over its 2,602 functions. A value from which no cycle of operand dependences is
+reachable is congruent to exactly the values with its static key and congruent
+operands, by induction on its depth. It is never congruent to a value that
+reaches a cycle: matching operands position by position from both would have
+to follow that cycle forever, and the acyclic side ends at leaves.
+
+So `ir_gvn_acyclic` numbers those values once each, in dependency order, by
+hashing the static key and the operand classes into a table of
+representatives. It is Kahn's algorithm. Instructions are visited in reverse
+postorder (unreachable blocks last), and an instruction whose operands all
+have classes is numbered at once; otherwise it waits, counting its unnumbered
+operands. When a value that something waits for is numbered, the use lists
+wake its users, and the users of every copy that resolves to it. The
+instructions still waiting at the end are exactly those that reach a cycle.
+Only they are refined in rounds, their numbered operands' classes held fixed,
+and their classes are numbered after the acyclic ones so the two never
+collide. In reachable SSA code every operand except a phi's input along a back
+edge dominates its use, so it is numbered first. The use lists are walked only
+from the few values such a phi waits for. Impure and undef-tainted
+instructions are unique leaves and never wait.
+
+Numbering one value is a dependent chain: its key needs its operands' classes,
+which the instructions just before it usually publish. So this numbering is
+scalar, one hash, a chain walk and at most one four-word key comparison per
+instruction. The refinement rounds keep the eight-lane key hashing. A
+representative's key (payload, meta word and operand classes) occupies four of
+the eight field words of its own index; the existing hash, link and bucket
+columns hold the rest, so the table needs no scratch of its own. The waiting
+counts, the awaited flags and the list of members to refine add nine bytes per
+instruction, allocated on every path so that `scratch_bytes` doesn't depend on
+which one ran. Its probes share
+the grouping's budget, `IrGvnOptions.probes` key comparisons per instruction
+(8). If the budget runs out, the numbering is abandoned and every instruction
+is refined in rounds instead, which counts as a collision-budget completion.
+The partition is the same either way; only class labels differ.
 
 Eight contiguous `uint64_t` key columns feed two eight-lane hash groups per
 16-instruction batch. Every column has its exact logical length, partial
 loads/stores are masked, and zero length performs no column access. Phi tails
-are hashed separately. `ir_gvn_partition_group` interns those already materialized
+and the upper six words of vector constants are hashed separately.
+`ir_gvn_partition_group` interns those already materialized
 keys in a bounded scratch hash table. A folded hash selects a bucket; the
 original full-key and predecessor-ordered phi comparison establishes equality.
 The analysis owns these columns in scratch. They are not persistent IR fields.
@@ -38,7 +87,8 @@ create a long chain. The existing eight-lane key hashing is retained; table
 probes are scalar indexed loads rather than AVX-512 gathers. No host-specific
 crossover threshold is introduced.
 
-Each round permits at most `8 * n` representative comparisons. If another probe
+Each round permits at most `8 * n` representative comparisons over its `n`
+members. If another probe
 would be needed, it abandons the partial grouping and runs the original stable
 comparison sort on the same keys. The sort initializes its own index order and
 overwrites every tentative class. This bounds hostile collisions by a linear
@@ -53,14 +103,16 @@ phi relations and parent-class splits remain the same. By induction the entire
 refinement sequence is unchanged up to renaming, including cyclic recurrences
 and the number of rounds. The subsequent dominance walk chooses representatives
 by instruction traversal and class equality, not by the numeric class order.
-Thus this is not an acyclic-only dispatch to the weaker available-expression
-oracle, nor does it eliminate whole-function refinement rounds.
+Neither the grouping nor the acyclic numbering dispatches anything to the weaker
+available-expression oracle: both compute the same congruence classes.
 
-`IrGvnResult.partition_probes` counts the bounded lookup comparisons across
-rounds. `partition_sort_fallbacks` counts collision-budget completions, separately
-from the existing sweep-limit `fallback` flag. A forced sorted round is not a
-collision fallback. These counters describe work, not elapsed time or generated
-program performance.
+`IrGvnResult.acyclic` counts the instructions the acyclic numbering classed and
+`rounds` the refinement rounds of the rest, their static round included (zero
+when nothing reaches a cycle). `partition_probes` counts the bounded lookup
+comparisons of both. `partition_sort_fallbacks` counts collision-budget
+completions, separately from the existing sweep-limit `fallback` flag. A forced
+sorted round is not a collision fallback. These counters describe work, not
+elapsed time or generated program performance.
 
 A dominator-tree walk chooses a previously executed representative from each
 class. Bucket insertions are undone when leaving a dominator subtree. Equal
@@ -80,6 +132,16 @@ floating comparisons are excluded. `undef` and every value transitively
 depending on it are excluded, including copies, to avoid strengthening the
 unspecified-value contract. Unreachable copy cycles are never followed as
 aliases and are removed with their blocks.
+
+SIMD functions are admitted (#1450). The same keys include each operation's
+lane flags and each `vcmp` predicate. `vconst` identity covers all 64 canonical
+payload bytes, including collision comparisons; identical constants at
+different table indices can merge, while different upper lanes cannot.
+Integer lane operations, masks, `vselect` and exact-bit scalar splats are pure.
+Floating lane arithmetic/comparisons retain the environment-sensitive exclusion.
+Tests exercise duplicate payloads, differences confined to the last word,
+forced hash collisions, different lane widths and retained floating effects,
+with shared-interpreter execution on both transformation paths.
 
 Substitution rebuilds private operand columns and each variable side-table
 slice before compaction. This matters because valid input slices can overlap
@@ -101,11 +163,34 @@ partitions against the independent full-key relation and the sorted oracle at
 empty, tiny, vector and power-of-two boundaries through 257 instructions.
 The table, links, output classes and hashes end at protected pages. Distinct
 full-hash collisions exercise the exact probe-budget boundary and sort restart;
-a single duplicate class must not trigger it. A 4,100-instruction DAG keeps
-1,024 planted eliminations, verifies interpreted behavior, and checks that no
-sort fallback is needed. Forced sorted completion must preserve the rewritten
-function, class count, round count and scratch usage. This is focused local correctness evidence; target-host
-compile-time, emitted-code and complete pipeline measurements remain pending.
+a single duplicate class must not trigger it. Odd sizes group the members in
+reverse order after a nonzero class base. A 4,100-instruction DAG keeps 1,024
+planted eliminations, verifies interpreted behavior, is numbered in no round
+within one linear probe budget, and needs no sort fallback either way.
+
+Every fixture runs the vector path three more times. Complete refinement must
+give the same class count, rewritten function and scratch usage as the acyclic
+numbering. Forced sorted completion of complete refinement must preserve its
+rewritten function, class count, round count and scratch usage. A zero probe
+budget, which abandons the numbering at its first occupied bucket and sorts
+every grouping, must give the same classes and function. Acyclic fixtures must
+take no refinement round; recurrent ones must refine something. The acyclic
+numbering's own fixtures are:
+
+- a header phi whose back-edge input is computed in the latch, through a copy,
+  from loop-invariant values. It must be woken through the copy's users and
+  merged with the phi whose matching input is computed before the loop, leaving
+  only the counter's three values to refinement;
+- two identical chains of 1 to 256 additions, all of whose links merge, where
+  complete refinement takes more rounds than links;
+- two congruent cycles of additions across two unreachable blocks, which only
+  refinement can number and must merge;
+- 160 random chains of loops, of 1 to 4 headers with 2 to 5 phis and bodies of
+  0 to 9 random operations. Phi back-edge inputs come from anything the body
+  sees (recurrences, loop-invariant values computed before or inside the loop,
+  copies), and operations and phis repeat on purpose.
+
+This is focused local correctness evidence.
 
 The implementation is original. The algorithmic reference is Alpern, Wegman
 and Zadeck, [Detecting Equality of Variables in Programs (1988)](
@@ -115,10 +200,11 @@ the monotone congruence solver. No source implementation was imported.
 
 ## Performance acceptance
 
-The grouping change targets #866's repeated full comparison sorts. It does not
-claim that the partition solver now beats the weaker scalar algorithm, that
-all acyclic work is eliminated, or that the default C compilation path gets
-faster. Use `benchmark-ir-optimize-passes --pass gvn --instructions 4096
+#946's grouping change targeted #866's repeated full comparison sorts. It did
+not claim that the partition solver beat the weaker scalar algorithm or that
+acyclic work was eliminated; the acyclic numbering ("The acyclic numbering on
+the 9700X" below) does both on these inputs. Neither claims that the default C
+compilation path gets faster. Use `benchmark-ir-optimize-passes --pass gvn --instructions 4096
 --samples 21` for the existing whole-public-stage fixture, including preparation
 and rewriting, and `benchmark-ir-source --only gvn` (or `gvn-scalar`) for
 source-derived IR. `benchmark-ir-source` runs both GVN paths once on every
@@ -166,8 +252,80 @@ source-GVN benchmark; the adapter is part of this change, not of the measured
 pass. Raw logs, commands and the placement script are in [the measurement
 record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/gvn-866-2026-10-31).
 
-The Tier 1 pipeline still does not feed C source through GVN, so no
-compile-time, emitted-code or default C-driver effect is claimed here. Those
+### The acyclic numbering on the 9700X
+
+Main at `ec5f0f6b` against the same commit with the acyclic numbering
+(`52003046`, merged by #1560): both built with `BUSTER_DEBUG_INFO=0` and Clang
+23.1.1, pinned to CPU 2, each process under the shared lock by itself. The
+synthetic fixture ran three processes per tree and code placement (the same
+`./build.sh shifts` placements as above), alternating which tree went first;
+its 21-sample medians changed by:
+
+| Shape (instructions) | Path | Placement 0 | Placement 256 | Placement 1,024 |
+| --- | --- | ---: | ---: | ---: |
+| `small-dag` (36) | vector | −16.4% | −15.8% | −15.1% |
+| `large-dag` (4,100) | vector | −22.8% | −23.0% | −22.6% |
+| `cyclic-phi` (15) | vector | +0.3% | +0.2% | +3.4% |
+| `small-dag` (36) | scalar (control) | +0.2% | +1.3% | +3.2% |
+| `large-dag` (4,100) | scalar (control) | +0.8% | −1.6% | +1.0% |
+| `cyclic-phi` (15) | scalar (control) | +1.1% | −0.2% | +3.1% |
+
+`large-dag`'s vector medians went from 342,084, 338,839 and 343,789 ns to
+264,055, 261,021 and 266,256 ns, against a scalar twin of 288,181 to 293,921 ns
+in both trees. The vector path's time over its twin's went from 1.15–1.19 to
+0.90–0.92 on `large-dag` and from 1.09–1.11 to 0.91–0.93 on `small-dag`. On
+`cyclic-phi` it stays 1.02–1.03: eight of its fifteen values reach its
+recurrences, so the refinement still runs, and its changes stay within the
+scalar control's. Every process removed 1,024 values from `large-dag` and 8
+from `small-dag`, and the vector path 4 from `cyclic-phi` against its twin's 0.
+
+On the frozen `sqlite3.c`, `benchmark-ir-source` with all its variants in
+each process, three processes per tree, alternating:
+
+| Variant, per typed entry | Main | Acyclic numbering | Change |
+| --- | ---: | ---: | ---: |
+| `gvn` time | 316.69 ns | 193.72 ns | −38.8% |
+| `gvn` cycles | 1,754.0 | 1,073.2 | −38.8% |
+| `gvn` instructions | 5,577.1 | 3,525.5 | −36.8% |
+| `gvn-scalar` time (control) | 198.79 ns | 199.16 ns | +0.2% |
+
+The processes' medians agreed within 0.2%. The vector path now takes 0.97 of
+its twin's time, where it took 1.59. Both trees removed 94,314 instructions
+(the corpus's lowering has changed since #946's record, which counted 94,358).
+Main's vector path ran 15,002 refinement rounds and 3,717,064 key
+comparisons; with the numbering all 599,254 instructions are numbered
+acyclic, in no round, with 241,031 key comparisons and no collision-budget
+completion. The scalar twin executes 0.6% more instructions per entry
+(3,660.6 to 3,680.7): it allocates and zeroes the new scratch columns too, so
+that `scratch_bytes` doesn't depend on the path.
+
+Under `--tier1-gvn` ("Tier 1's measurement" below), `-c` of the same frozen
+`sqlite3.c` with the C driver's options timed as `ab --rounds 3` over both
+trees, each round `time-runs --runs 5`:
+
+| Compile, median of the rounds' medians | Main | Acyclic numbering | Change |
+| --- | ---: | ---: | ---: |
+| `--tier1` (control) | 455.95 ms | 455.29 ms | −0.1% |
+| `--tier1 --tier1-gvn` | 583.06 ms | 529.36 ms | −9.2% |
+
+What the option adds to the compile went from 127.1 ms (+27.9%) to 74.1 ms
+(+16.3%), and from 2,034 million instructions to 1,201 million. The two trees'
+objects are byte-identical, as the unchanged partition requires.
+
+A profile of the `gvn` variant's process gives the acyclic numbering
+(`ir_gvn_number`, `ir_gvn_visit`, `ir_gvn_payload`) about 6% of the samples.
+The IR verifier and its derived arrays take about 54%, because at that base
+`ir_optimize_prepare` checked the input's rows three times (in `ir_verify`, in
+`ir_build_cfg`, and in `ir_verify` again inside `ir_build_uses`). #1570 (#786)
+has since made preparation verify once and build the graph and use lists
+without checking the function again, so these shares are of `ec5f0f6b`'s
+preparation, not the current one. A free numbering would have saved at most
+that 6%, which is why it stays a scalar chain. [The measurement record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/gvn-866-acyclic-2026-11-06)
+has the scripts, the raw logs and a disclosed invalid first attempt at the
+Tier 1 step (driver options it refused).
+
+The Tier 1 pipeline still does not feed C source through GVN by default, so no
+default C-driver or emitted-code effect is claimed here. Those
 remain #139's integration work. The source-derived rows qualify the pass on
 real IR; the synthetic rows measure the whole public stage.
 
@@ -192,5 +350,8 @@ is the merge, not dead values, that costs. Routing C source through GVN by
 default therefore waits for a variant that accounts for allocation cost; the
 option stays as the reproducible measurement, and [the measurement
 record](https://github.com/buster14a/buster-performance/tree/126886e46a23f095709bffb36c3c57aaafac35b3/docs/measurements/gvn-866-tier1-2026-11-01)
-has the commands, the host and the raw logs.
-
+has the commands, the host and the raw logs. The acyclic numbering ("The
+acyclic numbering on the 9700X" above) later cut the option's added compile
+time on the frozen file from 127.1 to 74.1 ms with byte-identical objects. It
+changes what the option costs, not what it emits, so the reason to keep it off
+stands.

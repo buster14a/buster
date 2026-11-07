@@ -17,13 +17,14 @@
 //     directory, whose output and file (NUL bytes among them) name its own directory; each part of a key (the input's
 //     bytes, an argument's byte, where the arguments split, a variable's value, one set to nothing against one that
 //     isn't set, the purpose, the time limit, the tool's path and its file's times) making a new one, and HOME not; a
-//     tool not on PATH; a file the run didn't write removed when it is taken;
+//     tool not on PATH; an entry that removes a present file runs the tool; diagnostic environment variables preserve
+//     unset, empty and distinct values through use/check, and diagnostic-log side effects refuse replay;
 //   - dependencies (traced clang -fsyntax-only): taken in the same and the other directory, again after a header
 //     changes, and taken after a file it doesn't look for is added beside it; again after #embed's resource or what
 //     __has_include found changes; __has_include's header created where it looked, in a directory other files go
 //     into; a nested header created in its includer's directory, before the one -I found; preprocessed text's
 //     #include; errors naming absolute paths, taken with the other directory's; a missing #include kept, and run
-//     again once its header is there; -M options, not kept;
+//     again once its header is there; -M options and dependency-output environment variables, not kept;
 //   - identities: a hard link replaced by a copy of its bytes, which #pragma once takes again; clang's __TIMESTAMP__,
 //     SOURCE_DATE_EPOCH's, its files' times changed and its entry taken; __DATE__, and __TIME__ pasted from two halves
 //     in a header in no root and on standard input, none kept without SOURCE_DATE_EPOCH and each with it; a header in
@@ -38,12 +39,14 @@
 //     BUSTER_ORACLE_VARIANTS states, the key's oldest entry removed and the others taken;
 //   - permissions (traced sh): a directory's mode, which `test -x` reads, and a script's in a root made 0644 from
 //     0755, each run again when they change; and as root, a file's owner;
-//   - the kernel's paths: the path rule's answers for 64 paths by stat, lstat, access, readlink, open and a change, for
+//   - the kernel's paths: the path rule's answers by stat, lstat, access, readlink, open and a change, for
 //     a process of the test's whose descriptors it knows (a pipe's among them), its paths by its pid and the test's,
 //     another process's, among them (and a root under /usr); a source in a root in /dev/shm ($TMPDIR there) and a
 //     header in /dev/shm in no root, each compiled again when they change; runs that follow /proc/self/cwd and
 //     /dev/fd/3 to a file, not kept; and one that reads /proc/self/fd/3's link and /dev/stdin and writes /dev/null,
 //     kept;
+//   - path spellings: package paths with repeated separators or dot components are retained; disposable paths in no
+//     root with those spellings invalidate use/check entries when their contents change;
 //   - random bytes, devices and the kernel's files (#550's fifth review): getrandom's bytes the cache's, taken, and the
 //     same in another cache's run, two programs' calls in one run each their own, another key's others, and a call for
 //     more than the cache gives never taken; /dev/urandom's, /dev/random's and a FIFO's bytes, never taken; /dev/zero,
@@ -55,9 +58,11 @@
 //   - the kernel's numbers (#550's sixth review): a file's inode, which no entry has, by the test's program's stat of a
 //     file of the same bytes in each directory, taken in use mode by the other directory's run, as the contract has it,
 //     and stale in check mode, which fails the run;
-//   - outputs: a run that reads its output before it writes it (traced sh), run again when those bytes differ and
-//     taken when they are an entry's; clang's object where the last compile left one, run again once, then taken, and
-//     in the other directory, without one, taken;
+//   - outputs: read-before-write outputs are taken when their recorded inputs match; missing outputs are created on hits;
+//   - replays (#1317): every preparation and replay fault and every pair of faults check in-place rollback or refusal;
+//     concurrent writes, replacements and an appearing removal are left to the tool or fail restoration. A present
+//     removal misses before mutation; creations are verified and never unlinked on failure, including under concurrent
+//     replacement. A large existing output is compared in bounded chunks;
 //   - listings (the test's program's getdents64, as ls -i lists): a file made anew with the same name and bytes, its
 //     inode another, run again;
 //   - changes (the test's program's mkdir and traced sh's rmdir): mkdir's path, which the run made, there the next
@@ -85,7 +90,9 @@
 #define BUSTER_ORACLE_CACHE_TEST_INCLUDED
 
 #include <dirent.h>
+#include <malloc.h>
 #include <stddef.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 
@@ -460,6 +467,197 @@ static bool oracle_test_results(const OracleRun* run, const char* directory, con
     return result;
 }
 
+// Empty PATH components search the current directory, including the last or only component. An unset PATH uses the
+// system's default search path instead. Exercise both direct resolution and execution with the cache on and off.
+static void oracle_test_empty_path(OracleTest* test)
+{
+    char tool[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(tool, sizeof(tool), "%s/oracle-path-tool", test->base);
+    const char script[] = "#!/bin/sh\nprintf path-tool";
+    const bool made = oracle_test_write(tool, script, sizeof(script) - 1) && chmod(tool, 0755) == 0;
+    const char* original = getenv("PATH");
+    char* saved = original != 0 ? strdup(original) : 0;
+    const int directory = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    const bool ready = made && (original == 0 || saved != 0) && directory >= 0 && chdir(test->base) == 0;
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "empty-path");
+    OracleCache off = { 0 };
+    static const char* const paths[] = { ":/nonexistent", "/nonexistent::/nonexistent", "/nonexistent:", "", "." };
+    bool correct = ready;
+    for (uint32_t i = 0; ready && i < sizeof(paths) / sizeof(paths[0]); i += 1)
+    {
+        correct &= setenv("PATH", paths[i], 1) == 0;
+        char resolved[BUSTER_ORACLE_PATH_BYTES];
+        correct &= oracle_find_tool("oracle-path-tool", resolved, sizeof(resolved)) && strcmp(resolved, "./oracle-path-tool") == 0;
+        for (uint32_t mode = 0; mode < 2; mode += 1)
+        {
+            for (uint32_t changed = 0; changed < 2; changed += 1)
+            {
+                for (uint32_t attempt = 0; attempt < (mode == 0 ? 1u : 2u); attempt += 1)
+                {
+                    char* arguments[] = { "oracle-path-tool", 0 };
+                    OracleRun run = { .cache = mode == 0 ? &off : &cache, .purpose = "oracle test: empty path", .arguments = arguments,
+                                      .directory = changed != 0 ? test->runs[0] : 0 };
+                    const bool ran = oracle_run(&run);
+                    correct &= ran && run.taken == (mode != 0 && attempt != 0) && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0 &&
+                               run.output != 0 && strcmp(run.output, "path-tool") == 0;
+                    oracle_run_release(&run);
+                }
+            }
+        }
+    }
+    char resolved[BUSTER_ORACLE_PATH_BYTES];
+    char alternate[BUSTER_ORACLE_PATH_BYTES + 32];
+    char search[BUSTER_ORACLE_PATH_BYTES + 4];
+    snprintf(alternate, sizeof(alternate), "%s/oracle-path-directory", test->runs[0]);
+    snprintf(search, sizeof(search), ":%s", test->runs[0]);
+    bool skips_directory = ready && mkdir("oracle-path-directory", 0700) == 0 && oracle_test_copy(tool, alternate) && setenv("PATH", search, 1) == 0;
+    skips_directory = skips_directory && oracle_find_tool("oracle-path-directory", resolved, sizeof(resolved)) && strcmp(resolved, alternate) == 0;
+    for (uint32_t mode = 0; mode < 2 && skips_directory; mode += 1)
+    {
+        char* arguments[] = { "oracle-path-directory", 0 };
+        OracleRun run;
+        const bool ran = oracle_test_go(&run, mode == 0 ? &off : &cache, "oracle test: skip directory", arguments, 0, 0);
+        skips_directory = ran && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0 && run.output != 0 && strcmp(run.output, "path-tool") == 0;
+        oracle_run_release(&run);
+    }
+    const char identity_script[] = "#!/bin/sh\nprintf '%s' \"$0\"";
+    char cwd[BUSTER_ORACLE_PATH_BYTES];
+    char expected[BUSTER_ORACLE_PATH_BYTES + 32];
+    bool link_spelling = ready && oracle_test_write("oracle-path-argv0", identity_script, sizeof(identity_script) - 1) &&
+                         chmod("oracle-path-argv0", 0755) == 0 && symlink("oracle-path-argv0", "oracle-path-link") == 0 &&
+                         setenv("PATH", "", 1) == 0 && getcwd(cwd, sizeof(cwd)) != 0;
+    if (link_spelling)
+    {
+        const int written = snprintf(expected, sizeof(expected), "%s/./oracle-path-link", cwd);
+        link_spelling = written > 0 && (size_t)written < sizeof(expected);
+    }
+    for (uint32_t mode = 0; mode < 2 && link_spelling; mode += 1)
+    {
+        char* arguments[] = { "oracle-path-link", 0 };
+        OracleRun run = { .cache = mode == 0 ? &off : &cache, .purpose = "oracle test: path symlink", .arguments = arguments,
+                          .directory = test->runs[0] };
+        const bool ran = oracle_run(&run);
+        link_spelling = ran && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0 && run.output != 0 && strcmp(run.output, expected) == 0;
+        oracle_run_release(&run);
+    }
+    bool same_spelling = ready && setenv("PATH", "", 1) == 0;
+    for (uint32_t mode = 0; mode < 2 && same_spelling; mode += 1)
+    {
+        char* arguments[] = { "oracle-path-link", 0 };
+        OracleRun run = { .cache = mode == 0 ? &off : &cache, .purpose = "oracle test: path symlink same directory", .arguments = arguments,
+                          .directory = "." };
+        const bool ran = oracle_run(&run);
+        same_spelling = ran && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0 && run.output != 0 && strcmp(run.output, "./oracle-path-link") == 0;
+        oracle_run_release(&run);
+    }
+    const bool unset = ready && unsetenv("PATH") == 0 && !oracle_find_tool("oracle-path-tool", resolved, sizeof(resolved)) && oracle_find_tool("sh", resolved, sizeof(resolved));
+    const bool restored_path = !ready || (saved != 0 ? setenv("PATH", saved, 1) == 0 : unsetenv("PATH") == 0);
+    const bool restored_directory = directory >= 0 && fchdir(directory) == 0;
+    if (directory >= 0)
+    {
+        close(directory);
+    }
+    free(saved);
+    oracle_test_expect(test, correct && restored_path && restored_directory, "runs: empty PATH components resolve and execute a tool in the current directory");
+    oracle_test_expect(test, skips_directory, "runs: PATH search skips a directory in favor of a later executable");
+    oracle_test_expect(test, link_spelling, "runs: a changed directory preserves the selected executable's symlink spelling");
+    oracle_test_expect(test, same_spelling, "runs: the same directory preserves the selected executable's relative spelling");
+    oracle_test_expect(test, unset, "runs: an unset PATH uses the system default rather than the current directory");
+}
+
+// Diagnostic controls must preserve both the inherited environment and distinct stderr in use/check modes.
+static void oracle_test_diagnostic_environment(OracleTest* test)
+{
+    static const char* const names[] = {
+        "GCC_EXTRA_DIAGNOSTIC_OUTPUT",
+        "GCC_COLORS",
+        "GCC_URLS",
+        "TERM_URLS",
+        "TERM",
+        "GCC_DIAGNOSTICS_LOG",
+    };
+    static const char* const values[] = {
+        0,
+        "",
+        "fixits-v1",
+        "fixits-v2",
+    };
+    OracleCache use;
+    OracleCache check;
+    oracle_test_open(test, &use, "use", "diagnostic-environment");
+    oracle_test_open(test, &check, "check", "diagnostic-environment");
+    char path[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(path, sizeof(path), "PATH=%s", getenv("PATH") != 0 ? getenv("PATH") : "/usr/bin:/bin");
+    for (uint32_t n = 0; n < sizeof(names) / sizeof(names[0]); n += 1)
+    {
+        char script[256];
+        snprintf(script, sizeof(script), "printf '%%s|%%s' \"${%s+x}\" \"${%s-}\" >&2", names[n], names[n]);
+        char* arguments[] = {
+            "sh",
+            "-c",
+            script,
+            0,
+        };
+        bool correct = true;
+        for (uint32_t v = 0; v < sizeof(values) / sizeof(values[0]); v += 1)
+        {
+            char value[128];
+            char expected[128];
+            snprintf(value, sizeof(value), "%s=%s", names[n], values[v] != 0 ? values[v] : "");
+            snprintf(expected, sizeof(expected), "%s|%s", values[v] != 0 ? "x" : "", values[v] != 0 ? values[v] : "");
+            char* environment[] = {
+                path,
+                "SOURCE_DATE_EPOCH=" BUSTER_ORACLE_EPOCH,
+                values[v] != 0 ? value : 0,
+                0,
+            };
+            for (uint32_t pass = 0; pass < 3; pass += 1)
+            {
+                OracleRun run;
+                const bool ran = oracle_test_go(&run, pass == 2 ? &check : &use, "oracle test: diagnostic environment", arguments, 0, environment);
+                correct &= ran && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0 && run.taken == (pass == 1) &&
+                           run.errors != 0 && strcmp(run.errors, expected) == 0;
+                oracle_run_release(&run);
+            }
+        }
+        oracle_test_expect(test, correct, names[n]);
+    }
+    oracle_test_expect(test, check.counts->stale == 0, "diagnostic environment: changes do not report stale entries");
+    char* arguments[] = {
+        "sh",
+        "-c",
+        "printf 'log=%s' \"$GCC_DIAGNOSTICS_LOG\" >&2",
+        0,
+    };
+    bool refused = true;
+    for (uint32_t value = 0; value < 2; value += 1)
+    {
+        char* environment[] = {
+            path,
+            "SOURCE_DATE_EPOCH=" BUSTER_ORACLE_EPOCH,
+            value == 0 ? "GCC_DIAGNOSTICS_LOG=" : "GCC_DIAGNOSTICS_LOG=diagnostics.log",
+            0,
+        };
+        for (uint32_t pass = 0; pass < 2; pass += 1)
+        {
+            OracleRun run = {
+                .cache = pass == 0 ? &use : &check,
+                .purpose = "oracle test: diagnostic log",
+                .arguments = arguments,
+                .environment = environment,
+                .dependencies = true,
+            };
+            refused &= oracle_run(&run) && !run.keyed && !run.taken && run.status == 0 && run.errors != 0 &&
+                       strcmp(run.errors, value == 0 ? "log=" : "log=diagnostics.log") == 0;
+            oracle_run_release(&run);
+        }
+    }
+    oracle_test_expect(test, refused, "diagnostic environment: log side effects run without replay");
+    oracle_cache_close(&check);
+    oracle_cache_close(&use);
+}
+
 static void oracle_test_runs(OracleTest* test)
 {
     OracleCache cache;
@@ -550,22 +748,22 @@ static void oracle_test_runs(OracleTest* test)
     const bool started = oracle_test_go(&run, &cache, "oracle test: parts", missing, 0, 0);
     oracle_run_release(&run);
     oracle_test_expect(test, !started && cache.counts->unkept == unkept + 1, "runs: a tool that isn't on PATH");
-    // A file the run didn't write is removed when its entry is taken.
+    // A cached removal of a now-present file must run the tool, not unlink it during replay.
     char absent[BUSTER_ORACLE_PATH_BYTES + 16];
     snprintf(absent, sizeof(absent), "%s/absent", test->runs[0]);
     unlink(absent);
-    char* nothing[] = { "sh", "-c", "true", 0 };
+    char* nothing[] = { "sh", "-c", "rm -f \"$1\"", "sh", absent, 0 };
     const char* files[] = { absent };
     bool removed = true;
     for (uint32_t i = 0; i < 2; i += 1)
     {
         run = (OracleRun){ .cache = &cache, .purpose = "oracle test: sh", .arguments = nothing, .files = files, .file_count = 1 };
-        removed &= oracle_run(&run) && run.taken == (i == 1);
+        removed &= oracle_run(&run) && !run.taken;
         oracle_run_release(&run);
         removed &= i == 1 || oracle_test_write(absent, "junk", 4);
     }
     struct stat status;
-    oracle_test_expect(test, removed && lstat(absent, &status) != 0 && errno == ENOENT, "runs: a file the run didn't write, removed when it is taken");
+    oracle_test_expect(test, removed && lstat(absent, &status) != 0 && errno == ENOENT, "runs: a present file the entry removes is left to the tool");
     uint32_t count = 0;
     uint32_t others = 0;
     oracle_test_count(&cache, &count, &others);
@@ -878,6 +1076,117 @@ static void oracle_test_dependencies(OracleTest* test)
 
 static bool oracle_test_traced(OracleCache* cache, const char* script, const char* directory, bool taken, const char* output);
 
+// GCC's dependency-output environment is forwarded, but a sidecar absent from run.files must be regenerated.
+static void oracle_test_dependency_environment(OracleTest* test)
+{
+    typedef struct OracleTestDependencyEnvironment OracleTestDependencyEnvironment;
+    struct OracleTestDependencyEnvironment
+    {
+        const char* environment;
+        bool sidecar;
+    };
+    static const OracleTestDependencyEnvironment cases[] = {
+        {
+            .environment = "DEPENDENCIES_OUTPUT=dependency-env.d",
+            .sidecar = true,
+        },
+        {
+            .environment = "SUNPRO_DEPENDENCIES=dependency-env.d",
+            .sidecar = true,
+        },
+        {
+            .environment = "DEPENDENCIES_OUTPUT=",
+            .sidecar = false,
+        },
+        {
+            .environment = "SUNPRO_DEPENDENCIES=",
+            .sidecar = false,
+        },
+    };
+    OracleCache use;
+    OracleCache check;
+    oracle_test_open(test, &use, "use", "dependency-environment");
+    oracle_test_open(test, &check, "check", "dependency-environment");
+    const char* directory = test->runs[0];
+    const bool ready = oracle_test_write_text(directory, "dependency-env.c", "int a;\n");
+    char object[BUSTER_ORACLE_PATH_BYTES + 32];
+    char sidecar[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(object, sizeof(object), "%s/dependency-env.o", directory);
+    snprintf(sidecar, sizeof(sidecar), "%s/dependency-env.d", directory);
+    const char* files[] = {
+        object,
+    };
+    char path[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(path, sizeof(path), "PATH=%s", getenv("PATH") != 0 ? getenv("PATH") : "/usr/bin:/bin");
+    char* arguments[] = {
+        "sh",
+        "-c",
+        "read source < dependency-env.c; printf '%s\\n' \"$source\" > dependency-env.o; "
+        "dependency=${DEPENDENCIES_OUTPUT-${SUNPRO_DEPENDENCIES-}}; "
+        "if test -n \"$dependency\"; then printf 'dependency-env.o: dependency-env.c\\n' > \"$dependency\"; fi",
+        0,
+    };
+    for (uint32_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c += 1)
+    {
+        char* environment[] = {
+            path,
+            "SOURCE_DATE_EPOCH=" BUSTER_ORACLE_EPOCH,
+            (char*)cases[c].environment,
+            0,
+        };
+        bool correct = ready;
+        for (uint32_t pass = 0; pass < 3; pass += 1)
+        {
+            unlink(object);
+            unlink(sidecar);
+            OracleRun run = {
+                .cache = pass == 2 ? &check : &use,
+                .purpose = "oracle test: dependency environment",
+                .arguments = arguments,
+                .environment = environment,
+                .directory = directory,
+                .files = files,
+                .file_count = 1,
+                .dependencies = true,
+            };
+            const bool ran = oracle_run(&run);
+            uint64_t length = 0;
+            char* object_bytes = oracle_test_read(object, &length);
+            char* sidecar_bytes = oracle_test_read(sidecar, &length);
+            correct &= ran && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0 &&
+                       !run.keyed && !run.taken &&
+                       object_bytes != 0 && strcmp(object_bytes, "int a;\n") == 0 &&
+                       (cases[c].sidecar ? sidecar_bytes != 0 && strcmp(sidecar_bytes, "dependency-env.o: dependency-env.c\n") == 0 : sidecar_bytes == 0);
+            free(sidecar_bytes);
+            free(object_bytes);
+            oracle_run_release(&run);
+        }
+        oracle_test_expect(test, correct, cases[c].environment);
+    }
+    char* environment[] = {
+        path,
+        "SOURCE_DATE_EPOCH=" BUSTER_ORACLE_EPOCH,
+        0,
+    };
+    OracleRun run = {
+        .cache = &use,
+        .purpose = "oracle test: dependency environment",
+        .arguments = arguments,
+        .environment = environment,
+        .directory = directory,
+        .files = files,
+        .file_count = 1,
+        .dependencies = true,
+    };
+    oracle_test_expect(test, oracle_run_key(&run), "dependency environment: unset variables permit admission");
+    oracle_test_expect(test, check.counts->stale == 0, "dependency environment: no stale entries in check mode");
+    oracle_test_unlink(directory, "dependency-env.c");
+    unlink(object);
+    unlink(sidecar);
+    oracle_cache_close(&check);
+    oracle_cache_close(&use);
+}
+
 // What a run reads of its files besides their bytes: which of them are one file (a hard link, which #pragma once takes
 // once), its time macros, which only SOURCE_DATE_EPOCH makes keepable, however its sources spell them, the bytes of the
 // files outside its roots, which a rewrite with the same bytes keeps, and their extended attributes.
@@ -1043,7 +1352,11 @@ static void oracle_test_identities(OracleTest* test)
 // " short" if it gave fewer); `list DIRECTORY` each name getdents64 gives but . and .., after its inode, in its order;
 // `mtime PATH` its modification time's seconds; `inode PATH` the inode number stat gives ("none" if it gives none);
 // `mkdir PATH` "made", "there" or "failed"; `cat`, `readlink`, `rmdir`, `unlink`, `device` and `zero` exercise the
-// corresponding file operations without depending on a system utility; and `tty` whether it could open /dev/tty.
+// corresponding file operations without depending on a system utility; `tty` whether it could open /dev/tty; and
+// `replay` the replay test's tool (oracle_test_replays): it prints its files as it finds them (the bytes of the counter
+// and of the file it removes, then each file's name, size, mode, modification time and inode, then after a line "--"
+// each one's status-change time and link count and its directory's times), adds one to the counter in place, makes a
+// file, removes one, and makes one that says it ran.
 static const char oracle_test_helper[] =
     "#define _GNU_SOURCE\n"
     "#include <errno.h>\n"
@@ -1140,6 +1453,33 @@ static const char oracle_test_helper[] =
     "        putchar('\\n');\n"
     "    }\n"
     "    else if (argc == 2 && strcmp(argv[1], \"tty\") == 0) puts(open(\"/dev/tty\", O_RDWR | O_NOCTTY) >= 0 ? \"tty\" : \"none\");\n"
+    "    else if (argc == 2 && strcmp(argv[1], \"replay\") == 0)\n"
+    "    {\n"
+    "        static const char* const names[] = { \"replay-counter\", \"replay-gone\", \"replay-made\" };\n"
+    "        char bytes[256]; struct stat status; long count = 0;\n"
+    "        for (int i = 0; i < 2; i += 1)\n"
+    "        {\n"
+    "            const int file = open(names[i], O_RDONLY);\n"
+    "            const ssize_t got = file >= 0 ? read(file, bytes, sizeof(bytes) - 1) : 0;\n"
+    "            bytes[got > 0 ? got : 0] = 0;\n"
+    "            fputs(bytes, stdout);\n"
+    "            count = i == 0 ? strtol(bytes, 0, 10) : count;\n"
+    "            if (file >= 0) close(file);\n"
+    "        }\n"
+    "        for (int i = 0; i < 3; i += 1) if (lstat(names[i], &status) == 0) printf(\"%s %lld %o %lld.%09ld %llu\\n\", names[i], (long long)status.st_size, (unsigned)(status.st_mode & 07777), (long long)status.st_mtim.tv_sec, status.st_mtim.tv_nsec, (unsigned long long)status.st_ino);\n"
+    "        puts(\"--\");\n"
+    "        for (int i = 0; i < 3; i += 1) if (lstat(names[i], &status) == 0) printf(\"%s %lld.%09ld %llu\\n\", names[i], (long long)status.st_ctim.tv_sec, status.st_ctim.tv_nsec, (unsigned long long)status.st_nlink);\n"
+    "        if (lstat(\".\", &status) == 0) printf(\". %lld.%09ld %lld.%09ld\\n\", (long long)status.st_mtim.tv_sec, status.st_mtim.tv_nsec, (long long)status.st_ctim.tv_sec, status.st_ctim.tv_nsec);\n"
+    "        const int counter = open(names[0], O_WRONLY | O_TRUNC);\n"
+    "        if (counter < 0 || dprintf(counter, \"%ld\\n\", count + 1) < 0) return 1;\n"
+    "        close(counter);\n"
+    "        const int made = open(names[2], O_WRONLY | O_CREAT | O_TRUNC, 0666);\n"
+    "        if (made < 0 || write(made, \"made\\n\", 5) != 5) return 1;\n"
+    "        close(made);\n"
+    "        unlink(names[1]);\n"
+    "        const int ran = open(\"replay-ran\", O_WRONLY | O_CREAT | O_TRUNC, 0666);\n"
+    "        if (ran >= 0) close(ran);\n"
+    "    }\n"
     "    return 0;\n"
     "}\n";
 
@@ -1475,6 +1815,15 @@ static void oracle_test_path_rules(OracleTest* test)
     static const OracleTestPath fixed[] = {
         { "/usr/include/stdio.h", "LLLLLL" },
         { "/usr/local/include/x.h", "KKKKKK" },
+        { "/usr//local/include/x.h", "KKKKKK" },
+        { "/usr///local/include/x.h", "KKKKKK" },
+        { "/usr/./local/include/x.h", "KKKKKK" },
+        { "/usr/././local/include/x.h", "KKKKKK" },
+        { "/usr/locality/x.h", "LLLLLL" },
+        { "/usr//locality/x.h", "KKKKKK" },
+        { "/usr/.", "KKKKKK" },
+        { "/usr/include/./x.h", "KKKKKK" },
+        { "/lib64//ld-linux-x86-64.so.2", "KKKKKK" },
         { "/usr/../home/x.h", "KKKKKK" },
         { "/lib64/ld-linux-x86-64.so.2", "LLLLLL" },
         { "/library/x.h", "KKKKKK" },
@@ -1587,6 +1936,77 @@ static void oracle_test_path_rules(OracleTest* test)
     oracle_test_expect(test, right, "kernel: the path rule's answers, by stat, lstat, access, readlink, open and a change");
 }
 
+// The path table checks the system prefixes. These disposable paths separately check the retained spellings'
+// traced invalidation outside run roots, without requiring write access to /usr/local or changing system headers.
+static void oracle_test_path_spellings(OracleTest* test)
+{
+    const char* temporary = oracle_temporary_directory();
+    char directory[BUSTER_ORACLE_PATH_BYTES];
+    char local[BUSTER_ORACLE_PATH_BYTES + 16];
+    snprintf(directory, sizeof(directory), "%s/buster_oracle_spelling_%ld_x", temporary, (long)getpid());
+    snprintf(local, sizeof(local), "%s/local", directory);
+    const bool made = mkdir(directory, 0700) == 0;
+    const bool ready = made && mkdir(local, 0700) == 0;
+    OracleCache use;
+    OracleCache check;
+    oracle_test_open(test, &use, "use", "path-spellings");
+    oracle_test_open(test, &check, "check", "path-spellings");
+    static const char* const spellings[] = {
+        "%s//local/value.h",
+        "%s/./local/value.h",
+    };
+    static const char* const values[] = {
+        "first\n",
+        "first\n",
+        "other\n",
+        "other\n",
+        "third\n",
+        "third\n",
+    };
+    for (uint32_t s = 0; s < sizeof(spellings) / sizeof(spellings[0]); s += 1)
+    {
+        char path[BUSTER_ORACLE_PATH_BYTES + 32];
+        snprintf(path, sizeof(path), spellings[s], directory);
+        char* arguments[] = {
+            "sh",
+            "-c",
+            "read value < \"$1\"; printf '%s\\n' \"$value\"",
+            "sh",
+            path,
+            0,
+        };
+        bool correct = ready;
+        for (uint32_t pass = 0; pass < sizeof(values) / sizeof(values[0]); pass += 1)
+        {
+            // Shell runs retain file times, so leave the file untouched for each warm replay.
+            correct &= pass % 2 == 1 || oracle_test_write_text(local, "value.h", values[pass]);
+            OracleRun run = {
+                .cache = pass == 4 ? &check : &use,
+                .purpose = "oracle test: path spellings",
+                .arguments = arguments,
+                .dependencies = true,
+            };
+            const bool ran = oracle_run(&run);
+            correct &= ran && run.status == 0 && run.taken == (pass % 2 == 1) &&
+                       !oracle_run_rooted(&run, path) && run.output != 0 && strcmp(run.output, values[pass]) == 0;
+            oracle_run_release(&run);
+        }
+        oracle_test_expect(test, correct, s == 0 ? "paths: repeated separators retain a changed input outside roots" : "paths: dot components retain a changed input outside roots");
+    }
+    oracle_test_expect(test, check.counts->stale == 0, "paths: changed inputs invalidate entries before check comparison");
+    if (ready)
+    {
+        oracle_test_unlink(local, "value.h");
+        rmdir(local);
+    }
+    if (made)
+    {
+        rmdir(directory);
+    }
+    oracle_cache_close(&check);
+    oracle_cache_close(&use);
+}
+
 // The kernel's paths and /dev's: a source in a root in /dev/shm, an ordinary tmpfs and a common $TMPDIR, which clang
 // compiles to an object, changed to give another, and a header in /dev/shm in no root ($TMPDIR elsewhere), changed in
 // place, each compiled again; a run that follows a process's links into the file system (cat of /proc/self/cwd/FILE
@@ -1610,7 +2030,7 @@ static void oracle_test_kernel(OracleTest* test)
         uint64_t lengths[3] = { 0 };
         for (uint32_t i = 0; compiled && i < 3; i += 1)
         {
-            // Compiled, taken, and compiled again once the source gives another object, each without the object there
+            // Compiled, taken, then compiled again once the source gives another object, each without the object there
             // (which, there, would be among what the run looked at: oracle_test_outputs).
             oracle_test_unlink(root, "main.o");
             compiled &= i == 1 || oracle_test_write_text(root, "main.c", i == 0 ? "int f(void) { return 1; }\n" : "int f(void) { return 2; }\n");
@@ -1943,7 +2363,7 @@ static void oracle_test_outputs(OracleTest* test)
     uint64_t lengths[4] = { 0 };
     for (uint32_t i = 0; compiled && i < 4; i += 1)
     {
-        // Into an empty place, over that object (run), over the second's (taken), and in the other directory (taken).
+        // Into an empty place (run), over that object (run), over the second's (taken), and into another empty place (taken).
         const char* place = test->runs[i == 3 ? 1 : 0];
         if (i == 0 || i == 3)
         {
@@ -1968,6 +2388,698 @@ static void oracle_test_outputs(OracleTest* test)
         oracle_test_unlink(test->runs[d], "output.o");
     }
     oracle_test_expect(test, compiled, "outputs: clang's object where the last compile left one, run again once, then taken");
+    oracle_cache_close(&cache);
+}
+
+// --- Replays (#1317) ---
+
+// The names in `directory` that takes moved removed files to (oracle_replay_kept), removed if `remove`: how many.
+static uint32_t oracle_test_replay_kept(const char* directory, bool remove)
+{
+    uint32_t count = 0;
+    DIR* listing = opendir(directory);
+    for (struct dirent* entry = listing != 0 ? readdir(listing) : 0; entry != 0; entry = readdir(listing))
+    {
+        const size_t length = strlen(entry->d_name);
+        const bool kept = length > 6 && strcmp(entry->d_name + length - 6, ".taken") == 0;
+        count += kept;
+        if (kept && remove)
+        {
+            unlinkat(dirfd(listing), entry->d_name, 0);
+        }
+    }
+    if (listing != 0)
+    {
+        closedir(listing);
+    }
+    return count;
+}
+
+// The replay test's files as they are before its tool's run (the test's program's `replay`): the counter at 1, with the
+// set-user and set-group bits that a write by a process that isn't root takes, and, if `gone`, the file the tool
+// removes, each with a time of its own; and neither the file it makes, nor the one that says it ran, nor a name a take
+// moved a file to.
+static bool oracle_test_replay_reset(const char* directory, bool gone)
+{
+    char counter[BUSTER_ORACLE_PATH_BYTES + 32];
+    char removed[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(counter, sizeof(counter), "%s/replay-counter", directory);
+    snprintf(removed, sizeof(removed), "%s/replay-gone", directory);
+    oracle_test_unlink(directory, "replay-made");
+    oracle_test_unlink(directory, "replay-ran");
+    oracle_test_unlink(directory, "replay-gone");
+    oracle_test_replay_kept(directory, true);
+    const struct timespec times[2] = { { .tv_sec = 1000000000, .tv_nsec = 123456789 }, { .tv_sec = 1000000000, .tv_nsec = 987654321 } };
+    const bool counted = oracle_test_write(counter, "1\n", 2) && chmod(counter, 06750) == 0 && utimensat(AT_FDCWD, counter, times, 0) == 0;
+    return counted && (!gone || (oracle_test_write(removed, "old\n", 4) && chmod(removed, 0600) == 0 && utimensat(AT_FDCWD, removed, times, 0) == 0));
+}
+
+// What the replay test's tool prints of its files as they are now, as the test sees them, into `seen`; and how much of
+// it comes before its line "--" (what the cache has a tool's result depend on), into `contract`.
+static void oracle_test_replay_seen(const char* directory, char* seen, size_t capacity, size_t* contract)
+{
+    static const char* const names[] = { "replay-counter", "replay-gone", "replay-made" };
+    struct stat statuses[3];
+    bool there[3];
+    size_t at = 0;
+    seen[0] = 0;
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        char path[BUSTER_ORACLE_PATH_BYTES + 32];
+        snprintf(path, sizeof(path), "%s/%s", directory, names[i]);
+        there[i] = lstat(path, &statuses[i]) == 0;
+        uint64_t length = 0;
+        char* bytes = i < 2 ? oracle_test_read(path, &length) : 0;
+        const int put = bytes != 0 && at < capacity ? snprintf(seen + at, capacity - at, "%s", bytes) : 0;
+        at += put > 0 ? (size_t)put : 0;
+        free(bytes);
+    }
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        const struct stat* status = &statuses[i];
+        const int put = there[i] && at < capacity ? snprintf(seen + at, capacity - at, "%s %lld %o %lld.%09ld %llu\n", names[i], (long long)status->st_size,
+                                                             (unsigned)(status->st_mode & 07777), (long long)status->st_mtim.tv_sec, status->st_mtim.tv_nsec,
+                                                             (unsigned long long)status->st_ino)
+                                                  : 0;
+        at += put > 0 ? (size_t)put : 0;
+    }
+    *contract = at;
+    const int line = at < capacity ? snprintf(seen + at, capacity - at, "--\n") : 0;
+    at += line > 0 ? (size_t)line : 0;
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        const struct stat* status = &statuses[i];
+        const int put = there[i] && at < capacity ? snprintf(seen + at, capacity - at, "%s %lld.%09ld %llu\n", names[i], (long long)status->st_ctim.tv_sec, status->st_ctim.tv_nsec,
+                                                             (unsigned long long)status->st_nlink)
+                                                  : 0;
+        at += put > 0 ? (size_t)put : 0;
+    }
+    struct stat place;
+    const int put = lstat(directory, &place) == 0 && at < capacity ? snprintf(seen + at, capacity - at, ". %lld.%09ld %lld.%09ld\n", (long long)place.st_mtim.tv_sec,
+                                                                             place.st_mtim.tv_nsec, (long long)place.st_ctim.tv_sec, place.st_ctim.tv_nsec)
+                                                                  : 0;
+    at += put > 0 ? (size_t)put : 0;
+}
+
+// Whether the replay test's files are as one run of its tool from their state before it leaves them: the counter at 2,
+// the file it makes there, and the one it removes not.
+static bool oracle_test_replay_after(const char* directory)
+{
+    char counter[BUSTER_ORACLE_PATH_BYTES + 32];
+    char made[BUSTER_ORACLE_PATH_BYTES + 32];
+    char gone[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(counter, sizeof(counter), "%s/replay-counter", directory);
+    snprintf(made, sizeof(made), "%s/replay-made", directory);
+    snprintf(gone, sizeof(gone), "%s/replay-gone", directory);
+    uint64_t length = 0;
+    char* count = oracle_test_read(counter, &length);
+    const bool counted = count != 0 && strcmp(count, "2\n") == 0;
+    free(count);
+    char* making = oracle_test_read(made, &length);
+    const bool making_right = making != 0 && strcmp(making, "made\n") == 0;
+    free(making);
+    struct stat status;
+    return counted && making_right && lstat(gone, &status) != 0 && errno == ENOENT;
+}
+
+// A run of the replay test's tool, what came of it: whether it ran or took its entry, whether it took it, whether what
+// the tool printed is what the test saw of its files before it (wholly, and up to its line "--"), whether the tool ran,
+// and what it printed.
+typedef struct OracleTestReplay OracleTestReplay;
+struct OracleTestReplay
+{
+    bool went;
+    bool taken;
+    bool seen;
+    bool contract;
+    bool ran;
+    char output[1024];
+};
+
+// A run of the replay test's tool in `directory`, its three files declared, with the take's steps in `faults` failing
+// (oracle_replay_faults), into `replay`: whether it ran or took its entry.
+static bool oracle_test_replay_run(OracleTest* test, OracleCache* cache, const char* directory, uint64_t faults, OracleTestReplay* replay)
+{
+    char counter[BUSTER_ORACLE_PATH_BYTES + 32];
+    char made[BUSTER_ORACLE_PATH_BYTES + 32];
+    char gone[BUSTER_ORACLE_PATH_BYTES + 32];
+    char marker[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(counter, sizeof(counter), "%s/replay-counter", directory);
+    snprintf(made, sizeof(made), "%s/replay-made", directory);
+    snprintf(gone, sizeof(gone), "%s/replay-gone", directory);
+    snprintf(marker, sizeof(marker), "%s/replay-ran", directory);
+    char before[1024];
+    size_t contract = 0;
+    oracle_test_replay_seen(directory, before, sizeof(before), &contract);
+    char* arguments[] = { test->helper, "replay", 0 };
+    // The file it removes first, so that a preparation's failure comes after the step that once linked it aside.
+    const char* files[] = { gone, counter, made };
+    OracleRun run = {
+        .cache = cache,
+        .purpose = "oracle test: replays",
+        .arguments = arguments,
+        .directory = directory,
+        .files = files,
+        .file_count = 3,
+    };
+    oracle_replay_faults = faults;
+    replay->went = oracle_run(&run);
+    oracle_replay_faults = 0;
+    struct stat status;
+    const char* output = run.output != 0 ? run.output : "";
+    replay->taken = run.taken;
+    replay->seen = strcmp(output, before) == 0;
+    replay->contract = strncmp(output, before, contract) == 0 && strncmp(output + contract, "--\n", 3) == 0;
+    replay->ran = lstat(marker, &status) == 0;
+    snprintf(replay->output, sizeof(replay->output), "%s", output);
+    oracle_run_release(&run);
+    return replay->went;
+}
+
+// Another process's changes to the replay test's files at a take's boundaries, by oracle_test_replay_change. Between
+// the take's preparation and its replay (oracle_replay_between): 1 makes the file the take would make, 2 and 3 put a
+// file of their own over the counter and over the file the take would remove, 4 removes that file, 5 makes it where it
+// wasn't, and 6 writes the counter in place. As the take puts back what its replay changed (oracle_replay_restoring,
+// with the files in the order the run declares them, oracle_test_replay_run): 7 writes the counter in place before its
+// restoration, 8 puts a file of its own over the file the replay made before its restoration, and 9 makes one where
+// that was, between the check of the file the take moved aside and its removal.
+static const char* oracle_test_replay_place;
+static uint32_t oracle_test_replay_change;
+static ino_t oracle_test_replay_inode;
+
+// `text` into the replay test's file `name`: in place, or as a file of its own put over it (or where there is none); the
+// inode of the file there after into oracle_test_replay_inode.
+static void oracle_test_replay_put(const char* name, const char* text, bool in_place)
+{
+    char path[BUSTER_ORACLE_PATH_BYTES + 32];
+    char fresh[BUSTER_ORACLE_PATH_BYTES + 48];
+    snprintf(path, sizeof(path), "%s/%s", oracle_test_replay_place, name);
+    snprintf(fresh, sizeof(fresh), "%s.fresh", path);
+    const bool put = in_place ? oracle_test_write(path, text, strlen(text)) : oracle_test_write(fresh, text, strlen(text)) && rename(fresh, path) == 0;
+    struct stat status;
+    if (put && lstat(path, &status) == 0)
+    {
+        oracle_test_replay_inode = status.st_ino;
+    }
+}
+
+static void oracle_test_replay_other(void)
+{
+    static const char* const names[] = { "", "replay-made", "replay-counter", "replay-gone", "replay-gone", "replay-gone", "replay-counter" };
+    static const char* const texts[] = { "", "theirs\n", "9\n", "new\n", "", "new\n", "9\n" };
+    const uint32_t change = oracle_test_replay_change;
+    if (change == 4)
+    {
+        oracle_test_unlink(oracle_test_replay_place, "replay-gone");
+    }
+    else if (change >= 1 && change <= 6)
+    {
+        oracle_test_replay_put(names[change], texts[change], change == 6);
+    }
+}
+
+// The name in the replay test's directory that the take moved a file to (oracle_replay_kept), into `name`: false if
+// there is none.
+static bool oracle_test_replay_kept_name(char* name, size_t capacity)
+{
+    bool result = false;
+    DIR* listing = opendir(oracle_test_replay_place);
+    for (struct dirent* entry = listing != 0 ? readdir(listing) : 0; !result && entry != 0; entry = readdir(listing))
+    {
+        const size_t length = strlen(entry->d_name);
+        result = length > 6 && strcmp(entry->d_name + length - 6, ".taken") == 0 && length < capacity;
+        if (result)
+        {
+            memcpy(name, entry->d_name, length + 1);
+        }
+    }
+    if (listing != 0)
+    {
+        closedir(listing);
+    }
+    return result;
+}
+
+static void oracle_test_replay_restoring(uint32_t file, bool acting)
+{
+    const uint32_t change = oracle_test_replay_change;
+    char kept[256];
+    if (change == 7 && file == 1 && !acting)
+    {
+        oracle_test_replay_put("replay-counter", "9\n", true);
+    }
+    else if ((change == 8 && file == 2 && !acting) || (change == 9 && file == 2 && acting))
+    {
+        oracle_test_replay_put("replay-made", "theirs\n", false);
+    }
+    else if (((change == 10 || change == 11) && file == 0 && !acting) || (change == 12 && file == 0 && acting))
+    {
+        if (oracle_test_replay_kept_name(kept, sizeof(kept)))
+        {
+            oracle_test_replay_put(kept, change == 11 ? "changed\n" : "theirs\n", change == 11);
+        }
+    }
+}
+
+// Existing outputs can still be replayed and rolled back. Leave the removed output absent and the written output
+// present so the replay never needs an unsafe unlink; the counter and the other output each exercise an in-place write.
+static bool oracle_test_replay_reset_writable(const char* directory, bool gone)
+{
+    char made[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(made, sizeof(made), "%s/replay-made", directory);
+    return oracle_test_replay_reset(directory, gone) && oracle_test_write(made, "before\n", 7);
+}
+
+static void oracle_test_replays(OracleTest* test)
+{
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "replays");
+    const char* directory = test->runs[0];
+    char counter[BUSTER_ORACLE_PATH_BYTES + 32];
+    char made[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(counter, sizeof(counter), "%s/replay-counter", directory);
+    snprintf(made, sizeof(made), "%s/replay-made", directory);
+    OracleTestReplay replay;
+    const bool first = oracle_test_replay_reset_writable(directory, false) && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && replay.seen && replay.ran &&
+                       oracle_test_replay_after(directory);
+    struct stat before;
+    struct stat after;
+    const bool reset = oracle_test_replay_reset_writable(directory, false) && lstat(counter, &before) == 0;
+    const bool second = reset && oracle_test_replay_run(test, &cache, directory, 0, &replay) && replay.taken && !replay.ran && oracle_test_replay_after(directory) &&
+                        lstat(counter, &after) == 0 && after.st_ino == before.st_ino && (after.st_mode & 0777) == 0750;
+    // The first of the three replay steps checks an absent removal and changes nothing; the other two rewrite files.
+    const uint32_t steps = oracle_replay_steps;
+    const uint32_t replayed = steps >= 3 ? steps - 3 : 0;
+    oracle_test_expect(test, first && second && steps >= 3 && steps + 2 < 64 && oracle_test_replay_kept(directory, false) == 0, "replays: existing outputs taken in place");
+    bool restored = first && second;
+    for (uint32_t s = 0; restored && s < steps; s += 1)
+    {
+        const bool ready = oracle_test_replay_reset_writable(directory, false);
+        char original[1024];
+        char after_restore[1024];
+        size_t contract = 0;
+        size_t after_contract = 0;
+        oracle_test_replay_seen(directory, original, sizeof(original), &contract);
+        oracle_test_replay_run(test, &cache, directory, 1ull << s, &replay);
+        oracle_test_replay_seen(directory, after_restore, sizeof(after_restore), &after_contract);
+        const bool untouched = replay.went && !replay.taken && replay.ran && replay.seen && oracle_test_replay_after(directory);
+        const bool refused = !replay.went && !replay.taken && !replay.ran && contract == after_contract && memcmp(original, after_restore, contract) == 0;
+        restored = ready && (s <= replayed ? untouched : refused) && oracle_test_replay_kept(directory, false) == 0;
+    }
+    oracle_test_expect(test, restored, "replays: untouched failures fall back; changed files are restored and the run refuses");
+    // Every touched replay refuses, whether or not the second fault also prevents restoration.
+    printf("oracle cache: takes made to fail on purpose are reported on the next lines:\n");
+    fflush(stdout);
+    bool exact = restored;
+    uint32_t restoration_failures = 0;
+    for (uint32_t a = 0; exact && a < steps; a += 1)
+    {
+        for (uint32_t b = a + 1; exact && b < steps + 2; b += 1)
+        {
+            const bool touched = a > replayed;
+            const bool restoration = touched && b <= a + (a - replayed);
+            const bool ready = oracle_test_replay_reset_writable(directory, false);
+            char original[1024];
+            char after_restore[1024];
+            size_t contract = 0;
+            size_t after_contract = 0;
+            oracle_test_replay_seen(directory, original, sizeof(original), &contract);
+            oracle_test_replay_run(test, &cache, directory, (1ull << a) | (1ull << b), &replay);
+            oracle_test_replay_seen(directory, after_restore, sizeof(after_restore), &after_contract);
+            const bool fell_back = replay.went && !replay.taken && replay.ran && replay.seen && oracle_test_replay_after(directory);
+            const bool refused = !replay.went && !replay.taken && !replay.ran;
+            const bool put_back = contract == after_contract && memcmp(original, after_restore, contract) == 0;
+            exact = ready && (touched ? refused && (restoration || put_back) : fell_back);
+            restoration_failures += refused && restoration;
+        }
+    }
+    oracle_test_expect(test, exact && restoration_failures == 3, "replays: all touched takes refuse, including each failed restoration");
+    oracle_test_replay_place = directory;
+    oracle_replay_between = oracle_test_replay_other;
+    oracle_replay_restoring = oracle_test_replay_restoring;
+    bool other = true;
+    struct stat status;
+    uint64_t length = 0;
+    // A replacement of the second output is left intact; the first rewrite is restored and the run refuses.
+    oracle_test_replay_change = 1;
+    other &= oracle_test_replay_reset_writable(directory, false) && !oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && !replay.ran &&
+             lstat(made, &status) == 0 && status.st_ino == oracle_test_replay_inode;
+    char* theirs = oracle_test_read(made, &length);
+    char* original = oracle_test_read(counter, &length);
+    other &= theirs != 0 && strcmp(theirs, "theirs\n") == 0 && original != 0 && strcmp(original, "1\n") == 0;
+    free(theirs);
+    free(original);
+    oracle_test_replay_change = 2;
+    other &= oracle_test_replay_reset_writable(directory, false) && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && replay.ran;
+    char* count = oracle_test_read(counter, &length);
+    other &= count != 0 && strcmp(count, "10\n") == 0 && lstat(counter, &status) == 0 && status.st_ino == oracle_test_replay_inode;
+    free(count);
+    // A file appearing where the entry removes an absent one is left to the tool.
+    oracle_test_replay_change = 5;
+    other &= oracle_test_replay_reset_writable(directory, false) && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && replay.ran &&
+             strncmp(replay.output, "1\nnew\n", 6) == 0 && oracle_test_replay_after(directory);
+    oracle_test_replay_change = 6;
+    other &= oracle_test_replay_reset_writable(directory, false) && lstat(counter, &before) == 0 && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && replay.ran;
+    count = oracle_test_read(counter, &length);
+    other &= count != 0 && strcmp(count, "10\n") == 0 && lstat(counter, &status) == 0 && status.st_ino == before.st_ino;
+    free(count);
+    oracle_test_replay_change = 7;
+    other &= oracle_test_replay_reset_writable(directory, false) && !oracle_test_replay_run(test, &cache, directory, 1ull << (steps - 1), &replay) && !replay.taken && !replay.ran;
+    count = oracle_test_read(counter, &length);
+    other &= count != 0 && strcmp(count, "9\n") == 0;
+    free(count);
+    oracle_replay_between = 0;
+    oracle_replay_restoring = 0;
+    oracle_test_replay_change = 0;
+    oracle_test_expect(test, other, "replays: concurrent replacement or writes are left to the tool, or refuse restoration");
+    // A present removal misses before the first replay mutation. The helper prints the whole pre-run
+    // state, including ctimes and directory times, so an earlier rewrite is detected.
+    const bool existing_removal = oracle_test_replay_reset_writable(directory, true) && oracle_test_replay_run(test, &cache, directory, 0, &replay) &&
+                                  oracle_replay_steps >= 2 && !replay.taken && replay.ran && replay.seen && oracle_test_replay_after(directory) && oracle_test_replay_kept(directory, false) == 0;
+    oracle_test_expect(test, existing_removal, "replays: a present removal misses before any mutation");
+    oracle_test_replay_kept(directory, true);
+    oracle_test_unlink(directory, "replay-counter");
+    oracle_test_unlink(directory, "replay-made");
+    oracle_test_unlink(directory, "replay-gone");
+    oracle_test_unlink(directory, "replay-ran");
+    oracle_cache_report(&cache, "test-oracle-cache's replays");
+    oracle_cache_close(&cache);
+}
+
+// Two absent outputs exercise creation and failure between outputs. The hooks model another writer at the exact
+// boundary after the first output is written or after its descriptor is checked, before the final path check.
+static uint32_t oracle_test_created_action;
+
+static void oracle_test_created_initial(uint32_t file)
+{
+    if (file == 0 && oracle_test_created_action == 5)
+    {
+        char path[BUSTER_ORACLE_PATH_BYTES + 32];
+        snprintf(path, sizeof(path), "%s/replay-one", oracle_test_replay_place);
+        chmod(path, 0);
+    }
+}
+
+static void oracle_test_created_written(uint32_t file)
+{
+    if (file == 0 && oracle_test_created_action == 1)
+    {
+        oracle_test_replay_put("replay-two", "foreign\n", false);
+    }
+}
+
+static void oracle_test_created_restoring(uint32_t file, bool acting)
+{
+    if (file == 0 && !acting && oracle_test_created_action == 4)
+    {
+        oracle_test_replay_put("replay-one", "foreign\n", false);
+    }
+}
+
+static void oracle_test_created_verifying(uint32_t file)
+{
+    if (file == 0 && (oracle_test_created_action == 2 || oracle_test_created_action == 3))
+    {
+        oracle_test_replay_put("replay-one", oracle_test_created_action == 2 ? "foreign\n" : "Z", oracle_test_created_action == 3);
+    }
+}
+
+static bool oracle_test_created_run(OracleCache* cache, const char* directory, uint64_t faults, bool* taken, bool removal)
+{
+    char* written[] = { "sh", "-c", "printf A > replay-one; printf B > replay-two; : > replay-ran", 0 };
+    char* removed[] = { "sh", "-c", "printf A > replay-one; rm -f replay-two; : > replay-ran", 0 };
+    const char* files[] = { "replay-one", "replay-two" };
+    OracleRun run = { .cache = cache, .purpose = "oracle test: created outputs", .arguments = removal ? removed : written,
+                      .directory = directory, .files = files, .file_count = 2 };
+    oracle_replay_faults = faults;
+    const bool result = oracle_run(&run);
+    oracle_replay_faults = 0;
+    *taken = run.taken;
+    oracle_run_release(&run);
+    return result;
+}
+
+static void oracle_test_created_reset(const char* directory)
+{
+    oracle_test_unlink(directory, "replay-one");
+    oracle_test_unlink(directory, "replay-two");
+    oracle_test_unlink(directory, "replay-ran");
+}
+
+static bool oracle_test_created_text(const char* directory, const char* name, const char* expected)
+{
+    char path[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(path, sizeof(path), "%s/%s", directory, name);
+    uint64_t length = 0;
+    char* text = oracle_test_read(path, &length);
+    const bool same = text != 0 && strcmp(text, expected) == 0;
+    free(text);
+    return same;
+}
+
+static void oracle_test_created(OracleTest* test)
+{
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "created");
+    const char* directory = test->runs[0];
+    char one[BUSTER_ORACLE_PATH_BYTES + 32];
+    char two[BUSTER_ORACLE_PATH_BYTES + 32];
+    char marker[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(one, sizeof(one), "%s/replay-one", directory);
+    snprintf(two, sizeof(two), "%s/replay-two", directory);
+    snprintf(marker, sizeof(marker), "%s/replay-ran", directory);
+    oracle_test_replay_place = directory;
+    bool taken = false;
+    oracle_test_created_reset(directory);
+    const bool first = oracle_test_created_run(&cache, directory, 0, &taken, false) && !taken;
+    oracle_test_created_reset(directory);
+    const bool hit = oracle_test_created_run(&cache, directory, 0, &taken, false) && taken;
+    const uint32_t steps = oracle_replay_steps;
+    struct stat status;
+    const bool right = hit && oracle_test_created_text(directory, "replay-one", "A") && oracle_test_created_text(directory, "replay-two", "B") && lstat(marker, &status) != 0;
+    oracle_test_expect(test, first && right && steps >= 6 && steps < 64, "replays: two absent outputs are created on a cache hit");
+    // Failure after creating the second output leaves both names alone and never runs the tool.
+    oracle_test_created_reset(directory);
+    const bool failed = steps >= 6 && !oracle_test_created_run(&cache, directory, 1ull << (steps - 3), &taken, false) && !taken &&
+                        oracle_test_created_text(directory, "replay-one", "A") && lstat(two, &status) == 0 && status.st_size == 0 && lstat(marker, &status) != 0;
+    oracle_test_expect(test, failed, "replays: failed creation leaves outputs in place and refuses the tool");
+    // A delayed close error also refuses without removing either completed output.
+    oracle_test_created_reset(directory);
+    const bool close_failed = steps >= 6 && !oracle_test_created_run(&cache, directory, 1ull << (steps - 1), &taken, false) && !taken &&
+                              oracle_test_created_text(directory, "replay-one", "A") && oracle_test_created_text(directory, "replay-two", "B") &&
+                              lstat(marker, &status) != 0;
+    oracle_test_expect(test, close_failed, "replays: a created output's close failure refuses without removing outputs");
+    // A foreign second output appearing after the first is written must not be removed or truncated.
+    oracle_test_created_reset(directory);
+    oracle_test_created_action = 1;
+    oracle_replay_written = oracle_test_created_written;
+    const bool conflict = !oracle_test_created_run(&cache, directory, 0, &taken, false) && !taken &&
+                          oracle_test_created_text(directory, "replay-one", "A") && oracle_test_created_text(directory, "replay-two", "foreign\n") &&
+                          lstat(two, &status) == 0 && status.st_ino == oracle_test_replay_inode && lstat(marker, &status) != 0;
+    oracle_replay_written = 0;
+    oracle_test_expect(test, conflict, "replays: a foreign later output survives failed creation");
+    // Replacement or an in-place write after the descriptor check is caught by the final pathname check.
+    bool verification = true;
+    oracle_replay_verifying = oracle_test_created_verifying;
+    for (uint32_t action = 2; action <= 3; action += 1)
+    {
+        oracle_test_created_reset(directory);
+        oracle_test_created_action = action;
+        verification &= !oracle_test_created_run(&cache, directory, 0, &taken, false) && !taken &&
+                        oracle_test_created_text(directory, "replay-one", action == 2 ? "foreign\n" : "Z") &&
+                        oracle_test_created_text(directory, "replay-two", "B") && lstat(one, &status) == 0 && status.st_ino == oracle_test_replay_inode &&
+                        lstat(marker, &status) != 0;
+    }
+    oracle_replay_verifying = 0;
+    oracle_test_created_action = 0;
+    oracle_test_expect(test, verification, "replays: final verification catches a created output replaced or written in place");
+    // A replacement made during rollback is left in place, as is the second created path.
+    oracle_test_created_reset(directory);
+    oracle_test_created_action = 4;
+    oracle_replay_restoring = oracle_test_created_restoring;
+    const bool replaced = steps >= 6 && !oracle_test_created_run(&cache, directory, 1ull << (steps - 3), &taken, false) && !taken &&
+                          oracle_test_created_text(directory, "replay-one", "foreign\n") && lstat(one, &status) == 0 && status.st_ino == oracle_test_replay_inode &&
+                          lstat(two, &status) == 0 && lstat(marker, &status) != 0;
+    oracle_replay_restoring = 0;
+    oracle_test_expect(test, replaced, "replays: a replacement during failure is never unlinked or renamed");
+    // Changes to a created file's original permissions after creation are not accepted as the cache result.
+    oracle_test_created_reset(directory);
+    oracle_test_created_action = 5;
+    oracle_replay_created = oracle_test_created_initial;
+    const bool changed_mode = !oracle_test_created_run(&cache, directory, 0, &taken, false) && !taken && lstat(one, &status) == 0 && (status.st_mode & 0777) == 0 &&
+                              lstat(marker, &status) != 0;
+    oracle_replay_created = 0;
+    oracle_test_created_action = 0;
+    oracle_test_expect(test, changed_mode, "replays: changed permissions on a created output refuse the take");
+    // O_RDWR retained at creation permits verification even if the new files have no read permission.
+    oracle_test_created_reset(directory);
+    const mode_t mask = umask(0444);
+    const bool masked = oracle_test_created_run(&cache, directory, 0, &taken, false) && taken && lstat(one, &status) == 0 && (status.st_mode & 0777) == 0222 && status.st_size == 1 &&
+                        lstat(two, &status) == 0 && (status.st_mode & 0777) == 0222 && status.st_size == 1;
+    umask(mask);
+    oracle_test_expect(test, masked, "replays: write-only created outputs can be verified through their descriptors");
+    oracle_test_created_reset(directory);
+    oracle_cache_close(&cache);
+
+    // A later existing output is restored on failure, while the earlier created output is left alone.
+    oracle_test_open(test, &cache, "use", "created-mixed");
+    oracle_test_created_reset(directory);
+    const bool mixed_seeded = oracle_test_write(two, "prior", 5) && oracle_test_created_run(&cache, directory, 0, &taken, false) && !taken;
+    oracle_test_created_reset(directory);
+    const bool mixed_hit = oracle_test_write(two, "prior", 5) && oracle_test_created_run(&cache, directory, 0, &taken, false) && taken;
+    const uint32_t mixed_steps = oracle_replay_steps;
+    bool mixed = mixed_seeded && mixed_hit && mixed_steps >= 5;
+    for (uint32_t offset = 1; mixed && offset <= 2; offset += 1)
+    {
+        oracle_test_created_reset(directory);
+        mixed = oracle_test_write(two, "prior", 5) && !oracle_test_created_run(&cache, directory, 1ull << (mixed_steps - offset), &taken, false) && !taken &&
+                oracle_test_created_text(directory, "replay-one", "A") && oracle_test_created_text(directory, "replay-two", "prior") && lstat(marker, &status) != 0;
+    }
+    oracle_test_expect(test, mixed, "replays: failed mixed creation restores existing output without removing created output");
+    oracle_test_created_reset(directory);
+    oracle_cache_close(&cache);
+
+    // A path the entry expects absent can appear after an earlier creation; it too remains untouched.
+    oracle_test_open(test, &cache, "use", "created-removal");
+    oracle_test_created_reset(directory);
+    const bool seeded = oracle_test_created_run(&cache, directory, 0, &taken, true) && !taken;
+    oracle_test_created_reset(directory);
+    oracle_test_created_action = 1;
+    oracle_replay_written = oracle_test_created_written;
+    const bool appeared = seeded && !oracle_test_created_run(&cache, directory, 0, &taken, true) && !taken &&
+                          oracle_test_created_text(directory, "replay-one", "A") && oracle_test_created_text(directory, "replay-two", "foreign\n") &&
+                          lstat(two, &status) == 0 && status.st_ino == oracle_test_replay_inode && lstat(marker, &status) != 0;
+    oracle_replay_written = 0;
+    oracle_test_created_action = 0;
+    oracle_test_expect(test, appeared, "replays: a foreign path appearing before an absent removal survives");
+    oracle_test_created_reset(directory);
+    oracle_cache_close(&cache);
+}
+
+// A run in `directory` through `cache` (the large replays', oracle_test_replay_large): `cat replay-big-source >
+// replay-big`, replay-big declared, or if `removal`, `rm -f replay-big-gone`, replay-big-gone declared. Whether it ran or
+// took its entry, and whether it took it.
+static bool oracle_test_replay_big(OracleCache* cache, const char* directory, bool removal, bool* taken)
+{
+    char big[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(big, sizeof(big), "%s/%s", directory, removal ? "replay-big-gone" : "replay-big");
+    char* written[] = { "sh", "-c", "cat replay-big-source > replay-big", 0 };
+    char* removed[] = { "sh", "-c", "rm -f replay-big-gone", 0 };
+    const char* files[] = { big };
+    OracleRun run = {
+        .cache = cache,
+        .purpose = "oracle test: a large replay",
+        .arguments = removal ? removed : written,
+        .directory = directory,
+        .files = files,
+        .file_count = 1,
+    };
+    const bool result = oracle_run(&run);
+    *taken = run.taken;
+    oracle_run_release(&run);
+    return result;
+}
+
+// How much a child process's peak resident memory grows, in KiB, as it reads the large replay's file once (`what` 0), or
+// takes the entry of the large replay that writes it (1) or of the one that removes its other file (2), with whether it
+// took it into `taken`: -1 if it can't be told. The child gives back the free memory it shares with its parent
+// (malloc_trim), whose pages a buffer grown into them wouldn't add to what it has resident, then starts its peak at what
+// it has resident (writing 5 to /proc/self/clear_refs), as a fork's is its parent's, which hides growth below the
+// parent's own peak. Mappings stand for large allocations (M_MMAP_THRESHOLD fixed, so that a growing buffer is remapped
+// rather than copied), so that a copy of the file is its size again.
+static int64_t oracle_test_replay_peak(OracleCache* cache, const char* directory, uint32_t what, bool* taken)
+{
+    int ends[2] = { -1, -1 };
+    const pid_t child = pipe(ends) == 0 ? fork() : -1;
+    if (child == 0)
+    {
+        close(ends[0]);
+        mallopt(M_MMAP_THRESHOLD, 128 * 1024);
+        malloc_trim(0);
+        char big[BUSTER_ORACLE_PATH_BYTES + 32];
+        snprintf(big, sizeof(big), "%s/replay-big", directory);
+        const int refs = open("/proc/self/clear_refs", O_WRONLY | O_CLOEXEC);
+        const bool reset = refs >= 0 && write(refs, "5", 1) == 1;
+        if (refs >= 0)
+        {
+            close(refs);
+        }
+        struct rusage before;
+        struct rusage after;
+        getrusage(RUSAGE_SELF, &before);
+        bool took = false;
+        OracleBuffer buffer = { 0 };
+        const bool done = what != 0 ? oracle_test_replay_big(cache, directory, what == 2, &took) : oracle_buffer_file(&buffer, big);
+        getrusage(RUSAGE_SELF, &after);
+        free(buffer.bytes);
+        const int64_t report[2] = { reset && done ? (int64_t)(after.ru_maxrss - before.ru_maxrss) : -1, took };
+        const bool written = write(ends[1], report, sizeof(report)) == (ssize_t)sizeof(report);
+        _exit(written ? 0 : 1);
+    }
+    if (ends[1] >= 0)
+    {
+        close(ends[1]);
+    }
+    int64_t report[2] = { -1, 0 };
+    const bool read_whole = child > 0 && read(ends[0], report, sizeof(report)) == (ssize_t)sizeof(report);
+    int status = 0;
+    const bool waited = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (ends[0] >= 0)
+    {
+        close(ends[0]);
+    }
+    *taken = report[1] != 0;
+    return read_whole && waited ? report[0] : -1;
+}
+
+// A large replay, 16 MiB, compared against one read of the file in a child without a sanitizer: an existing
+// rewritten output takes less than 2.7 times one read, since the check uses a bounded buffer. A present
+// output to remove instead misses and the tool removes it.
+static void oracle_test_replay_large(OracleTest* test)
+{
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "replay-large");
+    const char* directory = test->runs[0];
+    char source[BUSTER_ORACLE_PATH_BYTES + 32];
+    char big[BUSTER_ORACLE_PATH_BYTES + 32];
+    char gone[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(source, sizeof(source), "%s/replay-big-source", directory);
+    snprintf(big, sizeof(big), "%s/replay-big", directory);
+    snprintf(gone, sizeof(gone), "%s/replay-big-gone", directory);
+    const uint64_t size = 16u << 20;
+    uint8_t* bytes = malloc(size);
+    for (uint64_t i = 0; bytes != 0 && i < size; i += 1)
+    {
+        bytes[i] = (uint8_t)(i * 131 + (i >> 16));
+    }
+    unlink(big);
+    bool taken = false;
+    const bool first = bytes != 0 && oracle_test_write(source, bytes, size) && oracle_test_replay_big(&cache, directory, false, &taken) && !taken;
+    const int64_t once = first ? oracle_test_replay_peak(&cache, directory, 0, &taken) : -1;
+    const int64_t took = once > 0 ? oracle_test_replay_peak(&cache, directory, 1, &taken) : -1;
+    uint64_t length = 0;
+    char* left = taken ? oracle_test_read(big, &length) : 0;
+    const bool right = left != 0 && length == size && memcmp(left, bytes, size) == 0;
+    free(left);
+    bool kept_first = false;
+    const bool removal = bytes != 0 && oracle_test_write(gone, bytes, size) && oracle_test_replay_big(&cache, directory, true, &kept_first) && !kept_first;
+    bool removed = false;
+    const int64_t removing = removal && oracle_test_write(gone, bytes, size) ? oracle_test_replay_peak(&cache, directory, 2, &removed) : -1;
+    struct stat status;
+    const bool gone_right = !removed && lstat(gone, &status) != 0 && errno == ENOENT && oracle_test_replay_kept(directory, false) == 0;
+    free(bytes);
+#if __has_feature(address_sanitizer) || __has_feature(memory_sanitizer) || __has_feature(thread_sanitizer)
+    const bool bounded = true;
+#else
+    const bool bounded = took >= 0 && took * 10 < once * 27;
+#endif
+    printf("oracle cache: a large take's peak grew by %lld KiB, a large removal's by %lld KiB, one read of its file by %lld KiB\n", (long long)took,
+           (long long)removing, (long long)once);
+    oracle_test_expect(test, first && taken && right && bounded, "replays: a large output taken without a copy of it for its check");
+    oracle_test_expect(test, removal && removing >= 0 && gone_right, "replays: a large output to remove is left to the tool");
+    unlink(source);
+    unlink(big);
+    unlink(gone);
     oracle_cache_close(&cache);
 }
 
@@ -2269,6 +3381,8 @@ static void oracle_test_damaged(OracleTest* test)
     oracle_run_release(&run);
     uint32_t key_word = 0;
     memcpy(&key_word, run.key.bytes + 4, sizeof(key_word));
+    uint32_t legacy_magic = 0;
+    memcpy(&legacy_magic, "ORC3", sizeof(legacy_magic));
     typedef struct OracleTestDamage OracleTestDamage;
     struct OracleTestDamage
     {
@@ -2280,6 +3394,7 @@ static void oracle_test_damaged(OracleTest* test)
     };
     const OracleTestDamage damages[] = {
         { "a changed magic", 0, 0x54535543u, -1, false },
+        { "an entry with the older package-path rules", 4, legacy_magic, -1, false },
         { "a changed key", (int64_t)offsetof(OracleEntryHeader, key) + 4, key_word ^ 1u, -1, false },
         { "a changed body length", (int64_t)offsetof(OracleEntryHeader, body), 7, -1, false },
         { "too many roots", (int64_t)offsetof(OracleEntryHeader, roots), BUSTER_ORACLE_ROOTS + 1, -1, false },
@@ -2692,17 +3807,24 @@ static int run_oracle_cache_tests(int argc, char** argv)
         oracle_test_roots(&test);
         oracle_test_trailing_root(&test);
         oracle_test_trailing_dependencies(&test);
+        oracle_test_empty_path(&test);
         oracle_test_runs(&test);
+        oracle_test_diagnostic_environment(&test);
         oracle_test_dependencies(&test);
+        oracle_test_dependency_environment(&test);
         oracle_test_identities(&test);
         oracle_test_tracing(&test);
         oracle_test_variants(&test);
         oracle_test_permissions(&test);
         oracle_test_path_rules(&test);
+        oracle_test_path_spellings(&test);
         oracle_test_kernel(&test);
         oracle_test_streams(&test);
         oracle_test_numbers(&test);
         oracle_test_outputs(&test);
+        oracle_test_replays(&test);
+        oracle_test_created(&test);
+        oracle_test_replay_large(&test);
         oracle_test_listings(&test);
         oracle_test_changes(&test);
         oracle_test_unfollowed(&test);
@@ -2738,12 +3860,12 @@ static int run_oracle_cache_tests(int argc, char** argv)
         unlink(test.helper);
     }
     oracle_epoch_end(epoch);
-    static const char* const directories[] = { "runs/oracle",        "dependencies/oracle", "identities/oracle", "tracing/oracle",
-                                               "variants/oracle",    "permissions/oracle",  "kernel/oracle",     "outputs/oracle",
+    static const char* const directories[] = { "empty-path/oracle",  "runs/oracle", "diagnostic-environment/oracle",         "dependencies/oracle", "identities/oracle", "tracing/oracle",
+                                               "variants/oracle",    "permissions/oracle",  "kernel/oracle",     "outputs/oracle",      "replays/oracle",      "replay-large/oracle",
                                                "listings/oracle",    "changes/oracle",      "streams/oracle",    "streams-other/oracle",
-                                               "streams-terminal/oracle", "numbers/oracle",
+                                               "streams-terminal/oracle", "numbers/oracle", "path-spellings/oracle",
                                                "unfollowed/oracle",  "groups/oracle",       "check/oracle",      "damaged/oracle",
-                                               "writers/oracle",     "process/one/two/buster/oracle", "adapter/oracle", "fresh/oracle", "" };
+                                               "writers/oracle",     "process/one/two/buster/oracle", "adapter/oracle", "fresh/oracle", "dependency-environment/oracle", "" };
     for (uint32_t i = 0; made && i < sizeof(directories) / sizeof(directories[0]); i += 1)
     {
         oracle_test_remove(test.base, directories[i]);

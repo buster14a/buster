@@ -690,6 +690,7 @@ static int run_ir_parse_tests(int argc, char** argv)
                 "tests/ir/labels.ir",
                 "tests/ir/aggregates.ir",
                 "tests/ir/vector-mask.ir",
+                "tests/ir/vector-lanes.ir",
                 "tests/ir/empty.ir",
                 "tests/ir/tier0-add.ir",
                 "tests/ir/hello.ir",
@@ -697,7 +698,9 @@ static int run_ir_parse_tests(int argc, char** argv)
                 "tests/ir/atomics.ir",
                 "tests/ir/wide.ir",
                 "tests/ir/intrinsics.ir",
+                "tests/ir/splats.ir",
                 "tests/ir/rows.ir",
+                "tests/ir/carrier-rows.ir",
             };
             for (uint32_t i = 0; i < sizeof(fixtures) / sizeof(fixtures[0]); i += 1)
             {

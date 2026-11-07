@@ -112,8 +112,9 @@ static void ir_simd_scan_test(IrTestTally* tally)
 }
 
 // A function whose only SIMD values are masks (#179): its masks loaded, complemented and stored. SSA promotion and SCCP,
-// dead code and CFG cleanup take it (ir_function_has_vectors), by both paths, into a function that verifies; GVN, LICM,
-// SROA and the inliner, which don't model masks, still refuse it transactionally.
+// dead code and CFG cleanup take it (ir_function_has_vectors), by both paths, into a function that verifies; GVN, LICM
+// and SROA (without #1282's `simd`), which don't model masks, still refuse it transactionally. The inliner takes it
+// (#1282): it clones a callee's values whatever their types.
 static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* output, Arena* scratch)
 {
     static const uint8_t masks[4] = { IR_M8, IR_M16, IR_M32, IR_M64 };
@@ -150,19 +151,21 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* 
                 ir_test_expect(tally, checked.error == IR_OK && ir_verify_scalar(&optimized.function, scratch, NULL).error == IR_OK && scratch->length == 0,
                                "SCCP, dead code and CFG cleanup take a function of masks alone, into a function that verifies");
                 arena_pop_to(output, 0);
-                // GVN, LICM, SROA and the inliner find the masks by ir_function_has_simd_path, by their requested path
-                // (#141's review): a scalar run takes its scalar twin alone.
+                // GVN and LICM now model masks (#1450). SROA's default admission still finds them by the requested
+                // scan path (#141's review): a scalar run takes its scalar twin alone.
                 const uint64_t scans = ir_scan_vector_paths;
                 IrGvnResult gvn = { .function.instruction_count = 123 };
                 IrGvnOptions gvn_options = ir_gvn_options();
                 gvn_options.scalar = scalar != 0;
                 checked = ir_optimize_gvn(&function, output, scratch, gvn_options, &gvn);
-                ir_test_expect(tally, checked.error == IR_ERROR_UNSUPPORTED && gvn.function.instruction_count == 123 && output->length == 0 && scratch->length == 0, "GVN refuses masks");
+                ir_test_expect(tally, checked.error == IR_OK && gvn.function.instruction_count == function.instruction_count && scratch->length == 0, "GVN preserves mask loads and stores");
+                arena_pop_to(output, 0);
                 IrLicmResult licm = { .function.instruction_count = 123 };
                 IrLicmOptions licm_options = ir_licm_options();
                 licm_options.scalar = scalar != 0;
                 checked = ir_optimize_licm(&function, output, scratch, licm_options, &licm);
-                ir_test_expect(tally, checked.error == IR_ERROR_UNSUPPORTED && licm.function.instruction_count == 123 && output->length == 0 && scratch->length == 0, "LICM refuses masks");
+                ir_test_expect(tally, checked.error == IR_OK && licm.function.instruction_count == function.instruction_count && scratch->length == 0, "LICM preserves mask loads and stores");
+                arena_pop_to(output, 0);
                 IrSroaResult sroa = { .function.instruction_count = 123 };
                 const IrSroaOptions sroa_options = { .scalar = scalar != 0 };
                 checked = ir_optimize_sroa(&function, output, scratch, sroa_options, &sroa);
@@ -175,7 +178,9 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* 
                 IrInlineOptions inline_options = ir_inline_options();
                 inline_options.scalar = scalar != 0;
                 checked = ir_optimize_inline(&unit, output, scratch, inline_options, &inlined, NULL);
-                ir_test_expect(tally, checked.error == IR_ERROR_UNSUPPORTED && inlined.function_count == 123 && output->length == 0 && scratch->length == 0, "the inliner refuses masks");
+                ir_test_expect(tally, checked.error == IR_OK && inlined.function_count == 1 && inlined.functions[0].instruction_count == function.instruction_count && scratch->length == 0,
+                               "the inliner takes masks (#1282)");
+                arena_pop_to(output, 0);
                 ir_test_expect(tally, scalar != 0 ? ir_scan_vector_paths == scans : !BUSTER_HOST_VECTOR || ir_scan_vector_paths > scans,
                                "the passes' scans for SIMD values take the requested path: none the vector path on a scalar run");
                 function.symbol_count = 0;
@@ -187,8 +192,8 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* 
 
 // A function with vectors (#141), at each width: a constant x stored into a slot of its vector type and loaded back, x + x
 // compared lanewise below a constant y and the lesser selected, and the lanes where that selection is y returned as a
-// mask. SSA promotion takes its slot (no load or store left), and SCCP, dead code and CFG cleanup take it without
-// folding a vector, both constants' payloads kept, by both paths, into functions that verify and that the shared
+// mask. SSA promotion takes its slot (no load or store left), and SCCP, dead code and CFG cleanup fold the lanes,
+// both original constants' payloads kept, by both paths, into functions that verify and that the shared
 // interpreter runs to the mask the lanes give.
 static void ir_simd_vector_consumer_test(IrTestTally* tally, Arena* input, Arena* output, Arena* scratch)
 {
@@ -253,9 +258,9 @@ static void ir_simd_vector_consumer_test(IrTestTally* tally, Arena* input, Arena
                 {
                     vector_values += ((BUSTER_IR_VECTORS >> optimized.function.type[i]) & 1) != 0;
                 }
-                ir_test_expect(tally, checked.error == IR_OK && ir_verify_scalar(&optimized.function, scratch, NULL).error == IR_OK && vector_values == 4 &&
+                ir_test_expect(tally, checked.error == IR_OK && ir_verify_scalar(&optimized.function, scratch, NULL).error == IR_OK && vector_values == 0 && optimized.function.instruction_count == 2 &&
                                           optimized.function.vector_constant_count == 2 && memcmp(optimized.function.vector_constants, function.vector_constants, 2 * sizeof(IrSimdValue)) == 0,
-                               "SCCP, dead code and CFG cleanup take a function with vectors, folding none, into a function that verifies");
+                               "SCCP folds promoted constant lanes through compare and select to a verified constant mask");
                 arena_pop_to(scratch, 0);
                 const IrFunction* const forms[3] = { &function, &promoted, &optimized.function };
                 for (uint32_t form = 0; checked.error == IR_OK && form < 3; form += 1)
@@ -319,14 +324,16 @@ static int run_ir_simd_tests(int argc, char** argv)
             IrGvnOptions gvn_options = ir_gvn_options();
             gvn_options.scalar = scalar != 0;
             checked = ir_optimize_gvn(&function, &output, &scratch, gvn_options, &gvn);
-            ir_test_expect(&tally, checked.error == IR_ERROR_UNSUPPORTED && gvn.function.instruction_count == 123 && output.length == 0 && scratch.length == 0,
-                           "GVN refuses unsupported SIMD without merging distinct semantic shapes");
+            ir_test_expect(&tally, checked.error == IR_OK && gvn.function.instruction_count == 2 && gvn.function.vector_constant_count == 1 && scratch.length == 0,
+                           "GVN takes SIMD and preserves a vector constant's payload");
+            arena_pop_to(&output, 0);
             IrLicmResult licm = { .function.instruction_count = 123 };
             IrLicmOptions licm_options = ir_licm_options();
             licm_options.scalar = scalar != 0;
             checked = ir_optimize_licm(&function, &output, &scratch, licm_options, &licm);
-            ir_test_expect(&tally, checked.error == IR_ERROR_UNSUPPORTED && licm.function.instruction_count == 123 && output.length == 0 && scratch.length == 0,
-                           "LICM refuses unsupported SIMD before changing memory/effect order");
+            ir_test_expect(&tally, checked.error == IR_OK && licm.function.instruction_count == 2 && licm.function.vector_constant_count == 1 && scratch.length == 0,
+                           "LICM takes SIMD and preserves a vector constant's payload");
+            arena_pop_to(&output, 0);
             IrSroaResult sroa = { .function.instruction_count = 123 };
             const IrSroaOptions sroa_options = { .scalar = scalar != 0 };
             checked = ir_optimize_sroa(&function, &output, &scratch, sroa_options, &sroa);
@@ -339,8 +346,11 @@ static int run_ir_simd_tests(int argc, char** argv)
             IrInlineOptions inline_options = ir_inline_options();
             inline_options.scalar = scalar != 0;
             checked = ir_optimize_inline(&unit, &output, &scratch, inline_options, &inlined, NULL);
-            ir_test_expect(&tally, checked.error == IR_ERROR_UNSUPPORTED && inlined.function_count == 123 && output.length == 0 && scratch.length == 0,
-                           "inlining refuses unsupported SIMD metadata before cloning a unit");
+            ir_test_expect(&tally, checked.error == IR_OK && inlined.function_count == 1 && inlined.functions[0].vector_constant_count == 1 &&
+                                       memcmp(inlined.functions[0].vector_constants, function.vector_constants, sizeof(IrSimdValue)) == 0 && scratch.length == 0,
+                           "inlining clones a unit with vectors, its constants' payloads kept (#1282)");
+            arena_pop_to(&output, 0);
+            inlined = (IrInlineResult){ .function_count = 123 };
             IrSimdValue* original_payload = function.vector_constants;
             IrSimdValue* borrowed = (IrSimdValue*)output.base;
             *borrowed = (IrSimdValue){ .words = { UINT64_C(0xfedcba9876543210) } };

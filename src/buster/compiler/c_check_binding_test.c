@@ -834,6 +834,8 @@ static void check_test_binding_compatibility_capacity(CheckTest* test)
                 }
                 const TypeAnswer compatible = type_compatible(&types.table, function, function);
                 check_input_bind(&reader, 1, 2);
+                check_test_expect(test, !check_sparse_wide_present(input.attributes) && input.sparse_pool == NULL,
+                                  "binding compatibility retains absent optional attribute storage");
                 const bool released = internal.arena->length == internal.length;
                 internal.arena->capacity = capacity;
                 scratch_end(internal);
@@ -851,6 +853,72 @@ static void check_test_binding_compatibility_capacity(CheckTest* test)
                                       "compatible declaration control lost acceptance or linked object identity");
                 }
             }
+        }
+    }
+    arena_release(&storage);
+    check_test_types_close(&types);
+}
+
+// A declaration can bind before a constant job publishes its attributes. The later attribute consumers must still
+// distinguish a closed block's redeclaration from a block's first declaration of an otherwise invisible entity.
+static void check_test_binding_attribute_scope(CheckTest* test)
+{
+    CheckTestTypes types = { 0 };
+    Arena storage = arena_reserve(UINT64_C(1) << 16);
+    const bool ready = check_test_types_open(&types) && storage.base != NULL;
+    const TypeId function = ready ? type_function(&types.table, BUSTER_TYPE_VOID, NULL, 0, BUSTER_TYPE_FLAG_PROTOTYPE) : 0;
+    uint32_t names[] = { 1, 1, 1, 1 };
+    Parser parser = { .tokens = { .count = BUSTER_ARRAY_LENGTH(names), .names = names } };
+    check_test_expect(test, ready && function != 0, "delayed attribute scope fixture allocation");
+    for (uint32_t hidden = 0; ready && function != 0 && hidden < 2; hidden += 1)
+    {
+        arena_pop_to(&storage, 0);
+        CBindings bindings;
+        const bool bound = c_bindings_initialize(&bindings, &storage, 2, 8) &&
+                           c_bindings_declare(&bindings, C_BINDING_ORDINARY, 1, C_BINDING_FUNCTION, 0, 0, 0) != 0 &&
+                           (!hidden || c_bindings_restore(&bindings, 0, 1));
+        check_test_expect(test, bound, "delayed attribute scope preceding declaration");
+        if (bound)
+        {
+            TypeId declared_types[] = { function, function, 0, 0 };
+            uint8_t kinds[] = { C_BINDING_FUNCTION, C_BINDING_FUNCTION, 0, 0 };
+            uint8_t bits[] = { 2u << BUSTER_CHECK_BITS_LINKAGE_SHIFT, 2u << BUSTER_CHECK_BITS_LINKAGE_SHIFT, 0, 0 };
+            uint32_t definitions[4] = { 0 };
+            uint32_t objects[] = { 1, 2, 0, 0 };
+            uint32_t linked_declarations[] = { 0, 1 };
+            TypeId linked_types[] = { 0, function };
+            uint32_t scope_ends[] = { 2 };
+            CheckInputReport reports[4];
+            CheckInput input = {
+                .reports = reports,
+                .report_capacity = BUSTER_ARRAY_LENGTH(reports),
+                .declaration_bits = bits,
+            };
+            CheckInputReader reader = {
+                .output = &input,
+                .parser = &parser,
+                .types = &types.table,
+                .arena = &storage,
+                .bindings = bindings,
+                .declared_types = declared_types,
+                .declaration_kinds = kinds,
+                .declaration_bits = bits,
+                .definition_origins = definitions,
+                .objects = objects,
+                .linked_declarations = linked_declarations,
+                .linked_types = linked_types,
+                .scope_count = 1,
+                .scope_ends = scope_ends,
+            };
+            check_input_bind(&reader, 1, 2);
+            check_test_expect(test, !check_sparse_wide_present(input.attributes) && input.sparse_pool == NULL,
+                              "delayed attribute scope retains absent optional attribute storage");
+            check_test_expect(test, !input.resource && input.report_count == 0 && objects[1] == objects[0],
+                              "delayed attribute scope retains the linked declaration's entity");
+            check_test_expect(test, check_input_declaration_visible(&reader, 1, 2) &&
+                                   check_input_declaration_visible(&reader, 1, 3) == (hidden != 0),
+                              hidden ? "a first block declaration remains available to a later otherwise invisible linked declaration" :
+                                       "attributes published after binding cannot escape their declaration's closed block");
         }
     }
     arena_release(&storage);
@@ -1149,6 +1217,7 @@ static __attribute__((noinline)) void check_test_bindings(CheckTest* test)
     check_test_binding_guards(test);
     check_test_binding_column_failures(test);
     check_test_binding_compatibility_capacity(test);
+    check_test_binding_attribute_scope(test);
     check_test_binding_recovery_limits(test);
 }
 

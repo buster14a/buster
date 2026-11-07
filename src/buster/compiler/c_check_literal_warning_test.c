@@ -2,6 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Original source-format boundaries, independently checked with Clang 23. Include after c_checker_test.c's helpers.
 
+#include "c_check_literal_quad_test.c"
+
 typedef struct CheckTestLiteralRange CheckTestLiteralRange;
 struct CheckTestLiteralRange
 {
@@ -57,6 +59,7 @@ static const CheckTestLiteralRange check_test_literal_range_cases[] =
 };
 static void check_test_literal_warnings(CheckTest* test, Arena* scratch)
 {
+    check_test_literal_quad(test, scratch);
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(check_test_literal_range_cases); c += 1)
     {
         const CheckTestLiteralRange* item = check_test_literal_range_cases + c;

@@ -224,6 +224,8 @@ static bool ir_optimize_test_equal(const IrFunction* a, const IrFunction* b)
         equal = equal && memcmp(a->block_offsets, b->block_offsets, ((uint64_t)a->block_count + 1) * 4) == 0;
         equal = equal && (a->extra_count == 0 || memcmp(a->extra, b->extra, (uint64_t)a->extra_count * 4) == 0);
         equal = equal && (a->constant_count == 0 || memcmp(a->constants, b->constants, (uint64_t)a->constant_count * sizeof(IrConstant)) == 0);
+        equal = equal && a->vector_constant_count == b->vector_constant_count &&
+                (a->vector_constant_count == 0 || memcmp(a->vector_constants, b->vector_constants, (uint64_t)a->vector_constant_count * sizeof(IrSimdValue)) == 0);
         equal = equal && (a->call_count == 0 || memcmp(a->calls, b->calls, (uint64_t)a->call_count * sizeof(IrCall)) == 0);
         equal = equal && a->label_count == b->label_count && (a->label_count == 0 || memcmp(a->labels, b->labels, (uint64_t)a->label_count * 4) == 0);
         equal = equal && a->abi_call_count == b->abi_call_count && (a->abi_call_count == 0 || memcmp(a->abi_calls, b->abi_calls, (uint64_t)a->abi_call_count * sizeof(IrAbiCall)) == 0);
@@ -1101,6 +1103,63 @@ static void ir_optimize_test_records(IrOptimizeTest* test, Arena* input, Arena* 
     }
 }
 
+// An unused vector comparison (#141's element types, #1413's review): of floating lanes it stays, a floating-environment
+// effect (a NaN operand raises invalid) as fcmp's is, and of integer lanes it goes, by both paths, a batch of each
+// beside the function's other instructions so that the vector path's roots read both kinds in one batch.
+static void ir_optimize_test_vector_compares(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
+{
+    IrFunction f = { 0 };
+    const IrSizes sizes = { .instruction_count = 9, .block_count = 1, .parameter_count = 2 };
+    const bool created = ir_create(input, &sizes, &f) == IR_OK;
+    ir_optimize_test_expect(test, created, "vector comparisons fixture allocation");
+    if (created)
+    {
+        f.parameter_types[0] = IR_V4I32;
+        f.parameter_types[1] = IR_V4I32;
+        f.result_type = IR_VOID;
+        f.block_offsets[1] = 9;
+        ir_optimize_test_instruction(&f, 0, IR_PARAM, IR_V4I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, 1, IR_PARAM, IR_V4I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        // Floats', doubles', 32-bit and 8-bit integers' comparisons, then a floating addition, all unused.
+        ir_optimize_test_instruction(&f, 2, IR_VCMP, IR_M8, 0, 1, IR_LT);
+        f.flags[2] = IR_SIMD_LANE_F32;
+        ir_optimize_test_instruction(&f, 3, IR_VCMP, IR_M8, 0, 1, IR_EQ);
+        f.flags[3] = IR_SIMD_LANE_F64;
+        ir_optimize_test_instruction(&f, 4, IR_VCMP, IR_M8, 0, 1, IR_ULT);
+        ir_optimize_test_instruction(&f, 5, IR_VCMP, IR_M16, 0, 1, IR_GT);
+        f.flags[5] = IR_SIMD_LANE_I8;
+        ir_optimize_test_instruction(&f, 6, IR_FADD, IR_V4I32, 0, 1, BUSTER_IR_NONE);
+        f.flags[6] = IR_SIMD_LANE_F32;
+        ir_optimize_test_instruction(&f, 7, IR_ADD, IR_V4I32, 0, 1, BUSTER_IR_NONE);
+        f.flags[7] = IR_SIMD_LANE_I16;
+        ir_optimize_test_instruction(&f, 8, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_expect(test, ir_verify(&f, scratch, 0).error == IR_OK, "vector comparisons fixture verifies");
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            const uint64_t mark = output->length;
+            IrOptimizeOptions options = ir_optimize_options();
+            options.path = path != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
+            IrOptimizeResult result = { 0 };
+            const IrCheck check = ir_optimize(&f, output, scratch, options, &result);
+            const IrFunction* out = &result.function;
+            uint32_t floating = 0;
+            uint32_t integer = 0;
+            uint32_t additions = 0;
+            for (uint32_t i = 0; check.error == IR_OK && i < out->instruction_count; i += 1)
+            {
+                floating += out->op[i] == IR_VCMP && out->flags[i] >= IR_SIMD_LANE_F32;
+                integer += out->op[i] == IR_VCMP && out->flags[i] < IR_SIMD_LANE_F32;
+                additions += out->op[i] == IR_FADD ? 1 : out->op[i] == IR_ADD ? 16 : 0;
+            }
+            ir_optimize_test_expect(test, check.error == IR_OK && floating == 2 && integer == 0 && additions == 1,
+                                    path == 0 ? "the vector path keeps an unused floating comparison and drops an integer one" :
+                                                "the scalar path keeps an unused floating comparison and drops an integer one");
+            arena_pop_to(output, mark);
+        }
+    }
+    arena_pop_to(input, 0);
+}
+
 static void ir_optimize_test_ir(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(16ull << 20);
@@ -1159,6 +1218,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
         }
         ir_optimize_test_threading(test, &scratch);
         ir_optimize_test_records(test, &input, &vector, &scalar, &scratch);
+        ir_optimize_test_vector_compares(test, &input, &vector, &scratch);
         ir_optimize_test_limits(test, &input, &vector, &scratch);
         ir_optimize_test_entry_phi(test, &input, &vector, &scratch);
         for (uint32_t length = 0; length < 130; length += 1)
@@ -1182,6 +1242,8 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
 // #175's text-form pass fixtures, defined after the per-pass implementations in ir_optimize_text_test.c.
 static void ir_optimize_text_tests(IrOptimizeTest* test);
 static int ir_optimize_text_print_fixtures(void);
+
+#include "ir_optimize_simd_test.c"
 
 static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
 {
@@ -1216,6 +1278,7 @@ static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
         ir_optimize_test_folds(&test);
         ir_optimize_test_fold_guards(&test);
         ir_optimize_test_ir(&test);
+        ir_optimize_test_simd(&test);
         ir_optimize_text_tests(&test);
         printf("ir-optimize: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;

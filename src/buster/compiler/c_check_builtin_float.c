@@ -456,6 +456,11 @@ static void check_builtin_float_nan_argument(TypeTable* table, const CheckBuilti
 // convert to; two constants fold, quietly, to the int the comparison gives.
 static void check_builtin_float_compare(TypeTable* table, const CheckBuiltinFloatAction* input, CheckBuiltinFloatResult* output, CheckValue* values)
 {
+    if ((input->context.fp_environment & BUSTER_CHECK_FP_EVAL_MASK) != 0)
+    {
+        check_action_fp_promote(table, values, output->argument_conversions, input->node, input->context.fp_environment);
+        check_action_fp_promote(table, values + 1, output->argument_conversions + 1, input->node, input->context.fp_environment);
+    }
     const bool arithmetic = check_action_is_arithmetic(table, values[0].type) && check_action_is_arithmetic(table, values[1].type);
     const TypeId common = arithmetic ? type_usual_arithmetic(table, values[0].type, values[1].type) : 0;
     if (common == 0 || check_action_kind(table, common) != BUSTER_TYPE_KIND_FLOATING)

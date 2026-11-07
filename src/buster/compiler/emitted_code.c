@@ -13,7 +13,8 @@
 //
 // - the code: the instruction records, the branch columns (each branch's record and its target's record, ascending,
 //   which branch sizing reads), the symbolic references (LinkReference, by marked instruction) and each label's first
-//   record, where the emission defines the label's symbol;
+//   record, where the emission defines the label's symbol. UINT32_MAX marks a label without code, which no indirect
+//   branch reaches; its symbol still gets a placeholder at the function's start. Record 0 remains a real target;
 // - optional source events (-g only; none otherwise, so a compile without -g pays for none): `source_count` events, event
 //   e at the RIGHT side of record boundary source_records[e] (nondecreasing), whose origin is source_origins[e], an
 //   index into the body's typed entries (the lowering's entry tokens), or event e itself where source_origins is null
@@ -30,10 +31,10 @@
 //
 // emitted_verify_frames proves the frame events against the records and their control flow (with --verify, and in the
 // tests): see its comment. Producers' own checks run at their production; a frame a producer can't describe is
-// EMITTED_FRAME_UNDESCRIBED, which the emission reports as the backend's failure at the function, and a fixed frame
-// whose CFA offset passes the events' signed 32-bit values EMITTED_FRAME_LIMIT, which it reports as unsupported (#1149).
+// EMITTED_FRAME_UNDESCRIBED, which the emission reports as the backend's failure at the function. Signed 64-bit frame
+// values cover every fixed imm32 allocation plus the return address and callee-saved pushes (#1149).
 
-#define BUSTER_EMITTED_UNKNOWN INT32_MIN
+#define BUSTER_EMITTED_UNKNOWN INT64_MIN
 #define BUSTER_EMITTED_NONE 0xffu
 // The registers whose entry values the verifier follows: the general ones, and the return address's slot (16).
 #define BUSTER_EMITTED_TRACKED 17u
@@ -48,9 +49,6 @@ typedef enum EmittedFrameStatus
     EMITTED_FRAME_DESCRIBED,
     // The producer's frame is one its events can't describe, or isn't the frame it published.
     EMITTED_FRAME_UNDESCRIBED,
-    // A fixed frame whose CFA offset passes the events' signed 32-bit values (emitted_cfa_fits): within 56 bytes of 2 GB,
-    // which the fixed descriptor alone described (#1149).
-    EMITTED_FRAME_LIMIT,
     // No room for the events.
     EMITTED_FRAME_MEMORY,
 } EmittedFrameStatus;
@@ -65,8 +63,11 @@ struct EmittedCode
     uint32_t branch_count;
     LinkReference* references;
     uint32_t reference_count;
+    // First records by label index; UINT32_MAX is an absent label, not an indirect control-flow target.
     uint32_t* label_records;
     uint32_t label_count;
+    const Tier0Home* local_homes;
+    uint32_t local_count;
     const uint32_t* source_records;
     const uint32_t* source_origins;
     uint32_t source_count;
@@ -102,6 +103,15 @@ typedef enum EmittedVerifyError
     EMITTED_VERIFY_MEMORY,
 } EmittedVerifyError;
 
+typedef enum EmittedVerifyRule
+{
+    EMITTED_VERIFY_RULE_NONE,
+    EMITTED_VERIFY_RULE_CFA,
+    EMITTED_VERIFY_RULE_SAME,
+    EMITTED_VERIFY_RULE_OFFSET,
+    EMITTED_VERIFY_RULE_REGISTER,
+} EmittedVerifyRule;
+
 typedef struct EmittedVerdict EmittedVerdict;
 struct EmittedVerdict
 {
@@ -109,6 +119,14 @@ struct EmittedVerdict
     // The record where the rules first fail, and the last event applied before it (frame_count for none).
     uint32_t record;
     uint32_t event;
+    // The first rule that fails (refuted or unproven only). Registers use DWARF numbering; holder is a REGISTER
+    // rule's location. CFA/OFFSET compare CFA-relative offsets; SAME/REGISTER compare entry-register identities.
+    // BUSTER_EMITTED_UNKNOWN means the actual value is unknown. These fields do not decide the verdict.
+    EmittedVerifyRule rule;
+    uint32_t reg;
+    uint32_t holder;
+    int64_t expected;
+    int64_t actual;
 };
 
 static __attribute__((unused)) EmittedCode emitted_from_tier0(const Tier0Code* code, bool frames, bool sources, bool assembly, Arena* arena);
@@ -126,18 +144,178 @@ typedef enum EmittedSame
 static __attribute__((unused)) EmittedSame emitted_unwind_same(const UnwindFunction* a, const UnwindFunction* b, Arena* scratch);
 static __attribute__((unused)) EmittedVerdict emitted_verify_frames(const EmittedCode* code, Arena* scratch);
 
-// Whether a fixed frame's largest CFA offset, its pushes' and its allocation's, is one the events' signed 32-bit values
-// carry: a frame within 56 bytes of 2 GB isn't, which the fixed descriptor alone could describe.
-static bool emitted_cfa_fits(uint32_t saved, uint32_t frame_size)
+// How many registers a preserving function keeps for its caller past the callee-saved ones (#147): its general ones, and
+// the vector and mask ones of its preserve block, each with three rows (emitted_tier0_preserve_rows).
+static uint32_t emitted_tier0_preserved(const Tier0Code* code)
 {
-    return 8 + 8 * (uint64_t)__builtin_popcount(saved & 63) + frame_size <= INT32_MAX;
+    const bool block = tier0_preserve_block_bytes(code->frame_preserve_vectors, code->frame_preserve_vector_bytes, code->frame_preserve_mask_bytes) != 0;
+    return (uint32_t)__builtin_popcount(code->frame_preserved) + (block ? tier0_preserve_moves(code->frame_preserve_vectors, code->frame_preserve_mask_bytes) : 0);
 }
 
 // The rows of a fixed descriptor at most: the prologue's (2 per push and rbp's pointing, 15), the epilogue's (2 per
-// pop, 16) and each tail's (its bracket and the epilogue's, 18).
+// pop, 16) and each tail's (its bracket and the epilogue's, 18); an eh_return function's rdx's and rax's saves
+// (emitted_tier0_eh_rows); and a probed reservation's loop's two (#177, emitted_tier0_probe_rows), which only a frame
+// without a frame pointer has, and so never an eh_return function's.
 static uint64_t emitted_tier0_frame_room(const Tier0Code* code)
 {
-    return 31 + 18 * (uint64_t)code->tail_count;
+    return 31 + 18 * (uint64_t)code->tail_count + (code->frame_eh_return ? 4 + 2 * (uint64_t)code->tail_count : 0) + 2 +
+           3 * (uint64_t)emitted_tier0_preserved(code);
+}
+
+// A row into rows sorted by their offsets, after those at its offset or before (room for it). Returns the count.
+static uint32_t emitted_insert_row(EmissionFrameRow* rows, uint32_t count, EmissionFrameRow row)
+{
+    uint32_t at = count;
+    while (at > 0 && rows[at - 1].offset > row.offset)
+    {
+        rows[at] = rows[at - 1];
+        at -= 1;
+    }
+    rows[at] = row;
+    return count + 1;
+}
+
+// An eh_return function's frame (#148, Tier0Code.frame_eh_return): rdx's and rax's saves, which its prologue pushes after
+// the callee-saved registers and which no fixed descriptor describes, into its fixed shape's `count` rows (room for
+// emitted_tier0_frame_room's more): after the prologue's rows (rbp's three and one per push), at the boundary after rax's
+// push, as LLVM's CSR_64EHRet frame's CFI has them for libgcc's uw_install_context to write; a later row before that
+// boundary, a tail's remembered state at its row before, moves to it. Their rules are restored where their slots are
+// released: after the epilogue's release, which steps over them, after each __builtin_eh_return's pops of them (its
+// tail's, Tier0Code.tail_records: the release, rax's pop and rdx's, the other pops, rbp's, rsp's mov and the jump), and
+// after each musttail call's release, which steps over them as the epilogue's does (#148: a tail whose jump isn't
+// emitted_handed's).
+// Returns the rows' count.
+static bool emitted_handed(const X86Instruction* records, uint32_t i);
+
+static uint32_t emitted_tier0_eh_rows(const Tier0Code* code, EmissionFrameRow* rows, uint32_t count)
+{
+    const uint32_t pushes = (uint32_t)__builtin_popcount(code->frame_saved);
+    const uint32_t prologue = 3 + pushes;
+    // Record boundaries (emitted_from_tier0's rows are before branch sizing): rbp's push and mov, the pushes, rdx's and rax's.
+    const uint32_t boundary = 2 + pushes + 2;
+    const int32_t rdx = -(int32_t)(16 + 8 * (pushes + 1));
+    for (uint32_t r = count; r > prologue; r -= 1)
+    {
+        rows[r + 1] = rows[r - 1];
+        rows[r + 1].offset = rows[r + 1].offset < boundary ? boundary : rows[r + 1].offset;
+    }
+    rows[prologue] = (EmissionFrameRow){ .offset = boundary, .value = rdx, .reg = 1, .kind = EMISSION_FRAME_OFFSET };
+    rows[prologue + 1] = (EmissionFrameRow){ .offset = boundary, .value = rdx - 8, .reg = 0, .kind = EMISSION_FRAME_OFFSET };
+    count += 2;
+    // The epilogue's release, its first record: its pops, rbp's and the ret follow.
+    const uint32_t released = code->count - (pushes + 1 + 1);
+    count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = released, .reg = 1, .kind = EMISSION_FRAME_RESTORE });
+    count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = released, .reg = 0, .kind = EMISSION_FRAME_RESTORE });
+    for (uint32_t t = 0; t < code->tail_count; t += 1)
+    {
+        const uint32_t jump = code->tail_records[t];
+        if (emitted_handed(code->records, jump))
+        {
+            // rax's pop's end and rdx's: the jump less the mov, rbp's pop, the other pops and rdx's pop, then one more.
+            const uint32_t rdx_popped = jump - 1 - 1 - pushes;
+            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = rdx_popped - 1, .reg = 0, .kind = EMISSION_FRAME_RESTORE });
+            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = rdx_popped, .reg = 1, .kind = EMISSION_FRAME_RESTORE });
+        }
+        else
+        {
+            // A musttail call's (#148), whose release steps over their slots as the epilogue's does: its end, the jump
+            // less rbp's pop and the other pops.
+            const uint32_t release_end = jump - 1 - pushes;
+            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = release_end, .reg = 1, .kind = EMISSION_FRAME_RESTORE });
+            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = release_end, .reg = 0, .kind = EMISSION_FRAME_RESTORE });
+        }
+    }
+    return count;
+}
+
+// A preserving function's frame (#147, Tier0Code.frame_preserved and frame_preserve_vectors), into its fixed shape's
+// `count` rows (room for emitted_tier0_frame_room's more): the rules of the registers it keeps for its caller past the
+// callee-saved ones, which no fixed descriptor describes, at every boundary. Each holds the caller's value from the entry
+// (same_value, which the CIE gives the callee-saved registers alone); then its slot from its save on: a general register's
+// push after the callee-saved ones', in their numbers' order, or a vector or mask register's store into the preserve block
+// below the pushes, at its slot's offset from the CFA (a vector register's low 128 bits, as DWARF's XMM numbers name them,
+// and LLVM's CFI describes its spills); and its own value again from its reload on: a vector or mask register's load,
+// right before the epilogue's release, or a general register's pop, right after it, in the reverse order. The frame has a
+// frame pointer, so that none of these moves the CFA, and no tail call or eh_return (unwind_tier0_frame_tails). Returns
+// the rows' count.
+static uint32_t emitted_tier0_preserve_rows(const Tier0Code* code, EmissionFrameRow* rows, uint32_t count)
+{
+    // DWARF's numbers of the general registers, by the encoder's; of xmm0 to xmm15, xmm16 to xmm31 and k0 to k7 from these.
+    static const uint8_t dwarf[16] = { 0, 2, 1, 3, 7, 6, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const uint32_t pushes = (uint32_t)__builtin_popcount(code->frame_saved);
+    const uint32_t kept = (uint32_t)__builtin_popcount(code->frame_preserved);
+    const uint32_t vectors = code->frame_preserve_vectors;
+    const uint32_t block = tier0_preserve_block_bytes(vectors, code->frame_preserve_vector_bytes, code->frame_preserve_mask_bytes);
+    const uint32_t moves = block != 0 ? tier0_preserve_moves(vectors, code->frame_preserve_mask_bytes) : 0;
+    // Record boundaries (emitted_from_tier0's rows are before branch sizing). The epilogue: the block's loads, the release,
+    // the kept registers' pops, the callee-saved ones', rbp's and the ret.
+    const uint32_t release = code->count - 3 - pushes - kept;
+    uint32_t pushed = 0;
+    for (uint32_t r = 0; r < 16; r += 1)
+    {
+        if ((code->frame_preserved & (1u << r)) != 0)
+        {
+            const uint32_t saved = 2 + pushes + pushed + 1;
+            const uint32_t popped = release + 1 + kept - pushed;
+            const int32_t offset = -(int32_t)(16 + 8 * (pushes + pushed + 1));
+            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = 0, .reg = dwarf[r], .kind = EMISSION_FRAME_SAME_VALUE });
+            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = saved, .value = offset, .reg = dwarf[r], .kind = EMISSION_FRAME_OFFSET });
+            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = popped, .reg = dwarf[r], .kind = EMISSION_FRAME_SAME_VALUE });
+            pushed += 1;
+        }
+    }
+    // The block's slots from the CFA, past rbp's push and the others; its stores after its sub.
+    int32_t slot = -(int32_t)(16 + 8 * (pushes + kept) + block);
+    for (uint32_t k = 0; k < moves; k += 1)
+    {
+        // The k-th saved register: a vector register in the numbers' order, then the mask registers.
+        const uint32_t vector_count = (uint32_t)__builtin_popcount(vectors);
+        uint32_t reg = 0;
+        uint32_t seen = 0;
+        for (uint32_t r = 0; k < vector_count && r < 32; r += 1)
+        {
+            reg = (vectors & (1u << r)) != 0 && seen == k ? (r < 16 ? 17 + r : 67 + (r - 16)) : reg;
+            seen += (vectors & (1u << r)) != 0 ? 1 : 0;
+        }
+        reg = k < vector_count ? reg : 118 + (k - vector_count);
+        const uint32_t stored = 2 + pushes + kept + 1 + k + 1;
+        const uint32_t loaded = release - moves + k + 1;
+        count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = 0, .reg = (uint16_t)reg, .kind = EMISSION_FRAME_SAME_VALUE });
+        count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = stored, .value = slot, .reg = (uint16_t)reg, .kind = EMISSION_FRAME_OFFSET });
+        count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = loaded, .reg = (uint16_t)reg, .kind = EMISSION_FRAME_SAME_VALUE });
+        slot += k < vector_count ? (int32_t)code->frame_preserve_vector_bytes : 8;
+    }
+    return count;
+}
+
+// A probed reservation's loop without a frame pointer (#177, tier0_emit_probed_reservation): its CFA in r11 from the end
+// of r11's subtraction to the loop's bound, which no record of the loop changes, and back in rsp at the loop's exit,
+// where rsp equals it, as Tier 1's frame events have it (tier1_frame_emit.c). The fixed shape's rows (`rows`, `count` of
+// them, in order) then take the two at their places, before the reservation's own, with the pushes' before them; the
+// emission resolves such rows into a row program. Returns the rows' count.
+static uint32_t emitted_tier0_probe_rows(const Tier0Code* code, EmissionFrameRow* rows, uint32_t count, uint32_t room)
+{
+    const uint32_t pushes = (uint32_t)__builtin_popcount(code->frame_saved);
+    const uint32_t pages = code->frame_size & ~(BUSTER_TIER0_PAGE_BYTES - 1);
+    const bool loop = !code->frame_pointer && pages != 0 && tier0_probes_reservation(code->frame_probe, code->frame_size, code->frame_alignment_log2, false);
+    uint32_t result = count;
+    if (loop && count + 2 <= room)
+    {
+        // The records: the pushes, then r11's mov and its subtraction (the bound), the loop's three and its jne (the exit).
+        const uint32_t bound = pushes + 2;
+        const uint32_t exit = pushes + BUSTER_TIER0_PROBE_LOOP_RECORDS;
+        const int32_t cfa = 8 + 8 * (int32_t)pushes + (int32_t)pages;
+        uint32_t at = 0;
+        while (at < count && rows[at].offset < bound)
+        {
+            at += 1;
+        }
+        memmove(rows + at + 2, rows + at, (count - at) * sizeof(EmissionFrameRow));
+        rows[at] = (EmissionFrameRow){ .offset = bound, .value = cfa, .reg = (uint16_t)emission_x86_registers[X86_REGISTER_R11], .kind = EMISSION_FRAME_CFA };
+        rows[at + 1] = (EmissionFrameRow){ .offset = exit, .value = cfa, .reg = BUSTER_EMISSION_X86_RSP, .kind = EMISSION_FRAME_CFA };
+        result = count + 2;
+    }
+    return loop && count + 2 > room ? UINT32_MAX : result;
 }
 
 // Tier 0's code as the emission takes it: its records, columns, references and labels as they are; with `sources` its
@@ -145,8 +323,7 @@ static uint64_t emitted_tier0_frame_room(const Tier0Code* code)
 // `frames` its frame's events, from the frame it published (Tier0Code.frame_*, tail_records) and the records that make
 // it, which unwind_tier0_frame_tails checks are the frame's: its transitions at their records' boundaries, in the
 // fixed writer's order (unwind_function_rows), from `arena`. A frame that isn't the published one is
-// EMITTED_FRAME_UNDESCRIBED; one whose CFA offset the events' values can't carry, EMITTED_FRAME_LIMIT; no room,
-// EMITTED_FRAME_MEMORY, with nothing left in `arena`.
+// EMITTED_FRAME_UNDESCRIBED; no room, EMITTED_FRAME_MEMORY, with nothing left in `arena`.
 static EmittedCode emitted_from_tier0(const Tier0Code* code, bool frames, bool sources, bool assembly, Arena* arena)
 {
     EmittedCode result = {
@@ -166,6 +343,8 @@ static EmittedCode emitted_from_tier0(const Tier0Code* code, bool frames, bool s
     };
     if (code->error == TIER0_OK && sources)
     {
+        result.local_homes = code->local_homes;
+        result.local_count = code->local_count;
         result.source_records = code->entry_records;
         result.source_count = code->entry_count;
     }
@@ -179,16 +358,25 @@ static EmittedCode emitted_from_tier0(const Tier0Code* code, bool frames, bool s
         EmissionFrameRow* rows = BUSTER_ARENA_PUSH_ARRAY(arena, EmissionFrameRow, room);
         result.frame_status = events != 0 && rows != 0 && (tail_room == 0 || tails != 0) ? EMITTED_FRAME_DESCRIBED : EMITTED_FRAME_MEMORY;
         UnwindFunction boundaries;
-        // Each transition at its record's boundary: unwind_tier0_frame_tails without final offsets. A CFA past the
-        // events' offsets (emitted_cfa_fits) is one no event carries.
+        // Each transition at its record's boundary: unwind_tier0_frame_tails without final offsets.
         if (result.frame_status == EMITTED_FRAME_DESCRIBED)
         {
             const bool read = unwind_tier0_frame_tails(code, 0, code->count, &boundaries, tails) == UNWIND_OK;
-            result.frame_status = !read ? EMITTED_FRAME_UNDESCRIBED : !emitted_cfa_fits(boundaries.saved, boundaries.frame_size) ? EMITTED_FRAME_LIMIT :
-                                                                                                                                   EMITTED_FRAME_DESCRIBED;
+            result.frame_status = read ? EMITTED_FRAME_DESCRIBED : EMITTED_FRAME_UNDESCRIBED;
         }
-        const uint32_t count = result.frame_status == EMITTED_FRAME_DESCRIBED ? unwind_function_rows(&boundaries, rows, (uint32_t)room) : 0;
+        const uint32_t fixed = result.frame_status == EMITTED_FRAME_DESCRIBED ? unwind_function_rows(&boundaries, rows, (uint32_t)room) : 0;
+        // A probed reservation's loop's rows (#177), a frame without a frame pointer's, and an eh_return function's, one
+        // with: never both.
+        uint32_t count = fixed <= room ? emitted_tier0_probe_rows(code, rows, fixed, (uint32_t)room) : fixed;
         result.frame_status = count <= room ? result.frame_status : EMITTED_FRAME_UNDESCRIBED;
+        const bool eh = result.frame_status == EMITTED_FRAME_DESCRIBED && code->frame_eh_return;
+        result.frame_status = !eh || (count + 4 + 2 * (uint64_t)code->tail_count <= room && count >= 3 + (uint32_t)__builtin_popcount(code->frame_saved)) ? result.frame_status :
+                                                                                                                                                        EMITTED_FRAME_UNDESCRIBED;
+        count = eh && result.frame_status == EMITTED_FRAME_DESCRIBED ? emitted_tier0_eh_rows(code, rows, count) : count;
+        // A preserving function's kept registers (#147), never an eh_return function's.
+        const uint32_t kept = emitted_tier0_preserved(code);
+        result.frame_status = kept == 0 || count + 3 * (uint64_t)kept <= room ? result.frame_status : EMITTED_FRAME_UNDESCRIBED;
+        count = kept != 0 && result.frame_status == EMITTED_FRAME_DESCRIBED ? emitted_tier0_preserve_rows(code, rows, count) : count;
         for (uint32_t i = 0; result.frame_status == EMITTED_FRAME_DESCRIBED && i < count; i += 1)
         {
             events[i] = (EmissionFrameEvent){
@@ -226,7 +414,7 @@ static UnwindError emitted_unwind(const EmittedCode* code, const uint32_t* offse
     const EmissionMetadata metadata = {
         .frames = code->frames,
         .frame_count = code->frame_count,
-        .register_count = BUSTER_EMISSION_X86_REGISTERS,
+        .register_count = BUSTER_EMISSION_X86_DWARF_REGISTERS,
     };
     UnwindError error = length == 0 || (code->frame_count != 0 && rows == 0) ? UNWIND_ERROR_INVALID : length > INT32_MAX ? UNWIND_ERROR_LIMIT : UNWIND_OK;
     if (error == UNWIND_OK && code->frame_count != 0)
@@ -303,9 +491,9 @@ static EmittedSame emitted_unwind_same(const UnwindFunction* a, const UnwindFunc
 typedef struct EmittedState EmittedState;
 struct EmittedState
 {
-    int32_t value[16];
+    int64_t value[16];
     uint8_t holds[16];
-    int32_t slots[BUSTER_EMITTED_TRACKED];
+    int64_t slots[BUSTER_EMITTED_TRACKED];
     bool reached;
     bool unproven;
 };
@@ -324,9 +512,9 @@ typedef struct EmittedRules EmittedRules;
 struct EmittedRules
 {
     uint32_t cfa_register;
-    int32_t cfa_offset;
+    int64_t cfa_offset;
     uint8_t kinds[BUSTER_EMITTED_TRACKED];
-    int32_t values[BUSTER_EMITTED_TRACKED];
+    int64_t values[BUSTER_EMITTED_TRACKED];
 };
 
 static uint32_t emitted_dwarf_gpr(uint32_t dwarf)
@@ -400,26 +588,29 @@ static bool emitted_meet(EmittedState* into, const EmittedState* from)
     return changed;
 }
 
-static int32_t emitted_add(int32_t value, int64_t amount)
+static int64_t emitted_add(int64_t value, int64_t amount)
 {
-    const int64_t sum = (int64_t)value + amount;
-    return value == BUSTER_EMITTED_UNKNOWN || sum <= INT32_MIN || sum > INT32_MAX ? BUSTER_EMITTED_UNKNOWN : (int32_t)sum;
+    int64_t sum;
+    const bool overflow = __builtin_add_overflow(value, amount, &sum);
+    return value == BUSTER_EMITTED_UNKNOWN || overflow || sum == BUSTER_EMITTED_UNKNOWN ? BUSTER_EMITTED_UNKNOWN : sum;
 }
 
 // A store of `bytes` at CFA + `at` overwrites the slots it overlaps.
-static void emitted_clobber_slots(EmittedState* state, int32_t at, uint32_t bytes)
+static void emitted_clobber_slots(EmittedState* state, int64_t at, uint32_t bytes)
 {
     for (uint32_t h = 0; at != BUSTER_EMITTED_UNKNOWN && h < BUSTER_EMITTED_TRACKED; h += 1)
     {
         const int64_t slot = state->slots[h];
-        state->slots[h] = slot != BUSTER_EMITTED_UNKNOWN && slot < (int64_t)at + bytes && (int64_t)at < slot + 8 ? BUSTER_EMITTED_UNKNOWN : state->slots[h];
+        // Compare distances, not interval ends: neither at + bytes nor slot + 8 need fit int64_t.
+        const bool overlaps = slot <= at ? (uint64_t)at - (uint64_t)slot < 8 : (uint64_t)slot - (uint64_t)at < bytes;
+        state->slots[h] = slot != BUSTER_EMITTED_UNKNOWN && bytes != 0 && overlaps ? BUSTER_EMITTED_UNKNOWN : slot;
     }
 }
 
 // Slots below rsp aren't the frame's: a signal handler's frame, or a call's return address, may overwrite them.
 static void emitted_release_slots(EmittedState* state)
 {
-    const int32_t rsp = state->value[X86_REGISTER_RSP];
+    const int64_t rsp = state->value[X86_REGISTER_RSP];
     for (uint32_t h = 0; rsp != BUSTER_EMITTED_UNKNOWN && h < BUSTER_EMITTED_TRACKED; h += 1)
     {
         state->slots[h] = state->slots[h] != BUSTER_EMITTED_UNKNOWN && state->slots[h] < rsp ? BUSTER_EMITTED_UNKNOWN : state->slots[h];
@@ -452,6 +643,17 @@ static bool emitted_exit(const X86Instruction* record, bool branch)
            (form == X86_FORM_JMP_RM64 && emitted_direct(record) && record->rm == X86_REGISTER_R11);
 }
 
+// Whether record i is __builtin_eh_return's jump to its handler (#148, tier0_emit_tail's): through r11 right after rsp's
+// mov from rcx, the handler's stack, which no rule describes (nor does LLVM's CFI of its EH_RETURN's ret). The verifier
+// checks the rules up to the mov, and not at the jump.
+static bool emitted_handed(const X86Instruction* records, uint32_t i)
+{
+    const X86Instruction* jump = &records[i];
+    const X86Instruction* setting = i != 0 ? &records[i - 1] : 0;
+    return setting != 0 && jump->form == X86_FORM_JMP_RM64 && emitted_direct(jump) && jump->rm == X86_REGISTER_R11 && setting->form == X86_FORM_MOV_RM64_R64 &&
+           emitted_direct(setting) && setting->reg == X86_REGISTER_RCX && setting->rm == X86_REGISTER_RSP;
+}
+
 // An indirect jump within the function (a computed goto's, a jump table's): it may go to any of its labels.
 static bool emitted_indirect(const X86Instruction* record)
 {
@@ -481,7 +683,7 @@ static void emitted_transfer(const X86Instruction* record, EmittedState* state)
     }
     else if (form == X86_FORM_POP_R64 && record->rm < 16)
     {
-        const int32_t at = state->value[rsp];
+        const int64_t at = state->value[rsp];
         uint8_t held = BUSTER_EMITTED_NONE;
         for (uint32_t h = 0; at != BUSTER_EMITTED_UNKNOWN && h < 16; h += 1)
         {
@@ -502,7 +704,7 @@ static void emitted_transfer(const X86Instruction* record, EmittedState* state)
     }
     else if (form == X86_FORM_LEA_R64_M && record->mode == BUSTER_X86_MEMORY_BASE)
     {
-        const int32_t base = state->value[record->rm];
+        const int64_t base = state->value[record->rm];
         emitted_forget(state, record->reg);
         state->value[record->reg] = emitted_add(base, record->displacement);
         emitted_release_slots(state);
@@ -510,7 +712,7 @@ static void emitted_transfer(const X86Instruction* record, EmittedState* state)
     else if ((form == X86_FORM_SUB_RM64_IMM8 || form == X86_FORM_SUB_RM64_IMM32 || form == X86_FORM_ADD_RM64_IMM8 || form == X86_FORM_ADD_RM64_IMM32) && direct)
     {
         const int64_t amount = form == X86_FORM_SUB_RM64_IMM8 || form == X86_FORM_SUB_RM64_IMM32 ? -(int64_t)record->immediate : (int64_t)record->immediate;
-        const int32_t value = state->value[record->rm];
+        const int64_t value = state->value[record->rm];
         emitted_forget(state, record->rm);
         state->value[record->rm] = emitted_add(value, amount);
         emitted_release_slots(state);
@@ -538,7 +740,7 @@ static void emitted_transfer(const X86Instruction* record, EmittedState* state)
         const bool frame_store = (writes & BUSTER_X86_RESOURCE_MEMORY) != 0 && !direct && record->mode == BUSTER_X86_MEMORY_BASE && record->rm < 16;
         // A store's address is its base register's value as the record reads it, before its own writes: `xchg [rbp],
         // rbp` overwrites the slot rbp pointed at, whatever rbp holds after it.
-        const int32_t address = frame_store ? emitted_add(state->value[record->rm], record->displacement) : BUSTER_EMITTED_UNKNOWN;
+        const int64_t address = frame_store ? emitted_add(state->value[record->rm], record->displacement) : BUSTER_EMITTED_UNKNOWN;
         for (uint32_t g = 0; g < 16; g += 1)
         {
             if (((writes >> g) & 1) != 0)
@@ -608,18 +810,24 @@ static bool emitted_apply(const EmissionFrameEvent* event, EmittedRules* rules, 
             rules->cfa_offset = event->value;
         } break;
         case EMISSION_FRAME_OFFSET:
-        case EMISSION_FRAME_REGISTER:
-        case EMISSION_FRAME_RESTORE:
         case EMISSION_FRAME_SAME_VALUE:
         case EMISSION_FRAME_UNDEFINED:
+        case EMISSION_FRAME_REGISTER:
+        case EMISSION_FRAME_RESTORE:
         {
-            valid &= reg < BUSTER_EMITTED_TRACKED && reg != BUSTER_EMISSION_X86_RSP;
-            const uint32_t r = valid ? reg : 0;
-            rules->kinds[r] = event->kind == EMISSION_FRAME_OFFSET ? EMITTED_RULE_OFFSET : event->kind == EMISSION_FRAME_REGISTER ? EMITTED_RULE_REGISTER :
-                              event->kind == EMISSION_FRAME_SAME_VALUE ? EMITTED_RULE_SAME : event->kind == EMISSION_FRAME_RESTORE ? initial.kinds[r] :
-                                                                                                                              EMITTED_RULE_UNCHECKED;
-            rules->values[r] = event->kind == EMISSION_FRAME_RESTORE ? initial.values[r] : event->value;
-            valid &= event->kind != EMISSION_FRAME_REGISTER || (event->value >= 0 && event->value < 16);
+            // A vector or mask register's rule (#147, a preserving frame's), which the verifier doesn't follow: a slot or
+            // the caller's value, never another register's or the CIE's.
+            const bool untracked = emission_x86_saved_vector(reg) && event->kind != EMISSION_FRAME_REGISTER && event->kind != EMISSION_FRAME_RESTORE;
+            valid &= untracked || (reg < BUSTER_EMITTED_TRACKED && reg != BUSTER_EMISSION_X86_RSP);
+            if (!untracked)
+            {
+                const uint32_t r = valid ? reg : 0;
+                rules->kinds[r] = event->kind == EMISSION_FRAME_OFFSET ? EMITTED_RULE_OFFSET : event->kind == EMISSION_FRAME_REGISTER ? EMITTED_RULE_REGISTER :
+                                  event->kind == EMISSION_FRAME_SAME_VALUE ? EMITTED_RULE_SAME : event->kind == EMISSION_FRAME_RESTORE ? initial.kinds[r] :
+                                                                                                                                  EMITTED_RULE_UNCHECKED;
+                rules->values[r] = event->kind == EMISSION_FRAME_RESTORE ? initial.values[r] : event->value;
+                valid &= event->kind != EMISSION_FRAME_REGISTER || (event->value >= 0 && event->value < 16);
+            }
         } break;
         case EMISSION_FRAME_REMEMBER_STATE:
         {
@@ -652,7 +860,8 @@ static bool emitted_apply(const EmissionFrameEvent* event, EmittedRules* rules, 
 static bool emitted_holds(const EmittedRules* rules, const EmittedState* state)
 {
     const uint32_t cfa = emitted_dwarf_gpr(rules->cfa_register);
-    bool valid = cfa < 16 && state->value[cfa] != BUSTER_EMITTED_UNKNOWN && (int64_t)state->value[cfa] + rules->cfa_offset == 0;
+    const int64_t offset = rules->cfa_offset;
+    bool valid = cfa < 16 && offset >= 0 && state->value[cfa] != BUSTER_EMITTED_UNKNOWN && state->value[cfa] == -offset;
     for (uint32_t d = 0; valid && d < BUSTER_EMITTED_TRACKED; d += 1)
     {
         const uint32_t g = d < 16 ? emitted_dwarf_gpr(d) : 16;
@@ -664,7 +873,7 @@ static bool emitted_holds(const EmittedRules* rules, const EmittedState* state)
             } break;
             case EMITTED_RULE_OFFSET:
             {
-                valid = state->slots[g] == rules->values[d];
+                valid = state->slots[g] != BUSTER_EMITTED_UNKNOWN && state->slots[g] == rules->values[d];
             } break;
             case EMITTED_RULE_REGISTER:
             {
@@ -679,6 +888,52 @@ static bool emitted_holds(const EmittedRules* rules, const EmittedState* state)
     return valid;
 }
 
+// Explain a failed emitted_holds without changing its proof: the first failing rule in the same order. This is
+// diagnostic work only, after a failure, and emits nothing (the verifier's mutation tests expect refutations).
+static EmittedVerdict emitted_failed_rule(const EmittedRules* rules, const EmittedState* state, uint32_t record, uint32_t event)
+{
+    EmittedVerdict failed = {
+        .error = state->unproven ? EMITTED_VERIFY_UNPROVEN : EMITTED_VERIFY_REFUTED,
+        .record = record,
+        .event = event,
+    };
+    const uint32_t cfa = emitted_dwarf_gpr(rules->cfa_register);
+    const int64_t offset = rules->cfa_offset;
+    if (!(cfa < 16 && offset >= 0 && state->value[cfa] != BUSTER_EMITTED_UNKNOWN && state->value[cfa] == -offset))
+    {
+        failed.rule = EMITTED_VERIFY_RULE_CFA;
+        failed.reg = rules->cfa_register;
+        failed.expected = offset >= 0 ? -offset : BUSTER_EMITTED_UNKNOWN;
+        failed.actual = cfa < 16 ? state->value[cfa] : BUSTER_EMITTED_UNKNOWN;
+    }
+    for (uint32_t d = 0; failed.rule == EMITTED_VERIFY_RULE_NONE && d < BUSTER_EMITTED_TRACKED; d += 1)
+    {
+        const uint32_t g = d < 16 ? emitted_dwarf_gpr(d) : 16;
+        const uint32_t kind = rules->kinds[d];
+        if (kind == EMITTED_RULE_OFFSET && !(state->slots[g] != BUSTER_EMITTED_UNKNOWN && state->slots[g] == rules->values[d]))
+        {
+            failed.rule = EMITTED_VERIFY_RULE_OFFSET;
+            failed.reg = d;
+            failed.expected = rules->values[d];
+            failed.actual = state->slots[g];
+        }
+        else if (kind == EMITTED_RULE_SAME || kind == EMITTED_RULE_REGISTER)
+        {
+            const uint32_t holder = kind == EMITTED_RULE_SAME ? g : emitted_dwarf_gpr((uint32_t)rules->values[d]);
+            const uint32_t held = holder < 16 ? state->holds[holder] : BUSTER_EMITTED_NONE;
+            if (!(holder < 16 && held == g))
+            {
+                failed.rule = kind == EMITTED_RULE_SAME ? EMITTED_VERIFY_RULE_SAME : EMITTED_VERIFY_RULE_REGISTER;
+                failed.reg = d;
+                failed.holder = kind == EMITTED_RULE_SAME ? d : (uint32_t)rules->values[d];
+                failed.expected = d;
+                failed.actual = held < 16 ? emission_x86_registers[held] : BUSTER_EMITTED_UNKNOWN;
+            }
+        }
+    }
+    return failed;
+}
+
 // Proves a function's frame events against its records and their control flow, as an unwinder reads them: at every
 // record the code reaches, the rules in force there (the events anchored at or before its start, in order, from the
 // CIE's) must hold of every path that reaches it. A forward dataflow over the code's blocks (from its entry, each
@@ -690,9 +945,67 @@ static bool emitted_holds(const EmittedRules* rules, const EmittedState* state)
 // both hold from the record after it: a layout's padding between them executes nothing. An assembly template's code
 // isn't the compiler's: its caller doesn't verify it. Scalar: this runs with --verify and in the tests, off the
 // compile's path. Its memory, the leaders' states and two words per record, from `scratch`, is given back.
-static EmittedVerdict emitted_verify_frames(const EmittedCode* code, Arena* scratch)
+// The DWARF number of the vector or mask register `record` moves whole between it and a preserving frame's slot at
+// [rbp + displacement] (#147, tier0_emit_preserve's forms): a store into the slot with `store`, else a load back from it;
+// UINT32_MAX for any other. Whole: the form exactly one of those, with no segment override or fixup, in its encoding's
+// registers (xmm16 to xmm31 an EVEX form's alone), its address rbp's alone, and no other operand: no opmask, zeroing or
+// rounding (EVEX's decorations, an opmask's store or load partial), index, vvvv or immediate.
+static uint32_t emitted_saved_vector_move(const X86Instruction* record, bool store)
+{
+    const uint32_t form = record->form;
+    const bool legacy = store ? form == X86_FORM_MOVUPS_XM_X || form == X86_FORM_VMOVDQU_YM256_Y : form == X86_FORM_MOVUPS_X_XM || form == X86_FORM_VMOVDQU_Y_YM256;
+    const bool evex = store ? form == X86_FORM_VMOVDQU64_ZM512_Z : form == X86_FORM_VMOVDQU64_Z_ZM512;
+    const bool mask = store ? form == X86_FORM_KMOVQ_M64_K || form == X86_FORM_KMOVW_M16_K : form == X86_FORM_KMOVQ_K_M64 || form == X86_FORM_KMOVW_K_M16;
+    const uint32_t reg = record->reg;
+    const bool whole = record->rm == X86_REGISTER_RBP && record->mode == BUSTER_X86_MEMORY_BASE && record->index == 0 && record->vvvv == 0 && record->decorations == 0 &&
+                       record->immediate == 0;
+    const bool vector = whole && ((legacy && reg < 16) || (evex && reg < 32));
+    return vector ? (reg < 16 ? 17 + reg : 67 + (reg - 16)) : whole && mask && reg < 8 ? 118 + reg : UINT32_MAX;
+}
+
+// A vector or mask register's rules (#147, a preserving frame's: emitted_tier0_preserve_rows), which the fixpoint below
+// doesn't follow, proved by the records at their boundaries: a slot's rule right after the whole store of that register
+// into that slot from rbp (emitted_saved_vector_move: a masked one is no save), the CFA rbp's plus 16 by then; and its
+// caller's value at the entry, or right after its whole load back from the slot its rule named. The frame keeps rbp and the slots past the body's places (tier0_layout_frame).
+static EmittedVerdict emitted_verify_saved_vectors(const EmittedCode* code)
 {
     EmittedVerdict verdict = { .error = EMITTED_VERIFY_OK, .event = code->frame_count };
+    int64_t slots[BUSTER_EMISSION_X86_DWARF_REGISTERS];
+    for (uint32_t r = 0; r < BUSTER_EMISSION_X86_DWARF_REGISTERS; r += 1)
+    {
+        slots[r] = BUSTER_EMITTED_UNKNOWN;
+    }
+    bool framed = false;
+    for (uint32_t e = 0; verdict.error == EMITTED_VERIFY_OK && e < code->frame_count; e += 1)
+    {
+        const EmissionFrameEvent* event = &code->frames[e];
+        const uint32_t boundary = event->at.boundary;
+        const uint32_t kind = event->kind;
+        framed = kind == EMISSION_FRAME_CFA ? event->reg == BUSTER_EMISSION_X86_RBP && event->value == 16 : kind == EMISSION_FRAME_CFA_OFFSET ? framed && event->value == 16 : framed;
+        if (emission_x86_saved_vector(event->reg) && kind != EMISSION_FRAME_CFA && kind != EMISSION_FRAME_CFA_OFFSET)
+        {
+            const X86Instruction* record = boundary != 0 && boundary <= code->count ? &code->records[boundary - 1] : NULL;
+            bool proved = false;
+            if (kind == EMISSION_FRAME_OFFSET)
+            {
+                proved = framed && record != NULL && emitted_saved_vector_move(record, true) == event->reg && record->displacement == event->value + 16;
+                slots[event->reg] = event->value;
+            }
+            else if (kind == EMISSION_FRAME_SAME_VALUE)
+            {
+                proved = boundary == 0 || (record != NULL && emitted_saved_vector_move(record, false) == event->reg && slots[event->reg] != BUSTER_EMITTED_UNKNOWN &&
+                                           record->displacement == slots[event->reg] + 16);
+            }
+            verdict = proved ? verdict : (EmittedVerdict){ .error = EMITTED_VERIFY_REFUTED, .record = boundary, .event = e };
+        }
+    }
+    return verdict;
+}
+
+static EmittedVerdict emitted_verify_frames(const EmittedCode* code, Arena* scratch)
+{
+    // A vector or mask register's rules (#147), which the fixpoint doesn't follow, first.
+    EmittedVerdict verdict = emitted_verify_saved_vectors(code);
     const uint32_t count = code->count;
     const uint64_t mark = scratch->length;
     // Each record's branch target (UINT32_MAX for none), and the leaders: the blocks' first records, each's state.
@@ -851,11 +1164,9 @@ static EmittedVerdict emitted_verify_frames(const EmittedCode* code, Arena* scra
             break;
         }
         state = leaders[i] != UINT32_MAX ? states[leaders[i]] : state;
-        if (state.reached && !emitted_holds(&rules, &state))
+        if (state.reached && !emitted_handed(code->records, i) && !emitted_holds(&rules, &state))
         {
-            const EmittedVerdict failed = { .error = state.unproven ? EMITTED_VERIFY_UNPROVEN : EMITTED_VERIFY_REFUTED,
-                                            .record = i,
-                                            .event = event != 0 ? event - 1 : code->frame_count };
+            const EmittedVerdict failed = emitted_failed_rule(&rules, &state, i, event != 0 ? event - 1 : code->frame_count);
             verdict = state.unproven ? verdict : failed;
             unproven = state.unproven && unproven.error == EMITTED_VERIFY_OK ? failed : unproven;
         }

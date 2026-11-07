@@ -123,6 +123,18 @@ static const char asm_test_segmented_movq[] =
     "movq %xmm0,%fs:(%r8)\nmovq %xmm0,%gs:(%r8)\n"
     "movq %xmm8,%fs:(%rax)\nmovq %xmm8,%gs:(%rax)\n";
 
+static const char asm_test_rep_scans[] =
+    ".text\nscans:\n"
+    "rep bsfw %cx,%ax\nrepz bsfl %ecx,%eax\nrep; bsfq %r9,%r8\n"
+    "rep bsrw %cx,%ax\nrepe bsrl %ecx,%eax\nrep; bsrq %r9,%r8\n"
+    "rep bsfl %fs:8(%rax),%ecx\nrep bsrq target(%rip),%rax\n"
+    ".intel_syntax noprefix\nrep bsf ax,cx\nrep bsf eax,ecx\nrep bsf r8,r9\n"
+    "rep bsr ax,cx\nrep bsr eax,ecx\nrep bsr r8,r9\n.att_syntax prefix\n"
+    "jmp 1f\n.zero 123\nrep bsfl %ecx,%eax\n1:\n"
+    "jmp 2f\n.zero 124\nrep bsfl %ecx,%eax\n2:\n"
+    "3:\n.zero 122\nrep bsfl %ecx,%eax\njmp 3b\n"
+    "4:\n.zero 123\nrep bsfl %ecx,%eax\njmp 4b\n";
+
 // Every mask move's five operand forms, in both syntaxes. Include k0, k7, extended GPRs, SIB addresses and the
 // exact displacement main.c's naked semantics harness uses. GNU as supplies the independent encoding oracle.
 static const char asm_test_kmov[] =
@@ -763,6 +775,15 @@ static void asm_test_targets(AsmTest* test)
         const bool rdtscp = architecture == X86_ARCH_NATIVE ? (native.features & BUSTER_X86_FEATURE(RDTSCP)) != 0 : architecture >= X86_ARCH_ZNVER5;
         asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nmov rax,200\naddps xmm0,xmm1\nret\n"), 1, architecture);
         asm_test_pair(test, BUSTER_S8("pause\nlfence\nmfence\nsfence\nrdtsc\n"), 1, architecture);
+        asm_test_pair(test, (String8){.pointer = (char*)asm_test_rep_scans, .length = sizeof(asm_test_rep_scans) - 1}, 1, architecture);
+        if (architecture == X86_ARCH_BASELINE)
+        {
+            asm_test_pair(test, BUSTER_S8("tzcntl %ecx,%eax\n"), 0, architecture);
+            asm_test_pair(test, BUSTER_S8("lzcntl %ecx,%eax\n"), 0, architecture);
+            asm_test_pair(test, BUSTER_S8("bsfl %ecx,%eax\nbsrq %rcx,%rax\n"), 1, architecture);
+            asm_test_pair(test, BUSTER_S8("rep bsfw %ecx,%eax\n"), 0, architecture);
+            asm_test_pair(test, BUSTER_S8("repne bsfl %ecx,%eax\n"), 0, architecture);
+        }
         asm_test_pair(test, BUSTER_S8("rdtscp\n"), rdtscp, architecture);
         asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nvpaddd ymm0,ymm1,ymm2\n"), avx2, architecture);
         asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nvaddps zmm0,zmm1,zmm2\n"), avx512, architecture);
@@ -868,6 +889,19 @@ static AsmCode asm_test_code_pair(AsmTest* test, const char* source, int64_t exp
 
 static void asm_test_code(AsmTest* test)
 {
+    X86Target baseline;
+    const bool parsed = x86_target_parse("x86-64", 6, &baseline);
+    asm_test_check(test, parsed, "inline code: baseline target", 0);
+    if (parsed)
+    {
+        x86_match_initialize(test->index, &baseline);
+        test->architecture = X86_ARCH_BASELINE;
+        const AsmCode scans = asm_test_code_pair(test, "rep bsfl %ecx,%eax\nrep bsrq %rcx,%rax\n", 2, "inline code: baseline rep scans");
+        uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(2)];
+        static const uint8_t expected[] = { 0xf3, 0x0f, 0xbc, 0xc1, 0xf3, 0x48, 0x0f, 0xbd, 0xc1 };
+        const int64_t length = scans.error == 0 ? x86_encode_scalar(scans.records, scans.count, bytes, sizeof(bytes), 0, 0) : -1;
+        asm_test_check(test, length == sizeof(expected) && memcmp(bytes, expected, sizeof(expected)) == 0, "inline code: baseline rep scan bytes", 0);
+    }
     // Every feature, as the C lowering's index has them: a template's instructions are its author's to choose.
     const X86Target everything = { .features = (UINT64_C(1) << X86_FEATURE_COUNT) - 1, .architecture = X86_ARCH_OTHER };
     x86_match_initialize(test->index, &everything);
@@ -893,6 +927,9 @@ static void asm_test_code(AsmTest* test)
                              "bswapl %eax\nbswapq %r9\nfxsave (%rax)\nfxrstor 16(%rsp)\nfxsave64 (%rdi)\nfxrstor64 -512(%rbp)", 16,
                        "inline code: processor-state instructions");
     // Symbols the source doesn't define: references by name, a call's preemptible, the records marked.
+    const AsmCode section_name = asm_test_code_pair(test, "leaq .text(%rip), %rax", 1, "inline code: section name stays a symbolic reference");
+    asm_test_check(test, section_name.reference_count == 1 && section_name.references[0].name.length == 5 &&
+                   memcmp(section_name.references[0].name.pointer, ".text", 5) == 0, "inline code: section reference name", 0);
     const AsmCode symbols = asm_test_code_pair(test, "call external\n\tmovq data+8(%rip), %rax\n\tmovl $sym+4, %eax", 3, "inline code: references");
     const bool marked = symbols.count == 3 && (symbols.records[0].form & BUSTER_X86_FORM_FIXUP) != 0 && (symbols.records[1].form & BUSTER_X86_FORM_FIXUP) != 0 &&
                         (symbols.records[2].form & BUSTER_X86_FORM_FIXUP) != 0;
@@ -1111,11 +1148,60 @@ static bool asm_test_gas_pads_like_2_47(AsmTest* test, const char* directory)
     return same && found;
 }
 
-// The driver reads a pipe, which has no size, to its end, and refuses a file one byte past the limit.
+// The driver reads regular files and streams beyond its old fixed buffer, with rollback on allocation or offset
+// limits. Large comments keep the token table small while exercising actual source bytes in both lexer paths.
+// Model the callback boundary with initialized bytes whose shadow was not written by libc. In MSan builds the
+// destination must become readable without clearing the original fwrite input's poison or the next arena byte.
+static void asm_test_print_callback(AsmTest* test)
+{
+    static const uint32_t counts[] = { 0, 1, 15, 16, 17, 31, 32, 33 };
+    Arena arena = arena_reserve(4096);
+    for (uint32_t c = 0; c < sizeof(counts) / sizeof(counts[0]); c += 1)
+    {
+        uint8_t input[64];
+        for (uint32_t i = 0; i < sizeof(input); i += 1)
+        {
+            input[i] = i % 5 == 0 ? 0 : (uint8_t)(i + 1);
+        }
+        arena_pop_to(&arena, 0);
+        uint8_t* storage = arena_push(&arena, 128, 1);
+        const bool ready = storage != NULL;
+        asm_test_check(test, ready, "cookie-write boundary fixture storage", 0);
+        if (ready)
+        {
+            memset(storage, 0xa5, 128);
+            // Commit the page before poisoning shadow, so the callback's small append maps no new page.
+            arena_pop_to(&arena, 1);
+            String8 printed = { .pointer = (char*)storage };
+            AsmPrintBuffer buffer = { .arena = &arena, .source = &printed };
+            const uint32_t count = counts[c];
+#if __has_feature(memory_sanitizer)
+            const uint32_t poisoned = count / 2;
+            __msan_poison(input + poisoned, 1);
+            __msan_poison(storage, count + 2);
+#endif
+            const ssize_t copied = asm_print_write(&buffer, (const char*)input, count);
+#if __has_feature(memory_sanitizer)
+            const bool shadow = __msan_test_shadow(storage, count + 1) == -1 &&
+                                __msan_test_shadow(input, sizeof(input)) == (intptr_t)poisoned &&
+                                __msan_test_shadow(storage + count + 1, 1) == 0;
+            asm_test_check(test, shadow, "cookie write defines only its appended output and preserves source/guard poison", 0);
+            // Restore the artificial poison only where the byte-value checks below read it.
+            __msan_unpoison(input + poisoned, 1);
+            __msan_unpoison(storage + count + 1, 1);
+#endif
+            const bool exact = copied == (ssize_t)count && !buffer.failed && printed.length == count && arena.length == count + 1 &&
+                               memcmp(storage, input, count) == 0 && storage[count] == 0 && storage[count + 1] == 0xa5;
+            asm_test_check(test, exact, "cookie write appends exact binary bytes, a terminator and no extra byte", 0);
+        }
+    }
+    arena_release(&arena);
+}
+
 static void asm_test_reader(AsmTest* test, const char* directory)
 {
     static const char text[] = "nop\nret\n";
-    Arena arena = arena_reserve(1ull << 30);
+    Arena arena = arena_reserve(1ull << 32);
     int ends[2];
     bool okay = pipe(ends) == 0;
     if (okay)
@@ -1128,7 +1214,7 @@ static void asm_test_reader(AsmTest* test, const char* directory)
         close(ends[0]);
     }
     asm_test_check(test, okay, "assembly input read from a pipe to its end", 0);
-    // A pipe has no size to refuse beforehand: a child writes one byte past the limit into one, and the read refuses it.
+    // A pipe has no size: grow past two initial buffers, without requiring the maximum source reservation.
     okay = pipe(ends) == 0;
     if (okay)
     {
@@ -1137,26 +1223,51 @@ static void asm_test_reader(AsmTest* test, const char* directory)
         {
             static const uint8_t chunk[1u << 16];
             close(ends[0]);
-            uint64_t left = BUSTER_ASM_MAX_SOURCE + 1;
+            uint64_t left = (1u << 17) + 1;
             ssize_t written = 1;
             while (left != 0 && written > 0)
             {
                 written = write(ends[1], chunk, left < sizeof(chunk) ? left : sizeof(chunk));
                 left -= written > 0 ? (uint64_t)written : 0;
             }
-            _exit(0);
+            _exit(left == 0 ? 0 : 1);
         }
         close(ends[1]);
         String8 source;
-        const uint64_t before = arena.length;
-        okay = child > 0 && !asm_read_descriptor(ends[0], &arena, &source) && arena.length == before && source.pointer == 0;
+        okay = child > 0 && asm_read_descriptor(ends[0], &arena, &source) && source.length == (1u << 17) + 1;
+        okay = okay && source.pointer[0] == 0 && source.pointer[source.length - 1] == 0 && source.pointer[source.length] == 0;
         close(ends[0]);
         if (child > 0)
         {
-            waitpid(child, 0, 0);
+            int status = 0;
+            okay = waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0 && okay;
         }
     }
-    asm_test_check(test, okay, "assembly input past the limit refused from a pipe", 0);
+    asm_test_check(test, okay, "assembly stream grows beyond its first buffer", 0);
+    for (uint32_t overflow = 0; overflow < 2; overflow += 1)
+    {
+        uint8_t bytes[64];
+        memset(bytes, 'x', sizeof(bytes));
+        Arena small = {
+            .base = bytes,
+            .capacity = sizeof(bytes),
+            .length = 7,
+        };
+        static const uint8_t input[57];
+        okay = pipe(ends) == 0;
+        if (okay)
+        {
+            const uint32_t length = 56 + overflow;
+            okay = write(ends[1], input, length) == length;
+            close(ends[1]);
+            String8 read = {0};
+            const bool accepted = asm_read_descriptor(ends[0], &small, &read);
+            okay = okay && accepted == (overflow == 0) && bytes[0] == 'x' && bytes[6] == 'x';
+            okay = okay && (overflow == 0 ? read.length == 56 && read.pointer[56] == 0 && small.length == sizeof(bytes) : read.pointer == NULL && small.length == 7);
+            close(ends[0]);
+        }
+        asm_test_check(test, okay, overflow == 0 ? "assembly stream fits the arena exactly" : "assembly stream capacity failure rolls back", 0);
+    }
     char large[PATH_MAX];
     snprintf(large, sizeof(large), "%s/large.s", directory);
     const int fd = open(large, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
@@ -1168,14 +1279,28 @@ static void asm_test_reader(AsmTest* test, const char* directory)
     String8 source;
     const uint64_t before = arena.length;
     okay = okay && !asm_read_file(large, &arena, &source) && arena.length == before && source.pointer == 0;
-    asm_test_check(test, okay, "assembly input past the limit refused", 0);
+    asm_test_check(test, okay, "unrepresentable assembly file refused before allocation", 0);
+    const String8 invalid_source = {
+        .pointer = (char*)text,
+        .length = (uint64_t)BUSTER_ASM_MAX_SOURCE + 1,
+    };
+    const AsmResult unrepresentable = asm_assemble(invalid_source, test->index, (AsmOptions){0}, &arena);
+    asm_test_check(test, unrepresentable.error != NULL && strstr(unrepresentable.error, "32-bit") != NULL && arena.length == before,
+                   "unrepresentable assembly slice refused before reading", 0);
+    AsmParser too_many = {
+        .arena = &arena,
+        .token_count = BUSTER_ASM_MAX_TOKENS + 1,
+    };
+    asm_parse_source(&too_many);
+    asm_test_check(test, too_many.result.error != NULL && strstr(too_many.result.error, "symbol-table") != NULL && arena.length == before,
+                   "unrepresentable assembly token table refused before allocation", 0);
     unlink(large);
-    // A source past the former 16 MiB bound reaches the parser and assembles. One comment line keeps its token table
+    // A source past the former 64 MiB bound reaches the parser and assembles. One comment line keeps its token table
     // small; the source itself proves the read and lexer bounds.
     const int big_fd = open(large, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     uint8_t chunk[1u << 16];
     memset(chunk, 'x', sizeof(chunk));
-    uint64_t left = 17u << 20;
+    uint64_t left = 65u << 20;
     okay = big_fd >= 0 && write(big_fd, "#", 1) == 1;
     while (okay && left != 0)
     {
@@ -1190,13 +1315,54 @@ static void asm_test_reader(AsmTest* test, const char* directory)
     }
     arena.length = 0;
     source = (String8){0};
-    okay = okay && asm_read_file(large, &arena, &source) && source.length > (16u << 20) && source.length < BUSTER_ASM_MAX_SOURCE;
-    if (okay)
+    okay = okay && asm_read_file(large, &arena, &source) && source.length > (64u << 20) && source.length < BUSTER_ASM_MAX_SOURCE;
+    asm_test_check(test, okay, "assembly file beyond 64 MiB is read", 0);
+    const uint64_t source_end = arena.length;
+    for (uint32_t scalar = 0; okay && scalar < 2; scalar += 1)
     {
-        AsmResult assembled = asm_assemble(source, test->index, (AsmOptions){.vectorized = true}, &arena);
-        okay = assembled.error == 0 && assembled.link.atoms.count > 1;
+        AsmResult assembled = asm_assemble(source, test->index, (AsmOptions){.vectorized = scalar == 0}, &arena);
+        const bool code = assembled.error == NULL && assembled.link.atoms.count > 1 && assembled.link.atoms.size[1] == 1 &&
+                          assembled.link.atoms.bytes[1][0] == 0xc3;
+        asm_test_check(test, code, scalar == 0 ? "assembly beyond 64 MiB emits ret on the vector path" : "assembly beyond 64 MiB emits ret on the scalar path", assembled.error);
+        arena_pop_to(&arena, source_end);
     }
-    asm_test_check(test, okay, "assembly input past 16 MiB assembles", 0);
+    // The .S printer's stream also grows beyond 64 MiB; its bytes belong directly to the caller's arena.
+    Arena printed_arena = arena_reserve(1ull << 28);
+    String8 printed = {.pointer = arena_push(&printed_arena, 1, 1)};
+    AsmPrintBuffer buffer = {
+        .arena = &printed_arena,
+        .source = &printed,
+    };
+    FILE* stream = okay && printed.pointer != NULL ? fopencookie(&buffer, "w", (cookie_io_functions_t){.write = asm_print_write}) : NULL;
+    bool streamed = stream != NULL;
+    for (uint64_t at = 0; streamed && at < source.length; )
+    {
+        const uint64_t count = source.length - at < sizeof(chunk) ? source.length - at : sizeof(chunk);
+        streamed = fwrite(source.pointer + at, 1, count, stream) == count;
+        at += count;
+    }
+    if (stream != NULL)
+    {
+        streamed = fclose(stream) == 0 && streamed;
+    }
+    streamed = streamed && !buffer.failed && printed.length == source.length && printed.pointer[printed.length] == 0 &&
+               memcmp(printed.pointer, source.pointer, source.length) == 0 && printed_arena.length == printed.length + 1;
+    asm_test_check(test, streamed, "preprocessed assembly output grows past 64 MiB in place", 0);
+    arena_release(&printed_arena);
+    // The real preprocessor path must close a failed output stream and roll back the destination, including when
+    // libc buffered the write until fflush/fclose. Only the already-owned prefix remains.
+    uint8_t small_bytes[8];
+    memset(small_bytes, 'x', sizeof(small_bytes));
+    Arena small = {
+        .base = small_bytes,
+        .capacity = sizeof(small_bytes),
+        .length = 7,
+    };
+    const PPOptions options = {0};
+    const bool written = object_write_file(large, (const uint8_t*)text, sizeof(text) - 1) == OBJECT_ERROR_NONE;
+    const bool refused = written && !asm_preprocess_file(large, options, &small, &source);
+    asm_test_check(test, refused && small.length == 7 && small_bytes[0] == 'x' && small_bytes[6] == 'x' &&
+                         source.pointer == NULL && source.length == 0, "preprocessed assembly output failure rolls back", 0);
     unlink(large);
     arena_release(&arena);
 }
@@ -1574,6 +1740,7 @@ static int run_assembler_tests(int count, char** arguments)
         char directory[] = "/tmp/buster-assembler-XXXXXX";
         if (mkdtemp(directory) != 0)
         {
+            asm_test_print_callback(&test);
             asm_test_reader(&test, directory);
             asm_test_preprocessed(&test, directory);
             asm_test_compatibility(&test, directory, cross_check);
@@ -1597,6 +1764,7 @@ static int run_assembler_tests(int count, char** arguments)
                 asm_test_oracle(&test, ".text\nf: movq %rdi,%rax\naddq $200,%rax\nmovl 4(%rdi,%rcx,4),%edx\nshlq %cl,%rax\nshrdq %cl,%rbx,%rax\nret\n.size f,.-f\n", directory, 0);
                 asm_test_oracle(&test, ".text\nf: pause\nlfence\nmfence\nsfence\nrdtsc\nrdtscp\n.intel_syntax noprefix\npause\nlfence\nmfence\nsfence\nrdtsc\nrdtscp\n", directory, X86_ARCH_ZNVER5);
                 asm_test_oracle(&test, ".text\nf: rep nop\nrep; nop\n.intel_syntax noprefix\nrep nop\nrep; nop\n", directory, 0);
+                asm_test_oracle(&test, asm_test_rep_scans, directory, X86_ARCH_BASELINE);
                 asm_test_oracle(&test, ".text\nf: rep ret\nrepz ret\nrep; ret\nrepz; ret\nrep retq\nrepz; retq\nrepne ret\nrepnz; ret\n", directory, X86_ARCH_ZNVER5);
                 asm_test_oracle(&test, ".data\nexpr:\n.byte ~0,~1,~0+256\n.long -1|0,~0&0xffffffff\n.quad ~0xffffffffffffffff\n", directory, 0);
                 // The processor-state instructions C's inline assembly reaches (#147).

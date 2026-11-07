@@ -9,6 +9,8 @@
 //   - After the walk, check_deferred_bodies reads the bodies on lanes: one, and one more per
 //     BUSTER_CHECK_DEFERRED_LANE_TOKENS (and one per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens) of
 //     the bodies' tokens beyond the larger of the largest body's and twice the second largest's, no more than bodies.
+//     The post-merge rounds take those lanes only where they are BUSTER_CHECK_DEFERRED_POST_LANES or more
+//     (check_deferred_post_lanes).
 //     It cuts the bodies into parts before the lanes start (parts_by_cost), promotes the part containing the largest
 //     body for the first lane, and every lane takes the others from one counter, costliest first (check_deferred_lane):
 //     the others are woken for the bodies and read them more slowly. A lane copies the top
@@ -44,12 +46,17 @@
 #include <time.h>
 
 #define BUSTER_CHECK_DEFERRED_MAX_LANES 64
-// The bodies' tokens that pay for a lane past the first, beyond their critical path (check_deferred_bodies): this many,
+// The bodies' tokens beyond their critical path that pay for a lane past the first (check_deferred_bodies): this many,
 // and one more per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, since a lane's copy of the reader
-// grows with the top level (docs/c-deferred-bodies.md, "How many lanes" and "The rare columns' pages by the unit's
-// size").
-#define BUSTER_CHECK_DEFERRED_LANE_TOKENS 1024
-#define BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS 4
+// grows with the top level (docs/c-deferred-bodies.md, "How many lanes" and "The post-merge rounds' lanes (#447)").
+#define BUSTER_CHECK_DEFERRED_LANE_TOKENS 3072
+#define BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS 3
+// The fewest of the bodies' lanes on which the post-merge rounds (the controls, binding answers, constant contexts and
+// expression parts) run on lanes too (check_deferred_post_lanes); on fewer, they run on the calling thread alone. Each
+// round on lanes costs its dispatch, its wake-ups and its parts' ordered publication, which on the 9700X a unit's
+// post-merge work pays for only where its bodies take four lanes or more (docs/c-deferred-bodies.md, "The post-merge
+// rounds' lanes (#447)").
+#define BUSTER_CHECK_DEFERRED_POST_LANES 4
 // The unit's tokens from which check_input_run's arena of rare columns is base pages where more than one lane reads the
 // bodies (check_deferred_shared, #764, #847). In a smaller unit the top level's walk faults in most of the arena's huge
 // pages, the bodies' lanes write into them at no cost, and the phases after the merge read the huge zero page where
@@ -65,6 +72,34 @@
 // Linux's MADV_POPULATE_WRITE (5.14), which the C library's headers may not name: a lane's per-name columns committed
 // before its bodies (check_deferred_lane_commit).
 #define BUSTER_CHECK_DEFERRED_MADV_POPULATE_WRITE 23
+// The lanes the driver's reading (check_input_deferred_compile) needs its bodies to take, but where --lanes N forces them
+// (every_lane), before it reads them apart: on the 9700X, `-c sqlite3.c -w`'s check-input took 59.5 ms with its bodies on
+// 2 lanes, 56.9 on 3 and 55.7 on 4, against source order's 56.7 (#151, docs/function-lanes.md's "The checker's bodies on
+// lanes").
+#define BUSTER_CHECK_DEFERRED_COMPILE_LANES 4
+// The reader's rounds of a command's flow (#151, CheckDeferredFlow): bodies, merge and post-merge work. The C
+// driver's flow also runs the emission's (BUSTER_CHECK_EMIT_ROUND_BODIES, 1), and its other lanes run each kind's lane
+// (check_deferred_follow).
+#define BUSTER_CHECK_DEFERRED_ROUND_BODIES 2u
+#define BUSTER_CHECK_DEFERRED_ROUND_PASS 3u
+#define BUSTER_CHECK_DEFERRED_ROUND_EXPRESSIONS 4u
+#define BUSTER_CHECK_DEFERRED_ROUND_CONTEXTS 5u
+#define BUSTER_CHECK_DEFERRED_ROUND_BINDINGS 6u
+#define BUSTER_CHECK_DEFERRED_ROUND_CONTROLS 7u
+
+// A caller whose lanes are a command's flow (the C driver's, #151): the reader's lanes are rounds of `flow`
+// (lane_flow_round_begin) rather than lane_run's, whose other lanes run them from the flow's follow loop. `grant` gives the
+// lanes the bodies may take of the `wanted` the rule plans (the session's that started and the worker budget's), before
+// the top level's walk; `give_back` returns them after the final post-merge round, or as the unit goes to source order.
+// The driver's reading takes a grant of one lane for source order's.
+typedef struct CheckDeferredFlow CheckDeferredFlow;
+struct CheckDeferredFlow
+{
+    LaneFlow* flow;
+    uint32_t (*grant)(void* context, uint32_t wanted);
+    void (*give_back)(void* context);
+    void* context;
+};
 
 // The top level's counts where its walk skipped a body.
 typedef struct CheckDeferredCut CheckDeferredCut;
@@ -120,6 +155,8 @@ struct CheckDeferredResult
     CheckInputIntrinsicCall* intrinsic_calls;
     uint32_t intrinsic_call_count;
     uint32_t event_count;
+    // The body's retained events' range after the source-order merge, for the binding-answer round.
+    uint32_t event_begin;
     uint32_t* key;
     uint32_t* declaration;
     uint32_t* point;
@@ -288,6 +325,12 @@ struct CheckDeferred
     uint64_t history_reads;
     uint64_t withdrawn;
     uint64_t copies;
+    uint64_t expression_parts;
+    uint64_t expression_parallel_tokens;
+    uint64_t expression_serial_tokens;
+    uint64_t expression_worker_mask;
+    uint64_t expression_ticks[4];
+    bool expression_retry;
     // With `timing` (benchmark-checker-deferred), nanoseconds: the top level's walk with the setup before it, the file
     // scope's history (the environment's index), the lanes, the merge; and summed over the lanes, the bodies' walks and
     // their position checks: setting each body's heads from the history and its table's view, and taking them back. And
@@ -298,6 +341,10 @@ struct CheckDeferred
     bool timing;
     // The lanes' CPUs, which a caller whose lane team is pinned (lane_team_start) sets for lane_run to name; 0 for none.
     const uint32_t* cpus;
+    // A caller whose lanes are a command's flow (the C driver's): the lanes are its rounds (check_deferred_lanes_run), as
+    // many as it grants; 0 for lane_run's. `leased` while the reading holds the lanes it granted.
+    const CheckDeferredFlow* flow;
+    bool leased;
     // Every lane the bodies can take, however few tokens they have, as the tests and test-checker-corpus read them.
     bool every_lane;
     // For the tests (test-checker-deferred): the merge fails right after its replay into the caller's table, as one
@@ -306,6 +353,7 @@ struct CheckDeferred
     // `late_first` (not with hold_lanes), the first lane starts its part only once every other lane has taken from the
     // counter, as when the others arrive first, so that it must still read the costliest part.
     bool fail_after_replay;
+    bool fail_after_expressions;
     bool hold_lanes;
     bool late_first;
     // For the tests: the merge finds the token columns' entries by its scalar twin (check_deferred_entries).
@@ -673,6 +721,8 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     bindings->point = bindings->declaration != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
     bindings->end = bindings->point != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
     bindings->previous = bindings->end != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
+    // A lane's proxies copy the file scope's previous handles, so its stream keeps no first column (#1351).
+    bindings->first = 0;
     bindings->depth = bindings->previous != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
     bindings->operation = bindings->depth != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint8_t)) : 0;
     bindings->kind = bindings->operation != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint8_t)) : 0;
@@ -1003,6 +1053,9 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     reader->specifier_abi_origin = 0;
     reader->declarator_abi_origin = 0;
     reader->constant_abi_origin = 0;
+    reader->specifier_noderef = NULL;
+    reader->declarator_noderef = NULL;
+    reader->constant_noderef = NULL;
     reader->specifier_thread_local = false;
     reader->declarator_overloadable = false;
     reader->lane_unsupported = false;
@@ -1757,6 +1810,73 @@ static void check_deferred_pass_lane(void* argument)
     pass->warnings[lane_index()] = check_deferred_pass_items(pass, (uint32_t)items.begin, (uint32_t)items.end);
 }
 
+// `entry` on `lanes` lanes, a round of kind `kind` in a caller's flow (CheckDeferred.flow), whose other lanes run it from
+// the flow's follow loop (check_deferred_follow), or else lane_run's. False if the lanes didn't start: a flow's lanes are
+// those its session started (lane_flow_lanes), which its grant counted before the bodies' parts were cut.
+static bool check_deferred_lanes_run(const CheckDeferred* deferred, uint32_t kind, uint32_t lanes, void (*entry)(void* argument), void* argument)
+{
+    bool result = false;
+    if (deferred->flow != 0)
+    {
+        LaneFlow* flow = deferred->flow->flow;
+        result = lane_flow_lanes(flow) > 1;
+        if (result)
+        {
+            lane_flow_round_begin(flow, kind, argument, lanes);
+            entry(argument);
+            lane_flow_round_end(flow);
+        }
+    }
+    else
+    {
+        result = lane_run(lanes, entry, argument, deferred->cpus);
+    }
+    return result;
+}
+
+// A flow's other lane, for a round lane 0 announced (lane_flow_next): its part of the reader's round of kind `kind`, if it
+// is one and the lane is one of the round's (`argument` not null). Returns whether `kind` is one of the reader's; the
+// caller widens the lane after it, as after any round.
+static void check_deferred_expression_lane(void* argument);
+static void check_deferred_context_lane(void* argument);
+static void check_deferred_binding_lane(void* argument);
+static void check_deferred_control_lane(void* argument);
+
+static __attribute__((unused)) bool check_deferred_follow(uint32_t kind, void* argument)
+{
+    const bool bodies = kind == BUSTER_CHECK_DEFERRED_ROUND_BODIES;
+    const bool pass = kind == BUSTER_CHECK_DEFERRED_ROUND_PASS;
+    const bool expressions = kind == BUSTER_CHECK_DEFERRED_ROUND_EXPRESSIONS;
+    const bool contexts = kind == BUSTER_CHECK_DEFERRED_ROUND_CONTEXTS;
+    const bool bindings = kind == BUSTER_CHECK_DEFERRED_ROUND_BINDINGS;
+    const bool controls = kind == BUSTER_CHECK_DEFERRED_ROUND_CONTROLS;
+    if (bodies && argument != 0)
+    {
+        check_deferred_lane(argument);
+    }
+    else if (pass && argument != 0)
+    {
+        check_deferred_pass_lane(argument);
+    }
+    else if (expressions && argument != 0)
+    {
+        check_deferred_expression_lane(argument);
+    }
+    else if (contexts && argument != 0)
+    {
+        check_deferred_context_lane(argument);
+    }
+    else if (bindings && argument != 0)
+    {
+        check_deferred_binding_lane(argument);
+    }
+    else if (controls && argument != 0)
+    {
+        check_deferred_control_lane(argument);
+    }
+    return bodies || pass || expressions || contexts || bindings || controls;
+}
+
 // Maps a decoded intrinsic's types through a part of the replay.
 static void check_deferred_intrinsic_types(BuiltinIntrinsicTypeResult* decoded, const TypeReplayPart* part)
 {
@@ -1897,6 +2017,10 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
             counts[b] = deferred->results[b].event_count;
         }
         event_total = check_deferred_layout(deferred, offsetof(CheckDeferredCut, events), counts, top_events, event_map, event_bases);
+        for (uint32_t b = 0; b < bodies; b += 1)
+        {
+            deferred->results[b].event_begin = event_bases[b];
+        }
         valid = string_total <= count + 1 && region_total <= count + 1 && vla_total <= input->vla_capacity && asm_total <= input->asm_capacity && vararg_total <= reader->vararg_capacity &&
                 event_total <= reader->bindings.capacity;
     }
@@ -2193,7 +2317,8 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
     {
         costs[bodies] = (uint64_t)count + 1;
     }
-    // On one lane, this thread; on more, a lane_run of the lanes the bodies ran on, which are awake. On more than
+    // On one lane, this thread; on more, a lane_run of the lanes the bodies ran on, which are awake, or in a caller's flow
+    // a round of them (check_deferred_lanes_run). On more than
     // one lane, fault in the columns the pass writes first, on this thread (check_deferred_fault_range): the merged
     // stream's events, every one of which the pass writes, and the token positions, which its scans fill from their
     // start. On one lane this thread writes them alone, and needs no fault-in.
@@ -2216,7 +2341,7 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
     }
     else if (valid)
     {
-        valid = lane_run(lanes, check_deferred_pass_lane, &pass, deferred->cpus);
+        valid = check_deferred_lanes_run(deferred, BUSTER_CHECK_DEFERRED_ROUND_PASS, lanes, check_deferred_pass_lane, &pass);
         deferred->reason = !valid ? "the merge's lanes couldn't start" : deferred->reason;
         input->constant_warning_count = 0;
         for (uint32_t lane = 0; lane < lanes; lane += 1)
@@ -2232,6 +2357,8 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
         bindings->point = point;
         bindings->end = end;
         bindings->previous = previous;
+        // The merged stream's previous handles are remapped; it keeps no first column (#1351).
+        bindings->first = 0;
         bindings->depth = depth;
         bindings->operation = operation;
         bindings->kind = kind;
@@ -2365,13 +2492,28 @@ static void check_deferred_primary_part(CheckDeferred* deferred)
 // The lanes the bodies take: one, and one more per `lane_tokens` of the bodies' tokens (`total` of them in `bodies`)
 // beyond their critical path, the larger of the largest body and twice the second largest, no more than the reader's
 // lanes or the bodies (check_deferred_bodies says why).
-static uint32_t check_deferred_rule(const CheckDeferred* deferred, uint64_t total, uint32_t bodies, uint32_t largest, uint32_t second_body, uint32_t lane_tokens)
+static uint32_t check_deferred_rule_of(uint32_t lanes, bool every_lane, uint64_t total, uint32_t bodies, uint32_t largest, uint32_t second_body,
+                                       uint32_t lane_tokens)
 {
     const uint64_t second = (uint64_t)second_body * 2;
     const uint64_t path = largest > second ? largest : second;
-    const uint64_t paid = deferred->every_lane ? UINT64_MAX : 1 + (total > path ? total - path : 0) / lane_tokens;
-    const uint32_t most = deferred->lanes < bodies ? deferred->lanes : bodies;
+    const uint64_t paid = every_lane ? UINT64_MAX : 1 + (total > path ? total - path : 0) / lane_tokens;
+    const uint32_t most = lanes < bodies ? lanes : bodies;
     return paid < most ? (uint32_t)paid : most;
+}
+
+// check_deferred_rule_of with the state's lanes.
+static uint32_t check_deferred_rule(const CheckDeferred* deferred, uint64_t total, uint32_t bodies, uint32_t largest, uint32_t second_body, uint32_t lane_tokens)
+{
+    return check_deferred_rule_of(deferred->lanes, deferred->every_lane, total, bodies, largest, second_body, lane_tokens);
+}
+
+// The lanes the post-merge rounds take: the bodies' lanes, by the rule or every lane they can take, where those are
+// BUSTER_CHECK_DEFERRED_POST_LANES or more, and otherwise one, the calling thread's original walks (#447).
+static uint32_t check_deferred_post_lanes(const CheckDeferred* deferred)
+{
+    const uint32_t lanes = check_deferred_rule(deferred, deferred->body_tokens, deferred->body_count, deferred->largest_body, deferred->second_body, deferred->lane_tokens);
+    return lanes >= BUSTER_CHECK_DEFERRED_POST_LANES ? lanes : 1;
 }
 
 // Whether check_input_run's arena of rare columns is base pages throughout: where the rule gives a large unit's bodies
@@ -2381,6 +2523,16 @@ static bool check_deferred_shared(const CheckDeferred* deferred)
     return deferred->planned > 1 && deferred->large;
 }
 
+// The lanes a caller's flow granted (CheckDeferredFlow), given back once: after the final post-merge round, or as the unit
+// goes to source order. The outer reading owns the successful path's cleanup.
+static void check_deferred_give_back(CheckDeferred* deferred)
+{
+    if (deferred->leased)
+    {
+        deferred->flow->give_back(deferred->flow->context);
+        deferred->leased = false;
+    }
+}
 
 static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* reader)
 {
@@ -2473,11 +2625,13 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     // largest body, which the first lane reads itself, and twice the second largest, which a woken lane reads at about
     // half the first lane's speed. A lane costs its copy of the reader and its wake-up, which its share of the walks must
     // pay for, and the copy grows with the top level: BUSTER_CHECK_DEFERRED_LANE_TOKENS, and one more per
-    // BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens. And no more lanes than bodies, which are at least
-    // as many as the parts: a lane past them would take none.
+    // BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens. The post-merge rounds join the lanes only from
+    // BUSTER_CHECK_DEFERRED_POST_LANES of them (check_deferred_post_lanes). And no more lanes than bodies, which are at
+    // least as many as the parts: a lane past them would take none.
     const uint32_t count = reader->parser->tokens.count;
     deferred->top_tokens = count > total ? (uint32_t)(count - total) : 0;
     deferred->lane_tokens = BUSTER_CHECK_DEFERRED_LANE_TOKENS + deferred->top_tokens / BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS;
+    // In a caller's flow, `lanes` are those it granted before the top level's walk (check_input_deferred_run).
     const uint32_t active = check_deferred_rule(deferred, total, deferred->body_count, deferred->largest_body, deferred->second_body, deferred->lane_tokens);
     // The lanes' parts, cut here rather than by the lanes, which would wait at lane_parts_by_cost's sync for the last of
     // them to wake: the first lane, this thread, starts its part at once (check_deferred_lane).
@@ -2503,9 +2657,11 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     const uint64_t lanes_begin = deferred->timing ? check_deferred_now() : 0;
     deferred->arenas_ns = lanes_begin - arenas_begin;
     // A one-lane cold run starts no worker and preserves this thread's affinity and context, independently of any
-    // installed team. More than one lane keeps the team's fixed workers and CPU assignment.
+    // installed team. More than one lane keeps the team's fixed workers and CPU assignment, or are a round of the
+    // caller's flow.
     const bool ran = !valid || deferred->body_count == 0 ||
-                     (active == 1 ? lane_run_cold(1, check_deferred_lane, &run, 0) : lane_run(active, check_deferred_lane, &run, deferred->cpus));
+                     (active == 1 ? lane_run_cold(1, check_deferred_lane, &run, 0) :
+                                    check_deferred_lanes_run(deferred, BUSTER_CHECK_DEFERRED_ROUND_BODIES, active, check_deferred_lane, &run));
     deferred->reason = valid && !ran ? "the lanes couldn't start" : deferred->reason;
     valid = valid && ran;
     deferred->lanes_ns = deferred->timing ? check_deferred_now() - lanes_begin : 0;
@@ -2542,12 +2698,18 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     const uint64_t merge_begin = deferred->timing ? check_deferred_now() : 0;
     const bool merged = valid && check_deferred_merge(deferred, reader);
     deferred->merge_ns = deferred->timing ? check_deferred_now() - merge_begin : 0;
+    if (!merged)
+    {
+        check_deferred_give_back(deferred);
+    }
     deferred->reason = valid && !merged && deferred->reason == 0 ? "the merge ran out of room" : deferred->reason;
     valid = merged;
     // A unit that isn't merged is source order's: nothing more of this run counts.
     deferred->unsupported |= !valid;
     input->resource |= !valid;
 }
+
+#include "c_check_deferred_expressions.c"
 
 // The state's memory, its lanes' among it, which its readings' inputs point into: release it once the last input is no
 // longer used. The state then reserves memory again if it reads another unit.
@@ -2605,82 +2767,150 @@ static __attribute__((unused)) void check_deferred_poison(CheckDeferred* deferre
     }
 }
 
-// check_input with every function body read apart, on `lanes` lanes, through `binding_mode`'s resolution. `deferred` is
-// the reader's state, which starts zeroed and which the caller keeps until it releases it (check_deferred_release); its
-// `unsupported` says that the unit was checked in source order instead. The result is check_input's in either case. A
-// state may read several units, one after another: each reading takes back the memory the state's earlier readings
-// reserved, and with it their inputs, which point into it.
-static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena,
-                                 Arena* scratch, uint32_t lanes, CheckInputBindingMode binding_mode)
+// Whether the unit has a `#pragma clang section` line, as check_input_section_pragmas finds them among the retained
+// pragmas: check_deferred_bodies sends such a unit to source order after the top level's walk, which the driver's reading
+// (check_input_deferred_run's `compile`) then doesn't walk.
+static bool check_deferred_sections(const Parser* parser, const Preprocessor* pp)
 {
-    const bool timing = deferred->timing;
-    const uint32_t* cpus = deferred->cpus;
-    const bool fail_after_replay = deferred->fail_after_replay;
-    const bool hold_lanes = deferred->hold_lanes;
-    const bool late_first = deferred->late_first;
-    const bool every_lane = deferred->every_lane;
-    const bool scalar_merge = deferred->scalar_merge;
-    const uint32_t base_page_tokens = deferred->base_page_tokens;
-    const CheckDeferredMemory memory = deferred->memory;
-    *deferred = (CheckDeferred){
-        .memory = memory,
-        .lanes = lanes,
-        .table = types,
-        .timing = timing,
-        .cpus = cpus,
-        .every_lane = every_lane,
-        .scalar_merge = scalar_merge,
-        .base_page_tokens = base_page_tokens,
-        .fail_after_replay = fail_after_replay,
-        .hold_lanes = hold_lanes,
-        .late_first = late_first,
-    };
+    const ParseTokens* tokens = &parser->tokens;
+    const PPTokens* output = &pp->output;
+    bool found = false;
+    for (uint32_t pragma = 0; !found && pragma < tokens->pragma_count; pragma += 1)
+    {
+        const uint32_t source = tokens->pragma_sources[pragma];
+        uint32_t end = source;
+        found = source < output->count && output->kinds[source] == C_TOKEN_HASH && parse_pragma_at(output, source, &end) && end - source >= 4 &&
+                pp_token_is_name(pp, output, source + 1, end, "pragma") && pp_token_is_name(pp, output, source + 2, end, "clang") &&
+                pp_token_is_name(pp, output, source + 3, end, "section");
+    }
+    return found;
+}
+
+// check_input_deferred and check_input_deferred_compile: with `compile`, the C driver's reading (check_input_compile's),
+// which publishes no environment and takes `arena` as fresh where it is (CheckInput's `fresh_output`); and a unit for
+// source order is checked by that reading too.
+static bool check_input_deferred_run(CheckDeferred* deferred, CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena,
+                                     Arena* scratch, uint32_t lanes, CheckInputBindingMode binding_mode, bool compile)
+{
     const uint32_t count = parser->tokens.count;
     const uint64_t arena_mark = arena->length;
-    // Plain char's signedness on the caller's table, which the merge fills and the phases after the reader read
-    // (check_input_run sets the top level's, and type_copy each lane's).
-    types->char_unsigned = pp->options.predefines.char_unsigned;
+    const CheckDeferredFlow* flow = deferred->flow;
+    const bool every_lane = deferred->every_lane;
+    // The target's facts on the caller's table (plain char's signedness, cx16's 16-byte atomics), which the merge fills and
+    // the phases after the reader read: check_input_run sets the top level's, and type_copy each lane's.
+    check_input_target_table(types, pp);
     // The caller's table as it comes, which a fallback to source order takes it back to: the merge replays into it, and
     // may fail after that.
     const TypeViewMark empty = type_view_mark(types);
     const TypeError empty_error = types->last_error;
-    // The state's own arena, and address space for the top level's table and its record at the caller's capacities:
-    // pages are committed as they are touched, and stay for the state's later readings.
-    check_deferred_arena(&deferred->memory.arena, UINT64_C(1) << 36);
-    check_deferred_arena(&deferred->memory.top, UINT64_C(1) << 40);
-    check_deferred_arena(&deferred->memory.top_index, UINT64_C(1) << 34);
-    // Every function body at file scope deferred: a run from its opening brace to its closing one.
-    uint8_t* mask = deferred->memory.arena.base != 0 && parser->tree.roles != 0 ? BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, uint8_t, (uint64_t)count + 1) : 0;
-    bool valid = mask != 0 && types->types.count == BUSTER_TYPE_BUILTIN_COUNT && types->tags.count == 1 && types->changes == 0 && lanes != 0 &&
+    // Every function body at file scope deferred, each a run from its opening brace to its closing one: their openings,
+    // in the caller's scratch until the mask has them, and the counts the lanes' rule takes. A body has two tokens at
+    // least.
+    const uint64_t scratch_mark = scratch->length;
+    uint32_t* openings = parser->tree.roles != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count / 2 + 1) : 0;
+    bool valid = openings != 0 && types->types.count == BUSTER_TYPE_BUILTIN_COUNT && types->tags.count == 1 && types->changes == 0 && lanes != 0 &&
                  lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES;
     uint32_t bodies = 0;
     uint64_t body_tokens = 0;
     uint32_t largest = 0;
     uint32_t second = 0;
-    if (valid)
+    for (uint32_t token = 0; valid && token < count; token += 1)
     {
-        memset(mask, 0, (uint64_t)count + 1);
-        for (uint32_t token = 0; token < count; token += 1)
+        const uint32_t close = parser->tree.parents[token];
+        if (parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY && close > token && close < count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_BODY)
         {
-            const uint32_t close = parser->tree.parents[token];
-            if (parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY && close > token && close < count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_BODY)
-            {
-                const uint32_t tokens = close - token + 1;
-                memset(mask + token, 1, tokens);
-                bodies += 1;
-                body_tokens += tokens;
-                second = tokens > largest ? largest : tokens > second ? tokens : second;
-                largest = tokens > largest ? tokens : largest;
-                token = close;
-            }
+            const uint32_t tokens = close - token + 1;
+            openings[bodies] = token;
+            bodies += 1;
+            body_tokens += tokens;
+            second = tokens > largest ? largest : tokens > second ? tokens : second;
+            largest = tokens > largest ? tokens : largest;
+            token = close;
         }
     }
     // The lanes the rule will give the bodies, from the counts check_deferred_bodies takes again from the top level's
     // cuts, before check_input_run reserves its arena of rare columns by them and the unit's size (check_deferred_shared).
     const uint32_t top_tokens = count > body_tokens ? (uint32_t)(count - body_tokens) : 0;
-    deferred->large = count >= (deferred->base_page_tokens != 0 ? deferred->base_page_tokens : BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS);
-    deferred->planned = check_deferred_rule(deferred, body_tokens, bodies, largest, second,
-                                            BUSTER_CHECK_DEFERRED_LANE_TOKENS + top_tokens / BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS);
+    const uint32_t lane_tokens = BUSTER_CHECK_DEFERRED_LANE_TOKENS + top_tokens / BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS;
+    const uint32_t ruled = check_deferred_rule_of(lanes, every_lane, body_tokens, bodies, largest, second, lane_tokens);
+    // The driver's reading (`compile`) reads the bodies apart only where they take BUSTER_CHECK_DEFERRED_COMPILE_LANES
+    // lanes or more (two where --lanes N forces them, every_lane) and the unit has no `#pragma clang section` line, which
+    // check_deferred_bodies would send to source order after the top level's walk: on fewer lanes the deferred reader's
+    // top level's record and merge cost more than its lanes save.
+    const uint32_t least = every_lane ? 2 : BUSTER_CHECK_DEFERRED_COMPILE_LANES;
+    const bool sections = valid && compile && ruled >= least && check_deferred_sections(parser, pp);
+    // In a caller's flow, as many of the planned lanes as it grants (CheckDeferredFlow), taken before the top level's walk,
+    // whose bodies' rule is this one; they are given back after the final post-merge round, or on a source-order retry.
+    const bool leased = valid && flow != 0 && ruled > 1 && (!compile || (ruled >= least && !sections));
+    const uint32_t granted = leased ? flow->grant(flow->context, ruled) : lanes;
+    const uint32_t reading = granted == 0 ? 1 : granted < lanes ? granted : lanes;
+    const uint32_t planned = check_deferred_rule_of(reading, every_lane, body_tokens, bodies, largest, second, lane_tokens);
+    const bool alone = valid && compile && (sections || planned < least);
+    if (alone)
+    {
+        // The driver's reading of a unit for source order, decided before it reserves or zeroes anything: the state as it
+        // was, its memory too, but for what says so. Zeroing the state, its lanes' copies of the reader among it, faulted in
+        // 176 more pages for a small unit's -c, 3.8% of its time on the 9700X (#151).
+        if (leased)
+        {
+            flow->give_back(flow->context);
+        }
+        deferred->leased = false;
+        deferred->unsupported = true;
+        deferred->active = 0;
+        deferred->reason = sections ? "#pragma clang section" : "too few lanes";
+    }
+    else
+    {
+        const bool timing = deferred->timing;
+        const uint32_t* cpus = deferred->cpus;
+        const bool fail_after_replay = deferred->fail_after_replay;
+        const bool hold_lanes = deferred->hold_lanes;
+        const bool late_first = deferred->late_first;
+        const bool scalar_merge = deferred->scalar_merge;
+        const uint32_t base_page_tokens = deferred->base_page_tokens;
+        const CheckDeferredMemory memory = deferred->memory;
+        const bool fail_after_expressions = deferred->fail_after_expressions;
+        *deferred = (CheckDeferred){
+            .memory = memory,
+            .lanes = reading,
+            .table = types,
+            .timing = timing,
+            .cpus = cpus,
+            .flow = flow,
+            .leased = leased,
+            .every_lane = every_lane,
+            .scalar_merge = scalar_merge,
+            .base_page_tokens = base_page_tokens,
+            .fail_after_replay = fail_after_replay,
+            .fail_after_expressions = fail_after_expressions,
+            .hold_lanes = hold_lanes,
+            .late_first = late_first,
+            .planned = planned,
+            .large = count >= (base_page_tokens != 0 ? base_page_tokens : BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS),
+        };
+    }
+    valid = valid && !alone;
+    // The state's own arena, and address space for the top level's table and its record at the caller's capacities:
+    // pages are committed as they are touched, and stay for the state's later readings.
+    if (valid)
+    {
+        check_deferred_arena(&deferred->memory.arena, UINT64_C(1) << 36);
+        check_deferred_arena(&deferred->memory.top, UINT64_C(1) << 40);
+        check_deferred_arena(&deferred->memory.top_index, UINT64_C(1) << 34);
+    }
+    uint8_t* mask = valid && deferred->memory.arena.base != 0 ? BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, uint8_t, (uint64_t)count + 1) : 0;
+    valid = valid && mask != 0;
+    if (valid)
+    {
+        memset(mask, 0, (uint64_t)count + 1);
+        for (uint32_t b = 0; b < bodies; b += 1)
+        {
+            const uint32_t opening = openings[b];
+            memset(mask + opening, 1, parser->tree.parents[opening] - opening + 1);
+        }
+    }
+    arena_pop_to(scratch, scratch_mark);
     deferred->cuts = valid ? BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, CheckDeferredCut, (uint64_t)bodies + 1) : 0;
     deferred->body_capacity = bodies;
     valid = valid && deferred->cuts != 0;
@@ -2701,23 +2931,44 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
     valid = valid && type_initialize(&deferred->top, &deferred->memory.top, &deferred->memory.top_index, capacity) &&
             type_changes_initialize(&deferred->top_changes, &deferred->memory.top, types->types.capacity + types->tags.capacity * 4, types->parameters.capacity,
                                     types->members.capacity);
-    deferred->top.changes = valid ? &deferred->top_changes : 0;
-    deferred->reason = !valid ? "the deferred reader's own memory" : 0;
+    deferred->reason = alone ? deferred->reason : !valid ? "the deferred reader's own memory" : 0;
     // check_deferred_bodies ends the top level's span, which starts here.
-    deferred->top_ns = timing ? check_deferred_now() : 0;
-    bool checked = valid && check_input_run(input, parser, pp, &deferred->top, arena, scratch, true, count, mask, binding_mode, deferred, true, true, false);
+    deferred->top_ns = valid && deferred->timing ? check_deferred_now() : 0;
+    deferred->top.changes = valid ? &deferred->top_changes : 0;
+    bool checked = valid && check_input_run(input, parser, pp, &deferred->top, arena, scratch, true, count, mask, binding_mode, deferred, !compile, true, compile);
     deferred->top.changes = 0;
+    check_deferred_give_back(deferred);
     deferred->unsupported |= !valid;
     deferred->reason = deferred->unsupported && deferred->reason == 0 ? "the top level's walk stopped" : deferred->reason;
-    if (deferred->unsupported)
+    if (deferred->unsupported || deferred->expression_retry)
     {
         // Source order, from nothing: the caller's table back to how it came (a merge that failed after its replay
         // filled it), and the input's records gone.
         const bool reset = type_view_reset(types, empty);
         types->last_error = empty_error;
         arena_pop_to(arena, arena_mark);
-        checked = reset && check_input_bindings_mode(input, parser, pp, types, arena, scratch, binding_mode);
+        checked = reset && (compile ? check_input_compile(input, parser, pp, types, arena, scratch, true, count, 0) :
+                                      check_input_bindings_mode(input, parser, pp, types, arena, scratch, binding_mode));
         input->resource |= !reset;
     }
     return checked;
+}
+
+// check_input with every function body read apart, on `lanes` lanes, through `binding_mode`'s resolution. `deferred` is
+// the reader's state, which starts zeroed and which the caller keeps until it releases it (check_deferred_release); its
+// `unsupported` says that the unit was checked in source order instead. The result is check_input's in either case. A
+// state may read several units, one after another: each reading takes back the memory the state's earlier readings
+// reserved, and with it their inputs, which point into it.
+static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena,
+                                 Arena* scratch, uint32_t lanes, CheckInputBindingMode binding_mode)
+{
+    return check_input_deferred_run(deferred, input, parser, pp, types, arena, scratch, lanes, binding_mode, false);
+}
+
+// The C driver's reading of a whole unit with its bodies read apart (#151): check_input_compile's result, on up to `lanes`
+// lanes, which are the rounds of the state's flow where it has one (CheckDeferred.flow).
+static __attribute__((unused)) bool check_input_deferred_compile(CheckDeferred* deferred, CheckInput* input, const Parser* parser, Preprocessor* pp,
+                                                                 TypeTable* types, Arena* arena, Arena* scratch, uint32_t lanes)
+{
+    return check_input_deferred_run(deferred, input, parser, pp, types, arena, scratch, lanes, CHECK_INPUT_BINDINGS_DEFAULT, true);
 }

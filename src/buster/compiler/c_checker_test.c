@@ -167,7 +167,16 @@ static bool check_test_value_equal(const CheckValue* a, const CheckValue* b)
                            (a->imaginary == b->imaginary && signbit(a->imaginary) == signbit(b->imaginary));
     return a->type == b->type && a->category == b->category && a->flags == b->flags &&
            a->constant_kind == b->constant_kind && a->integer == b->integer && floating && imaginary && a->object == b->object && a->overload_head == b->overload_head &&
-           a->offset == b->offset && a->bit_width == b->bit_width && a->fault == b->fault && a->fault_node == b->fault_node;
+           a->offset == b->offset && a->bit_width == b->bit_width && a->fault == b->fault && a->fault_node == b->fault_node &&
+           a->object_bit_offset == b->object_bit_offset;
+}
+
+// Whether two graphs' leaves of VALUE node `node` are the same value, whichever form each graph holds its leaves in.
+static __attribute__((unused)) bool check_test_leaf_equal(const CheckGraph* x, const CheckGraph* y, uint32_t node)
+{
+    const CheckValue a = check_graph_leaf_value(x, node);
+    const CheckValue b = check_graph_leaf_value(y, node);
+    return check_test_value_equal(&a, &b);
 }
 
 static bool check_test_action_equal(const CheckActionResult* a, const CheckActionResult* b)
@@ -698,6 +707,40 @@ static __attribute__((noinline)) void check_test_action_constraints(CheckTest* t
     check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_ADDRESS && result.value.object == 11 && result.value.offset == 12,
                       "static pointer arithmetic retains byte addend");
     const CheckValue address = result.value;
+    action.operands[1] = check_test_integer(BUSTER_TYPE_ULONG, (unsigned __int128)1 << 62);
+    result = check_test_action(test, table, action);
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_ADDRESS && result.value.object == 11 && result.value.offset == 0,
+                      "a 2^62 int index wraps the byte addend to zero");
+    CheckValue bytes = address;
+    bytes.offset = 0;
+    bytes.type = type_pointer(table, BUSTER_TYPE_CHAR);
+    action.operands[0] = bytes;
+    action.operands[1] = check_test_integer(BUSTER_TYPE_ULONG, (unsigned __int128)1 << 63);
+    result = check_test_action(test, table, action);
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_ADDRESS && result.value.object == 11 &&
+                           result.value.offset == (int64_t)((uint64_t)1 << 63),
+                      "a 2^63 byte index is the signed relocation addend");
+    action = (CheckAction){
+        .op = CHECK_OP_CAST,
+        .type = BUSTER_TYPE_BOOL,
+        .operands = {
+            {
+                .type = type_pointer(table, BUSTER_TYPE_CHAR),
+                .category = CHECK_RVALUE,
+                .flags = BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_NONNULL_ADDRESS,
+                .constant_kind = CHECK_CONSTANT_ADDRESS,
+                .object = 11,
+                .offset = (int64_t)((uint64_t)1 << 63),
+            }
+        }
+    };
+    result = check_test_action(test, table, action);
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_INTEGER && result.value.integer == 1,
+                      "a non-weak address is true as _Bool, including a wrapped displacement");
+    action.operands[0].flags = BUSTER_CHECK_STATIC_OBJECT;
+    result = check_test_action(test, table, action);
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_NONE,
+                      "a weak address is not a constant _Bool");
     action = (CheckAction){
         .op = CHECK_OP_SUBTRACT,
         .operands = {
@@ -1616,7 +1659,7 @@ static uint32_t check_test_leaf(CheckGraph* graph, uint32_t token, CheckValue va
     const uint32_t node = check_graph_add(graph, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
     if (node != BUSTER_CHECK_NONE)
     {
-        *check_graph_leaf_of(graph, node) = value;
+        check_graph_set_leaf(graph, node, &value);
     }
     return node;
 }
@@ -1709,7 +1752,8 @@ static __attribute__((noinline)) void check_test_graph_fixtures(CheckTest* test,
         const uint32_t selected = check_graph_add(&graph, CHECK_OP_LOGICAL_OR, 8, zero, divide, BUSTER_CHECK_NONE);
         graph.contexts[selected] = BUSTER_CHECK_CONTEXT_ICE;
         const uint32_t assertion = check_graph_add(&graph, CHECK_OP_VALUE, 7, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
-        *check_graph_leaf_of(&graph, assertion) = check_test_integer(BUSTER_TYPE_INT, 0);
+        const CheckValue asserted = check_test_integer(BUSTER_TYPE_INT, 0);
+        check_graph_set_leaf(&graph, assertion, &asserted);
         graph.contexts[assertion] = BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_ICE;
         // Both children are checked even when evaluation selects only one: invalid operand types remain errors.
         const uint32_t floating = check_test_leaf(&graph, 9, check_test_float(BUSTER_TYPE_FLOAT, 1));
@@ -1740,6 +1784,7 @@ static __attribute__((noinline)) void check_test_graph_fixtures(CheckTest* test,
         arena_pop_to(output, output_mark);
         graph.count = 0;
         graph.leaf_count = 0;
+        graph.leaf_payload_count = 0;
         // All expressions would have the same bracket depth in `a+b+c`. Edges, not parser depths, carry readiness.
         uint32_t previous = check_test_leaf(&graph, 0, check_test_integer(BUSTER_TYPE_UINT, 0));
         for (uint32_t i = 1; i <= 127; i += 1)
@@ -1753,6 +1798,7 @@ static __attribute__((noinline)) void check_test_graph_fixtures(CheckTest* test,
         arena_pop_to(output, output_mark);
         graph.count = 0;
         graph.leaf_count = 0;
+        graph.leaf_payload_count = 0;
         for (uint32_t i = 0; i < 257; i += 1)
         {
             const uint32_t a = check_test_leaf(&graph, i * 3, check_test_integer(BUSTER_TYPE_ULONG, i));
@@ -1786,6 +1832,7 @@ static __attribute__((noinline)) void check_test_graph_random(CheckTest* test, T
     {
         graph.count = 0;
         graph.leaf_count = 0;
+        graph.leaf_payload_count = 0;
         for (uint32_t i = 0; i < graph.capacity; i += 1)
         {
             if (i < 2 || (check_test_random(test) & 7) == 0)
@@ -2124,7 +2171,7 @@ static __attribute__((noinline)) void check_test_graph_guarded(CheckTest* test, 
             .operand0 = columns[2],
             .operand1 = columns[3],
             .operand2 = columns[4],
-            .leaves = columns[5],
+            .dense_leaves = columns[5],
             .leaf_slots = columns[11],
             .leaf_count = leaf_count,
             .types = columns[6],
@@ -2146,7 +2193,7 @@ static __attribute__((noinline)) void check_test_graph_guarded(CheckTest* test, 
             graph.leaf_slots[node] = leaf ? node / 2 : BUSTER_CHECK_NONE;
             if (leaf)
             {
-                graph.leaves[node / 2] = check_test_integer(BUSTER_TYPE_UINT, node + 1);
+                graph.dense_leaves[node / 2] = check_test_integer(BUSTER_TYPE_UINT, node + 1);
             }
             graph.types[node] = 0;
             graph.members[node] = 0;
@@ -2251,8 +2298,8 @@ static __attribute__((noinline)) void check_test_expression_coverage(CheckTest* 
         const bool counted = test->expression_acted[code] != 0 || test->expression_left[code] != 0;
         // The classes whose actions leave valid code to the walk by design: a K&R unit's or a constexpr object's
         // identifiers, a function's name, a label's address, sizeof or alignof, and K&R calls. An initializer's
-        // assignment, a builtin's token and an intrinsic's call are the walk's class (check_input_expression_fold), and
-        // a statement expression's terminators are the terminators' action's. The others' actions leave a token only where
+        // assignment is its own class, a builtin's token and an intrinsic's call the walk's (check_input_expression_fold),
+        // and a statement expression's terminators are the terminators' action's. The others' actions leave a token only where
         // a child has no value or the walk refuses the token (their guard keeps the walk's refusal), and a list's takes
         // every token; DROP's tokens never reach an action.
         const bool declines = code == CHECK_INPUT_CODE_IDENTIFIER || code == CHECK_INPUT_CODE_LITERAL || code == CHECK_INPUT_CODE_PREFIX ||
@@ -2287,7 +2334,7 @@ static bool check_test_source_graphs_equal(const CheckInput* a, const CheckInput
                 x->members[node] == y->members[node] && x->contexts[node] == y->contexts[node] && x->leaf_slots[node] == y->leaf_slots[node] &&
                 x->argument_offsets[node] == y->argument_offsets[node] && x->argument_counts[node] == y->argument_counts[node] &&
                 (x->source_positions == NULL || x->source_positions[node] == y->source_positions[node]);
-        equal = equal && (x->ops[node] != CHECK_OP_VALUE || check_test_value_equal(check_graph_leaf_of(x, node), check_graph_leaf_of(y, node)));
+        equal = equal && (x->ops[node] != CHECK_OP_VALUE || check_test_leaf_equal(x, y, node));
     }
     for (uint32_t argument = 0; equal && argument < x->argument_count; argument += 1)
     {
@@ -2301,6 +2348,24 @@ static bool check_test_source_graphs_equal(const CheckInput* a, const CheckInput
     for (uint32_t token = 0; equal && token < tokens; token += 1)
     {
         equal = a->token_nodes[token] == b->token_nodes[token] && (a->overload_heads == NULL || a->overload_heads[token] == b->overload_heads[token]);
+    }
+    return equal;
+}
+
+// Whether the two paths' readers listed the same enumeration constants, with their values, and the same enumerations'
+// definitions, in token order (check_input_enum_records: the vector path visits the enumerators and the `enum` keywords
+// alone, the scalar path every token).
+static bool check_test_source_enums_equal(const CheckInput* a, const CheckInput* b)
+{
+    bool equal = a->enum_value_count == b->enum_value_count && a->enum_definition_count == b->enum_definition_count;
+    for (uint32_t i = 0; equal && i < a->enum_value_count; i += 1)
+    {
+        equal = a->enum_values[i].token == b->enum_values[i].token && a->enum_values[i].value == b->enum_values[i].value;
+    }
+    for (uint32_t i = 0; equal && i < a->enum_definition_count; i += 1)
+    {
+        equal = a->enum_definitions[i].type == b->enum_definitions[i].type && a->enum_definitions[i].open == b->enum_definitions[i].open &&
+                a->enum_definitions[i].close == b->enum_definitions[i].close;
     }
     return equal;
 }
@@ -2491,6 +2556,8 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             char graphs[256];
             snprintf(graphs, sizeof(graphs), "%s: the source paths build the same expression graph", fixture->name);
             check_test_expect(test, check_test_source_graphs_equal(&input[0], &input[1], input[0].token_count), graphs);
+            snprintf(graphs, sizeof(graphs), "%s: the source paths list the same enumeration constants and definitions", fixture->name);
+            check_test_expect(test, check_test_source_enums_equal(&input[0], &input[1]), graphs);
         }
         if (checked[0] && checked[1])
         {
@@ -2591,6 +2658,66 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
         {
             "global address initializer",
             "int g; int *p = &g;\n",
+            false,
+            false
+        },
+        {
+            "bool of a defined object's address",
+            "int s; _Bool b = (_Bool)&s;\n",
+            false,
+            false
+        },
+        {
+            "bool of a strong external address",
+            "extern int e; _Bool b = (_Bool)&e;\n",
+            false,
+            false
+        },
+        {
+            "bool of a wrapped address",
+            "int s; _Bool b = (_Bool)((char *)&s + (1ul << 63));\n",
+            false,
+            false
+        },
+        {
+            "bool of an automatic address in a static initializer",
+            "void f(void) { int x; static _Bool b = (_Bool)&x; }\n",
+            false,
+            false
+        },
+        {
+            "bool of a weak address",
+            "extern int w __attribute__((weak)); _Bool b = (_Bool)&w;\n",
+            true,
+            false
+        },
+        {
+            "bool of a weak definition's address",
+            "int w __attribute__((weak)); _Bool b = (_Bool)&w;\n",
+            true,
+            false
+        },
+        {
+            "pointer index that wraps in 64 bits",
+            "int a[4]; int *r = a + (1ul << 62); char s; char *p = &s + (1ul << 63);\n",
+            false,
+            false
+        },
+        {
+            "bool of an address named by pragma weak",
+            "#pragma weak w\nextern int w;\n_Bool b = (_Bool)&w;\n",
+            true,
+            false
+        },
+        {
+            "bool of an address an ignored pragma weak names",
+            "#pragma weak w extra\nextern int w;\n_Bool b = (_Bool)&w;\n",
+            false,
+            false
+        },
+        {
+            "bool of an address a pragma weak after it names",
+            "extern int w;\n_Bool b = (_Bool)&w;\n#pragma weak w\n",
             false,
             false
         },
@@ -3495,22 +3622,58 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
-            // What clang deduces as C++ deduces a declarator's type, and GCC refuses: refused by name.
-            "__auto_type: a pointer declarator",
+            // What clang deduces as C++ deduces a declarator's type, and GCC refuses (#147): pointer and function
+            // declarators, qualifiers through them, and a declaration's later declarators, each the same deduction.
+            "__auto_type: pointer declarators",
+            "int g(void);\n"
             "void f(void) {\n"
             "    int y = 0;\n"
+            "    double d = 1;\n"
             "    __auto_type *p = &y;\n"
+            "    __auto_type **pp = &p;\n"
+            "    __auto_type const *q = &d;\n"
+            "    __auto_type (*fp)(void) = g;\n"
+            "    _Static_assert(_Generic(p, int *: 1, default: 0), \"\");\n"
+            "    _Static_assert(_Generic(pp, int **: 1, default: 0), \"\");\n"
+            "    _Static_assert(_Generic(q, const double *: 1, default: 0), \"\");\n"
+            "    _Static_assert(_Generic(fp, int (*)(void): 1, default: 0), \"\");\n"
             "}\n",
-            true,
-            true
+            false,
+            false
         },
         {
-            "__auto_type: a second declarator",
+            "__auto_type: later declarators",
+            "int a[3];\n"
             "void f(void) {\n"
             "    __auto_type x = 1, y = 2;\n"
+            "    const __auto_type c = 3, e = 4;\n"
+            "    __auto_type r = a, s = &a[1];\n"
+            "    _Static_assert(_Generic(y, int: 1, default: 0), \"\");\n"
+            "    _Static_assert(_Generic(&e, const int *: 1, default: 0), \"\");\n"
+            "    _Static_assert(_Generic(s, int *: 1, default: 0), \"\");\n"
+            "    (void)x; (void)c; (void)r;\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            // Declarators that deduce differently, clang's error at the keyword.
+            "__auto_type: later declarators' different deductions",
+            "int a[3];\n"
+            "void f(void) {\n"
+            "    __auto_type r = a, *s = &a[1];\n"
             "}\n",
             true,
-            true
+            false
+        },
+        {
+            "__auto_type: a pointer declarator of no pointer",
+            "int x;\n"
+            "void f(void) {\n"
+            "    __auto_type *p = x;\n"
+            "}\n",
+            true,
+            false
         },
         {
             // A name with linkage declared before: its types would bind before the deduction.
@@ -6061,7 +6224,9 @@ static CheckSparseWide check_input_attributes_from(Arena* arena, CheckInputAttri
 #include "c_check_initializer_test.c"
 #include "c_check_data_source_test.c"
 #include "c_check_attribute_test.c"
+#include "c_check_deprecated_walk_test.c"
 #include "c_check_program_test.c"
+#include "c_check_direct_initializer_test.c"
 #include "c_check_typeof_compound_test.c"
 #include "c_check_cleanup_test.c"
 #include "c_check_musttail_test.c"
@@ -6074,6 +6239,7 @@ static CheckSparseWide check_input_attributes_from(Arena* arena, CheckInputAttri
 #include "c_check_embed_test.c"
 #include "c_check_prefix_test.c"
 #include "c_check_repair_test.c"
+#include "c_check_system_tokens_test.c"
 #include "c_check_input_scan_test.c"
 #include "c_check_warning_input_test.c"
 #include "c_check_selection_test.c"
@@ -6144,6 +6310,7 @@ static void check_test_requests(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
 static void check_test_mutations(CheckTest* test, const char* clang);
 static void check_test_constraints(CheckTest* test, const char* clang);
+static void check_test_semantic_diagnostics(CheckTest* test, const char* clang);
 static void check_test_x86_diagnostics(CheckTest* test, TypeTable* types, const char* clang);
 static void check_test_undeclared(CheckTest* test, const char* clang);
 
@@ -6156,6 +6323,7 @@ static int run_checker_tests(int argc, char** argv)
         .random = 133
     };
     const char* clang = "clang";
+    bool direct_initializers = false;
     bool program_initializers = false;
     bool program_selection = false;
     bool const_values = false;
@@ -6171,6 +6339,7 @@ static int run_checker_tests(int argc, char** argv)
     bool requests = false;
     bool sizeof_only = false;
     bool transitions_only = false;
+    bool semantic_diagnostics = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -6181,6 +6350,10 @@ static int run_checker_tests(int argc, char** argv)
             const char* value = argv[++i];
             test.random = strtoull(value, &end, 10);
             options = errno == 0 && value != end && *end == 0 && *value != '-';
+        }
+        else if (strcmp(argv[i], "--direct-initializers") == 0)
+        {
+            direct_initializers = true;
         }
         else if (strcmp(argv[i], "--program-initializers") == 0)
         {
@@ -6238,6 +6411,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             requests = true;
         }
+        else if (strcmp(argv[i], "--semantic-diagnostics") == 0)
+        {
+            semantic_diagnostics = true;
+        }
         else if (strcmp(argv[i], "--transitions") == 0)
         {
             transitions_only = true;
@@ -6265,18 +6442,26 @@ static int run_checker_tests(int argc, char** argv)
     check_test_part.seed = test.random;
     check_test_part.test = &test;
     // The selections run their own checks whole: --part deals the default run's.
-    options = options && (check_test_part.count == 1 || !(program_initializers || const_values || program_vectors || program_amx || program_asm ||
+    options = options && (check_test_part.count == 1 || !(direct_initializers || program_initializers || const_values || program_vectors || program_amx || program_asm ||
                                                            program_bits || program_align || program_float_constants || program_overloads ||
-                                                           program_library || embed_initializers || requests || sizeof_only || transitions_only || program_selection));
+                                                           program_library || embed_initializers || requests || sizeof_only || transitions_only || semantic_diagnostics || program_selection));
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--direct-initializers|--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions|--semantic-diagnostics]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
     {
         const bool initialized = check_test_types_open(&types);
         check_test_expect(&test, initialized, "type-table allocation");
-        if (initialized && transitions_only)
+        if (initialized && direct_initializers)
+        {
+            check_test_direct_initializers(&test, clang);
+        }
+        else if (initialized && semantic_diagnostics)
+        {
+            check_test_semantic_diagnostics(&test, clang);
+        }
+        else if (initialized && transitions_only)
         {
             check_test_transitions(&test);
         }
@@ -6585,12 +6770,14 @@ static int run_checker_tests(int argc, char** argv)
             }
             if (check_test_takes())
             {
+                check_test_system_tokens(&test);
                 check_test_input_scans(&test);
             }
             if (check_test_takes())
             {
                 check_test_identifier_leaves(&test);
                 check_test_literal_values(&test);
+                check_test_expression_flush(&test);
             }
             if (check_test_takes())
             {
@@ -6723,6 +6910,7 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_initializers(&test, clang);
+                check_test_direct_initializers(&test, clang);
             }
             if (check_test_takes())
             {
@@ -6739,6 +6927,10 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_attribute_sources(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_deprecated_walks(&test);
             }
             // Deals its programs itself.
             check_test_programs(&test, clang);

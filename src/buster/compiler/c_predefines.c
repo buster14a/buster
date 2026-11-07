@@ -859,6 +859,15 @@ struct PredefinesOptions
     uint8_t dwarf2_cfi_asm;
     uint8_t asynchronous_unwind_tables;
     uint8_t unwind_tables;
+    // The last of -fomit-frame-pointer and -fno-omit-frame-pointer, and of -momit-leaf-frame-pointer and
+    // -mno-omit-leaf-frame-pointer (BUSTER_PREDEFINES_ON for the first of each pair), which change no macro but the frame
+    // pointer the code keeps (#177, predefines_frame_pointer).
+    uint8_t omit_frame_pointer;
+    uint8_t omit_leaf_frame_pointer;
+    // The last of -fstack-clash-protection and -fno-stack-clash-protection (BUSTER_PREDEFINES_ON for the first), which
+    // changes no macro but whether both tiers' frames and dynamic allocations probe the stack a page at a time (#177,
+    // predefines_stack_clash).
+    uint8_t stack_clash_protection;
     // -fcommon (the last of it and -fno-common): every tentative definition of external linkage a common symbol (#147),
     // which changes no macro.
     bool common;
@@ -1282,6 +1291,10 @@ static bool predefines_neutral(PredefinesOptions* options, const char* argument)
     {
         result = strcmp(argument, predefines_neutral_flags[i]) == 0;
     }
+    // The frame pointer's leaf rule (#177, predefines_frame_pointer): the last of the pair.
+    options->omit_leaf_frame_pointer = strcmp(argument, "-momit-leaf-frame-pointer") == 0      ? BUSTER_PREDEFINES_ON
+                                       : strcmp(argument, "-mno-omit-leaf-frame-pointer") == 0 ? BUSTER_PREDEFINES_OFF
+                                                                                               : options->omit_leaf_frame_pointer;
     const bool no = predefines_starts(argument, "-mno-");
     for (uint32_t h = 0; !result && h < PREDEFINES_HARDENING_COUNT; h += 1)
     {
@@ -1748,6 +1761,14 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
     else if (strcmp(argument, "-funwind-tables") == 0 || strcmp(argument, "-fno-unwind-tables") == 0)
     {
         options->unwind_tables = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
+    }
+    else if (strcmp(argument, "-fomit-frame-pointer") == 0 || strcmp(argument, "-fno-omit-frame-pointer") == 0)
+    {
+        options->omit_frame_pointer = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
+    }
+    else if (strcmp(argument, "-fstack-clash-protection") == 0 || strcmp(argument, "-fno-stack-clash-protection") == 0)
+    {
+        options->stack_clash_protection = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
     }
     else if (strcmp(argument, "-fcommon") == 0 || strcmp(argument, "-fno-common") == 0)
     {
@@ -3423,9 +3444,15 @@ static __attribute__((unused)) X86Target predefines_function_target(const Predef
     return result;
 }
 
+#define BUSTER_PREDEFINES_FP_APPROX_FUNC 0x01u
+#define BUSTER_PREDEFINES_FP_REASSOCIATE 0x02u
+#define BUSTER_PREDEFINES_FP_RECIPROCAL 0x04u
+
 // The floating-point macros' inputs, stepped through the options in order as clang's driver does
 // (RenderFloatingPointOptions): whether to define __FAST_MATH__, __FINITE_MATH_ONLY__ 1 and __NO_MATH_ERRNO__.
-static void predefines_floating_point(const PredefinesOptions* options, bool* fast, bool* finite, bool* no_errno)
+// Return the three effective relaxation permissions that conflict with a lexical eval_method pragma. Reassociation
+// requires both signed-zero and trapping semantics disabled, just as the driver requires before emitting -mreassociate.
+static uint8_t predefines_floating_point(const PredefinesOptions* options, bool* fast, bool* finite, bool* no_errno)
 {
     bool honor_infinities = true;
     bool honor_nans = true;
@@ -3545,6 +3572,9 @@ static void predefines_floating_point(const PredefinesOptions* options, bool* fa
     *fast = !honor_infinities && !honor_nans && !math_errno && associative && approx_func && reciprocal && !signed_zeros && !trapping && !rounding;
     *finite = *fast || (!honor_infinities && !honor_nans);
     *no_errno = !math_errno;
+    return (approx_func ? BUSTER_PREDEFINES_FP_APPROX_FUNC : 0) |
+           (associative && !signed_zeros && !trapping ? BUSTER_PREDEFINES_FP_REASSOCIATE : 0) |
+           (reciprocal ? BUSTER_PREDEFINES_FP_RECIPROCAL : 0);
 }
 
 // __FLT_EVAL_METHOD__'s value where predefines_text doesn't run (--predefines): -ffp-eval-method's, else 0 with SSE
@@ -3619,6 +3649,30 @@ static __attribute__((unused)) bool predefines_unwind_tables(const PredefinesOpt
     const bool asynchronous = options->asynchronous_unwind_tables != 0 ? options->asynchronous_unwind_tables == BUSTER_PREDEFINES_ON : !freestanding;
     const bool unwind = options->unwind_tables == BUSTER_PREDEFINES_ON;
     return options->exceptions || unwind || asynchronous || options->debug || options->debug_modules;
+}
+
+// The frame pointer the code keeps (#177), as clang's driver reads the options (getFramePointerKind) but for its default:
+// none, the C driver's code at every -O level (clang keeps it at -O0 on x86-64 Linux, and omits it from -O1); with
+// -fno-omit-frame-pointer the last of its pair, every function's (all), or with -momit-leaf-frame-pointer the last of its
+// own pair too, every function's that calls (non-leaf). Tier 0's and Tier 1's frames take it (Tier0Function.frame_pointer,
+// Tier1EmitOptions.frame_flags): `push rbp; mov rbp, rsp` first, rbp no value's register.
+#define BUSTER_PREDEFINES_FRAME_POINTER_NONE 0
+#define BUSTER_PREDEFINES_FRAME_POINTER_ALL 1
+#define BUSTER_PREDEFINES_FRAME_POINTER_NON_LEAF 2
+static __attribute__((unused)) uint8_t predefines_frame_pointer(const PredefinesOptions* options)
+{
+    const bool keep = options->omit_frame_pointer == BUSTER_PREDEFINES_OFF;
+    const bool leaf = options->omit_leaf_frame_pointer == BUSTER_PREDEFINES_ON;
+    return !keep ? BUSTER_PREDEFINES_FRAME_POINTER_NONE : leaf ? BUSTER_PREDEFINES_FRAME_POINTER_NON_LEAF : BUSTER_PREDEFINES_FRAME_POINTER_ALL;
+}
+
+// Whether the code probes the stack as it grows it (#177): -fstack-clash-protection the last of its pair, as clang's driver
+// reads it; off by default, as clang's on x86-64 Linux. Tier 0's frames and allocations (Tier0Function.probe_stack) and
+// Tier 1's (BUSTER_TIER1_FRAME_PROBE_STACK) then touch each page below rsp before rsp moves past it, so that no frame or
+// allocation steps over a guard page.
+static __attribute__((unused)) bool predefines_stack_clash(const PredefinesOptions* options)
+{
+    return options->stack_clash_protection == BUSTER_PREDEFINES_ON;
 }
 
 // The macros the target and the options decide, as #define lines, into `buffer` (`capacity` bytes, at least

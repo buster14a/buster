@@ -116,6 +116,15 @@ typedef enum CheckInputAttributeKind
     // An attribute of clang's thread-safety analysis (#147, check_input_thread_attribute), which changes nothing here past
     // its handler's checks.
     CHECK_ATTRIBUTE_THREAD_SAFETY,
+    CHECK_ATTRIBUTE_MS_STRUCT,
+    CHECK_ATTRIBUTE_GCC_STRUCT,
+    // #1361: conservative object-size compatibility, without hidden ABI arguments.
+    CHECK_ATTRIBUTE_PASS_OBJECT_SIZE,
+    CHECK_ATTRIBUTE_PASS_DYNAMIC_OBJECT_SIZE,
+    CHECK_ATTRIBUTE_DIAGNOSE_IF,
+    CHECK_ATTRIBUTE_ENABLE_IF,
+    CHECK_ATTRIBUTE_SELECTANY,
+    CHECK_ATTRIBUTE_NODEREF,
 } CheckInputAttributeKind;
 
 typedef enum CheckInputAttributeError
@@ -166,6 +175,8 @@ typedef enum CheckInputAttributeSchema
     CHECK_ATTRIBUTE_IDENTIFIER_LIST,
     // One expression, read where the declaration is (the counted_by family's, #148), never evaluated as a constant.
     CHECK_ATTRIBUTE_EXPRESSION,
+    // A deferred condition followed by message/severity strings, without executing the condition.
+    CHECK_ATTRIBUTE_CONDITION_STRINGS,
 } CheckInputAttributeSchema;
 
 typedef enum CheckInputCallingConvention
@@ -178,8 +189,21 @@ typedef enum CheckInputCallingConvention
     CHECK_CALL_PRESERVE_MOST,
     CHECK_CALL_PRESERVE_ALL,
     CHECK_CALL_PRESERVE_NONE,
+    // no_caller_saved_registers (#147): clang's function type bit beside the convention, a System V function's here
+    // (TYPE_FUNCTION_ABI_NO_CALLER_SAVED), so that with System V's convention it is this one (check_input_convention_merge).
+    CHECK_CALL_NO_CALLER_SAVED,
     CHECK_CALL_IGNORED_X86_32,
 } CheckInputCallingConvention;
+
+// The convention a function asks for with `current` asked for already and `call` next (CheckInputAttributes'
+// calling_convention): the first x86-64 has, but no_caller_saved_registers with System V's, clang's function type bit
+// beside its convention, which is no_caller_saved_registers' here (TYPE_FUNCTION_ABI_NO_CALLER_SAVED). Its pairs with the
+// other conventions, which clang takes, are refused by name (check_input_attribute_conventions).
+static CheckInputCallingConvention check_input_convention_merge(CheckInputCallingConvention current, CheckInputCallingConvention call)
+{
+    const bool kept = (current == CHECK_CALL_SYSV && call == CHECK_CALL_NO_CALLER_SAVED);
+    return kept ? call : current == CHECK_CALL_DEFAULT && call != CHECK_CALL_IGNORED_X86_32 ? call : current;
+}
 
 typedef struct CheckInputAttribute CheckInputAttribute;
 struct CheckInputAttribute
@@ -200,11 +224,22 @@ struct CheckInputAttribute
     bool resolved;
     bool standard;
     bool ignored;
+    // C23 attributes after declaration specifiers apply to that base type, before declarator chunks (#147).
+    bool specifier_type;
+    bool specifier_ignored;
+    // A C23 calling convention already applied to the specifier's function type, before outer chunks are built.
+    bool specifier_applied;
+    // Read from the declaration's common specifiers, before the declarator's chunks (#147).
+    bool declaration_prefix;
     // Ignored by the subject check (check_input_attribute_subjects) of the declarator that read it last: a record that
     // declaration specifiers' attributes share among their declarators is checked again by each.
     bool subject_ignored;
     // A keyword's record (_Alignas, asm, a calling convention, _Noreturn, a nullability), not an attribute list's item.
     bool keyword;
+    // A calling convention's wrong count of arguments (BUSTER_CHECK_COUNT_* and its bound), clang's error where the
+    // convention meets a function (check_input_attribute_conventions); on another subject, its warning alone.
+    uint8_t convention_count;
+    uint8_t convention_bound;
     // cleanup's function declaration plus one, bound before later declarators can shadow its parsed argument.
     uint32_t cleanup_function;
     // cleanup's argument is an expression other than a name, which clang's handleCleanupAttr says isn't a function: a
@@ -218,6 +253,9 @@ struct CheckInputAttribute
     // as BUSTER_CHECK_COUNT_* and the bound.
     uint8_t count_check;
     uint32_t count_bound;
+    // A wrong-count list whose expressions still need the declaration evaluator before the handler's count check.
+    bool parse_arguments;
+    uint8_t parsed_schema;
     // A generic attribute's integer arguments (xray_log_args's, the function effects', the GPU kernels' sizes), evaluated
     // where its attributes are read (check_input_read_attributes), not where its handler checks them, which a tag's subjects
     // reach from the constant evaluator: whether the first is an integer constant (its value in `value`), and bit N of
@@ -233,6 +271,8 @@ struct CheckInputAttribute
     // A type argument's type (#147: vec_type_hint's and preferred_type's, check_input_type_argument), read where its
     // attributes are read (check_input_read_attributes), or 0.
     TypeId argument_type;
+    // Thread-safety arguments' checked expression types, retained once for the subject's handler.
+    TypeId* expression_types;
 };
 
 // An attribute's count of arguments against clang's (CheckInputAttribute.count_check): none wrong, another than exactly
@@ -242,10 +282,28 @@ struct CheckInputAttribute
 #define BUSTER_CHECK_COUNT_LEAST 2
 #define BUSTER_CHECK_COUNT_MOST 3
 
+typedef struct CheckInputUnknownAttribute CheckInputUnknownAttribute;
+struct CheckInputUnknownAttribute
+{
+    CheckInputUnknownAttribute* next;
+    uint32_t first;
+    uint32_t name_token;
+    uint32_t name;
+    uint32_t end;
+    bool standard;
+    // GNU-scoped C23 unknowns warn once per written attribute, even when a prefix is copied to several declarators.
+    bool single_warning;
+    bool warned;
+    bool* warned_shared;
+};
+
 typedef struct CheckInputAttributes CheckInputAttributes;
 struct CheckInputAttributes
 {
     CheckInputAttribute* records;
+    // Diagnostic-only spellings are separate from semantic records. Prefix copies share one-shot C23 GNU warning state.
+    CheckInputUnknownAttribute* unknown_begin;
+    CheckInputUnknownAttribute* unknown_end;
     uint32_t count;
     uint32_t capacity;
     uint32_t error_first;
@@ -258,6 +316,17 @@ struct CheckInputAttributes
     bool has_alignas;
     // A counted_by family attribute among the records (#148), which a member's declaration checks.
     bool counted;
+    // A nonempty function-type chunk remains after type attributes slide to it. clang rechecks the declaration's
+    // already-applied kernel attributes after that chunk's attribute list too (#147).
+    bool function_chunk;
+    // A function's own parameters: 0 for ordinary, 1..4 for static modes 0..3, 5..8 for dynamic modes.
+    // Present only when at least one parameter requests an object size. Immutable output-arena bytes.
+    const uint8_t* object_sizes;
+    uint32_t object_size_count;
+    // Where the first warning of an attribute the list dropped completes, plus one, or 0 for none: one clang gives where it
+    // processes the declaration's attributes, after its type's (#147, check_input_attribute_type_warnings): an unknown
+    // one's (after its first token), another language's or a type name's declaration attribute's (at it, so one before).
+    uint32_t unknown_first;
 };
 
 typedef struct CheckInputAttributeRule CheckInputAttributeRule;
@@ -278,12 +347,15 @@ struct CheckInputAttributeRule
 static const CheckInputAttributeRule check_input_attribute_rules[] =
 {
     { "packed", CHECK_ATTRIBUTE_PACKED, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "ms_struct", CHECK_ATTRIBUTE_MS_STRUCT, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "gcc_struct", CHECK_ATTRIBUTE_GCC_STRUCT, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "aligned", CHECK_ATTRIBUTE_ALIGNED, CHECK_ATTRIBUTE_INTEGER, 0, 1 },
     { "mode", CHECK_ATTRIBUTE_MODE, CHECK_ATTRIBUTE_IDENTIFIER, 1, 1 },
     { "vector_size", CHECK_ATTRIBUTE_VECTOR_SIZE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
     { "ext_vector_type", CHECK_ATTRIBUTE_EXT_VECTOR_TYPE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
     { "transparent_union", CHECK_ATTRIBUTE_TRANSPARENT_UNION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "may_alias", CHECK_ATTRIBUTE_MAY_ALIAS, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "noderef", CHECK_ATTRIBUTE_NODEREF, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "visibility", CHECK_ATTRIBUTE_VISIBILITY, CHECK_ATTRIBUTE_STRING, 1, 1 },
     { "alias", CHECK_ATTRIBUTE_ALIAS, CHECK_ATTRIBUTE_STRING, 1, 1 },
     { "ifunc", CHECK_ATTRIBUTE_IFUNC, CHECK_ATTRIBUTE_STRING, 1, 1 },
@@ -305,6 +377,7 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "preserve_most", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "preserve_all", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "preserve_none", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "no_caller_saved_registers", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     // Other targets' conventions (#147), which x86-64's checkCallingConvention warns of and ignores; pcs's count and string
     // are checked where it meets a function or a tag, as clang's CheckCallingConvAttr checks them
     // (check_input_attribute_pcs); the kernels' are declarations' attributes, of functions alone.
@@ -316,6 +389,7 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "device_kernel", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "nvptx_kernel", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "regparm", CHECK_ATTRIBUTE_REGPARM, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
+    { "selectany", CHECK_ATTRIBUTE_SELECTANY, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "noreturn", CHECK_ATTRIBUTE_NORETURN, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "_Noreturn", CHECK_ATTRIBUTE_NORETURN, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "returns_twice", CHECK_ATTRIBUTE_RETURNS_TWICE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
@@ -346,6 +420,10 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "artificial", CHECK_ATTRIBUTE_ARTIFICIAL, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "nodebug", CHECK_ATTRIBUTE_NODEBUG, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "overloadable", CHECK_ATTRIBUTE_OVERLOADABLE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "pass_object_size", CHECK_ATTRIBUTE_PASS_OBJECT_SIZE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
+    { "pass_dynamic_object_size", CHECK_ATTRIBUTE_PASS_DYNAMIC_OBJECT_SIZE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
+    { "diagnose_if", CHECK_ATTRIBUTE_DIAGNOSE_IF, CHECK_ATTRIBUTE_CONDITION_STRINGS, 3, 3 },
+    { "enable_if", CHECK_ATTRIBUTE_ENABLE_IF, CHECK_ATTRIBUTE_CONDITION_STRINGS, 2, 2 },
     { "flatten", CHECK_ATTRIBUTE_FLATTEN, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "leaf", CHECK_ATTRIBUTE_LEAF, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "used", CHECK_ATTRIBUTE_USED, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
@@ -366,7 +444,7 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "flag_enum", CHECK_ATTRIBUTE_FLAG_ENUM, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "enum_extensibility", CHECK_ATTRIBUTE_ENUM_EXTENSIBILITY, CHECK_ATTRIBUTE_IDENTIFIER, 1, 1 },
     { "target", CHECK_ATTRIBUTE_TARGET, CHECK_ATTRIBUTE_STRING, 1, 1 },
-    { "target_clones", CHECK_ATTRIBUTE_TARGET_CLONES, CHECK_ATTRIBUTE_STRING_LIST, 1, 255 },
+    { "target_clones", CHECK_ATTRIBUTE_TARGET_CLONES, CHECK_ATTRIBUTE_STRING_LIST, 0, 255 },
     // clang's CPU dispatch multiversioning. Its code generation isn't supported yet, but retaining it lets the checker
     // report clang's attribute-compatibility errors at -fsyntax-only, as #839 requires.
     { "cpu_specific", CHECK_ATTRIBUTE_CPU_SPECIFIC, CHECK_ATTRIBUTE_IDENTIFIER_LIST, 1, 255 },
@@ -401,10 +479,8 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
 
 static bool check_input_spelling(CheckInputReader* reader, uint32_t token, const uint8_t** bytes, uint32_t* length);
 
-static String8 check_input_attribute_name(CheckInputReader* reader, uint32_t name)
+static String8 check_input_attribute_spelling(const InternTable* table, uint32_t name)
 {
-    // (A reader of no preprocessor, a unit test's, has no names.)
-    const InternTable* table = reader->pp != NULL ? reader->pp->table : NULL;
     String8 result = { 0 };
     if (table != NULL && name != 0 && name < table->count)
     {
@@ -422,6 +498,13 @@ static String8 check_input_attribute_name(CheckInputReader* reader, uint32_t nam
         }
     }
     return result;
+}
+
+static String8 check_input_attribute_name(CheckInputReader* reader, uint32_t name)
+{
+    // A reader of no preprocessor, a unit test's, has no names.
+    const InternTable* table = reader->pp != NULL ? reader->pp->table : NULL;
+    return check_input_attribute_spelling(table, name);
 }
 
 static bool check_input_attribute_equal(String8 text, const char* expected)
@@ -601,6 +684,15 @@ typedef enum CheckAttributeArgumentError
     // (CheckInputReport.type), at the type, with a tag's note at its declaration (CHECK_INPUT_NOTE_FORWARD_DECLARATION).
     CHECK_ARGUMENT_VEC_TYPE_HINT,
     CHECK_ARGUMENT_INCOMPLETE_TYPE,
+    CHECK_ARGUMENT_EXPECTED_EXPRESSION,
+    CHECK_ARGUMENT_EXPRESSION_MEMBER_BASE,
+    CHECK_ARGUMENT_EXPRESSION_MEMBER_NAME,
+    CHECK_ARGUMENT_EXPRESSION_SIZEOF,
+    CHECK_ARGUMENT_EXPRESSION_CALL_COUNT,
+    CHECK_ARGUMENT_EXPRESSION_BINARY,
+    CHECK_ARGUMENT_ANNOTATE_CONSTANT,
+    CHECK_ARGUMENT_TARGET_CLONES_DEFAULT,
+    CHECK_ARGUMENT_SELECTANY_LINKAGE,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -671,40 +763,6 @@ static bool check_input_alignas_underaligned(CheckInputReader* reader, CheckInpu
         check_input_alignas_error(reader, attributes, NULL, 1u << natural, type, spelling);
     }
     return !underaligned;
-}
-
-// clang's Expr::getExprLoc of the expression from `first` to `end` (#147), where some handlers report an argument: a
-// binary operator's (an assignment's and a comma's too) at its operator, a member access at the member's name, a postfix
-// increment or decrement at its operator, a subscript at its base's, and any other (a conditional, a call, a cast, a
-// prefix operator, a parenthesized expression, a primary one) at its first token. Its root is the token whose parent is
-// outside it.
-static uint32_t check_input_expression_location(const Parser* parser, uint32_t first, uint32_t end)
-{
-    uint32_t result = first;
-    uint32_t last = end;
-    bool searching = first < end && end <= parser->tokens.count;
-    while (searching)
-    {
-        uint32_t root = BUSTER_CHECK_NONE;
-        for (uint32_t token = first; root == BUSTER_CHECK_NONE && token < last; token += 1)
-        {
-            const uint32_t parent = parser->tree.parents[token];
-            root = parent < first || parent >= last ? token : BUSTER_CHECK_NONE;
-        }
-        const uint8_t role = root != BUSTER_CHECK_NONE ? parser->tree.roles[root] : PARSE_ROLE_NONE;
-        uint32_t opener = BUSTER_CHECK_NONE;
-        for (uint32_t token = first; role == PARSE_ROLE_CLOSE_SUBSCRIPT && opener == BUSTER_CHECK_NONE && token < root; token += 1)
-        {
-            opener = parser->tree.parents[token] == root && parser->tree.roles[token] == PARSE_ROLE_OPEN_SUBSCRIPT ? token : BUSTER_CHECK_NONE;
-        }
-        const bool binary = role == PARSE_ROLE_MULTIPLICATIVE || role == PARSE_ROLE_ADDITIVE || role == PARSE_ROLE_SHIFT || role == PARSE_ROLE_RELATIONAL ||
-                            role == PARSE_ROLE_EQUALITY || role == PARSE_ROLE_BITWISE_AND || role == PARSE_ROLE_BITWISE_XOR || role == PARSE_ROLE_BITWISE_OR ||
-                            role == PARSE_ROLE_LOGICAL_AND || role == PARSE_ROLE_LOGICAL_OR || role == PARSE_ROLE_ASSIGN || role == PARSE_ROLE_COMMA;
-        result = binary || role == PARSE_ROLE_POSTFIX ? root : role == PARSE_ROLE_MEMBER_OPERATOR && root + 1 < last ? root + 1 : first;
-        searching = opener != BUSTER_CHECK_NONE && opener > first;
-        last = opener;
-    }
-    return result;
 }
 
 // An argument of more than 32 bits (CheckInputAttribute.wide), clang's err_ice_too_large at its expression, from `first`
@@ -996,6 +1054,32 @@ static bool check_input_visibility_known(String8 text)
            check_input_attribute_equal(text, "internal");
 }
 
+static bool check_input_attribute_unknown_append(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputUnknownAttribute attribute)
+{
+    CheckInputUnknownAttribute* record = arena_push_array(reader->arena, 1, sizeof(CheckInputUnknownAttribute), 8);
+    const bool valid = record != NULL;
+    if (valid)
+    {
+        *record = attribute;
+        record->next = NULL;
+        record->warned_shared = attribute.warned_shared != NULL ? attribute.warned_shared : &record->warned;
+        if (attributes->unknown_end != NULL)
+        {
+            attributes->unknown_end->next = record;
+        }
+        else
+        {
+            attributes->unknown_begin = record;
+        }
+        attributes->unknown_end = record;
+    }
+    else
+    {
+        check_input_attribute_error(reader, attributes, attribute.first, attribute.end, CHECK_ATTRIBUTE_ERROR_RESOURCE);
+    }
+    return valid;
+}
+
 static bool check_input_attribute_append(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute attribute)
 {
     bool valid = true;
@@ -1034,12 +1118,63 @@ static bool check_input_attribute_copy(CheckInputReader* reader, const CheckInpu
     destination->records = 0;
     destination->capacity = 0;
     destination->count = 0;
+    destination->unknown_begin = NULL;
+    destination->unknown_end = NULL;
     bool valid = source->error == CHECK_ATTRIBUTE_ERROR_NONE;
     for (uint32_t i = 0; valid && i < source->count; i += 1)
     {
         valid = check_input_attribute_append(reader, destination, source->records[i]);
     }
+    for (const CheckInputUnknownAttribute* unknown = source->unknown_begin; valid && unknown != NULL; unknown = unknown->next)
+    {
+        valid = check_input_attribute_unknown_append(reader, destination, *unknown);
+    }
     return valid;
+}
+
+// A compatible visible bare function redeclaration keeps its predecessor's format contract. Copy only those
+// records into a new accumulator: neither the predecessor nor already published declaration metadata is mutable.
+static void check_input_format_inherit(CheckInputReader* reader, uint32_t token, uint32_t previous)
+{
+    // Binding-only clients can omit the optional attribute column entirely.
+    const CheckInputAttributes* prior = check_sparse_wide_present(reader->output->attributes) ?
+                                        check_input_attributes_at(reader->output, previous) : NULL;
+    bool inherit = false;
+    for (uint32_t i = 0; prior != NULL && i < prior->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = prior->records + i;
+        inherit |= attribute->kind == CHECK_ATTRIBUTE_FORMAT && !attribute->ignored && !attribute->subject_ignored;
+    }
+    const CheckInputAttributes* own = inherit ? check_input_attributes_at(reader->output, token) : NULL;
+    bool annotated = false;
+    for (uint32_t i = 0; own != NULL && i < own->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = own->records + i;
+        annotated |= attribute->kind == CHECK_ATTRIBUTE_FORMAT && !attribute->ignored && !attribute->subject_ignored;
+    }
+    if (inherit && !annotated)
+    {
+        CheckInputAttributes* copy = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1);
+        bool valid = copy != NULL;
+        if (valid)
+        {
+            *copy = (CheckInputAttributes){ 0 };
+            valid = own == NULL || check_input_attribute_copy(reader, own, copy);
+        }
+        for (uint32_t i = 0; valid && i < prior->count; i += 1)
+        {
+            const CheckInputAttribute* attribute = prior->records + i;
+            if (attribute->kind == CHECK_ATTRIBUTE_FORMAT && !attribute->ignored && !attribute->subject_ignored)
+            {
+                valid = check_input_attribute_append(reader, copy, *attribute);
+            }
+        }
+        reader->output->resource |= !valid;
+        if (valid)
+        {
+            check_input_set_attributes_at(reader->output, token, copy);
+        }
+    }
 }
 
 // Both input accumulators are complete and immutable; output must be distinct from them. This combines metadata
@@ -1052,14 +1187,23 @@ static bool check_input_attribute_merge(CheckInputReader* reader, const CheckInp
     {
         valid = check_input_attribute_append(reader, output, suffix->records[i]);
     }
+    for (const CheckInputUnknownAttribute* unknown = suffix->unknown_begin; valid && unknown != NULL; unknown = unknown->next)
+    {
+        valid = check_input_attribute_unknown_append(reader, output, *unknown);
+    }
     if (valid)
     {
         output->packed |= suffix->packed;
         output->has_alignas |= suffix->has_alignas;
+        output->function_chunk |= suffix->function_chunk;
+        output->object_sizes = suffix->object_sizes != NULL ? suffix->object_sizes : output->object_sizes;
+        output->object_size_count = suffix->object_sizes != NULL ? suffix->object_size_count : output->object_size_count;
         output->alignment_log2 = suffix->alignment_log2 > output->alignment_log2 ? suffix->alignment_log2 : output->alignment_log2;
         output->required_alignment_log2 = suffix->required_alignment_log2 > output->required_alignment_log2 ? suffix->required_alignment_log2 : output->required_alignment_log2;
         // The common one first, as their records are; a conflict is clang's error where they meet a function.
-        output->calling_convention = output->calling_convention != CHECK_CALL_DEFAULT ? output->calling_convention : suffix->calling_convention;
+        output->calling_convention = check_input_convention_merge(output->calling_convention, suffix->calling_convention);
+        output->unknown_first = output->unknown_first == 0 || (suffix->unknown_first != 0 && suffix->unknown_first < output->unknown_first) ?
+                                suffix->unknown_first : output->unknown_first;
     }
     return valid;
 }
@@ -1140,9 +1284,10 @@ static const char* check_input_convention_name(uint32_t call)
 {
     const char* result = call == CHECK_CALL_MICROSOFT ? "ms_abi" : call == CHECK_CALL_VECTOR ? "vectorcall" : call == CHECK_CALL_REG ? "regcall" :
                          call == CHECK_CALL_PRESERVE_MOST ? "preserve_most" : call == CHECK_CALL_PRESERVE_ALL ? "preserve_all" :
-                         call == CHECK_CALL_PRESERVE_NONE ? "preserve_none" : "cdecl";
+                         call == CHECK_CALL_PRESERVE_NONE ? "preserve_none" : call == CHECK_CALL_NO_CALLER_SAVED ? "no_caller_saved_registers" : "cdecl";
     return result;
 }
+
 
 // clang's error for a calling convention a function meets with another (err_attributes_are_not_compatible): at
 // `attribute`'s first token, which asks for `call` where the function has `previous`, "A and B attributes are not
@@ -1154,7 +1299,13 @@ static void check_input_attribute_conflict(CheckInputReader* reader, CheckInputA
         attributes->error = CHECK_ATTRIBUTE_ERROR_CONFLICT;
         attributes->error_first = attribute->first;
         attributes->error_end = attribute->end;
+        const uint32_t before = reader->output->report_count;
         check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_CONVENTIONS, (call & 0xffu) | (previous & 0xffu) << 8);
+        if (reader->output->report_count > before)
+        {
+            CheckInputReport* report = reader->output->reports + before;
+            report->completion = report->completion < reader->attribute_completion ? reader->attribute_completion : report->completion;
+        }
     }
 }
 
@@ -1188,6 +1339,10 @@ static CheckInputCallingConvention check_input_attribute_call(String8 name)
     else if (check_input_attribute_equal(name, "preserve_none"))
     {
         result = CHECK_CALL_PRESERVE_NONE;
+    }
+    else if (check_input_attribute_equal(name, "no_caller_saved_registers"))
+    {
+        result = CHECK_CALL_NO_CALLER_SAVED;
     }
     return result;
 }
@@ -1228,6 +1383,10 @@ static bool check_input_attribute_value(CheckInputReader* reader, CheckInputAttr
         {
             // Clang's x86-64 target accepts all six integer argument registers here; i386's limit is three.
             valid = value >= 0 && value <= 6;
+        }
+        else if (attribute->kind == CHECK_ATTRIBUTE_PASS_OBJECT_SIZE || attribute->kind == CHECK_ATTRIBUTE_PASS_DYNAMIC_OBJECT_SIZE)
+        {
+            valid = value >= 0 && value <= 3;
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_CONSTRUCTOR || attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR)
         {
@@ -1405,7 +1564,8 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
         const bool identifier = (attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER && attribute->kind != CHECK_ATTRIBUTE_CLEANUP) ||
                                 attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_LIST ||
                                 (attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS && argument == 0);
-        const bool string = attribute->schema == CHECK_ATTRIBUTE_STRING || attribute->schema == CHECK_ATTRIBUTE_STRING_LIST;
+        const bool string = attribute->schema == CHECK_ATTRIBUTE_STRING || attribute->schema == CHECK_ATTRIBUTE_STRING_LIST ||
+                            (attribute->schema == CHECK_ATTRIBUTE_CONDITION_STRINGS && argument != 0);
         if (valid && identifier)
         {
             valid = first + 1 == end && parser->tokens.names[first] != 0;
@@ -1417,14 +1577,36 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             }
             else if (!valid && attribute->kind == CHECK_ATTRIBUTE_FORMAT)
             {
+                const CheckInputAttributeError saved = attributes->error;
+                const uint32_t saved_first = attributes->error_first;
+                const uint32_t saved_end = attributes->error_end;
+                const uint32_t before = reader->output->report_count;
                 check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PARAMETER_IDENTIFIER, argument + 1);
+                // This is handleFormatAttr's check, after the subject, rather than a parser constraint. A variable's
+                // format(1, 2, 3) therefore gets only the subject warning, just as format(printf, 2, 3) does.
+                valid = check_input_attribute_defer(reader, attributes, attribute, before, saved, saved_first, saved_end);
             }
         }
         else if (valid && string)
         {
             String8 text = { 0 };
-            valid = check_input_attribute_string(reader, first, end, &text);
+            uint32_t string_first = first;
+            uint32_t string_end = end;
+            // Clang delays these attributes' arguments as expressions: glibc parenthesizes the message.
+            while (attribute->schema == CHECK_ATTRIBUTE_CONDITION_STRINGS && string_first + 1 < string_end &&
+                   parser->tokens.kinds[string_first] == PARSE_KIND_L_PAREN && parser->tree.parents[string_first] == string_end - 1)
+            {
+                string_first += 1;
+                string_end -= 1;
+            }
+            const bool decoded = check_input_attribute_string(reader, string_first, string_end, &text);
+            valid = decoded;
             error = CHECK_ATTRIBUTE_ERROR_STRING;
+            if (valid && attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF && argument == 2)
+            {
+                valid = check_input_attribute_equal(text, "warning") || check_input_attribute_equal(text, "error");
+                error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+            }
             if (valid && argument == 0)
             {
                 attribute->text = text;
@@ -1432,7 +1614,7 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             // clang's error of an argument that is no string literal, at it (#147): visibility's own wording, the others'
             // checkStringLiteralArgumentAttr's.
             // visibility's argument is an enumerator's, which clang's parser reads as an identifier: one is its own error.
-            if (!valid)
+            if (!decoded)
             {
                 const bool named = first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER;
                 check_input_attribute_argument_error(reader, attributes, attribute, first,
@@ -1510,6 +1692,85 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
         check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, reader->output->resource ? CHECK_ATTRIBUTE_ERROR_RESOURCE : error);
     }
     return valid;
+}
+
+// What clang's parser makes of an attribute's arguments before its handler counts them (#147,
+// ParseAttributeArgsCommon): CLEAN, no error, so the count's error waits for the subject's check; ERROR, its first
+// argument's error, reported (a string literal's position that holds none, clang's "expected string literal", or an
+// expression's name that names nothing, "use of undeclared identifier"), which drops the attribute; or UNSURE, an
+// argument whose errors need the expression reader (a type's, a call's, a builtin's or an empty one), which reads it
+// before the handler counts it. Linear over the arguments' tokens: only an attribute whose count is
+// wrong (or cleanup's) gets here.
+#define BUSTER_CHECK_PARSED_CLEAN 0
+#define BUSTER_CHECK_PARSED_ERROR 1
+#define BUSTER_CHECK_PARSED_UNSURE 2
+
+static uint8_t check_input_attribute_parsed(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t stop = attribute->argument_end;
+    const uint8_t schema = attribute->schema;
+    uint8_t result = stop > attribute->argument_first && parser->tokens.kinds[stop - 1] == PARSE_KIND_COMMA ? BUSTER_CHECK_PARSED_UNSURE : BUSTER_CHECK_PARSED_CLEAN;
+    uint32_t first = attribute->argument_first;
+    for (uint32_t argument = 0; result == BUSTER_CHECK_PARSED_CLEAN && first < stop; argument += 1)
+    {
+        uint32_t end = first;
+        while (end < stop && parser->tokens.kinds[end] != PARSE_KIND_COMMA)
+        {
+            end = check_input_attribute_after_group(parser, end, stop);
+        }
+        // An identifier argument (an IdentifierArgument's or an EnumArgument's, visibility's; not cleanup's nor malloc's,
+        // whose arguments clang parses as expressions) is taken as one; a string literal's position must hold one.
+        const bool lone = first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER;
+        const bool identifier = lone && (schema == CHECK_ATTRIBUTE_IDENTIFIER_LIST ||
+                                         (argument == 0 && attribute->kind != CHECK_ATTRIBUTE_MALLOC && attribute->kind != CHECK_ATTRIBUTE_CLEANUP &&
+                                          (schema == CHECK_ATTRIBUTE_IDENTIFIER || schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS ||
+                                           attribute->kind == CHECK_ATTRIBUTE_VISIBILITY)));
+        const bool string = schema == CHECK_ATTRIBUTE_STRING_LIST || (argument == 0 && schema == CHECK_ATTRIBUTE_STRING);
+        uint32_t undeclared = BUSTER_CHECK_NONE;
+        bool unsure = first >= end;
+        bool literal = !unsure;
+        for (uint32_t token = first; !identifier && token < end; token += 1)
+        {
+            const uint8_t kind = parser->tokens.kinds[token];
+            literal &= kind == PARSE_KIND_STRING;
+            const String8 spelled = kind == PARSE_KIND_IDENTIFIER ? check_input_attribute_name(reader, parser->tokens.names[token]) : (String8){ 0 };
+            const uint8_t previous = token > 0 ? parser->tokens.kinds[token - 1] : PARSE_KIND_END;
+            const uint8_t next = token + 1 < stop ? parser->tokens.kinds[token + 1] : PARSE_KIND_END;
+            unsure |= kind == PARSE_KIND_TYPE || kind == PARSE_KIND_QUALIFIER || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
+                      kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_SIZEOF || kind == PARSE_KIND_ATOMIC ||
+                      kind == PARSE_KIND_GENERIC || kind == PARSE_KIND_TYPE_ARGUMENT || (kind == PARSE_KIND_IDENTIFIER && next == PARSE_KIND_L_PAREN) ||
+                      (spelled.length > 10 && memcmp(spelled.pointer, "__builtin_", 10) == 0);
+            const bool named = previous == PARSE_KIND_PERIOD || previous == PARSE_KIND_ARROW ||
+                               c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[token]) != 0;
+            undeclared = undeclared == BUSTER_CHECK_NONE && kind == PARSE_KIND_IDENTIFIER && !named ? token : undeclared;
+        }
+        if (identifier)
+        {
+        }
+        else if (string && first < end && parser->tokens.kinds[first] != PARSE_KIND_STRING)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, first, CHECK_ARGUMENT_STRING_LITERAL, 0);
+            result = BUSTER_CHECK_PARSED_ERROR;
+        }
+        else if (unsure || (string && !literal))
+        {
+            result = BUSTER_CHECK_PARSED_UNSURE;
+        }
+        else if (!string && undeclared != BUSTER_CHECK_NONE)
+        {
+            if (attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+            {
+                attributes->error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+                attributes->error_first = first;
+                attributes->error_end = end;
+                check_input_report(reader, undeclared, CHECK_INPUT_UNDECLARED);
+            }
+            result = BUSTER_CHECK_PARSED_ERROR;
+        }
+        first = end + 1;
+    }
+    return result;
 }
 
 // Declaration attributes clang drops when first added after a definition. Unscoped [[noreturn]] and [[_Noreturn]]
@@ -1784,6 +2045,8 @@ static const CheckInputClangAttribute check_input_clang_scopes[] =
 // A variable's declaration that defines it, tentatively or not (#147): no table row's subject, but weak_import's handler's
 // (clang's canBeWeakImported).
 #define BUSTER_CHECK_SUBJECT_DEFINITION 0x1000000u
+// An object with external linkage, including a block-scope extern declaration.
+#define BUSTER_CHECK_SUBJECT_EXTERNAL_OBJECT 0x2000000u
 
 typedef struct CheckInputSubjectRow CheckInputSubjectRow;
 struct CheckInputSubjectRow
@@ -2035,6 +2298,9 @@ static bool check_input_type_argument(CheckInputReader* reader, const CheckInput
     return check_input_attribute_equal(name, "vec_type_hint") || check_input_attribute_equal(name, "preferred_type");
 }
 
+static const CheckInputFactRow* check_input_attribute_gnu_fact(CheckInputReader* reader, uint32_t name);
+static const CheckInputArgumentsRow* check_input_attribute_gnu_arguments(CheckInputReader* reader, uint32_t name);
+
 // clang's parser's reading of attributes it applies nothing of (#147): a free-standing declaration's specifiers' (clang's
 // ParsedFreeStandingDeclSpec), and a bare tag declaration's after its name. Of each GNU list's items and each alignment
 // specifier's argument from `first` to `end` (a tag's tokens skipped, CheckInputReader.tag_ends), only what clang's parser
@@ -2071,9 +2337,8 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
                 const uint32_t arguments_first = argued ? k + 2 : BUSTER_CHECK_NONE;
                 const uint32_t arguments_end = argued ? parser->tree.parents[k + 1] : BUSTER_CHECK_NONE;
                 k = comma ? k + 1 : argued ? arguments_end + 1 : k + 1;
-                const String8 spelled = !comma ? check_input_attribute_name(reader, parser->tokens.names[name]) : (String8){ 0 };
-                const CheckInputArgumentsRow* row = gnu && !comma ? check_input_arguments_row(spelled) : NULL;
-                const bool known = gnu && !comma && check_input_fact_row((String8){ "", 0 }, spelled, false, false) != NULL;
+                const CheckInputArgumentsRow* row = gnu && !comma ? check_input_attribute_gnu_arguments(reader, parser->tokens.names[name]) : NULL;
+                const bool known = gnu && !comma && check_input_attribute_gnu_fact(reader, parser->tokens.names[name]) != NULL;
                 const uint32_t flags = row != NULL ? row->flags : 0;
                 const uint32_t strings = row != NULL ? row->strings : 0;
                 const bool typed = (flags & BUSTER_CHECK_ARGUMENTS_TYPE) != 0 || (alignas && arguments_first < arguments_end &&
@@ -2162,7 +2427,7 @@ static void check_input_attribute_gcc_position(CheckInputReader* reader, const C
     {
         const CheckInputAttribute* attribute = attributes->records + i;
         const CheckInputFactRow* fact = attribute->standard || attribute->keyword ? NULL :
-                                        check_input_fact_row((String8){ "", 0 }, check_input_attribute_name(reader, attribute->name), false, false);
+                                        check_input_attribute_gnu_fact(reader, attribute->name);
         if (fact != NULL && (fact->flags & BUSTER_CHECK_FACT_GCC) != 0)
         {
             const CheckWarningEvent event =
@@ -2250,6 +2515,70 @@ static bool check_input_attribute_clang_knows(String8 scope, String8 name, bool 
     return result;
 }
 
+_Static_assert(BUSTER_ARRAY_LENGTH(check_input_attribute_rules) < UINT16_MAX && BUSTER_ARRAY_LENGTH(check_input_fact_gnu) < UINT16_MAX &&
+                   BUSTER_ARRAY_LENGTH(check_input_arguments_rows) < UINT16_MAX,
+               "a GNU name's rows are 16-bit indices");
+
+// The rows of the GNU attribute name `name` (an IdentId, as check_input_attribute_name reads it): its rule's, its facts', its
+// subjects' and its arguments' rows and whether clang knows it, each what its lookup gives a GNU spelling, which no scope
+// changes. They are kept by the name in the reader's slots (CheckInputReader.gnu_rows), as a unit's attributes repeat a
+// few names: glibc's headers give most of sqlite3.c's prototypes __nothrow__, __leaf__ and __nonnull__, and the lookups'
+// binary searches, a string comparison a step, took 1.3 ms of its -c on the 9700X (#1489). A slot another name takes
+// is looked up again.
+static const CheckInputGnuRows* check_input_attribute_gnu_rows(CheckInputReader* reader, uint32_t name)
+{
+    CheckInputGnuRows* slot = reader->gnu_rows + ((name * UINT32_C(0x9e3779b1)) >> (32 - BUSTER_CHECK_GNU_ROW_BITS));
+    if (slot->key != name + 1)
+    {
+        const String8 text = check_input_attribute_name(reader, name);
+        // A calling convention's keyword (`__cdecl`) is spelled with its underscores (check_input_attribute_read_item).
+        const bool keyword = name >= C_NAME_CDECL && name <= C_NAME_VECTORCALL && reader->pp != NULL && text.length + 2 == reader->pp->table->spans[name].length;
+        const String8 spelled = keyword ? (String8){ text.pointer - 2, text.length + 2 } : text;
+        uint16_t rule = 0;
+        for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(check_input_attribute_rules) && rule == 0; r += 1)
+        {
+            rule = check_input_attribute_equal(text, check_input_attribute_rules[r].name) ? (uint16_t)(r + 1) : 0;
+        }
+        const CheckInputFactRow* fact = check_input_fact_row((String8){ "", 0 }, text, false, false);
+        const CheckInputArgumentsRow* arguments = check_input_arguments_row(text);
+        *slot = (CheckInputGnuRows){
+            .key = name + 1,
+            .rule = rule,
+            .fact = fact != NULL ? (uint16_t)(fact - check_input_fact_gnu + 1) : 0,
+            .arguments = arguments != NULL ? (uint16_t)(arguments - check_input_arguments_rows + 1) : 0,
+            .known = check_input_attribute_clang_knows((String8){ "", 0 }, spelled, false, false),
+            .subject = check_input_subject_row((String8){ "", 0 }, text, false, false),
+        };
+    }
+    return slot;
+}
+
+// A GNU attribute name's facts' row (check_input_fact_row's), or null.
+static const CheckInputFactRow* check_input_attribute_gnu_fact(CheckInputReader* reader, uint32_t name)
+{
+    const CheckInputGnuRows* rows = check_input_attribute_gnu_rows(reader, name);
+    return rows->fact != 0 ? check_input_fact_gnu + rows->fact - 1 : NULL;
+}
+
+// A GNU attribute name's arguments' row (check_input_arguments_row's), or null.
+static const CheckInputArgumentsRow* check_input_attribute_gnu_arguments(CheckInputReader* reader, uint32_t name)
+{
+    const CheckInputGnuRows* rows = check_input_attribute_gnu_rows(reader, name);
+    return rows->arguments != 0 ? check_input_arguments_rows + rows->arguments - 1 : NULL;
+}
+
+// An attribute's subjects' row (check_input_subject_row's): a GNU one's by its name's slot.
+static const CheckInputSubjectRow* check_input_attribute_subject_of(CheckInputReader* reader, String8 scope, uint32_t name, bool scoped, bool standard)
+{
+    return standard ? check_input_subject_row(scope, check_input_attribute_name(reader, name), scoped, standard) : check_input_attribute_gnu_rows(reader, name)->subject;
+}
+
+// An attribute's facts' row (check_input_fact_row's): a GNU one's by its name's slot.
+static const CheckInputFactRow* check_input_attribute_fact_of(CheckInputReader* reader, String8 scope, uint32_t name, bool scoped, bool standard)
+{
+    return standard ? check_input_fact_row(scope, check_input_attribute_name(reader, name), scoped, standard) : check_input_attribute_gnu_fact(reader, name);
+}
+
 // clang's warning at `__clang__`'s expansion where a C23 attribute's scope or name goes (#147), which the parser made the
 // identifier `_Clang` (parse_clang_scope_numbers): a token of that name whose source is a number.
 static void check_input_attribute_clang_macro(CheckInputReader* reader, uint32_t token)
@@ -2267,7 +2596,7 @@ static void check_input_attribute_clang_macro(CheckInputReader* reader, uint32_t
             .token = token,
             .source = BUSTER_CHECK_WARNING_NO_SOURCE,
             .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-            .completion = token + 1,
+            .completion = token,
             .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
         };
         check_input_warning_event(reader, &event, NULL, 0);
@@ -2283,6 +2612,7 @@ static void check_input_attribute_clang_macro(CheckInputReader* reader, uint32_t
 #define BUSTER_CHECK_PLACE_SPECIFIERS 2u
 #define BUSTER_CHECK_PLACE_QUALIFIERS 3u
 #define BUSTER_CHECK_PLACE_FUNCTION 4u
+#define BUSTER_CHECK_PLACE_GROUP 5u
 
 static uint32_t check_input_standard_place(const Parser* parser, uint32_t open)
 {
@@ -2319,7 +2649,10 @@ static uint32_t check_input_standard_place(const Parser* parser, uint32_t open)
     const bool chunk = role == PARSE_ROLE_CLOSE_FUNCTION || role == PARSE_ROLE_CLOSE_SUBSCRIPT || kind == PARSE_KIND_STAR;
     const bool specifiers = role == PARSE_ROLE_SPECIFIER || role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_ENUM || role == PARSE_ROLE_CLOSE_SPECIFIER ||
                             role == PARSE_ROLE_TAG;
-    return qualifiers ? BUSTER_CHECK_PLACE_QUALIFIERS : role == PARSE_ROLE_CLOSE_FUNCTION ? BUSTER_CHECK_PLACE_FUNCTION : chunk ? BUSTER_CHECK_PLACE_CHUNK :
+    // (A list that begins a declarator's group, `void ([[gnu::stdcall]] *p)(void)`, clang's parser rejects as one after a
+    // pointer's qualifiers: #147.)
+    const bool group = kind == PARSE_KIND_L_PAREN && role == PARSE_ROLE_OPEN_GROUP;
+    return group ? BUSTER_CHECK_PLACE_GROUP : qualifiers ? BUSTER_CHECK_PLACE_QUALIFIERS : role == PARSE_ROLE_CLOSE_FUNCTION ? BUSTER_CHECK_PLACE_FUNCTION : chunk ? BUSTER_CHECK_PLACE_CHUNK :
            specifiers && open > 0 ? BUSTER_CHECK_PLACE_SPECIFIERS : BUSTER_CHECK_PLACE_DECLARATION;
 }
 
@@ -2355,7 +2688,7 @@ static void check_input_attribute_named_event(CheckInputReader* reader, const Ch
 
 // check_input_attribute_named_event once an attribute (CheckInputReader.attribute_warned): its declaration specifiers'
 // record meets each declarator, and a type name's attributes are read by the constant evaluator and the walk.
-static void check_input_attribute_named_once(CheckInputReader* reader, const CheckInputAttribute* attribute, CheckWarningEventKind kind)
+static void check_input_attribute_named_once(CheckInputReader* reader, const CheckInputAttribute* attribute, CheckWarningEventKind kind, uint32_t completion)
 {
     const uint32_t count = reader->parser->tokens.count;
     if (reader->attribute_warned == NULL)
@@ -2371,14 +2704,15 @@ static void check_input_attribute_named_once(CheckInputReader* reader, const Che
     if (!warned)
     {
         reader->attribute_warned[token >> 6] |= (uint64_t)1 << (token & 63);
-        check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, kind);
+        check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, kind, token, completion);
     }
 }
 
 // clang's warning for a calling convention x86-64 hasn't (stdcall, fastcall, thiscall and pascal, which
 // X86_64TargetInfo::checkCallingConvention warns of and ignores: CHECK_CALL_IGNORED_X86_32), once each attribute meets a
-// function type: at its first token, named as written (a C23 one's normalized).
-static void check_input_attribute_unsupported(CheckInputReader* reader, const CheckInputAttribute* attribute)
+// function type: at its first token, named as written (a C23 one's normalized), completing at `completion`: its
+// declarator's type's warnings' (check_input_attribute_type_warnings), or that token.
+static void check_input_attribute_unsupported_at(CheckInputReader* reader, const CheckInputAttribute* attribute, uint32_t completion)
 {
     const uint32_t count = reader->parser->tokens.count;
     if (reader->attribute_warned == NULL)
@@ -2394,8 +2728,26 @@ static void check_input_attribute_unsupported(CheckInputReader* reader, const Ch
     if (!warned)
     {
         reader->attribute_warned[token >> 6] |= (uint64_t)1 << (token & 63);
-        check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED);
+        const Parser* parser = reader->parser;
+        const uint32_t scope_name = attribute->standard && attribute->first != attribute->name_token ? parser->tokens.names[attribute->first] : 0;
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+            .kind = CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED,
+            .token = attribute->first,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = completion,
+            .payload = { .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                         .data = scope_name | (attribute->standard ? BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE : 0) },
+        };
+        check_input_warning_event(reader, &event, NULL, 0);
     }
+}
+
+static void check_input_attribute_unsupported(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    check_input_attribute_unsupported_at(reader, attribute, attribute->first);
 }
 
 // Whether a convention attribute is a GPU kernel's (#147): a declaration's attribute of functions alone, whose subject
@@ -2411,11 +2763,20 @@ static bool check_input_attribute_kernel(CheckInputReader* reader, const CheckIn
 // pcs's arguments where it meets a function or a tag (#147, clang's CheckCallingConvAttr): exactly one, "aapcs" or
 // "aapcs-vfp", else clang's errors at the attribute ("'pcs' attribute takes one argument", "invalid PCS type"). Whether
 // they are.
+// Whether a convention's arguments are as check_input_attribute_pcs wants them (#147), reporting nothing: pcs's one, "aapcs"
+// or "aapcs-vfp"; any other's whatever they are.
+static bool check_input_attribute_pcs_valid(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    const bool pcs = attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "pcs");
+    return !pcs || (attribute->argument_count == 1 &&
+                    (check_input_attribute_equal(attribute->text, "aapcs") || check_input_attribute_equal(attribute->text, "aapcs-vfp")));
+}
+
 static bool check_input_attribute_pcs(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute)
 {
     const bool pcs = attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "pcs");
     const bool counted = !pcs || attribute->argument_count == 1;
-    const bool known = !pcs || !counted || check_input_attribute_equal(attribute->text, "aapcs") || check_input_attribute_equal(attribute->text, "aapcs-vfp");
+    const bool known = !counted || check_input_attribute_pcs_valid(reader, attribute);
     if (!counted && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
     {
         attributes->error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
@@ -2463,8 +2824,8 @@ static uint8_t check_input_attribute_count_check(const CheckInputFactRow* fact, 
 // check, past their subjects and argument counts: at least one argument (LEAST_ONE); capability's name, a string literal
 // (STRING); a trylock's first argument, an int or a bool (TRYLOCK); and a lock function's integer literal argument, an index
 // of its parameters (INDEXED). Their arguments are expressions, which clang's parser reads where the attribute is: their names
-// are the scope's there (check_input_thread_names). Their other warnings (-Wthread-safety-attributes) are off by default
-// and aren't made here. Linear: an attribute is rare.
+// and types are the scope's there (check_input_thread_names). Their warnings (-Wthread-safety-attributes) are off by
+// default and retained as sparse events. Linear catalog lookup: an attribute is rare.
 #define BUSTER_CHECK_THREAD_LEAST_ONE 0x1u
 #define BUSTER_CHECK_THREAD_TRYLOCK 0x2u
 #define BUSTER_CHECK_THREAD_INDEXED 0x4u
@@ -2530,21 +2891,22 @@ static const CheckInputThreadRow* check_input_thread_row(String8 name)
 
 
 // Whether clang applies an attribute of `name` in a way that changes nothing this checker models (#147): one its generated
-// handler applies with nothing more (its facts' SIMPLE), no type's or statement's alone, but selectany (a COMDAT) and
-// no_caller_saved_registers (a calling convention), which stay refused by name;
+// handler applies with nothing more (its facts' SIMPLE), no type's or statement's alone, except selectany (handled by its
+// explicit rule);
 // and these whose own handlers check what is checked here: minsize, optnone (check_input_attribute_optnone), noescape
 // (a pointer parameter's, check_input_attribute_subjects), annotate (a string first, check_input_attribute_read_item),
-// uninitialized, gcc_struct (the default layout), no_sanitize_memory, analyzer_noreturn and carries_dependency; the
+// uninitialized, no_sanitize_memory, analyzer_noreturn and carries_dependency; the
 // thread-safety analysis's (check_input_thread_rows); one of no C subject (`subjectless`: Objective-C's, C++'s and the like,
 // whose subject's diagnostic is all clang gives in C); and these, whose handlers change nothing in C past their subjects,
-// counts and arguments' kinds (#147): available_only_in_default_eval_method (whose `#pragma clang fp eval_method` the
-// checker refuses), btf_decl_tag (BPF's debug information), randomize_layout and no_randomize_layout (without
+// counts and arguments' kinds (#147): btf_decl_tag (BPF's debug information), randomize_layout and no_randomize_layout (without
 // -frandomize-layout-seed), Objective-C's boxable and bridge_mutable, Fuchsia's handles (the analyzer's), suppress, Swift's
 // bridge, unsafe_buffer_usage and AMDGPU's max_num_work_groups (a kernel's alone).
 static bool check_input_attribute_generic(String8 name, const CheckInputFactRow* fact, bool subjectless)
 {
     static const char* const unchanged[] = {
-        "available_only_in_default_eval_method", "btf_decl_tag", "randomize_layout", "no_randomize_layout", "objc_boxable", "objc_bridge_mutable",
+        // Its resolved typedef uses are checked after expression reading, including constant-only type queries.
+        "available_only_in_default_eval_method",
+        "btf_decl_tag", "randomize_layout", "no_randomize_layout", "objc_boxable", "objc_bridge_mutable",
         "release_handle", "use_handle", "suppress", "swift_bridge", "unsafe_buffer_usage", "amdgpu_max_num_work_groups",
         // The retain-ownership attributes, whose handlers' checks are check_input_attribute_ownership's.
         "cf_consumed", "ns_consumed", "os_consumed", "cf_returns_retained", "cf_returns_not_retained", "ns_returns_retained",
@@ -2571,10 +2933,10 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         "preferred_type", "forceinline", "forceinline_calls",
     };
     const bool simple = fact != NULL && (fact->flags & (BUSTER_CHECK_FACT_SIMPLE | BUSTER_CHECK_FACT_TYPE)) == BUSTER_CHECK_FACT_SIMPLE;
-    const bool effect = check_input_attribute_equal(name, "selectany") || check_input_attribute_equal(name, "no_caller_saved_registers");
+    const bool effect = check_input_attribute_equal(name, "selectany");
     bool handled = check_input_attribute_equal(name, "minsize") || check_input_attribute_equal(name, "optnone") ||
                    check_input_attribute_equal(name, "noescape") || check_input_attribute_equal(name, "annotate") ||
-                   check_input_attribute_equal(name, "uninitialized") || check_input_attribute_equal(name, "gcc_struct") ||
+                   check_input_attribute_equal(name, "uninitialized") ||
                    check_input_attribute_equal(name, "no_sanitize_memory") || check_input_attribute_equal(name, "analyzer_noreturn") ||
                    check_input_attribute_equal(name, "carries_dependency") || check_input_thread_row(name) != NULL || subjectless;
     for (uint32_t i = 0; !handled && i < BUSTER_ARRAY_LENGTH(unchanged); i += 1)
@@ -2584,16 +2946,17 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
     return fact != NULL && ((simple && !effect) || handled);
 }
 
-// Whether the attribute at `first` is in a type name (#147): the group around it, past its list's parentheses and a
-// declarator's grouping ones, is a cast's, a sizeof's or alignof's, a compound literal's, a specifier's (typeof, _Atomic, _Alignas)
+// The closer of the type name containing the attribute at `first`, or BUSTER_CHECK_NONE (#147): the group around it,
+// past its list's parentheses and a declarator's grouping ones, is a cast's, a sizeof's or alignof's, a compound literal's,
+// a specifier's (typeof, _Atomic, _Alignas)
 // or a keyword's type argument (va_arg, offsetof, _Generic's association). A parameter's list (a function
 // declarator's), a block, a statement, a declaration's end or a tag's own list is none. A scan back over at most 256
 // tokens.
-static bool check_input_attribute_in_type_name(const Parser* parser, uint32_t first)
+static uint32_t check_input_attribute_type_name_end(const Parser* parser, uint32_t first)
 {
     uint32_t depth = 0;
     uint32_t i = first;
-    bool result = false;
+    uint32_t result = BUSTER_CHECK_NONE;
     bool scanning = true;
     for (uint32_t steps = 0; scanning && i > 0 && steps < 256; steps += 1)
     {
@@ -2609,12 +2972,19 @@ static bool check_input_attribute_in_type_name(const Parser* parser, uint32_t fi
         // A tag's own list, between its keyword and its name or body, is the tag's.
         const bool tag = open && depth == 0 && role == PARSE_ROLE_OPEN_ATTRIBUTE_RIGHT;
         const bool enclosing = (open && depth == 0 && !transparent) || tag;
-        result = enclosing && !tag && (role == PARSE_ROLE_OPEN_CAST || role == PARSE_ROLE_OPEN_SIZEOF || role == PARSE_ROLE_OPEN_COMPOUND ||
-                               role == PARSE_ROLE_OPEN_SPECIFIER || role == PARSE_ROLE_OPEN_KEYWORD);
+        const bool type_name = enclosing && !tag && (role == PARSE_ROLE_OPEN_CAST || role == PARSE_ROLE_OPEN_SIZEOF || role == PARSE_ROLE_OPEN_COMPOUND ||
+                                                    role == PARSE_ROLE_OPEN_SPECIFIER || role == PARSE_ROLE_OPEN_KEYWORD);
+        const uint32_t closer = type_name ? parser->tree.parents[i] : BUSTER_CHECK_NONE;
+        result = closer > first && closer < parser->tokens.count ? closer : result;
         depth = close ? depth + 1 : open && depth != 0 ? depth - 1 : depth;
         scanning = !stop && !enclosing;
     }
     return result;
+}
+
+static bool check_input_attribute_in_type_name(const Parser* parser, uint32_t first)
+{
+    return check_input_attribute_type_name_end(parser, first) != BUSTER_CHECK_NONE;
 }
 
 static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t* cursor, uint32_t end, bool standard,
@@ -2622,7 +2992,8 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
 {
     const Parser* parser = reader->parser;
     uint32_t i = *cursor;
-    CheckInputAttribute attribute = { .first = i, .name_token = i, .standard = standard };
+    CheckInputAttribute attribute = { .first = i, .name_token = i, .standard = standard,
+                                      .specifier_type = standard && place == BUSTER_CHECK_PLACE_SPECIFIERS };
     bool valid = i < end && parser->tokens.names[i] != 0;
     bool namespace_known = true;
     bool scoped = false;
@@ -2650,14 +3021,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
     {
         attribute.name = parser->tokens.names[i++];
         const String8 name = check_input_attribute_name(reader, attribute.name);
-        const CheckInputAttributeRule* rule = 0;
-        for (uint32_t r = 0; namespace_known && r < BUSTER_ARRAY_LENGTH(check_input_attribute_rules) && rule == 0; r += 1)
-        {
-            if (check_input_attribute_equal(name, check_input_attribute_rules[r].name))
-            {
-                rule = &check_input_attribute_rules[r];
-            }
-        }
+        // The name's rows, a GNU spelling's, whose rule is any spelling's of the name.
+        const CheckInputGnuRows* rows = check_input_attribute_gnu_rows(reader, attribute.name);
+        const CheckInputAttributeRule* rule = namespace_known && rows->rule != 0 ? check_input_attribute_rules + rows->rule - 1 : 0;
         if (rule != 0 && standard && !scoped)
         {
             const bool standard_name = check_input_attribute_equal(name, "deprecated") || check_input_attribute_equal(name, "fallthrough") ||
@@ -2691,7 +3057,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         const String8 written = check_input_attribute_name(reader, attribute.name);
         const bool keyword = attribute.name >= C_NAME_CDECL && attribute.name <= C_NAME_VECTORCALL && written.length + 2 == reader->pp->table->spans[attribute.name].length;
         const String8 spelled = keyword ? (String8){ written.pointer - 2, written.length + 2 } : written;
-        const bool known = valid && check_input_attribute_clang_knows(scope, spelled, scoped, standard);
+        const bool known = valid && (standard ? check_input_attribute_clang_knows(scope, spelled, scoped, standard) : rows->known);
         // A C23 attribute of a declaration (no type's) in a type's place (check_input_standard_place, clang's
         // processTypeAttrs): a gnu:: one after a declarator chunk, clang's warning that it is ignored, keeping nothing of
         // it; any other there, or any after the specifiers, its error.
@@ -2703,6 +3069,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         const bool specifiers = place == BUSTER_CHECK_PLACE_SPECIFIERS;
         const bool nocf = specifiers && check_input_attribute_equal(name, "nocf_check");
         const bool typed = fact != NULL && (fact->flags & BUSTER_CHECK_FACT_TYPE) != 0 && !nocf;
+        attribute.specifier_type = standard && specifiers && typed;
         const bool chunk = place == BUSTER_CHECK_PLACE_CHUNK || place == BUSTER_CHECK_PLACE_FUNCTION;
         const bool chunk_gnu = valid && chunk && gnu_scope;
         const bool ignored_type = known && ((clang_scope && check_input_attribute_equal(name, "noderef")) || (specifiers && check_input_attribute_equal(name, "vector_size")));
@@ -2712,12 +3079,15 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         // identifier argument of one whose identifiers all are); then an argument it reads as an unevaluated string literal
         // that is none is its error at the argument. One whose arguments clang parses its own way (availability's and the
         // like) is its own.
-        const CheckInputFactRow* parsed = standard ? fact : known ? check_input_fact_row((String8){ "", 0 }, name, false, false) : NULL;
+        const CheckInputFactRow* parsed = standard ? fact : known ? check_input_attribute_gnu_fact(reader, attribute.name) : NULL;
         // One of no C subject (#147, check_input_attribute_generic).
-        const CheckInputSubjectRow* subject_row = known ? check_input_subject_row(scope, name, scoped, standard) : NULL;
+        const CheckInputSubjectRow* subject_row = known ? check_input_attribute_subject_of(reader, scope, attribute.name, scoped, standard) : NULL;
         const bool subjectless = subject_row != NULL && subject_row->subjects == 0;
         const bool custom = parsed != NULL && (parsed->flags & BUSTER_CHECK_FACT_CUSTOM_PARSING) != 0;
-        const CheckInputArgumentsRow* arguments = valid && known && !custom ? check_input_arguments_row(name) : NULL;
+        // The compatibility conditions are retained, not evaluated here. Their expression-form messages are
+        // validated by their own schema below, after peeling parentheses, rather than the eager literal pass.
+        const bool condition = rule != NULL && rule->schema == CHECK_ATTRIBUTE_CONDITION_STRINGS;
+        const CheckInputArgumentsRow* arguments = valid && known && !custom && !condition ? check_input_attribute_gnu_arguments(reader, attribute.name) : NULL;
         const uint32_t identifiers = BUSTER_CHECK_ARGUMENTS_VARIADIC_IDENTIFIER | BUSTER_CHECK_ARGUMENTS_STRICT_IDENTIFIER;
         uint32_t literal = BUSTER_CHECK_NONE;
         uint32_t index = 0;
@@ -2733,7 +3103,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             const bool lone = stop == argument + 1 && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
             const bool identifier = lone && ((index == 0 && (arguments->flags & BUSTER_CHECK_ARGUMENTS_IDENTIFIER) != 0) || (arguments->flags & identifiers) != 0);
             const bool string = index < 32 && ((arguments->strings >> index) & 1u) != 0 && (arguments->flags & (identifiers | BUSTER_CHECK_ARGUMENTS_TYPE)) == 0;
-            literal = string && !identifier && !strings ? argument : BUSTER_CHECK_NONE;
+            literal = string && !identifier && (!strings || stop == argument) ? argument : BUSTER_CHECK_NONE;
             argument = stop + 1;
         }
         if (literal != BUSTER_CHECK_NONE)
@@ -2815,17 +3185,23 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         if (valid && chunk_gnu && typed)
         {
             // clang's declaration path warns of a calling convention it hasn't before this, on a function's chunk.
-            if (place == BUSTER_CHECK_PLACE_FUNCTION && rule != 0 && rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_call(name) == CHECK_CALL_IGNORED_X86_32)
+            // (Not one of a wrong count, whose count's error is clang's alone: CheckInputAttribute.convention_count.)
+            uint32_t ignored_bound = 0;
+            const CheckInputFactRow* ignored_fact = standard ? fact : check_input_attribute_gnu_fact(reader, attribute.name);
+            if (place == BUSTER_CHECK_PLACE_FUNCTION && rule != 0 && rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_call(name) == CHECK_CALL_IGNORED_X86_32 &&
+                check_input_attribute_count_check(ignored_fact, check_input_attribute_count(parser, &attribute), &ignored_bound) == BUSTER_CHECK_COUNT_NONE)
             {
                 check_input_attribute_unsupported(reader, &attribute);
             }
             check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_GCC_COMPAT, CHECK_WARNING_EVENT_GCC_TYPE_ATTRIBUTE);
         }
         // A GNU attribute of a declaration in a type name: clang ignores it with its warning, keeping nothing (#147).
-        const CheckInputFactRow* gnu_fact = known && !standard ? check_input_fact_row((String8){ "", 0 }, name, false, false) : NULL;
+        const CheckInputFactRow* gnu_fact = known && !standard ? check_input_attribute_gnu_fact(reader, attribute.name) : NULL;
         // The facts of one this checker has no rule for (#147), which decide how clang takes it.
         const CheckInputFactRow* generic_fact = known && rule == 0 ? (standard ? fact : gnu_fact) : NULL;
-        const bool type_name = gnu_fact != NULL && (gnu_fact->flags & BUSTER_CHECK_FACT_TYPE) == 0 && check_input_attribute_in_type_name(parser, attribute.first);
+        const uint32_t type_name_end = gnu_fact != NULL && (gnu_fact->flags & BUSTER_CHECK_FACT_TYPE) == 0 ?
+                                       check_input_attribute_type_name_end(parser, attribute.first) : BUSTER_CHECK_NONE;
+        const bool type_name = type_name_end != BUSTER_CHECK_NONE;
         if (valid && chunk_gnu && !typed)
         {
             check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_TYPE_POSITION);
@@ -2833,7 +3209,8 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         }
         else if (valid && type_name)
         {
-            check_input_attribute_named_once(reader, &attribute, CHECK_WARNING_EVENT_TYPE_NAME_ATTRIBUTE);
+            check_input_attribute_named_once(reader, &attribute, CHECK_WARNING_EVENT_TYPE_NAME_ATTRIBUTE, type_name_end);
+            attributes->unknown_first = attributes->unknown_first != 0 ? attributes->unknown_first : attribute.first;
             unknown = true;
         }
         else if (valid && ignored_type)
@@ -2860,15 +3237,57 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             reader->deprecated_attributes |= rule->kind == CHECK_ATTRIBUTE_DEPRECATED || rule->kind == CHECK_ATTRIBUTE_UNAVAILABLE;
             // A lane cannot publish attribute state to later declarations; source-order replay handles this case.
             check_input_lane_refuse(reader, reader->lane && late_kind, "a body declares an attribute with linked state");
-            // An argument count other than clang's is its error, worded as clang's (#147): before the arguments are read,
-            // where clang checks it after the subject. cleanup's is checked after its subject's already
-            // (check_input_cleanup_declaration).
+            // An argument count other than clang's is its error, worded as clang's (#147). cleanup's is checked after its
+            // subject's already (check_input_cleanup_declaration).
             uint32_t bound = 0;
-            const CheckInputFactRow* counted = standard ? fact : check_input_fact_row((String8){ "", 0 }, name, false, false);
-            const uint8_t count_check = rule->kind == CHECK_ATTRIBUTE_MUSTTAIL || rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION ||
-                                        rule->kind == CHECK_ATTRIBUTE_CLEANUP || rule->kind == CHECK_ATTRIBUTE_COUNTED_BY ? BUSTER_CHECK_COUNT_NONE :
-                                        check_input_attribute_count_check(counted, check_input_attribute_count(parser, &attribute), &bound);
-            if (count_check != BUSTER_CHECK_COUNT_NONE)
+            const CheckInputFactRow* counted = standard ? fact : check_input_attribute_gnu_fact(reader, attribute.name);
+            const uint32_t count = check_input_attribute_count(parser, &attribute);
+            // A calling convention's count is clang's error where it meets a function (CheckCallingConvAttr): `preserve_all(1)`
+            // on a function is "takes no arguments", and `pcs("aapcs", 1)` "takes one argument", but on a variable each is
+            // its subject's warning alone (CheckInputAttribute.convention_count). no_caller_saved_registers' count comes
+            // first, as a type's (below).
+            const bool convention = rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_call(name) != CHECK_CALL_NO_CALLER_SAVED;
+            uint32_t convention_bound = 0;
+            const uint8_t convention_count = convention ? check_input_attribute_count_check(counted, count, &convention_bound) : BUSTER_CHECK_COUNT_NONE;
+            uint8_t count_check = rule->kind == CHECK_ATTRIBUTE_MUSTTAIL || rule->kind == CHECK_ATTRIBUTE_CLEANUP || rule->kind == CHECK_ATTRIBUTE_COUNTED_BY || convention ?
+                                  BUSTER_CHECK_COUNT_NONE : check_input_attribute_count_check(counted, count, &bound);
+            // Attr.td leaves these variadic lists' minimum at zero; the handlers call checkAtLeastNumArgs(1).
+            // Keep that constraint after the subject, with the same diagnostic as a generated minimum.
+            const bool least_one = rule->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || rule->kind == CHECK_ATTRIBUTE_CPU_DISPATCH ||
+                                   (rule->kind == CHECK_ATTRIBUTE_NO_SANITIZE && rule->schema == CHECK_ATTRIBUTE_STRING_LIST);
+            if (count_check == BUSTER_CHECK_COUNT_NONE && count == 0 && least_one)
+            {
+                count_check = BUSTER_CHECK_COUNT_LEAST;
+                bound = 1;
+            }
+            // The count's error comes after its subject's check (check_input_attribute_subjects), as clang's
+            // handleCommonAttributeFeatures has it: `cold(1)` or `format(printf)` on a variable is the subject's warning
+            // alone. Its arguments aren't read then, but clang's parser's errors of them come first
+            // (check_input_attribute_parsed). Not a type's, whose count clang's type processing checks first, nor
+            // sentinel's, whose subject its handler checks after the count. Kept as clang's generated handler's (the
+            // generic kind), its own handler's checks and effects aren't made.
+            // (no_caller_saved_registers' count before its subject too: clang's type processing checks it first.)
+            const bool type_attribute = rule->kind == CHECK_ATTRIBUTE_NORETURN || rule->kind == CHECK_ATTRIBUTE_PACKED || rule->kind == CHECK_ATTRIBUTE_MAY_ALIAS ||
+                                        rule->kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION || rule->kind == CHECK_ATTRIBUTE_NULLABILITY ||
+                                        rule->kind == CHECK_ATTRIBUTE_SENTINEL ||
+                                        (rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_call(name) == CHECK_CALL_NO_CALLER_SAVED);
+            const uint8_t parsed = count_check != BUSTER_CHECK_COUNT_NONE && !type_attribute ? check_input_attribute_parsed(reader, attributes, &attribute) :
+                                   BUSTER_CHECK_PARSED_UNSURE;
+            if (parsed == BUSTER_CHECK_PARSED_ERROR)
+            {
+                valid = false;
+            }
+            else if (parsed == BUSTER_CHECK_PARSED_CLEAN || (count_check != BUSTER_CHECK_COUNT_NONE && !type_attribute))
+            {
+                attribute.parse_arguments = parsed == BUSTER_CHECK_PARSED_UNSURE;
+                attribute.parsed_schema = (uint8_t)attribute.schema;
+                attribute.kind = CHECK_ATTRIBUTE_UNKNOWN;
+                attribute.schema = CHECK_ATTRIBUTE_NO_ARGUMENTS;
+                attribute.argument_count = check_input_attribute_count(parser, &attribute);
+                attribute.count_check = count_check;
+                attribute.count_bound = bound;
+            }
+            else if (count_check != BUSTER_CHECK_COUNT_NONE)
             {
                 check_input_report_argument(reader, attribute.first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, count_check | bound << 8);
                 valid = false;
@@ -2894,6 +3313,20 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             {
                 valid = check_input_attribute_counted_shape(reader, attributes, &attribute);
             }
+            else if (rule->kind == CHECK_ATTRIBUTE_CLEANUP && check_input_attribute_count(parser, &attribute) != 1 &&
+                     check_input_attribute_parsed(reader, attributes, &attribute) == BUSTER_CHECK_PARSED_ERROR)
+            {
+                // cleanup's arguments of another count than one: clang's parser's errors of them first (an undeclared
+                // name), then its subject's and its count's (check_input_cleanup_declaration).
+                valid = false;
+            }
+            else if (convention_count != BUSTER_CHECK_COUNT_NONE)
+            {
+                // Its arguments aren't read: its count is its error where it meets a function, and nothing elsewhere.
+                attribute.convention_count = convention_count;
+                attribute.convention_bound = (uint8_t)convention_bound;
+                attribute.argument_count = count;
+            }
             else
             {
                 valid = check_input_attribute_validate(reader, attributes, &attribute, rule->minimum, rule->maximum);
@@ -2908,6 +3341,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         {
             // Another language's: clang's warning that it ignores it, before anything else (#147).
             check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ATTRIBUTE_IGNORED);
+            attributes->unknown_first = attributes->unknown_first != 0 ? attributes->unknown_first : attribute.first;
             unknown = true;
         }
         else if (valid && known && rule == 0 && check_input_attribute_equal(name, "nocf_check"))
@@ -2957,8 +3391,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         }
         else if (valid)
         {
-            // One clang doesn't know (#147), which it ignores with -Wunknown-attributes' warning at the attribute's first
-            // token (its scope's), as the C23 one's spelling normalized: none of it is kept.
+            // Declaration attributes are processed after the whole declarator's type, including its parameters. Keep
+            // unknown spellings for that point too: a shared specifier list warns once for each declarator. Statements
+            // and type names have no declaration subject pass, so publish their warnings here.
+            const bool deferred = !reader->statement_attributes && !check_input_attribute_in_type_name(parser, attribute.first);
             const CheckWarningEvent event =
             {
                 .id = CHECK_WARNING_ID_UNKNOWN_ATTRIBUTE,
@@ -2970,7 +3406,19 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                 .payload = { .name = attribute.name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
                              .data = scope_name | (standard ? BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE : 0) },
             };
-            check_input_warning_event(reader, &event, NULL, 0);
+            if (!deferred)
+            {
+                check_input_warning_event(reader, &event, NULL, 0);
+            }
+            attributes->unknown_first = attributes->unknown_first != 0 ? attributes->unknown_first : attribute.first + 1;
+            if (deferred)
+            {
+                const CheckInputUnknownAttribute diagnostic = {
+                    .first = attribute.first, .name_token = attribute.name_token, .name = attribute.name, .end = attribute.end, .standard = attribute.standard,
+                    .single_warning = standard && gnu_scope,
+                };
+                valid = check_input_attribute_unknown_append(reader, attributes, diagnostic);
+            }
             unknown = true;
         }
         if (valid && !unknown)
@@ -2983,8 +3431,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                 // The first convention x86-64 has is the one asked for; one that conflicts with an earlier one is clang's
                 // error where they meet a function (check_input_attribute_conventions).
                 const CheckInputCallingConvention call = check_input_attribute_call(name);
-                attributes->calling_convention = attributes->calling_convention == CHECK_CALL_DEFAULT && call != CHECK_CALL_IGNORED_X86_32 ? call :
-                                                 attributes->calling_convention;
+                attributes->calling_convention = check_input_convention_merge(attributes->calling_convention, call);
                 attribute.value = call;
             }
             attributes->packed |= attribute.kind == CHECK_ATTRIBUTE_PACKED;
@@ -3039,14 +3486,23 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
             const uint32_t list_end = valid ? parser->tree.parents[open + 1] : end;
             valid &= list_end + 1 == close;
             i = open + 2;
-            if (valid && place == BUSTER_CHECK_PLACE_QUALIFIERS)
+            if (valid && (place == BUSTER_CHECK_PLACE_QUALIFIERS || place == BUSTER_CHECK_PLACE_GROUP))
             {
-                // clang's declarator parser rejects a C23 list after a pointer's qualifiers (err_attributes_not_allowed).
+                // clang's declarator parser rejects a C23 list after a pointer's qualifiers, or at a group's start
+                // (err_attributes_not_allowed). A group's bounded list is discarded, then the same declarator finishes
+                // its type and outer attributes. The retained report still stops the unit before another declaration.
                 check_input_report(reader, first, CHECK_INPUT_ATTRIBUTE_LIST_PLACE);
-                valid = false;
-                attributes->error = CHECK_ATTRIBUTE_ERROR_SUBJECT;
-                attributes->error_first = first;
-                attributes->error_end = close + 1;
+                if (place == BUSTER_CHECK_PLACE_GROUP)
+                {
+                    i = list_end;
+                }
+                else
+                {
+                    valid = false;
+                    attributes->error = CHECK_ATTRIBUTE_ERROR_SUBJECT;
+                    attributes->error_first = first;
+                    attributes->error_end = close + 1;
+                }
             }
             while (valid && i < list_end)
             {
@@ -3093,8 +3549,7 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
             {
                 const CheckInputCallingConvention call = check_input_attribute_call(check_input_attribute_name(reader, name));
                 attribute.value = call;
-                attributes->calling_convention = attributes->calling_convention == CHECK_CALL_DEFAULT && call != CHECK_CALL_IGNORED_X86_32 ? call :
-                                                 attributes->calling_convention;
+                attributes->calling_convention = check_input_convention_merge(attributes->calling_convention, call);
             }
             valid = valid && check_input_attribute_append(reader, attributes, attribute);
         }
@@ -3257,8 +3712,22 @@ static TypeId check_input_attribute_mode(CheckInputReader* reader, CheckInputAtt
         {
             check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES, CHECK_WARNING_EVENT_VECTOR_MODE);
         }
+        const bool unsupported = result == 0 && width != 0 && (error == CHECK_ARGUMENT_MODE_PRIMITIVE || error == CHECK_ARGUMENT_MODE_TYPE);
         result = 0;
         check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, error, attribute->argument_first - attribute->first);
+        if (unsupported)
+        {
+            // AddModeAttr diagnoses the base, then still asks the target for the mode. An unavailable target type
+            // therefore produces a second error at the same attribute, in that order.
+            CheckInputAttributes following = { 0 };
+            const uint32_t before = reader->output->report_count;
+            check_input_attribute_argument_error(reader, &following, attribute, attribute->first, CHECK_ARGUMENT_UNSUPPORTED_MODE,
+                                                  attribute->argument_first - attribute->first);
+            if (reader->output->report_count > before)
+            {
+                reader->output->reports[before].repeated = true;
+            }
+        }
     }
     return result;
 }
@@ -3317,6 +3786,17 @@ static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAtt
     {
         CheckInputAttribute* attribute = &attributes->records[i];
         CheckInputAttributeError error = CHECK_ATTRIBUTE_ERROR_SUBJECT;
+        if (attribute->specifier_type && deduced)
+        {
+            TypeId function = result;
+            uint8_t kind = type_kind(reader->types, function);
+            while (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED)
+            {
+                function = reader->types->types.base[type_index(function)];
+                kind = type_kind(reader->types, function);
+            }
+            attribute->specifier_ignored = kind != BUSTER_TYPE_KIND_FUNCTION;
+        }
         if (attribute->kind == CHECK_ATTRIBUTE_MODE && type_kind(reader->types, type_strip_aligned(reader->types, result)) == BUSTER_TYPE_KIND_FUNCTION)
         {
             // A function's, which clang's subject check refuses before the mode is read (check_input_attribute_subjects).
@@ -3370,6 +3850,20 @@ static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAtt
             check_input_attribute_error(reader, attributes, attribute->first, attribute->end, reader->output->resource ? CHECK_ATTRIBUTE_ERROR_RESOURCE : error);
         }
     }
+    // A convention ignored on a C23 specifier type must not become the later declarator's ABI. Recompute the compact
+    // requested convention from the retained records; an ordinary prefix convention still reaches the full type.
+    if (deduced)
+    {
+        attributes->calling_convention = CHECK_CALL_DEFAULT;
+        for (uint32_t i = 0; i < attributes->count; i += 1)
+        {
+            const CheckInputAttribute* attribute = attributes->records + i;
+            if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !attribute->specifier_ignored && !attribute->specifier_applied)
+            {
+                attributes->calling_convention = check_input_convention_merge(attributes->calling_convention, (CheckInputCallingConvention)attribute->value);
+            }
+        }
+    }
     // clang's CheckAlignasUnderalignment: the greatest of all the alignments (GNU aligned's too) where one is _Alignas's.
     if (valid && attributes->required_alignment_log2 != 0 && !deduced)
     {
@@ -3408,7 +3902,7 @@ static uint32_t check_input_abi_call(TypeFunctionABI abi)
     const uint32_t result = abi == TYPE_FUNCTION_ABI_MICROSOFT ? CHECK_CALL_MICROSOFT : abi == TYPE_FUNCTION_ABI_VECTOR ? CHECK_CALL_VECTOR :
                             abi == TYPE_FUNCTION_ABI_REG ? CHECK_CALL_REG : abi == TYPE_FUNCTION_ABI_PRESERVE_MOST ? CHECK_CALL_PRESERVE_MOST :
                             abi == TYPE_FUNCTION_ABI_PRESERVE_ALL ? CHECK_CALL_PRESERVE_ALL : abi == TYPE_FUNCTION_ABI_PRESERVE_NONE ? CHECK_CALL_PRESERVE_NONE :
-                            CHECK_CALL_SYSV;
+                            abi == TYPE_FUNCTION_ABI_NO_CALLER_SAVED ? CHECK_CALL_NO_CALLER_SAVED : CHECK_CALL_SYSV;
     return result;
 }
 
@@ -3419,7 +3913,8 @@ static TypeFunctionABI check_input_attribute_requested_abi(const CheckInputAttri
                                    call == CHECK_CALL_VECTOR ? TYPE_FUNCTION_ABI_VECTOR : call == CHECK_CALL_REG ? TYPE_FUNCTION_ABI_REG :
                                    call == CHECK_CALL_PRESERVE_MOST ? TYPE_FUNCTION_ABI_PRESERVE_MOST :
                                    call == CHECK_CALL_PRESERVE_ALL ? TYPE_FUNCTION_ABI_PRESERVE_ALL :
-                                   call == CHECK_CALL_PRESERVE_NONE ? TYPE_FUNCTION_ABI_PRESERVE_NONE : TYPE_FUNCTION_ABI_INVALID;
+                                   call == CHECK_CALL_PRESERVE_NONE ? TYPE_FUNCTION_ABI_PRESERVE_NONE :
+                                   call == CHECK_CALL_NO_CALLER_SAVED ? TYPE_FUNCTION_ABI_NO_CALLER_SAVED : TYPE_FUNCTION_ABI_INVALID;
     return result;
 }
 
@@ -3430,7 +3925,28 @@ static uint8_t check_input_attribute_abi_origin(CheckInputReader* reader, CheckI
 {
     uint8_t result = origin;
     const TypeFunctionABI requested = check_input_attribute_requested_abi(attributes);
-    if (requested != TYPE_FUNCTION_ABI_INVALID && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+    // no_caller_saved_registers and System V's convention are one function type (check_input_convention_merge); with
+    // another, which clang takes, it is refused by name (TYPE_FUNCTION_ABI_NO_CALLER_SAVED).
+    const uint8_t sysv = (uint8_t)TYPE_FUNCTION_ABI_SYSV + 1;
+    const uint8_t every = (uint8_t)TYPE_FUNCTION_ABI_NO_CALLER_SAVED + 1;
+    const bool bit = origin != 0 && (origin == every) != (requested == TYPE_FUNCTION_ABI_NO_CALLER_SAVED);
+    const bool paired = bit && (origin == sysv || requested == TYPE_FUNCTION_ABI_SYSV);
+    if (requested != TYPE_FUNCTION_ABI_INVALID && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE && paired)
+    {
+        result = every;
+    }
+    else if (requested != TYPE_FUNCTION_ABI_INVALID && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE && bit)
+    {
+        for (uint32_t i = 0; attributes->error == CHECK_ATTRIBUTE_ERROR_NONE && i < attributes->count; i += 1)
+        {
+            const CheckInputAttribute* attribute = attributes->records + i;
+            if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !attribute->specifier_ignored && attribute->value != CHECK_CALL_IGNORED_X86_32)
+            {
+                check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+            }
+        }
+    }
+    else if (requested != TYPE_FUNCTION_ABI_INVALID && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
     {
         if (origin == 0 || origin == (uint8_t)requested + 1)
         {
@@ -3438,10 +3954,22 @@ static uint8_t check_input_attribute_abi_origin(CheckInputReader* reader, CheckI
         }
         else
         {
-            for (uint32_t i = 0; i < attributes->count; i += 1)
+            bool reported = false;
+            // When a C23 specifier attribute and an ordinary declarator attribute meet on the same function,
+            // clang diagnoses the specifier attribute against the already-applied declaration convention.
+            for (uint32_t i = 0; !reported && i < attributes->count; i += 1)
             {
                 const CheckInputAttribute* attribute = attributes->records + i;
-                if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->value != CHECK_CALL_IGNORED_X86_32)
+                if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->specifier_applied)
+                {
+                    check_input_attribute_conflict(reader, attributes, attribute, (uint32_t)attribute->value, check_input_abi_call(requested));
+                    reported = true;
+                }
+            }
+            for (uint32_t i = 0; !reported && i < attributes->count; i += 1)
+            {
+                const CheckInputAttribute* attribute = attributes->records + i;
+                if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !attribute->specifier_ignored && !attribute->specifier_applied && attribute->value != CHECK_CALL_IGNORED_X86_32)
                 {
                     check_input_attribute_conflict(reader, attributes, attribute, (uint32_t)attribute->value, check_input_abi_call((TypeFunctionABI)(origin - 1)));
                 }
@@ -3449,6 +3977,20 @@ static uint8_t check_input_attribute_abi_origin(CheckInputReader* reader, CheckI
         }
     }
     return result;
+}
+
+// Whether `type` is a function or wraps one in pointers, arrays and aligned typedefs, where a calling convention applies.
+static bool check_input_attribute_function_wrapped(const TypeTable* types, TypeId type)
+{
+    TypeId function = type;
+    bool wrapped = type != 0;
+    while (wrapped)
+    {
+        const uint8_t kind = type_kind(types, function);
+        wrapped = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED;
+        function = wrapped ? types->types.base[type_index(function)] : function;
+    }
+    return type != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION;
 }
 
 // The calling conventions among `attributes` as clang applies them to a function, when `type` is one or wraps one in
@@ -3470,7 +4012,9 @@ static void check_input_attribute_conventions(CheckInputReader* reader, CheckInp
     for (uint32_t i = 0; is_function && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE && i < attributes->count; i += 1)
     {
         const CheckInputAttribute* attribute = attributes->records + i;
-        if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_pcs(reader, attributes, attribute))
+        const bool convention = attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !attribute->specifier_ignored && !attribute->specifier_applied;
+        // One of a wrong count is its count's error alone, at its subject's check (CheckInputAttribute.convention_count).
+        if (convention && attribute->convention_count == BUSTER_CHECK_COUNT_NONE && check_input_attribute_pcs(reader, attributes, attribute))
         {
             const uint32_t call = attribute->value == CHECK_CALL_IGNORED_X86_32 ? CHECK_CALL_SYSV : (uint32_t)attribute->value;
             // (A GPU kernel's convention is a function's declaration's alone, not a pointer's to one.)
@@ -3480,11 +4024,19 @@ static void check_input_attribute_conventions(CheckInputReader* reader, CheckInp
             {
                 check_input_attribute_unsupported(reader, attribute);
             }
-            if (current != CHECK_CALL_DEFAULT && call != current)
+            // no_caller_saved_registers beside System V's convention is clang's function type bit (check_input_convention_merge);
+            // beside another, which clang takes too, it is refused by name: the type has no room for both.
+            const bool bit = (call == CHECK_CALL_NO_CALLER_SAVED) != (current == CHECK_CALL_NO_CALLER_SAVED);
+            const bool paired = bit && (call == CHECK_CALL_SYSV || current == CHECK_CALL_SYSV);
+            if (current != CHECK_CALL_DEFAULT && call != current && bit && !paired)
+            {
+                check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+            }
+            else if (current != CHECK_CALL_DEFAULT && call != current && !paired)
             {
                 check_input_attribute_conflict(reader, attributes, attribute, call, current);
             }
-            current = call;
+            current = paired ? CHECK_CALL_NO_CALLER_SAVED : call;
         }
     }
 }
@@ -3494,7 +4046,8 @@ static void check_input_attribute_conventions(CheckInputReader* reader, CheckInp
 // warning-only ignored metadata. A prefix caller waits for the full declarator before invoking this helper.
 // Always inlined (#880), as profile-guided builds do; hot callers: check_input_declarator_step and
 // check_input_declaration.
-static inline __attribute__((always_inline)) TypeId check_input_attribute_abi(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type)
+static inline __attribute__((always_inline)) TypeId check_input_attribute_abi_with_override(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type,
+                                                                                          bool replace_wrapped_abi)
 {
     TypeId result = type;
     if (type != 0 && attributes != 0 && attributes->count != 0 && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
@@ -3532,10 +4085,12 @@ static inline __attribute__((always_inline)) TypeId check_input_attribute_abi(Ch
                 wrappers[i] = cursor;
                 cursor = reader->types->types.base[type_index(cursor)];
             }
-            result = previous == TYPE_FUNCTION_ABI_SYSV || previous == abi ?
+            // System V's convention on a no_caller_saved_registers function's type keeps the bit (check_input_convention_merge).
+            const TypeFunctionABI kept = previous == TYPE_FUNCTION_ABI_NO_CALLER_SAVED && abi == TYPE_FUNCTION_ABI_SYSV ? previous : abi;
+            result = previous == TYPE_FUNCTION_ABI_SYSV || previous == kept || replace_wrapped_abi ?
                      type_function_abi(reader->types, type_return(reader->types, function), parameters, count,
-                                       reader->types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_KEY, abi) : 0;
-            if (previous == TYPE_FUNCTION_ABI_SYSV || previous == abi)
+                                       reader->types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_KEY, kept) : 0;
+            if (previous == TYPE_FUNCTION_ABI_SYSV || previous == kept || replace_wrapped_abi)
             {
                 result = check_input_type_result(reader, result);
             }
@@ -3566,7 +4121,7 @@ static inline __attribute__((always_inline)) TypeId check_input_attribute_abi(Ch
         for (uint32_t i = 0; i < attributes->count; i += 1)
         {
             CheckInputAttribute* attribute = attributes->records + i;
-            if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION)
+            if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !attribute->specifier_applied)
             {
                 attribute->ignored |= !is_function;
                 if (result == 0 && reader->output->resource)
@@ -3579,6 +4134,13 @@ static inline __attribute__((always_inline)) TypeId check_input_attribute_abi(Ch
                     // vectorcall and regcall take no variadic function (#147, clang's supportsVariadicCall): its error.
                     check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_VARIADIC_CONVENTION, (uint32_t)attribute->value);
                 }
+                else if (result == 0 && attribute->value != CHECK_CALL_IGNORED_X86_32 &&
+                         (previous == TYPE_FUNCTION_ABI_NO_CALLER_SAVED || abi == TYPE_FUNCTION_ABI_NO_CALLER_SAVED))
+                {
+                    // no_caller_saved_registers and another convention than System V's, which clang takes, refused by name:
+                    // the type has no room for both (TYPE_FUNCTION_ABI_NO_CALLER_SAVED).
+                    check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+                }
                 else if (result == 0 && attribute->value != CHECK_CALL_IGNORED_X86_32)
                 {
                     // The function's type has another convention (a typedef's).
@@ -3589,6 +4151,11 @@ static inline __attribute__((always_inline)) TypeId check_input_attribute_abi(Ch
         arena_pop_to(reader->scratch, mark);
     }
     return attributes == 0 || attributes->error == CHECK_ATTRIBUTE_ERROR_NONE ? result : 0;
+}
+
+static inline __attribute__((always_inline)) TypeId check_input_attribute_abi(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type)
+{
+    return check_input_attribute_abi_with_override(reader, attributes, type, false);
 }
 
 // The declaration whose attributes check_input_attribute_definition checks: its name's token; whether it is a function's
@@ -3649,6 +4216,7 @@ static bool check_input_attribute_multiversion_allowed(CheckInputMultiversionKin
         case CHECK_ATTRIBUTE_NORETURN:
         case CHECK_ATTRIBUTE_CALLING_CONVENTION:
         case CHECK_ATTRIBUTE_REGPARM:
+        case CHECK_ATTRIBUTE_NODEREF:
         // Attributes clang ignores on a function (with a warning this checker doesn't model).
         case CHECK_ATTRIBUTE_ACCESS:
         case CHECK_ATTRIBUTE_EXTERNALLY_VISIBLE:
@@ -3660,6 +4228,8 @@ static bool check_input_attribute_multiversion_allowed(CheckInputMultiversionKin
         case CHECK_ATTRIBUTE_ARTIFICIAL: result = !inline_function; break;
         // Type attributes. aligned and may_alias are FunctionDecl attributes to clang, which refuses them there.
         case CHECK_ATTRIBUTE_PACKED:
+        case CHECK_ATTRIBUTE_MS_STRUCT:
+        case CHECK_ATTRIBUTE_GCC_STRUCT:
         case CHECK_ATTRIBUTE_ALIGNAS:
         case CHECK_ATTRIBUTE_MODE:
         case CHECK_ATTRIBUTE_VECTOR_SIZE:
@@ -3842,6 +4412,7 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
             default:
                 break;
         }
+        const uint32_t before = reader->output->multiversion_report_count;
         if (earlier != BUSTER_CHECK_NONE && !incompatible[i])
         {
             // An earlier different-kind attribute is still present: clang reports the incompatibility, not the
@@ -3855,6 +4426,12 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
             check_input_report_multiversion(reader, attribute->name_token, CHECK_INPUT_MULTIVERSION_DUPLICATE, 0, attribute->name_token,
                                             attributes->records[duplicate].name_token, CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE, 0);
             incompatible[i] = true;
+        }
+        for (uint32_t r = before; r < reader->output->multiversion_report_count; r += 1)
+        {
+            CheckInputReport* report = reader->output->multiversion_reports + r;
+            report->completion = reader->attribute_completion;
+            report->suborder = (uint64_t)attribute->first + 2;
         }
     }
     // The active multiversioning attribute: the first target("default"), target_clones, cpu_specific or cpu_dispatch
@@ -4781,7 +5358,8 @@ static bool check_input_attribute_annotations(CheckInputReader* reader, CheckInp
 // clang's ProcessDeclAttributeList ends (#147): the first of reqd_work_group_size, work_group_size_hint, vec_type_hint and
 // intel_reqd_sub_group_size, "attribute 'X' can only be applied to an OpenCL kernel function"; then the first of AMDGPU's
 // flat_work_group_size, waves_per_eu, num_sgpr and num_vgpr, "'X' attribute only applies to kernel functions"; each at the
-// function's name (`name`), in that order of their names, not of the attributes.
+// function's name (`name`), in that order of their names, not of the attributes. A nonempty function-type chunk is
+// processed after the specifiers too: prefix attributes are checked before it, then checked again with the later list.
 static void check_input_attribute_kernels(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t name)
 {
     static const char* const groups[2][4] = {
@@ -4794,32 +5372,37 @@ static void check_input_attribute_kernels(CheckInputReader* reader, CheckInputAt
         kernel |= check_input_attribute_kernel(reader, attributes->records + i);
     }
     bool reported = false;
-    for (uint32_t group = 0; !kernel && attributes != NULL && group < 2; group += 1)
+    for (uint32_t pass = 0; !kernel && attributes != NULL && pass < (attributes->function_chunk ? 2u : 1u); pass += 1)
     {
-        const CheckInputAttribute* found = NULL;
-        for (uint32_t n = 0; found == NULL && n < 4; n += 1)
+        const bool prefix = attributes->function_chunk && pass == 0;
+        for (uint32_t group = 0; group < 2; group += 1)
         {
-            for (uint32_t i = 0; found == NULL && i < attributes->count; i += 1)
+            const CheckInputAttribute* found = NULL;
+            for (uint32_t n = 0; found == NULL && n < 4; n += 1)
             {
-                const CheckInputAttribute* attribute = attributes->records + i;
-                const bool generic = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && !attribute->ignored;
-                found = generic && check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), groups[group][n]) ? attribute : NULL;
+                for (uint32_t i = 0; found == NULL && i < attributes->count; i += 1)
+                {
+                    const CheckInputAttribute* attribute = attributes->records + i;
+                    const bool generic = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && !attribute->ignored &&
+                                         (!prefix || attribute->declaration_prefix);
+                    found = generic && check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), groups[group][n]) ? attribute : NULL;
+                }
             }
+            const uint32_t before = reader->output->report_count;
+            if (found != NULL)
+            {
+                check_input_report_argument(reader, name, CHECK_INPUT_ATTRIBUTE_ARGUMENT, group == 0 ? CHECK_ARGUMENT_OPENCL_KERNEL : CHECK_ARGUMENT_KERNEL_ONLY);
+                attributes->error = attributes->error == CHECK_ATTRIBUTE_ERROR_NONE ? CHECK_ATTRIBUTE_ERROR_ARGUMENTS : attributes->error;
+            }
+            // (Published after the attributes' own diagnostics, as clang gives it once they are applied.)
+            if (reader->output->report_count > before)
+            {
+                reader->output->reports[before].attribute = found->first;
+                reader->output->reports[before].repeated = reported;
+                reader->output->reports[before].sort = attributes->records[attributes->count - 1].end + 1;
+            }
+            reported |= found != NULL;
         }
-        const uint32_t before = reader->output->report_count;
-        if (found != NULL)
-        {
-            check_input_report_argument(reader, name, CHECK_INPUT_ATTRIBUTE_ARGUMENT, group == 0 ? CHECK_ARGUMENT_OPENCL_KERNEL : CHECK_ARGUMENT_KERNEL_ONLY);
-            attributes->error = attributes->error == CHECK_ATTRIBUTE_ERROR_NONE ? CHECK_ATTRIBUTE_ERROR_ARGUMENTS : attributes->error;
-        }
-        // (Published after the attributes' own diagnostics, as clang gives it once they are applied.)
-        if (reader->output->report_count > before)
-        {
-            reader->output->reports[before].attribute = found->first;
-            reader->output->reports[before].repeated = reported;
-            reader->output->reports[before].sort = attributes->records[attributes->count - 1].end + 1;
-        }
-        reported |= found != NULL;
     }
 }
 
@@ -4833,7 +5416,7 @@ static void check_input_attribute_kernels(CheckInputReader* reader, CheckInputAt
 // another declaration "... functions and methods" (NS's) or "... functions, methods, and parameters"; the out
 // parameters' "... pointer/reference-to-OSObject-pointer parameters". ns_returns_retained is a type's too: a function
 // type's warning at the attribute, "'ns_returns_retained' attribute only applies to functions that return an
-// Objective-C object", and off one "only applies to function types" (check_input_attribute_function_types); a tag's
+// Objective-C object", and off one "only applies to function types" (check_input_attribute_type_warnings); a tag's
 // "functions and methods" at its first token.
 static void check_input_attribute_ownership(CheckInputReader* reader, CheckInputAttribute* attribute, uint32_t declaration, TypeId type, uint32_t begin)
 {
@@ -4899,12 +5482,45 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
                                            uint32_t name)
 {
     const Parser* parser = reader->parser;
+    const uint32_t warning_begin = reader->warning_events.count;
+    const uint32_t report_begin = reader->output->report_count;
+    const uint32_t completion = reader->attribute_completion;
     const uint32_t pointer_variable = BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_FUNCTION_POINTER;
     const uint32_t subjects = declaration | ((declaration & pointer_variable) == pointer_variable ? BUSTER_CHECK_SUBJECT_FUNCTION_POINTER_VARIABLE : 0);
+    uint32_t microsoft_layout = UINT32_MAX;
+    uint32_t ordinary_layout = UINT32_MAX;
     bool valid = true;
-    for (uint32_t i = 0; valid && attributes != NULL && i < attributes->count; i += 1)
+    const CheckInputUnknownAttribute* unknown = attributes != NULL ? attributes->unknown_begin : NULL;
+    for (uint32_t i = 0; valid && attributes != NULL && (i < attributes->count || unknown != NULL);)
     {
-        CheckInputAttribute* attribute = attributes->records + i;
+        if (unknown != NULL && (i == attributes->count || unknown->first < attributes->records[i].first))
+        {
+            const CheckInputAttribute attribute = {
+                .first = unknown->first, .name_token = unknown->name_token, .name = unknown->name, .end = unknown->end, .standard = unknown->standard,
+            };
+            if (!unknown->single_warning || !*unknown->warned_shared)
+            {
+                check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_UNKNOWN_ATTRIBUTE, CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE);
+                *unknown->warned_shared = true;
+            }
+            unknown = unknown->next;
+            continue;
+        }
+        CheckInputAttribute* attribute = attributes->records + i++;
+        if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->convention_count != BUSTER_CHECK_COUNT_NONE && !attribute->subject_ignored &&
+            check_input_attribute_function_wrapped(reader->types, type))
+        {
+            // A calling convention's wrong count on a function, or a pointer or an array of one, is clang's error alone,
+            // after its parser's warnings (a definition's -Wgcc-compat); on another subject its warning (#147,
+            // CheckInputAttribute.convention_count).
+            check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT,
+                                        attribute->convention_count | (uint32_t)attribute->convention_bound << 8);
+            attributes->error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+            attributes->error_first = attribute->first;
+            attributes->error_end = attribute->end;
+            valid = false;
+            continue;
+        }
         const bool scoped = attribute->standard && attribute->first != attribute->name_token;
         const uint32_t scope_name = scoped ? parser->tokens.names[attribute->first] : 0;
         const String8 scope = scoped ? check_input_attribute_name(reader, scope_name) : (String8){ "", 0 };
@@ -4913,7 +5529,7 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         // (A GPU kernel's convention, which a type off a function ignored, is a declaration's attribute: its subject's error.)
         const bool kernel = check_input_attribute_kernel(reader, attribute);
         // matrix_type without -fenable-matrix (#147): clang's error, then a typedef's subject's off one; cfi_salt is a
-        // function type's, whose warning off one is check_input_attribute_function_types's, not a subject's.
+        // function type's, whose warning off one is check_input_attribute_type_warnings', not a subject's.
         const bool generic_name = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword;
         const String8 generic_spelled = generic_name ? check_input_attribute_name(reader, attribute->name) : (String8){ 0 };
         const bool matrix = generic_name && check_input_attribute_equal(generic_spelled, "matrix_type") &&
@@ -4958,7 +5574,7 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             continue;
         }
         const CheckInputSubjectRow* row = attribute->keyword || overflow || (attribute->ignored && !attribute->subject_ignored && !transparent && !kernel) ? NULL :
-                                          check_input_subject_row(scope, check_input_attribute_name(reader, attribute->name), scoped, attribute->standard);
+                                          check_input_attribute_subject_of(reader, scope, attribute->name, scoped, attribute->standard);
         // A shared record another declarator ignored applies to this one when its subjects fit (checked again below).
         attribute->ignored &= !(attribute->subject_ignored && !transparent);
         attribute->subject_ignored = false;
@@ -5074,7 +5690,9 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         // declaration without a declarator): a convention's arguments (pcs's) first, then x86-64's warning of one it
         // hasn't; then "'X' attribute only applies to functions and methods", which ignores it. regparm has none there.
         const bool tag = (declaration & (BUSTER_CHECK_SUBJECT_STRUCT | BUSTER_CHECK_SUBJECT_UNION | BUSTER_CHECK_SUBJECT_ENUM)) != 0;
-        const bool convention = attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !check_input_attribute_kernel(reader, attribute);
+        // (no_caller_saved_registers on a tag is nothing to clang: its type processing never meets it.)
+        const bool convention = attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !check_input_attribute_kernel(reader, attribute) &&
+                                attribute->value != CHECK_CALL_NO_CALLER_SAVED;
         const bool function_type = convention || (attribute->kind == CHECK_ATTRIBUTE_NORETURN && !attribute->standard && !attribute->keyword) ||
                                    (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword &&
                                     check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "cfi_unchecked_callee"));
@@ -5147,7 +5765,14 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         // After its subject's check, as clang's handleCommonAttributeFeatures has them (#147): an attribute already on the
         // declaration that excludes it (diagMutualExclusion), with the note at that one, then its count of arguments.
         const bool kept = valid && !attribute->ignored && !attribute->subject_ignored && !attribute->keyword;
-        const uint32_t excluding = kept ? check_input_attribute_excluding(reader, attributes, i) : UINT32_MAX;
+        // Layout handlers reject the opposite kind on this declaration, but permit both across redeclarations.
+        // Remember each first local attribute once: repeated identical attributes must not rescan the whole prefix.
+        const bool microsoft = kept && attribute->kind == CHECK_ATTRIBUTE_MS_STRUCT && attribute->first >= begin;
+        const bool ordinary = kept && attribute->kind == CHECK_ATTRIBUTE_GCC_STRUCT && attribute->first >= begin;
+        const uint32_t excluding = microsoft ? ordinary_layout : ordinary ? microsoft_layout :
+                                   kept ? check_input_attribute_excluding(reader, attributes, i - 1) : UINT32_MAX;
+        microsoft_layout = microsoft && microsoft_layout == UINT32_MAX ? i - 1 : microsoft_layout;
+        ordinary_layout = ordinary && ordinary_layout == UINT32_MAX ? i - 1 : ordinary_layout;
         if (excluding != UINT32_MAX)
         {
             const uint32_t before = reader->output->report_count;
@@ -5161,12 +5786,36 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         }
         else if (kept && attribute->count_check != BUSTER_CHECK_COUNT_NONE)
         {
+            const uint32_t before = reader->output->report_count;
             check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, attribute->count_check | attribute->count_bound << 8);
+            if (reader->output->report_count > before)
+            {
+                // All original argument syntax precedes the handler, including a type-name error retained by the
+                // diagnostic-only parser view. Keep the attribute's name as its location, and its end as publication.
+                reader->output->reports[before].completion = attribute->end;
+            }
             valid = false;
+            if (attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+            {
+                attributes->error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+                attributes->error_first = attribute->first;
+                attributes->error_end = attribute->end;
+            }
         }
         else if (kept && attribute->kind == CHECK_ATTRIBUTE_THREAD_SAFETY)
         {
             valid = check_input_thread_attribute(reader, attribute, declaration, type);
+        }
+        else if (kept && attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES && attribute->argument_count == 0)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_TARGET_CLONES_DEFAULT, 0);
+            valid = false;
+        }
+        else if (kept && attribute->kind == CHECK_ATTRIBUTE_SELECTANY && (declaration & (BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_FUNCTION)) != 0 &&
+                 (declaration & BUSTER_CHECK_SUBJECT_EXTERNAL_OBJECT) == 0)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_SELECTANY_LINKAGE, 0);
+            valid = false;
         }
         else if (kept && attribute->deferred != NULL)
         {
@@ -5223,6 +5872,26 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
                 other->ignored = true;
             }
         }
+    }
+    // Subject checks run after the declarator's type is complete. Give their warnings and errors that same boundary,
+    // retaining each handler's earlier ordering key separately, so its introductory warning still precedes its error
+    // and the final kernel checks follow both. Keep parameters before the containing declarator's checks. Parser macro
+    // warnings retain their own lexical boundaries, including any read by an attribute's nested type expression.
+    for (uint32_t w = warning_begin; w < reader->warning_events.count; w += 1)
+    {
+        CheckWarningEvent* event = reader->warning_events.events + w;
+        if (event->kind != CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE && event->completion_kind == CHECK_WARNING_COMPLETE_AT_TOKEN &&
+            event->completion < completion)
+        {
+            event->suborder = (uint64_t)event->completion + 1;
+            event->completion = completion;
+        }
+    }
+    for (uint32_t r = report_begin; r < reader->output->report_count; r += 1)
+    {
+        CheckInputReport* report = reader->output->reports + r;
+        report->suborder = (uint64_t)(report->sort != 0 ? report->sort : report->completion != 0 ? report->completion : report->token) + 1;
+        report->completion = report->completion < completion ? completion : report->completion;
     }
     return valid;
 }
@@ -5331,6 +6000,7 @@ static bool check_input_attribute_after_kind(CheckInputReader* reader, const Che
 {
     const CheckInputAttributeKind kind = attribute->kind;
     const bool excluded = attribute->keyword || check_input_attribute_late_kind(attribute) || kind == CHECK_ATTRIBUTE_UNKNOWN || kind == CHECK_ATTRIBUTE_PACKED ||
+                          kind == CHECK_ATTRIBUTE_MS_STRUCT || kind == CHECK_ATTRIBUTE_GCC_STRUCT ||
                           kind == CHECK_ATTRIBUTE_ALIGNAS || kind == CHECK_ATTRIBUTE_MODE || kind == CHECK_ATTRIBUTE_VECTOR_SIZE ||
                           kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE || kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION || kind == CHECK_ATTRIBUTE_ALIAS ||
                           kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_ASM_LABEL ||
@@ -5344,7 +6014,7 @@ static bool check_input_attribute_after_kind(CheckInputReader* reader, const Che
     const Parser* parser = reader->parser;
     const bool scoped = attribute->standard && attribute->first != attribute->name_token;
     const String8 scope = scoped ? check_input_attribute_name(reader, parser->tokens.names[attribute->first]) : (String8){ "", 0 };
-    const CheckInputFactRow* fact = excluded ? NULL : check_input_fact_row(scope, check_input_attribute_name(reader, attribute->name), scoped, attribute->standard);
+    const CheckInputFactRow* fact = excluded ? NULL : check_input_attribute_fact_of(reader, scope, attribute->name, scoped, attribute->standard);
     return !excluded && (unsigned)kind < 128 && !(fact != NULL && (fact->flags & BUSTER_CHECK_FACT_TYPE) != 0);
 }
 
@@ -5378,10 +6048,32 @@ static void check_input_attribute_summary(CheckInputAttributes* attributes)
     }
 }
 
+// Whether declaration `d`, before `token`, is one clang's lookup of `token`'s entity finds in its chain (#147): at file
+// scope, or in a block `token` is in (CheckInputReader.declaration_scope_ends).
+static bool check_input_declaration_visible(const CheckInputReader* reader, uint32_t d, uint32_t token)
+{
+    return reader->declaration_scope_ends == NULL || reader->declaration_scope_ends[d] == BUSTER_CHECK_NONE || token <= reader->declaration_scope_ends[d];
+}
+
+// Whether `attribute`'s name is one of a mutual exclusion's (check_input_exclusions), which an earlier declaration's
+// attribute may exclude.
+static bool check_input_attribute_excludable(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    const String8 name = check_input_attribute_name(reader, attribute->name);
+    bool listed = false;
+    for (uint32_t r = 0; !listed && r < BUSTER_ARRAY_LENGTH(check_input_exclusions); r += 1)
+    {
+        listed = name.length == check_input_exclusions[r].length && memcmp(name.pointer, check_input_exclusions[r].spelling, name.length) == 0;
+    }
+    return listed;
+}
+
 // clang's error for an attribute of a redeclaration that an earlier declaration's of its entity excludes (#147, as its
 // mergeDeclAttributes takes them in): at the attribute, with the note at the earlier one. On the serial path, where the
-// declarations of `previous`'s entity before `token` are found by their linked object.
-static void check_input_attribute_merge_exclusions(CheckInputReader* reader, uint32_t token, uint32_t previous)
+// declarations of `previous`'s entity before `token` are found by their linked object: where `token` has a visible
+// previous declaration (`visible`), those its lookup finds alone (check_input_declaration_visible), and otherwise every
+// one, as clang finds a block's extern declaration in a closed scope (findLocallyScopedExternCDecl).
+static void check_input_attribute_merge_exclusions(CheckInputReader* reader, uint32_t token, uint32_t previous, bool visible)
 {
     const CheckInputAttributes* attributes = check_sparse_wide_present(reader->output->attributes) ? check_input_attributes_at(reader->output, token) : 0;
     const uint32_t object = reader->objects != NULL ? reader->objects[previous] : 0;
@@ -5391,11 +6083,7 @@ static void check_input_attribute_merge_exclusions(CheckInputReader* reader, uin
         const CheckInputAttribute* attribute = attributes->records + i;
         const bool kept = !attribute->ignored && !attribute->subject_ignored && !attribute->keyword;
         const String8 name = kept ? check_input_attribute_name(reader, attribute->name) : (String8){ "", 0 };
-        bool listed = false;
-        for (uint32_t r = 0; kept && !listed && r < BUSTER_ARRAY_LENGTH(check_input_exclusions); r += 1)
-        {
-            listed = name.length == check_input_exclusions[r].length && memcmp(name.pointer, check_input_exclusions[r].spelling, name.length) == 0;
-        }
+        const bool listed = kept && check_input_attribute_excludable(reader, attribute);
         const bool scalar = reader->parser->options.scalar;
         const CheckSparseWide all = reader->output->attributes;
         for (uint32_t first = listed ? check_input_attributed_next(all, 0, token, scalar) : token; !reported && first < token;
@@ -5405,7 +6093,8 @@ static void check_input_attribute_merge_exclusions(CheckInputReader* reader, uin
             for (uint32_t selected = lanes; !reported && selected != 0; selected &= selected - 1)
             {
                 const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
-                const CheckInputAttributes* earlier = reader->objects[d] == object ? check_input_attributes_at(reader->output, d) : 0;
+                const bool seen = reader->objects[d] == object && (!visible || check_input_declaration_visible(reader, d, token));
+                const CheckInputAttributes* earlier = seen ? check_input_attributes_at(reader->output, d) : 0;
                 const uint32_t excluding = earlier != 0 ? check_input_attribute_excluding_in(reader, name, earlier, earlier->count) : UINT32_MAX;
                 if (excluding != UINT32_MAX)
                 {
@@ -5429,18 +6118,29 @@ static void check_input_attribute_merge_exclusions(CheckInputReader* reader, uin
 // definition and the declarations before it lack the kind of (check_input_attribute_after_kind, #147), whose layout
 // it then no longer changes. Earlier accepted attributes remain in their declaration records. A specifier's list is
 // each declarator's: one declarator's is copied before its records are marked.
-static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point)
+static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point, bool visible)
 {
     const CheckInputAttributes* attributes = check_sparse_wide_present(reader->output->attributes) ? check_input_attributes_at(reader->output, token) : 0;
     const bool after = attributes != 0 && reader->definition_origins != NULL && reader->definition_origins[previous] &&
                        !check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED);
     bool late = false;
-    for (uint32_t i = 0; after && i < attributes->count; i += 1)
+    // A body on a lane: what the earlier declarations' attributes decide, which the lane can't read (other lanes' columns
+    // hold them), and what its own decide for later declarations, which it can't publish to them, is source order's
+    // (#147): the declaration attributes clang drops after the definition and checks a later one's against
+    // (check_input_attribute_after_kind), and those of a mutual exclusion (check_input_attribute_merge_exclusions).
+    bool replay = false;
+    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
     {
         const CheckInputAttribute* attribute = attributes->records + i;
-        late |= !attribute->ignored && ((reader->late_attributes && check_input_attribute_late_kind(attribute)) ||
-                                        (!reader->lane && !attribute->subject_ignored && check_input_attribute_after_kind(reader, attribute)));
+        const bool kept = !attribute->ignored && !attribute->subject_ignored;
+        late |= after && !attribute->ignored && ((reader->late_attributes && check_input_attribute_late_kind(attribute)) ||
+                                                 (!reader->lane && !attribute->subject_ignored && check_input_attribute_after_kind(reader, attribute)));
+        // (One the declaration inherits, as naked from a file-scope one, check_input_naked_inherit, isn't the body's.)
+        const bool written = reader->function_body >= reader->parser->tokens.count || attribute->first > reader->function_body;
+        replay |= reader->lane && kept && written && (check_input_attribute_after_kind(reader, attribute) ||
+                                                      (!attribute->keyword && check_input_attribute_excludable(reader, attribute)));
     }
+    check_input_lane_refuse(reader, replay, "a body's redeclaration has attributes its entity's other declarations decide");
     CheckInputAttributes* copy = late ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1) : 0;
     const bool copied = copy != 0 && check_input_attribute_copy(reader, attributes, copy);
     reader->output->resource |= late && !copied;
@@ -5470,7 +6170,9 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
                 {
                     const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
                     const uint32_t object = reader->objects[d];
-                    if (object != 0 && object <= count)
+                    // (A file-scope declaration's alone: a block's attributes never reach the definition's, #147.)
+                    const bool file_scope = reader->declaration_scope_ends == NULL || reader->declaration_scope_ends[d] == BUSTER_CHECK_NONE;
+                    if (object != 0 && object <= count && file_scope)
                     {
                         reader->late_attribute_masks[object] |= check_input_attribute_late_mask(check_input_attributes_at(reader->output, d), reader->output->function_flags[d]);
                         check_input_attribute_after_kinds(reader, check_input_attributes_at(reader->output, d), reader->late_attribute_kinds + 2 * (uint64_t)object);
@@ -5523,7 +6225,7 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
         }
         check_input_set_attributes_at(reader->output, token, copy);
     }
-    check_input_attribute_merge_exclusions(reader, token, previous);
+    check_input_attribute_merge_exclusions(reader, token, previous, visible);
 }
 
 // Whether a parameter of `type` is one nonnull's index may name, as clang's isValidPointerAttrType has it: a pointer, or a
@@ -5611,8 +6313,8 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
         // ignores with its subject's warning before reading its arguments (check_input_attribute_subjects).
         const bool scoped = attribute->standard && attribute->first != attribute->name_token;
         const CheckInputSubjectRow* row = attribute->keyword || prototyped ? NULL :
-            check_input_subject_row(scoped ? check_input_attribute_name(reader, reader->parser->tokens.names[attribute->first]) : (String8){ "", 0 },
-                                    check_input_attribute_name(reader, attribute->name), scoped, attribute->standard);
+            check_input_attribute_subject_of(reader, scoped ? check_input_attribute_name(reader, reader->parser->tokens.names[attribute->first]) : (String8){ "", 0 },
+                                             attribute->name, scoped, attribute->standard);
         if (row != NULL && (row->subjects & (BUSTER_CHECK_SUBJECT_PROTOTYPED | BUSTER_CHECK_SUBJECT_FUNCTION | BUSTER_CHECK_SUBJECT_FUNCTION_LIKE)) == BUSTER_CHECK_SUBJECT_PROTOTYPED)
         {
             continue;
@@ -5620,6 +6322,14 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
         if (attribute->kind == CHECK_ATTRIBUTE_ALIGNAS)
         {
             check_input_alignas_error(reader, attributes, NULL, BUSTER_CHECK_NONE, 0, 0);
+            valid = false;
+        }
+        if (!attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF || attribute->kind == CHECK_ATTRIBUTE_ENABLE_IF) &&
+            attributes->object_sizes == NULL && !check_graph_system_token(&reader->output->graph, attribute->first))
+        {
+            // #1361's unchecked wrappers include system-header functions without size annotations (glibc 2.44's
+            // openat2). General user diagnostics/filtering remain unsupported outside this compatibility path.
+            check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
             valid = false;
         }
         const bool allocation = attribute->kind == CHECK_ATTRIBUTE_ALLOC_SIZE || attribute->kind == CHECK_ATTRIBUTE_ALLOC_ALIGN;
@@ -5639,7 +6349,11 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
             "NSString", "CFString", "scanf", "printf", "printf0", "strfmon", "gnu_scanf", "gnu_printf", "gnu_strfmon", "cmn_err",
             "vcmn_err", "zcmn_err", "kprintf", "syslog", "freebsd_kprintf", "os_trace", "os_log",
         };
-        bool recognized_format = attribute->kind != CHECK_ATTRIBUTE_FORMAT || strftime;
+        // A malformed format kind is its handler's deferred error, once its subject is known. It must neither become
+        // an unknown format warning here nor make the parameter-index reader report a replacement error.
+        const bool identifier_error = attribute->kind == CHECK_ATTRIBUTE_FORMAT && attribute->deferred != NULL &&
+                                      reader->parser->tokens.kinds[attribute->argument_first] != PARSE_KIND_IDENTIFIER;
+        bool recognized_format = attribute->kind != CHECK_ATTRIBUTE_FORMAT || strftime || identifier_error;
         for (uint32_t k = 0; !recognized_format && k < BUSTER_ARRAY_LENGTH(format_kinds); k += 1)
         {
             recognized_format = check_input_attribute_equal(kind_name, format_kinds[k]);
@@ -5662,7 +6376,7 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
         {
             attribute->ignored = true;
         }
-        else if (allocation || nonnull || format)
+        else if ((allocation || nonnull || format) && attribute->deferred == NULL)
         {
             uint32_t begin = attribute->kind == CHECK_ATTRIBUTE_FORMAT ? 1 : 0;
             uint32_t end = attribute->kind == CHECK_ATTRIBUTE_FORMAT ? 2 : attribute->argument_count;
@@ -5775,6 +6489,8 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
 }
 
 static uint32_t check_input_skip_attributes(const Parser* parser, uint32_t token, uint32_t end);
+static uint32_t check_input_enum_base_end(const Parser* parser, uint32_t tag, uint32_t colon, uint32_t end);
+static uint32_t check_input_enum_base_skip(const Parser* parser, uint32_t colon, uint32_t end);
 
 // The declaration a deprecated or unavailable attribute's uses are counted by (#147): a tag's first declaration's name
 // for a tag keyword's attributes (at `token`) or a tag's name, its object's first declaration for a function's or a
@@ -5790,159 +6506,1288 @@ static uint32_t check_input_deprecated_key(const CheckInputReader* reader, uint3
     return object != 0 && object - 1 < count ? object - 1 : declared;
 }
 
+// The bracket depth a backward walk has after stepping over a token of `kind` at `depth`.
+static uint32_t check_input_deprecated_enum_depth(uint8_t kind, uint32_t depth)
+{
+    return kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE ? depth + 1 :
+           (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE) && depth != 0 ? depth - 1 : depth;
+}
+
 // The tag key (check_input_deprecated_key) of the enum whose body declares the enumerator at `enumerator`: its `{`'s, back
-// past the earlier enumerators, and its keyword's before that; `count` for none.
-static uint32_t check_input_deprecated_enum(const CheckInputReader* reader, uint32_t enumerator)
+// past the earlier enumerators, and its keyword's before that; `count` for none. `enums` keeps each answer plus one by
+// enumerator token (#1354): a walk stops at the nearest earlier enumerator of its body already answered and answers
+// every one it passed. Repeated uses of a flat enum share that walk; nested enum bodies can be traversed again by an
+// enclosing enum's walk.
+static uint32_t check_input_deprecated_enum(const CheckInputReader* reader, uint32_t enumerator, uint32_t* enums)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
+    uint32_t known = enums[enumerator];
     uint32_t i = enumerator;
     uint32_t depth = 0;
-    bool scanning = true;
+    bool scanning = known == 0;
     while (scanning && i > 0)
     {
         i -= 1;
         const uint8_t kind = parser->tokens.kinds[i];
-        scanning = !(kind == PARSE_KIND_L_BRACE && depth == 0);
-        depth = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE ? depth + 1 :
-                (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE) && depth != 0 ? depth - 1 : depth;
+        known = depth == 0 && reader->declaration_kinds[i] == C_BINDING_ENUMERATOR ? enums[i] : 0;
+        scanning = known == 0 && !(kind == PARSE_KIND_L_BRACE && depth == 0);
+        depth = check_input_deprecated_enum_depth(kind, depth);
     }
     uint32_t keyword = i;
-    while (!scanning && keyword > 0 && parser->tokens.kinds[keyword] != PARSE_KIND_ENUM)
+    while (!scanning && known == 0 && keyword > 0 && parser->tokens.kinds[keyword] != PARSE_KIND_ENUM)
     {
         keyword -= 1;
     }
-    return !scanning && parser->tokens.kinds[keyword] == PARSE_KIND_ENUM ? check_input_deprecated_key(reader, keyword) : count;
+    const uint32_t result = known != 0                                                   ? known - 1 :
+                            !scanning && parser->tokens.kinds[keyword] == PARSE_KIND_ENUM ? check_input_deprecated_key(reader, keyword) :
+                                                                                            count;
+    // The enumerators the walk passed, at its own depth, are the same body's.
+    if (enums[enumerator] == 0)
+    {
+        enums[enumerator] = result + 1;
+        depth = 0;
+        for (uint32_t j = enumerator; j > i + 1;)
+        {
+            j -= 1;
+            const uint8_t kind = parser->tokens.kinds[j];
+            if (depth == 0 && reader->declaration_kinds[j] == C_BINDING_ENUMERATOR)
+            {
+                enums[j] = result + 1;
+            }
+            depth = check_input_deprecated_enum_depth(kind, depth);
+        }
+    }
+    return result;
 }
 
-// The deprecated or unavailable record of `attributes`, kept, or null.
-static const CheckInputAttribute* check_input_deprecated_record(const CheckInputAttributes* attributes)
+// The deprecated or unavailable record of `attributes` whose attribute is before `bound`, kept, or null: its first
+// unavailable one, else its first deprecated one, as clang's Decl::getAvailability takes the worst of a declaration's
+// attributes, whatever their order. A tag's records gather its declarations', which a use sees only before it.
+static const CheckInputAttribute* check_input_deprecated_record_before(const CheckInputAttributes* attributes, uint32_t bound)
 {
-    const CheckInputAttribute* result = NULL;
-    for (uint32_t i = 0; attributes != NULL && result == NULL && i < attributes->count; i += 1)
+    const CheckInputAttribute* deprecated = NULL;
+    const CheckInputAttribute* unavailable = NULL;
+    for (uint32_t i = 0; attributes != NULL && unavailable == NULL && i < attributes->count; i += 1)
     {
         const CheckInputAttribute* attribute = attributes->records + i;
-        const bool marks = attribute->kind == CHECK_ATTRIBUTE_DEPRECATED || attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE;
-        result = marks && !attribute->ignored && !attribute->subject_ignored ? attribute : NULL;
+        const bool kept = !attribute->ignored && !attribute->subject_ignored && attribute->first < bound;
+        unavailable = kept && attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE ? attribute : NULL;
+        deprecated = deprecated == NULL && kept && attribute->kind == CHECK_ATTRIBUTE_DEPRECATED ? attribute : deprecated;
     }
+    const CheckInputAttribute* result = unavailable != NULL ? unavailable : deprecated;
+    return result;
+}
+
+// The deprecated or unavailable record of `attributes`, kept, or null (check_input_deprecated_record_before).
+static const CheckInputAttribute* check_input_deprecated_record(const CheckInputAttributes* attributes)
+{
+    const CheckInputAttribute* result = check_input_deprecated_record_before(attributes, UINT32_MAX);
+    return result;
+}
+
+// The deprecated or unavailable record that marks what the declaration at `key` declares by its declarations at `limit`
+// or before (marks: the first, chain: the next of the same key; check_input_deprecated_uses'), and by attributes before
+// `bound`: an unavailable one over a deprecated one, and the latest of its kind, as a redeclaration's attributes are its
+// own and then those it inherits, which clang's Decl::getAvailability reads in that order for the worst.
+static const CheckInputAttribute* check_input_availability_mark(const CheckInputReader* reader, const uint32_t* marks, const uint32_t* chain,
+                                                                uint32_t key, uint32_t limit, uint32_t bound)
+{
+    const uint32_t count = reader->parser->tokens.count;
+    const CheckInputAttribute* deprecated = NULL;
+    const CheckInputAttribute* unavailable = NULL;
+    for (uint32_t marking = key < count ? marks[key] : 0; marking != 0 && marking - 1 <= limit && marking - 1 < count; marking = chain[marking - 1])
+    {
+        const CheckInputAttribute* record = check_input_deprecated_record_before(check_input_attributes_at(reader->output, marking - 1), bound);
+        unavailable = record != NULL && record->kind == CHECK_ATTRIBUTE_UNAVAILABLE ? record : unavailable;
+        deprecated = record != NULL && record->kind == CHECK_ATTRIBUTE_DEPRECATED ? record : deprecated;
+    }
+    const CheckInputAttribute* result = unavailable != NULL ? unavailable : deprecated;
+    return result;
+}
+
+// The bit of a context (BUSTER_CHECK_CONTEXT_*) that the declaration at `key` makes, where a deprecated or unavailable
+// attribute marks it by a declaration at `limit` or before (check_input_availability_mark), and the tokens from `first`
+// to `end` (past the last) that take it. A struct's, a union's or an enum's body among them takes it only with `tags`:
+// clang reads a member's or an enumerator's use in its own context, then its tag's parent's, which is a function whose
+// body holds it but no declarator whose bound, parameter list or initializer does.
+// The context bit (BUSTER_CHECK_CONTEXT_*) of a deprecated or unavailable record, or 0.
+static uint8_t check_input_availability_bit(const CheckInputAttribute* attribute)
+{
+    const uint8_t result = attribute == NULL ? 0 : attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE ? BUSTER_CHECK_CONTEXT_UNAVAILABLE : BUSTER_CHECK_CONTEXT_DEPRECATED;
+    return result;
+}
+
+// Gives the tokens from `first` to `end` (past the last) the context `bit`, but with `tags` only a struct's, a union's or
+// an enum's body among them (check_input_availability_fill).
+static void check_input_availability_fill_range(const Parser* parser, uint8_t* contexts, uint8_t bit, uint32_t first, uint32_t end, bool tags)
+{
+    const uint32_t count = parser->tokens.count;
+    for (uint32_t i = first; bit != 0 && i < end && i < count;)
+    {
+        const uint8_t role = parser->tree.roles[i];
+        const uint32_t closer = parser->tree.parents[i];
+        const bool own = !tags && (role == PARSE_ROLE_OPEN_STRUCT || role == PARSE_ROLE_OPEN_ENUM) && closer < count && closer > i;
+        contexts[i] |= own ? 0 : bit;
+        i = own ? closer + 1 : i + 1;
+    }
+}
+
+static void check_input_availability_fill(const CheckInputReader* reader, uint8_t* contexts, const uint32_t* marks, const uint32_t* chain, uint32_t key,
+                                          uint32_t limit, uint32_t first, uint32_t end, bool tags)
+{
+    const uint8_t bit = check_input_availability_bit(check_input_availability_mark(reader, marks, chain, key, limit, UINT32_MAX));
+    check_input_availability_fill_range(reader->parser, contexts, bit, first, end, tags);
+}
+
+// A tag's declaration at its keyword `keyword` (#147): past its name, its attributes and an enum's base (`start`), its
+// body's `}` where it is a definition, and the tag's worst mark there: its declarations' up to the body, and an enum's
+// attributes after it (clang applies those before its enumerators' uses), but not a struct's, which come after its
+// members'. A named tag's marks gather by its first declaration's; an anonymous one's are its keyword's.
+typedef struct CheckInputTagMark CheckInputTagMark;
+struct CheckInputTagMark
+{
+    uint32_t start;
+    uint32_t closer;
+    bool defined;
+    const CheckInputAttribute* attribute;
+};
+
+static CheckInputTagMark check_input_tag_mark(const CheckInputReader* reader, const uint32_t* marks, const uint32_t* chain, uint32_t keyword)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const bool is_enum = parser->tokens.kinds[keyword] == PARSE_KIND_ENUM;
+    const uint32_t name = check_input_skip_attributes(parser, keyword + 1, count);
+    const uint32_t after_name = name < count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER ? name + 1 : name;
+    const uint32_t start = is_enum ? check_input_enum_base_end(parser, keyword, check_input_skip_attributes(parser, after_name, count), count) : after_name;
+    const uint32_t body = check_input_skip_attributes(parser, start, count);
+    const uint8_t body_role = body < count ? parser->tree.roles[body] : PARSE_ROLE_NONE;
+    const uint32_t closer = body < count ? parser->tree.parents[body] : count;
+    const bool defined = body < count && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE && (body_role == PARSE_ROLE_OPEN_STRUCT || body_role == PARSE_ROLE_OPEN_ENUM) &&
+                         closer < count && closer > body;
+    const uint32_t bound = defined && is_enum ? check_input_skip_attributes(parser, closer + 1, count) : body;
+    const uint32_t key = check_input_deprecated_key(reader, keyword);
+    const CheckInputTagMark result = {
+        .start = start,
+        .closer = defined ? closer : count,
+        .defined = defined,
+        .attribute = key < count ? check_input_availability_mark(reader, marks, chain, key, bound, bound) :
+                                   check_input_deprecated_record_before(check_input_attributes_at(reader->output, keyword), bound),
+    };
+    return result;
+}
+
+// A marked tag's own definition, from its keyword at `keyword` through its body (#147): a struct's, a union's or an
+// enum's body is its tag's context, which clang reads its members' and enumerators' uses in, and its nested tags' too;
+// the mark is check_input_tag_mark's. From past its name: the name of a definition with declarators is a use of the tag,
+// which its own mark doesn't drop; and past an enum's base, whose uses check_input_enum_base_context gives a context.
+static void check_input_availability_tag(const CheckInputReader* reader, uint8_t* contexts, const uint32_t* marks, const uint32_t* chain, uint32_t keyword)
+{
+    const CheckInputTagMark tag = check_input_tag_mark(reader, marks, chain, keyword);
+    if (tag.defined)
+    {
+        check_input_availability_fill_range(reader->parser, contexts, check_input_availability_bit(tag.attribute), tag.start, tag.closer + 1, true);
+    }
+}
+
+// The token after a tag's name at `name`, its attributes and an enum's base (`enum E : int {`): its body's `{`, or what
+// follows, as check_input_tag_body finds it from the keyword.
+static uint32_t check_input_name_body(const Parser* parser, uint32_t name, uint32_t end)
+{
+    return check_input_enum_base_skip(parser, check_input_skip_attributes(parser, name + 1, end), end);
+}
+
+// Whether the token at `token` is a typedef's declarator's name (#147): C_BINDING_TYPEDEF is also every other token's
+// declaration kind, zero, so it is a typedef's where it declares itself and an object (a member doesn't).
+static bool check_input_typedef_declared(const CheckInputReader* reader, uint32_t token)
+{
+    const bool result = token < reader->parser->tokens.count && reader->parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER &&
+                        reader->declaration_kinds[token] == C_BINDING_TYPEDEF && reader->output->declarations[token] == token && reader->objects != NULL &&
+                        reader->objects[token] != 0;
+    return result;
+}
+
+// Whether the token at `token` is a declarator's name: an object's, a function's, an enumerator's, a tag's or a typedef's.
+static bool check_input_declares(const CheckInputReader* reader, uint32_t token)
+{
+    const bool result = token < reader->parser->tokens.count && (reader->declaration_kinds[token] != 0 || check_input_typedef_declared(reader, token));
+    return result;
+}
+
+// The mark a declarator's name at `name` has: an object's by its declarations (check_input_availability_mark), or null;
+// and a member's, by the record that marks it, as context bits in `*member_bit` (CheckInputReader.member_marks, by its
+// name's token: one load, whatever the unit's marked members).
+static const CheckInputAttribute* check_input_declarator_mark(const CheckInputReader* reader, const uint32_t* marks, const uint32_t* chain, uint32_t name,
+                                                              uint8_t* member_bit)
+{
+    const uint32_t count = reader->parser->tokens.count;
+    const bool object = name < count && check_input_declares(reader, name);
+    const CheckInputAttribute* result = object ? check_input_availability_mark(reader, marks, chain, check_input_deprecated_key(reader, name), name, UINT32_MAX) : NULL;
+    *member_bit = name < count && !object && reader->member_marks != NULL ? reader->member_marks[name] : 0;
+    return result;
+}
+
+// Whether a context drops a use whose mark is unavailable or not: a deprecated one drops a deprecated use, an unavailable
+// one an unavailable use too.
+static bool check_input_availability_dropped(uint8_t context, bool unavailable)
+{
+    const bool result = (context & BUSTER_CHECK_CONTEXT_UNAVAILABLE) != 0 || (!unavailable && (context & BUSTER_CHECK_CONTEXT_DEPRECATED) != 0);
+    return result;
+}
+
+// How many times clang diagnoses the use of a tag at `t` in a declaration's specifiers (#147): once for each declarator
+// the declaration has, as its delayed diagnostics give each declarator the specifiers' own, each in that declarator's
+// context, so a declarator whose mark (an object's, a member's) drops the use by the severity rule takes none. A use in
+// a group (a type name's, a parameter's) is one. `context` is the use's own (check_input_availability_contexts), and
+// `unavailable` whether its mark is; `*first` takes the first declarator's mark's context bits, and `*bare` whether there
+// is none (a group, or a declaration of the tag alone). A
+// fixed enum's underlying type (`enum E : T { ... } x`, whose T is no declarator's name), a definition's body after the
+// tag's name and attribute groups (whose names aren't declarators') are passed over; the declarators are separated by
+// the commas at the declaration's level, and end at its `;` or a function's body.
+static uint32_t check_input_tag_use_copies(const CheckInputReader* reader, const uint32_t* marks, const uint32_t* chain, uint32_t t, uint8_t context, bool unavailable,
+                                           uint8_t* first, bool* bare)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    int32_t depth = 0;
+    int32_t lists = 0;
+    bool grouped = false;
+    bool scanning = true;
+    uint32_t name = count;
+    uint32_t copies = 0;
+    uint32_t declarators = 0;
+    uint32_t first_name = count;
+    uint8_t first_bits = 0;
+    for (uint32_t at = t + 1; scanning && at <= count;)
+    {
+        const bool attribute = at < count && check_input_attribute_starts(parser, at, count);
+        const uint8_t kind = at < count && !attribute ? parser->tokens.kinds[at] : PARSE_KIND_END;
+        const uint8_t role = at < count && !attribute ? parser->tree.roles[at] : PARSE_ROLE_NONE;
+        const uint32_t closer = at < count ? parser->tree.parents[at] : count;
+        const bool tag_body = kind == PARSE_KIND_L_BRACE && (role == PARSE_ROLE_OPEN_STRUCT || role == PARSE_ROLE_OPEN_ENUM) && closer < count && closer > at;
+        const bool base = depth == 0 && kind == PARSE_KIND_COLON && role == PARSE_ROLE_SPECIFIER;
+        const bool opens = !tag_body && (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE) && role != PARSE_ROLE_OPEN_BODY;
+        const bool closes = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
+        grouped = depth == 0 && closes;
+        const bool last = at == count || grouped || (depth == 0 && (kind == PARSE_KIND_SEMI || role == PARSE_ROLE_OPEN_BODY));
+        const bool segment = last || (depth == 0 && kind == PARSE_KIND_COMMA);
+        // A declarator's name: its first identifier outside the parameter lists, an object's or a member's.
+        const bool names = !segment && name == count && lists == 0 && kind == PARSE_KIND_IDENTIFIER;
+        name = names ? at : name;
+        // Each segment is a declarator, which drops its copy by its own mark if it has one.
+        if (segment && !grouped)
+        {
+            uint8_t member_bit = 0;
+            const CheckInputAttribute* mark = check_input_declarator_mark(reader, marks, chain, name, &member_bit);
+            const uint8_t bits = check_input_availability_bit(mark) | member_bit;
+            copies += !check_input_availability_dropped(context | bits, unavailable);
+            first_bits = declarators == 0 && name < count ? bits : first_bits;
+            first_name = declarators == 0 ? name : first_name;
+            declarators += 1;
+        }
+        name = segment ? count : name;
+        depth += opens;
+        depth -= closes && !grouped;
+        lists += (role == PARSE_ROLE_OPEN_FUNCTION || role == PARSE_ROLE_OPEN_CALL) - (!grouped && (role == PARSE_ROLE_CLOSE_FUNCTION || role == PARSE_ROLE_CLOSE_CALL));
+        scanning = !last;
+        at = attribute ? check_input_skip_attributes(parser, at, count) : tag_body ? closer + 1 : base ? check_input_enum_base_skip(parser, at, count) : at + 1;
+    }
+    *first = grouped ? 0 : first_bits;
+    *bare = grouped || declarators == 0 || (declarators == 1 && first_name == count);
+    const uint32_t result = grouped ? !check_input_availability_dropped(context, unavailable) : copies;
+    return result;
+}
+
+// The `:` of the fixed enum's underlying type the use at `t` is in, past the parser's specifier `:` (an enum base's,
+// which a bit-field's width's isn't) over specifiers alone; the token count where it is in none.
+static uint32_t check_input_enum_base_colon(const Parser* parser, uint32_t t)
+{
+    uint32_t j = t;
+    while (j > 0 && parser->tree.roles[j - 1] == PARSE_ROLE_SPECIFIER && parser->tokens.kinds[j - 1] != PARSE_KIND_COLON)
+    {
+        j -= 1;
+    }
+    const bool based = j > 0 && parser->tokens.kinds[j - 1] == PARSE_KIND_COLON && parser->tree.roles[j - 1] == PARSE_ROLE_SPECIFIER;
+    return based ? j - 1 : parser->tokens.count;
+}
+
+// The `enum` keyword of the base whose `:` is at `colon`: back past the enum's name and attributes; the token count
+// where none is there.
+static uint32_t check_input_enum_base_keyword(const Parser* parser, uint32_t colon)
+{
+    uint32_t j = colon;
+    int32_t depth = 0;
+    bool searching = true;
+    while (searching && j > 0)
+    {
+        j -= 1;
+        const uint8_t kind = parser->tokens.kinds[j];
+        depth += (kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE) - (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE);
+        searching = !(depth == 0 && (kind == PARSE_KIND_ENUM || kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE ||
+                                     kind == PARSE_KIND_COMMA));
+    }
+    return !searching && parser->tokens.kinds[j] == PARSE_KIND_ENUM ? j : parser->tokens.count;
+}
+
+// The context clang reads a use in a fixed enum's underlying type at `t` in (#147), whose `:` is at `colon`: its
+// declaration's, once (a typedef name's use in the specifiers is once), at any scope. That is its first declarator's
+// (check_input_tag_use_copies' scan past the enum's body), an object's or a member's, not the enum's own mark; or, in a
+// declaration of the enum alone (`enum E : T { ... };`, `enum E : T;`), the enum's (check_input_tag_mark's: its
+// declarations' up to this one, a definition's attributes after its body).
+static uint8_t check_input_enum_base_context(const CheckInputReader* reader, const uint32_t* marks, const uint32_t* chain, uint32_t t, uint32_t colon)
+{
+    uint8_t first = 0;
+    bool bare = false;
+    check_input_tag_use_copies(reader, marks, chain, t, 0, false, &first, &bare);
+    const uint32_t keyword = bare ? check_input_enum_base_keyword(reader->parser, colon) : reader->parser->tokens.count;
+    const uint8_t own = keyword < reader->parser->tokens.count ? check_input_availability_bit(check_input_tag_mark(reader, marks, chain, keyword).attribute) : 0;
+    return bare ? own : first;
+}
+
+// Each token's availability context (#147, CheckInput.availability_contexts), for the uses of the unit's marked members
+// (check_input_member_uses): the body of a function that a deprecated or unavailable attribute marks by a declaration up
+// to its definition's, a declaration's declarator and initializer where one marks it there or before, and a marked
+// declarator's parameter lists, as clang's ShouldDiagnoseAvailabilityInContext reads a use's context (its delayed
+// diagnostics drop those in a deprecated declaration's declarator, parameters and initializer). Nested contexts give
+// their tokens both bits.
+// One token's part of check_input_availability_contexts, which `*function` (the last function's name outside a body) and
+// `*body_end` (where the body it is in ends) carry from the tokens before it.
+static void check_input_availability_token(CheckInputReader* reader, uint8_t* contexts, const uint32_t* marks, const uint32_t* chain, uint32_t t, uint32_t* function,
+                                           uint32_t* body_end)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint8_t kind = parser->tokens.kinds[t];
+    const bool inside = t < *body_end;
+    *function = !inside && kind == PARSE_KIND_IDENTIFIER && reader->declaration_kinds[t] == C_BINDING_FUNCTION ? t : *function;
+    if (!inside && *function != BUSTER_CHECK_NONE && parser->tree.roles[t] == PARSE_ROLE_OPEN_BODY && parser->tree.parents[t] < count)
+    {
+        *body_end = parser->tree.parents[t];
+        // Its declarator's tokens before the body, a K&R definition's parameter declarations among them, as a
+        // declarator's; then the body, whose tags have the function for their parent.
+        const uint32_t key = check_input_deprecated_key(reader, *function);
+        check_input_availability_fill(reader, contexts, marks, chain, key, *function, *function + 1, t, false);
+        check_input_availability_fill(reader, contexts, marks, chain, key, *function, t, *body_end + 1, true);
+    }
+    const uint32_t initialized = kind == PARSE_KIND_IDENTIFIER && reader->declaration_kinds[t] != 0 ? check_sparse_get(reader->output->initializer_ends, t) : BUSTER_CHECK_NONE;
+    if (initialized != BUSTER_CHECK_NONE)
+    {
+        check_input_availability_fill(reader, contexts, marks, chain, check_input_deprecated_key(reader, t), t, t, initialized, false);
+    }
+    if (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM)
+    {
+        check_input_availability_tag(reader, contexts, marks, chain, t);
+    }
+    // A marked declarator's parameter lists and array bounds, at any scope, as clang reads their uses in the
+    // declaration's context: those after its name, past its groups' `)` (a function pointer's, a function's that
+    // returns one), nested lists within them.
+    // A marked member's name is such a declarator too, by its own mark (CheckInputReader.member_marks).
+    const uint32_t key = kind == PARSE_KIND_IDENTIFIER && check_input_declares(reader, t) ? check_input_deprecated_key(reader, t) : count;
+    const uint8_t member_bit = kind == PARSE_KIND_IDENTIFIER && key == count && reader->member_marks != NULL ? reader->member_marks[t] : 0;
+    bool suffix = (key < count && marks[key] != 0 && marks[key] - 1 <= t) || member_bit != 0;
+    for (uint32_t at = t + 1; suffix && at < count;)
+    {
+        const uint8_t next = parser->tokens.kinds[at];
+        const uint8_t next_role = parser->tree.roles[at];
+        const uint32_t closer = parser->tree.parents[at];
+        // A function declarator's parentheses and a call's are one role to the two parsers.
+        const bool list = next == PARSE_KIND_L_PAREN && (next_role == PARSE_ROLE_OPEN_FUNCTION || next_role == PARSE_ROLE_OPEN_CALL) && closer < count &&
+                          closer > at;
+        const bool bound = next == PARSE_KIND_L_SQUARE && closer < count && closer > at;
+        if ((list || bound) && member_bit != 0)
+        {
+            check_input_availability_fill_range(parser, contexts, member_bit, at, closer + 1, false);
+        }
+        else if (list || bound)
+        {
+            check_input_availability_fill(reader, contexts, marks, chain, key, t, at, closer + 1, false);
+        }
+        suffix = list || bound || (next == PARSE_KIND_R_PAREN && next_role == PARSE_ROLE_CLOSE_GROUP);
+        at = list || bound ? closer + 1 : at + 1;
+    }
+}
+
+// The 64 tokens from `first` (`length` of them) whose part of check_input_availability_contexts can do anything: a body's
+// `{`, a function's name, which a body after it reads, a struct's, a union's or an enum's keyword, a marked member's name,
+// and an identifier whose key is marked (`marked`, check_input_deprecated_marked), which every fill reads.
+static uint64_t check_input_availability_events(const CheckInputReader* reader, uint32_t first, uint32_t length, uint64_t marked)
+{
+    const Parser* parser = reader->parser;
+    const uint64_t valid = length == 64 ? UINT64_MAX : (UINT64_C(1) << length) - 1;
+    const __m512i kinds = _mm512_maskz_loadu_epi8(valid, parser->tokens.kinds + first);
+    const __m512i roles = _mm512_maskz_loadu_epi8(valid, parser->tree.roles + first);
+    const __m512i declared = _mm512_maskz_loadu_epi8(valid, reader->declaration_kinds + first);
+    const __m512i members = reader->member_marks != NULL ? _mm512_maskz_loadu_epi8(valid, reader->member_marks + first) : _mm512_setzero_si512();
+    const uint64_t functions = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_IDENTIFIER)) &
+                               _mm512_cmpeq_epi8_mask(declared, _mm512_set1_epi8(C_BINDING_FUNCTION));
+    const uint64_t events = _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_OPEN_BODY)) | _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_STRUCT)) |
+                            _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_ENUM)) | functions | _mm512_test_epi8_mask(members, members) | marked;
+    return events & valid;
+}
+
+static void check_input_availability_contexts(CheckInputReader* reader, const uint32_t* marks, const uint32_t* chain, const uint64_t* marked)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    uint8_t* contexts = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint8_t, (uint64_t)count + 1);
+    reader->output->resource |= contexts == NULL;
+    if (contexts != NULL)
+    {
+        memset(contexts, 0, (uint64_t)count + 1);
+        uint32_t function = BUSTER_CHECK_NONE;
+        uint32_t body_end = 0;
+        if (marked != NULL)
+        {
+            // The vector path visits only the tokens whose part can do anything (check_input_availability_events): the
+            // others' set no context and change neither the function nor the body.
+            uint32_t first = 0;
+            while (first < count)
+            {
+                const uint32_t length = count - first < 64 ? count - first : 64;
+                for (uint64_t events = check_input_availability_events(reader, first, length, marked[first / 64]); events != 0; events &= events - 1)
+                {
+                    check_input_availability_token(reader, contexts, marks, chain, first + (uint32_t)__builtin_ctzll(events), &function, &body_end);
+                }
+                // length <= count - first: first reaches count exactly, even at the u32 limit.
+                first += length;
+            }
+        }
+        else
+        {
+            for (uint32_t t = 0; t < count; t += 1)
+            {
+                check_input_availability_token(reader, contexts, marks, chain, t, &function, &body_end);
+            }
+        }
+        reader->output->availability_contexts = contexts;
+    }
+}
+
+// The tag index of the struct, union or enum `type` is, through qualifiers and alignment, or 0.
+static uint32_t check_input_tag_of(const TypeTable* types, TypeId type)
+{
+    const TypeId bare = type_is_valid(types, type) ? type_unqualified(type_strip_aligned(types, type)) : 0;
+    const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_NONE;
+    const bool tagged = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM;
+    const uint32_t result = tagged ? types->types.index[type_index(bare)] : 0;
+    return result;
+}
+
+// An anonymous tag's deprecated or unavailable mark (#147): its keyword's attributes before `bound`, those after its
+// body among them, as check_input_tag_mark reads them.
+static const CheckInputAttribute* check_input_anonymous_mark(const CheckInputReader* reader, uint32_t keyword, uint32_t bound)
+{
+    const CheckInputAttribute* result = check_input_deprecated_record_before(check_input_attributes_at(reader->output, keyword), bound);
+    return result;
+}
+
+// The overloadable functions' declarations a deprecated attribute marks (#147, CheckInput.marked_overloads): each
+// candidate's by its declarations up to its own, as a redeclaration inherits its attributes, for the calls that select it
+// (check_input_overload_uses). An unavailable one is the selection's error already (BUSTER_CHECK_OVERLOAD_UNAVAILABLE).
+static void check_input_overload_marks(CheckInputReader* reader, const uint32_t* marks, const uint32_t* chain)
+{
+    CheckInput* input = reader->output;
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t candidates = input->graph.overload_candidate_count;
+    uint32_t marked = 0;
+    for (uint32_t pass = 0; pass < 2 && !input->resource; pass += 1)
+    {
+        // The first pass counts, the second records into the array the count sizes, in the candidates' token order.
+        if (pass == 1 && marked != 0)
+        {
+            input->marked_overloads = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputMarkedMember, marked);
+            input->resource |= input->marked_overloads == NULL;
+        }
+        uint32_t recorded = 0;
+        uint32_t last = 0;
+        for (uint32_t i = 0; i < candidates && (pass == 0 || input->marked_overloads != NULL) && !input->resource; i += 1)
+        {
+            const uint32_t declaration = input->graph.overload_candidates[i].declaration;
+            const CheckInputAttribute* mark = declaration < count ? check_input_availability_mark(reader, marks, chain, check_input_deprecated_key(reader, declaration),
+                                                                                                   declaration, UINT32_MAX) : NULL;
+            const bool deprecated = mark != NULL && mark->kind == CHECK_ATTRIBUTE_DEPRECATED && (recorded == 0 || declaration > last);
+            const bool message = deprecated && mark->argument_first < mark->argument_end && parser->tokens.kinds[mark->argument_first] == PARSE_KIND_STRING;
+            if (deprecated && pass == 1 && recorded < marked)
+            {
+                input->marked_overloads[recorded] = (CheckInputMarkedMember)
+                {
+                    .member = declaration,
+                    .name = declaration,
+                    .attribute = mark->first,
+                    .message = message ? mark->argument_first : BUSTER_CHECK_WARNING_NO_SOURCE,
+                };
+            }
+            recorded += deprecated;
+            last = deprecated ? declaration : last;
+        }
+        marked = pass == 0 ? recorded : marked;
+        input->marked_overload_count = pass == 1 && input->marked_overloads != NULL ? recorded : 0;
+    }
+}
+
+// clang's diagnostic of a use of a marked member at its name `name` (#147, DiagnoseUseOfDecl's of a member expression):
+// "'x' is deprecated" (-Wdeprecated-declarations), with the attribute's message after a colon and a note at the
+// attribute, or the error "'x' is unavailable" (CHECK_INPUT_UNAVAILABLE_USE), with its note at the member's declaration,
+// unless the use's context drops it (CheckInput.availability_contexts, and `specified`, a marked declaration's whose
+// specifiers it is in).
+static void check_input_marked_member_use(CheckInputReader* reader, uint32_t name, const CheckInputMarkedMember* marked, uint8_t specified)
+{
+    const Parser* parser = reader->parser;
+    const uint8_t context = (reader->output->availability_contexts != NULL ? reader->output->availability_contexts[name] : 0) | specified;
+    const bool dropped = check_marked_dropped(marked, context);
+    if (!dropped && marked->unavailable)
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_report(reader, name, CHECK_INPUT_UNAVAILABLE_USE);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].note_token = marked->name;
+            reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_UNAVAILABLE_HERE;
+            reader->output->reports[before].detail = marked->message != BUSTER_CHECK_WARNING_NO_SOURCE ? marked->message + 1 : 0;
+        }
+    }
+    else if (!dropped)
+    {
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_DEPRECATED_DECLARATIONS,
+            .kind = CHECK_WARNING_EVENT_DEPRECATED_USE,
+            .token = name,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = name + 1,
+            .payload = { .name = parser->tokens.names[name], .token = marked->message },
+        };
+        const CheckWarningNote note =
+        {
+            .kind = CHECK_WARNING_NOTE_DEPRECATED_HERE,
+            .token = marked->attribute,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .payload = { .name = parser->tokens.names[marked->name], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        check_input_warning_event(reader, &event, &note, 1);
+    }
+}
+
+// The marked members' accesses only the reader's evaluator reads (#147, CheckInputReader.evaluated_members), by their
+// names' tokens: each one's member's index plus one, once, where the graph has no access for check_input_member_uses
+// (`typeof`'s operand, a file-scope array bound). Null for none; check_input_deprecated_uses diagnoses them in turn.
+static uint32_t* check_input_evaluated_members(CheckInputReader* reader)
+{
+    const CheckInput* input = reader->output;
+    const CheckGraph* graph = &input->graph;
+    const uint32_t count = reader->parser->tokens.count;
+    uint32_t* result = reader->evaluated_member_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1) : NULL;
+    reader->output->resource |= reader->evaluated_member_count != 0 && result == NULL;
+    if (result != NULL)
+    {
+        memset(result, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        for (uint32_t i = 0; i < reader->evaluated_member_count; i += 1)
+        {
+            const uint32_t name = reader->evaluated_members[i * 2];
+            result[name < count ? name : count] = reader->evaluated_members[i * 2 + 1] + 1;
+        }
+        for (uint32_t node = 0; node < graph->count; node += 1)
+        {
+            const uint32_t name = graph->tokens[node] + 1;
+            if ((graph->ops[node] == CHECK_OP_MEMBER || graph->ops[node] == CHECK_OP_ARROW) && name < count)
+            {
+                result[name] = 0;
+            }
+        }
+        result[count] = 0;
+    }
+    return result;
+}
+
+// The next declarator separator after `first`, with complete groups skipped. Delayed availability diagnostics for
+// file-scope type specifiers complete here, after type construction and declaration attributes. The caller keeps
+// this cursor across uses in the same declaration, so many marked parameter types do not rescan the declaration.
+static uint32_t check_input_availability_declarator_end(const Parser* parser, uint32_t first)
+{
+    uint32_t token = first;
+    while (token < parser->tokens.count)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        const uint32_t close = parser->tree.parents[token];
+        if ((kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE) && close > token && close < parser->tokens.count)
+        {
+            token = close + 1;
+        }
+        else if (kind == PARSE_KIND_COMMA || kind == PARSE_KIND_EQUAL || kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE)
+        {
+            break;
+        }
+        else
+        {
+            token += 1;
+        }
+    }
+    return token;
+}
+
+// The tables check_input_deprecated_uses' uses read (check_input_deprecated_use): the marks, each tag key's latest
+// declaration so far (written as the walk passes it), the marked members' names, the scopes open at a use, each tag's
+// first declaration, the uses' contexts and the members only the evaluator reads.
+typedef struct CheckInputDeprecatedPass CheckInputDeprecatedPass;
+struct CheckInputDeprecatedPass
+{
+    const uint32_t* marks;
+    const uint32_t* chain;
+    uint32_t* latest;
+    const uint8_t* member_marks;
+    const int32_t* scope_levels;
+    const int32_t* scope_lists;
+    const bool* scope_records;
+    const uint32_t* tag_keys;
+    uint32_t* enums;
+    uint32_t tag_count;
+    // Cursor for the declaration whose availability diagnostics are delayed (#1455).
+    uint32_t delayed_first;
+    uint32_t delayed_end;
+    const uint8_t* contexts;
+    const uint32_t* evaluated;
+};
+
+// The use at `t`, if it is one, of what a deprecated or unavailable attribute marks (check_input_deprecated_uses): its
+// diagnostic, and a tag's declaration's place for the notes of the uses after it. `level` and `lists` are the brackets
+// and parameter lists open before it, `scopes` the scopes (`pass->scope_levels` and the rest), and `inside` whether it is
+// in a function's body.
+static void check_input_deprecated_use(CheckInputReader* reader, CheckInputDeprecatedPass* pass, uint32_t t, int32_t level, int32_t lists, uint32_t scopes,
+                                       bool inside)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t* marks = pass->marks;
+    const uint32_t* chain = pass->chain;
+    uint32_t* latest = pass->latest;
+    const uint8_t* member_marks = pass->member_marks;
+    const int32_t* scope_levels = pass->scope_levels;
+    const int32_t* scope_lists = pass->scope_lists;
+    const bool* scope_records = pass->scope_records;
+    const uint32_t* tag_keys = pass->tag_keys;
+    const uint32_t tag_count = pass->tag_count;
+    const uint8_t* contexts = pass->contexts;
+    const uint32_t* evaluated = pass->evaluated;
+    const uint8_t kind = parser->tokens.kinds[t];
+    const uint8_t role = parser->tree.roles[t];
+    const uint32_t declared = kind == PARSE_KIND_IDENTIFIER ? reader->output->declarations[t] : BUSTER_CHECK_NONE;
+    // A tag's name's body, past its attributes and an enum's base: a definition's (the parser makes the name a
+    // leaf before its `{`, or keeps it a tag before an enum's base), whose name is a use of the tag where
+    // declarators follow its body (`struct S { ... } x;`), as clang diagnoses the specifiers' type for them, and
+    // none alone; or its `;`, a declaration of it (`struct S;`, `enum E : int;`).
+    const bool leaf = kind == PARSE_KIND_IDENTIFIER && (role == PARSE_ROLE_TAG || role == PARSE_ROLE_LEAF_RIGHT);
+    const uint32_t body_at = leaf ? check_input_name_body(parser, t, count) : count;
+    const uint8_t body_role = body_at < count ? parser->tree.roles[body_at] : PARSE_ROLE_NONE;
+    const uint32_t body_closer = body_at < count ? parser->tree.parents[body_at] : count;
+    const bool defines = body_at < count && parser->tokens.kinds[body_at] == PARSE_KIND_L_BRACE &&
+                         (body_role == PARSE_ROLE_OPEN_STRUCT || body_role == PARSE_ROLE_OPEN_ENUM) && body_closer < count && body_closer > body_at;
+    // A leaf is a tag's name only before its body.
+    const bool named = leaf && (role == PARSE_ROLE_TAG || defines);
+    const bool bare = named && body_at < count && parser->tokens.kinds[body_at] == PARSE_KIND_SEMI;
+    const uint32_t defined_end = defines ? check_input_skip_attributes(parser, body_closer + 1, count) : count;
+    const bool declares = defined_end < count && parser->tokens.kinds[defined_end] != PARSE_KIND_SEMI;
+    const bool tag = role == PARSE_ROLE_TAG || declares;
+    const uint32_t tag_declared = declared < count ? declared : t;
+    // A tag's declaration or definition, where its unavailable note goes for the uses after it.
+    const uint32_t tag_key = named ? tag_declared : count;
+    if (tag_key < count && (bare || defines || tag_key == t))
+    {
+        latest[tag_key] = t + 1;
+    }
+    // An overloadable function's name is its overload set's, whose resolution clang checks otherwise.
+    const bool overloaded = reader->output->overload_heads != NULL && reader->output->overload_heads[t] != 0;
+    const bool use = defines ? declares && !overloaded :
+                     declared < count && declared != t && role != PARSE_ROLE_MEMBER && !overloaded &&
+                     (tag ? !bare : reader->declaration_kinds[t] == 0);
+    uint32_t key = use ? (tag ? tag_declared : check_input_deprecated_key(reader, t)) : count;
+    // An enumerator of a deprecated enum is deprecated by its enum (the note names the enum).
+    const bool by_enum = use && key < count && marks[key] == 0 && declared < count && reader->declaration_kinds[declared] == C_BINDING_ENUMERATOR;
+    if (by_enum)
+    {
+        key = check_input_deprecated_enum(reader, declared, pass->enums);
+    }
+    // The declarations a use's marks are by: those up to what its lookup finds, or a tag's (and attributes) before it.
+    bool by_tag = tag || by_enum;
+    uint32_t limit = by_tag ? t - 1 : declared;
+    const uint32_t marking = key < count ? marks[key] : 0;
+    bool marked = marking != 0 && marking - 1 <= limit && marking - 1 < t;
+    // A typedef its own marks don't mark takes the marks of the struct, union or enum it names, as clang's
+    // ShouldDiagnoseAvailabilityOfDecl looks through an available typedef (and the typedefs it names) to its tag
+    // type: a named tag's by its first declaration, as a tag's use reads them, before the use; an anonymous
+    // one's by its keyword's (check_input_anonymous_mark), whose note names its type (`T` for its typedef).
+    const uint32_t typedef_tag = use && !tag && !marked && !by_enum && check_input_typedef_declared(reader, declared) ?
+                                 check_input_tag_of(reader->types, reader->declared_types[declared]) : 0;
+    const uint32_t typedef_first = typedef_tag != 0 && typedef_tag < tag_count && tag_keys[typedef_tag] != 0 ? tag_keys[typedef_tag] - 1 : count;
+    const bool typedef_anonymous = typedef_first < count && parser->tokens.kinds[typedef_first] != PARSE_KIND_IDENTIFIER;
+    // The tag type's declaration is its definition where one is before the use (which inherits its earlier
+    // declarations' marks), else its first declaration, by its own marks alone (clang's TagType::getDecl).
+    const uint32_t typedef_completion = typedef_first < count && reader->tag_completions != NULL ? reader->tag_completions[typedef_tag] : BUSTER_CHECK_NONE;
+    const bool typedef_defined = typedef_completion != BUSTER_CHECK_NONE && typedef_completion != 0 && typedef_completion <= t;
+    // A tag's attributes gather at its first declaration's name, each read before its bound
+    // (check_input_deprecated_record_before): the first declaration's own are those before its name's end.
+    uint32_t tag_bound = t;
+    if (typedef_first < count && !typedef_anonymous && marks[typedef_first] != 0 && marks[typedef_first] - 1 < t)
+    {
+        key = typedef_first;
+        by_tag = true;
+        limit = t - 1;
+        marked = true;
+        tag_bound = typedef_defined ? t : typedef_first + 1;
+    }
+    // An anonymous struct's, union's or enum's definition with declarators (or in a type name), at its keyword: a
+    // use of its type, as a named one's name is, by its keyword's marks, those after its body among them; and an
+    // anonymous member's, once (its record is "(anonymous at ...)", check_driver_spelling_build).
+    const uint32_t anonymous_body = kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ? check_input_skip_attributes(parser, t + 1, count) : count;
+    const uint8_t anonymous_role = anonymous_body < count ? parser->tree.roles[anonymous_body] : PARSE_ROLE_NONE;
+    const uint32_t anonymous_closer = anonymous_body < count ? parser->tree.parents[anonymous_body] : count;
+    const bool anonymous_defines = anonymous_body < count && parser->tokens.kinds[anonymous_body] == PARSE_KIND_L_BRACE &&
+                                   (anonymous_role == PARSE_ROLE_OPEN_STRUCT || anonymous_role == PARSE_ROLE_OPEN_ENUM) && anonymous_closer < count &&
+                                   anonymous_closer > anonymous_body;
+    const uint32_t anonymous_end = anonymous_defines ? check_input_skip_attributes(parser, anonymous_closer + 1, count) : count;
+    const bool anonymous_member = anonymous_end < count && parser->tokens.kinds[anonymous_end] == PARSE_KIND_SEMI && scopes != 0 &&
+                                  scope_records[scopes - 1] && level == scope_levels[scopes - 1];
+    const bool anonymous_use = anonymous_end < count && (parser->tokens.kinds[anonymous_end] != PARSE_KIND_SEMI || anonymous_member);
+    const CheckInputAttribute* anonymous = anonymous_use ? check_input_anonymous_mark(reader, t, anonymous_end) :
+                                           typedef_anonymous ? check_input_anonymous_mark(reader, typedef_first, t) : NULL;
+    marked |= anonymous != NULL;
+    // A use in the specifiers of a declaration itself marked, which clang's delayed diagnostics read in that
+    // declaration's context: one before its first declarator, which an attribute marks by its own token. Its worst
+    // mark is a context as check_input_availability_contexts' are: a deprecated one drops a deprecated use, an
+    // unavailable one an unavailable use too. Only from the specifiers: a `,` or `=` at the declaration's own
+    // level, outside every group (an attribute list's, `typeof`'s, a declarator's), ends an initializer or an
+    // earlier declarator, whose uses a later declarator's mark doesn't reach. And only the declaration's own
+    // declarator, outside every parameter list: a parameter's mark is no context of its own specifiers, and a use
+    // in a parameter list takes its function's (check_input_availability_contexts). Looked for only at a marked
+    // use, which are few.
+    // A use in a fixed enum's underlying type takes its declaration's first declarator's context, at any scope
+    // (check_input_enum_base_context), not the specifiers' scan's.
+    const uint32_t base_colon = marked && !tag ? check_input_enum_base_colon(parser, t) : count;
+    const bool based = base_colon < count;
+    // In a body (a record's, a function's, a block's), from its declaration's own level.
+    // A marked member's access the evaluator alone reads (check_input_evaluated_members) takes the specifiers' context too.
+    const uint32_t evaluated_member = evaluated != NULL ? evaluated[t] : 0;
+    uint32_t declarator = (marked || evaluated_member != 0) && !tag && !anonymous_use && !based ? t + 1 : count;
+    int32_t depth = scopes != 0 ? level - scope_levels[scopes - 1] : level;
+    int32_t open_lists = scopes != 0 ? lists - scope_lists[scopes - 1] : lists;
+    // The braces the scan opened: a `}` beyond them closes one open at the use, and a tag's body there (an
+    // enumerator's value, a member's bound) isn't the declarator's context; a compound literal's is.
+    int32_t braces = 0;
+    bool specifiers = true;
+    while (specifiers && declarator < count && !check_input_declares(reader, declarator) && member_marks[declarator] == 0 &&
+           parser->tokens.kinds[declarator] != PARSE_KIND_SEMI)
+    {
+        const uint8_t scanned = parser->tokens.kinds[declarator];
+        const uint8_t scanned_role = parser->tree.roles[declarator];
+        // A `{` at the declaration's own level is a body or an initializer's; within a group, a compound
+        // literal's (`typeof((T){0})`), which the specifiers hold.
+        const bool body = scanned == PARSE_KIND_L_BRACE && depth <= 0;
+        const bool tag_body = scanned == PARSE_KIND_R_BRACE && braces == 0 && (scanned_role == PARSE_ROLE_CLOSE_STRUCT || scanned_role == PARSE_ROLE_CLOSE_ENUM);
+        braces += (scanned == PARSE_KIND_L_BRACE) - (scanned == PARSE_KIND_R_BRACE && braces != 0);
+        depth += scanned == PARSE_KIND_L_PAREN || scanned == PARSE_KIND_L_SQUARE || scanned == PARSE_KIND_L_BRACE;
+        depth -= scanned == PARSE_KIND_R_PAREN || scanned == PARSE_KIND_R_SQUARE || scanned == PARSE_KIND_R_BRACE;
+        open_lists += (scanned_role == PARSE_ROLE_OPEN_FUNCTION || scanned_role == PARSE_ROLE_OPEN_CALL) -
+                      (scanned_role == PARSE_ROLE_CLOSE_FUNCTION || scanned_role == PARSE_ROLE_CLOSE_CALL);
+        specifiers = !body && !tag_body && (depth > 0 || (scanned != PARSE_KIND_COMMA && scanned != PARSE_KIND_EQUAL));
+        declarator += specifiers;
+    }
+    const uint32_t declarator_key = specifiers && open_lists == 0 && declarator < count && check_input_declares(reader, declarator) ?
+                                    check_input_deprecated_key(reader, declarator) : count;
+    // In a function's body, only a typedef's mark is its specifiers' context, or a member's: a block's object's
+    // isn't, whose specifiers clang diagnoses as it reads them.
+    const bool block_object = inside && !(scopes != 0 && scope_records[scopes - 1]) && declarator < count && !check_input_typedef_declared(reader, declarator);
+    const CheckInputAttribute* enclosing = declarator_key < count && !block_object ?
+                                           check_input_availability_mark(reader, marks, chain, declarator_key, declarator, UINT32_MAX) : NULL;
+    // A marked member's own mark, as an object's (check_input_declarator_mark).
+    const uint8_t member_specified = specifiers && open_lists == 0 && declarator < count && declarator_key == count ? member_marks[declarator] : 0;
+    const uint8_t specified = based ? check_input_enum_base_context(reader, marks, chain, t, base_colon) : member_specified != 0 ? member_specified :
+                              enclosing == NULL ? 0 :
+                              enclosing->kind == CHECK_ATTRIBUTE_UNAVAILABLE ? BUSTER_CHECK_CONTEXT_UNAVAILABLE : BUSTER_CHECK_CONTEXT_DEPRECATED;
+    // A definition's name reads the attributes after its body too, which apply to the type its declarators take.
+    const CheckInputAttribute* candidate = anonymous != NULL ? anonymous :
+                                           marked ? check_input_availability_mark(reader, marks, chain, key, limit, declares ? defined_end : by_tag ? tag_bound : UINT32_MAX) :
+                                           NULL;
+    // A deprecated context drops a deprecated use's warning, an unavailable one an unavailable use's error too.
+    const uint8_t context = (contexts != NULL ? contexts[t] : 0) | specified;
+    const CheckInputMarkedMember* evaluated_mark = evaluated_member != 0 ?
+                                                   check_marked_member(reader->output->marked_members, reader->output->marked_member_count, evaluated_member - 1) : NULL;
+    if (evaluated_mark != NULL)
+    {
+        check_input_marked_member_use(reader, t, evaluated_mark, specified);
+    }
+    const bool unavailable = candidate != NULL && candidate->kind == CHECK_ATTRIBUTE_UNAVAILABLE;
+    // A tag's once for each declarator (check_input_tag_use_copies), anything else's once.
+    uint8_t first_declarator = 0;
+    bool no_declarator = false;
+    const uint32_t copies = candidate == NULL ? 0 :
+                            anonymous_member ? !check_input_availability_dropped(contexts != NULL ? contexts[t] : 0, unavailable) :
+                            tag || anonymous_use ? check_input_tag_use_copies(reader, marks, chain, t, contexts != NULL ? contexts[t] : 0, unavailable,
+                                                                              &first_declarator, &no_declarator) :
+                            !check_input_availability_dropped(context, unavailable);
+    const CheckInputAttribute* attribute = copies != 0 ? candidate : NULL;
+    uint32_t completion = t + 1;
+    // File-scope typedef uses in a declaration's specifiers or parameter types are delayed until that
+    // declarator is complete. Initializers and type names in expressions retain their own use boundaries;
+    // record members and block declarations have separate availability contexts above.
+    const bool delayed = attribute != NULL && !inside && scopes == 0 && !tag && !anonymous_use &&
+                         role == PARSE_ROLE_SPECIFIER && check_input_typedef_declared(reader, declared) && reader->declaration_starts != NULL;
+    if (delayed)
+    {
+        const uint32_t first = reader->declaration_starts[t];
+        if (pass->delayed_first != first)
+        {
+            pass->delayed_first = first;
+            pass->delayed_end = check_input_availability_declarator_end(parser, first);
+        }
+        while (pass->delayed_end < t && parser->tokens.kinds[pass->delayed_end] == PARSE_KIND_COMMA)
+        {
+            pass->delayed_end = check_input_availability_declarator_end(parser, pass->delayed_end + 1);
+        }
+        completion = pass->delayed_end > t ? pass->delayed_end : completion;
+    }
+    // The attribute's message, its first argument's string.
+    const uint32_t message = attribute != NULL && attribute->argument_first < attribute->argument_end &&
+                             parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_STRING ? attribute->argument_first : BUSTER_CHECK_WARNING_NO_SOURCE;
+    if (attribute != NULL && attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE)
+    {
+        // Its note is at the declaration, not the attribute: at the name of the one the use's lookup finds, or a
+        // tag's latest declaration, which an enumerator's note names; an anonymous tag's keyword, whose type the
+        // report names.
+        const uint32_t noted = anonymous != NULL ? (anonymous_use ? t : typedef_first) :
+                               by_tag ? (key < count && latest[key] != 0 ? latest[key] - 1 : key) : declared;
+        const uint32_t before = reader->output->report_count;
+        check_input_report(reader, t, CHECK_INPUT_UNAVAILABLE_USE);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].note_token = noted;
+            reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_UNAVAILABLE_HERE;
+            reader->output->reports[before].detail = message != BUSTER_CHECK_WARNING_NO_SOURCE ? message + 1 : 0;
+            reader->output->reports[before].completion = completion;
+            // A token's reports print its first alone: the copies after it ride on it.
+            reader->output->reports[before].value = copies - 1;
+        }
+    }
+    else if (attribute != NULL)
+    {
+        CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_DEPRECATED_DECLARATIONS,
+            .kind = CHECK_WARNING_EVENT_DEPRECATED_USE,
+            .token = t,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = completion,
+            .payload = { .name = parser->tokens.names[t], .token = message },
+        };
+        // An anonymous tag's names are its type's spelling (BUSTER_CHECK_DEPRECATED_TYPE_NAME): its use's at its
+        // keyword, and its note's, a typedef's use naming the typedef.
+        const TypeId anonymous_type = anonymous != NULL ? reader->declared_types[anonymous_use ? t : typedef_first] : 0;
+        if (anonymous_use)
+        {
+            event.payload.first_type = anonymous_type;
+            event.payload.data = BUSTER_CHECK_DEPRECATED_TYPE_NAME;
+        }
+        CheckWarningNote note =
+        {
+            .kind = CHECK_WARNING_NOTE_DEPRECATED_HERE,
+            .token = attribute->first,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .payload = { .name = parser->tokens.names[key < count ? key : t], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        if (anonymous != NULL)
+        {
+            note.payload.first_type = anonymous_type;
+            note.payload.data = BUSTER_CHECK_DEPRECATED_TYPE_NAME;
+        }
+        for (uint32_t copy = 0; copy < copies; copy += 1)
+        {
+            check_input_warning_event(reader, &event, &note, 1);
+        }
+    }
+}
+
+// The keys `marks` marks, of `count` (its entries that aren't 0), as a filter's halves (CheckInputFilter), which also
+// take every token whose object's first declaration (`objects`, where not null) is such a key: the declarations whose
+// key is marked, as check_input_deprecated_marked gives a declaration its key. A unit marks few keys. Two scans, 16
+// entries at a time: the marks, then the objects, whose first declarations the marked keys' own filter tests.
+static CheckInputFilter check_input_deprecated_mark_filter(const uint32_t* marks, const uint32_t* objects, uint32_t count)
+{
+    uint32_t low[16] = { 0 };
+    uint32_t high[16] = { 0 };
+    for (uint32_t first = 0; first < count; first += 16)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, count - first < 16 ? count - first : 16);
+        const __m512i values = _mm512_maskz_loadu_epi32(lanes, marks + first);
+        for (uint32_t keys = _mm512_mask_test_epi32_mask(lanes, values, values); keys != 0; keys &= keys - 1)
+        {
+            const uint32_t key = first + (uint32_t)__builtin_ctz(keys);
+            low[(key / 32) % 16] |= UINT32_C(1) << (key % 32);
+            high[(key / 16384) % 16] |= UINT32_C(1) << ((key / 512) % 32);
+        }
+    }
+    const CheckInputFilter keys = { .low = _mm512_loadu_si512(low), .high = _mm512_loadu_si512(high) };
+    const __m512i limit = _mm512_set1_epi32((int32_t)count);
+    for (uint32_t first = 0; objects != NULL && first < count; first += 16)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, count - first < 16 ? count - first : 16);
+        const __m512i object_first = _mm512_sub_epi32(_mm512_maskz_loadu_epi32(lanes, objects + first), _mm512_set1_epi32(1));
+        const __mmask16 owned = _mm512_mask_cmplt_epu32_mask(lanes, object_first, limit);
+        for (uint32_t selected = check_input_filter_test(&keys, object_first, owned); selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
+            if (marks[objects[token] - 1] != 0)
+            {
+                low[(token / 32) % 16] |= UINT32_C(1) << (token % 32);
+                high[(token / 16384) % 16] |= UINT32_C(1) << ((token / 512) % 32);
+            }
+        }
+    }
+    return (CheckInputFilter){ .low = _mm512_loadu_si512(low), .high = _mm512_loadu_si512(high) };
+}
+
+// Bit t of `words`, a word for each 64 tokens: whether the identifier at t is a use or a declaration whose key a
+// deprecated or unavailable attribute marks (`marks`, check_input_deprecated_key's): its declaration's object's first
+// declaration where it has one, else its declaration. The vector path's walks (check_input_availability_events,
+// check_input_deprecated_block) visit these and few other tokens. 16 identifiers' declarations are tested against a
+// filter of the declarations whose key is marked (check_input_deprecated_mark_filter), and only those 16 that pass
+// gather their objects and their keys' marks (#529): the two gathers at every 16 identifiers took 0.7% of
+// -c sqlite3.c's cycles, for the few keys glibc's headers mark.
+// Keep this whole-column leaf out of the large reader's frame: LLVM 23.1.4 MSan can allocate wide callback
+// shadows at a check inside the loop after inlining (#1610). Its own small instrumentation context retains every
+// check without inheriting the reader's callback threshold. The loop and its vector-only admission stay unchanged.
+static __attribute__((noinline)) void check_input_deprecated_marked(const CheckInputReader* reader, const uint32_t* marks, uint64_t* words)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t* declarations = reader->output->declarations;
+    const uint32_t* objects = reader->objects;
+    const __m512i limit = _mm512_set1_epi32((int32_t)count);
+    const __m512i one = _mm512_set1_epi32(1);
+    const CheckInputFilter filter = check_input_deprecated_mark_filter(marks, objects, count);
+    uint32_t first = 0;
+    while (first < count)
+    {
+        const uint32_t length = count - first < 64 ? count - first : 64;
+        const uint64_t valid = length == 64 ? UINT64_MAX : (UINT64_C(1) << length) - 1;
+        const __m512i kinds = _mm512_maskz_loadu_epi8(valid, parser->tokens.kinds + first);
+        const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(PARSE_KIND_IDENTIFIER));
+        uint64_t word = 0;
+        for (uint32_t lane = 0; lane < 64; lane += 16)
+        {
+            const __mmask16 lanes = (__mmask16)(identifiers >> lane);
+            if (lanes != 0)
+            {
+                const __m512i declared = _mm512_maskz_loadu_epi32(lanes, declarations + first + lane);
+                const __mmask16 known = _mm512_mask_cmplt_epu32_mask(lanes, declared, limit);
+                const __mmask16 candidates = check_input_filter_test(&filter, declared, known);
+                if (candidates != 0)
+                {
+                    // Its declaration, then that declaration's object's first declaration where it has one.
+                    const __m512i object = objects != NULL ? _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), candidates, declared, objects, 4) : _mm512_setzero_si512();
+                    const __m512i object_first = _mm512_sub_epi32(object, one);
+                    const __m512i key = _mm512_mask_mov_epi32(declared, _mm512_cmplt_epu32_mask(object_first, limit), object_first);
+                    const __m512i mark = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), candidates, key, marks, 4);
+                    word |= (uint64_t)_mm512_mask_test_epi32_mask(candidates, mark, mark) << lane;
+                }
+            }
+        }
+        words[first / 64] = word;
+        // length <= count - first: first reaches count exactly, even at the u32 limit.
+        first += length;
+    }
+}
+
+// The 64 tokens' columns the vector path's walk of check_input_deprecated_uses reads, from `first` (`length` of them): the
+// brackets that open and close a level, the parameter lists' and calls' parentheses, the scopes' braces and the bodies'
+// `{`, as the scalar walk reads each token's, and the tokens check_input_deprecated_use may do anything at: a struct's,
+// a union's or an enum's keyword; a tag's name, or a leaf one that may be; an identifier whose key is marked (`marked`,
+// check_input_deprecated_marked), every identifier where a tag is marked (`tags`: an enumerator's enum's, a typedef's
+// struct's), and a member only the evaluator reads (`evaluated`). At any other token it does nothing.
+typedef struct CheckInputDeprecatedBlock CheckInputDeprecatedBlock;
+struct CheckInputDeprecatedBlock
+{
+    uint64_t opens;
+    uint64_t closes;
+    uint64_t list_opens;
+    uint64_t list_closes;
+    uint64_t pushes;
+    uint64_t pops;
+    uint64_t bodies;
+    uint64_t uses;
+};
+
+static CheckInputDeprecatedBlock check_input_deprecated_block(const Parser* parser, uint32_t first, uint32_t length, uint64_t marked, bool tags, const uint32_t* evaluated)
+{
+    const uint64_t valid = length == 64 ? UINT64_MAX : (UINT64_C(1) << length) - 1;
+    const __m512i kinds = _mm512_maskz_loadu_epi8(valid, parser->tokens.kinds + first);
+    const __m512i roles = _mm512_maskz_loadu_epi8(valid, parser->tree.roles + first);
+    const uint64_t identifiers = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_IDENTIFIER));
+    const uint64_t left_braces = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_L_BRACE));
+    const uint64_t right_braces = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_R_BRACE));
+    const uint64_t leaves = _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_TAG)) | _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_LEAF_RIGHT));
+    uint64_t members = 0;
+    for (uint32_t lane = 0; evaluated != NULL && lane < 64; lane += 16)
+    {
+        const __m512i names = _mm512_maskz_loadu_epi32((__mmask16)(valid >> lane), evaluated + first + lane);
+        members |= (uint64_t)_mm512_test_epi32_mask(names, names) << lane;
+    }
+    const CheckInputDeprecatedBlock result = {
+        .opens = (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_L_PAREN)) | _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_L_SQUARE)) | left_braces) &
+                 valid,
+        .closes = (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_R_PAREN)) | _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_R_SQUARE)) | right_braces) &
+                  valid,
+        .list_opens = (_mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_OPEN_FUNCTION)) | _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_OPEN_CALL))) & valid,
+        .list_closes = (_mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_CLOSE_FUNCTION)) | _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_CLOSE_CALL))) &
+                       valid,
+        .pushes = left_braces &
+                  (_mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_OPEN_STRUCT)) | _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_OPEN_BODY)) |
+                   _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_OPEN_BLOCK))) & valid,
+        .pops = right_braces &
+                (_mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_CLOSE_STRUCT)) | _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_CLOSE_BODY)) |
+                 _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_CLOSE_BLOCK))) & valid,
+        .bodies = _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_OPEN_BODY)) & valid,
+        .uses = (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_STRUCT)) | _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_ENUM)) |
+                 (identifiers & (leaves | (tags ? UINT64_MAX : 0))) | marked | members) & valid,
+    };
     return result;
 }
 
 // clang's diagnostics of a use of what a deprecated or unavailable attribute marks (#147, DiagnoseUseOfDecl's): at each
 // use of a function, a variable, a typedef, an enumerator or a tag after the declaration that marks it, "'X' is
 // deprecated" (-Wdeprecated-declarations), or the error "'X' is unavailable", with the attribute's message after a colon
-// and a note at the attribute. None in the body of a function itself deprecated, nor in a bare declaration of a tag. A
-// field's use (`m.x`) isn't diagnosed: its declaration is found by the expression's type, which this pass doesn't have.
+// and a note at the attribute. None in a context that drops it (a deprecated or unavailable function's body or
+// declaration's initializer: check_input_availability_contexts, which it makes for check_input_member_uses too), nor in
+// a bare declaration of a tag. A member's use (`m.x`) is check_input_member_uses', after checking: its declaration is
+// found by the expression's type, which this pass doesn't have.
 // The uses are the tokens the bindings resolved to another declaration than their own (CheckInput.declarations); the
-// marks are found once, by the declaration a use counts by (check_input_deprecated_key).
+// marks are found once, by the declaration a use counts by (check_input_deprecated_key), each key's marked declarations
+// in source order. A use reads those up to the declaration its lookup finds, which inherits from the ones before it,
+// as clang's redeclarations inherit their attributes: not a block's later one, which it doesn't see. A tag's use, which
+// finds its first declaration, reads those before it.
+// The scalar path walks every token (check_input_deprecated_use). A unit with such an attribute marks a few declarations
+// (glibc's headers mark a handful of functions), so the vector path visits only the tokens a use may be at and the
+// braces that open and close the scopes they read, with the brackets between them counted 64 tokens a mask (#1489):
+// sqlite3.c's 716,158 tokens took 25 M cycles of the 9700X's for the scalar walk.
 static void check_input_deprecated_uses(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
     const uint64_t mark = reader->scratch->length;
+    // The vector path's gathers index by signed 32-bit lanes.
+    const bool vector = BUSTER_VECTOR_PATH(!parser->options.scalar) && count <= INT32_MAX;
+    // marks: a key's first marked declaration plus one; chain: a marked declaration's next of its key plus one; latest:
+    // a key's last marked declaration plus one while the marks are found, then a tag key's latest declaration so far.
     uint32_t* marks = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
-    reader->output->resource |= marks == NULL;
-    if (marks != NULL)
+    uint32_t* chain = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
+    uint32_t* latest = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
+    // Each marked member's name's mark, once (check_input_declarator_mark's lookup, CheckInputReader.member_marks).
+    uint8_t* member_marks = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, (uint64_t)count + 1);
+    // The levels and parameter lists open at each body the uses are in (a struct's or union's, a function's, a block's),
+    // innermost last, and whether it is a record's: a declaration's own level is its scope's body's.
+    int32_t* scope_levels = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, int32_t, (uint64_t)count + 1);
+    int32_t* scope_lists = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, int32_t, (uint64_t)count + 1);
+    bool* scope_records = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, bool, (uint64_t)count + 1);
+    // Each tag's first declaration plus one: its name's, or an anonymous one's keyword (a typedef's use reads its tag's
+    // marks by it).
+    const uint32_t tag_count = reader->types->tags.count;
+    uint32_t* tag_keys = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)tag_count + 1);
+    // Each enumerator's enum key plus one, memoized by its token (#1354).
+    uint32_t* enums = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
+    // The vector path's identifiers whose key is marked (check_input_deprecated_marked), a bit a token.
+    uint64_t* marked = vector ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, (uint64_t)count / 64 + 1) : NULL;
+    const bool allocated = marks != NULL && chain != NULL && latest != NULL && member_marks != NULL && scope_levels != NULL && scope_lists != NULL && scope_records != NULL &&
+                           tag_keys != NULL && enums != NULL && (!vector || marked != NULL);
+    reader->output->resource |= !allocated;
+    if (allocated)
     {
+        memset(tag_keys, 0, ((uint64_t)tag_count + 1) * sizeof(uint32_t));
+        memset(enums, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        if (vector)
+        {
+            // The tags' declarations, 64 tokens a mask, in order.
+            uint32_t first = 0;
+            while (first < count)
+            {
+                const uint32_t length = count - first < 64 ? count - first : 64;
+                const uint64_t valid = length == 64 ? UINT64_MAX : (UINT64_C(1) << length) - 1;
+                const __m512i kinds = _mm512_maskz_loadu_epi8(valid, reader->declaration_kinds + first);
+                for (uint64_t tags = _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(C_BINDING_TAG_KIND)); tags != 0; tags &= tags - 1)
+                {
+                    const uint32_t i = first + (uint32_t)__builtin_ctzll(tags);
+                    const uint32_t tag = check_input_tag_of(reader->types, reader->declared_types[i]);
+                    if (tag != 0 && tag < tag_count && tag_keys[tag] == 0)
+                    {
+                        tag_keys[tag] = i + 1;
+                    }
+                }
+                first += length;
+            }
+        }
+        else
+        {
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const uint32_t tag = reader->declaration_kinds[i] == C_BINDING_TAG_KIND ? check_input_tag_of(reader->types, reader->declared_types[i]) : 0;
+                if (tag != 0 && tag < tag_count && tag_keys[tag] == 0)
+                {
+                    tag_keys[tag] = i + 1;
+                }
+            }
+        }
         memset(marks, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        memset(chain, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        memset(latest, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        memset(member_marks, 0, (uint64_t)count + 1);
+        for (uint32_t i = 0; i < reader->output->marked_member_count; i += 1)
+        {
+            const CheckInputMarkedMember* marked_member = reader->output->marked_members + i;
+            const uint8_t bit = marked_member->unavailable ? BUSTER_CHECK_CONTEXT_UNAVAILABLE : BUSTER_CHECK_CONTEXT_DEPRECATED;
+            member_marks[marked_member->name < count ? marked_member->name : count] = bit;
+        }
+        reader->member_marks = member_marks;
         const bool scalar = parser->options.scalar;
         const CheckSparseWide all = reader->output->attributes;
+        // Whether an attribute marks what may be a tag (an enumerator's use reads its enum's marks, and a typedef's use
+        // its struct's, union's or enum's): any mark but on a function, an object or an enumerator, or on a keyword.
+        bool tags = false;
+        // In source order, so that each key's chain runs first to last.
         for (uint32_t first = check_input_attributed_next(all, 0, count, scalar); first < count; first = check_input_attributed_next(all, first + 16, count, scalar))
         {
             const uint32_t lanes = check_input_attributed_group(all, first, count, scalar);
             for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
             {
                 const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
-                const uint32_t key = check_input_deprecated_record(check_input_attributes_at(reader->output, d)) != NULL ? check_input_deprecated_key(reader, d) : count;
-                if (key < count && (marks[key] == 0 || d + 1 < marks[key]))
+                const bool recorded = check_input_deprecated_record(check_input_attributes_at(reader->output, d)) != NULL;
+                const uint32_t key = recorded ? check_input_deprecated_key(reader, d) : count;
+                const uint8_t key_kind = key < count ? reader->declaration_kinds[key] : C_BINDING_TYPEDEF;
+                const bool named = key < count && parser->tokens.kinds[key] == PARSE_KIND_IDENTIFIER &&
+                                   (key_kind == C_BINDING_OBJECT || key_kind == C_BINDING_FUNCTION || key_kind == C_BINDING_ENUMERATOR);
+                tags |= recorded && (parser->tokens.kinds[d] != PARSE_KIND_IDENTIFIER || (key < count && !named));
+                if (key < count)
                 {
-                    marks[key] = d + 1;
+                    marks[key] = marks[key] == 0 ? d + 1 : marks[key];
+                    if (latest[key] != 0)
+                    {
+                        chain[latest[key] - 1] = d + 1;
+                    }
+                    latest[key] = d + 1;
                 }
             }
         }
-        // The function whose body a use is in, if it is deprecated (as clang's context is), and where that body ends.
-        uint32_t function = BUSTER_CHECK_NONE;
-        uint32_t body_end = 0;
-        bool deprecated_body = false;
-        for (uint32_t t = 0; t < count; t += 1)
+        // `latest` again all zeros, for the walk: the loop above wrote it only at its keys, which the same tokens give
+        // again (#529), where a fill wrote every token's entry.
+        for (uint32_t first = check_input_attributed_next(all, 0, count, scalar); first < count; first = check_input_attributed_next(all, first + 16, count, scalar))
         {
-            const uint8_t kind = parser->tokens.kinds[t];
+            for (uint32_t selected = check_input_attributed_group(all, first, count, scalar); selected != 0; selected &= selected - 1)
+            {
+                const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
+                const uint32_t key = check_input_deprecated_record(check_input_attributes_at(reader->output, d)) != NULL ? check_input_deprecated_key(reader, d) : count;
+                latest[key < count ? key : count] = 0;
+            }
+        }
+        check_input_overload_marks(reader, marks, chain);
+        if (vector)
+        {
+            check_input_deprecated_marked(reader, marks, marked);
+        }
+        // Each token's context (check_input_availability_contexts): a deprecated or unavailable function's body or
+        // declaration's initializer, which drops its uses' diagnostics as clang's ShouldDiagnoseAvailabilityInContext does.
+        check_input_availability_contexts(reader, marks, chain, marked);
+        CheckInputDeprecatedPass pass = {
+            .marks = marks,
+            .chain = chain,
+            .latest = latest,
+            .member_marks = member_marks,
+            .scope_levels = scope_levels,
+            .scope_lists = scope_lists,
+            .scope_records = scope_records,
+            .tag_keys = tag_keys,
+            .enums = enums,
+            .tag_count = tag_count,
+            .delayed_first = count,
+            .contexts = reader->output->availability_contexts,
+            .evaluated = check_input_evaluated_members(reader),
+        };
+        // Where the function body a use is in ends.
+        uint32_t body_end = 0;
+        // The brackets open before a use (`(`, `[` and `{` less their closers): a file-scope declaration's own level is 0.
+        // And of them, the parameter lists (a function declarator's parentheses, a call's to the vector parser).
+        int32_t level = 0;
+        int32_t lists = 0;
+        uint32_t scopes = 0;
+        if (vector)
+        {
+            // Each event in order: a use with the levels the tokens before it open, by their masks' bits below it; a
+            // body's `{` (inside: before its update, as the scalar walk reads it); a scope's brace, which the tokens
+            // after it read, as the scalar walk's `previous`.
+            uint32_t first = 0;
+            while (first < count)
+            {
+                const uint32_t length = count - first < 64 ? count - first : 64;
+                const CheckInputDeprecatedBlock block = check_input_deprecated_block(parser, first, length, marked[first / 64], tags, pass.evaluated);
+                for (uint64_t events = block.uses | block.bodies | block.pushes | block.pops; events != 0; events &= events - 1)
+                {
+                    const uint32_t bit = (uint32_t)__builtin_ctzll(events);
+                    const uint64_t below = (UINT64_C(1) << bit) - 1;
+                    const uint64_t self = UINT64_C(1) << bit;
+                    const uint32_t t = first + bit;
+                    const int32_t at_level = level + __builtin_popcountll(block.opens & below) - __builtin_popcountll(block.closes & below);
+                    const int32_t at_lists = lists + __builtin_popcountll(block.list_opens & below) - __builtin_popcountll(block.list_closes & below);
+                    const bool inside = t < body_end;
+                    if ((block.uses & self) != 0)
+                    {
+                        check_input_deprecated_use(reader, &pass, t, at_level, at_lists, scopes, inside);
+                    }
+                    if ((block.bodies & self) != 0 && !inside && parser->tree.parents[t] < count)
+                    {
+                        body_end = parser->tree.parents[t];
+                    }
+                    if ((block.pushes & self) != 0)
+                    {
+                        scope_levels[scopes] = at_level + ((block.opens & self) != 0) - ((block.closes & self) != 0);
+                        scope_lists[scopes] = at_lists + ((block.list_opens & self) != 0) - ((block.list_closes & self) != 0);
+                        scope_records[scopes] = parser->tree.roles[t] == PARSE_ROLE_OPEN_STRUCT;
+                        scopes += 1;
+                    }
+                    scopes -= (block.pops & self) != 0 && scopes != 0;
+                }
+                level += __builtin_popcountll(block.opens) - __builtin_popcountll(block.closes);
+                lists += __builtin_popcountll(block.list_opens) - __builtin_popcountll(block.list_closes);
+                // length <= count - first: first reaches count exactly, even at the u32 limit.
+                first += length;
+            }
+        }
+        for (uint32_t t = 0; !vector && t < count; t += 1)
+        {
             const uint8_t role = parser->tree.roles[t];
             const bool inside = t < body_end;
-            function = !inside && kind == PARSE_KIND_IDENTIFIER && reader->declaration_kinds[t] == C_BINDING_FUNCTION ? t : function;
+            const uint8_t previous = t != 0 ? parser->tokens.kinds[t - 1] : PARSE_KIND_END;
+            const uint8_t previous_role = t != 0 ? parser->tree.roles[t - 1] : PARSE_ROLE_NONE;
+            level += (previous == PARSE_KIND_L_PAREN || previous == PARSE_KIND_L_SQUARE || previous == PARSE_KIND_L_BRACE) -
+                     (previous == PARSE_KIND_R_PAREN || previous == PARSE_KIND_R_SQUARE || previous == PARSE_KIND_R_BRACE);
+            lists += (previous_role == PARSE_ROLE_OPEN_FUNCTION || previous_role == PARSE_ROLE_OPEN_CALL) -
+                     (previous_role == PARSE_ROLE_CLOSE_FUNCTION || previous_role == PARSE_ROLE_CLOSE_CALL);
+            const bool scope_open = previous == PARSE_KIND_L_BRACE &&
+                                    (previous_role == PARSE_ROLE_OPEN_STRUCT || previous_role == PARSE_ROLE_OPEN_BODY || previous_role == PARSE_ROLE_OPEN_BLOCK);
+            scopes -= previous == PARSE_KIND_R_BRACE && scopes != 0 &&
+                      (previous_role == PARSE_ROLE_CLOSE_STRUCT || previous_role == PARSE_ROLE_CLOSE_BODY || previous_role == PARSE_ROLE_CLOSE_BLOCK);
+            if (scope_open)
+            {
+                scope_levels[scopes] = level;
+                scope_lists[scopes] = lists;
+                scope_records[scopes] = previous_role == PARSE_ROLE_OPEN_STRUCT;
+                scopes += 1;
+            }
             if (!inside && role == PARSE_ROLE_OPEN_BODY && parser->tree.parents[t] < count)
             {
-                // Deprecated by any of its declarations up to its definition's.
-                const uint32_t function_key = function != BUSTER_CHECK_NONE ? check_input_deprecated_key(reader, function) : count;
                 body_end = parser->tree.parents[t];
-                deprecated_body = function_key < count && marks[function_key] != 0 && marks[function_key] - 1 <= function;
             }
-            const uint32_t declared = kind == PARSE_KIND_IDENTIFIER ? reader->output->declarations[t] : BUSTER_CHECK_NONE;
-            const bool tag = role == PARSE_ROLE_TAG;
-            const uint8_t next = t + 1 < count ? parser->tokens.kinds[t + 1] : PARSE_KIND_END;
-            // An overloadable function's name is its overload set's, whose resolution clang checks otherwise.
-            const bool overloaded = reader->output->overload_heads != NULL && reader->output->overload_heads[t] != 0;
-            const bool use = declared < count && declared != t && role != PARSE_ROLE_MEMBER && !overloaded &&
-                             (tag ? next != PARSE_KIND_SEMI && next != PARSE_KIND_L_BRACE : reader->declaration_kinds[t] == 0);
-            uint32_t key = use ? (tag ? declared : check_input_deprecated_key(reader, t)) : count;
-            // An enumerator of a deprecated enum is deprecated by its enum (the note names the enum).
-            if (use && key < count && marks[key] == 0 && reader->declaration_kinds[declared] == C_BINDING_ENUMERATOR)
-            {
-                key = check_input_deprecated_enum(reader, declared);
-            }
-            const uint32_t marking = key < count ? marks[key] : 0;
-            const bool marked = marking != 0 && marking - 1 < t && !(inside && deprecated_body);
-            // A use in the declaration of something itself deprecated, as clang's delayed diagnostics drop it: one before
-            // the declaration's first declarator, which a deprecated attribute marks by its own token. Looked for only at a
-            // marked use, which are few.
-            uint32_t declarator = marked && !inside ? t + 1 : count;
-            while (declarator < count && reader->declaration_kinds[declarator] == 0 && parser->tokens.kinds[declarator] != PARSE_KIND_SEMI &&
-                   parser->tokens.kinds[declarator] != PARSE_KIND_L_BRACE)
-            {
-                declarator += 1;
-            }
-            const uint32_t declarator_key = declarator < count && reader->declaration_kinds[declarator] != 0 ? check_input_deprecated_key(reader, declarator) : count;
-            const bool deprecated_declaration = declarator_key < count && marks[declarator_key] != 0 && marks[declarator_key] - 1 <= declarator;
-            const CheckInputAttribute* attribute = marked && !deprecated_declaration ?
-                                                   check_input_deprecated_record(check_input_attributes_at(reader->output, marking - 1)) : NULL;
-            // The attribute's message, its first argument's string.
-            const uint32_t message = attribute != NULL && attribute->argument_first < attribute->argument_end &&
-                                     parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_STRING ? attribute->argument_first : BUSTER_CHECK_WARNING_NO_SOURCE;
-            if (attribute != NULL && attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE)
-            {
-                // Its note is at the declaration, not the attribute.
-                const uint32_t before = reader->output->report_count;
-                check_input_report(reader, t, CHECK_INPUT_UNAVAILABLE_USE);
-                if (reader->output->report_count > before)
-                {
-                    reader->output->reports[before].note_token = marking - 1;
-                    reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_UNAVAILABLE_HERE;
-                    reader->output->reports[before].detail = message != BUSTER_CHECK_WARNING_NO_SOURCE ? message + 1 : 0;
-                }
-            }
-            else if (attribute != NULL)
-            {
-                const CheckWarningEvent event =
-                {
-                    .id = CHECK_WARNING_ID_DEPRECATED_DECLARATIONS,
-                    .kind = CHECK_WARNING_EVENT_DEPRECATED_USE,
-                    .token = t,
-                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
-                    .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-                    .completion = t + 1,
-                    .payload = { .name = parser->tokens.names[t], .token = message },
-                };
-                const CheckWarningNote note =
-                {
-                    .kind = CHECK_WARNING_NOTE_DEPRECATED_HERE,
-                    .token = attribute->first,
-                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
-                    .payload = { .name = parser->tokens.names[key], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
-                };
-                check_input_warning_event(reader, &event, &note, 1);
-            }
+            check_input_deprecated_use(reader, &pass, t, level, lists, scopes, inside);
         }
     }
+    reader->member_marks = NULL;
     arena_pop_to(reader->scratch, mark);
 }
 

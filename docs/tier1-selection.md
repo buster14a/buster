@@ -64,7 +64,8 @@ patterns are:
   `zext (icmp lt a, b)`, which `if`, `!`, `&&` and `||` compare with zero again,
   `icmp ne (zext x), 0` (`eq` for `!`), once for each operator the source
   nests. A branch on such a chain is its comparison's `cmp` and `jcc`, and its
-  zero extension to an integer the comparison's `cmp`, `setcc` and `movzx`,
+  zero extension to an integer the comparison's zero-initialized destination,
+  `cmp` and `setcc` (an aliased destination is cleared by a flag-preserving move after `cmp`),
   negated for an odd number of `eq` links, where every link is consecutive and
   used only by the next, so that nothing the pattern doesn't compute runs
   between the comparison and its test. `if (a < b)` had been
@@ -253,15 +254,22 @@ patterns are:
   (`lea d, [size + alignment - 1]`, `and d, -alignment`, `sub rsp, d`,
   `mov d, rsp`), or with a constant size of up to 1 GB a `sub` of the rounded
   constant (`TIER1_RULE_ALLOCA_IMMEDIATE`); `stack_save` copies rsp and
-  `stack_restore` sets it. The alignment is 16 bytes, or a realigned frame's,
-  which the CFG consumer sets in the holes' `scale`, so that rsp keeps the
-  alignment at every call after an allocation. An allocation and a restore are
+  `stack_restore` sets it. The alignment is the most the function's calls'
+  stack arguments need: 16 bytes, or a 32- or 64-byte vector's or an
+  over-aligned aggregate's. The CFG consumer sets it in the holes' `scale`, so
+  that rsp keeps it at every call after an allocation. An object's own
+  alignment is the frame base's, not rsp's: a frame realigned to a megabyte for
+  an object (#1450) doesn't round each allocation and call area to a megabyte. An allocation and a restore are
   memory barriers: no load folds past either. Every function with one is the CFG
   consumer's, in a dynamic frame (the frame guide's "Frame and prologue rules"):
   a frame pointer, its places rbp's (or r15's in a realigned frame), and each
   call with stack arguments takes its outgoing area, its stack bytes rounded up
   to the alignment, from rsp before its stores and gives it back after it
-  returns (`tier1_emit_cfg_call_area`).
+  returns (`tier1_emit_cfg_call_area`). With stack-clash protection, a call
+  area of a page or more uses the frame emitter's page loop and final partial
+  touch, with reserved r11 as its bound; all argument registers and the stable
+  frame base survive it (#1450). Object alignments through the frame planner's
+  `1 << 30` bound are accepted, including alignments larger than a page.
 - By-value aggregates (#789): a call or a function with ABI records takes each
   argument and parameter where its record says (`tier1_select_argument_place`,
   `tier1_select_parameter_place`): a scalar in its register or stack slot, and
@@ -289,15 +297,20 @@ patterns are:
   `IGNORE`, an empty struct or one of unnamed bit-fields) is passed and returned
   nowhere: a call copies nothing for it, and a parameter's copy keeps no bytes it
   was given. Refused: a result LLVM demotes to a hidden pointer (`DEMOTED`),
-  which only a vector type makes, and a call whose parts in registers take more
-  than the red zone's 14 staging slots of 8 bytes, a whole vector register's its
-  bytes' (`tier1_select_part_slots`), but a 64-byte vector's, which waits in
+  which only a vector type makes. A call's parts in registers take staging
+  slots of 8 bytes, a whole vector register's its bytes'
+  (`tier1_select_part_slots`), but a 64-byte vector's, which waits in
   zmm16 and on instead (#141, `tier1_select_part_in_zmm`: Tier 1 allocates no
   register past xmm15, and only an AVX-512F target passes a zmm one), so that a
-  call takes all eight of its vector registers' 64-byte vectors. Every function
-  and call with records goes to the CFG consumer. Before a call's moves, it
+  call takes all eight of its vector registers' 64-byte vectors. Up to 14
+  staging slots use the red zone. If any call needs more, the CFG consumer
+  reserves one frame object sized for the largest call (#1450), with a
+  whole-function lifetime and the stable frame base, so neither live values
+  nor a dynamic outgoing area overlap it. This also supports all eight
+  32-byte vector arguments on x86-64-v3, without extra vector registers.
+  Every function and call with records goes to the CFG consumer. Before a call's moves, it
   copies the call's aggregates from their addresses into their stack slots, or
-  into the red zone's staging slots or a 64-byte part's zmm register, whose
+  into the staging slots or a 64-byte part's zmm register, whose
   argument registers it loads or moves after the moves. An address
   in a slot, or recomputed, goes through the scratch register, with rax saved
   below rsp, so its use needn't be required: a call may pass more aggregates than
@@ -307,6 +320,11 @@ patterns are:
   return loads the parts staged below rsp (the frame stays out of the red zone),
   or copies the bytes through the hidden pointer that the entry stored, which
   rax returns.
+  `test-checker-driver`'s overflow-staging fixture cross-links four, five,
+  eight and nine vector arguments, mixed integer aggregate parts, repeated
+  values, and dynamic and indirect callers with clang. Both v3 and v4 policies,
+  both host paths and both rematerialization choices require Tier 1 under
+  `--verify`; fixed callers retain emitted-code certificates.
 - Arguments and parameters past the registers (#141): a call takes up to
   sixteen `I32`, `I64` or pointer arguments, and a function up to sixteen such
   parameters (`BUSTER_TIER1_SELECT_MAX_ARGUMENTS`); those past the sixth are in
@@ -336,10 +354,167 @@ arguments and parameters to Tier 1 as `i32` (#141, the [IR guide](ir.md)'s
 "Typed-stream lowering"). `i1` memory and signed-extension forms are also
 declined explicitly.
 
+### Proven upper bits (#1219)
+
+Selection keeps two semantic range bounds per integer value: the number of
+possibly nonzero low bits and the smallest signed width. Constants, masks,
+shifts, bounded arithmetic, extensions and truncations supply the bounds; copies, selects and phis
+propagate them. They start unknown, including on loop backedges, and improve
+in at most eight sweeps per round. Unresolved cycles retain the full range.
+Widths need seven bits each; the spare low-byte bit records a proved I32 value
+strictly below `INT_MAX` without adding a scratch column.
+
+A checked induction certificate can then establish a nonnegative I32 loop
+index. Every initial edge must supply a nonnegative constant or a run-time value
+already independently proved nonnegative, such as a mask or zero extension.
+These facts begin with unknown backedges. Every other edge
+must add a known nonnegative stride to that same phi. A strict upper-bound
+guard may check the sum on the backedge: a walk of at most eight blocks may
+follow unconditional bridges to that guard, each bridge with exactly one
+incoming predecessor. An alternate entrance refuses the proof. The predecessor
+map reuses selection's positions workspace before level ordering. With indirect
+control flow, every address-taken label is conservatively ambiguous; marking
+them once preserves unrelated unique edges without enumerating labels per jump.
+A header guard before the increment also
+works when the selected successor has only the header as its predecessor and
+the existing verified dominance intervals prove that successor dominates the
+increment. This bounds the increment by the admitted index plus its stride,
+including the terminating index; merely dominating it with the header does
+not prove that the guarded edge executes. One maximum covers all starts and all
+admitted backedge values. Every increment must fit signed I32: after a header
+guard, its admitted index plus stride; before a sum guard, the common maximum
+plus stride. Unsigned guards also require a
+proven upper limit at most `INT32_MAX`. Equality, non-strict bounds, unrelated
+tests, unknown strides and possible wrapping sums retain their extensions.
+Only a complete certificate supplies facts, followed by one additional bounded
+propagation round. The candidate scan is masked SIMD with a scalar twin.
+
+A separate phi certificate excludes `INT_MAX` when every incoming edge supplies
+an independently bounded value or necessarily tests that incoming value with
+a strict upper guard. Arithmetic may wrap before the guard: only the selected
+value entering the phi receives the endpoint fact. A guard of the old phi
+does not constrain its increment. Constant `INT_MAX` seeds and unsigned guards
+that can admit it refuse the certificate.
+
+A sign extension of a single-use register truncation reads the original
+register's low bits directly. This removes the intermediate mask without
+narrowing a load's memory access or assuming that the original value fits
+the truncated signed range.
+
+A separate byte certifies physical register storage. A 32-bit ALU result or
+ordinary 32-bit load clears the upper half; an incoming `I32`, a call result and a machine row
+make no such promise. Copies and phis need their inputs' certificates. A shift
+whose count can be zero, multiplication or division by one, and a truncation
+to `I32` can leave a register untouched, so their proofs account for that.
+
+The same byte can instead certify a sign-preserving `I32` representation:
+all 64 register bits equal its signed value. A real signed-widening consumer
+requests it from an ordinary `I32` load or a byte/word sign extension to `I32`,
+through a worklist of at most eight nodes: copies, selects, small phis and
+the admitted expression patterns below. The defining load or extension writes 64 bits
+once, preserving its exact memory width. Later signed widening is a copy;
+unsigned widening still clears the upper half. Copies, selects and phis
+propagate only proven representations, and a nonnegative value makes the two
+certificates equivalent. A sign-only value records eight-byte storage in its
+selected pattern: both native consumers preserve all eight bytes through
+spills, reloads and CFG edge moves. Edge moves use the source's width, so an
+I32 phi and every incoming value in its connected component share eight-byte
+spill storage if any member needs it. Union by rank and path halving closes
+arbitrarily long phi chains in the dead positions workspace. This width
+obligation grants no upper-bit fact to opaque inputs. Calls and opaque rows
+receive no sign certificate. An I32 parameter with two distinct signed widening
+roots (directly or through same-type copies) explicitly establishes its signed
+representation once at entry. General-register inputs receive `movsxd` before
+entry moves or reads; a stack input uses a four-byte `movsxd` load. Unsigned
+widening still clears the upper half, and a single signed use stays local.
+The dead positions workspace counts these requests before its storage-component
+role; this adds no allocation and assumes nothing about incoming ABI upper bits.
+For a requested loop state with that strict endpoint, an ordinary I32 ALU
+definition can establish signed storage once: perform its wrapping 32-bit
+operation, then sign-extend its result. Later widening of the state is a copy,
+and its separately proved `+1` can use a 64-bit `lea`. The original loop update
+retains its I32 wrapping semantics. A nonzero constant arithmetic right shift
+can establish storage the same way. Multiplication, division, dynamic or
+zero-count shifts and no-write copy identities do not use this definition form. The selected pattern
+records the extra operation, and both emitters preserve its eight-byte storage.
+
+A branch can prove a value nonnegative only at a guarded conversion. The
+selected successor must have the conditional block as its only predecessor
+and dominate the conversion, using the verified dominator intervals. Signed
+lower bounds, equality to a nonnegative value and unsigned upper bounds below
+the sign bit supply such facts. The source must independently have real
+zero-upper-bit storage. A separate use annotation removes that conversion;
+the source's unguarded uses retain their signed extensions. Alternate
+entrances and address-taken labels refuse the proof. The pass keeps one
+conservative guard per value and reuses positions and pending workspace.
+
+With both facts, a nonnegative signed extension becomes a zero extension,
+and a zero extension of already canonical storage becomes a coalescible copy.
+A truncation of a value already in the unsigned destination range is a copy;
+sign extension can bypass a truncation of an already sign-extended value.
+Successive sign extensions read the original narrow value directly, including
+a folded signed load through an intermediate integer promotion.
+A single-use ordinary load followed by sign extension becomes one exact-width
+`movsx`/`movsxd` load, under the existing memory-order and address-fold rules.
+Volatile and atomic accesses retain their separate access.
+An exact-width store can read the original value of a single-use truncation:
+the memory instruction itself discards the unwanted upper bits, preserving
+the same address, byte count and observable access.
+For a signed 32-bit offset followed by extension to 64 bits, selection can
+combine a single-use chain of constant additions/subtractions into one 64-bit
+`lea`. Two signed fields that each fit fewer than 32 signed bits also add
+without I32 overflow; their sum and walked constants can use one 64-bit `lea`.
+Every intermediate operation must be proven nonoverflowing and the remaining
+operands must have physical sign-preserving storage, including nonnegative
+canonical values. An unbounded
+32-bit subtraction retains its extension and wrapping semantics.
+For a single-use expression followed by signed widening, bitwise operations,
+NOT and constant arithmetic right shift commute with sign extension when the
+inputs already have that representation. Negation also does so when its input
+needs fewer than 32 signed bits. A difference of two values each needing fewer
+than 32 signed bits, or a product whose signed widths sum to at most 32, also
+fits without I32 overflow and can operate directly on their signed 64-bit
+representations. A positive power-of-two multiplier adds only its shift to
+the input's signed width; an immediate multiply keeps its constant folded.
+The native expression matrix checks negative
+fields and constants, full-width signed loads, poisoned ABI bits, and wrapping
+addition/negation controls that must retain their extensions.
+
+A byte or word truncation of a single-use I32 add, subtract, negation or NOT can
+instead use a byte or word ALU operation when its inputs already fit that
+unsigned width and have physical zero storage. The initial 32-bit copy, when
+needed, preserves those zero upper bits; the narrow operation wraps only the
+low result and leaves the rest zero. Both binary inputs must satisfy the proof
+because commutative register selection can exchange them on an alias. This
+removes the separate truncation while preserving canonical narrow storage.
+
+The bounds occupy two scratch bytes per node and the storage certificate one.
+The independent range seeds are classified in 32-node SIMD batches with masked
+tails and an exact scalar twin; dependency propagation reuses bounded ordered
+sweeps on both selector paths. `test-tier1-select` checks poisoned ABI upper
+halves, signed boundaries, zero-count shifts, identity operations, retruncation,
+volatile and exact-width loads, cyclic phis, and every tail through 65 nodes
+against protected pages. The bounds do not assume an ABI extension or infer a
+loop's numeric range from its initial value alone. `test-tier1-emit` executes
+positive and unsafe induction near-matches through both selection/allocation
+paths with constrained registers and independent unsigned-bit arithmetic.
+Mixed signed/unsigned widening tests keep eight loaded values live before
+either use, require real three-register spills, check the stored results
+independently, and put exact-width input at a protected page boundary. A
+volatile `I32` load checks the conservative representation.
+Mixed signed, positive, volatile and opaque phi inputs check uniform spill
+widths without inventing sign facts. Byte/word wrapping and guarded conversion
+fixtures observe the complete 64-bit result, including poisoned ABI inputs,
+negative bypass paths and unsafe unsigned bounds.
+
 Comparisons used by a branch alone do not produce `setcc`. Their comparison and
 conditional jump are consecutive records. A comparison producing a value uses
-`cmp`/`test`, `setcc`, then `movzx`; clearing the destination before comparison
-would corrupt an aliased input, so the zero extension follows `setcc`.
+canonical 32-bit storage and `setcc`. An independent destination is cleared with
+`xor` before `cmp`/`test`; an aliased input is read by the comparison first, then
+`mov r32, 0` clears the destination while preserving the flags. A floating
+comparison's result is in the general class and its inputs in the vector class,
+so it can always clear the result before `ucomis`. Its parity combination for
+unordered equality/inequality touches only the already canonical low byte.
 
 The body uses only RAX, RCX, RDX, RSI, RDI and R8–R10. R11 is reserved for
 operand-overlap repairs. Parameters must be an entry-block prefix, with up to
@@ -441,14 +616,12 @@ representer); and each operator's table gives the state of each pair of
 representers. The grammar isn't finite-state as it stands (a chain of additions
 grows a register's cost against a fold's zero without bound), so normalized
 costs saturate at 8, past which a difference no longer picks another rule in
-these patterns. The tables have 582 states, 172 rules, at most 57
-representers in an operator's position and a pool of 18,705 16-bit entries for
-the operators' maps and tables (as `test-tier1-select` prints them), and are in
+these patterns. `test-tier1-select` prints the generated state, rule, representer,
+and 16-bit pool entry counts. The tables are in
 the baked section (`baked.c`), so a compile starts with them built; `--tier1`
 and `test-baked-tables` build them where the executable isn't baked. The bound
-and table sizes are `BUSTER_TIER1_BURS_*`: a bound of 4 gives 346 states, 23
-representers and 11,418 entries, and 16 gives 1,430 states, past the tables'
-1,024, so that its build's bake fails.
+and table sizes are `BUSTER_TIER1_BURS_*`; table generation fails if the
+grammar exceeds a table's fixed capacity.
 
 A plan then takes four passes over the function's nodes, each 16 nodes a
 vector with an exact scalar twin (`tier1_burs_*_scalar`):
@@ -639,15 +812,16 @@ counts are reported separately as `call_stores` and `call_loads`.
 An `I32` value's upper half is unspecified in Tier 1's registers, as System V
 leaves an `int` parameter's and result's (#1116). Every rule reads an `I32`
 operand at 32 bits (an address's index is an `I64`), and a zero extension to
-`I64` always writes its `mov r32, r32`, even in place. So nothing else writes
-a move to clear it:
+`I64` writes its `mov r32, r32`, even in place, unless selection proves that
+the upper half is already zero (#1219). Nothing else needs to clear it:
 
 - an `I32` argument is passed as the argument moves leave its register;
 - an `I32` result stays in RAX;
 - a copy of an `I32`, and a truncation to `I32`, is nothing in its own register.
 
 Narrow values keep their canonical storage (#981): a narrow result is still
-zero-extended from RAX, and a narrow truncation still clears in place.
+zero-extended from RAX, and a narrow truncation clears in place unless its
+discarded bits are already proven zero.
 
 Call-containing functions disable the red zone and use the frame planner's
 System V call alignment, including zero-argument calls. The bounded register
@@ -834,6 +1008,7 @@ or 64 bytes, the xmm, ymm or zmm one (`tier1_select_vector_forms`):
 | `not` | `NOT` | `vpternlogd x, a, a, 0x55`, the complement of its third operand |
 | `vcmp` | `COMPARE` | `vpcmpd k, a, b, imm` (`vpcmpud` for an unsigned predicate) into the mask's opmask register |
 | `vselect` | `SELECT` | `vpblendmd x{k}, f, t` |
+| the same at other lanes ([the SIMD IR guide](ir-simd.md)'s "Lanes") | `BINARY`, `COMPARE`, `SELECT` | the lanes' forms (`tier1_select_lane_forms`, `_compares`, `_blends`): `vpaddb` to `vpaddq`, `vpsubb` to `vpsubq`, `vpmullw`, `vpmullq`, `vpsllvw` to `vpsllvq`, `vpsrlv*`, `vpsrav*`, `vaddps` to `vdivpd`; `vpcmp[u]b` to `vpcmp[u]q`, `vcmpps` and `vcmppd` (the rows' EQ_OQ, NEQ_UQ, LT_OS, LE_OS, GT_OS and GE_OS); `vpblendmb` to `vpblendmq` |
 | `load`, `store` | `TIER1_RULE_FLOAT_LOAD`, `_STORE` and their `_ADDRESS` folds | `vmovdqu32` at the width, the address folded as a floating value's |
 | `phi` | `TIER1_RULE_PHI` | none: its edges' moves |
 
@@ -846,7 +1021,46 @@ reloaded and moved along edges by `vmovdqu32` and `vmovdqa64` at their widths;
 the class's call-save rows and temporary slot take the widest vector's bytes,
 which the saves around a call move (`Tier1EmitPrepared.vector_bytes`). The forms
 need AVX512F, and below 64 bytes AVX512VL, which a target without them refuses at
-emission, as any record's. A vector C passes or returns by value is an aggregate
+emission, as any record's.
+
+### At targets without AVX-512 (#1281)
+
+A target without AVX512VL, such as x86-64-v3, has no EVEX form of a 16- or 32-byte
+vector, and no register past xmm15. There the CFG consumer
+(`Tier1EmitPrepared.vex`, from the target's allow-list: whether it allows
+`vmovdqa64` of an xmm register) takes VEX forms of AVX and AVX2 for them
+(`tier1_select_vector_forms` and `tier1_select_class_forms` with `vex`, and
+`Tier1SelectHoles.vex`), which name xmm0 to xmm15 alone, as the class's values
+are:
+
+| Kind | Records |
+| --- | --- |
+| `ZERO` | `vpxor x, x, x` of the xmm register, which zeroes a ymm one's upper half too |
+| `ONES` | `vpcmpeqd x, x, x` |
+| `SPLAT` | `mov r11d, imm32`, `vmovd x, r11d`, then `vpshufd x, x, 0` (16 bytes) or `vpbroadcastd y, x` (32 bytes) |
+| `CONSTANT`, loads, stores, spills, reloads, call saves | `vmovdqu` at the width |
+| `COPY`, edge moves | `vmovdqa` of a ymm register (`movaps` for 16 bytes) |
+| `BINARY` | `vpaddd`, `vpsubd`, `vpmulld`, `vpand`, `vpor`, `vpxor`, and at other lanes AVX's and AVX2's (`tier1_select_lane_forms`' VEX column: no 16-bit shift and no 64-bit arithmetic right shift, which VEX hasn't) |
+
+At a target with AVX but not AVX2 (Sandy Bridge's, `Tier1EmitPrepared.avx2`
+from the allow-list's `vpcmpeqd` of a ymm register), a ymm register's integer
+forms are AVX2's, so a 32-byte vector's bitwise operations take the packed
+singles' `vandps`, `vorps` and `vxorps` (the same bits), its ones `vpcmpeqd x,
+x, x` and `vinsertf128 y, y, x, 1`, and its splat `vmovd`, `vpshufd x, x, 0` and
+`vinsertf128 y, y, x, 1`: no record reads the register's old bits as floats,
+which a signaling NaN or a denormal among them would raise MXCSR's flags for; its additions, subtractions and multiplications are AVX2's alone,
+which the decoder admits only where the target has them.
+
+VEX has no ternary logic, no compare into a mask and no blend under one: a target
+without AVX-512 has no masks (their types still refuse there), and the IR's
+`not`, `vcmp` and `vselect` come of EVEX rows alone, which it has none of. Its
+typed stream's rows are VEX's (`c_check_program_vectors_baseline.c` and the
+builtins'): the 32-bit integers' addition, subtraction, multiplication and
+bitwise operations decode into the IR's own operations by their VEX forms
+(`ir_simd_typed_operation`), and the others, a comparison or a complement among
+them, are machine rows. The lowering admits a 16- or 32-byte vector where the
+target has AVX512F and VL, or else AVX (`ir_typed_vector_moves`: the features of
+the moves Tier 1 then takes), and a 64-byte one with AVX512F. A vector C passes or returns by value is an aggregate
 to the lowering, a pointer to its bytes, in a vector register whole ("By-value
 aggregates"); an IR function whose own parameter or result is a vector value has
 no convention's place of Tier 1's and is refused at selection
@@ -858,7 +1072,55 @@ locals) stays in its frame object, as a 128-bit integer's does.
 interpreter on both paths, with and without rematerialization: every operation
 and all ten predicates at each width; constants of every kind; a loop whose vector
 phis swap, a cycle through xmm15; eighteen 64-byte vectors live at once, spilled
-and reloaded; and vectors of each width live across two calls of the helper.
+and reloaded; and vectors of each width live across two calls of the helper. And
+four emitted for x86-64-v3 (#1281), every record one that target has: the
+operations and constants of every kind at 16 and 32 bytes; a loop whose 32-byte
+phis swap through xmm15; seventeen 32-byte vectors live at once, spilled and
+reloaded; and vectors of both widths live across two calls. One more is emitted
+for x86-64-v2 with AVX, Sandy Bridge's target: 32-byte bitwise operations and
+constants of every kind by AVX's forms, beside 16-byte arithmetic.
+
+### At targets without AVX (#141's SSE targets)
+
+At the x86-64 baseline and x86-64-v2, which have no AVX, the vector registers
+are xmm0 to xmm15 and every form is legacy SSE's, whose destination is its first
+operand. The lowering admits a 16-byte vector there with no feature past the
+target's (`ir_typed_vector_moves`), and still refuses a 32- or 64-byte one, which
+such a target computes in halves (Tier 0's), and an SSE carrier, whose zeroing
+moves are AVX's. The decoder takes the typed stream's legacy rows
+(`c_check_program_vectors_baseline.c`'s `op v0, v1`) into the IR's operations of
+their lanes: every element type's `paddb`/`w`/`d`/`q` and `psubb`/`w`/`d`/`q`,
+`pmullw` and SSE4.1's `pmulld`, `pand`, `por`, `pxor` and the packed singles'
+`andps`, `orps` and `xorps`, and `addps` to `divpd`; the comparisons (`pcmpeq`
+and `pcmpgt` sequences, `cmpps`), complements and splats stay machine rows. The
+CFG consumer's encoding level is legacy SSE's there (`Tier1EmitPrepared.sse`,
+from the target's allow-list: whether it allows `vmovdqu` of an xmm register;
+`BUSTER_TIER1_ENCODING_SSE`, `Tier1SelectHoles.sse`):
+
+| Kind | Records |
+| --- | --- |
+| `ZERO`, `ONES` | `pxor x, x`, `pcmpeqd x, x` |
+| `SPLAT` | `mov r11d, imm32`, `movd x, r11d`, `pshufd x, x, 0` |
+| `CONSTANT`, loads, stores, spills, reloads, call saves | `movups` |
+| `COPY`, edge moves | `movaps` |
+| `BINARY` | the lanes' legacy form (`tier1_select_lane_forms`' SSE column) after `movaps x, left` where the destination isn't the left operand: a commutative integer operation's operands swapped where the right one is in the destination, and any other's right operand copied into xmm15 first, a floating one's too, so that a NaN result is its first operand's, as the IR's is |
+| `NOT` | `pcmpeqd x, x` and `pxor x, operand` where the operand is elsewhere; `pcmpeqd xmm15, xmm15` and `pxor x, xmm15` where it is the destination (#1425's review) |
+
+`COMPARE` and `SELECT` have no SSE records: their masks are opmasks, which no SSE
+target has. They take AVX-512's forms, which the target's allow-list refuses at
+emission (`TIER1_EMIT_TARGET`), as at a VEX target, so a function the decoder
+didn't give them (an IR client's) goes to Tier 0 rather than lose them.
+
+A machine row's roles are placed below 16 as at a VEX target, moved by `movaps`.
+`test-tier1-masks` runs two fixtures natively, at x86-64-v2 and at the baseline
+(without `pmulld`), of every lane's legacy operation in every operand order,
+against the interpreter; their records must all be the target's (its
+allow-list). A third, at the baseline, complements a vector into another register
+and in place, and a comparison and selection there must be refused at emission;
+`test-tier1-select` checks those records directly. `test-checker-driver`'s SSE fixture compiles C's operators on
+16-byte vectors of every element type by `--tier1 -march=x86-64` and
+`-march=x86-64-v2`, every function Tier 1's, by both paths and with and without
+rematerialization, and matches clang -O0's output.
 
 ## Machine rows (#141)
 
@@ -868,21 +1130,39 @@ effective uses, each in a register (the CFG problem's uses of it are required,
 as any operand's): a row call isn't a call of a function's
 (`tier1_select_function_call`), so nothing is saved around it, no argument moves,
 and it makes no frame a caller's. The selector takes a row Tier 0 places
-(`tier0_operation_valid`, which needs x86_semantics.c's tables) whose records
-name vector registers in EVEX forms alone, so that its vector roles can be zmm16
-and on, which no value takes, its floating roles past them below 32
-(`tier1_select_row_supported`). Its narrow integer result isn't canonical
+(`tier0_operation_valid`, which needs x86_semantics.c's tables), whose vector
+and floating roles fit: a row whose records name vector registers in EVEX forms
+alone has its vector roles in zmm16 and on, which no value takes, and its floating
+roles past them below 32; a row with a VEX or legacy form's vector register has
+its vector roles below 16, each that doesn't stay in place in a free register;
+and a row that names a
+floating role in a VEX or legacy form's field (F16C's conversions,
+`tier1_select_row_low_floating`, #1281) has its floating roles below 16 too, its
+vector roles and its floating ones at most 16 (`tier1_select_row_supported`). Its narrow integer result isn't canonical
 (`tier1_select_canonical`): its field's bits past the class are the row's. Only
-the CFG consumer takes it (`tier1_emit_cfg_row`), which places the row as Tier 0
-does (`Tier0Placement`, `tier0_operation_place`) at the node's definition phase:
+the CFG consumer takes it (`tier1_emit_cfg_row`), which places the row at the
+node's definition phase as Tier 0 does (`Tier0Placement`, `tier0_operation_place`)
+but for its vector roles, which it places one at a time (#1283,
+`tier1_emit_cfg_row_place`), so that most rows emit their own records alone:
 
 | Role | Register |
 | --- | --- |
-| `VECTOR(j)` | zmm16 + j; a vector operand moved there from its register at its width first (`vmovdqa64`), the result moved from zmm16 into the destination last |
-| `FLOATING(j)`, `FLOATING_RESULT` | its operand's own xmm register where no record writes it, else the zmm registers past the vector roles' (moved there first); the result's past those, the first floating operand's too (copied there first), moved into the destination last |
+| `VECTOR(0)` of a vector result | the destination, where nothing else there is read after the role's first write (no value live past the node, no floating operand, and no other vector operand that stays there whose role a later record names, or the first-writing one where its destination can't be a source: a gather's, a complex multiplication's), and every record that writes it is a VEX or EVEX form's (which zero the register past their field; one wider than the result is followed by a move of the destination into itself at the result's width). The first operand is copied in first (no other operand may then be there); or, where the first write is a pure one (no tied operand, no merge into the rest of the register, no merging opmask) and nothing reads the operand past its width up to it, it is read in its own register up to that write, which writes the destination: the two-operand forms' `op V0, V0, V1` with the result in a dying second operand's register is `op d, a, d` |
+| other `VECTOR(j)` of a vector operand | its own register where nothing reads it past its width up to the role's first write (whose bits the move at its width would have zeroed) and no record writes it, or they write it by VEX and EVEX forms alone and it dies at the node, no other operand in its register and not the destination the result is written in |
+| other `VECTOR(j)` | zmm16 + j, which no value takes and an EVEX form names, or for a row with a VEX or legacy form's vector register, and at a target without AVX512VL a row with a vector narrower than 64 bytes or any row where there is no AVX512F (#1281; a 64-byte EVEX row at Knights Landing's AVX512F without VL keeps zmm16 and on), a free xmm register below 16 (xmm15 among them, the class's scratch), each taken as its role is placed rather than a run of them, which register pressure could leave none of, and none the destination where the result is written there; a vector operand copied in at its width first (`vmovdqa64`, or `vmovdqa` at a target without AVX512VL), a vector result moved into the destination at its width last. An SSE carrier (#1280) is copied and moved zero-extended (`tier1_select_carrier_move`, by VEX's `vmovq` or `vinsertps` at a target without AVX512VL): its value's register may hold anything past its bytes, which every vector field reads past, so it never stays in its own register |
+| `FLOATING(j)`, `FLOATING_RESULT` | its operand's own xmm register where no record writes it, else the zmm registers past the vector roles' (moved there first); the result's past those, the first floating operand's too (copied there first), moved into the destination last. For a row that names a floating role in a VEX or legacy form's field, and every row at a target without AVX512VL (#1281), all below 16: a written operand's a free xmm register no vector role takes (nor the destination a vector result is written in), from the vector roles' pool, and the result's the destination itself where no other operand is there, else such a free register; each copy `movaps` |
 | `INTEGER(j)`, `MASK(j)` | its operand's own register where no record writes it (`tier1_select_row_written`, by x86_semantics.c's effects of each field, and a gather's or scatter's decoration mask), else a free register of its class, moved into first |
-| `INTEGER_RESULT`, `MASK_RESULT` | the destination, where no other operand is; else a free register, moved into the destination last. As Tier 0 places them, it is also its class's first operand's register (that operand copied into it first), so that a row may read the result as that operand, or the operand as the result once written |
+| `INTEGER_RESULT`, `MASK_RESULT` | the destination, where no other operand is; else a free register, moved into the destination last. As Tier 0 places them, it is also its class's first operand's register (that operand copied into it first), so that a row may read the result as that operand, or the operand as the result once written: `MASK_RESULT` the first mask operand's, `INTEGER_RESULT` the first operand's of Tier 0's integer stack where that is an integer (a vector's place on that stack is no general register: after one, `INTEGER_RESULT` shares no operand's register, #1284) |
 | `SCRATCH(k)`, `MASK_SCRATCH(k)` | free registers |
+
+`tier1_select_row_vectors` reads what the records do with each vector role from
+x86_semantics.c's effects: which they write and by which family, how wide each
+role is read up to its first write and written, which record writes it first and
+whether purely, which names it last, and which records' destinations can't be a
+source. `--tier1-report` counts the rows and the moves around them
+(`machine_rows`, `row_moves`): the machine rows' fixture's unit below took 150
+moves around its 58 rows by Tier 0's placement and takes 18 (13 by the scalar
+path's allocation).
 
 The free registers are the caller-saved general registers (rax, rcx, rdx, rsi,
 rdi, r8, r9, r10 and the scratch r11) and k1 to k7 that hold no value live past
@@ -893,10 +1173,47 @@ k and k + 1), which must be free where it is. Short of them, the row is refused 
 (`TIER1_EMIT_UNSUPPORTED`), and its function is Tier 0's: the CFG consumer keeps a
 node's own error rather than the block's owed call saves' (`TIER1_EMIT_INVALID`,
 which a refusal mid-block left owed). A move into place never
-overwrites another's source: its destination is free or a vector role's. Each row
-node takes `BUSTER_TIER1_EMIT_ROW_RECORDS` records past its share, and the code's
-certificate leaves a function with rows uncertified (`TIER1_CERT_EMITTED_VECTOR`):
-it doesn't decode the rows' records.
+overwrites another's source: its destination is free, a vector role's or the
+node's destination with no other operand in it. Each row
+node takes `BUSTER_TIER1_EMIT_ROW_RECORDS` records past its share. The free xmm
+registers below 16 are those that hold no value live past the node and no operand.
+
+The emitter publishes each row's placement under `Tier1EmitOptions.certify`
+(`Tier1RowPlacement`, `Tier1EmitResult.row_placements`, by node): each role's
+register as the records name it, VECTOR(0)'s early register up to the result's
+first write where the first operand is read in its own register (#1283), and the
+renamed opmask registers. The code's certificate takes it as a claim (#1284, [the
+certificate guide](tier1-certificate.md)'s "Machine rows"): it places the template
+by it itself and compares, refuses roles in one register while both hold values
+that Tier 0's placement keeps apart, and proves each operand is at its role's
+register when the row reads it; the staging copies and the borrowed masks' saves
+are moves at the node's definition phase (`TIER1_ORIGIN_MOVE`), the row's records,
+its result's move and the reloads its node's (`TIER1_ORIGIN_NODE`). A row whose
+records read or write a role's register implicitly, or of a form x86_semantics.c's
+effects don't cover, leaves its function uncertified (`TIER1_CERT_EMITTED_VECTOR`).
+
+An SSE carrier (#1280), a vector of 4 or 8 bytes, is an f32 or f64 in the IR
+([the IR guide](ir.md)'s "Machine rows"), so it is the vector class's value as
+those are: their loads and stores (`movss`, `movsd`), constants (`xorps`, or the
+bits through the scratch register and `vmovd` or `vmovq`), copies, phis and
+spills move its bits alone, and no floating operation reads it, since only a row
+does. A row sees zeros past its bytes in its role's register, as Tier 0's row
+does (Tier 0 reloads every operand by `vmovd` or `vmovq`). Rows rely on those
+zeros: a row of no records, the intrinsics' narrowing shuffle, has its wider
+operand's register as its result, and a narrow vector's floating operation at a
+16-byte form computes its other lanes too, which must raise no exception (an
+sNaN there raises invalid). A carrier's own register needn't have the zeros: a
+`param.f64` or a call's `f64` result is the convention's, whose bytes past the
+double are undefined, and Tier 1 copies it by `movaps`. So each carrier operand
+moves into its role by `tier1_select_carrier_move`, which zero-extends it:
+`vmovq` for 8 bytes, and for 4 bytes `vinsertps` of element 0 with elements 1
+to 3 zeroed (immediate 0x0e), a shuffle that raises no exception. That move
+replaces the whole register's copy that staging takes anyway, so it costs
+nothing. A row's carrier result moves into its destination the same way, also
+at no cost. So a carrier that a row, a load or a constant makes has the zeros
+in its own register too, but one from a parameter or a call doesn't. A
+placement that leaves a carrier operand in place must zero-extend it unless its
+producer is one of the former.
 
 `test-checker-driver`'s machine rows' fixture compiles a unit of x86-64-v4's
 vector builtins and vector operators on bytes, words and quadwords by `--tier1`,
@@ -907,10 +1224,52 @@ permutes and shuffles, shifts by immediates, by counts in general registers and 
 vectors, masked loads and stores, a store of no result and a compress, inserts,
 extracts and widening conversions of every width, broadcasts, reductions and
 extractions into general registers, and a loop whose row results cross its back
-edge. Its half-precision check builds F16C's conversions at x86-64-v3 by both
+edge. Its unit takes at most a move into or out of place for every two rows, by
+each path and with and without rematerialization (#1283). Its SSE carriers' fixture (#1280) does the same for vectors of 4 and 8
+bytes:
+- the intrinsics' widening conversions of each width (`cvtepu8`, `cvtepi8`,
+  `cvtepu16`, `cvtepi16`);
+- `loadl` and `storel`, `loadu` and `storeu` of 4 and 8 bytes, `move_epi64`, and
+  `loadl_pi` and `storel_pi`;
+- the `movq` forms;
+- MMX's `__m64` operations, by value to and from clang's unit;
+- GNU C's operators on vectors of 4 and 8 bytes;
+- a signaling NaN's and -0's bits as constants;
+- a loop whose carriers cross its back edge;
+- under `FENV_ACCESS`, a product of two-float shuffles whose vectors' other
+  lanes would overflow. It raises no exception only where the zeros hold
+  (without `tier1_select_carrier_move`'s zeroing it raised overflow and inexact).
+
+`test-tier1-masks`' "SSE carriers with dirty upper lanes" fixture takes the
+carriers no row makes. A `param.f64`, a `param.f32` and a call's `f64` result,
+whose registers hold signaling NaNs past their bytes (the native entry's xmm0
+and xmm1, the helper's `vpbroadcastq` of its result), are each read whole by a
+row of no records. Each must read zeros past its bytes; with a whole register's
+staging copy it read the NaNs.
+
+Its half-precision check builds F16C's conversions at x86-64-v3 by both
 paths: `_cvtsh_ss`'s row names a float in a VEX form's XMM field, which Tier 1
-refuses at selection, so that its function is Tier 0's, and the program runs as
-clang -O0's does.
+places below 16 (#1281), every function Tier 1's, and the program runs as clang
+-O0's does. With `--verify`, the fixture's every function's code is certified
+(#1284).
+
+Its VEX fixture (#1281) compiles a unit of x86-64-v3's AVX2 and F16C builtins and
+vector operators the same way, every function Tier 1's, by both paths and with and
+without rematerialization, against clang -O0's build: the 32-bit integers'
+operators (the IR's own operations by their VEX forms, and the comparisons,
+shifts and complements as machine rows) on 16- and 32-byte vectors; the operators
+on words, bytes, quadwords, floats and doubles; AVX2's shuffles, blends, permutes,
+shifts, unpacks, maxima, tests and movemasks, lane extracts and inserts, widening
+conversions, masked loads and stores and gathers; F16C's scalar and vector
+conversions and FMA's; constants of every kind; a loop whose vectors cross its
+back edge and live across a call; and more vectors live at once than xmm0 to
+xmm14. A floating expression clang would contract into an FMA (its
+`-ffp-contract=on`, even at -O0) is split into statements. `_mm256_set1_epi8`'s
+32 stack arguments are refused at every target, so the fixture takes other
+builtins in its place; its SSE carriers (#1280, `_mm_cvtph_ps`'s and
+`_mm256_cvtepu8_epi32`'s operands) move by VEX's `vmovq` and `vinsertps`. Its AVX fixture
+does the same at `-march=sandybridge` (AVX without AVX2): 32-byte bitwise
+operators and constants, 16-byte arithmetic and AVX's float builtins.
 
 `test-tier1-masks` takes hand-written IR of machine rows too, natively against a C
 model of each (the interpreter has none of x86 records) by both paths, with and
@@ -918,10 +1277,30 @@ without rematerialization: rows beside seven word masks live in k1 to k7, one
 naming k1 and k2 by number and one taking a mask scratch register, which borrow
 live masks' registers and reload them; rows that read their integer and mask
 results as their first operands, as Tier 0 places them; a row of no records, its
-result its operand; and an EVEX floating row, its result read as its first
-operand. Its refusals take a row with a floating role in a VEX form, refused at
-selection by both paths; and its random mask programs whose rows the decoders
-refuse run as machine rows against the generator's model.
+result its operand; an EVEX floating row, its result read as its first
+operand; its VEX twin (#1281), for x86-64-v4 and for x86-64-v3, its floating
+roles below 16; and vector rows placed one role at a time (#1283), with the moves
+around them counted by each path: a two-operand form's, its result in a dying
+second operand's register; a tied operand's; a merging opmask's; an operand
+written and dying under an integer result; a VEX form's /is4 blend in the run
+below xmm16; a narrow result written at a wider width and a narrow operand read
+at one; and a widening conversion. Two more take the forms whose destination
+can't be a source's register (#1283's review): gathers whose source and index
+are one value dying at the row, and AVX512-FP16's complex multiplications whose
+factors die at it, the allocation giving the result such a register. The test
+checks that every record is valid and that each such destination is none of
+its sources, and runs them against a model, the complex multiplications only
+where the host has AVX512-FP16 (not the 9700X), on a forms table that allows
+that form, which no target of Tier 1's does yet. For x86-64-v3 it takes a fixture
+of rows too: a VEX row of 32-byte vectors, one live past it; a floating row whose
+result is read as its first operand and one that writes its second floating
+operand first, both operands live past them; and a 16-byte vector's row. Its
+random mask programs whose rows the decoders refuse run as machine rows against
+the generator's model. Every row's code is certified, and its corruptions refused
+(#1284, [the certificate guide](tier1-certificate.md)'s tests): a borrowed mask's
+reload left out, a staging copy onto a live register, a claimed placement whose
+roles share a register Tier 0 keeps apart or whose opmask register named by number
+is k0.
 
 ## Tests and benchmark
 

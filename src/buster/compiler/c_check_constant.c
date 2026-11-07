@@ -30,6 +30,8 @@ static CheckContext check_input_context(const CheckInputReader* reader, uint32_t
         .source_position = position,
         .extensions = check_input_expression_extensions(reader->parser) |
                       (check_graph_system_token(&reader->output->graph, token) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0),
+        .fp_environment = reader->output->fp_environments != NULL && token < reader->parser->tokens.count ?
+                          reader->output->fp_environments[token] & BUSTER_CHECK_FP_EVAL_MASK : 0,
         .const_values = &reader->output->const_values,
         .constant_evaluated = constant_evaluated,
     };
@@ -144,12 +146,29 @@ struct CheckConstantAttributes
 
 typedef struct CheckConstantInput CheckConstantInput;
 typedef struct CheckConstantRange CheckConstantRange;
+// Optional evidence for an attribute argument's parser diagnostics. Other constant/type queries keep their existing
+// reporting owner; this record contains no borrowed operand arrays and survives the evaluator's scratch rollback.
+typedef struct CheckConstantFailure CheckConstantFailure;
+struct CheckConstantFailure
+{
+    CheckDiagnostic diagnostic;
+    CheckOp op;
+    TypeId type;
+    TypeId second_type;
+    uint32_t token;
+    uint32_t callee;
+    uint32_t name;
+    uint32_t expected;
+    uint32_t actual;
+    bool variadic;
+};
 struct CheckConstantRange
 {
     uint32_t first;
     uint32_t end;
     // Exact function-designator identifier plus one. Source ranges may also contain unrelated same-set calls.
     uint32_t overload_token;
+    const CheckNoderefType* noderef;
 };
 
 struct CheckConstantInput
@@ -184,8 +203,12 @@ struct CheckConstantInput
     uint32_t* tag_next;
     uint32_t* prototype_marks;
     uint32_t* failed_token;
+    CheckConstantFailure* diagnosed;
     bool raw;
     bool cached;
+    // Attribute expressions may refer to a completed declarator's parameters or a record's earlier members. Those
+    // references already have declaration/type columns, while new type syntax and builtins still need normal binding.
+    bool scoped_names;
     bool deferred_tags;
 };
 
@@ -331,6 +354,7 @@ struct CheckConstantPart
     uint32_t parameter_names;
     uint8_t kind;
     uint8_t flags;
+    bool noderef;
 };
 
 typedef struct CheckConstantParameter CheckConstantParameter;
@@ -340,6 +364,7 @@ struct CheckConstantParameter
     uint32_t next;
     uint32_t name;
     uint32_t name_children[2];
+    const CheckNoderefType* noderef;
 };
 
 // Each prototype owns a digital search tree in its existing parameter records. Links are index + 1, with zero
@@ -380,6 +405,7 @@ struct CheckConstantTypeAttribute
 struct CheckConstantTypeFrame
 {
     TypeId base;
+    const CheckNoderefType* noderef;
     uint32_t cursor;
     uint32_t end;
     uint32_t first;
@@ -392,7 +418,9 @@ struct CheckConstantTypeFrame
     uint8_t state;
     uint8_t abi_origin;
     bool group;
+    bool group_noderef;
     bool parameter;
+    bool noderef_pending;
 };
 
 static CheckConstantTypeFrame check_constant_type_frame(TypeId base, uint32_t first, uint32_t end, bool group, bool parameter)
@@ -466,7 +494,7 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
         {
             i = input->attribute_starts[i - input->first]->end - 1;
         }
-        else if (check_input_qualifier(name, &qualifiers))
+        else if (check_input_qualifier(parser, i, &qualifiers))
         {
         }
         else if (kind == PARSE_KIND_STORAGE)
@@ -492,6 +520,7 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
             named_type = true;
             bit_int_specifier = name == C_NAME_BITINT || name == C_NAME_EXTINT;
             frame->abi_origin = selected != 0 ? input->abi_origins[close - input->first] : 0;
+            frame->noderef = selected != 0 ? check_input_noderef_at(reader->output, close) : NULL;
             i = close > i + 1 && close < end ? close : i;
         }
         else if (name == C_NAME_LONG)
@@ -546,6 +575,7 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
             base = reader->declared_types[i];
             const uint32_t declaration = reader->output->declarations[i];
             frame->abi_origin = reader->output->explicit_abis != 0 && declaration < parser->tokens.count ? reader->output->explicit_abis[declaration] : 0;
+            frame->noderef = check_input_noderef_at(reader->output, declaration);
             named_type = true;
             valid &= base != 0;
         }
@@ -612,6 +642,7 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
     if (valid && atomic)
     {
         base = check_input_type_result(reader, type_atomic(reader->types, base));
+        frame->noderef = check_input_noderef_wrap(reader, frame->noderef);
     }
     // Only attributes belonging to this specifier sequence affect its base. Attribute groups inside a tag or
     // nested typeof already belong to those independently completed type jobs.
@@ -622,6 +653,8 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
         if (attributes != 0)
         {
             base = check_input_attribute_type(reader, &attributes->parsed, base, false, false);
+            frame->noderef = check_input_noderef_attributes(reader, &attributes->parsed, frame->noderef);
+            frame->noderef_pending |= check_input_noderef_new_attributes(&attributes->parsed, 0);
             valid = base != 0 && check_constant_type_attribute(frame, links, link_count, capacity, attributes);
             token = attributes->end;
         }
@@ -674,12 +707,13 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
 {
     CheckInputReader* reader = input->reader;
     reader->constant_abi_origin = 0;
+    reader->constant_noderef = NULL;
     const Parser* parser = reader->parser;
     const uint64_t mark = reader->scratch->length;
     const uint32_t capacity = end - first + 1;
     CheckConstantTypeFrame* frames = arena_push_array(reader->scratch, capacity, sizeof(CheckConstantTypeFrame), 8);
     CheckConstantPart* parts = arena_push_array(reader->scratch, capacity, sizeof(CheckConstantPart), 8);
-    CheckConstantParameter* parameters = arena_push_array(reader->scratch, capacity, sizeof(CheckConstantParameter), 4);
+    CheckConstantParameter* parameters = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckConstantParameter, capacity);
     CheckConstantTypeAttribute* attributes = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckConstantTypeAttribute, capacity);
     reader->output->resource |= frames == 0 || parts == 0 || parameters == 0 || attributes == 0;
     uint32_t cursor = first;
@@ -711,6 +745,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                 CheckConstantAttributes* attribute = input->attribute_starts[i - input->first];
                 if (attribute != 0)
                 {
+                    frame->group_noderef |= frame->group && check_input_noderef_new_attributes(&attribute->parsed, 0);
                     valid = check_constant_type_attribute(frame, attributes, &attribute_count, capacity, attribute);
                     i = attribute->end;
                     continue;
@@ -718,12 +753,14 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                 const uint32_t token = i++;
                 uint32_t qualifiers = 0;
                 bool atomic = false;
+                bool noderef = false;
                 while (valid && i < frame->end && (input->attribute_starts[i - input->first] != 0 ||
-                       check_input_qualifier(parser->tokens.names[i], &qualifiers) || parser->tokens.names[i] == C_NAME_ATOMIC))
+                       check_input_qualifier(parser, i, &qualifiers) || parser->tokens.names[i] == C_NAME_ATOMIC))
                 {
                     CheckConstantAttributes* pointer_attribute = input->attribute_starts[i - input->first];
                     if (pointer_attribute != 0)
                     {
+                        noderef |= check_input_noderef_new_attributes(&pointer_attribute->parsed, 0);
                         valid = check_constant_type_attribute(frame, attributes, &attribute_count, capacity, pointer_attribute);
                         i = pointer_attribute->end;
                     }
@@ -740,6 +777,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                     .qualifiers = qualifiers,
                     .kind = BUSTER_TYPE_KIND_POINTER,
                     .flags = atomic,
+                    .noderef = noderef,
                 };
                 frame->pointers = part_count++;
             }
@@ -757,6 +795,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                 {
                     frame->cursor = close + 1;
                     frames[depth++] = check_constant_type_frame(frame->base, i + 1, close, true, false);
+                    frames[depth - 1].noderef = frame->noderef;
                 }
             }
             frame->cursor = frame == &frames[depth - 1] ? i : frame->cursor;
@@ -903,6 +942,19 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
             }
             if (valid && frame->group)
             {
+                if (frame->group_noderef)
+                {
+                    if (frame->last != BUSTER_CHECK_NONE)
+                    {
+                        parts[frame->last].next = part_count;
+                    }
+                    else
+                    {
+                        frame->first = part_count;
+                    }
+                    parts[part_count] = (CheckConstantPart){ .next = BUSTER_CHECK_NONE, .token = frame->end, .kind = BUSTER_TYPE_KIND_NONE, .noderef = true };
+                    frame->last = part_count++;
+                }
                 CheckConstantTypeFrame* parent = &frames[depth - 2];
                 parent->name = frame->name;
                 parent->first = frame->first;
@@ -932,15 +984,24 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                     p = next;
                 }
                 TypeId type = frame->base;
+                const CheckNoderefType* noderef = frame->noderef;
+                bool noderef_pending = frame->noderef_pending;
                 for (uint32_t p = reverse; type != 0 && p != BUSTER_CHECK_NONE; p = parts[p].next)
                 {
                     const CheckConstantPart* part = &parts[p];
+                    if (noderef_pending && part->kind == BUSTER_TYPE_KIND_FUNCTION)
+                    {
+                        check_input_noderef_placement(reader, part->token, end);
+                    }
+                    noderef_pending = part->kind != BUSTER_TYPE_KIND_NONE ? part->noderef : noderef_pending;
                     if (part->kind == BUSTER_TYPE_KIND_POINTER)
                     {
                         const bool restricted_function = (part->qualifiers & BUSTER_TYPE_RESTRICT) != 0 && type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION;
                         type = restricted_function ? 0 : check_input_type_result(reader, type_pointer(reader->types, type));
                         type = type != 0 && part->flags ? check_input_type_result(reader, type_atomic(reader->types, type)) : type;
                         type = type != 0 ? check_input_type_result(reader, type_qualify(reader->types, type, part->qualifiers)) : 0;
+                        noderef = check_input_noderef_wrap(reader, noderef);
+                        noderef = part->flags ? check_input_noderef_wrap(reader, noderef) : noderef;
                     }
                     else if (part->kind == BUSTER_TYPE_KIND_FUNCTION)
                     {
@@ -949,19 +1010,29 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                         TypeId* types = arena_push_array(reader->scratch, (uint64_t)part->parameter_count + 1, sizeof(TypeId), 4);
                         reader->output->resource |= types == 0;
                         uint32_t count = 0;
+                        CheckNoderefParameter* annotated = NULL;
+                        CheckNoderefParameter* annotated_last = NULL;
                         for (uint32_t parameter = part->parameter_first; types != 0 && parameter != BUSTER_CHECK_NONE; parameter = parameters[parameter].next)
                         {
+                            check_input_noderef_parameter_add(reader, &annotated, &annotated_last, parameters[parameter].noderef, count);
                             types[count++] = parameters[parameter].type;
                         }
                         type = types != 0 ? check_input_type_result(reader, type_function(reader->types, type, types, count, part->flags)) : 0;
+                        noderef = check_input_noderef_make(reader, noderef, annotated, false);
                         arena_pop_to(reader->scratch, parameter_mark);
                     }
-                    else
+                    else if (part->kind != BUSTER_TYPE_KIND_NONE)
                     {
                         type = check_input_type_result(reader, part->kind == BUSTER_TYPE_KIND_ARRAY ? type_array(reader->types, type, part->extent) :
                                part->kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY ? type_variable_array(reader->types, type, (uint32_t)part->extent) :
                                                                               type_incomplete_array(reader->types, type));
+                        noderef = check_input_noderef_wrap(reader, noderef);
                     }
+                    noderef = part->noderef ? check_input_noderef_mark(reader, noderef) : noderef;
+                }
+                if (noderef_pending)
+                {
+                    check_input_noderef_placement(reader, first, end);
                 }
                 for (uint32_t attribute = frame->attribute_first; type != 0 && attribute != BUSTER_CHECK_NONE; attribute = attributes[attribute].next)
                 {
@@ -987,6 +1058,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                                 .type = adjusted,
                                 .next = BUSTER_CHECK_NONE,
                                 .name = name,
+                                .noderef = check_input_noderef_adjust_parameter(reader, type, noderef),
                             };
                             valid = check_constant_parameter_unique(function, parameters, parameter_count);
                             if (function->parameter_last != BUSTER_CHECK_NONE)
@@ -1014,6 +1086,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                     valid = frame->name == BUSTER_CHECK_NONE;
                     result = type;
                     reader->constant_abi_origin = frame->abi_origin;
+                    reader->constant_noderef = noderef;
                     depth -= 1;
                 }
             }
@@ -1074,6 +1147,44 @@ static uint32_t check_constant_separator(CheckConstantInput* input, uint32_t fir
 }
 
 #include "c_check_intrinsic_input.c"
+
+// A marked member's access that the evaluator reads (#147, CheckInputReader.evaluated_members): `token` is its `.` or
+// `->` (an arrow's operand a pointer to the record), `base` its operand's type, `name` the member's name. Only a marked
+// member's is kept, for check_input_deprecated_uses.
+static void check_input_evaluated_member(CheckInputReader* reader, uint32_t token, bool arrow, TypeId base, uint32_t name)
+{
+    const TypeTable* types = reader->types;
+    TypeId record = type_is_valid(types, base) ? type_strip_aligned(types, base) : 0;
+    record = arrow ? (record != 0 && type_kind(types, record) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, record)) : 0) : record;
+    const uint8_t kind = record != 0 ? type_kind(types, type_unqualified(record)) : BUSTER_TYPE_KIND_NONE;
+    uint64_t offset = 0;
+    uint32_t qualifiers = 0;
+    const uint32_t member = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ? type_lookup_member(types, record, name, &offset, &qualifiers) : 0;
+    const bool marked = member != 0 && member != BUSTER_TYPE_MEMBER_UNKNOWN &&
+                        check_marked_member(reader->output->marked_members, reader->output->marked_member_count, member) != NULL;
+    if (marked && reader->evaluated_member_count == reader->evaluated_member_capacity && !reader->output->resource)
+    {
+        const uint32_t capacity = reader->evaluated_member_capacity != 0 ? reader->evaluated_member_capacity * 2 : 16;
+        uint32_t* grown = capacity <= UINT32_MAX / 2 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)capacity * 2) : NULL;
+        reader->output->resource |= grown == NULL;
+        if (grown != NULL)
+        {
+            if (reader->evaluated_member_count != 0)
+            {
+                memcpy(grown, reader->evaluated_members, (uint64_t)reader->evaluated_member_count * 2 * sizeof(*grown));
+            }
+            reader->evaluated_members = grown;
+            reader->evaluated_member_capacity = capacity;
+        }
+    }
+    if (marked && reader->evaluated_member_count < reader->evaluated_member_capacity)
+    {
+        reader->evaluated_members[reader->evaluated_member_count * 2] = token + 1;
+        reader->evaluated_members[reader->evaluated_member_count * 2 + 1] = member;
+        reader->evaluated_member_count += 1;
+    }
+}
+
 
 // Declaration queries can encounter a missing library name before the main reader reaches it, including an
 // address/sizeof operand. Bind it at that source point using the ordinary declaration path. Intrinsics still
@@ -1713,7 +1824,8 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
         else if (valid && kind == PARSE_KIND_IDENTIFIER && role != PARSE_ROLE_MEMBER && role != PARSE_ROLE_TAG && role != PARSE_ROLE_LEAF_RIGHT &&
                  (!input->syntax[index] || role == PARSE_ROLE_SPECIFIER))
         {
-            const uint32_t handle = input->cached ? 0 : check_input_library_binding(reader, name, token);
+            const bool scoped = input->scoped_names && reader->declared_types[token] != 0;
+            const uint32_t handle = input->cached || scoped ? 0 : check_input_library_binding(reader, name, token);
             const uint16_t builtin = !input->syntax[index] ? check_constant_integer_builtin(input, token, handle) : CBUILTIN_NONE;
             const bool invoke = !input->syntax[index] && builtin == CBUILTIN_NONE && check_constant_invoke(input, token, handle);
             const TypeId intrinsic = !input->syntax[index] && builtin == CBUILTIN_NONE && !invoke ? check_constant_intrinsic_type(input, token, handle) : 0;
@@ -1721,7 +1833,7 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
             {
                 check_constant_callee_syntax(input, token);
             }
-            else if (input->cached || intrinsic != 0)
+            else if (input->cached || scoped || intrinsic != 0)
             {
                 valid = intrinsic != 0 || reader->declared_types[token] != 0 || role == PARSE_ROLE_OPERAND;
             }
@@ -1815,6 +1927,7 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
             {
                 const uint32_t root = check_constant_range_root(input, condition ? separator + 1 : next + 1, condition ? next : token);
                 input->abi_origins[token - input->first] = input->abi_origins[root - input->first];
+                check_input_noderef_set(reader->output, token, check_input_noderef_at(reader->output, root));
                 if (reader->selected_tokens != NULL && (reader->selected_tokens[token] & CHECK_INPUT_SOURCE_SELECTION) != 0)
                 {
                     reader->selected_tokens[token] = root | CHECK_INPUT_SOURCE_SELECTION;
@@ -1885,6 +1998,7 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
             {
                 const uint32_t root = check_constant_range_root(input, chosen_first, chosen_end);
                 input->abi_origins[token - input->first] = input->abi_origins[root - input->first];
+                check_input_noderef_set(reader->output, token, check_input_noderef_at(reader->output, root));
                 if (reader->selected_tokens != NULL && (reader->selected_tokens[token] & CHECK_INPUT_SOURCE_SELECTION) != 0)
                 {
                     reader->selected_tokens[token] = root | CHECK_INPUT_SOURCE_SELECTION;
@@ -2098,7 +2212,7 @@ static bool check_constant_source_builtin(CheckConstantInput* input, uint32_t to
         {
             .type = type,
             .category = CHECK_RVALUE,
-            .flags = address ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_ICE,
+            .flags = address ? BUSTER_CHECK_STATIC_OBJECT | (number != 0 ? BUSTER_CHECK_NONNULL_ADDRESS : 0) : BUSTER_CHECK_ICE,
             .constant_kind = address ? CHECK_CONSTANT_ADDRESS : CHECK_CONSTANT_INTEGER,
             .integer = address ? 0 : number,
             .object = address ? (uint32_t)number : 0,
@@ -2389,6 +2503,35 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
             *checked = (CheckActionResult){ .diagnostic = reader->output->resource ? CHECK_DIAG_RESOURCE : CHECK_DIAG_INCOMPATIBLE };
         }
     }
+    if (input->diagnosed != NULL && input->diagnosed->diagnostic == CHECK_DIAG_NONE && checked->diagnostic != CHECK_DIAG_NONE)
+    {
+        TypeId type = action->type != 0 ? action->type : action->operands[0].type;
+        uint32_t expected = 0;
+        bool variadic = false;
+        if (action->op == CHECK_OP_CALL && type != 0)
+        {
+            type = type_strip_aligned(reader->types, type);
+            type = type_kind(reader->types, type) == BUSTER_TYPE_KIND_POINTER ? type_element(reader->types, type) : type;
+            if (type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION)
+            {
+                type_parameters(reader->types, type, &expected);
+                variadic = (reader->types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
+            }
+        }
+        *input->diagnosed = (CheckConstantFailure)
+        {
+            .diagnostic = checked->diagnostic,
+            .op = action->op,
+            .type = type,
+            .second_type = action->operands[1].type,
+            .token = action->node,
+            .callee = callee,
+            .name = action->member,
+            .expected = expected,
+            .actual = action->argument_count,
+            .variadic = variadic,
+        };
+    }
     const uint32_t warning = checked->warnings & CHECK_WARNING_KR_CALLS;
     if (warning != 0)
     {
@@ -2590,7 +2733,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 {
                     .type = string->type,
                     .category = CHECK_LVALUE,
-                    .flags = BUSTER_CHECK_STATIC_OBJECT,
+                    .flags = BUSTER_CHECK_STATIC_OBJECT | (string->object != 0 ? BUSTER_CHECK_NONNULL_ADDRESS : 0),
                     .constant_kind = CHECK_CONSTANT_ADDRESS,
                     .object = string->object,
                 };
@@ -2631,7 +2774,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 {
                     .type = reader->declared_types[declaration],
                     .category = CHECK_LVALUE,
-                    .flags = check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_SIDE_EFFECT,
+                    .flags = (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_SIDE_EFFECT) | check_input_nonnull_flag(reader, declaration, token, false, reader->objects[declaration]),
                     .constant_kind = CHECK_CONSTANT_ADDRESS,
                     .object = reader->objects[declaration],
                 };
@@ -2660,7 +2803,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                     .type = type,
                     .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
                     .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) |
-                             (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0),
+                             (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0) | check_input_nonnull_flag(reader, declaration, token, enumeration, reader->objects[declaration]),
                     .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
                     .integer = enumeration ? reader->enum_values[declaration] : 0,
                     .object = reader->objects[declaration],
@@ -2679,6 +2822,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 valid = check_constant_designator(input, &input->values[index]);
                 check_input_internal_bound_use(reader, token, declaration);
                 input->abi_origins[index] = reader->output->explicit_abis != 0 ? reader->output->explicit_abis[declaration] : 0;
+                check_input_noderef_set(reader->output, token, check_input_noderef_at(reader->output, declaration));
                 produced = true;
             }
         }
@@ -2745,6 +2889,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 valid = count == 1;
                 input->values[index] = action.operands[0];
                 input->abi_origins[index] = valid ? input->abi_origins[first - input->first] : 0;
+                check_input_noderef_set(reader->output, token, valid ? check_input_noderef_at(reader->output, first) : NULL);
                 if (valid && input->proof_values != 0)
                 {
                     proof = input->proof_values[first - input->first];
@@ -2757,6 +2902,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             const uint32_t type_first = input->type_begin[index];
             action.type = type_first != BUSTER_CHECK_NONE ? check_constant_type(input, type_first, token) : 0;
             input->abi_origins[index] = reader->constant_abi_origin;
+            check_input_noderef_set(reader->output, token, reader->constant_noderef);
             action.op = CHECK_OP_CAST;
             valid = count == 1 && action.type != 0;
         }
@@ -2773,6 +2919,8 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             }
             TypeId type = type_first != BUSTER_CHECK_NONE ? check_constant_type(input, type_first, token) : count == 1 && valid ? action.operands[0].type : 0;
             input->abi_origins[index] = type_first != BUSTER_CHECK_NONE ? reader->constant_abi_origin : count == 1 && valid ? input->abi_origins[first - input->first] : 0;
+            const CheckNoderefType* noderef = type_first != BUSTER_CHECK_NONE ? reader->constant_noderef :
+                                             count == 1 && valid ? check_input_noderef_at(reader->output, first) : NULL;
             if (name == C_NAME_BITINT || name == C_NAME_EXTINT)
             {
                 int64_t width = 0;
@@ -2789,10 +2937,12 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             {
                 valid = type_first != BUSTER_CHECK_NONE;
                 type = valid && type != 0 ? check_input_type_result(reader, type_atomic(reader->types, type)) : 0;
+                noderef = check_input_noderef_wrap(reader, noderef);
             }
             else if (name == C_NAME_TYPEOF_UNQUAL || name == C_NAME_GNU_TYPEOF_UNQUAL || name == C_NAME_GNU_TYPEOF_UNQUAL2)
             {
                 type = type_unqualified(type);
+                noderef = type_kind(reader->types, type) == BUSTER_TYPE_KIND_ATOMIC ? check_input_noderef_base(noderef) : noderef;
                 type = type_kind(reader->types, type) == BUSTER_TYPE_KIND_ATOMIC ? type_element(reader->types, type) : type;
             }
             else
@@ -2805,6 +2955,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 check_input_warning_suppress(reader, keyword + 2, token, check_constant_unevaluated_warnings());
             }
             input->queries[index] = type;
+            check_input_noderef_set(reader->output, token, noderef);
         }
         else if (role == PARSE_ROLE_TERMINATOR)
         {
@@ -2886,6 +3037,10 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             valid = count == 1 && token + 1 < input->end && parser->tree.roles[token + 1] == PARSE_ROLE_MEMBER;
             action.op = kind == PARSE_KIND_ARROW ? CHECK_OP_ARROW : CHECK_OP_MEMBER;
             action.member = valid ? parser->tokens.names[token + 1] : 0;
+            if (valid && reader->output->marked_member_count != 0)
+            {
+                check_input_evaluated_member(reader, token, kind == PARSE_KIND_ARROW, action.operands[0].type, action.member);
+            }
             // The access's base type, which __builtin_counted_by_ref's check reads at its operator (#148); queries are a
             // type query's, which no operator token has.
             input->queries[index] = valid ? action.operands[0].type : 0;
@@ -3050,6 +3205,23 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
                 valid = checked.diagnostic == CHECK_DIAG_NONE;
                 input->values[index] = checked.value;
+                if (valid && check_sparse_wide_present(reader->output->noderef_types))
+                {
+                    const TypeId types[3] = { action.operands[0].type, action.operands[1].type, action.operands[2].type };
+                    const CheckNoderefType* shadows[3] = { NULL, NULL, NULL };
+                    uint32_t operand = 0;
+                    for (uint32_t child = first; child != BUSTER_CHECK_NONE && operand < 3; child = input->next_value[child - input->first])
+                    {
+                        shadows[operand++] = check_input_noderef_at(reader->output, child);
+                    }
+                    if (action.op == CHECK_OP_CONDITIONAL && count == 2)
+                    {
+                        shadows[2] = shadows[1];
+                        shadows[1] = shadows[0];
+                    }
+                    const CheckNoderefType* destination = check_input_noderef_at(reader->output, token);
+                    check_input_noderef_set(reader->output, token, check_input_noderef_action(reader, action.op, types, shadows, destination, action.member));
+                }
                 if (first != BUSTER_CHECK_NONE && (action.op == CHECK_OP_ADDRESS || action.op == CHECK_OP_DEREFERENCE || action.op == CHECK_OP_SELECT ||
                     action.op == CHECK_OP_SUBSCRIPT || action.op == CHECK_OP_ASSIGN || action.op == CHECK_OP_STATEMENT_VALUE))
                 {
@@ -3114,6 +3286,7 @@ struct CheckConstantOperator
     uint8_t marker;
     uint16_t builtin;
     uint8_t abi_origin;
+    const CheckNoderefType* noderef;
 };
 
 static uint8_t check_constant_precedence(CheckOp op)
@@ -3276,6 +3449,16 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
             check_input_warning_add_at(reader, action.node, checked.warnings, action.context.source_position);
             reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
             valid &= checked.diagnostic == CHECK_DIAG_NONE;
+            if (valid && check_sparse_wide_present(reader->output->noderef_types))
+            {
+                const TypeId types[3] = { action.operands[0].type, action.operands[1].type, action.operands[2].type };
+                const CheckNoderefType* shadows[3] = { NULL, NULL, NULL };
+                for (uint32_t i = 0; i < operation.arity && i < 3; i += 1)
+                {
+                    shadows[i] = ranges[*value_count + i].noderef;
+                }
+                range.noderef = check_input_noderef_action(reader, action.op, types, shadows, operation.noderef, action.member);
+            }
             ranges[*value_count] = range;
             input->abi_origins[range.first - input->first] = abi_origin;
             values[*value_count] = checked.value;
@@ -3301,7 +3484,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
     CheckConstantOperator* operators = arena_push_array(reader->scratch, capacity, sizeof(CheckConstantOperator), 8);
     CheckValue* values = arena_push_array(reader->scratch, capacity, sizeof(CheckValue), 16);
     CheckValue* proofs = input->proof_values != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckValue, capacity) : 0;
-    CheckConstantRange* ranges = arena_push_array(reader->scratch, capacity, sizeof(CheckConstantRange), 4);
+    CheckConstantRange* ranges = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckConstantRange, capacity);
     reader->output->resource |= operators == 0 || values == 0 || ranges == 0 || (input->proof_values != 0 && proofs == 0);
     bool valid = first < end && operators != 0 && values != 0 && ranges != 0 && (input->proof_values == 0 || proofs != 0);
     bool operand = true;
@@ -3310,6 +3493,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
     uint32_t token = first;
     while (valid && token < end)
     {
+        const uint32_t current = token;
         const uint8_t kind = parser->tokens.kinds[token];
         bool argument_separator = false;
         if (kind == PARSE_KIND_COMMA)
@@ -3394,13 +3578,14 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
             if (valid)
             {
                 const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
-                ranges[value_count] = (CheckConstantRange){ .first = token, .end = token + 1, .overload_token = token + 1 };
+                ranges[value_count] = (CheckConstantRange){ .first = token, .end = token + 1, .overload_token = token + 1,
+                                                         .noderef = check_input_noderef_at(reader->output, declaration) };
                 values[value_count++] = (CheckValue)
                 {
                     .type = type,
                     .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
                     .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) |
-                             (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0),
+                             (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0) | check_input_nonnull_flag(reader, declaration, token, enumeration, reader->objects[declaration]),
                     .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
                     .integer = enumeration ? reader->enum_values[declaration] : 0,
                     .object = reader->objects[declaration],
@@ -3428,7 +3613,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                 {
                     .type = string->type,
                     .category = CHECK_LVALUE,
-                    .flags = BUSTER_CHECK_STATIC_OBJECT,
+                    .flags = BUSTER_CHECK_STATIC_OBJECT | (string->object != 0 ? BUSTER_CHECK_NONNULL_ADDRESS : 0),
                     .constant_kind = CHECK_CONSTANT_ADDRESS,
                     .object = string->object,
                 };
@@ -3488,6 +3673,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                     .precedence = 14,
                     .arity = query ? 0 : 1,
                     .abi_origin = query ? 0 : input->abi_origins[close - input->first],
+                    .noderef = query ? NULL : check_input_noderef_at(reader->output, close),
                 };
                 if (query)
                 {
@@ -3637,6 +3823,10 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
             operand = true;
             token += 1;
         }
+        if (!valid && input->failed_token != NULL)
+        {
+            *input->failed_token = current;
+        }
     }
     valid &= !operand;
     while (valid && operator_count != 0)
@@ -3648,6 +3838,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
     {
         input->values[first - input->first] = values[0];
         input->abi_origins[first - input->first] = input->abi_origins[ranges[0].first - input->first];
+        check_input_noderef_set(reader->output, first, ranges[0].noderef);
         if (input->proof_values != 0)
         {
             input->proof_values[first - input->first] = proofs[0];
@@ -3667,9 +3858,10 @@ static bool check_constant_raw_type_start(CheckConstantInput* input, uint32_t to
                 kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC;
     if (kind == PARSE_KIND_IDENTIFIER)
     {
-        const uint32_t handle = input->cached ? 0 : c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[token]);
+        const bool scoped = input->scoped_names && reader->declared_types[token] != 0;
+        const uint32_t handle = input->cached || scoped ? 0 : c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[token]);
         const uint32_t declaration = reader->output->declarations[token];
-        type = input->cached ? declaration < parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_TYPEDEF :
+        type = input->cached || scoped ? declaration < parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_TYPEDEF :
                handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF;
     }
     return type;
@@ -3781,7 +3973,8 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
                  (parser->tokens.kinds[token - 1] != PARSE_KIND_STRUCT && parser->tokens.kinds[token - 1] != PARSE_KIND_ENUM)))
         {
             const uint32_t name = parser->tokens.names[token];
-            const uint32_t handle = input->cached ? 0 : check_input_library_binding(reader, name, token);
+            const bool scoped = input->scoped_names && reader->declared_types[token] != 0;
+            const uint32_t handle = input->cached || scoped ? 0 : check_input_library_binding(reader, name, token);
             const bool type = handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF;
             const uint16_t builtin = !input->syntax[index] ? check_constant_integer_builtin(input, token, handle) : CBUILTIN_NONE;
             const bool invoke = !input->syntax[index] && builtin == CBUILTIN_NONE && check_constant_invoke(input, token, handle);
@@ -3792,7 +3985,7 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
             }
             else
             {
-                valid = intrinsic != 0 || (input->cached ? reader->declared_types[token] != 0 || !input->syntax[index] :
+                valid = intrinsic != 0 || (input->cached || scoped ? reader->declared_types[token] != 0 || !input->syntax[index] :
                         handle != 0 ? type == (input->syntax[index] != 0) : !input->syntax[index]);
             }
             valid = valid && !(!input->cached && builtin == CBUILTIN_NONE && check_input_use_shadowed(reader, token, handle));
@@ -3808,6 +4001,10 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
                 valid = c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, check_input_use_point(reader, token)) != 0;
                 reader->output->resource |= !valid;
             }
+        }
+        if (!valid && input->failed_token != NULL)
+        {
+            *input->failed_token = token;
         }
     }
     if (valid && input->pending_tag == BUSTER_CHECK_NONE)
@@ -3860,6 +4057,7 @@ static bool check_constant_raw_prepare(CheckConstantInput* input)
                 }
                 type = valid ? check_constant_type(input, first, type_end) : 0;
                 input->abi_origins[close - input->first] = reader->constant_abi_origin;
+                check_input_noderef_set(reader->output, close, reader->constant_noderef);
                 valid &= type != 0;
             }
             else if (specifier)
@@ -3869,12 +4067,14 @@ static bool check_constant_raw_prepare(CheckConstantInput* input)
                 valid = valid && check_constant_resolve(input, &value, 0, &value);
                 type = valid ? value.type : 0;
                 input->abi_origins[close - input->first] = input->abi_origins[token + 1 - input->first];
+                check_input_noderef_set(reader->output, close, check_input_noderef_at(reader->output, token + 1));
             }
             if (valid && specifier)
             {
                 if (name == C_NAME_ATOMIC)
                 {
                     type = check_input_type_result(reader, type_atomic(reader->types, type));
+                    check_input_noderef_set(reader->output, close, check_input_noderef_wrap(reader, check_input_noderef_at(reader->output, close)));
                 }
                 else if (name == C_NAME_BITINT || name == C_NAME_EXTINT)
                 {
@@ -3891,6 +4091,10 @@ static bool check_constant_raw_prepare(CheckConstantInput* input)
                 else if (name == C_NAME_TYPEOF_UNQUAL || name == C_NAME_GNU_TYPEOF_UNQUAL || name == C_NAME_GNU_TYPEOF_UNQUAL2)
                 {
                     type = type_unqualified(type);
+                    if (type_kind(reader->types, type) == BUSTER_TYPE_KIND_ATOMIC)
+                    {
+                        check_input_noderef_set(reader->output, close, check_input_noderef_base(check_input_noderef_at(reader->output, close)));
+                    }
                     type = type_kind(reader->types, type) == BUSTER_TYPE_KIND_ATOMIC ? type_element(reader->types, type) : type;
                 }
                 valid &= type != 0;
@@ -4141,13 +4345,16 @@ static bool check_input_constant_job_step(CheckConstantInput* input, CheckValue*
     return valid;
 }
 
-static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, uint32_t end, bool type_name, bool cached,
-                                      CheckValue* value, TypeId* type, uint32_t* failed_token)
+static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, uint32_t end, bool type_name, bool cached, bool scoped_names,
+                                      CheckValue* value, TypeId* type, uint32_t* failed_token, CheckConstantFailure* diagnosed)
 {
     const uint64_t mark = reader->scratch->length;
     CheckConstantInput input;
     reader->constant_abi_origin = 0;
+    reader->constant_noderef = NULL;
     bool valid = check_constant_input_initialize(&input, reader, first, end, cached, failed_token);
+    input.diagnosed = diagnosed;
+    input.scoped_names = scoped_names;
     if (valid)
     {
         if (input.raw)
@@ -4171,6 +4378,7 @@ static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, 
         valid = check_constant_range_value(&input, first, end, value) && check_constant_resolve(&input, value, 0, value);
         const uint32_t root = valid ? check_constant_range_root(&input, first, end) : BUSTER_CHECK_NONE;
         reader->constant_abi_origin = root != BUSTER_CHECK_NONE ? input.abi_origins[root - first] : 0;
+        reader->constant_noderef = check_input_noderef_at(reader->output, root);
     }
     reader->prototype_depth = input.prototype_depth;
     arena_pop_to(reader->scratch, mark);
@@ -4180,19 +4388,19 @@ static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, 
 static bool check_input_evaluate(CheckInputReader* reader, uint32_t first, uint32_t end, CheckValue* value)
 {
     TypeId unused = 0;
-    return check_input_constant_read(reader, first, end, false, false, value, &unused, 0);
+    return check_input_constant_read(reader, first, end, false, false, false, value, &unused, 0, NULL);
 }
 
 static __attribute__((unused)) bool check_input_evaluate_cached(CheckInputReader* reader, uint32_t first, uint32_t end, CheckValue* value)
 {
     TypeId unused = 0;
-    return check_input_constant_read(reader, first, end, false, true, value, &unused, 0);
+    return check_input_constant_read(reader, first, end, false, true, false, value, &unused, 0, NULL);
 }
 
 static __attribute__((unused)) bool check_input_evaluate_cached_at(CheckInputReader* reader, uint32_t first, uint32_t end, CheckValue* value, uint32_t* failed_token)
 {
     TypeId unused = 0;
-    return check_input_constant_read(reader, first, end, false, true, value, &unused, failed_token);
+    return check_input_constant_read(reader, first, end, false, true, false, value, &unused, failed_token, NULL);
 }
 
 static bool check_input_constant(CheckInputReader* reader, uint32_t first, uint32_t end, int64_t* number)
@@ -4246,6 +4454,6 @@ static __attribute__((unused)) TypeId check_input_constant_type(CheckInputReader
 {
     CheckValue unused = { 0 };
     TypeId type = 0;
-    const bool valid = check_input_constant_read(reader, first, end, true, false, &unused, &type, 0);
+    const bool valid = check_input_constant_read(reader, first, end, true, false, false, &unused, &type, 0, NULL);
     return valid ? type : 0;
 }

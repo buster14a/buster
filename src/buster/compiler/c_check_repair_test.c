@@ -393,6 +393,17 @@ static void check_test_repair_report_boundaries(CheckTest* test)
     kinds[1] = PARSE_KIND_PLUS;
     input.message = CHECK_INPUT_DECLARATION;
     check_test_expect(test, !check_repair_input_report(&repair, &input), "repair does not infer declaration diagnostics from synthetic closure");
+    kinds[0] = PARSE_KIND_BREAK;
+    roles[0] = PARSE_ROLE_RETURN;
+    input.message = CHECK_INPUT_BREAK;
+    check_test_expect(test, check_repair_input_report(&repair, &input), "repair retains an original break outside a loop or switch");
+    input.message = CHECK_INPUT_CONTINUE;
+    check_test_expect(test, !check_repair_input_report(&repair, &input), "repair checks the transfer message against its original keyword");
+    kinds[0] = PARSE_KIND_CONTINUE;
+    check_test_expect(test, check_repair_input_report(&repair, &input), "repair retains an original continue outside a loop");
+    roles[0] = PARSE_ROLE_OPERAND;
+    check_test_expect(test, !check_repair_input_report(&repair, &input), "repair requires the original transfer statement role");
+    kinds[0] = PARSE_KIND_IDENTIFIER;
     input.message = CHECK_INPUT_RESOURCE;
     check_test_expect(test, !check_repair_input_report(&repair, &input), "repair does not replace a syntax error with a resource failure");
     input = (CheckInputReport){ .token = 3, .message = CHECK_INPUT_UNDECLARED };

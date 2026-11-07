@@ -65,9 +65,21 @@ successor's assertion after its **sequential** edits and simultaneous source
 phi renaming. All blocks must be reachable; disconnected circular assertions
 are rejected rather than treated as proofs.
 
-An assertion names at most one location per value. Different equal-width names
-may share the same byte span, provided the ABI or every incoming edge proves
-each name. Partial overlapping assertions are refused. Within a block, copies
+An assertion may name several locations per value: each home must independently
+be proved from the ABI or on **every** incoming edge. Different equal-width
+names may share the same byte span under the same proof requirement. Exact
+repeated facts are idempotent; partial overlapping assertions are refused.
+Equal-span names form transitive alias sets, independent of assertion order,
+including when a later fact joins names already asserted at different homes.
+The fast seed uses a temporary union-by-rank forest in its existing name
+scratch, flattens names and byte tokens, then binds frame-recipe incarnations.
+The oracle uses an independent dense alias closure for ABI and local assertion
+seeds; certificates still never seed its CFG inference. An undefined incoming
+phi (`BUSTER_CERT_NONE`) is the exception: it may assert only one physical byte
+span, with exact duplicate views allowed. Any bits may satisfy that one home,
+but they do not prove equality between several homes; otherwise such a phi
+could falsely join unrelated known values. Defined incoming phis still support
+multiple independently proved homes. Within a block, copies
 may establish any number of register and stack homes. The exit requirements
 share the same assertion discipline; they are proved on every zero-edge
 (sink) block, and a program with exit requirements but no sink block is
@@ -114,9 +126,10 @@ side effect. The oracle instead executes the XORs as GF(2) expressions over
 incoming bytes and proves their resulting permutation. A damaged middle
 instruction is rejected.
 
-The target vocabulary deliberately does not model EVEX 128/256-bit edits into
-registers 16–31, arbitrary XOR networks, symbol/TLS recipes or cross-class
-register transfers. The decoder must refuse a target form whose full effects
+EVEX 128/256-bit edits into registers 16–31 are their xmm and ymm views,
+with AVX512VL (`BUSTER_CERT_AVX512VL`, #1284: a machine row's staging into
+them). The target vocabulary deliberately does not model arbitrary XOR
+networks, symbol/TLS recipes or cross-class register transfers. The decoder must refuse a target form whose full effects
 cannot be represented; it must not silently approximate it by a supported edit.
 
 Integer recipes belong to the value's own register class. A general register's
@@ -174,8 +187,11 @@ incarnation, a strict subset of the fast checker's surviving-base cases.
     (`BUSTER_TIER1_CFG_NONE`, the IR's undef that #141's blocks' lifetimes
     give promotion) is a rename from `BUSTER_CERT_NONE`: any bits are the
     phi's value along that edge, so its fact needs no proof there, which is
-    what `tier1_cfg_verify` checks of it too. The oracle makes every unit hold
-    such a destination after the edge.
+    what `tier1_cfg_verify` checks of it too. Only one physical span may be
+    asserted for that undefined destination; it cannot establish equality
+    between distinct homes. The oracle makes every unit hold such a destination
+    during inference, then checks that single-span obligation on the edge in
+    its separate local sufficiency pass.
   - A rematerializable value is an integer recipe of its class, with its own
     id as the payload.
 - **The allocation is untrusted.** Its stream is what the consumers run. Each
@@ -293,8 +309,9 @@ counts fixpoint rounds and cumulative work.
 Fast scratch is bounded by
 `24*units + 24*values + 5*blocks + 96` bytes with the current record layouts.
 Checking costs linear work in the bounded declarations, source instructions/
-operands, rewritten edits, certificate assertions, edge/rename obligations and
-byte-unit updates. Width is bounded by 64 bytes. There are no per-store scans
+operands, rewritten edits, edge/rename obligations and byte-unit updates, plus
+near-linear union/find work in the certificate assertions' alias closure.
+Width is bounded by 64 bytes. There are no per-store scans
 of stack homes, per-block clears of the value domain or per-edge state copies.
 
 The fragment adapter includes `tier1_allocate.c`'s input contract and independently
@@ -385,7 +402,9 @@ the normalized-stream checker/oracle and fragment mutation suites. The stream
 fixtures cover ABI entry, initialized/uninitialized cycles, critical edges,
 phi cycles, sibling-edge isolation, forged homes, partial writes, omitted
 uses, tied-source copies, call clobbers/restricted masks, callee-saved exits,
-exit-assertion shape and sink requirements, stack reuse, stale definition
+exit-assertion shape and sink requirements, multi-home assertions, all alias
+orders, narrow carried rows, missing/overwritten/wrong-owner rows on edges and
+joins, stale loop incarnations, stack reuse, stale definition
 incarnations, frame-recipe base redefinitions, legal exchanges, damaged XORs
 and missing materializations. There are 1,000 generated valid move sequences
 and 1,000 independently checked mutations, plus structural/capacity tests and
@@ -505,21 +524,29 @@ uncertified (`Tier1EmitResult.code_reason`), counted by `--tier1-report`'s
 
 **Trusted, as the source:** the IR and its selection (what a node's sequence
 computes from the registers it is given: `tier1_emit_cfg_kernel`,
-`tier1_select_fixed`), the ABI's argument registers, the rematerialization
-recipes, the frame's displacements from its base register, the CFG and its
-phis, and `x86_semantics.c`'s effects of each record.
+`tier1_select_fixed`, and a machine row's template, the front end's records
+that `tier0_operation_valid` admits, by the roles they name), the ABI's
+argument registers and its records of by-value aggregates, the
+rematerialization recipes, the frame's displacements from its base register,
+the CFG and its phis, and `x86_semantics.c`'s effects of each record.
 
 **Untrusted:** the allocation, every emitted record, and the emitter's
 account of them: each record's origin (`Tier1Origin`, marked by
-`tier1_emit_mark`), each block's and stub's first record, the references, and
-which recomputed definitions it left out. An origin only says which decoding
-applies; every record is decoded by its own bytes.
+`tier1_emit_mark`), each block's and stub's first record, the references,
+which recomputed definitions it left out, and each machine row's placement
+(`Tier1RowPlacement`, #1284). An origin only says which decoding applies, and a
+placement only how to place a row's template; every record is decoded by its
+own bytes.
 
 The decoding:
 
 - **Storage.** Each general register is an 8-byte and a 4-byte location, each
   xmm register its 16 bytes and its scalar 8 and 4, each opmask register its 1,
-  2, 4 and 8. The frame base register's displacements over the spill, save and
+  2, 4 and 8. In a function with a vector wider than 8 bytes or a machine row
+  (#1284), the vector registers are zmm0 to zmm31, each its 64, 32, 16, 8 and 4
+  bytes, and a write of any width kills the whole register (a VEX or EVEX one
+  zeroes it past its width; a legacy SSE one, which keeps it, writes a register
+  no other value shares). The frame base register's displacements over the spill, save and
   temporary rows, the calls' outgoing areas and the stack parameters' incoming
   slots are byte units, so slots that values share over their lifetimes are the
   same bytes. Values have their own widths: a general one 8 bytes or 4 (every
@@ -530,7 +557,15 @@ The decoding:
 - **Moves.** `mov` (32- and 64-bit), `movss`, `movsd`, `movaps` and `kmov`
   between registers and frame bytes are the edits their forms say, at their
   forms' widths: a 32-bit store of an 8-byte value truncates it, and its later
-  8-byte use fails. A recomputation is a constant's edit only where
+  8-byte use fails. So are a vector's `vmovdqa64` and `vmovdqu32` of 16, 32 and
+  64 bytes and an aggregate part's `movups`, `vmovdqu` and `vmovdqu64` (#1284):
+  a ymm or zmm value moved through its xmm register is a 16-byte value, and its
+  wider use fails. An SSE carrier's copies (#1280, `tier1_select_carrier_move`)
+  are its 8 bytes' `vmovq` and its 4 bytes' `vinsertps` of element 0 with the
+  others zeroed (immediate `0x0e`, its source in vvvv too); any other immediate
+  is no move. At a target without AVX512VL (#1281) they are their VEX twins,
+  which name registers below 16 alone: a vector's `vmovdqa` and `vmovdqu` of 16
+  and 32 bytes, and a carrier's VEX `vmovq` and `vinsertps`. A recomputation is a constant's edit only where
   `tier1_rematerialize` writes exactly that record, with its reference, for the
   value its origin names.
 - **Nodes.** Each node's records are regenerated from the allocation's
@@ -548,6 +583,46 @@ The decoding:
   opmask register, which `x86_semantics`' effects of the `call` itself don't
   say) and the outgoing area too (its callee owns it), before its result. A copy that vanishes in its own register
   is its operand's value. A return's epilogue may come before its `ret`.
+- **Machine rows** (`TIER1_RULE_ROW`, #1284). The emitter publishes the
+  placement it gave each row (`Tier1RowPlacement`: each role's register, and
+  the opmask registers the row names by number, renamed). The certificate
+  places the row's template by it itself, each register field's role, an /is4
+  operand's and an opmask decoration's, compares the records byte for byte,
+  and validates them (`x86_validate`). The roles are registers that hold
+  values: no rsp; k0 no decoration's role, and by number only as itself, k1 to
+  k7 only as one of them; a pair's registers (VP2INTERSECT's) themselves. No two
+  roles share a register while both hold their values but those Tier 0's
+  placement puts together (`tier0_operation_placement`,
+  `tier0_operation_mask_place`), which the template may take for granted: the
+  result and the first operand of its stack (an integer's where that operand is
+  an integer, a floating one's, a mask's), or operands no record writes. Since
+  #1283 places VECTOR roles one at a time, a VECTOR role holds its register over
+  the records from the row's entry (an operand there) or its first write, to the
+  last record naming it (past the row for the result), by the template's own
+  uses (`tier1_select_row_vectors`); two may share one where one is done with it
+  before the other's first write, or in that record where the write is pure, the
+  form's destination may be a source, and the record doesn't write the first.
+  VECTOR(0)'s early register, where the first operand is read in its own
+  register up to the result's first write, must be that first write's, a pure
+  one, in the claimed field; the fields naming VECTOR(0) before it read the
+  early register. The records are one instruction: each operand
+  read at its role's register at its value's width, what they write killed,
+  the result defined at its role's. The operands' staging into their roles'
+  registers, the result's move out, and the borrowed opmask registers' saves
+  and reloads around the row are moves. A row whose records read or write a
+  role's register implicitly, or of a form `x86_semantics.c`'s effects don't
+  cover, is left uncertified (`TIER1_CERT_EMITTED_VECTOR`).
+- **By-value aggregates** (#789, #1284). A parameter's copy at entry, from its
+  registers and incoming slots (a SPLIT location's, a STACK one's high or low
+  eightbyte alone); a call's argument copies into staging slots below rsp or
+  the reserved frame object when they exceed the red zone's capacity (#1450),
+  zmm16 and on for 64-byte parts, stack slots or the outgoing area whole; its
+  parts' loads, the hidden pointer's `lea`, the result parts' stores; and the
+  function's own result, staged then loaded or copied through the hidden
+  pointer, are regenerated as the emitter writes them and compared. Each part
+  is a value of the certificate, defined where its copy puts it and read where
+  it is consumed: a part loaded from the wrong slot, or a copy's address
+  overwritten before its last piece, fails.
 - **Entry.** The parameters are entry facts in their ABI registers and incoming
   slots. An incoming slot is placed by the ABI from the decoded prologue (8 bytes
   past the return address per slot), and the layout's offset, which the
@@ -559,13 +634,42 @@ The decoding:
   from its slot) is the instruction that reads those bytes and defines the
   parameter, so an extension left out, or made a wider move or load, leaves the
   parameter undefined and its uses fail.
+- **Carried call-save rows (#1270).** `tier1_emit_cfg_records` carries rows only
+  from a block's single predecessor earlier in layout (`only < b`); joins and
+  backward-layout edges reset them. No load is owed at entry. The private rows
+  are disjoint from allocation spill/edge-move slots; fixed-register sequences
+  still invalidate rows they overwrite. A row's SSA name dominates the
+  predecessor and cannot be redefined in its sole successor.
+
+  With `Tier1EmitOptions.certify` and a nonempty general call-save mask,
+  `Tier1EmitResult.entry_rows` retains `cfg_input.block_count * 16` contiguous
+  `uint32_t` node owners (block-major, register-minor; `BUSTER_IR_NONE` means
+  unknown); otherwise it is null. It lives in the output arena with the emitted
+  records. The same-size exit table is emission scratch only. The producer
+  allocates neither table for a function without general call-save rows.
+
+  `tier1_certificate_emitted` bounds each owner, value class, register mask and
+  frame row before publication. Each nonempty reachable entry row adds a fact
+  at `tier1_emit_call_save`'s actual frame displacement, at the value's width:
+  four bytes for a canonical narrow integer even though the store/load is
+  eight bytes. These untrusted assertions supplement, never replace, the
+  allocation's register/slot facts. The normal edge proof must establish each
+  one from decoded records; a row-owner claim alone proves nothing. Missing,
+  stale, overwritten or wrong-owner rows fail closed. The fact/location
+  capacities include every added row; no fixed per-value home limit is assumed.
 - **The frame protocol.** The prologue and each epilogue are decoded record by
   record by rsp's offset from its value at entry, each record exactly its form's
   (`push`, the frame pointer's `mov`, `sub`; `add`, the reset from rbp, `pop`),
   nothing else in them. The prologue must build the frame the layout's offsets
   are of: its saved registers pushed, its frame pointer set where it has one,
   its allocation exactly; and with calls, rsp a multiple of 16 at them (the ABI's
-  alignment, rsp 8 past one at entry). A frame pointer is the ABI's frame
+  alignment, rsp 8 past one at entry). A realigned frame's prologue ends in its
+  `and rsp, -alignment`, after the allocation, with a frame pointer (#1284):
+  rsp is then at no known distance from the entry, so the bytes the protocol
+  places from the entry (the pushes' slots, the return address and the
+  incoming area, which rbp reaches) are units of their own, by their offsets
+  from rsp at entry, and the rows must lie below the pushes; its epilogue
+  resets rsp from rbp before its pops. A frame pointer is the ABI's frame
   record: rbp pushed first and set right after, the caller's rbp at it and the
   return address above it, as the layout's offsets from rbp and an unwinder by
   frame pointers take it. A push is a store of its register into
@@ -591,15 +695,15 @@ The decoding:
   any pointer but the frame base register's is the program's own, assumed not to
   reach the frame's rows, as C's object model says.
 
-**Not decoded yet**, so not certified, each counted by its reason: by-value
-aggregates (#789's copies, parts and hidden pointers), dynamic frames with
-`alloca` or a stack restore (a stack save alone is certified, rbp its base)
-and realigned ones, vectors wider than 8 bytes (#141's ymm and zmm moves) and
-long doubles (the x87 stack), a prologue's stack probes, a variadic
-definition's register save area,
-an indirect jump to several labels, a call's stack arguments or a stack
+**Not decoded yet**, so not certified, each counted by its reason: dynamic
+frames with `alloca` or a stack restore (a stack save alone is certified, rbp
+its base), or a dynamic outgoing area, or a realigned frame whose base register
+isn't rsp; long doubles (the x87 stack, an aggregate's x87 parts among them),
+a prologue's stack probes, a variadic definition's register save area, an
+indirect jump to several labels, a call's stack arguments or a stack
 parameter where the frame base register isn't rsp's (or the incoming area's),
-and an entry block that is a loop's. The allocation's certificate still covers
+an entry block that is a loop's, and a machine row of an implicit register or
+an uncovered form. The allocation's certificate still covers
 them, and the straight-line consumer's functions keep the interval
 certificate. Canonical 32-bit storage (a 4-byte value's upper half zero) is the
 selection's contract and isn't checked: a 4-byte value is its low 4 bytes.
@@ -625,7 +729,31 @@ fixture with an I8 parameter in `rdi` and an I16 on the stack is certified, and
 its extensions made `mov edi, edi` or a 32-bit load of the slot are refused.
 A compare-exchange with four values live across it, rax among the four
 allocatable registers, is certified; its restore of rax made `mov rax, rax` or
-`mov rax, rcx` is refused.
+`mov rax, rcx` is refused. A realigned frame (#1284's review: a 64-byte object
+aligned to 64, a value across a call in rbx) is certified; with its allocation
+moved before rbx's push, its epilogue matched so that every register and the
+return address still come back (its reset from rbp lower by the allocation, and
+`mov rsp, rbp` before rbp's pop), it is refused: rbx's slot is below the
+allocation, among the bytes the rows may take once the realignment moves rsp.
+Without the prologue's rule that nothing but the realignment follows the
+allocation, that mutant is accepted.
+`test-tier1-masks` corrupts every machine row it emits and every wide
+vector's move (#1284): each borrowed opmask register's reload after a row made
+its move into itself, the mask it held lost; each staging copy into a general
+register renamed, through the row's records and its claimed placement, to a
+register holding a value live across the row; the claim corrupted with the
+row's records placed by it, so that only the claim's checks can refuse it
+(a non-operand role, SCRATCH, MASK_SCRATCH or a temporary VECTOR still in
+use when the result is written, in the result's register; the result in an
+operand's that Tier 0's own placement doesn't give it; an opmask register named
+by number made k0; a split's claim cleared, or its early register made the
+result's); and each ymm or zmm value's reload or register move narrowed to its
+xmm form. Each is refused, and the code put back is certified. The rule on
+VECTOR roles sharing a register is checked on its own too, on `vpaddd V2, V0,
+V1; vpaddd V0, V2, V1`: V1 and V2 may each share the result's register, each
+last read where the result's pure write makes it; V1 and V2 may not; nor V1 and
+the result where that write merges or its record's destination can't be a
+source.
 `test-tier1-pipeline` also corrupts each
 certified function's records: every prologue and epilogue record, and a sample
 of its moves and nodes' (another register, a frame access 8 bytes off, an
@@ -636,6 +764,15 @@ refused, all 76 of the prologues' and 72 of the epilogues' among them, and the
 11 accepted (independent moves swapped, and the like) are harmless. With `--tier1 --verify`, the
 compiler's `main.c` certifies 562 of its 813 CFG functions' code and the
 c-testsuite subset 231 of 288, none refused; most of the rest are aggregates'.
+Since #1284, `main.c` with `./build.sh`'s znver5 flags certifies 1082 of its
+1101 CFG functions' code (653 before), the other 19 indirect jumps to several
+labels and variadic definitions, and the c-testsuite subset 284 of 297 (231
+before), the rest switch tables, a VLA, long doubles and variadic
+definitions; none refused. `test-checker-driver --executable`'s Tier 1
+fixtures check their counts: the machine rows', the SSE carriers', the
+vectors', the 64-byte arguments', the rarer aggregate shapes' and the
+thread-locals' code all certified, the by-value aggregates' but its variadic definition's, the wide
+values' but its long doubles' and its variadic definition's.
 
 **Cost.** `benchmark-tier1-code-certificate [--only emit|decode|check|certify]
 [-E's options] file...` times the decoding, the check and both per IR

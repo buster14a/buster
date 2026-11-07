@@ -334,7 +334,7 @@ static void check_test_x86_diagnostic_storage(CheckTest* test)
         uint32_t none = BUSTER_CHECK_NONE;
         CheckValue leaf = { 0 };
         uint32_t slot = 0;
-        CheckInput input = { .graph = { .count = 1, .ops = &op, .leaves = &leaf, .leaf_slots = &slot, .leaf_count = 1, .operand0 = &none, .operand1 = &none,
+        CheckInput input = { .graph = { .count = 1, .ops = &op, .dense_leaves = &leaf, .leaf_slots = &slot, .leaf_count = 1, .operand0 = &none, .operand1 = &none,
                                         .operand2 = &none } };
         CheckBuiltinX86Effect effect = { .range_event_count = 1 };
         CheckStream stream = { .x86 = &effect, .x86_count = 1 };
@@ -741,6 +741,31 @@ static void check_test_x86_hard_errors(CheckTest* test, const char* clang)
           "unsigned f(unsigned b,unsigned i){if(0)return __builtin_ia32_kshiftlisi(b,i);return sizeof(__builtin_ia32_kshiftrisi(b,i));}\n",
           "8:47: error: argument to '__builtin_ia32_kshiftlisi' must be a constant integer\n"
           "8:92: error: argument to '__builtin_ia32_kshiftrisi' must be a constant integer\n" },
+        { "32-bit-only flags on x86-64",
+          "unsigned a(void){return __builtin_ia32_readeflags_u32();}\n"
+          "void b(unsigned x){__builtin_ia32_writeeflags_u32(x);}\n"
+          "unsigned long c(void){return sizeof(__builtin_ia32_readeflags_u32());}\n"
+          "unsigned d(void){if(0)return __builtin_ia32_readeflags_u32();return 0;}\n"
+          "void e(unsigned x){if(0)__builtin_ia32_writeeflags_u32(x);}\n",
+          "8:25: error: this builtin is only available on 32-bit targets\n"
+          "9:20: error: this builtin is only available on 32-bit targets\n"
+          "10:37: error: this builtin is only available on 32-bit targets\n"
+          "11:30: error: this builtin is only available on 32-bit targets\n"
+          "12:25: error: this builtin is only available on 32-bit targets\n" },
+        { "string and paired immediates",
+          "typedef long long Q __attribute__((vector_size(16)));\n"
+          "V a(V x,V y,int i){return __builtin_ia32_pcmpestrm128(x,1,y,2,i);}\n"
+          "int b(V x,V y,int i){return __builtin_ia32_pcmpistri128(x,y,i);}\n"
+          "Q c(Q x,int i){return __builtin_ia32_extrqi(x,i,1);}\n"
+          "Q d(Q x,int i){return __builtin_ia32_extrqi(x,1,i);}\n"
+          "Q e(Q x,Q y,int i){return __builtin_ia32_insertqi(x,y,i,1);}\n"
+          "Q f(Q x,Q y,int i){return __builtin_ia32_insertqi(x,y,1,i);}\n",
+          "9:27: error: argument to '__builtin_ia32_pcmpestrm128' must be a constant integer\n"
+          "10:29: error: argument to '__builtin_ia32_pcmpistri128' must be a constant integer\n"
+          "11:23: error: argument to '__builtin_ia32_extrqi' must be a constant integer\n"
+          "12:23: error: argument to '__builtin_ia32_extrqi' must be a constant integer\n"
+          "13:27: error: argument to '__builtin_ia32_insertqi' must be a constant integer\n"
+          "14:27: error: argument to '__builtin_ia32_insertqi' must be a constant integer\n" },
         { "other immediates",
           "I4 a(I4 x,int n){return __builtin_ia32_pshufd(x,n);}\n"
           "F4 b(F4 x,F4 y,int n){return __builtin_ia32_shufps(x,y,n);}\n"
@@ -936,15 +961,21 @@ static void check_test_x86_hard_every(CheckTest* test, TypeTable* table, const c
             };
             builtin_intrinsic_types_decode(table, &input, &types);
         }
+        const uint32_t parameters = types.parameter_count;
         const uint64_t required = types.ice_parameters | check_graph_x86_ice_mask(info, false);
         const bool immediate = rule->immediate != BUSTER_CHECK_X86_NO_IMMEDIATE;
+        const bool paired = rule->immediate_extra != 0;
         const bool rounding = rule->rounding != CHECK_X86_ROUND_NONE;
-        if (immediate || rounding)
+        if (immediate || paired || rounding)
         {
-            const uint32_t last = types.parameter_count != 0 ? types.parameter_count - 1 : 0;
+            // Most rounding controls are the last parameter. VCVTPS2PH512's SAE shares its immediate instead;
+            // its last parameter is a runtime mask. SSE4a's second immediate has its own prototype ICE marker.
+            const uint32_t rounded = rule->rounding == CHECK_X86_ROUND_IMMEDIATE_SAE ? rule->immediate : parameters != 0 ? parameters - 1 : 0;
+            const uint32_t extra = paired ? rule->immediate_extra - 1u : 0;
             const bool right = info != NULL && types.status == BUILTIN_INTRINSIC_TYPES_SUCCESS &&
-                               (!immediate || (rule->immediate < types.parameter_count && (required & (UINT64_C(1) << rule->immediate)) != 0)) &&
-                               (!rounding || (types.parameter_count != 0 && (required & (UINT64_C(1) << last)) != 0));
+                               (!immediate || (rule->immediate < parameters && (required & (UINT64_C(1) << rule->immediate)) != 0)) &&
+                               (!paired || (immediate && extra < parameters && (required & (UINT64_C(1) << extra)) != 0)) &&
+                               (!rounding || (rounded < parameters && (required & (UINT64_C(1) << rounded)) != 0));
             rows += 1;
             loose += !right;
             first_loose = first_loose == NULL && !right ? rule->name : first_loose;

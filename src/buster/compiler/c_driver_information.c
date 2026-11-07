@@ -84,7 +84,13 @@ static bool driver_information_files(const char* name, int count, char** argumen
             }
             result = putchar('\n') != EOF && result;
         }
-        else
+        // An empty -print-file-name= is the empty spelling. Probing "directory/" would be a directory, and a
+        // directory is never a file this lookup may print.
+        if (result && name != NULL && name[0] == 0)
+        {
+            result = printf("\n") >= 0;
+        }
+        else if (result && name != NULL)
         {
             String8 file = { 0 };
             struct stat status;
@@ -122,6 +128,12 @@ static bool driver_information_files(const char* name, int count, char** argumen
             {
                 file = runtime_find_file(&runtime, name, false);
             }
+            if (file.length != 0)
+            {
+                struct stat found_status;
+                const bool regular = file.pointer != NULL && stat(file.pointer, &found_status) == 0 && S_ISREG(found_status.st_mode);
+                file = regular ? file : (String8){ 0 };
+            }
             result = printf("%.*s\n", (int)(file.length != 0 ? file.length : strlen(name)), file.length != 0 ? file.pointer : name) >= 0;
         }
     }
@@ -135,7 +147,8 @@ static bool driver_information_files(const char* name, int count, char** argumen
 
 // Information actions may follow other options; an operand spelling an action is never interpreted again. A null
 // status tests for an action so implicit assembly dispatch leaves it to the driver. A bare -v prints to stderr only.
-static bool main_information(int count, char** arguments, int* status)
+// noinline: its search paths' buffers would take 23 KB of its caller's frame, which a compile runs below (#652).
+static __attribute__((noinline)) bool main_information(int count, char** arguments, int* status)
 {
     const char* target = NULL;
     const char* file = NULL;
@@ -193,7 +206,7 @@ static bool main_information(int count, char** arguments, int* status)
         {
             verbose = true;
         }
-        else if ((pp_option_takes_value(argument) || strcmp(argument, "--lanes") == 0 || strcmp(argument, "--worker-budget") == 0 ||
+        else if ((pp_option_takes_value(argument) || strcmp(argument, "--lanes") == 0 || strcmp(argument, "--lane-cpus") == 0 || strcmp(argument, "--worker-budget") == 0 ||
                   strcmp(argument, "--id-order") == 0 || strcmp(argument, "-l") == 0 || strcmp(argument, "-L") == 0 || strcmp(argument, "-Xlinker") == 0) && i + 1 < count)
         {
             i += 1;

@@ -1301,6 +1301,11 @@
     BUSTER_CHECK_X86_ONE("selectsbf_128", SELECT_SCALAR, 2, 16, NONE, 0)
     BUSTER_CHECK_X86_ONE("extrq", BINARY, 8, 16, EXTRQ_X_X, BUSTER_X86_FEATURE(SSE4A))
     BUSTER_CHECK_X86_ONE("insertq", BINARY, 8, 16, INSERTQ_X_X, BUSTER_X86_FEATURE(SSE4A))
+    // SSE4a's two imm8 fields: length first, bit index second. Both prototype arguments are ICEs, without a SemaX86 range.
+    BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_extrqi", sizeof("__builtin_ia32_extrqi") - 1, CHECK_X86_LOWER_UNARY_IMMEDIATE, 8, 16, false, false, 1,
+        X86_FORM_EXTRQ_X_IMM8_IMM8, 0, false, BUSTER_X86_FEATURE(SSE4A), .immediate_extra = 3)
+    BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_insertqi", sizeof("__builtin_ia32_insertqi") - 1, CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 16, false, false, 2,
+        X86_FORM_INSERTQ_X_X_IMM8_IMM8, 0, false, BUSTER_X86_FEATURE(SSE4A), .immediate_extra = 4)
     // #148: SSE4.1's roundings by an immediate (VROUNDPS's, the scalar ones of b's first element into a), the dot
     // products under its masks (VDPPS, VDPPD), AES's key assist and SHA's four rounds by its byte, and F16C's
     // conversions of floats to halves by its rounding control, each the immediate's whole byte.
@@ -1319,6 +1324,13 @@
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vcvtps2ph", CHECK_X86_LOWER_UNARY_IMMEDIATE, 4, 16, false, 1, X86_FORM_VCVTPS2PH_XM64_X_IMM8, 16, BUSTER_X86_FEATURE(F16C))
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vcvtps2ph256", CHECK_X86_LOWER_UNARY_IMMEDIATE, 4, 32, false, 1, X86_FORM_VCVTPS2PH_XM128_Y_IMM8, 16,
                                 BUSTER_X86_FEATURE(F16C))
+    // VCVTPS2PH writes rm, unlike the other masked unary conversions. The 512-bit form uses SAE for controls 8..12.
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vcvtps2ph_mask", CHECK_X86_LOWER_MASK_UNARY, 4, 16, true, 1, X86_FORM_VCVTPS2PH_XM64_X_IMM8_EVEX, 16,
+                                BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vcvtps2ph256_mask", CHECK_X86_LOWER_MASK_UNARY, 4, 32, true, 1, X86_FORM_VCVTPS2PH_XM128_Y_IMM8_EVEX, 16,
+                                BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL))
+    BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_vcvtps2ph512_mask", sizeof("__builtin_ia32_vcvtps2ph512_mask") - 1, CHECK_X86_LOWER_MASK_UNARY, 4, 64, false, true, 1,
+        X86_FORM_VCVTPS2PH_YM256_Z_IMM8, 32, false, BUSTER_X86_FEATURE(AVX512F), X86_FORM_VCVTPS2PH_Y_Z_SAE_IMM8, CHECK_X86_ROUND_IMMEDIATE_SAE)
     BUSTER_CHECK_X86_ONE("sha1msg1", BINARY, 4, 16, SHA1MSG1_X_XM128, BUSTER_X86_FEATURE(SHA))
     BUSTER_CHECK_X86_ONE("sha1msg2", BINARY, 4, 16, SHA1MSG2_X_XM128, BUSTER_X86_FEATURE(SHA))
     BUSTER_CHECK_X86_ONE("sha1nexte", BINARY, 4, 16, SHA1NEXTE_X_XM128, BUSTER_X86_FEATURE(SHA))

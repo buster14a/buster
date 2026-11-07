@@ -61,6 +61,20 @@ static void check_test_driver_musttail_errors(CheckTest* test, const char* clang
                                                "__attribute__((musttail)) return f(x);\n}\nreturn 0;\n}\n" },
         { "a statement expression's cleanup's scope", "void c(int *);\nint f(int);\nint g(int x) {\nreturn ({ int y __attribute__((cleanup(c))) = x;\n"
                                                       "__attribute__((musttail)) return f(x);\n0; });\n}\n" },
+        // __builtin_call_with_static_chain's (#148): its signature is clang's R(R, C) of its call's result and its chain's
+        // type, the callee's name the builtin's.
+        { "a static chain's call", "int f(int);\nint g(int x, void *p) {\n__attribute__((musttail)) return __builtin_call_with_static_chain(f(x), p);\n}\n" },
+        { "a static chain's call, another parameter count", "int f(int, int);\nint g(int x, int y, void *p) {\n"
+                                                            "__attribute__((musttail)) return __builtin_call_with_static_chain(f(x, y), p);\n}\n" },
+        { "a static chain's call, another result", "int f(int);\nlong g(int x, void *p) {\n"
+                                                   "[[clang::musttail]] return __builtin_call_with_static_chain(f(x), p);\n}\n" },
+        { "a static chain's call, another chain", "int f(int);\nint g(int x, int *p) {\n__attribute__((musttail)) return __builtin_call_with_static_chain(f(x), (char *)p);\n}\n" },
+        { "a static chain's call, a decayed chain", "int f(int);\nchar b[4];\nint g(int x, const char *p) {\n"
+                                                    "__attribute__((musttail)) return __builtin_call_with_static_chain(f(x), b);\n}\n" },
+        { "a static chain's call, a variadic caller", "int f(int);\nint g(int x, void *p, ...) {\n"
+                                                      "__attribute__((musttail)) return __builtin_call_with_static_chain(f(x), p);\n}\n" },
+        { "a static chain's call, a caller of another convention", "int f(int);\n__attribute__((ms_abi)) int g(int x, void *p) {\n"
+                                                                   "__attribute__((musttail)) return __builtin_call_with_static_chain(f(x), p);\n}\n" },
         // A scope's error is its function's end's, after a later return's own error in the function.
         { "a scope's error after a later return's", "void c(int *);\nint f(int);\nint g(int x) {\nif (x) {\nint y __attribute__((cleanup(c))) = x;\n"
                                                     "__attribute__((musttail)) return f(x);\n}\n__attribute__((musttail)) return x;\n}\n" },

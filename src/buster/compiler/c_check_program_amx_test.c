@@ -329,7 +329,7 @@ static void check_test_program_amx_oracle(CheckTest* test, const char* clang)
     for (uint32_t kind = CBUILTIN_X86_HELPER_TILEZERO; valid && kind < CBUILTIN_X86_HELPER_COUNT; kind += 1)
     {
         const CBuiltinX86HelperInfo* info = cbuiltin_x86_helper_infos + kind;
-        const CBuiltinX86Helper helper = cbuiltin_x86_helper((CBuiltinX86HelperKind)kind, &output);
+        const CBuiltinX86Helper helper = cbuiltin_x86_helper((CBuiltinX86HelperKind)kind, 0, &output);
         for (uint32_t shape = 0; shape < BUSTER_ARRAY_LENGTH(shapes); shape += 1)
         {
             char name[64], failure[128] = { 0 };
@@ -535,19 +535,14 @@ static void check_test_program_amx(CheckTest* test, const char* clang)
             "__attribute__((target(\"amx-avx512,no-avx10.2\"))) V tested(Tile x){return __builtin_ia32_tcvtrowd2ps_internal(3,20,x,2);}",
             "AMX-row-operation-requires-avx10.2", true,false,0,0,"this AMX intrinsic without its required target features",&target);
         check_test_program_march = "-march=x86-64";
-        check_test_program_boundary_target(test,
-            "typedef int Tile __attribute__((vector_size(1024),aligned(64)));Tile tested(Tile x){return x+x;}",
-            "AMX-value-address-never-used-as-scalar-arithmetic", true,false,0,0,"arithmetic on 1024-byte tile vectors",&baseline);
+        // A tile's arithmetic is a wide transport vector's, a piece at a time (#137, c_check_program_transport.c), which
+        // c_check_program_vector_test.c's transport program runs against clang's; its volatile elements are refused.
         static const struct
         {
             const char* name;
             const char* source;
             const char* reason;
         } unsupported[] = {
-            { "AMX-value-bitwise", "Tile tested(Tile x){return ~x;}", "arithmetic on 1024-byte tile vectors" },
-            { "AMX-value-comparison", "Tile tested(Tile x,Tile y){return x==y;}", "arithmetic on 1024-byte tile vectors" },
-            { "AMX-value-update", "Tile tested(Tile x){x+=1;return x;}", "arithmetic on 1024-byte tile vectors" },
-            { "AMX-value-scalar-splat", "Tile tested(Tile x,int n){return x+n;}", "arithmetic on 1024-byte tile vectors" },
             { "AMX-value-volatile-element", "int tested(volatile Tile*x){return (*x)[3];}", "element access through volatile vectors" },
         };
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(unsupported); i += 1)
@@ -556,6 +551,6 @@ static void check_test_program_amx(CheckTest* test, const char* clang)
             snprintf(source,sizeof(source),"typedef int Tile __attribute__((vector_size(1024),aligned(64)));%s",unsupported[i].source);
             check_test_program_boundary_target(test,source,unsupported[i].name,true,false,0,0,unsupported[i].reason,&baseline);
         }
-        printf("  AMX: native tile arithmetic not executed; decoded Clang instruction traces and native memory-value ABI are separate checks\n");
+        printf("  AMX: native tile instructions not executed; decoded Clang instruction traces and native memory-value ABI are separate checks\n");
     }
 }

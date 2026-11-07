@@ -128,7 +128,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         {
             TypeId unused = 0;
             const bool cached = reader->bindings.count != 0 && reader->bindings.point[reader->bindings.count - 1] >= first;
-            valid = check_input_constant_read(reader, first, end, false, cached, &value, &unused, &failed);
+            valid = check_input_constant_read(reader, first, end, false, cached, false, &value, &unused, &failed, NULL);
         }
         // A job that stopped at a definition has no value yet.
         const bool evaluated = *definition == BUSTER_CHECK_NONE;
@@ -415,7 +415,7 @@ static uint32_t check_input_vla_scale(CheckInputReader* reader, uint32_t token, 
         const uint32_t constant = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         if (constant != BUSTER_CHECK_NONE)
         {
-            *check_graph_leaf_of(graph, constant) = (CheckValue)
+            const CheckValue leaf =
             {
                 .type = BUSTER_TYPE_ULONG,
                 .category = CHECK_RVALUE,
@@ -423,6 +423,7 @@ static uint32_t check_input_vla_scale(CheckInputReader* reader, uint32_t token, 
                 .constant_kind = CHECK_CONSTANT_INTEGER,
                 .integer = factor,
             };
+            check_graph_set_leaf(graph, constant, &leaf);
         }
         node = node == BUSTER_CHECK_NONE ? constant : constant != BUSTER_CHECK_NONE ?
                check_input_add(reader, CHECK_OP_MULTIPLY, token, node, constant, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;

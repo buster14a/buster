@@ -90,6 +90,11 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/statfs.h>
+#include <sys/syscall.h>
+#if __has_feature(memory_sanitizer)
+#include <sanitizer/msan_interface.h>
+#endif
 #include "host_isa.h"
 #include "c_dependency_driver.c"
 #include "c_builtin_catalog.c"
@@ -253,6 +258,24 @@ typedef enum PPRawStrings
     PP_RAW_STRINGS_OFF,
 } PPRawStrings;
 
+// One non-regular primary input, read to EOF before any unit or replay opens it. `path` borrows the command's argv.
+typedef struct PPStreamInput PPStreamInput;
+struct PPStreamInput
+{
+    const char* path;
+    String8 bytes;
+};
+
+#include "c_driver_inputs.c"
+
+typedef struct PPDriverInput PPDriverInput;
+struct PPDriverInput
+{
+    char* path;
+    CheckDriverInputKind kind;
+    bool explicit_language;
+};
+
 typedef struct PPOptions PPOptions;
 struct PPOptions
 {
@@ -260,7 +283,12 @@ struct PPOptions
     // Frozen command-owned stdin bytes, shared read-only by a unit and its diagnostic replay.
     String8 stdin_source;
     bool stdin_ready;
+    // Named non-regular inputs, read once the same way. A replay and a second pass see these bytes, not the stream.
+    PPStreamInput* streams;
+    uint32_t stream_count;
     bool explicit_language;
+    // A .i input is already preprocessed. Tokens copied to the output are not expanded again; directives still run.
+    bool preprocessed;
     bool verbose;
     // The checker's implicit-function diagnostic: 0 follows the language mode, 1 ignores, 2 warns, 3 errors.
     uint8_t implicit_function_diagnostic;
@@ -335,7 +363,7 @@ struct PPOptions
     // Keep where the expansions that can start a line start in the output (PPExpansionStart), which -E's line markers
     // need to place them: the printer can't print markers for a run without them.
     bool expansion_starts;
-    // Semantic consumers expand pack operands at their original source point. The default -E stream keeps them raw.
+    // Semantic consumers expand supported pragma operands at their original source point. Ordinary -E keeps them raw.
     bool semantic_pragmas;
     // Replace trigraphs (translation phase 1): clang's default in the ISO modes before C23, and -trigraphs,
     // -ftrigraphs or -fno-trigraphs.
@@ -359,6 +387,8 @@ struct PPOptions
     // fatal error and stops publication; -Wno-fatal-errors restores the ordinary error budget.
     bool fatal_errors;
     bool suppress_warnings;
+    // The default-on negative-to-unsigned #if warning has no individual Clang warning group.
+    bool negative_conversion_error;
     bool no_diagnostic_summary;
     // -dM: -E prints the macros defined at the end (pp_print_macros) instead of the tokens.
     bool dump_macros;
@@ -616,6 +646,9 @@ struct PPFile
 // The system calls lookups made, counted for whoever made them: open attempts (one per uncached path, whether or not a
 // file is there), fstat attempts (one per successful open, even for a non-regular file or a failed fstat), and files
 // mapped/read (the latter counts file-read operations, not individual pread attempts). Each unit/lane owns its counts.
+// `listings` counts directories whose names were read (file_cache_list_directory: an open, an fstatfs, getdents64 to the
+// end and a close, or fewer system calls if one of them fails), and `listed` the paths a listing answered without a
+// system call.
 typedef struct FileCacheCounts FileCacheCounts;
 struct FileCacheCounts
 {
@@ -623,6 +656,8 @@ struct FileCacheCounts
     uint64_t fstats;
     uint64_t maps;
     uint64_t reads;
+    uint64_t listings;
+    uint64_t listed;
 };
 
 // What a probe of a path found (file_cache_probe): whether a regular file can be read there, its identity and
@@ -668,6 +703,32 @@ struct FileCachePath
     FileProbe probe;
 };
 
+// A directory the include search looked up paths in (a search directory, or an includer's), which the cache counts the
+// failed probes of: the paths in it that had no file (ENOENT). When the count reaches BUSTER_FILE_CACHE_LISTING_MISSES,
+// the cache reads the directory's names once (file_cache_list_directory). The listing then answers a path in the
+// directory whose first component it doesn't have, with no system call (file_cache_listed_absent). It is about as dear
+// as ten to twenty failed probes, so a short search path or a small unit never pays for one (#653).
+typedef struct FileCacheDirectory FileCacheDirectory;
+struct FileCacheDirectory
+{
+    uint64_t hash;
+    const char* path; // NUL-terminated.
+    uint32_t length;
+    uint32_t misses;
+    // The listed names' keys (file_cache_name_key, never 0), in name_mask + 1 slots, or null: not listed yet, put off
+    // (`deferred`: more names than a first look reads), or (`unlisted`) a directory a listing can't answer for exactly.
+    const uint32_t* names;
+    uint32_t name_mask;
+    bool deferred;
+    bool unlisted;
+    FileCacheDirectory* next;
+};
+
+// The chains of directories the cache looked up paths in, by hash: a search directory and every includer's directory
+// (for quoted names) get one. A lookup comes here only for a path the cache never looked up, which costs a probe or
+// skips one, so a few directories a chain are cheap.
+#define BUSTER_FILE_CACHE_DIRECTORY_SLOTS 256u
+
 // The arenas a lane prepares records into: the token columns (kinds, starts, values), each in an arena of its own as a
 // translation unit's are, the leading-space words and directive tables, and the bytes of the files it reads.
 typedef struct FileCacheArenas FileCacheArenas;
@@ -708,7 +769,13 @@ struct FileCache
     uint32_t path_count;
     uint32_t* path_slots;
     uint32_t path_slot_mask;
+    // The paths' bytes, and the directories (FileCacheDirectory) and their listings, which a directory gets at its
+    // `listing_misses`-th failed probe (BUSTER_FILE_CACHE_LISTING_MISSES; 0 for never, the tests' oracle).
     Arena path_arena;
+    FileCacheDirectory* directory_slots[BUSTER_FILE_CACHE_DIRECTORY_SLOTS];
+    uint32_t listing_misses;
+    // The directories with a listing: until there is one, a lookup that finds a file looks no directory up.
+    uint32_t listed_directories;
     Arena arrays[4];
     // Each lane's arenas, reserved when the lane first prepares a record.
     FileCacheArenas lanes[BUSTER_LANE_MAX_COUNT];
@@ -1279,6 +1346,18 @@ struct PPHistoryRun
 };
 _Static_assert(sizeof(PPHistoryRun) == 8, "an output history run is eight bytes");
 
+// A semantic use of __FLT_EVAL_METHOD__, including expansions consumed by #if or another directive. The output
+// boundary and preceding pragma count retain the expansion's place even when a capture has not lifted its pragmas
+// into the output yet. No record is made for ordinary -E, or for tokens that were never expanded.
+typedef struct PPEvalMethodUse PPEvalMethodUse;
+struct PPEvalMethodUse
+{
+    uint32_t position;
+    uint32_t pragmas;
+    uint32_t location;
+    uint32_t origin;
+};
+
 // The most invocations in one invocation's arguments that pp_finish_simple expands in place (Preprocessor.nested).
 #define BUSTER_PP_NESTED_PLANS 8
 
@@ -1311,6 +1390,9 @@ struct PPDiagnosticRecord
     PPDiagnosticRecord* next;
     Preprocessor* owner;
     uint64_t position;
+    // Nonzero orders a completed construct's diagnostics before unsequenced ones at the same publication position.
+    // Zero retains ordinary discovery order. Notes belong to the same record and follow its primary.
+    uint64_t suborder;
     uint32_t location;
     uint32_t origin;
     uint32_t note_location;
@@ -1370,6 +1452,8 @@ struct Preprocessor
     char** directories;
     uint32_t* directory_lengths;
     uint8_t* directory_system;
+    // Each one's directory in the file cache (FileCacheDirectory), once a lookup has needed it.
+    FileCacheDirectory** directory_entries;
     uint32_t directory_count;
     uint32_t angled_first; // The first directory <...> searches.
     // With --buster-headers: clang's resource directory, right after buster's (`buster_directory`, its path, as
@@ -1533,12 +1617,19 @@ struct Preprocessor
     // The predefines' file data (clang's <built-in> buffer), whose __STDC macros clang reports as builtin when they are
     // redefined or undefined (pp_language_defined); BUSTER_PP_NONE before it is read.
     uint32_t predefines_data;
+    // __DATE__'s and __TIME__'s text, empty until the first expansion of either without SOURCE_DATE_EPOCH (pp_unit_time);
+    // and the unit's time they give, in seconds.
     char date[16];
     char time[16];
     char timestamp[32]; // __TIMESTAMP__'s with SOURCE_DATE_EPOCH (`has_epoch`); else each file's modification time.
     bool has_epoch;
+    int64_t unit_seconds;
     // The builtin __FLT_EVAL_METHOD__'s value (predefines_text).
     uint32_t flt_eval_method;
+    // Cold semantic expansion uses, in preprocessing order. History replay supplies their retained origins too.
+    PPEvalMethodUse* eval_method_uses;
+    uint32_t eval_method_use_count;
+    uint32_t eval_method_use_capacity;
     // The phases' TSC ticks, the tokens the prepared files have, and what the run did, when PPOptions.timing is set.
     uint64_t ticks[PP_PHASE_COUNT];
     uint64_t input_tokens;
@@ -1631,7 +1722,10 @@ typedef enum PPDiagnosticPhase
     PP_DIAGNOSTIC_LEXICAL,
     PP_DIAGNOSTIC_DEFERRED,
     PP_DIAGNOSTIC_RETURN,
+    // A declarator's completed type precedes declaration-attribute checks at the same parser boundary.
+    PP_DIAGNOSTIC_TYPE,
     PP_DIAGNOSTIC_SEMANTIC,
+    PP_DIAGNOSTIC_PHASE_COUNT,
 } PPDiagnosticPhase;
 
 typedef struct PPOutputDiagnosticNote PPOutputDiagnosticNote;
@@ -1726,7 +1820,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
         const uint32_t position = pp->diagnostic_position != BUSTER_PP_NONE ? pp->diagnostic_position : pp->output.count;
         if (pp->options.collect_diagnostics)
         {
-            pp_collect_diagnostic(pp, requested, (uint64_t)position * 4 + PP_DIAGNOSTIC_LEXICAL, location, location != 0 ? pp->diagnostic_origin : 0, NULL, NULL, 0, format, arguments);
+            pp_collect_diagnostic(pp, requested, (uint64_t)position * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_LEXICAL, location, location != 0 ? pp->diagnostic_origin : 0, NULL, NULL, 0, format, arguments);
         }
         else
         {
@@ -1738,7 +1832,9 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
 
 static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_history_ensure(Preprocessor* pp);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_release_file_columns(Preprocessor* pp, bool poison);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_location_in_main_file(const Preprocessor* pp, uint32_t location);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnose_eval_method_use(Preprocessor* pp, uint32_t use, uint32_t position, uint32_t pragma_source);
 
 #include "c_preprocessor_history.c"
 
@@ -1898,62 +1994,111 @@ static bool pp_raw_string_start(const uint8_t* bytes, uint32_t length)
     return length >= prefix + 2 && bytes[prefix] == 'R' && bytes[prefix + 1] == '"';
 }
 
+// `length` bytes of source cleaned of their line splices (and trigraphs, with `trigraphs`) into `buffer`, which needs
+// room for `length` bytes, through the scalar lexer's characters; with `string`, a raw string literal's characters
+// after its opening quote as written. Returns the length.
+static uint32_t pp_clean_splices(const uint8_t* bytes, uint32_t length, bool trigraphs, bool string, uint8_t* buffer)
+{
+    const ScalarLexer lexer = {
+        .source = bytes,
+        .length = length,
+        .trigraphs = trigraphs,
+        .cplusplus = false,
+    };
+    uint64_t p = 0;
+    uint32_t result = 0;
+    bool opened = false;
+    while (p < length)
+    {
+        uint64_t size;
+        uint64_t char_start;
+        const int32_t c = get_char(&lexer, p, &size, &char_start);
+        if (c != BUSTER_LEX_END_OF_FILE)
+        {
+            buffer[result] = (uint8_t)c;
+            result += 1;
+        }
+        p += size != 0 ? size : 1;
+        // A string literal's first quote is its opening one, right after its R if it is a raw string literal.
+        if (string && !opened && c == '"')
+        {
+            opened = true;
+            const bool raw = result >= 2 && buffer[result - 2] == 'R';
+            const uint64_t rest = raw ? length - p : 0;
+            memcpy(buffer + result, bytes + p, rest);
+            result += (uint32_t)rest;
+            p += rest;
+        }
+    }
+    return result;
+}
+
+// Whether `length` bytes may hold a line splice or, with `trigraphs`, a trigraph, so that pp_remove_splices_by cleans
+// them. A splice is a backslash, whitespace and a line break (get_char), so a backslash may start one only when a byte
+// up to ' ' follows it or it ends the bytes; a backslash before anything else, as an escape sequence's, may not, and
+// cleaning such bytes gives back the same bytes. The scalar twin of pp_splice_possible_vector, and its oracle.
+static bool pp_splice_possible_scalar(const uint8_t* bytes, uint32_t length, bool trigraphs)
+{
+    bool result = false;
+    for (uint32_t i = 0; !result && i < length; i += 1)
+    {
+        result = (bytes[i] == '\\' && (i + 1 == length || bytes[i + 1] <= ' ')) || (trigraphs && bytes[i] == '?');
+    }
+    return result;
+}
+
+// pp_splice_possible_scalar 64 bytes at a time, in masked loads that read no byte past `length`: a backslash's lane
+// shifted up one against the blanks (every byte up to ' '; the zeros past the bytes count, so a final backslash does),
+// a block's backslash in its last lane carried to the next block's first, or past the last block to its end.
+static bool pp_splice_possible_vector(const uint8_t* bytes, uint32_t length, bool trigraphs)
+{
+#if !BUSTER_HOST_VECTOR
+    return pp_splice_possible_scalar(bytes, length, trigraphs);
+#else
+    const __mmask64 questions = trigraphs ? ~0ull : 0;
+    uint64_t carry = 0;
+    uint64_t possible = 0;
+    for (uint32_t b = 0; possible == 0 && b < length; b += 64)
+    {
+        const __mmask64 lanes = _bzhi_u64(~0ull, length - b < 64 ? length - b : 64);
+        const __m512i block = _mm512_maskz_loadu_epi8(lanes, bytes + b);
+        const uint64_t backslashes = _mm512_mask_cmpeq_epi8_mask(lanes, block, _mm512_set1_epi8('\\'));
+        const uint64_t blanks = _mm512_cmple_epu8_mask(block, _mm512_set1_epi8(' '));
+        possible = (((backslashes << 1) | carry) & blanks) | _mm512_mask_cmpeq_epi8_mask(questions & lanes, block, _mm512_set1_epi8('?'));
+        carry = backslashes >> 63;
+    }
+    return possible != 0 || carry != 0;
+#endif
+}
+
 // `length` bytes of source of a token of kind `kind`, without the line splices in them (and trigraphs, with
 // C_TOKENIZER_TRIGRAPHS in `refine_flags`): the bytes themselves if they have none, else a copy in `buffer`, which
-// needs room for `length` bytes. A raw string literal's characters undo translation phases 1 and 2, as clang's
-// getSpelling keeps them: a raw string literal keeps what follows its opening quote as written, and so does an unknown
-// token the lexer read as one (its delimiter invalid, or unterminated) whose prefix and quote are as written, which
-// clang reads byte by byte (a token that needs cleaning anywhere, as one with a line splice in its prefix, clang cleans
-// whole). Returns the length.
-static uint32_t pp_remove_splices(const uint8_t* bytes, uint32_t length, uint32_t refine_flags, uint8_t kind, uint8_t* buffer, const uint8_t** spelling)
+// needs room for `length` bytes. Bytes have none to remove when no backslash in them may start a splice nor, with
+// trigraphs, a '?' a trigraph (pp_splice_possible_vector, or its scalar twin with `scalar`). A raw string literal's
+// characters undo translation phases 1 and 2, as clang's getSpelling keeps them: a raw string literal keeps what
+// follows its opening quote as written, and so does an unknown token the lexer read as one (its delimiter invalid, or
+// unterminated) whose prefix and quote are as written, which clang reads byte by byte (a token that needs cleaning
+// anywhere, as one with a line splice in its prefix, clang cleans whole). Returns the length.
+static uint32_t pp_remove_splices_by(const uint8_t* bytes, uint32_t length, uint32_t refine_flags, uint8_t kind, bool scalar, uint8_t* buffer, const uint8_t** spelling)
 {
     const bool trigraphs = (refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
     const bool string = pp_is_string_literal(kind);
-    bool cleaned = false;
-    for (uint32_t i = 0; !cleaned && i < length; i += 1)
-    {
-        cleaned = bytes[i] == '\\' || (bytes[i] == '?' && trigraphs);
-    }
+    bool cleaned = BUSTER_SCALAR_PATH(scalar) ? pp_splice_possible_scalar(bytes, length, trigraphs) : pp_splice_possible_vector(bytes, length, trigraphs);
     cleaned = cleaned && !(kind == C_TOKEN_UNKNOWN && pp_raw_string_start(bytes, length));
     uint32_t result = length;
     *spelling = bytes;
     if (cleaned)
     {
-        // Through the scalar lexer's characters, which skip the splices.
-        const ScalarLexer lexer = {
-            .source = bytes,
-            .length = length,
-            .trigraphs = trigraphs,
-            .cplusplus = false,
-        };
-        uint64_t p = 0;
-        result = 0;
-        bool opened = false;
-        while (p < length)
-        {
-            uint64_t size;
-            uint64_t char_start;
-            const int32_t c = get_char(&lexer, p, &size, &char_start);
-            if (c != BUSTER_LEX_END_OF_FILE)
-            {
-                buffer[result] = (uint8_t)c;
-                result += 1;
-            }
-            p += size != 0 ? size : 1;
-            // A string literal's first quote is its opening one, right after its R if it is a raw string literal.
-            if (string && !opened && c == '"')
-            {
-                opened = true;
-                const bool raw = result >= 2 && buffer[result - 2] == 'R';
-                const uint64_t rest = raw ? length - p : 0;
-                memcpy(buffer + result, bytes + p, rest);
-                result += (uint32_t)rest;
-                p += rest;
-            }
-        }
+        result = pp_clean_splices(bytes, length, trigraphs, string, buffer);
         *spelling = buffer;
     }
     return result;
+}
+
+// pp_remove_splices_by with the vectorized check.
+static uint32_t pp_remove_splices(const uint8_t* bytes, uint32_t length, uint32_t refine_flags, uint8_t kind, uint8_t* buffer, const uint8_t** spelling)
+{
+    return pp_remove_splices_by(bytes, length, refine_flags, kind, false, buffer, spelling);
 }
 
 // `length` bytes of a token of kind `kind` without the line splices in them (pp_remove_splices), unless they are a
@@ -1966,7 +2111,7 @@ static uint32_t pp_without_splices(const Preprocessor* pp, uint8_t kind, const u
     *spelling = bytes;
     if (!final)
     {
-        result = pp_remove_splices(bytes, length, pp->refine_flags, kind, buffer, spelling);
+        result = pp_remove_splices_by(bytes, length, pp->refine_flags, kind, pp->options.scalar, buffer, spelling);
     }
     return result;
 }
@@ -3828,6 +3973,9 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
 #define BUSTER_FILE_CACHE_PATH_BYTES (1ull << 32)
 #define BUSTER_FILE_CACHE_INITIAL_SLOTS 1024u
 #define BUSTER_FILE_CACHE_ARENA_BYTES (64ull << 30)
+// The base pages that a lane's records arena and its bytes arena start with (file_cache_arenas): a unit fills a few
+// hundred kilobytes of each (sqlite3.c's 268 and 376 KB), where each one's first huge page took 2 MB (#672).
+#define BUSTER_FILE_CACHE_SMALL_BYTES (2ull << 20)
 // The largest file a translation unit's lookup reads into its lane's bytes arena rather than maps
 // (file_cache_lookup_path), as c_files.c's lanes read theirs (BUSTER_FILES_READ_LIMIT): a read saves the file's mmap
 // and, when the cache is released, its munmap. On the 9700X, reading the files of up to 16 KB took 1.9% to 2.3% off the
@@ -3835,35 +3983,84 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
 // others', larger limits less, and reading every file (sqlite3.c's 9.5 MB too) made sqlite3.c's slower than mapping
 // them all (docs/c-preprocessor.md, "Files").
 #define BUSTER_FILE_CACHE_READ_LIMIT (16u << 10)
+// The failed probes of paths in a directory after which the cache first looks at its names (FileCacheDirectory), the
+// buffer of that look (about 25 names: a directory with more is put off), the factor of failed probes after which a
+// larger directory is read whole, the largest getdents64 record (its 19 bytes and a name of NAME_MAX bytes and its NUL,
+// aligned to 8), and the buffer a whole read reads with (about 200 names a call). A unit with only <stdio.h> fails 26
+// probes in each of clang's resource directory and /usr/local/include. On the 9700X, its include searches took 60 us
+// with first looks at 32 misses or none, and 64 us at 16; deflate.c's 159, 154 and 158 us, and sqlite3.c's 582, 576
+// and 601 us. Listing every directory whole at 16 made the first 77 us and sqlite3.c's 540 (file_cache_list_directory).
+#define BUSTER_FILE_CACHE_LISTING_MISSES 32u
+#define BUSTER_FILE_CACHE_SMALL_LISTING 1024u
+#define BUSTER_FILE_CACHE_LARGE_LISTING 8u
+#define BUSTER_FILE_CACHE_RECORD_MAX 280u
+#define BUSTER_FILE_CACHE_LISTING_BUFFER (8u << 10)
+// The longest name a directory entry has (NAME_MAX on every file system file_cache_exact_names takes).
+#define BUSTER_FILE_CACHE_NAME_MAX 255u
+
+// The capacity shift of a cache's arrays (arena_capacity_shift), for the larger of its records and paths.
+static uint32_t file_cache_shift(void)
+{
+    const uint64_t records = (uint64_t)BUSTER_PP_MAX_FILES * sizeof(PPFileData);
+    const uint64_t paths = (uint64_t)BUSTER_FILE_CACHE_MAX_PATHS * sizeof(FileCachePath);
+    return arena_capacity_shift(records > paths ? records : paths);
+}
+
+// The entries and entry bytes of a cache's four arrays at capacity shift `shift`, in FileCache.arrays' order: the
+// records, their identity slots, the paths and their slots.
+static void file_cache_array_shape(uint32_t shift, uint64_t counts[4], uint64_t sizes[4])
+{
+    counts[0] = BUSTER_PP_MAX_FILES >> shift;
+    counts[1] = 2ull * (BUSTER_PP_MAX_FILES >> shift);
+    counts[2] = BUSTER_FILE_CACHE_MAX_PATHS >> shift;
+    counts[3] = 2ull * (BUSTER_FILE_CACHE_MAX_PATHS >> shift);
+    sizes[0] = sizeof(PPFileData);
+    sizes[1] = sizeof(uint32_t);
+    sizes[2] = sizeof(FileCachePath);
+    sizes[3] = sizeof(uint32_t);
+}
+
+// Starts a cache whose bytes are all zero, with its four arrays at `arrays` (file_cache_array_shape's, at `shift`, zero
+// too, or a null among them if they couldn't be reserved), and reserves its paths' bytes. The arrays are the caller's to
+// release: file_cache_initialize's own arenas, or a unit's tables (pp_initialize_once, #652), which hold the cache itself
+// too and so need neither its 120 KB written zero nor four arenas of their own.
+static bool file_cache_start(FileCache* cache, InternTable* table, PPPrepare prepare, uint32_t shift, void* const arrays[4])
+{
+    cache->prepare = prepare;
+    cache->table = table;
+    cache->read_limit = BUSTER_FILE_CACHE_READ_LIMIT;
+    cache->listing_misses = BUSTER_FILE_CACHE_LISTING_MISSES;
+    cache->capacity_shift = shift;
+    const bool reserved = arrays[0] != 0 && arrays[1] != 0 && arrays[2] != 0 && arrays[3] != 0;
+    cache->path_arena = reserved ? arena_reserve(BUSTER_FILE_CACHE_PATH_BYTES) : (Arena){ 0 };
+    cache->records = arrays[0];
+    cache->identity_slots = arrays[1];
+    cache->paths = arrays[2];
+    cache->path_slots = arrays[3];
+    cache->identity_slot_mask = BUSTER_FILE_CACHE_INITIAL_SLOTS - 1;
+    cache->path_slot_mask = BUSTER_FILE_CACHE_INITIAL_SLOTS - 1;
+    return reserved && cache->path_arena.base != 0;
+}
 
 // Reserves a cache's memory, for files prepared as `prepare` says and refined with `table`. Returns false if it can't be
 // reserved (file_cache_release then releases what was).
 static __attribute__((unused)) bool file_cache_initialize(FileCache* cache, InternTable* table, PPPrepare prepare)
 {
     *cache = (FileCache){ 0 };
-    cache->prepare = prepare;
-    cache->table = table;
-    cache->read_limit = BUSTER_FILE_CACHE_READ_LIMIT;
-    const uint64_t records = (uint64_t)BUSTER_PP_MAX_FILES * sizeof(PPFileData);
-    const uint64_t paths = (uint64_t)BUSTER_FILE_CACHE_MAX_PATHS * sizeof(FileCachePath);
-    cache->capacity_shift = arena_capacity_shift(records > paths ? records : paths);
+    const uint32_t shift = file_cache_shift();
+    uint64_t counts[4];
+    uint64_t sizes[4];
+    file_cache_array_shape(shift, counts, sizes);
     // Reserved in turn until one can't be (file_cache_release releases those that were).
-    const uint64_t sizes[] = { (uint64_t)(BUSTER_PP_MAX_FILES >> cache->capacity_shift) * sizeof(PPFileData) + 64, 2ull * (BUSTER_PP_MAX_FILES >> cache->capacity_shift) * sizeof(uint32_t) + 64,
-                               (uint64_t)(BUSTER_FILE_CACHE_MAX_PATHS >> cache->capacity_shift) * sizeof(FileCachePath) + 64, 2ull * (BUSTER_FILE_CACHE_MAX_PATHS >> cache->capacity_shift) * sizeof(uint32_t) + 64 };
+    void* arrays[4] = { 0 };
     bool reserved = true;
     for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(cache->arrays); i += 1)
     {
-        cache->arrays[i] = arena_reserve(sizes[i]);
-        reserved = cache->arrays[i].base != 0;
+        cache->arrays[i] = arena_reserve(counts[i] * sizes[i] + 64);
+        arrays[i] = cache->arrays[i].base != 0 ? arena_push_array(&cache->arrays[i], counts[i], sizes[i], 64) : 0;
+        reserved = arrays[i] != 0;
     }
-    cache->path_arena = reserved ? arena_reserve(BUSTER_FILE_CACHE_PATH_BYTES) : (Arena){ 0 };
-    cache->records = arena_push_array(&cache->arrays[0], (BUSTER_PP_MAX_FILES >> cache->capacity_shift), sizeof(PPFileData), 64);
-    cache->identity_slots = arena_push_array(&cache->arrays[1], 2ull * (BUSTER_PP_MAX_FILES >> cache->capacity_shift), sizeof(uint32_t), 64);
-    cache->paths = arena_push_array(&cache->arrays[2], (BUSTER_FILE_CACHE_MAX_PATHS >> cache->capacity_shift), sizeof(FileCachePath), 64);
-    cache->path_slots = arena_push_array(&cache->arrays[3], 2ull * (BUSTER_FILE_CACHE_MAX_PATHS >> cache->capacity_shift), sizeof(uint32_t), 64);
-    cache->identity_slot_mask = BUSTER_FILE_CACHE_INITIAL_SLOTS - 1;
-    cache->path_slot_mask = BUSTER_FILE_CACHE_INITIAL_SLOTS - 1;
-    return cache->records != 0 && cache->identity_slots != 0 && cache->paths != 0 && cache->path_slots != 0 && cache->path_arena.base != 0;
+    return file_cache_start(cache, table, prepare, shift, arrays);
 }
 
 // Unmaps the records' files, and the files of paths whose probe mapped one that no record took, and releases the
@@ -3915,9 +4112,11 @@ static FileCacheArenas* file_cache_arenas(FileCache* cache, uint32_t lane)
         bool reserved = true;
         for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(arenas); i += 1)
         {
-            // The token columns are the first three.
+            // The token columns are the first three. The records' arena and the bytes arena, the last two, start with
+            // BUSTER_FILE_CACHE_SMALL_BYTES of base pages.
             const bool small = lane != 0 && cache->lane_small_bytes != 0 && i < 3;
-            *arenas[i] = small ? arena_reserve_small(BUSTER_FILE_CACHE_ARENA_BYTES, cache->lane_small_bytes) : arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
+            const uint64_t base_pages = i >= 3 ? BUSTER_FILE_CACHE_SMALL_BYTES : small ? cache->lane_small_bytes : BUSTER_ARENA_SMALL_BYTES;
+            *arenas[i] = arena_reserve_small(BUSTER_FILE_CACHE_ARENA_BYTES, base_pages);
             reserved = arenas[i]->base != 0;
         }
         for (uint32_t i = 0; !reserved && i < BUSTER_ARRAY_LENGTH(arenas); i += 1)
@@ -4040,6 +4239,7 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
     // Without blocking: opening a FIFO waits for a writer otherwise, also for the walk's speculative probes of includes
     // no unit reaches. A FIFO, a device or a directory then isn't a regular file, and is none. O_NONBLOCK changes
     // nothing for a regular file, and O_NOCTTY keeps a terminal from becoming the process's controlling one.
+    // A primary source is not one of those probes: pp_run_input reads a non-regular input to EOF, as `-` does.
     const int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
     int error = fd >= 0 ? 0 : errno;
     counts->opens += 1;
@@ -4158,22 +4358,315 @@ static void file_cache_identify(FileCache* cache, FileCachePath* entry)
     }
 }
 
+// Whether a lookup of a name on a file system of type `type` (fstatfs's f_type) finds what a listing of its directory
+// finds: the name byte for byte, or with ASCII letters' case folded, as file_cache_name_key folds them. Case folding
+// covers casefold directories (ext4, F2FS, tmpfs and bcachefs) and XFS's ascii-ci. Names with a byte past ASCII are
+// neither listed nor looked up (file_cache_list_directory, file_cache_listed_absent), so Unicode's foldings and
+// normalizations never apply to them. Some file systems alias names that their listings don't show (vfat's and NTFS's
+// short names and trailing dots), and network and FUSE file systems answer as their servers do. None of those is here:
+// their directories are probed as before.
+static bool file_cache_exact_names(uint64_t type)
+{
+    static const uint64_t types[] = {
+        0xEF53u,     // ext2, ext3 and ext4
+        0x58465342u, // XFS
+        0x9123683Eu, // Btrfs
+        0x01021994u, // tmpfs
+        0x794C7630u, // overlayfs
+        0xF2F52010u, // F2FS
+        0x73717368u, // SquashFS
+        0xE0F5E1E2u, // EROFS
+        0xCA451A4Eu, // bcachefs
+    };
+    bool result = false;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(types); i += 1)
+    {
+        result = result || type == types[i];
+    }
+    return result;
+}
+
+// The key of a name of `length` bytes (1 to BUSTER_FILE_CACHE_NAME_MAX, all ASCII) in a listing: 32 bits of the hash of
+// the name with its ASCII letters in lower case, never 0, which marks an empty slot. Two names with one key only cost
+// a probe: a listing rules out a name whose key it doesn't have.
+static uint32_t file_cache_name_key(const uint8_t* name, uint32_t length)
+{
+    uint8_t folded[BUSTER_FILE_CACHE_NAME_MAX];
+    for (uint32_t i = 0; i < length; i += 1)
+    {
+        const uint8_t c = name[i];
+        folded[i] = c >= 'A' && c <= 'Z' ? (uint8_t)(c + ('a' - 'A')) : c;
+    }
+    const uint64_t hash = intern_hash_bytes(folded, length);
+    const uint32_t key = (uint32_t)(hash ^ (hash >> 32));
+    return key != 0 ? key : 1;
+}
+
+// The directory of the first `length` bytes of `path`, with `hash` (intern_hash_bytes's), or null if the cache never
+// looked a path up in it. Lanes may find directories at once while no lane adds one.
+static FileCacheDirectory* file_cache_find_directory(const FileCache* cache, const char* path, uint32_t length, uint64_t hash)
+{
+    FileCacheDirectory* result = cache->directory_slots[hash & (BUSTER_FILE_CACHE_DIRECTORY_SLOTS - 1)];
+    while (result != 0 && !(result->hash == hash && result->length == length && memcmp(result->path, path, length) == 0))
+    {
+        result = result->next;
+    }
+    return result;
+}
+
+// The directory of the first `length` bytes of `path`, added (with no misses) if the cache never looked a path up in
+// it; null if the cache can't hold it. One lane at a time.
+static FileCacheDirectory* file_cache_directory(FileCache* cache, const char* path, uint32_t length)
+{
+    const uint64_t hash = intern_hash_bytes((const uint8_t*)path, length);
+    FileCacheDirectory* result = file_cache_find_directory(cache, path, length, hash);
+    if (result == 0)
+    {
+        FileCacheDirectory** slot = &cache->directory_slots[hash & (BUSTER_FILE_CACHE_DIRECTORY_SLOTS - 1)];
+        result = arena_push(&cache->path_arena, sizeof(FileCacheDirectory), _Alignof(FileCacheDirectory));
+        char* copy = result != 0 ? arena_push(&cache->path_arena, (uint64_t)length + 1, 1) : 0;
+        if (copy != 0)
+        {
+            memcpy(copy, path, length);
+            copy[length] = 0;
+            *result = (FileCacheDirectory){
+                .hash = hash,
+                .path = copy,
+                .length = length,
+                .next = *slot,
+            };
+            *slot = result;
+        }
+        result = copy != 0 ? result : 0;
+    }
+    return result;
+}
+
+// Whether the first `directory_length` bytes of `path` (`length` bytes) are a directory a path is looked up in: a
+// '/' follows them, and the path has more after it. BUSTER_PP_NONE is none.
+static bool file_cache_in_directory(const char* path, uint32_t length, uint32_t directory_length)
+{
+    return directory_length < length && path[directory_length] == '/';
+}
+
+// The table of a listing's names, grown to `*slots` (twice as many as `count` + 1 names at least, and at least 64) in the
+// cache's path arena, with the names of `names` (`*slots` before) placed again; null if the arena can't hold it.
+static uint32_t* file_cache_grow_names(FileCache* cache, uint32_t* names, uint32_t count, uint32_t* slots)
+{
+    const uint32_t old = *slots;
+    uint32_t grown = old != 0 ? old : 64;
+    while ((uint64_t)grown < 2 * ((uint64_t)count + 1))
+    {
+        grown *= 2;
+    }
+    uint32_t* result = grown != old ? arena_push_array(&cache->path_arena, grown, sizeof(uint32_t), 64) : names;
+    if (result != 0 && grown != old)
+    {
+        memset(result, 0, (uint64_t)grown * sizeof(uint32_t));
+        for (uint32_t i = 0; i < old; i += 1)
+        {
+            uint32_t slot = names[i] & (grown - 1);
+            while (names[i] != 0 && result[slot] != 0)
+            {
+                slot = (slot + 1) & (grown - 1);
+            }
+            result[slot] = names[i] != 0 ? names[i] : result[slot];
+        }
+        *slots = grown;
+    }
+    return result;
+}
+
+// The generic libc syscall entry does not run MSan's getdents64 post-write hook. Only the returned record span is
+// initialized by this boundary: do not clear or unpoison the requested capacity, EOF/error output, or an unread tail.
+static long file_cache_read_directory(int fd, uint8_t* buffer, uint32_t capacity)
+{
+    const long got = syscall(SYS_getdents64, fd, buffer, capacity);
+#if __has_feature(memory_sanitizer)
+    if (got > 0 && (uint64_t)got <= capacity)
+    {
+        __msan_unpoison(buffer, (size_t)got);
+    }
+#endif
+    return got;
+}
+
+// Adds the names of `got` bytes of getdents64's records to a listing's table (file_cache_grow_names), `*count` of them
+// so far in `*slots`. False for an incomplete/unterminated record, a name past ASCII, or a table that can't grow.
+static bool file_cache_list_names(FileCache* cache, const uint8_t* buffer, long got, uint32_t** names, uint32_t* slots, uint32_t* count)
+{
+    bool result = got >= 0;
+    // Each record (struct linux_dirent64): an 8-byte inode, an 8-byte offset, its 2-byte length, a type byte, and the
+    // NUL-terminated name.
+    for (long offset = 0; result && offset < got;)
+    {
+        const long remaining = got - offset;
+        uint16_t record = 0;
+        if (remaining >= 20)
+        {
+            memcpy(&record, buffer + offset + 16, sizeof(record));
+        }
+        const bool whole = record > 19 && record <= remaining;
+        const uint8_t* name = whole ? buffer + offset + 19 : NULL;
+        const uint32_t capacity = whole ? (uint32_t)record - 19 : 0;
+        const uint32_t length = whole ? (uint32_t)strnlen((const char*)name, capacity) : 0;
+        result = length != 0 && length < capacity && length <= BUSTER_FILE_CACHE_NAME_MAX;
+        for (uint32_t i = 0; result && i < length; i += 1)
+        {
+            result = name[i] < 0x80;
+        }
+        *names = result && 2 * ((uint64_t)*count + 1) > *slots ? file_cache_grow_names(cache, *names, *count, slots) : *names;
+        result = result && *names != 0;
+        if (result)
+        {
+            uint32_t* table = *names;
+            const uint32_t key = file_cache_name_key(name, length);
+            uint32_t slot = key & (*slots - 1);
+            while (table[slot] != 0 && table[slot] != key)
+            {
+                slot = (slot + 1) & (*slots - 1);
+            }
+            *count += table[slot] == 0;
+            table[slot] = key;
+            offset += record;
+        }
+    }
+    return result;
+}
+
+// Reads a directory's names into its listing: their keys (file_cache_name_key) in a table at least twice as large. The
+// directory is then `unlisted` instead if a listing can't answer for it exactly: its file system's lookups don't match
+// its listings (file_cache_exact_names), it has a name with a byte past ASCII, or it can't be read whole.
+//
+// A directory's first look reads one small buffer (BUSTER_FILE_CACHE_SMALL_LISTING, about 25 names) and, unless that is
+// filled to within a record of its end, finds the directory's end with one more call. A directory with more names is
+// `deferred`, unread, and read whole at BUSTER_FILE_CACHE_LARGE_LISTING times the failed probes (256). On the 9700X (Btrfs) a
+// failed probe took 0.24 to 0.31 us, and the calls of a small directory's listing (open, two getdents64, fstatfs, close)
+// about 1.2 us, which the probes it saves next repay; a first look at clang's resource directory or /usr/include took
+// 2.3 to 3.5 us in its getdents64 alone, and reading the 263 names of the former whole about 20 us in the compiler.
+// One lane at a time. The names are read once; a directory that changes during the run is no concern, as files that
+// change aren't (the cache keeps every path's answer for the whole run).
+static void file_cache_list_directory(FileCache* cache, FileCacheDirectory* directory, FileCacheCounts* counts)
+{
+    const int fd = open(directory->path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
+    counts->listings += 1;
+    // On the stack, whose pages a lookup's callers have touched, rather than in an arena's fresh ones.
+    uint8_t buffer[BUSTER_FILE_CACHE_LISTING_BUFFER] __attribute__((aligned(8)));
+    const bool first = !directory->deferred;
+    const long got = fd >= 0 ? file_cache_read_directory(fd, buffer, first ? BUSTER_FILE_CACHE_SMALL_LISTING : BUSTER_FILE_CACHE_LISTING_BUFFER) : -1;
+    const bool full = first && got > (long)(BUSTER_FILE_CACHE_SMALL_LISTING - BUSTER_FILE_CACHE_RECORD_MAX);
+    const long end = first && got > 0 && !full ? file_cache_read_directory(fd, buffer + BUSTER_FILE_CACHE_SMALL_LISTING, BUSTER_FILE_CACHE_SMALL_LISTING) : 0;
+    const bool more = full || end > 0;
+    struct statfs system;
+    const bool exact = !more && got >= 0 && end == 0 && fstatfs(fd, &system) == 0 && file_cache_exact_names((uint64_t)system.f_type);
+    uint32_t* names = 0;
+    uint32_t slots = 0;
+    uint32_t count = 0;
+    // A first look's one buffer is the whole directory; a whole read goes on to getdents64's end.
+    long chunk = exact ? got : -1;
+    while (chunk > 0)
+    {
+        const bool added = file_cache_list_names(cache, buffer, chunk, &names, &slots, &count);
+        chunk = !added ? -1 : first ? 0 : file_cache_read_directory(fd, buffer, BUSTER_FILE_CACHE_LISTING_BUFFER);
+    }
+    if (fd >= 0)
+    {
+        close(fd);
+    }
+    // A listing read to its end (getdents64 returned 0) with no name it can't answer for, or a large directory put off.
+    const bool listed = exact && chunk == 0 && names != 0;
+    directory->deferred = directory->deferred || more;
+    cache->listed_directories += listed;
+    directory->names = listed ? names : 0;
+    directory->name_mask = listed ? slots - 1 : 0;
+    directory->unlisted = !listed && !more;
+}
+
+// Whether directory `directory`'s listing says no file can be at `path` (`length` bytes), whose first
+// `directory->length` bytes are the directory and next a '/': the listing doesn't have the path's next component, with
+// ASCII letters' case folded. A component the listing can't rule out is probed: one it has (in any case, or another name
+// with its key), one with a byte past ASCII, "." and "..", an empty one, and one longer than a name can be, whose
+// lookup fails with ENAMETOOLONG, not ENOENT.
+static bool file_cache_listed_absent(const FileCacheDirectory* directory, const char* path, uint32_t length)
+{
+    const uint32_t* names = directory->names;
+    const uint32_t start = directory->length + 1;
+    uint32_t end = start;
+    bool ascii = true;
+    while (end < length && path[end] != '/')
+    {
+        ascii = ascii && (uint8_t)path[end] < 0x80;
+        end += 1;
+    }
+    const uint32_t component = end > start ? end - start : 0;
+    const bool dots = component != 0 && component <= 2 && path[start] == '.' && path[end - 1] == '.';
+    bool result = names != 0 && ascii && component != 0 && component <= BUSTER_FILE_CACHE_NAME_MAX && !dots;
+    if (result)
+    {
+        const uint32_t key = file_cache_name_key((const uint8_t*)path + start, component);
+        const uint32_t mask = directory->name_mask;
+        uint32_t slot = key & mask;
+        while (names[slot] != 0 && names[slot] != key)
+        {
+            slot = (slot + 1) & mask;
+        }
+        result = names[slot] == 0;
+    }
+    return result;
+}
+
+// After a probe of a path in `directory` (null for none): a path without a file there (ENOENT, which also says the
+// directory could be searched) counts towards the directory's listing, which the cache reads at the
+// cache->listing_misses-th, or BUSTER_FILE_CACHE_LARGE_LISTING times that for a directory its first look found large
+// (file_cache_list_directory). One lane at a time.
+static void file_cache_count_miss(FileCache* cache, FileCacheDirectory* directory, const FileProbe* probe, FileCacheCounts* counts)
+{
+    if (directory != 0 && probe->error == ENOENT)
+    {
+        directory->misses += 1;
+        const uint64_t at = (uint64_t)cache->listing_misses * (directory->deferred ? BUSTER_FILE_CACHE_LARGE_LISTING : 1);
+        if (cache->listing_misses != 0 && directory->misses == at && directory->names == 0 && !directory->unlisted)
+        {
+            file_cache_list_directory(cache, directory, counts);
+        }
+    }
+}
+
 // The record of the file at `path` (`length` bytes, NUL-terminated), probing the file system only the first time the
 // cache is asked about the path; BUSTER_PP_NONE if no file can be read there, or if the cache is full, with why in
 // `*error` (the probe's errno value or -1, or EMFILE for a full cache). A file of up to the cache's read limit is read
 // into the calling lane's bytes arena, which the cache keeps as long as its records, and a larger one is mapped with
 // MAP_POPULATE (all of them if the arena can't be reserved, so that the file's preparation, which needs the lane's other
-// arenas, says why it fails). One lane at a time.
-static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint32_t length, FileCacheCounts* counts, int* error)
+// arenas, says why it fails). A path whose first `directory_length` bytes are a directory the search looks in, followed
+// by a '/' (BUSTER_PP_NONE for none), is answered by the directory's listing once it has one (file_cache_listed_absent):
+// a path the listing rules out gets the entry a probe that found no file there (ENOENT) gives it, without the probe.
+// `*known` (if `known` isn't null) caches the directory's FileCacheDirectory for its caller: a search directory's.
+// Until some directory has a listing, only a failed probe looks its directory up. One lane at a time.
+static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint32_t length, uint32_t directory_length, FileCacheDirectory** known,
+                                       FileCacheCounts* counts, int* error)
 {
     const uint64_t hash = intern_hash_bytes((const uint8_t*)path, length);
     FileCachePath* entry = file_cache_find_path(cache, path, length, hash);
     int unheld = 0;
     if (entry == 0)
     {
-        Arena* bytes = &file_cache_arenas(cache, lane_index())->bytes;
-        FileProbe probe;
-        file_cache_probe(cache, path, FILE_CACHE_MAP_POPULATED, cache->read_limit, bytes->base != 0 ? bytes : 0, &probe, counts);
+        const bool in_directory = file_cache_in_directory(path, length, directory_length);
+        FileCacheDirectory* directory = known != 0 ? *known : 0;
+        directory = directory == 0 && in_directory && cache->listed_directories != 0 ? file_cache_directory(cache, path, directory_length) : directory;
+        FileProbe probe = { .record = BUSTER_PP_NONE, .error = ENOENT };
+        const bool absent = directory != 0 && file_cache_listed_absent(directory, path, length);
+        counts->listed += absent;
+        if (!absent)
+        {
+            Arena* bytes = &file_cache_arenas(cache, lane_index())->bytes;
+            file_cache_probe(cache, path, FILE_CACHE_MAP_POPULATED, cache->read_limit, bytes->base != 0 ? bytes : 0, &probe, counts);
+            directory = directory == 0 && in_directory && probe.error == ENOENT ? file_cache_directory(cache, path, directory_length) : directory;
+            file_cache_count_miss(cache, directory, &probe, counts);
+        }
+        if (known != 0 && directory != 0)
+        {
+            *known = directory;
+        }
         *error = probe.error;
         entry = file_cache_add_path(cache, path, length, hash, &probe);
         if (entry != 0)
@@ -4216,7 +4709,7 @@ static PPPrepare pp_prepare_options(const PPOptions* options)
                         (options->language.standard < 2023 ? C_TOKENIZER_NO_DIGIT_SEPARATORS : 0),
         .split_kinds = pp_split_kinds(options->language),
         .dollar_punctuation = pp_dollar_punctuation(options),
-        .vectorized = !options->scalar,
+        .vectorized = BUSTER_VECTOR_PATH(!options->scalar),
         .window_bytes = options->window_bytes,
     };
 }
@@ -4342,8 +4835,11 @@ static void pp_grow_file_slots(Preprocessor* pp)
 // file cache (file_cache_lookup_path), which probes the file system only for a path it never looked up. Its data is
 // BUSTER_PP_NONE if no file can be read there, and its error why, when that isn't that there is no file there (no such
 // file, a part of the path that isn't a directory, or a directory, which clang's header search takes as none there:
-// HeaderSearch::getFileAndSuggestModule). Returns BUSTER_PP_NONE if memory runs out.
-static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t length, uint8_t system)
+// HeaderSearch::getFileAndSuggestModule). `search_length` is the length of the directory the search looked for the path
+// in (a search directory's, or the includer's), which the path's next byte, a '/', ends, or BUSTER_PP_NONE for none:
+// the file cache answers from the directory's listing once it has one (file_cache_lookup_path), through `search`, the
+// unit's FileCacheDirectory of a search directory (or null). Returns BUSTER_PP_NONE if memory runs out.
+static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t length, uint32_t search_length, FileCacheDirectory** search, uint8_t system)
 {
     const uint64_t hash = intern_hash_bytes((const uint8_t*)path, length);
     uint32_t slot = (uint32_t)hash & pp->file_slot_mask;
@@ -4381,7 +4877,7 @@ static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t leng
             }
             int error = 0;
             const uint64_t start = pp->options.timing ? __rdtsc() : 0;
-            const uint32_t record = file_cache_lookup_path(pp->cache, copy, length, &pp->probes, &error);
+            const uint32_t record = file_cache_lookup_path(pp->cache, copy, length, search_length, search, &pp->probes, &error);
             const uint32_t data = record != BUSTER_PP_NONE ? pp_data_of_record(pp, record) : BUSTER_PP_NONE;
             error = record != BUSTER_PP_NONE && data == BUSTER_PP_NONE ? EMFILE : error;
             pp->ticks[PP_PHASE_READ] += pp->options.timing ? __rdtsc() - start : 0;
@@ -4420,7 +4916,7 @@ static bool pp_buster_supplies(Preprocessor* pp, const uint8_t* name, uint32_t l
         memcpy(path, pp->buster_directory, directory_length);
         path[directory_length] = '/';
         memcpy(path + directory_length + 1, name, length);
-        const uint32_t record = pp_lookup_path(pp, path, directory_length + 1 + length, BUSTER_PP_SYSTEM_FILE);
+        const uint32_t record = pp_lookup_path(pp, path, directory_length + 1 + length, directory_length, 0, BUSTER_PP_SYSTEM_FILE);
         result = record != BUSTER_PP_NONE && pp->files[record].data != BUSTER_PP_NONE;
     }
     return result;
@@ -4581,7 +5077,8 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
         int error = candidate == PP_CANDIDATE_SKIP && !shadowed ? ENAMETOOLONG : 0;
         if (candidate == PP_CANDIDATE_PATH && !shadowed)
         {
-            const uint32_t file = pp_lookup_path(pp, path, path_length, system);
+            const uint32_t file = pp_lookup_path(pp, path, path_length, absolute ? BUSTER_PP_NONE : prefix_length,
+                                                 directory != BUSTER_PP_NONE ? &pp->directory_entries[directory] : 0, system);
             result = file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE ? file : BUSTER_PP_NONE;
             *found_in = result != BUSTER_PP_NONE ? directory : BUSTER_PP_NONE;
             error = file != BUSTER_PP_NONE ? pp->files[file].error : 0;
@@ -6683,7 +7180,7 @@ static uint32_t pp_copy_file_text_vector(Preprocessor* pp, const PPFileData* dat
                 const PPMacro* macro = &pp->macros[pp->macro_of[value]];
                 const PPFileData* body = &pp->datas[macro->data];
                 const uint32_t b = macro->body_begin;
-                const bool direct = (macro->flags & (BUSTER_PP_MACRO_FUNCTION | BUSTER_PP_MACRO_BUILTIN | BUSTER_PP_MACRO_PASTES)) == 0 && macro->disabled == 0 &&
+                const bool direct = !pp->options.preprocessed && (macro->flags & (BUSTER_PP_MACRO_FUNCTION | BUSTER_PP_MACRO_BUILTIN | BUSTER_PP_MACRO_PASTES)) == 0 && macro->disabled == 0 &&
                                     macro->body_end - b == 1 && ((body->kinds[b] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro_vector(pp, body->values[b]));
                 if (!direct)
                 {
@@ -11794,6 +12291,28 @@ static bool pp_calendar(Preprocessor* pp, int64_t seconds, bool utc, uint32_t lo
     return result;
 }
 
+// __DATE__'s and __TIME__'s text for a validated calendar: "Jan  1 2000" and "00:00:00".
+static void pp_format_date_time(Preprocessor* pp, const struct tm* calendar)
+{
+    static const char months[12][4] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    snprintf(pp->date, sizeof(pp->date), "%s %2d %04d", months[calendar->tm_mon], calendar->tm_mday, calendar->tm_year + 1900);
+    snprintf(pp->time, sizeof(pp->time), "%02d:%02d:%02d", calendar->tm_hour, calendar->tm_min, calendar->tm_sec);
+}
+
+// __DATE__'s and __TIME__'s text, made from the unit's time in local time at the first expansion of either that needs
+// it (pp_initialize_time). False, with a fatal diagnostic at `where`, if the time can't be converted.
+static bool pp_unit_time(Preprocessor* pp, uint32_t where)
+{
+    struct tm calendar;
+    const bool made = pp->date[0] != 0;
+    const bool result = made || pp_calendar(pp, pp->unit_seconds, false, where, "current time", &calendar);
+    if (result && !made)
+    {
+        pp_format_date_time(pp, &calendar);
+    }
+    return result;
+}
+
 // __TIMESTAMP__'s text for a validated calendar: "Sat Jan  1 00:00:00 2000" (C locale).
 static void pp_format_timestamp(char* text, uint32_t capacity, const struct tm* calendar)
 {
@@ -11861,6 +12380,43 @@ static __attribute__((unused)) uint32_t pp_path_file_name(const char* path, uint
     return size != 0 ? size : length;
 }
 
+static void pp_eval_method_use(Preprocessor* pp, PPToken name)
+{
+    if (pp->options.semantic_pragmas && !pp->fatal)
+    {
+        const uint32_t count = pp->eval_method_use_count;
+        if (count == pp->eval_method_use_capacity)
+        {
+            const uint64_t capacity = count != 0 ? (uint64_t)count * 2 : 8;
+            PPEvalMethodUse* records = capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(&pp->arena, PPEvalMethodUse, capacity) : NULL;
+            if (records == NULL)
+            {
+                pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory for floating evaluation macro uses");
+            }
+            else
+            {
+                if (count != 0)
+                {
+                    memcpy(records, pp->eval_method_uses, (uint64_t)count * sizeof(PPEvalMethodUse));
+                }
+                pp->eval_method_uses = records;
+                pp->eval_method_use_capacity = (uint32_t)capacity;
+            }
+        }
+        if (!pp->fatal)
+        {
+            pp->eval_method_uses[count] = (PPEvalMethodUse)
+            {
+                .position = pp->output.count,
+                .pragmas = pp->pragma_lines,
+                .location = name.location,
+                .origin = name.origin,
+            };
+            pp->eval_method_use_count = count + 1;
+        }
+    }
+}
+
 static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint32_t expansion_end)
 {
     const uint32_t saved_history = pp->history_current;
@@ -11915,13 +12471,20 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
             break;
         case PP_BUILTIN_FLT_EVAL_METHOD:
             // The translation unit's: under -E, clang's `#pragma clang fp eval_method` doesn't change it.
+            pp_eval_method_use(pp, name);
             pp_emit(pp, pp_number_token(pp, pp->flt_eval_method, flags));
             break;
         case PP_BUILTIN_DATE:
-            pp_emit(pp, pp_string_token(pp, (const uint8_t*)pp->date, (uint32_t)strlen(pp->date), flags));
+            if (pp_unit_time(pp, where))
+            {
+                pp_emit(pp, pp_string_token(pp, (const uint8_t*)pp->date, (uint32_t)strlen(pp->date), flags));
+            }
             break;
         case PP_BUILTIN_TIME:
-            pp_emit(pp, pp_string_token(pp, (const uint8_t*)pp->time, (uint32_t)strlen(pp->time), flags));
+            if (pp_unit_time(pp, where))
+            {
+                pp_emit(pp, pp_string_token(pp, (const uint8_t*)pp->time, (uint32_t)strlen(pp->time), flags));
+            }
             break;
         case PP_BUILTIN_TIMESTAMP:
         {
@@ -12228,7 +12791,26 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
             }
             context->position = stop;
             more = false;
-            if (stop < run_end && !pp->fatal)
+            // _Pragma is the one builtin still valid in already-preprocessed text: it is an operator, not a macro to
+            // keep literal, so it expands as it does in any file (#1552's review). values[] is an IdentId only for a
+            // raw identifier; anything else the run stopped on is an offset, not an index into macro_of.
+            const PPMacroId stopped_macro = stop < run_end && (data->kinds[stop] & 0x7F) == C_TOKEN_RAW_IDENTIFIER ? pp->macro_of[data->values[stop]] : 0;
+            const bool pragma = stopped_macro != 0 && pp->macros[stopped_macro].builtin == PP_BUILTIN_PRAGMA;
+            if (stop < run_end && !pp->fatal && pp->options.preprocessed && pp_target(pp) == &pp->output && !pragma)
+            {
+                // The file was already expanded. Keep the macro's name as an identifier. #if still expands, because
+                // that capture is not the output.
+                PPToken token = pp_file_token(data, base, context->position);
+                if (context->pending_flags != 0)
+                {
+                    token.flags = pp_with_pending(token.flags, context->pending_flags, true);
+                    context->pending_flags = 0;
+                }
+                context->position += 1;
+                pp_emit(pp, token);
+                more = context->position < limit && !pp->fatal;
+            }
+            else if (stop < run_end && !pp->fatal)
             {
                 more = BUSTER_VECTOR_PATH(pp->vectorized) && pp_expand_file_direct(pp, context, data, base);
                 // A simple invocation whose expansion goes straight into the output, after which the main loop's next step
@@ -12699,7 +13281,7 @@ static void pp_diagnostic_text(Preprocessor* pp, const PPFileData* data, uint32_
     if (buffer != 0)
     {
         const uint8_t* text;
-        const uint32_t length = pp_remove_splices(data->bytes + begin, end - begin, pp->refine_flags, C_TOKEN_RAW_IDENTIFIER, buffer, &text);
+        const uint32_t length = pp_remove_splices_by(data->bytes + begin, end - begin, pp->refine_flags, C_TOKEN_RAW_IDENTIFIER, pp->options.scalar, buffer, &text);
         uint32_t first = 0;
         while (first < length && (text[first] == ' ' || text[first] == '\t' || text[first] == '\v' || text[first] == '\f'))
         {
@@ -13949,7 +14531,7 @@ typedef enum PPPragmaKind
     PP_PRAGMA_DEPENDENCY,
     PP_PRAGMA_DIAGNOSTIC,
     PP_PRAGMA_OMP, // Printed expanded (-E's printer expands it, as OpenMP says).
-    PP_PRAGMA_PACK, // Expanded only for an opted-in semantic consumer; ordinary -E retains raw operands.
+    PP_PRAGMA_SEMANTIC, // Expanded only for an opted-in semantic consumer; ordinary -E retains raw operands.
     PP_PRAGMA_IDENT, // #ident and #sccs: not pragmas, but read and printed alike.
     PP_PRAGMA_REGION, // clang assume_nonnull, arc_cf_code_audited and unsafe_buffer_usage: begin and end.
     PP_PRAGMA_MACRO_NOTE, // clang deprecated, final and restrict_expansion, of a macro: not printed.
@@ -13995,9 +14577,12 @@ static PPPragmaKind pp_pragma_kind(const Preprocessor* pp, const PPTokens* token
     {
         result = PP_PRAGMA_OMP;
     }
-    else if (pp->options.semantic_pragmas && pp_token_is_name(pp, tokens, begin, end, "pack"))
+    else if (pp->options.semantic_pragmas &&
+             (pp_token_is_name(pp, tokens, begin, end, "pack") || pp_token_is_name(pp, tokens, begin, end, "weak") ||
+              pp_token_is_name(pp, tokens, begin, end, "redefine_extname") || pp_token_is_name(pp, tokens, begin, end, "ms_struct") ||
+              pp_token_is_name(pp, tokens, begin, end, "float_control")))
     {
-        result = PP_PRAGMA_PACK;
+        result = PP_PRAGMA_SEMANTIC;
     }
     else if (space && second != 0)
     {
@@ -14011,6 +14596,7 @@ static PPPragmaKind pp_pragma_kind(const Preprocessor* pp, const PPTokens* token
                  : !clang && second == C_NAME_ERROR ? PP_PRAGMA_ERROR
                  : clang && (pp_token_is_name(pp, tokens, begin + 1, end, "assume_nonnull") || pp_token_is_name(pp, tokens, begin + 1, end, "arc_cf_code_audited") ||
                              pp_token_is_name(pp, tokens, begin + 1, end, "unsafe_buffer_usage")) ? PP_PRAGMA_REGION
+                 : clang && pp->options.semantic_pragmas && pp_token_is_name(pp, tokens, begin + 1, end, "fp") ? PP_PRAGMA_SEMANTIC
                  : clang && (pp_token_is_name(pp, tokens, begin + 1, end, "deprecated") || pp_token_is_name(pp, tokens, begin + 1, end, "final") ||
                              pp_token_is_name(pp, tokens, begin + 1, end, "restrict_expansion")) ? PP_PRAGMA_MACRO_NOTE
                  : PP_PRAGMA_OTHER;
@@ -14605,10 +15191,13 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
             pp_pragma_diagnostic(pp, tokens, names_begin, begin, end, location, from_operator);
         } break;
         case PP_PRAGMA_OMP:
-        case PP_PRAGMA_PACK:
+        case PP_PRAGMA_SEMANTIC:
         {
             pp_emit_pragma_start(pp, C_NAME_PRAGMA, location, from_operator);
-            pp_emit_pragma_token(pp, pp_stack_token(names, names_begin), true);
+            for (uint32_t i = names_begin; i < operands; i += 1)
+            {
+                pp_emit_pragma_token(pp, pp_stack_token(names, i), i == names_begin);
+            }
             for (uint32_t i = begin; i < end; i += 1)
             {
                 pp_emit_pragma_token(pp, pp_stack_token(tokens, i), i == begin);
@@ -14652,7 +15241,7 @@ static bool pp_pragma(Preprocessor* pp, uint32_t begin, uint32_t end, uint32_t l
         pp_check_poison_range(pp, 0, 0, tokens, begin, kind == PP_PRAGMA_POISON ? operands : end, kind == PP_PRAGMA_DEPENDENCY ? operands : BUSTER_PP_NONE, false);
     }
     const bool expanded = kind == PP_PRAGMA_MESSAGE || kind == PP_PRAGMA_WARNING || kind == PP_PRAGMA_ERROR || kind == PP_PRAGMA_PUSH_MACRO || kind == PP_PRAGMA_POP_MACRO ||
-                          kind == PP_PRAGMA_OMP || kind == PP_PRAGMA_PACK || kind == PP_PRAGMA_IDENT;
+                          kind == PP_PRAGMA_OMP || kind == PP_PRAGMA_SEMANTIC || kind == PP_PRAGMA_IDENT;
     bool started = false;
     // Not among a macro's arguments (or a builtin's operand), where clang's macro expansion is off (as for #line). An
     // #ident reads its string expanded (Preprocessor::HandleIdentSCCSDirective), and push_macro and pop_macro their '(',
@@ -14692,18 +15281,28 @@ static void pp_finish_pragma(Preprocessor* pp)
     copy.flags = arena_push(scratch.arena, (uint64_t)count + names + 1, 1);
     copy.values = arena_push_array(scratch.arena, (uint64_t)count + names + 1, sizeof(uint32_t), 4);
     copy.locations = arena_push_array(scratch.arena, (uint64_t)count + names + 1, sizeof(uint32_t), 4);
-    if (copy.kinds != 0 && copy.flags != 0 && copy.values != 0 && copy.locations != 0)
+    copy.origins = !pp->options.no_history ? arena_push_array(scratch.arena, (uint64_t)count + names + 1, sizeof(uint32_t), 4) : NULL;
+    if (copy.kinds != 0 && copy.flags != 0 && copy.values != 0 && copy.locations != 0 && (pp->options.no_history || copy.origins != NULL))
     {
-        // The names first, then the expanded operands.
+        // The names first, then the expanded operands. The copy outlives this capture's reset, so it must retain
+        // the tokens' origins as well as their spelling locations for later semantic diagnostics.
         for (uint32_t i = 0; i < names; i += 1)
         {
             const PPToken token = pp_stack_token(&pp->arguments, capture.directive + i);
             pp_tokens_set(&copy, i, token.kind, token.flags, token.value, token.location);
+            if (copy.origins != NULL)
+            {
+                copy.origins[i] = token.origin;
+            }
         }
         for (uint32_t i = 0; i < count; i += 1)
         {
             const PPToken token = pp_stack_token(&pp->captures, capture.begin + i);
             pp_tokens_set(&copy, names + i, token.kind, token.flags, token.value, token.location);
+            if (copy.origins != NULL)
+            {
+                copy.origins[names + i] = token.origin;
+            }
         }
         copy.count = names + count;
         pp->captures.count = capture.begin;
@@ -14971,6 +15570,8 @@ static uint32_t pp_binary_operator(uint8_t kind)
     return result;
 }
 
+#include "c_preprocessor_literal.c"
+
 // Parses an integer constant's spelling (C 6.4.4.1, with C23's binary prefix, C2y's 0o and digit separators, and the suffixes
 // u, l, ll, z, wb in any case and order). Returns false (with an error) if it isn't one.
 static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t length, uint32_t location, PPValue* value)
@@ -15063,9 +15664,7 @@ static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t
     valid &= digits || radix == 8;
     if (!valid)
     {
-        const bool floating = memchr(spelling, '.', length) != 0 || (radix != 16 && (memchr(spelling, 'e', length) != 0 || memchr(spelling, 'E', length) != 0));
-        pp_diagnose(pp, PP_SEVERITY_ERROR, location, floating ? "floating point literal in preprocessor expression" : "invalid integer constant '%.*s' in preprocessor expression",
-                    (int)length, (const char*)spelling);
+        pp_diagnose_integer(pp, spelling, length, location);
     }
     else if (overflow)
     {
@@ -15484,8 +16083,18 @@ static bool pp_parse_character(Preprocessor* pp, uint8_t kind, const uint8_t* sp
     return !error;
 }
 
+// The place and enclosing liveness of an operator. Reductions restore this state before another operator is
+// read, so &&, || and both arms of ?: suppress evaluation warnings without skipping syntax or losing signedness.
+typedef struct PPExpressionContext PPExpressionContext;
+struct PPExpressionContext
+{
+    uint32_t location;
+    uint32_t origin;
+    bool live;
+};
+
 // Applies an operator to the values on top of the stack (two for a binary one, three for ?:, which is COLON here).
-static bool pp_reduce(Preprocessor* pp, PPValue* values, uint32_t* value_count, uint32_t operator, uint32_t location)
+static bool pp_reduce(Preprocessor* pp, PPValue* values, uint32_t* value_count, uint32_t operator, uint32_t location, PPExpressionContext context)
 {
     bool result = true;
     const bool unary = operator == PP_OPERATOR_PLUS || operator == PP_OPERATOR_MINUS || operator == PP_OPERATOR_NOT || operator == PP_OPERATOR_COMPLEMENT;
@@ -15524,6 +16133,28 @@ static bool pp_reduce(Preprocessor* pp, PPValue* values, uint32_t* value_count, 
         PPValue r = { .is_unsigned = is_unsigned, .division_by_zero = a.division_by_zero || b.division_by_zero };
         const int64_t sa = (int64_t)a.bits;
         const int64_t sb = (int64_t)b.bits;
+        // Shifts, logical operators and comma do not apply the usual arithmetic conversions. ?: keeps its
+        // common unsigned type above, but clang does not warn for the conversion of its selected arm itself.
+        const bool converts = operator != PP_OPERATOR_SHIFT_LEFT && operator != PP_OPERATOR_SHIFT_RIGHT &&
+                              operator != PP_OPERATOR_LOGICAL_AND && operator != PP_OPERATOR_LOGICAL_OR && operator != PP_OPERATOR_COMMA;
+        if (context.live && is_unsigned && converts && ((!a.is_unsigned && sa < 0) || (!b.is_unsigned && sb < 0)))
+        {
+            const uint32_t saved_origin = pp->diagnostic_origin;
+            pp->diagnostic_origin = context.origin;
+            // A promoted warning must still obey -w and system-header suppression before it becomes an error.
+            const bool promoted = pp->options.negative_conversion_error && !pp->options.suppress_warnings &&
+                                  pp_diagnostic_warning_visible(pp, context.location, context.origin);
+            const PPSeverity severity = promoted ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+            if (!a.is_unsigned && sa < 0)
+            {
+                pp_diagnose(pp, severity, context.location, "left side of operator converted from negative value to unsigned: %ld to %lu", (long)sa, (unsigned long)a.bits);
+            }
+            if (!b.is_unsigned && sb < 0)
+            {
+                pp_diagnose(pp, severity, context.location, "right side of operator converted from negative value to unsigned: %ld to %lu", (long)sb, (unsigned long)b.bits);
+            }
+            pp->diagnostic_origin = saved_origin;
+        }
         switch (operator)
         {
             case PP_OPERATOR_MULTIPLY: r.bits = a.bits * b.bits; break;
@@ -15602,10 +16233,12 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
     const uint32_t saved_origin = pp->diagnostic_origin;
     PPValue values[BUSTER_PP_EXPRESSION_DEPTH];
     uint8_t operators[BUSTER_PP_EXPRESSION_DEPTH];
+    PPExpressionContext contexts[BUSTER_PP_EXPRESSION_DEPTH];
     uint32_t value_count = 0;
     uint32_t operator_count = 0;
     bool valid = true;
     bool expect_operand = true;
+    bool live = true;
     for (uint32_t i = begin; valid && i < end; i += 1)
     {
         const uint8_t kind = tokens->kinds[i];
@@ -15621,11 +16254,13 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
             if (kind == C_TOKEN_PLUS || kind == C_TOKEN_MINUS || kind == C_TOKEN_EXCLAIM || kind == C_TOKEN_TILDE)
             {
                 operators[operator_count] = kind == C_TOKEN_PLUS ? PP_OPERATOR_PLUS : kind == C_TOKEN_MINUS ? PP_OPERATOR_MINUS : kind == C_TOKEN_EXCLAIM ? PP_OPERATOR_NOT : PP_OPERATOR_COMPLEMENT;
+                contexts[operator_count] = (PPExpressionContext){ .location = token_location, .origin = pp->diagnostic_origin, .live = live };
                 operator_count += 1;
             }
             else if (kind == C_TOKEN_L_PAREN)
             {
                 operators[operator_count] = PP_OPERATOR_PAREN;
+                contexts[operator_count] = (PPExpressionContext){ .location = token_location, .origin = pp->diagnostic_origin, .live = live };
                 operator_count += 1;
             }
             else if (kind == C_TOKEN_NUMERIC_CONSTANT || kind == BUSTER_PP_KIND_INTEGER)
@@ -15692,14 +16327,19 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
             while (valid && operator_count != 0 && operators[operator_count - 1] != PP_OPERATOR_PAREN)
             {
                 operator_count -= 1;
-                valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location);
+                live = contexts[operator_count].live;
+                valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location, contexts[operator_count]);
             }
             if (valid && operator_count == 0)
             {
                 pp_diagnose(pp, PP_SEVERITY_ERROR, token_location, "unbalanced ')' in preprocessor expression");
                 valid = false;
             }
-            operator_count -= valid;
+            if (valid)
+            {
+                live = contexts[operator_count - 1].live;
+                operator_count -= 1;
+            }
         }
         else
         {
@@ -15722,7 +16362,8 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
                         break;
                     }
                     operator_count -= 1;
-                    valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location);
+                    live = contexts[operator_count].live;
+                    valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location, contexts[operator_count]);
                 }
                 // clang parses a #if line from ?:'s precedence on, so a comma is only an operator inside parentheses or
                 // between a '?' and its ':' (`#if 1, 2` is an error, `#if (1, 2)` isn't). Comma binds loosest, so the
@@ -15739,7 +16380,8 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
                     while (valid && operator_count != 0 && operators[operator_count - 1] != PP_OPERATOR_QUESTION && operators[operator_count - 1] != PP_OPERATOR_PAREN)
                     {
                         operator_count -= 1;
-                        valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location);
+                        live = contexts[operator_count].live;
+                        valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location, contexts[operator_count]);
                     }
                     if (valid && (operator_count == 0 || operators[operator_count - 1] != PP_OPERATOR_QUESTION))
                     {
@@ -15749,12 +16391,22 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
                     if (valid)
                     {
                         operators[operator_count - 1] = PP_OPERATOR_COLON;
+                        live = contexts[operator_count - 1].live && value_count >= 2 && values[value_count - 2].bits == 0;
                     }
                 }
                 else if (valid)
                 {
                     operators[operator_count] = (uint8_t)operator;
+                    contexts[operator_count] = (PPExpressionContext){ .location = token_location, .origin = pp->diagnostic_origin, .live = live };
                     operator_count += 1;
+                    if (operator == PP_OPERATOR_LOGICAL_AND || operator == PP_OPERATOR_QUESTION)
+                    {
+                        live = live && value_count != 0 && values[value_count - 1].bits != 0;
+                    }
+                    else if (operator == PP_OPERATOR_LOGICAL_OR)
+                    {
+                        live = live && value_count != 0 && values[value_count - 1].bits == 0;
+                    }
                 }
                 expect_operand = true;
             }
@@ -15776,7 +16428,7 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
         }
         else
         {
-            valid = pp_reduce(pp, values, &value_count, operators[operator_count], location);
+            valid = pp_reduce(pp, values, &value_count, operators[operator_count], location, contexts[operator_count]);
         }
     }
     if (valid && value_count != 1)
@@ -16238,7 +16890,7 @@ static void pp_embed_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
         uint64_t size;
         bool regular;
         const bool found = pp_find_embed(pp, context, name, length, angled, path, &path_length, &size, &regular);
-        const uint32_t file = regular ? pp_lookup_path(pp, path, path_length, BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
+        const uint32_t file = regular ? pp_lookup_path(pp, path, path_length, BUSTER_PP_NONE, 0, BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
         const uint32_t source = file != BUSTER_PP_NONE ? pp->files[file].data : BUSTER_PP_NONE;
         if (found && !regular)
         {
@@ -16828,8 +17480,8 @@ static const PPFeature pp_features_constexpr_builtin[] = {
 };
 
 // Implemented source capabilities, independent of the frozen Clang oracle. Attribute acceptance alone is not
-// implementation: diagnostic-only attributes and unpublished linkage obligations remain zero. These
-// entries have declaration/type, control, symbol or executable lowering consumers. C23 date codes describe the
+// implementation: attributes without an implemented consumer and unpublished linkage obligations remain zero. These
+// entries have declaration/type, diagnostic, control, symbol or executable lowering consumers. C23 date codes describe the
 // standardized attribute, not the language mode (the spelling is also accepted as an extension in earlier modes).
 // Feature dates are language-mode gates; __has_extension asks about the same implemented syntax in older modes.
 // Sorted for binary search. __has_warning remains the diagnostic vocabulary, not a promise to emit each warning.
@@ -16870,6 +17522,7 @@ static const PPFeature pp_implemented_c_attribute[] = {
     { "clang::overloadable", 1 },
     { "clang::sized_by", 1 },
     { "clang::sized_by_or_null", 1 },
+    { "deprecated", 201904 },
     { "fallthrough", 201910 },
     { "gnu::alias", 1 },
     { "gnu::aligned", 1 },
@@ -16893,6 +17546,7 @@ static const PPFeature pp_implemented_c_attribute[] = {
     { "gnu::visibility", 1 },
     { "gnu::weak", 1 },
     { "gnu::weakref", 1 },
+    { "maybe_unused", 202106 },
 };
 static const PPFeature pp_implemented_feature[] = {
     { "c_alignas", 1, 2011 },
@@ -17038,16 +17692,20 @@ static bool pp_library_builtin(const PPOptions* options, const uint8_t* name, ui
 // refuses by name (docs/c-builtins-integration.md's "Checked, refused in code"), that clang makes a builtin of the unit by its
 // language modes and whose required target features hold there, as clang answers (pp_builtin_language,
 // pp_builtin_features). Every __builtin_ library builtin is one of all of clang's languages without features, and a plain
-// one is a builtin where pp_library_builtin says so.
+// one is a builtin where pp_library_builtin says so. The answer is 1, but __builtin_operator_new's and
+// __builtin_operator_delete's: 201802 in every language, as clang's EvaluateHasBuiltin answers them, the date of the change
+// that let them call any usual allocation and deallocation function, which libc++ asks about.
 static uint32_t pp_implemented_builtin_query(const PPOptions* options, const uint8_t* name, uint32_t length)
 {
     const CBuiltinSourceScope* scope = cbuiltin_source_scope(name, length);
     const bool catalog = cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE) && pp_builtin_language(options, cbuiltin_languages(name, length));
     const bool intrinsic =
         cbuiltin_source_intrinsic(name, length) && pp_builtin_language(options, scope->languages) && pp_builtin_features(options, scope->features);
-    const uint32_t result =
+    const uint32_t answer =
         pp_feature_lookup(pp_implemented_builtin, BUSTER_ARRAY_LENGTH(pp_implemented_builtin), name, length, options->language.standard) | catalog |
         intrinsic | cbuiltin_fortify_source(name, length) | cbuiltin_library_source(name, length) | pp_library_builtin(options, name, length);
+    const CBuiltinId id = catalog ? cbuiltin_resolve((const char*)name, length) : CBUILTIN_NONE;
+    const uint32_t result = answer != 0 && (id == CBUILTIN_OPERATOR_NEW || id == CBUILTIN_OPERATOR_DELETE) ? 201802 : answer;
     return result;
 }
 
@@ -17127,6 +17785,9 @@ static uint32_t pp_feature(const PPOptions* options, PPBuiltin builtin, const ui
 // language mode decides (pp_predefines adds those) and the ones the target and the other options decide
 // (c_predefines.c's predefines_text).
 static const char pp_predefines_base[] =
+    // Clang's first two definitions also anchor expansion notes at their real built-in source lines.
+    "#define __llvm__ 1\n"
+    "#define __clang__ 1\n"
     "#define _LP64 1\n"
     "#define __ATOMIC_ACQUIRE 2\n"
     "#define __ATOMIC_ACQ_REL 4\n"
@@ -17449,7 +18110,6 @@ static const char pp_predefines_base[] =
     "#define __WINT_WIDTH__ 32\n"
     "#define __amd64 1\n"
     "#define __amd64__ 1\n"
-    "#define __clang__ 1\n"
     "#define __clang_literal_encoding__ \"UTF-8\"\n"
     "#define __clang_major__ 23\n"
     "#define __clang_minor__ 1\n"
@@ -17458,7 +18118,6 @@ static const char pp_predefines_base[] =
     "#define __gnu_linux__ 1\n"
     "#define __linux 1\n"
     "#define __linux__ 1\n"
-    "#define __llvm__ 1\n"
     "#define __seg_fs __attribute__((address_space(257)))\n"
     "#define __seg_gs __attribute__((address_space(256)))\n"
     "#define __unix 1\n"
@@ -17557,7 +18216,7 @@ static uint32_t pp_predefines(const PPOptions* options, char* buffer, uint32_t* 
     {
         length += (uint32_t)sprintf(buffer + length, "#define __STRICT_ANSI__ 1\n");
     }
-    else if (!options->undefine)
+    else if (!options->undefine && !options->preprocessed)
     {
         length += (uint32_t)sprintf(buffer + length, "#define linux 1\n#define unix 1\n");
     }
@@ -17752,6 +18411,7 @@ static bool pp_add_directory(Preprocessor* pp, const char* path, uint8_t system)
         pp->directories[pp->directory_count] = copy;
         pp->directory_lengths[pp->directory_count] = length;
         pp->directory_system[pp->directory_count] = system;
+        pp->directory_entries[pp->directory_count] = 0;
         pp->directory_count += 1;
     }
     return result;
@@ -17807,6 +18467,7 @@ static void pp_dedupe_directories(Preprocessor* pp)
                 pp->directories[written] = pp->directories[i];
                 pp->directory_lengths[written] = pp->directory_lengths[i];
                 pp->directory_system[written] = pp->directory_system[i];
+                pp->directory_entries[written] = 0;
                 written += 1;
             }
         }
@@ -17916,15 +18577,17 @@ static bool pp_initialize_time(Preprocessor* pp)
             pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't read the current time for predefined macros");
         }
     }
+    // SOURCE_DATE_EPOCH's calendar, in UTC, here, where its refusals are reported. The current time's, in local time,
+    // waits for the first __DATE__ or __TIME__ (pp_unit_time, #652): it reads the time zone's file, 7 system calls of
+    // every unit's start, which few units expand either of.
     struct tm calendar;
-    result = result && pp_calendar(pp, seconds, epoch != 0, 0, epoch != 0 ? "SOURCE_DATE_EPOCH" : "current time", &calendar);
-    if (result)
+    pp->unit_seconds = seconds;
+    result = result && (epoch == 0 || pp_calendar(pp, seconds, true, 0, "SOURCE_DATE_EPOCH", &calendar));
+    if (result && epoch != 0)
     {
-        static const char months[12][4] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-        snprintf(pp->date, sizeof(pp->date), "%s %2d %04d", months[calendar.tm_mon], calendar.tm_mday, calendar.tm_year + 1900);
-        snprintf(pp->time, sizeof(pp->time), "%02d:%02d:%02d", calendar.tm_hour, calendar.tm_min, calendar.tm_sec);
+        pp_format_date_time(pp, &calendar);
         pp_format_timestamp(pp->timestamp, sizeof(pp->timestamp), &calendar);
-        pp->has_epoch = epoch != 0;
+        pp->has_epoch = true;
     }
     return result;
 }
@@ -17995,6 +18658,7 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     pp_table(&plan, (void**)&pp->directories, BUSTER_PP_MAX_PUSHED >> shift, sizeof(char*));
     pp_table(&plan, (void**)&pp->directory_lengths, BUSTER_PP_MAX_PUSHED >> shift, sizeof(uint32_t));
     pp_table(&plan, (void**)&pp->directory_system, BUSTER_PP_MAX_PUSHED >> shift, sizeof(uint8_t));
+    pp_table(&plan, (void**)&pp->directory_entries, BUSTER_PP_MAX_PUSHED >> shift, sizeof(FileCacheDirectory*));
     pp_table(&plan, (void**)&pp->line_directives, BUSTER_PP_MAX_LINE_DIRECTIVES >> shift, sizeof(PPLineDirective));
     pp_table(&plan, (void**)&pp->expansion_starts, (uint64_t)(BUSTER_PP_MAX_OUTPUT_TOKENS >> shift) + 1, sizeof(PPExpansionStart));
     pp_table(&plan, (void**)&pp->silent_pragmas, BUSTER_PP_MAX_SILENT_PRAGMAS >> shift, sizeof(PPExpansionStart));
@@ -18017,8 +18681,18 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     pp_tokens_plan(&plan, &pp->arguments, BUSTER_PP_MAX_STACK_TOKENS >> shift);
     pp_tokens_plan(&plan, &pp->captures, BUSTER_PP_MAX_STACK_TOKENS >> shift);
     pp_tokens_plan(&plan, &pp->expansions, BUSTER_PP_MAX_STACK_TOKENS >> shift);
-    // 131 KB, most of it the lanes' arenas, that file_cache_initialize writes whole.
+    // The unit's own file cache, 120 KB, most of it the lanes' arenas, and its four arrays (file_cache_start): zero as
+    // tables, so that a small unit neither writes 30 pages of it nor reserves four arenas for a page of each (#652).
     pp_table(&plan, (void**)&pp->cache, options->files == 0, sizeof(FileCache));
+    const uint32_t cache_shift = file_cache_shift();
+    uint64_t cache_counts[4];
+    uint64_t cache_sizes[4];
+    void* cache_arrays[4];
+    file_cache_array_shape(cache_shift, cache_counts, cache_sizes);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cache_arrays); i += 1)
+    {
+        pp_table(&plan, &cache_arrays[i], options->files == 0 ? cache_counts[i] : 0, cache_sizes[i]);
+    }
     if (result && !plan.full)
     {
         pp->arrays[0] = arena_reserve_tables(plan.tables, plan.count);
@@ -18054,7 +18728,7 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     if (options->files == 0)
     {
         pp->owns_cache = result;
-        result = result && file_cache_initialize(pp->cache, table, pp_prepare_config(pp));
+        result = result && file_cache_start(pp->cache, table, pp_prepare_config(pp), cache_shift, cache_arrays);
     }
     else if (pp->cache->table != table || pp->cache->prepare.refine_flags != pp->refine_flags || pp->cache->prepare.split_kinds != pp->split_kinds ||
              pp->cache->prepare.dollar_punctuation != pp_dollar_punctuation(options))
@@ -18266,13 +18940,104 @@ static const char* pp_read_error(const Preprocessor* pp, uint32_t file)
 // Runs what comes before the main file: the predefines (or PPOptions.predefines_path's), then the command line's -D,
 // -U and -include. Returns false, after a fatal error, if the predefines can't be read, a part of the prelude can't be
 // made (out of memory, or the unit's files table full) or running a part was fatal; the parts after it don't run.
+// Bytes of `text` before a newline, less any backslashes at its end: the synthesized directive's own newline must not
+// be a line splice's other half, which would join the next directive onto this one's last line.
+static uint32_t pp_command_line_length(const char* text)
+{
+    uint32_t length = 0;
+    while (text[length] != 0 && text[length] != '\n' && text[length] != '\r')
+    {
+        length += 1;
+    }
+    while (length != 0 && text[length - 1] == '\\')
+    {
+        length -= 1;
+    }
+    return length;
+}
+
+// Whether `path` can be pasted as `#include "..."`'s spelling: no '"' to end the literal, no newline to break the
+// directive, and no '\' whose escape would change the name (a trailing one would splice the next line).
+static bool pp_command_include_safe(const char* path)
+{
+    bool safe = true;
+    for (uint32_t i = 0; safe && path[i] != 0; i += 1)
+    {
+        safe = path[i] != '"' && path[i] != '\\' && path[i] != '\n' && path[i] != '\r';
+    }
+    return safe;
+}
+
+// A raw -include's file run with the parentage a synthesized `#include` inside <built-in> would give it: entered at
+// include depth 1 under a <built-in> range, so __INCLUDE_LEVEL__ is 1, the __BASE_FILE__ root walk names <built-in>,
+// and #include_next resumes the search the raw lookup made. The <built-in> file is made, entered and popped for its
+// range alone — its dead conditional gives the range a span — then the depth the popped context would have kept is
+// added by hand for the raw file's run.
+static bool pp_command_include_raw(Preprocessor* pp, const char* path)
+{
+    bool result = true;
+    const bool newline = strpbrk(path, "\n\r") != NULL;
+    if (newline)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, 0, "-include path contains a newline");
+        result = false;
+    }
+    else
+    {
+        uint32_t found_in = 0;
+        const uint64_t bytes = strlen(path);
+        // A quoted include searches the includer's directory first. The command line has none, so "." stands in for it.
+        const uint32_t anchor = pp_virtual_file(pp, ".", "", 0, BUSTER_PP_USER_FILE);
+        const uint32_t file = bytes <= UINT32_MAX && anchor != BUSTER_PP_NONE ? pp_find_include(pp, (const uint8_t*)path, (uint32_t)bytes, false, false, anchor, 0, &found_in, 0) : BUSTER_PP_NONE;
+        if (file == BUSTER_PP_NONE && !pp->fatal)
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "'%s' file not found", path);
+        }
+        if (file != BUSTER_PP_NONE)
+        {
+            const uint32_t built_in = pp_virtual_file(pp, "<built-in>", "#if 0\n#endif\n", 13, BUSTER_PP_USER_FILE);
+            uint32_t built_in_range = BUSTER_PP_NONE;
+            const uint32_t depth = pp->context_count;
+            if (built_in != BUSTER_PP_NONE)
+            {
+                pp_enter_file(pp, built_in, BUSTER_PP_NONE, 0, BUSTER_PP_NONE, 0, 0);
+                PPContext* base = pp->context_count > depth ? &pp->contexts[pp->context_count - 1] : 0;
+                if (base != 0 && base->kind == BUSTER_PP_CONTEXT_FILE && base->file == built_in)
+                {
+                    built_in_range = base->range;
+                    pp_pop_context(pp);
+                }
+            }
+            if (built_in_range != BUSTER_PP_NONE && pp->context_count == depth)
+            {
+                const uint32_t include_depth = pp->include_depth;
+                pp->include_depth += 1;
+                pp_enter_file(pp, file, built_in_range, pp->ranges[built_in_range].base, found_in, 0, 0);
+                if (pp->context_count == depth)
+                {
+                    // A skipped/refused file has no context whose pop would consume the synthetic level.
+                    pp->include_depth = include_depth;
+                }
+                pp_run_contexts(pp, depth);
+            }
+            else if (!pp->fatal)
+            {
+                pp_run_file(pp, file);
+            }
+        }
+        result = file != BUSTER_PP_NONE && !pp->fatal;
+    }
+    return result;
+}
+
+// Runs the main file, then gives the output's keywords their kinds. Returns false if there were errors.
 static bool pp_run_prelude(Preprocessor* pp)
 {
     bool result = true;
     // The predefines.
     if (pp->options.predefines_path != 0)
     {
-        const uint32_t file = pp_lookup_path(pp, pp->options.predefines_path, (uint32_t)strlen(pp->options.predefines_path), BUSTER_PP_SYSTEM_FILE);
+        const uint32_t file = pp_lookup_path(pp, pp->options.predefines_path, (uint32_t)strlen(pp->options.predefines_path), BUSTER_PP_NONE, 0, BUSTER_PP_SYSTEM_FILE);
         pp->flt_eval_method = predefines_eval_method(&pp->options.predefines);
         result = file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE;
         if (result)
@@ -18330,18 +19095,33 @@ static bool pp_run_prelude(Preprocessor* pp)
         for (uint32_t i = 0; i < pp->options.macro_count; i += 1)
         {
             const char* macro = pp->options.macros[i];
-            const char* equals = strchr(macro + 1, '=');
+            const uint32_t line = pp_command_line_length(macro + 1);
+            // `line` lost any backslashes spliced onto the break, so the break's presence is asked of the text itself:
+            // a -D ending in one has text cut but no embedded newline to warn of.
+            const bool cut = strpbrk(macro + 1, "\n\r") != NULL;
+            const char* equals = memchr(macro + 1, '=', line);
+            if (cut)
+            {
+                const uint32_t name = equals != NULL ? (uint32_t)(equals - (macro + 1)) : line;
+                // A warning like the preprocessor's others: -w silences it, -Werror promotes it (negative_conversion_error
+                // is pp_parse_options' -Werror). ALWAYS: the command line is no system header, and location 0 would read as
+                // one to the visibility gate.
+                const PPSeverity severity = pp->options.negative_conversion_error && !pp->options.suppress_warnings ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING_ALWAYS;
+                pp_diagnose(pp, severity, 0, "macro '%.*s' contains embedded newline; text after the newline is ignored", (int)name, macro + 1);
+            }
             if (macro[0] == 'U')
             {
-                length += (uint64_t)sprintf(command_line + length, "#undef %s\n", macro + 1);
+                length += (uint64_t)sprintf(command_line + length, "#undef %.*s\n", (int)line, macro + 1);
             }
-            else if (equals != 0)
+            else if (equals != NULL)
             {
-                length += (uint64_t)sprintf(command_line + length, "#define %.*s %s\n", (int)(equals - macro - 1), macro + 1, equals + 1);
+                const uint32_t name = (uint32_t)(equals - (macro + 1));
+                const uint32_t body = pp_command_line_length(equals + 1);
+                length += (uint64_t)sprintf(command_line + length, "#define %.*s %.*s\n", (int)name, macro + 1, (int)body, equals + 1);
             }
             else
             {
-                length += (uint64_t)sprintf(command_line + length, "#define %s 1\n", macro + 1);
+                length += (uint64_t)sprintf(command_line + length, "#define %.*s 1\n", (int)line, macro + 1);
             }
         }
         const uint32_t file = pp_virtual_file(pp, "<command line>", command_line, (uint32_t)length, BUSTER_PP_USER_FILE);
@@ -18360,27 +19140,60 @@ static bool pp_run_prelude(Preprocessor* pp)
     // after the command line's macros, which __BASE_FILE__ in a forced header gives. Without -include there is no file.
     if (result && pp->options.include_count != 0)
     {
-        uint64_t length = 0;
-        for (uint32_t i = 0; i < pp->options.include_count; i += 1)
+        bool raw = false;
+        for (uint32_t i = 0; !raw && i < pp->options.include_count; i += 1)
         {
-            length += (uint64_t)sprintf(command_line + length, "#include \"%s\"\n", pp->options.includes[i]);
+            raw = !pp_command_include_safe(pp->options.includes[i]);
         }
-        const uint32_t includes = pp_virtual_file(pp, "<built-in>", command_line, (uint32_t)length, BUSTER_PP_USER_FILE);
-        result = includes != BUSTER_PP_NONE;
-        if (result)
+        if (!raw)
         {
-            pp_run_file(pp, includes);
-            result = !pp->fatal;
+            uint64_t length = 0;
+            for (uint32_t i = 0; i < pp->options.include_count; i += 1)
+            {
+                length += (uint64_t)sprintf(command_line + length, "#include \"%s\"\n", pp->options.includes[i]);
+            }
+            const uint32_t includes = pp_virtual_file(pp, "<built-in>", command_line, (uint32_t)length, BUSTER_PP_USER_FILE);
+            result = includes != BUSTER_PP_NONE;
+            if (result)
+            {
+                pp_run_file(pp, includes);
+                result = !pp->fatal;
+            }
+            else
+            {
+                pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't make the file of the command line's -include options: %s", pp_virtual_file_error(pp));
+            }
         }
         else
         {
-            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't make the file of the command line's -include options: %s", pp_virtual_file_error(pp));
+            for (uint32_t i = 0; result && i < pp->options.include_count; i += 1)
+            {
+                const char* path = pp->options.includes[i];
+                if (pp_command_include_safe(path))
+                {
+                    const uint64_t length = (uint64_t)sprintf(command_line, "#include \"%s\"\n", path);
+                    const uint32_t includes = pp_virtual_file(pp, "<built-in>", command_line, (uint32_t)length, BUSTER_PP_USER_FILE);
+                    result = includes != BUSTER_PP_NONE;
+                    if (result)
+                    {
+                        pp_run_file(pp, includes);
+                        result = !pp->fatal;
+                    }
+                    else
+                    {
+                        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't make the file of the command line's -include options: %s", pp_virtual_file_error(pp));
+                    }
+                }
+                else
+                {
+                    result = pp_command_include_raw(pp, path);
+                }
+            }
         }
     }
     return result;
 }
 
-// Runs the main file, then gives the output's keywords their kinds. Returns false if there were errors.
 static bool pp_run_main(Preprocessor* pp, uint32_t file)
 {
     pp->main_file = file;
@@ -18396,7 +19209,7 @@ static bool pp_run_main(Preprocessor* pp, uint32_t file)
 static bool pp_preprocess_file(Preprocessor* pp, const char* main_path)
 {
     bool result = pp_run_prelude(pp);
-    const uint32_t file = result && !pp->fatal ? pp_lookup_path(pp, main_path, (uint32_t)strlen(main_path), BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
+    const uint32_t file = result && !pp->fatal ? pp_lookup_path(pp, main_path, (uint32_t)strlen(main_path), BUSTER_PP_NONE, 0, BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
     if (file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE)
     {
         result = pp_run_main(pp, file);
@@ -18441,6 +19254,21 @@ static bool pp_tokens_same(const PPTokens* a, const PPTokens* b)
            memcmp(a->values, b->values, (uint64_t)a->count * sizeof(uint32_t)) == 0 && memcmp(a->locations, b->locations, (uint64_t)a->count * sizeof(uint32_t)) == 0;
 }
 
+// The semantic event timeline is part of replay identity even for expansions that left no output token. Origins
+// are intentionally excluded: the deferred first pass has none, and the replay supplies their exact history.
+static bool pp_eval_method_uses_same(const Preprocessor* a, const Preprocessor* b)
+{
+    const uint32_t count = a->eval_method_use_count;
+    bool same = count == b->eval_method_use_count;
+    for (uint32_t i = 0; same && i < count; i += 1)
+    {
+        const PPEvalMethodUse* left = a->eval_method_uses + i;
+        const PPEvalMethodUse* right = b->eval_method_uses + i;
+        same = left->position == right->position && left->pragmas == right->pragmas && left->location == right->location;
+    }
+    return same;
+}
+
 // Records a deferred history (PPOptions.defer_history): preprocesses the unit again as pp_run or pp_run_source ran it,
 // with history, into a preprocessor of its own (in an arena of its own) with the same options, file cache, intern table
 // and time, which prints the diagnostics if `report` says so, and takes its history, which the replay keeps until
@@ -18469,10 +19297,12 @@ static void pp_history_record(Preprocessor* pp, bool report)
         memcpy(replay->time, pp->time, sizeof(pp->time));
         memcpy(replay->timestamp, pp->timestamp, sizeof(pp->timestamp));
         replay->has_epoch = pp->has_epoch;
+        replay->unit_seconds = pp->unit_seconds;
         const bool result = pp->history_path != 0 ? pp_preprocess_file(replay, pp->history_path) :
                                                     pp_preprocess_source(replay, pp->history_name, pp->history_bytes, pp->history_length);
         same = result == pp->history_result && replay->fatal == pp->history_fatal && replay->errors == pp->history_errors &&
-               (pp->history_warning_filter_deferred || replay->warnings == pp->history_warnings) && pp_tokens_same(&replay->output, &pp->output);
+               (pp->history_warning_filter_deferred || replay->warnings == pp->history_warnings) && pp_tokens_same(&replay->output, &pp->output) &&
+               pp_eval_method_uses_same(pp, replay);
     }
     if (same)
     {
@@ -18498,6 +19328,9 @@ static void pp_history_record(Preprocessor* pp, bool report)
         pp->history_runs = replay->history_runs;
         pp->history_run_count = replay->history_run_count;
         pp->history_run_capacity = replay->history_run_capacity;
+        pp->eval_method_uses = replay->eval_method_uses;
+        pp->eval_method_use_count = replay->eval_method_use_count;
+        pp->eval_method_use_capacity = replay->eval_method_use_capacity;
         // The include stack the replay's diagnostics printed last, as the unit's own run would have left it: a later
         // diagnostic prints "In file included from" only for another one (pp_diagnostic_includes).
         pp->diagnostic_include_range = replay->diagnostic_include_range;
@@ -18506,6 +19339,18 @@ static void pp_history_record(Preprocessor* pp, bool report)
         {
             pp_diagnostic_take(pp, replay);
         }
+        // The replay's output is the unit's, token for token (pp_tokens_same), and nothing reads it after that comparison:
+        // its history and diagnostics name the unit's tokens, which the unit's own output holds. Its columns go now rather
+        // than at pp_release, so that a unit with a diagnostic doesn't keep a second output to its end (#628: 12 MB of
+        // sqlite3.c's, in the backend's peak). The final output has no origin column: what the diagnostics render through
+        // stays, the replay's history runs, ranges, files, substitutions and generated tokens.
+        arena_release(&replay->output.columns);
+        replay->output.kinds = NULL;
+        replay->output.flags = NULL;
+        replay->output.values = NULL;
+        replay->output.locations = NULL;
+        replay->output.count = 0;
+        replay->output.capacity = 0;
     }
     else
     {
@@ -18582,6 +19427,103 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_history_ensure(Preprocessor* pp)
     return pp->history != 0;
 }
 
+// A file's prepared token columns forgotten (pp_release_file_columns): the kinds, starts, values and leading-space
+// words, which are in the columns' arenas, and with `whole`, a cache record's, everything else preparing gives it, so
+// that preparing it again (file_cache_prepare) starts from a record as the cache made it.
+static void pp_forget_prepared(PPFileData* data, bool whole)
+{
+    data->kinds = NULL;
+    data->starts = NULL;
+    data->values = NULL;
+    data->space = NULL;
+    data->prepared = false;
+    if (whole)
+    {
+        data->token_count = 0;
+        data->raw_errors = NULL;
+        data->raw_error_count = 0;
+        data->directive_count = 0;
+        data->directive_hash = NULL;
+        data->directive_end = NULL;
+        data->directive_kind = NULL;
+        data->directive_next = NULL;
+        data->note_count = 0;
+        data->note_directives = NULL;
+        data->note_kinds = NULL;
+        data->guard = 0;
+        data->unterminated_comment = 0;
+        data->unterminated_comment_starts_line = false;
+        data->guard_opener = 0;
+        data->line_pages = NULL;
+    }
+}
+
+// Once a unit has run, its files' token columns have no reader left: the parser, the checker and the diagnostics read
+// the output, the ranges and the files' bytes and line tables. A unit with a file cache of its own gives the columns'
+// pages back to the kernel (the kinds, starts and values, 9 bytes a token, and the leading-space words: 11.5 MB of
+// sqlite3.c's, which stayed to the backend's peak, #628) and marks its records unprepared, so that a replay of the unit
+// for its history (pp_history_ensure), which enters the files through the same cache, prepares each again. A unit whose
+// replay has run keeps them, as the replay's files read them; and a cache that units share (PPOptions.files) keeps them
+// for the units after this one. With `poison` (the driver's --poison-arenas), the pages stay mapped but unreadable, and
+// the columns' next pushes go past them, so that any reader left faults.
+BUSTER_PREPROCESSOR_ENTRY void pp_release_file_columns(Preprocessor* pp, bool poison)
+{
+    if (pp->owns_cache && pp->history_replay == NULL)
+    {
+        FileCache* cache = pp->cache;
+        for (uint32_t r = 0; r < cache->record_count; r += 1)
+        {
+            pp_forget_prepared(&cache->records[r], true);
+        }
+        for (uint32_t d = 0; d < pp->data_count; d += 1)
+        {
+            if (pp->datas[d].record != BUSTER_PP_NONE)
+            {
+                pp_forget_prepared(&pp->datas[d], false);
+            }
+        }
+        for (uint32_t lane = 0; lane < BUSTER_LANE_MAX_COUNT; lane += 1)
+        {
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cache->lanes[lane].columns); i += 1)
+            {
+                Arena* columns = &cache->lanes[lane].columns[i];
+                if (poison && columns->base != NULL && columns->mapping_bytes != 0 && columns->peak != 0)
+                {
+                    // Whole pages from the arena's start, which is a page's, to its peak's; the arena is then never pooled
+                    // (arena_release unmaps an arena whose writable extent it doesn't know).
+                    const uint64_t end = (columns->peak + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uint64_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+                    if (mprotect(columns->base, end, PROT_NONE) == 0)
+                    {
+                        columns->length = end;
+                        columns->peak = end;
+                        columns->unaccounted = true;
+                    }
+                }
+                else
+                {
+                    arena_pop_to(columns, 0);
+                    arena_discard(columns);
+                }
+            }
+        }
+    }
+}
+
+// A source expansion may have no output token (#if), so its retained location/origin is the diagnostic source.
+// Group its lexical error with the active pragma's own source history. The caller supplies the final boundary
+// after preceding captured pragmas and that pragma's retained `fp` output token, including for macro _Pragma.
+BUSTER_PREPROCESSOR_ENTRY void pp_diagnose_eval_method_use(Preprocessor* pp, uint32_t use, uint32_t position, uint32_t pragma_source)
+{
+    pp_history_ensure(pp);
+    if (use < pp->eval_method_use_count && !pp->fatal)
+    {
+        const PPEvalMethodUse record = pp->eval_method_uses[use];
+        const PPOutputDiagnosticNote note = { .token = pragma_source, .message = "#pragma entered here" };
+        pp_diagnose_source_notes_phase(pp, PP_SEVERITY_ERROR, record.location, record.origin, position, PP_DIAGNOSTIC_LEXICAL, &note, 1,
+                                      "'__FLT_EVAL_METHOD__' cannot be expanded inside a scope containing '#pragma clang fp eval_method'");
+    }
+}
+
 // Preprocesses the main file (pp_preprocess_file); with PPOptions.defer_history, then prints the diagnostics the run
 // counted (pp_history_report). The output is pp->output, with keywords' kinds. Returns false if there were errors, the
 // replay's fatal error among them.
@@ -18609,11 +19551,86 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_run_source(Preprocessor* pp, const char* name,
     return result && !pp->fatal;
 }
 
-// The driver has read stdin once before starting unit lanes. Its source bytes also outlive diagnostic replay.
+// The command's cached bytes for `path`, or null when this input is an ordinary file.
+static const PPStreamInput* pp_cached_stream(const Preprocessor* pp, const char* path)
+{
+    const PPStreamInput* result = NULL;
+    for (uint32_t i = 0; result == NULL && i < pp->options.stream_count; i += 1)
+    {
+        if (strcmp(pp->options.streams[i].path, path) == 0)
+        {
+            result = pp->options.streams + i;
+        }
+    }
+    return result;
+}
+
+// The driver has read stdin, and any non-regular primary input, once before starting unit lanes. Those bytes also
+// outlive diagnostic replay. A stream that no command cached is read here, into this unit's arena, which the replay
+// still holds. Include probes stay on the non-blocking file cache and are unchanged.
 BUSTER_PREPROCESSOR_ENTRY bool pp_run_input(Preprocessor* pp, const char* path)
 {
+    bool result = false;
     const bool input_stdin = strcmp(path, "-") == 0;
-    return input_stdin ? pp->options.stdin_ready && pp_run_source(pp, "<stdin>", (const uint8_t*)pp->options.stdin_source.pointer, (uint32_t)pp->options.stdin_source.length) : pp_run(pp, path);
+    const PPStreamInput* cached = input_stdin ? NULL : pp_cached_stream(pp, path);
+    if (input_stdin)
+    {
+        result = pp->options.stdin_ready && pp_run_source(pp, "<stdin>", (const uint8_t*)pp->options.stdin_source.pointer, (uint32_t)pp->options.stdin_source.length);
+    }
+    else if (cached != NULL)
+    {
+        result = cached->bytes.length <= UINT32_MAX &&
+                 pp_run_source(pp, path, (const uint8_t*)cached->bytes.pointer, (uint32_t)cached->bytes.length);
+    }
+    else
+    {
+        String8 bytes = { 0 };
+        const int kind = driver_read_nonregular(&pp->arena, path, &bytes);
+        if (kind > 0)
+        {
+            result = bytes.length <= UINT32_MAX && pp_run_source(pp, path, (const uint8_t*)bytes.pointer, (uint32_t)bytes.length);
+        }
+        else if (kind == 0)
+        {
+            result = pp_run(pp, path);
+        }
+    }
+    return result;
+}
+
+// Reads each non-regular input once into `arena` and records it on `options`. `-` is stdin and is left to
+// driver_read_stdin. A regular file, a directory, and a missing path are left for the file cache. A failed stream
+// read fails the command; driver_read_nonregular has already said why.
+static bool driver_cache_streams(Arena* arena, char** inputs, uint32_t count, PPOptions* options)
+{
+    bool result = true;
+    options->streams = NULL;
+    options->stream_count = 0;
+    if (count != 0)
+    {
+        options->streams = BUSTER_ARENA_PUSH_ARRAY(arena, PPStreamInput, count);
+        result = options->streams != NULL;
+    }
+    for (uint32_t i = 0; result && i < count; i += 1)
+    {
+        bool seen = strcmp(inputs[i], "-") == 0;
+        for (uint32_t earlier = 0; !seen && earlier < options->stream_count; earlier += 1)
+        {
+            seen = strcmp(options->streams[earlier].path, inputs[i]) == 0;
+        }
+        String8 bytes = { 0 };
+        const int kind = seen ? 0 : driver_read_nonregular(arena, inputs[i], &bytes);
+        result = kind >= 0;
+        if (result && kind > 0)
+        {
+            options->streams[options->stream_count] = (PPStreamInput){
+                .path = inputs[i],
+                .bytes = bytes,
+            };
+            options->stream_count += 1;
+        }
+    }
+    return result;
 }
 
 // Build only, never publish, a unit's dependency output before releasing its source/cache. Remove the main source
@@ -18720,12 +19737,10 @@ static uint32_t pp_expansion_location(const Preprocessor* pp, uint32_t token, ui
     return valid ? pp_expansion_place(pp, pp->output.locations[token], origin) : 0;
 }
 
-// The end of output token `token`'s outermost expansion, as clang's SourceManager::getExpansionRange(...).getEnd()
-// resolves it (#148's source-location builtins, #1126's review): a function-like invocation's closing parenthesis, an
-// object-like macro's name, followed while that end was itself made by an expansion (PPExpansion.end_origin); an
-// argument's or a generated token's is the end of the expansion that substituted or made it; a file token's is its own
-// location. `origin` is the token's (pp_history_at's). Returns 0 when its history doesn't lead to a location.
-static __attribute__((unused)) uint32_t pp_output_expansion_end(const Preprocessor* pp, uint32_t token, uint32_t origin)
+// Either boundary of output token `token`'s outermost expansion. An argument or a generated token follows the
+// expansion that substituted or made it; a file token keeps its own location. `origin` is pp_history_at's, after
+// pp_history_ensure. Unlike pp_expansion_place, an argument reaches its invocation rather than its spelling place.
+static uint32_t pp_output_expansion_boundary(const Preprocessor* pp, uint32_t token, uint32_t origin, bool end)
 {
     bool valid = token < pp->output.count && pp->output.locations != 0;
     uint32_t location = valid ? pp->output.locations[token] : 0;
@@ -18747,12 +19762,104 @@ static __attribute__((unused)) uint32_t pp_output_expansion_end(const Preprocess
         else
         {
             valid = kind == 0 && index < pp->history_count;
-            location = valid ? pp->history[index].end : location;
-            origin = valid ? pp->history[index].end_origin : 0;
+            location = valid ? (end ? pp->history[index].end : pp->history[index].begin) : location;
+            origin = valid ? (end ? pp->history[index].end_origin : pp->history[index].parent) : 0;
         }
     }
     valid &= origin == 0;
     return valid ? location : 0;
+}
+
+// The begin of the outermost invocation, as clang's getExpansionLoc: the invocation's name even when its first
+// output token is an argument. Statement indentation uses this place, not the argument's spelling column (#1339).
+static __attribute__((unused)) uint32_t pp_output_expansion_begin(const Preprocessor* pp, uint32_t token, uint32_t origin)
+{
+    return pp_output_expansion_boundary(pp, token, origin, false);
+}
+
+// The end, as clang's SourceManager::getExpansionRange(...).getEnd() (#148's source-location builtins, #1126's
+// review): a function-like invocation's closing parenthesis or an object-like macro's name, followed while that
+// end was itself made by an expansion (PPExpansion.end_origin). Returns 0 for a history that leads to no location.
+static __attribute__((unused)) uint32_t pp_output_expansion_end(const Preprocessor* pp, uint32_t token, uint32_t origin)
+{
+    return pp_output_expansion_boundary(pp, token, origin, true);
+}
+
+// How far pp_output_invocation_place looks: the output tokens on either side of the one asked about, and the file's
+// bytes between the file tokens it finds.
+#define BUSTER_PP_INVOCATION_TOKENS 256u
+#define BUSTER_PP_INVOCATION_BYTES 2048u
+
+// Whether the identifier at `bytes` is spelled plainly (no line splice, no trigraph, no UCN) and isn't an operator the
+// preprocessor reads in text, _Pragma or __pragma: pp_output_invocation_place's name and the identifiers among its
+// arguments.
+static bool pp_plain_name(const uint8_t* bytes, uint32_t length)
+{
+    bool result = (length != 7 || memcmp(bytes, "_Pragma", 7) != 0) && (length != 8 || memcmp(bytes, "__pragma", 8) != 0);
+    for (uint32_t i = 0; result && i < length; i += 1)
+    {
+        result = bytes[i] != '\\' && bytes[i] != '?';
+    }
+    return result;
+}
+
+// pp_output_expansion_begin's place for output token `token`, without the expansion history, where the file alone
+// says it: the token comes from a macro, and between the file tokens the output has before and after the expansion
+// it is in, the file has one invocation, a plainly spelled name and at most one parenthesized argument list, with no
+// directive and no other token. All the output between those file tokens is then that invocation's, and its place is
+// the name's, as clang's getExpansionLoc gives it. Returns 0 where the file can't say so, for the history to answer:
+// -Wempty-body's indentation check asks this first (#628: on sqlite3.c, an `assert` after a `for (...);` made the
+// check replay the whole unit for its history).
+static __attribute__((unused)) uint32_t pp_output_invocation_place(const Preprocessor* pp, uint32_t token)
+{
+    uint32_t result = 0;
+    const PPTokens* output = &pp->output;
+    const bool from_macro = token < output->count && output->locations != NULL && (output->flags[token] & BUSTER_PP_FROM_MACRO) != 0;
+    uint32_t before = token;
+    uint32_t after = token;
+    while (from_macro && before > 0 && token - before < BUSTER_PP_INVOCATION_TOKENS && (output->flags[before] & BUSTER_PP_FROM_MACRO) != 0)
+    {
+        before -= 1;
+    }
+    while (from_macro && after < output->count && after - token < BUSTER_PP_INVOCATION_TOKENS && (output->flags[after] & BUSTER_PP_FROM_MACRO) != 0)
+    {
+        after += 1;
+    }
+    const bool bounded = from_macro && !pp_dollar_punctuation(&pp->options) && (output->flags[before] & BUSTER_PP_FROM_MACRO) == 0 && after < output->count &&
+                         (output->flags[after] & BUSTER_PP_FROM_MACRO) == 0;
+    const uint32_t first = bounded ? output->locations[before] : 0;
+    const uint32_t last = bounded ? output->locations[after] : 0;
+    const uint32_t range = first != 0 ? pp_find_range(pp, first) : BUSTER_PP_NONE;
+    const PPRange* place = range != BUSTER_PP_NONE ? &pp->ranges[range] : NULL;
+    const bool spanned = place != NULL && place->file != BUSTER_PP_NONE && last > first && last - place->base < place->length && last - first <= BUSTER_PP_INVOCATION_BYTES;
+    if (spanned)
+    {
+        // The file's tokens from the one before to the one after, which the lexer stops before: the bytes end there.
+        uint8_t kinds[BUSTER_PP_INVOCATION_BYTES + BUSTER_C_TOKENIZER_OUTPUT_SLACK];
+        uint32_t starts[BUSTER_PP_INVOCATION_BYTES + BUSTER_C_TOKENIZER_OUTPUT_SLACK];
+        uint32_t ends[BUSTER_PP_INVOCATION_BYTES + BUSTER_C_TOKENIZER_OUTPUT_SLACK];
+        uint64_t resume = 0;
+        const uint32_t begin = first - place->base;
+        const uint32_t end = last - place->base;
+        const uint64_t count = c_tokenize_scalar_range(place->bytes, end, begin, false, end, kinds, starts, ends, 0, pp->refine_flags, &resume);
+        // The token before, a name, and nothing or a parenthesized list that ends where the token after starts.
+        bool shaped = count >= 2 && starts[0] == begin && (kinds[1] & ~BUSTER_C_TOKEN_START_OF_LINE) == C_TOKEN_RAW_IDENTIFIER &&
+                      pp_plain_name(place->bytes + starts[1], ends[1] - starts[1]) &&
+                      (count == 2 || (kinds[2] & ~BUSTER_C_TOKEN_START_OF_LINE) == C_TOKEN_L_PAREN);
+        uint32_t depth = 0;
+        for (uint64_t i = 2; shaped && i < count; i += 1)
+        {
+            const uint8_t kind = kinds[i] & ~BUSTER_C_TOKEN_START_OF_LINE;
+            depth += kind == C_TOKEN_L_PAREN;
+            shaped = (kind != C_TOKEN_R_PAREN || depth != 0) && (kind != C_TOKEN_HASH || (kinds[i] & BUSTER_C_TOKEN_START_OF_LINE) == 0) &&
+                     (kind != C_TOKEN_RAW_IDENTIFIER || pp_plain_name(place->bytes + starts[i], ends[i] - starts[i])) && kind != C_TOKEN_UNKNOWN;
+            depth -= kind == C_TOKEN_R_PAREN;
+            // The list closes at the last token.
+            shaped = shaped && (depth != 0) == (i + 1 < count);
+        }
+        result = shaped ? place->base + starts[1] : 0;
+    }
+    return result;
 }
 
 // The deferred first run has no expansion graph. Its exact source-level runs already record where its current
@@ -20930,9 +22037,10 @@ static bool pp_parse_error_limit(const char* argument, uint32_t* output)
     return valid;
 }
 
-// The preprocessor's options from clang-style arguments (the ones -E needs). `input` gets the source file, `output`
-// the -o file (or null), `markers` false for -P. Returns false for an argument it doesn't know.
-BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPOptions* options, Arena* arena, const char** input, const char** output, bool* markers)
+// One option grammar serves the single-input API and -E's ordered input collection. A non-null `inputs` has room for
+// count entries and retains each input's language at that operand; option values and names after -- are never flags.
+// All other options apply to the whole command. Their language-sensitive refusals must hold for every active input.
+static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* options, Arena* arena, const char** input, const char** output, bool* markers, PPDriverInput* inputs, uint32_t* input_count)
 {
     bool result = true;
     const char** quote = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)count + 1);
@@ -20959,6 +22067,8 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     bool implicit_everything = false;
     bool warning_errors = false;
     bool end_options = false;
+    CheckDriverInputKind language = CHECK_DRIVER_INPUT_AUTO;
+    bool assembly_only = inputs != NULL;
     uint32_t dependency_modes = 0;
     // The last -std= or -ansi, the only one clang's driver reads.
     const char* standard = 0;
@@ -20977,12 +22087,23 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
             end_options = true;
             continue;
         }
-        if (end_options)
+        if (end_options || arguments[i][0] != '-' || strcmp(arguments[i], "-") == 0)
         {
-            result = *input == NULL;
+            result = inputs != NULL || *input == NULL;
             if (result)
             {
-                *input = arguments[i];
+                const CheckDriverInput classified = check_driver_classify(arguments[i], language);
+                if (inputs != NULL)
+                {
+                    inputs[(*input_count)++] = (PPDriverInput){ .path = arguments[i], .kind = classified.kind, .explicit_language = language != CHECK_DRIVER_INPUT_AUTO };
+                    assembly_only &= classified.kind == CHECK_DRIVER_INPUT_ASSEMBLY_CPP || classified.kind == CHECK_DRIVER_INPUT_ASSEMBLY;
+                }
+                if (*input == NULL)
+                {
+                    *input = arguments[i];
+                    options->explicit_language = language != CHECK_DRIVER_INPUT_AUTO;
+                    options->assembly = language == CHECK_DRIVER_INPUT_ASSEMBLY_CPP;
+                }
             }
             continue;
         }
@@ -21226,6 +22347,13 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         {
             warning_errors = strcmp(argument, "-Werror") == 0;
         }
+        else if (strcmp(argument, "-fpreprocessed") == 0)
+        {
+            // Rejected as an option here, where operands of value options were already skipped, rather than by scanning
+            // the filtered vector, which keeps operands and post-`--` inputs (#1552's review).
+            fprintf(stderr, "error: unsupported option '-fpreprocessed' (already-preprocessed input is not read that way)\n");
+            result = false;
+        }
         else if (strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0)
         {
             // The other code generation and warning options: none changes what -E gives (predefines_option takes the
@@ -21236,11 +22364,16 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         {
             standard = argument;
         }
-        else if (strcmp(argument, "-x") == 0 && next != 0 && (strcmp(next, "c") == 0 || strcmp(next, "assembler-with-cpp") == 0))
+        else if (strncmp(argument, "-x", 2) == 0)
         {
-            options->explicit_language = true;
-            options->assembly = strcmp(next, "assembler-with-cpp") == 0;
-            i += 1;
+            const char* value = argument[2] != 0 ? argument + 2 : next;
+            i += argument[2] == 0;
+            language = value != NULL ? check_driver_language(value) : CHECK_DRIVER_INPUT_INVALID;
+            result = language != CHECK_DRIVER_INPUT_INVALID;
+            if (!result)
+            {
+                fprintf(stderr, "error: unsupported or missing input language '%s'\n", value != NULL ? value : "");
+            }
         }
         else if ((strcmp(argument, "-o") == 0 || strcmp(argument, "--predefines") == 0 || strcmp(argument, "-include") == 0 || strcmp(argument, "-isystem") == 0 ||
                   strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0) && next != 0)
@@ -21280,7 +22413,13 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
             const char* value = argument[2] != 0 ? argument + 2 : next;
             i += argument[2] == 0;
             result = value != 0;
-            if (result && argument[1] == 'I')
+            if (result && argument[1] == 'I' && strcmp(value, "-") == 0)
+            {
+                // The obsolete -I- split. Clang rejects it; a directory literally named "-" is -I./- .
+                fprintf(stderr, "error: '-I-' not supported, please use -iquote instead\n");
+                result = false;
+            }
+            else if (result && argument[1] == 'I')
             {
                 include[options->include_directory_count] = value;
                 options->include_directory_count += 1;
@@ -21299,10 +22438,6 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
                 }
             }
         }
-        else if ((argument[0] != '-' || strcmp(argument, "-") == 0) && *input == 0)
-        {
-            *input = argument;
-        }
         else
         {
             fprintf(stderr, "unknown argument: %s\n", argument);
@@ -21315,6 +22450,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     options->dependencies.only = dependency_modes != 0 && (dependency_modes & 12u) == 0;
     options->dependencies.include_system = (dependency_modes & 3u) != 0 ? (dependency_modes & 2u) == 0 : (dependency_modes & 8u) == 0;
     options->suppress_warnings |= (dependency_modes & 3u) != 0;
+    options->negative_conversion_error = warning_errors;
     result = result && (error_limit == 0 || pp_parse_error_limit(error_limit, &options->error_limit));
     // -ansi is -std=c89 in C.
     const char* mode = standard == 0 ? 0 : standard[1] == 'a' ? "c89" : standard + 5;
@@ -21335,6 +22471,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     options->trigraphs = trigraphs >= 0 ? trigraphs != 0 : !options->language.gnu && options->language.standard < 2023;
     options->macros = macros;
     options->includes = includes;
+    options->assembly = inputs != NULL ? assembly_only : options->assembly;
     // The -f families, after the language mode (pp_settle_families).
     result = result && pp_settle_families(&families, options);
     options->embed_directories = embeds;
@@ -21346,7 +22483,26 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     return result && *input != 0;
 }
 
+// The preprocessor's single-input API. Later -x options are validated but do not change the selected input's language.
+BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPOptions* options, Arena* arena, const char** input, const char** output, bool* markers)
+{
+    return pp_parse_options_inputs(count, arguments, options, arena, input, output, markers, NULL, NULL);
+}
+
 static bool pp_option_takes_value(const char* argument);
+
+// A failed run's -o output removed, as clang removes it: a regular file, or a symbolic link (the link alone, not what it
+// names); never a device, a FIFO or a socket, which the run never wrote. So `-E bad.c -o /dev/null` leaves /dev/null
+// alone, which run as root it would otherwise delete (#1622).
+static void pp_driver_remove_output(const char* output)
+{
+    struct stat status;
+    const bool removable = lstat(output, &status) == 0 && (S_ISREG(status.st_mode) || S_ISLNK(status.st_mode));
+    if (removable)
+    {
+        unlink(output);
+    }
+}
 
 // Verbose output describes the integrated stages rather than inventing external cc1/as/ld subprocesses. It goes to
 // stderr, so preprocessing, macro queries, dependency rules and generated stdout remain machine-readable.
@@ -21362,6 +22518,15 @@ static void pp_driver_verbose(const PPOptions* options, const char* input)
 
 // `compiler -E/-M/-MM`: option operands are never inputs or actions. Each input has a private preprocessor and rule;
 // explicit -o requires a single input, while shared -MF publication follows argv order after all units succeed.
+// `.i` with no explicit -x is already preprocessed. `-x c file.i` stays ordinary C; -E's one -x applies to every input.
+static bool pp_suffix_preprocessed(const char* path, bool explicit_language)
+{
+    const char* slash = path != NULL ? strrchr(path, '/') : NULL;
+    const char* name = slash != NULL ? slash + 1 : path;
+    const char* dot = name != NULL ? strrchr(name, '.') : NULL;
+    return !explicit_language && dot != NULL && strcmp(dot, ".i") == 0;
+}
+
 static __attribute__((unused)) int run_preprocessor_command_mode(int count, char** arguments, bool release)
 {
     arena_failure = (ArenaFailure){ 0 };
@@ -21371,44 +22536,25 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
     const char* input = NULL;
     const char* output = NULL;
     bool markers = true;
-    char** filtered = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, (uint64_t)count + 1);
-    char** inputs = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, (uint64_t)count + 1);
+    PPDriverInput* inputs = BUSTER_ARENA_PUSH_ARRAY(&arena, PPDriverInput, (uint64_t)count + 1);
+    char** paths = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, (uint64_t)count + 1);
     DependencyOutput* dependencies = BUSTER_ARENA_PUSH_ARRAY(&arena, DependencyOutput, (uint64_t)count + 1);
     uint32_t input_count = 0;
-    uint32_t filtered_count = 0;
+    uint32_t active_count = 0;
     uint32_t stdin_count = 0;
-    bool end_options = false;
-    for (int i = 0; filtered != NULL && inputs != NULL && i < count; i += 1)
+    bool parsed = inputs != NULL && paths != NULL && dependencies != NULL &&
+                  pp_parse_options_inputs(count, arguments, &options, &arena, &input, &output, &markers, inputs, &input_count);
+    for (uint32_t i = 0; parsed && i < input_count; i += 1)
     {
-        const char* argument = arguments[i];
-        if (!end_options && strcmp(argument, "--") == 0)
+        // Plain assembly has no preprocessing action, including on stdin. Do not read or publish it as C text.
+        if (inputs[i].kind != CHECK_DRIVER_INPUT_ASSEMBLY)
         {
-            end_options = true;
-            filtered[filtered_count++] = arguments[i];
-        }
-        else if (!end_options && pp_option_takes_value(argument))
-        {
-            filtered[filtered_count++] = arguments[i];
-            if (i + 1 < count)
-            {
-                filtered[filtered_count++] = arguments[++i];
-            }
-        }
-        else if (end_options || argument[0] != '-' || strcmp(argument, "-") == 0)
-        {
-            if (input_count == 0)
-            {
-                filtered[filtered_count++] = arguments[i];
-            }
-            inputs[input_count++] = arguments[i];
-            stdin_count += strcmp(argument, "-") == 0;
-        }
-        else
-        {
-            filtered[filtered_count++] = arguments[i];
+            inputs[active_count] = inputs[i];
+            paths[active_count++] = inputs[i].path;
+            stdin_count += strcmp(inputs[i].path, "-") == 0;
         }
     }
-    bool parsed = filtered != NULL && inputs != NULL && dependencies != NULL && pp_parse_options((int)filtered_count, filtered, &options, &arena, &input, &output, &markers);
+    input_count = active_count;
     options.expansion_starts = markers;
     options.defer_history = true;
     if (parsed && ((output != NULL && input_count > 1) || stdin_count > 1))
@@ -21416,12 +22562,13 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
         fprintf(stderr, "error: -o and standard input each require a single output/input respectively\n");
         parsed = false;
     }
-    parsed = parsed && dependency_check_destinations(&options.dependencies, inputs, input_count, output, false, false, &arena);
+    parsed = parsed && dependency_check_destinations(&options.dependencies, paths, input_count, output, false, false, &arena);
     if (parsed && stdin_count != 0)
     {
         parsed = driver_read_stdin(&arena, &options.stdin_source);
         options.stdin_ready = parsed;
     }
+    parsed = parsed && driver_cache_streams(&arena, paths, input_count, &options);
     if (arena.base == NULL || (!parsed && arena_failure.bytes != 0))
     {
         arena_report_failure(stderr, "preprocessing", BUSTER_PP_ARENA_BYTES);
@@ -21437,8 +22584,11 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
         result = 0;
         for (uint32_t unit = 0; unit < input_count; unit += 1)
         {
-            input = inputs[unit];
+            input = inputs[unit].path;
+            options.assembly = inputs[unit].kind == CHECK_DRIVER_INPUT_ASSEMBLY_CPP;
+            options.explicit_language = inputs[unit].explicit_language;
             dependencies[unit] = (DependencyOutput){ 0 };
+            options.preprocessed = pp_suffix_preprocessed(input, options.explicit_language);
             pp_driver_verbose(&options, input);
             if (!intern_initialize(&table) || !pp_initialize(&pp, &options, &table))
             {
@@ -21452,9 +22602,16 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
             {
                 const bool preprocessed = pp_run_input(&pp, input);
                 bool printed = true;
-                if (!options.dependencies.only)
+                const bool file_output = output != NULL && strcmp(output, "-") != 0;
+                // Do not create or truncate -o until preprocessing succeeded. A failure removes a previous file,
+                // as clang and gcc do, instead of leaving the truncated output (pp_driver_remove_output).
+                if (!preprocessed && file_output)
                 {
-                    FILE* stream = output != NULL && strcmp(output, "-") != 0 ? fopen(output, "w") : stdout;
+                    pp_driver_remove_output(output);
+                }
+                if (preprocessed && !options.dependencies.only)
+                {
+                    FILE* stream = file_output ? fopen(output, "w") : stdout;
                     printed = stream != NULL && (options.dump_macros ? pp_print_macros(&pp, stream) : pp_print(&pp, stream, markers));
                     if (stream != NULL)
                     {
@@ -21466,6 +22623,10 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
                     }
                 }
                 const bool prepared = preprocessed && printed && pp_dependencies(&pp, input, output, &arena, dependencies + unit, stderr);
+                if (!prepared && file_output)
+                {
+                    pp_driver_remove_output(output);
+                }
                 result = prepared ? result : 1;
                 pp_diagnostic_summary(&pp);
             }

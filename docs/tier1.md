@@ -63,8 +63,8 @@ GPR value or infer target permission from the compiler host. SSA promotion and
 SCCP/DCE/CFG take a function whose only SIMD values are masks, as the typed
 stream's mask class and the `_k*` builtins' rows lower (#179, [the IR SIMD
 guide](ir-simd.md)'s "Masks from the typed stream"), and one with vectors
-(#141), folding no vector; GVN, LICM, SROA and the inliner still refuse every
-SIMD function. Selection takes vectors (#141, the selection guide's
+(#141), folding no vector; GVN and LICM still refuse every SIMD function. The
+inliner and SROA take them (#1282): "Inlining", below. Selection takes vectors (#141, the selection guide's
 "Vectors"), and claims no throughput gain for them.
 
 ## Required evidence
@@ -141,8 +141,10 @@ contract. The report also sums Tier 1's code: its records, its spills' stores
 and reloads, the saves and restores
 around its calls and fixed registers' sequences, its recomputed values and the
 definitions of them it left out, its edges' moves, its spill slots, its
-frames' bytes, and its unwind tables' shapes: open frames, returns published as
-tails and frames in the red zone (`open_frames`, `return_tails`, `red_zones`).
+frames' bytes, its unwind tables' shapes: open frames, returns published as
+tails and frames in the red zone (`open_frames`, `return_tails`, `red_zones`),
+and its machine rows and the moves around them into their roles' registers and
+out of them (`machine_rows`, `row_moves`, #1283).
 Its `requested`, `admitted`, `compiled`, `unsupported`, `resource_failures`,
 `resource_retries`, `internal_failures` and `fallbacks` fields count the
 selected, admitted and compiled bodies and the disposition of the rest.
@@ -189,7 +191,9 @@ instructions +40%, 2.5 times the spill traffic), and the pipeline's cleanup
 after it does not recover the regression (205,229 against 205,269
 instructions, 0.02%), so the cost is the merge rather than dead values. Tier 1
 therefore doesn't route C source through GVN until a variant accounts for
-allocation cost. [The measurement record](https://github.com/buster14a/buster-performance/tree/126886e46a23f095709bffb36c3c57aaafac35b3/docs/measurements/gvn-866-tier1-2026-11-01)
+allocation cost. #866's acyclic numbering later cut what the option adds to
+`-c` of the frozen `sqlite3.c` from 127.1 to 74.1 ms on the 9700X, with
+byte-identical objects, so the reason to keep it off stands. [The measurement record](https://github.com/buster14a/buster-performance/tree/126886e46a23f095709bffb36c3c57aaafac35b3/docs/measurements/gvn-866-tier1-2026-11-01)
 has the commands, the host and the raw logs; [the value-numbering
 guide](ir-value-numbering.md) has the rest of the figures.
 
@@ -293,25 +297,116 @@ the x87's registers, and the convention's rarer aggregate shapes (#141): a
 part in a stack slot, a high or low eightbyte alone, an aggregate in a vector
 register whole, and an aggregate it ignores. So do the IR's vectors (#141, the
 selection guide's "Vectors"), within a function and passed or returned by value,
-which the lowering makes aggregates in a vector register whole. Still refused: a
+which the lowering makes aggregates in a vector register whole. Calls whose
+register parts exceed the red zone's 14 eightbyte staging slots reserve one
+frame object for the largest call (#1450), addressed through the stable frame
+base even in a dynamic frame. Four or more 32-byte vector arguments therefore
+work on both v3 and v4 policies; the checker driver's overflow-staging fixture
+cross-links them with clang under `--verify`. Still refused: a
 vector result LLVM demotes to a hidden pointer, naked functions, whose bodies
 are assembly Tier 0 copies as written, an address whose offset alone is past 32
-bits, and a call whose aggregates' parts in registers other than 64-byte
-vectors take more than the red zone's 14 staging slots (four 32-byte vectors,
-for one). The IR's switches and selects of floating
+bits. The IR's switches and selects of floating
 values are refused too, but the C driver's lowering makes neither: a `switch`
 comes as compares or a jump table, which Tier 1 takes, and `?:` as branches.
 Vectors of elements other than 32-bit integers (floats, doubles, 8-, 16- and
-64-bit integers, which `__m512i`'s intrinsics are) and the x86 builtins' rows of
-vectors are the IR's machine rows (#141, [the IR guide](ir.md)'s "Machine rows"),
+64-bit integers, which `__m512i`'s intrinsics are) are the IR's operations of
+their lanes where C's operators make them (#141, [the SIMD IR guide](ir-simd.md)'s
+"Lanes"), and the x86 builtins' other rows of vectors are the IR's machine rows
+([the IR guide](ir.md)'s "Machine rows"),
 which Tier 1 places as Tier 0 does ([the selection guide](tier1-selection.md)'s
-"Machine rows"). Functions with what the IR doesn't represent stop before Tier 1,
-at the lowering to the IR: any vector at a target without AVX-512 (#775), and a
-row of a vector of 4 or 8 bytes (an SSE carrier's, `_mm256_cvtepu8_epi32`'s
-operand). The scalar ones, BMI2's
+"Machine rows"); a vector of 4 or 8 bytes (an SSE carrier, #1280: the operand of
+`_mm256_cvtepu8_epi32`, MMX's `__m64`) is an f32 or f64 there. A 32- or 64-byte
+vector at a target whose registers are narrower (x86-64's and x86-64-v2's 16 bytes,
+an AVX target's 32) is split into the target's widest vectors before the optimizer
+(#1624, "The vectors wider than the target's registers" below); an SSE carrier at
+a target without AVX (#775) still stops before Tier 1, at the lowering to the IR;
+at a target without AVX a 16-byte vector is Tier 1's by
+legacy SSE's forms (#141, [the selection guide](tier1-selection.md)'s "At targets
+without AVX"). At a
+target with AVX but without AVX512VL, such as x86-64-v3, Tier 1 takes 16- and
+32-byte vectors by VEX forms in xmm0 to xmm15, and places machine rows' roles
+below 16 (#1281, [the selection guide](tier1-selection.md)'s "At targets without
+AVX-512"). By `--tier1 -march=native`, main.c compiles every function by Tier 1
+but its naked one. The scalar ones, BMI2's
 `pdep`, `pext` and `bzhi` and BMI1's `bextr`, are the IR's `intrinsic` (#141,
 [the SIMD IR guide](ir-simd.md)'s "Scalar x86 builtins"), each one VEX
 instruction of selection's `TIER1_RULE_INTRINSIC`.
+
+### Inlining (#1282)
+
+Between the lowering and SSA promotion, `--tier1` expands a body's calls of the
+unit's always_inline functions of internal linkage, the x86 intrinsics'
+wrappers above all (`c_check_tier1_inline.c`), and splits the aggregates' slots
+of a body with vectors or with expansions into fields that promotion makes
+values. The checker records each function's always_inline and noinline
+attributes (`CheckProgram.object_inline`); a function with both, or neither, is
+no callee. The emission then lowers every part before any part's code
+(`CheckEmitRun.tier1_inline`: the lanes meet between the halves, a growing
+team's code waits for every lowering, a board's share runs two epochs), so that
+a body's lane reads any callee's typed stream. Each lane prepares a callee once
+an emission, in a cache arena of its own: lowered at its own target, promoted
+and optimized, which leaves a wrapper a preheader and its body, one straight
+line. A callee whose target has a feature its caller's lacks stays a call.
+
+The unit of the caller and the callees its calls reach (up to 64) goes through
+`ir_optimize_inline` with no cost threshold, as clang inlines an always_inline
+function whatever its size, copies of 64-, 32- and 16-byte vectors taking the
+target's widths ([the inlining guide](ir-inlining.md)'s "SIMD callees and
+by-value vectors"). SROA, with its `simd` and `flagged` options ([the field
+splitting guide](ir-scalar-replacement.md)'s "#1282's options"), then makes the
+by-value vectors' slots typed vector slots, which promotion makes values: a
+wrapper's arguments, its own parameter objects and its result's bytes all leave
+memory. Tier 1's own entry and return of a function that takes or returns a
+vector by value, which its frame emitter stores into and reloads from frame
+objects, are unchanged. The typed stream's lowering copies an aggregate
+parameter that a vector register holds whole by one vector load and store
+rather than eight `i64`s (`ir_typed_vector_whole`), in a function with vectors
+and at a target with AVX-512, so that its object is one field.
+
+Any failure of the inlining or of SROA keeps the body as it was lowered: inlining
+is an optimization, never a refusal. `--tier1-report`'s `inlined` sums the
+calls expanded into the bodies Tier 1 compiled; `--tier1-no-inline` keeps every
+call, for comparison. `test-ir-inline` runs the inliner's SIMD and by-value
+fixtures, the latter on the IR's interpreter before and after inlining, SROA and
+promotion; `test-checker-driver`'s inlining fixture builds a program of
+intrinsics, a struct helper and a noinline function by each path, with and
+without inlining, against clang -O0's.
+
+### The vectors wider than the target's registers
+
+At a target whose widest vector register is narrower than a function's vectors
+(x86-64's and x86-64-v2's xmm for 32- and 64-byte ones, AVX's ymm for 64-byte
+ones), the driver's lowering takes them (`ir_lower_typed_target_pieces`, #1624)
+and `ir_vector_split.c` splits each into the target's widest vectors
+(`ir_typed_vector_piece`) after SSA promotion, beside the 128-bit integers'
+halves (the driver's `wide` stage), so that the optimizer, selection, both
+allocations and their certificates see vectors the target has registers for. The
+typed stream carries such a vector through its transports alone: Tier 0 refuses
+a row wider than its target's vectors and computes C's operators on them in
+pieces, so a wide vector's IR is constants, loads and stores (of objects,
+through addresses, and of the expression stack's slots, which promotion makes
+phis), copies and phis. Each becomes its pieces' instructions in its place: a
+constant's bytes, an access per piece at its offset (the access's alignment, at
+most a piece's), a phi per piece. Any other instruction of a wide vector (an
+operation, a comparison, a select, a call's argument or result, a row's operand)
+or an atomic access refuses the function, which Tier 0 then compiles, as before.
+A vector passed by value is an object already; one returned in registers comes
+back split across xmm0 and xmm1, xmm0 to xmm3 or ymm0 and ymm1 (#1193), which
+selection, both consumers and the code's certificate now take as up to four
+result parts (`tier1_select_result_parts`, staged in the red zone one after
+another on the way out).
+
+Measured by `--tier1 --tier1-refusals --verify` of the compiler's own units,
+whose scalar host's emulations of AVX2's and AVX-512's intrinsics
+(`host_scalar_vectors.h`) take and return these vectors: at main `cf38957a`,
+`main_unit_frontend.c` refused 249 functions at x86-64 and x86-64-v2 and 244 at
+x86-64-v3, every one for its wide vectors, and now refuses none, its 2,177
+functions' code certified at x86-64 (1,928 at main, uncertified 59 either way);
+`main_unit_backend.c` refused 233 at x86-64 and now refuses 25, none for a wide
+vector (the same 25 it refuses at znver5). `test-tier1-wide` takes hand-written
+wide vector IR through the split at both piece widths and natively at x86-64's,
+and `test-checker-driver`'s wide vectors' unit runs against clang -O0 at
+x86-64, x86-64-v2 and x86-64-v3 by both paths.
 
 ### The 128-bit integers
 

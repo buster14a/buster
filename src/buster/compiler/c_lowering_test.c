@@ -91,12 +91,16 @@ static bool c_lowering_test_root(uint32_t flags)
     return eligible && (external || retained || constructor || destructor || alias_target);
 }
 
-static void c_lowering_test_oracle(CLoweringInput input, uint8_t* expected, uint32_t* queue)
+// The reachable selection, or with `all` the all-definition one: every eligible definition but an optional one, which
+// only a reference from those selects (#148).
+static void c_lowering_test_oracle(CLoweringInput input, uint8_t* expected, uint32_t* queue, bool all)
 {
     uint32_t queued = 0;
     for (uint32_t i = 0; i < input.definition_count; i += 1)
     {
-        expected[i] = c_lowering_test_root(input.definition_flags[i]);
+        const uint32_t flags = input.definition_flags[i];
+        const bool eligible = (flags & BUSTER_C_LOWERING_INLINE_ONLY) == 0 && (flags & BUSTER_C_LOWERING_OPTIONAL) == 0;
+        expected[i] = all ? eligible : c_lowering_test_root(flags);
         if (expected[i])
         {
             queue[queued++] = i;
@@ -128,7 +132,7 @@ static void c_lowering_test_result(CLoweringTest* test, const CLowering* lowerin
     uint64_t objects = 0;
     for (uint32_t i = 0; i < input.definition_count; i += 1)
     {
-        const bool selected = all ? (input.definition_flags[i] & BUSTER_C_LOWERING_INLINE_ONLY) == 0 : expected[i] != 0;
+        const bool selected = expected[i] != 0;
         const bool reached = (lowering->reached[i / 64] >> (i % 64)) & 1;
         c_lowering_test_check(test, reached == selected, "selection differs from independent expectation");
         roots += c_lowering_test_root(input.definition_flags[i]);
@@ -150,7 +154,12 @@ static void c_lowering_test_result(CLoweringTest* test, const CLowering* lowerin
         const uint64_t tail = lowering->reached[lowering->word_count - 1] >> (input.definition_count % 64);
         c_lowering_test_check(test, tail == 0, "inactive reached bits are set");
     }
-    if (all)
+    bool optional = false;
+    for (uint32_t i = 0; i < input.definition_count; i += 1)
+    {
+        optional = optional || (input.definition_flags[i] & BUSTER_C_LOWERING_OPTIONAL) != 0;
+    }
+    if (all && !optional)
     {
         c_lowering_test_check(test, lowering->statistics.rounds == 0 && lowering->statistics.visited_edges == 0, "all-definition mode traversed edges");
     }
@@ -164,8 +173,9 @@ static void c_lowering_test_compare(CLoweringTest* test, CLoweringInput input, c
     const CLoweringStatus vector_status = c_lowering_prepare(arena, input, &vector);
     const CLoweringStatus scalar_status = c_lowering_prepare(arena, input, &scalar);
     uint8_t* expected = arena_push_array(arena, (uint64_t)input.definition_count + 1, sizeof(uint8_t), 1);
+    uint8_t* expected_all = arena_push_array(arena, (uint64_t)input.definition_count + 1, sizeof(uint8_t), 1);
     uint32_t* queue = arena_push_array(arena, (uint64_t)input.definition_count + 1, sizeof(uint32_t), 4);
-    const bool ready = vector_status == C_LOWERING_OK && scalar_status == C_LOWERING_OK && expected != 0 && queue != 0;
+    const bool ready = vector_status == C_LOWERING_OK && scalar_status == C_LOWERING_OK && expected != 0 && expected_all != 0 && queue != 0;
     c_lowering_test_check(test, ready, "prepare/test allocation failed");
     if (ready)
     {
@@ -175,8 +185,9 @@ static void c_lowering_test_compare(CLoweringTest* test, CLoweringInput input, c
         }
         else
         {
-            c_lowering_test_oracle(input, expected, queue);
+            c_lowering_test_oracle(input, expected, queue, false);
         }
+        c_lowering_test_oracle(input, expected_all, queue, true);
         // Reusing the same prepared graph across modes must clear a preceding all-definition result.
         for (uint32_t pass = 0; pass < 3; pass += 1)
         {
@@ -188,8 +199,8 @@ static void c_lowering_test_compare(CLoweringTest* test, CLoweringInput input, c
             c_lowering_test_check(test, arena->length == solve_mark, "solver changed the preparation arena");
             if (solved)
             {
-                c_lowering_test_result(test, &vector, input, expected, all);
-                c_lowering_test_result(test, &scalar, input, expected, all);
+                c_lowering_test_result(test, &vector, input, all ? expected_all : expected, all);
+                c_lowering_test_result(test, &scalar, input, all ? expected_all : expected, all);
                 c_lowering_test_check(test, vector.selected_count == scalar.selected_count, "scalar/vector selected counts differ");
                 if (vector.word_count != 0)
                 {
@@ -244,6 +255,11 @@ static void c_lowering_test_graphs(CLoweringTest* test, Arena* arena)
             else if (choice == 18)
             {
                 flags[i] |= BUSTER_C_LOWERING_ALIAS_TARGET;
+            }
+            else if (choice == 19)
+            {
+                // An object made only for what references it (#148): no root, in the all-definition mode either.
+                flags[i] |= BUSTER_C_LOWERING_OPTIONAL;
             }
             // Regular root-free worlds must keep every cycle and self-edge dead.
             if (world % 19 == 0)
@@ -567,7 +583,6 @@ static void c_lowering_test_guards(CLoweringTest* test, Arena* arena)
                 .reference_target = targets,
                 .reference_kind = kinds,
             };
-            c_lowering_test_oracle(input, expected, queue);
             const uint64_t mark = arena->length;
             CLowering lowering = { 0 };
             const bool prepared = c_lowering_prepare(arena, input, &lowering) == C_LOWERING_OK;
@@ -610,6 +625,7 @@ static void c_lowering_test_guards(CLoweringTest* test, Arena* arena)
                         c_lowering_test_check(test, status == C_LOWERING_OK, "guarded output solve failed");
                         if (status == C_LOWERING_OK)
                         {
+                            c_lowering_test_oracle(input, expected, queue, mode != 0);
                             c_lowering_test_result(test, &lowering, input, expected, mode != 0);
                         }
                     }

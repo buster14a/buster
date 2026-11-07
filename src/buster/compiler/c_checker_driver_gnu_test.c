@@ -175,6 +175,18 @@ static void check_test_driver_gnu_scopes(CheckTest* test, const char* clang, con
         { "C23 auto: a double's deduction", "int main(void) { auto x = 3.5; return (int)sizeof x - 8; }\n" },
         { "C23 constexpr: an array's bound", "int main(void) { constexpr int y = 2; int a[y]; return sizeof a - 8; }\n" },
         { "C23 constexpr: a double and a null pointer", "int main(void) { constexpr double d = 2.5; constexpr int *p = nullptr; return (int)d + (p != 0); }\n" },
+        // Past the eight values that start check_input_constexpr_find's index (#1381): a file-scope chain, a block-scope
+        // constexpr shadowing one of it, and a body's own chain, each read back by a static assertion.
+        { "C23 constexpr: chains past the lookup's index",
+          "constexpr int c0 = 1; constexpr int c1 = c0 * 3 + 1; constexpr int c2 = c1 * 3 + 1; constexpr int c3 = c2 * 3 + 1;\n"
+          "constexpr int c4 = c3 * 3 + 1; constexpr int c5 = c4 * 3 + 1; constexpr int c6 = c5 * 3 + 1; constexpr int c7 = c6 * 3 + 1;\n"
+          "constexpr int c8 = c7 * 3 + 1; constexpr int c9 = c8 * 3 + 1;\n"
+          "static_assert(c9 == 29524 && c3 == 40);\n"
+          "int f(void) { constexpr int c3 = 5; static_assert(c3 == 5 && c4 == 121); return c3; }\n"
+          "int g(void) { constexpr int l0 = c9; constexpr int l1 = l0 + 1; constexpr int l2 = l1 + 1; constexpr int l3 = l2 + 1;\n"
+          "  constexpr int l4 = l3 + 1; constexpr int l5 = l4 + 1; constexpr int l6 = l5 + 1; constexpr int l7 = l6 + 1; constexpr int l8 = l7 + c3;\n"
+          "  static_assert(l8 == 29571 && l0 == 29524); return l8 - 29571; }\n"
+          "int main(void) { static_assert(c3 == 40); return f() - 5 + g(); }\n" },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(c23); i += 1)
     {

@@ -153,6 +153,15 @@ static void bind_test_gcc_search(BindTestTally* tally, const Runtime* runtime, c
     error = ready ? runtime_libraries_import(&libraries, &selected, &script_name, 1, 0, 0) : RUNTIME_ERROR_FILE;
     bind_test_expect(tally, error == RUNTIME_ERROR_NONE && libraries.count == 1, "script reuses exactly the selected libgcc archive", 0);
     runtime_libraries_release(&libraries);
+    // libgcc.a is not required to occupy archives[0]. A decoy there must not hide the imported archive.
+    Runtime reordered = selected;
+    reordered.archives[1] = selected.archives[0];
+    reordered.archives[0].path = bind_test_gcc_string("decoy.a");
+    reordered.archive_count = 2;
+    libraries = (RuntimeLibraries){ 0 };
+    error = ready ? runtime_libraries_import(&libraries, &reordered, &script_name, 1, 0, 0) : RUNTIME_ERROR_FILE;
+    bind_test_expect(tally, error == RUNTIME_ERROR_NONE && libraries.count == 1, "script finds libgcc.a when it is not the first archive", 0);
+    runtime_libraries_release(&libraries);
 
     snprintf(archive_path, sizeof(archive_path), "%s/libgcc.a", places[0]);
     ready = ready && bind_test_write_file(archive_path, "!<arch>\n", 8);

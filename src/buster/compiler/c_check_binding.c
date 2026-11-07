@@ -40,10 +40,12 @@ static const char* const check_input_binding_mode_names[CHECK_INPUT_BINDING_MODE
     "parser-batch",
 };
 
+// The incomplete array type a use inside its declaration's initializer sees, or 0: the type is read first, which most
+// declarations haven't, so that a use reads the initializer's end alone where there is one (#1489).
 static TypeId check_input_binding_incomplete(const CheckInputReader* reader, uint32_t declaration, uint32_t token)
 {
-    return reader->incomplete_array_types != 0 && declaration < reader->parser->tokens.count &&
-           token < check_sparse_get(reader->output->initializer_ends, declaration) ? reader->incomplete_array_types[declaration] : 0;
+    const TypeId incomplete = reader->incomplete_array_types != 0 && declaration < reader->parser->tokens.count ? reader->incomplete_array_types[declaration] : 0;
+    return incomplete != 0 && token < check_sparse_get(reader->output->initializer_ends, declaration) ? incomplete : 0;
 }
 
 // Whether a declared type is const-qualified, through an array's element type as Clang's -Wunused-const-variable sees it.
@@ -92,12 +94,17 @@ static bool check_input_unused_suppressed(const CheckInput* input, uint32_t toke
     return result;
 }
 
-// The definition parameters, whose uses alone decide -Wunused-parameter: a prototype's names never warn.
+// The definition parameters, whose uses alone decide -Wunused-parameter: a prototype's names never warn. The vector path
+// visits the bodies' openings alone (check_sparse_next), a few thousand of sqlite3.c's 716,158 tokens (#1489); the
+// scalar path, its twin, every token.
 static bool check_input_parameter_marks(const CheckInput* input, const Parser* parser, uint8_t* marks)
 {
     bool valid = parser != NULL && marks != NULL && check_sparse_present(input->body_declarations) &&
                  check_sparse_present(input->parameters) && check_sparse_present(input->parameter_next);
-    for (uint32_t opening = 0; valid && opening < parser->tokens.count; opening += 1)
+    const uint32_t count = valid ? parser->tokens.count : 0;
+    const bool vector = valid && BUSTER_VECTOR_PATH(!parser->options.scalar);
+    for (uint32_t opening = check_sparse_next(input->body_declarations, 0, count, vector); valid && opening < count;
+         opening = check_sparse_next(input->body_declarations, opening + 1, count, vector))
     {
         const uint32_t declaration = check_sparse_get(input->body_declarations, opening);
         valid = declaration == BUSTER_CHECK_NONE || declaration < parser->tokens.count;
@@ -112,44 +119,102 @@ static bool check_input_parameter_marks(const CheckInput* input, const Parser* p
     return valid;
 }
 
-// A declaration inherits an earlier declaration's unused/used mark, as clang's redeclarations do: an attribute on a
-// prototype covers the definition that follows it.
-static bool check_input_unused_marked_chain(const CheckInput* input, const CBindings* events, uint32_t event, uint32_t kind)
+// Nearest statement terminator, or scope-closing brace, including `token` itself (#1378). `parents` is a private copy
+// of the parser's count entries, used for this predicate alone, or NULL for an uncached walk. With a copy, compress
+// each walked path to its answer: a comma chain
+// shared by many declarators is visited once, without a new retained token column. Missing parents and cycles compress
+// to NONE too. The parser's original parents remain immutable, including when another consumer asks a different role.
+// `work` counts uncached parent steps only. Callers copy once those steps reach the unit's count, so cheap queries
+// don't pay a token-wide copy or allocation. Before that switch at most twice count steps have been walked.
+static uint32_t check_input_cached_ancestor(const Parser* parser, uint32_t token, uint32_t* parents, bool scope, uint64_t* work)
 {
-    bool marked = false;
-    uint32_t at = event + 1;
-    for (uint32_t steps = 0; !marked && at != 0 && steps < events->count; steps += 1)
+    const uint32_t count = parser->tokens.count;
+    const uint8_t* roles = parser->tree.roles;
+    const uint32_t* links = parents != NULL ? parents : parser->tree.parents;
+    uint32_t ancestor = token;
+    uint32_t steps = 0;
+    bool found = false;
+    while (ancestor < count && steps < count)
     {
-        const uint32_t previous = events->previous[at - 1];
-        if (previous == 0 || events->operation[previous - 1] != C_BINDING_DECLARE || events->key[previous - 1] != events->key[event] ||
-            events->depth[previous - 1] != events->depth[event])
+        const uint8_t role = roles[ancestor];
+        found = scope ? role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_COMPOUND_BODY :
+                        role == PARSE_ROLE_TERMINATOR;
+        if (found)
         {
             break;
         }
-        const uint32_t token = events->declaration[previous - 1];
-        marked = token < input->token_count && check_input_unused_suppressed(input, token, kind);
-        at = previous;
+        ancestor = links[ancestor];
+        steps += 1;
     }
-    return marked;
+    const uint32_t result = found ? ancestor : BUSTER_CHECK_NONE;
+    if (parents == NULL && work != NULL)
+    {
+        *work += steps;
+    }
+    for (uint32_t at = token, walked = 0; parents != NULL && at < count && at != result && walked < count; walked += 1)
+    {
+        const uint32_t next = parents[at];
+        parents[at] = result;
+        at = next;
+    }
+    return result;
+}
+
+// The events of `events` whose operation is `operation` (C_BINDING_DECLARE or C_BINDING_USE), in order, into `list`
+// (room for every event), and how many: 64 events' operations a mask, their indices compressed 16 at a time. The
+// binding answers' passes over declarations or uses visit these alone on the vector path (#529).
+static uint32_t check_input_operation_events(const CBindings* events, uint8_t operation, uint32_t* list)
+{
+    const __m512i lanes16 = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    uint32_t found = 0;
+    for (uint32_t first = 0; first < events->count; first += 64)
+    {
+        const uint32_t length = events->count - first < 64 ? events->count - first : 64;
+        const __mmask64 lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
+        const __m512i operations = _mm512_maskz_loadu_epi8(lanes, events->operation + first);
+        const uint64_t declares = _mm512_mask_cmpeq_epi8_mask(lanes, operations, _mm512_set1_epi8((char)operation));
+        for (uint32_t part = 0; part < length; part += 16)
+        {
+            const __mmask16 selected = (__mmask16)(declares >> part);
+            _mm512_mask_compressstoreu_epi32(list + found, selected, _mm512_add_epi32(_mm512_set1_epi32((int32_t)(first + part)), lanes16));
+            found += (uint32_t)__builtin_popcount(selected);
+        }
+    }
+    return found;
 }
 
 // -Wunused-variable, -Wunused-function and -Wunused-parameter facts, from the resolved binding events: a declaration
 // no use names. The declaration's own body decides the completion, as clang reports it after the function.
+// Its three passes act at declare events alone, and read the chains' columns only at them: the vector path visits the
+// declare events (`list`, `visited` of them, check_input_operation_events), where it visited every event, most of them
+// uses, in each pass, with a branch on each one's operation; the scalar path, its twin, visits every event (`list` null
+// and `visited` the events' count, #529).
 static void check_input_unused_events(CheckInputReader* reader, const uint8_t* used, const uint8_t* used_tokens, const uint8_t* parameters,
-                                      uint8_t* reported)
+                                      uint8_t* reported, const uint32_t* list, uint32_t visited)
 {
     CheckInput* output = reader->output;
     const Parser* parser = reader->parser;
     const CBindings* events = &reader->bindings;
     const uint32_t count = parser->tokens.count;
+    uint32_t* scope_parents = NULL;
+    uint64_t scope_work = 0;
     uint32_t* chain_first = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count);
     uint32_t* chain_definition = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count);
-    bool valid = chain_first != NULL && chain_definition != NULL;
+    // A declaration inherits an earlier declaration's unused/used mark, as clang's redeclarations do: an attribute on
+    // a prototype covers the definition that follows it. Carried along the chain in one pass (#1351), not walked back
+    // from each declaration. Only objects' and functions' marks are read: any other kind is suppressed by itself.
+    uint8_t* chain_marked = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, events->count);
+    // The events the passes visit (check_input_binding_answers'): the declare events on the vector path, every event on
+    // the scalar path, which passes no list.
+    const bool listed = list != NULL;
+    bool valid = chain_first != NULL && chain_definition != NULL && chain_marked != NULL;
     if (valid)
     {
-        memset(chain_definition, 0, (uint64_t)events->count * sizeof(uint32_t));
-        for (uint32_t event = 0; event < events->count; event += 1)
+        for (uint32_t at = 0; at < visited; at += 1)
         {
+            const uint32_t event = listed ? list[at] : at;
+            chain_marked[event] = 0;
+            chain_definition[event] = 0;
             if (events->operation[event] != C_BINDING_DECLARE)
             {
                 continue;
@@ -158,9 +223,11 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
             const bool linked = previous != 0 && previous <= events->count && events->operation[previous - 1] == C_BINDING_DECLARE &&
                                 events->key[previous - 1] == events->key[event] && events->depth[previous - 1] == events->depth[event];
             chain_first[event] = linked ? chain_first[previous - 1] : event;
+            chain_marked[event] = linked && (chain_marked[previous - 1] != 0 || check_input_unused_suppressed(output, events->declaration[previous - 1], C_BINDING_OBJECT));
         }
-        for (uint32_t event = 0; valid && event < events->count; event += 1)
+        for (uint32_t at = 0; valid && at < visited; at += 1)
         {
+            const uint32_t event = listed ? list[at] : at;
             const uint32_t token = events->declaration[event];
             if (events->operation[event] == C_BINDING_DECLARE && token < count && output->declaration_bits != NULL &&
                 check_input_bit(output->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED))
@@ -169,10 +236,18 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
             }
         }
     }
-    for (uint32_t event = 0; valid && event < events->count; event += 1)
+    for (uint32_t at = 0; valid && at < visited; at += 1)
     {
+        const uint32_t event = listed ? list[at] : at;
         const uint32_t token = events->declaration[event];
         const uint32_t kind = events->kind[event];
+        // Only an ordinary object's or function's declaration can be unused (check_input_unused_suppressed), once: the
+        // facts below are read for those alone, not for every use and restore (#1489).
+        if (events->operation[event] != C_BINDING_DECLARE || events->key[event] / events->name_capacity != C_BINDING_ORDINARY || token >= count ||
+            (kind != C_BINDING_OBJECT && kind != C_BINDING_FUNCTION) || reported[token])
+        {
+            continue;
+        }
         const bool local = token < count && check_sparse_get(output->declaration_bodies, token) < count;
         const uint32_t parameter = token < count && parameters != NULL && parameters[token] != 0;
         const bool implicit = token < count && output->function_flags != NULL &&
@@ -185,7 +260,7 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
         const bool declaration_used = parameter || local ? used_tokens[token] != 0 : used[event] != 0;
         const bool selected = events->operation[event] == C_BINDING_DECLARE && events->key[event] / events->name_capacity == C_BINDING_ORDINARY &&
                               token < count && !implicit && !inline_function && !declaration_used && !check_input_unused_suppressed(output, token, kind) &&
-                              !check_input_unused_marked_chain(output, events, event, kind) && main_file &&
+                              chain_marked[event] == 0 && main_file &&
                               (parameter || local || (token < count && check_input_linkage(output->declaration_bits, token) == 1));
         const uint32_t first = events->operation[event] == C_BINDING_DECLARE ? chain_first[event] : event;
         const uint32_t chosen = chain_definition[first] != 0 ? chain_definition[first] : events->declaration[first];
@@ -204,21 +279,20 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
             // declaration could still have used it; sorting there keeps declaration order.
             uint32_t closing = BUSTER_CHECK_NONE;
             const bool scoped = !file_scope && kind != C_BINDING_FUNCTION;
-            for (uint32_t ancestor = token, steps = 0; scoped && ancestor < count && steps < count; steps += 1)
+            if (scoped && scope_parents == NULL && scope_work >= count)
             {
-                const uint32_t parent = parser->tree.parents[ancestor];
-                if (parent == BUSTER_CHECK_NONE || parent >= count || parent == ancestor)
+                scope_parents = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, count);
+                valid = scope_parents != NULL;
+                if (valid)
                 {
-                    break;
+                    memcpy(scope_parents, parser->tree.parents, (uint64_t)count * sizeof(uint32_t));
                 }
-                ancestor = parent;
-                const uint8_t ancestor_role = parser->tree.roles[ancestor];
-                if (ancestor_role == PARSE_ROLE_CLOSE_BLOCK || ancestor_role == PARSE_ROLE_CLOSE_BODY ||
-                    ancestor_role == PARSE_ROLE_CLOSE_COMPOUND_BODY)
-                {
-                    closing = ancestor;
-                    break;
-                }
+            }
+            if (scoped && valid)
+            {
+                // Strict ancestors here: a declaration never completes its own scope.
+                const uint32_t parent = parser->tree.parents[token];
+                closing = parent != token ? check_input_cached_ancestor(parser, parent, scope_parents, true, &scope_work) : BUSTER_CHECK_NONE;
             }
             const CheckWarningEvent warning = {
                 .id = id,
@@ -230,7 +304,7 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
                 .completion = closing < count ? closing : BUSTER_CHECK_NONE,
                 .payload = { .name = parser->tokens.names[token] },
             };
-            if (!check_input_warning_event(reader, &warning, NULL, 0))
+            if (!valid || !check_input_warning_event(reader, &warning, NULL, 0))
             {
                 output->resource = true;
             }
@@ -245,6 +319,44 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
 
 // `resolved` has an answer for each of reader->bindings' events (only its uses' are read). Every answer is
 // checked before any is published: a use names a token, and sees no event at or after itself.
+// A use's retained answer. Declaration tokens carry immutable elaborated types; all writes belong to the use token.
+// The deferred handoff groups every event for the same use token in one body part, including repeated query uses.
+static void check_input_binding_answer(CheckInputReader* reader, const uint32_t* resolved, uint32_t event)
+{
+    CheckInput* output = reader->output;
+    const Parser* parser = reader->parser;
+    const CBindings* events = &reader->bindings;
+    const uint32_t count = parser->tokens.count;
+    if (events->operation[event] == C_BINDING_USE)
+    {
+        const uint32_t token = events->declaration[event];
+        const uint32_t handle = resolved[event];
+        const uint32_t declaration = handle != 0 ? events->declaration[handle - 1] : BUSTER_CHECK_NONE;
+        const uint32_t old = output->declarations[token];
+        const TypeId captured = reader->declared_types[token];
+        const TypeId incomplete = check_input_binding_incomplete(reader, declaration, token);
+        output->declarations[token] = declaration;
+        if (events->key[event] / events->name_capacity == C_BINDING_ORDINARY)
+        {
+            reader->declared_types[token] = incomplete != 0 ? incomplete : declaration < count ?
+                (old == declaration && captured != 0 ? captured : reader->declared_types[declaration]) : 0;
+            const bool typedef_use = handle != 0 && events->kind[handle - 1] == C_BINDING_TYPEDEF;
+            if (declaration < count && (reader->declared_types[token] == 0 ||
+                (captured != 0 && old != declaration) ||
+                (typedef_use && parser->tree.roles[token] == PARSE_ROLE_OPERAND && !reader->ignored[token])))
+            {
+                check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+            }
+        }
+        if (declaration == BUSTER_CHECK_NONE)
+        {
+            check_input_report(reader, token, CHECK_INPUT_UNDECLARED);
+        }
+    }
+}
+
+static bool check_deferred_binding_answers(CheckDeferred* deferred, CheckInputReader* reader, const uint32_t* resolved);
+
 static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t* resolved)
 {
     CheckInput* output = reader->output;
@@ -270,35 +382,19 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
         output->binding_statistics.identifiers = identifiers;
         output->binding_statistics.declarations = declarations;
     }
-    for (uint32_t event = 0; valid && event < events->count; event += 1)
+    // The vector path's passes visit the uses, and the declarations, each listed once in order
+    // (check_input_operation_events), where each visited every event with a branch on its operation; the scalar path, the
+    // twin, visits every event (#529).
+    const bool listed = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    const uint64_t list_mark = reader->scratch != NULL ? reader->scratch->length : 0;
+    uint32_t* uses = valid && listed && reader->scratch != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)events->count + 15) : NULL;
+    const uint32_t use_count = uses != NULL ? check_input_operation_events(events, C_BINDING_USE, uses) : events->count;
+    const bool deferred = valid && reader->deferred != NULL && check_deferred_binding_answers(reader->deferred, reader, resolved);
+    for (uint32_t at = 0; valid && !deferred && at < use_count; at += 1)
     {
-        if (events->operation[event] == C_BINDING_USE)
-        {
-            const uint32_t token = events->declaration[event];
-            const uint32_t handle = resolved[event];
-            const uint32_t declaration = handle != 0 ? events->declaration[handle - 1] : BUSTER_CHECK_NONE;
-            const uint32_t old = output->declarations[token];
-            const TypeId captured = reader->declared_types[token];
-            const TypeId incomplete = check_input_binding_incomplete(reader, declaration, token);
-            output->declarations[token] = declaration;
-            if (events->key[event] / events->name_capacity == C_BINDING_ORDINARY)
-            {
-                reader->declared_types[token] = incomplete != 0 ? incomplete : declaration < count ?
-                    (old == declaration && captured != 0 ? captured : reader->declared_types[declaration]) : 0;
-                const bool typedef_use = handle != 0 && events->kind[handle - 1] == C_BINDING_TYPEDEF;
-                if (declaration < count && (reader->declared_types[token] == 0 ||
-                    (captured != 0 && old != declaration) ||
-                    (typedef_use && parser->tree.roles[token] == PARSE_ROLE_OPERAND && !reader->ignored[token])))
-                {
-                    check_input_report(reader, token, CHECK_INPUT_DECLARATION);
-                }
-            }
-            if (declaration == BUSTER_CHECK_NONE)
-            {
-                check_input_report(reader, token, CHECK_INPUT_UNDECLARED);
-            }
-        }
+        check_input_binding_answer(reader, resolved, uses != NULL ? uses[at] : at);
     }
+    valid &= !output->resource;
     const bool unused_columns = check_sparse_present(output->body_declarations) && check_sparse_present(output->parameters) &&
                                 check_sparse_present(output->parameter_next) && check_sparse_present(output->declaration_bodies) &&
                                 output->declaration_kinds != NULL && output->declaration_bits != NULL;
@@ -314,21 +410,26 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
             memset(used_tokens, 0, count);
             memset(parameters, 0, count);
             memset(reported, 0, count);
-            for (uint32_t event = 0; event < events->count; event += 1)
+            uint32_t* declares = uses != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)events->count + 15) : NULL;
+            const uint32_t declare_count = declares != NULL ? check_input_operation_events(events, C_BINDING_DECLARE, declares) : events->count;
+            for (uint32_t at_use = 0; at_use < use_count; at_use += 1)
             {
+                const uint32_t event = uses != NULL ? uses[at_use] : at_use;
                 if (events->operation[event] == C_BINDING_USE)
                 {
                     const uint32_t handle = resolved[event];
                     if (handle != 0 && handle <= events->count && events->operation[handle - 1] == C_BINDING_DECLARE)
                     {
                         // A use binds the whole declaration chain: a prototype and its definition are one entity,
-                        // and a use of either makes every declaration in the chain used.
+                        // and a use of either makes every declaration in the chain used. A declaration that an earlier
+                        // use's walk marked ends the walk: that walk went on from it to the chain's start, as every
+                        // declaration of a chain has the key and the depth of the walk's first (#529).
                         uint32_t at = handle;
                         for (uint32_t steps = 0; at != 0 && steps < events->count; steps += 1)
                         {
                             const uint32_t declaration = at - 1;
                             if (events->operation[declaration] != C_BINDING_DECLARE || events->key[declaration] != events->key[handle - 1] ||
-                                events->depth[declaration] != events->depth[handle - 1])
+                                events->depth[declaration] != events->depth[handle - 1] || used[declaration] != 0)
                             {
                                 break;
                             }
@@ -343,8 +444,9 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
                 }
             }
             // A use that bound an earlier declaration also keeps a later definition of the same entity used.
-            for (uint32_t event = 0; event < events->count; event += 1)
+            for (uint32_t at_declare = 0; at_declare < declare_count; at_declare += 1)
             {
+                const uint32_t event = declares != NULL ? declares[at_declare] : at_declare;
                 const uint32_t previous = events->previous[event];
                 if (events->operation[event] == C_BINDING_DECLARE && previous != 0 && previous <= events->count &&
                     events->operation[previous - 1] == C_BINDING_DECLARE && events->key[previous - 1] == events->key[event] &&
@@ -355,7 +457,7 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
             }
             if (check_input_parameter_marks(output, parser, parameters))
             {
-                check_input_unused_events(reader, used, used_tokens, parameters, reported);
+                check_input_unused_events(reader, used, used_tokens, parameters, reported, declares, declare_count);
             }
         }
         else if (used == NULL || (count != 0 && (used_tokens == NULL || parameters == NULL || reported == NULL)))
@@ -365,6 +467,10 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
             output->resource = true;
             valid = false;
         }
+    }
+    if (reader->scratch != NULL)
+    {
+        arena_pop_to(reader->scratch, list_mark);
     }
     return valid && output->report_count == 0;
 }
@@ -522,3 +628,4 @@ static bool check_input_bindings(CheckInputReader* reader, CheckInputBindingMode
     const bool parser = selected == CHECK_INPUT_BINDINGS_PARSER_STACKS || selected == CHECK_INPUT_BINDINGS_PARSER_BATCH;
     return parser ? check_input_binding_parser(reader, selected == CHECK_INPUT_BINDINGS_PARSER_STACKS) : check_input_binding_events(reader, selected);
 }
+
