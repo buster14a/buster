@@ -70,9 +70,6 @@ static const CallGraphAllowed call_graph_allowed[] = {
     // Tokens' invocations and parenthesized groups, and an argument's invocation and tokens, are one level shallower,
     // and there are none at depth 0 (BUSTER_PPF_RANDOM_DEPTH, 3, at most).
     { .functions = BUSTER_S8_INIT("preprocessor_fuzz_random_argument preprocessor_fuzz_random_invocation preprocessor_fuzz_random_tokens") },
-    // A branch condition's truth through its wrappers and logical operands (check_program_branch_truth, #1447), at
-    // most BUSTER_CHECK_BRANCH_TRUTH_DEPTH operands down.
-    { .functions = BUSTER_S8_INIT("check_program_branch_truth") },
 };
 
 typedef struct CallGraphInput CallGraphInput;

@@ -795,31 +795,83 @@ static bool check_program_runtime_truth(const CheckProgram* program, uint32_t no
 // (check_common_body_reached) model: a known value's (check_program_runtime_truth), and a logical operator's that one
 // operand decides though the other isn't known, `0 && x` and `1 || x` by the left and `x && 0` and `x || 1` by the right,
 // or both together, through the condition's own node, conversions, casts and `!`. A conversion keeps the truth of the
-// 0 or 1 such an operator gives, the one value it isn't already known for. `depth` bounds the operands followed.
+// 0 or 1 such an operator gives, the one value it isn't already known for. A post-order walk on an explicit stack (the
+// call graph's no-recursion rule), BUSTER_CHECK_BRANCH_TRUTH_DEPTH operands deep at most: each frame's node, its depth and
+// whether its operands are pushed, and each value 0 (false), 1 (true) or 2 (unknown), the left operand's first.
 #define BUSTER_CHECK_BRANCH_TRUTH_DEPTH 64u
-static bool check_program_branch_truth(const CheckProgram* program, uint32_t node, uint32_t condition, uint32_t depth, bool* truth)
+#define BUSTER_CHECK_BRANCH_TRUTH_FRAMES (2u * BUSTER_CHECK_BRANCH_TRUTH_DEPTH + 2u)
+static bool check_program_branch_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
 {
     const CheckGraph* graph = &program->input->graph;
-    bool known = check_program_runtime_truth(program, node, condition, truth);
-    const CheckOp op = !known && depth != 0 && condition < graph->count ? graph->ops[condition] : CHECK_OP_COUNT;
-    if (op == CHECK_OP_CONDITION || op == CHECK_OP_CONVERT || op == CHECK_OP_CAST || op == CHECK_OP_NOT)
+    uint32_t frames[BUSTER_CHECK_BRANCH_TRUTH_FRAMES];
+    uint8_t levels[BUSTER_CHECK_BRANCH_TRUTH_FRAMES];
+    uint8_t expanded[BUSTER_CHECK_BRANCH_TRUTH_FRAMES];
+    uint8_t values[BUSTER_CHECK_BRANCH_TRUTH_FRAMES];
+    uint32_t top = 1;
+    uint32_t count = 0;
+    frames[0] = condition;
+    levels[0] = 0;
+    expanded[0] = 0;
+    while (top != 0)
     {
-        bool inner = false;
-        known = check_program_branch_truth(program, node, graph->operand0[condition], depth - 1, &inner);
-        *truth = inner != (op == CHECK_OP_NOT);
+        const uint32_t at = frames[top - 1];
+        const uint8_t level = levels[top - 1];
+        const CheckOp op = at < graph->count ? graph->ops[at] : CHECK_OP_COUNT;
+        const bool unary = op == CHECK_OP_CONDITION || op == CHECK_OP_CONVERT || op == CHECK_OP_CAST || op == CHECK_OP_NOT;
+        const bool binary = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR;
+        if (expanded[top - 1] == 0)
+        {
+            bool value = false;
+            const bool known = at < graph->count && check_program_runtime_truth(program, node, at, &value);
+            if (!known && level < BUSTER_CHECK_BRANCH_TRUTH_DEPTH && (unary || binary))
+            {
+                // Its operands, the left one on top.
+                expanded[top - 1] = 1;
+                if (binary)
+                {
+                    frames[top] = graph->operand1[at];
+                    levels[top] = (uint8_t)(level + 1);
+                    expanded[top] = 0;
+                    top += 1;
+                }
+                frames[top] = graph->operand0[at];
+                levels[top] = (uint8_t)(level + 1);
+                expanded[top] = 0;
+                top += 1;
+            }
+            else
+            {
+                values[count] = known ? (uint8_t)value : 2u;
+                count += 1;
+                top -= 1;
+            }
+        }
+        else
+        {
+            uint8_t result = 2u;
+            if (unary)
+            {
+                const uint8_t inner = values[count - 1];
+                count -= 1;
+                result = inner == 2u ? 2u : (uint8_t)(inner ^ (op == CHECK_OP_NOT ? 1u : 0u));
+            }
+            else
+            {
+                const uint8_t right = values[count - 1];
+                const uint8_t left = values[count - 2];
+                count -= 2;
+                const uint8_t decider = op == CHECK_OP_LOGICAL_OR ? 1u : 0u;
+                result = left == decider ? left :
+                         left != 2u && right != 2u ? (op == CHECK_OP_LOGICAL_OR ? (uint8_t)(left | right) : (uint8_t)(left & right)) :
+                         left == 2u && right == decider ? right : 2u;
+            }
+            values[count] = result;
+            count += 1;
+            top -= 1;
+        }
     }
-    else if (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
-    {
-        const bool disjunction = op == CHECK_OP_LOGICAL_OR;
-        bool left = false;
-        bool right = false;
-        const bool left_known = check_program_branch_truth(program, node, graph->operand0[condition], depth - 1, &left);
-        const bool right_known = (!left_known || left != disjunction) &&
-                                 check_program_branch_truth(program, node, graph->operand1[condition], depth - 1, &right);
-        known = (left_known && left == disjunction) || (right_known && (left_known || right == disjunction));
-        *truth = left_known && left == disjunction ? left : left_known ? (disjunction ? left || right : left && right) : right;
-    }
-    return known;
+    *truth = values[0] == 1u;
+    return values[0] != 2u;
 }
 
 static bool check_program_case_value(const CheckProgram* program, uint32_t node, TypeId target, unsigned __int128* result)
@@ -2416,7 +2468,7 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                 {
                     bool truth = false;
                     const bool jump = entry->kind == CHECK_CONTROL_JUMP;
-                    const bool known = pass != 0 && !jump && check_program_branch_truth(program, entry->node, entry->node, BUSTER_CHECK_BRANCH_TRUTH_DEPTH, &truth);
+                    const bool known = pass != 0 && !jump && check_program_branch_truth(program, entry->node, entry->node, &truth);
                     const bool taken = truth == (entry->kind == CHECK_CONTROL_BRANCH_TRUE);
                     targets[0] = jump || !known || taken ? entry->target : BUSTER_CHECK_NONE;
                     next = !jump && (!known || !taken);

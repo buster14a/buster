@@ -2456,9 +2456,9 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
                                       const CheckCommonEnabled* enabled)
 {
     const CheckOp op = graph->ops[node];
-    // (A null dereference's in the division scan too, check_common_div_own.)
     const uint32_t divisor = graph->operand1[node];
     TypeId divisor_type = 0;
+    // (A null dereference's in the division scan too, check_common_div_own.)
     const bool division = ((op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && check_common_integer_constant(stream, divisor) &&
                            check_common_stream_integer(stream, divisor, &divisor_type) == 0) ||
                           (op == CHECK_OP_DEREFERENCE && check_common_null_dereference(graph, stream, types, node));
@@ -4427,7 +4427,7 @@ static void check_common_body_reached(const CheckProgram* program, const CheckPr
         {
             bool truth = false;
             const bool jump = entry->kind == CHECK_CONTROL_JUMP;
-            const bool known = !jump && check_program_branch_truth(program, entry->node, entry->node, BUSTER_CHECK_BRANCH_TRUTH_DEPTH, &truth);
+            const bool known = !jump && check_program_branch_truth(program, entry->node, entry->node, &truth);
             const bool taken = truth == (entry->kind == CHECK_CONTROL_BRANCH_TRUE);
             targets[0] = jump || !known || taken ? entry->target : BUSTER_CHECK_NONE;
             next = !jump && (!known || !taken);
@@ -4853,8 +4853,8 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
     return result;
 }
 
-// The operators whose own reach (check_common_own_reach) may have a bit: check_common_own_candidate's, a division's and a
-// comparison's.
+// The operators whose own reach (check_common_own_reach) may have a bit: check_common_own_candidate's, a null dereference's
+// (#1447, check_common_div_own's), a division's and a comparison's.
 static const CheckOp check_common_reach_ops[] =
 {
     CHECK_OP_INITIALIZE,
@@ -4863,9 +4863,9 @@ static const CheckOp check_common_reach_ops[] =
     CHECK_OP_CALL,
     CHECK_OP_SUBSCRIPT,
     CHECK_OP_COMMA,
+    CHECK_OP_DEREFERENCE,
     CHECK_OP_DIVIDE,
     CHECK_OP_REMAINDER,
-    CHECK_OP_DEREFERENCE,
     CHECK_OP_LESS,
     CHECK_OP_LESS_EQUAL,
     CHECK_OP_GREATER,
@@ -5017,6 +5017,40 @@ static bool check_common_facts_tree(const CheckGraph* graph, const CheckStream* 
     return result;
 }
 
+// Clears the nodes from the `depth` on `stack` with every node below them (operands and arguments) that is still
+// evaluated, a worklist's walk: check_common_evaluated_tree's, which visits each node once in its tree.
+static void check_common_clear_below(const CheckGraph* graph, uint8_t* evaluated, uint32_t* stack, uint32_t depth)
+{
+    const uint32_t count = graph->count;
+    while (depth != 0)
+    {
+        const uint32_t at = stack[--depth];
+        if (evaluated[at] != 0)
+        {
+            evaluated[at] = 0;
+            const uint32_t children[] = { graph->operand0[at], graph->operand1[at], graph->operand2[at] };
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(children); i += 1)
+            {
+                if (children[i] < count)
+                {
+                    stack[depth++] = children[i];
+                }
+            }
+            if (check_graph_has_arguments(graph->ops[at]) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
+            {
+                for (uint32_t i = 0; i < graph->argument_counts[at]; i += 1)
+                {
+                    const uint32_t argument = graph->argument_nodes[graph->argument_offsets[at] + i];
+                    if (argument < count)
+                    {
+                        stack[depth++] = argument;
+                    }
+                }
+            }
+        }
+    }
+}
+
 // check_common_evaluated's vector path, over the tree check_common_facts_tree found: a node is evaluated where its root is
 // and no node on its way there leaves its operand out (check_common_operand_mask). So every node a parent reads starts
 // evaluated, and then the roots the control and selection walks left out and the operands the masks leave out (their
@@ -5032,10 +5066,11 @@ static uint8_t* check_common_evaluated_tree(const CheckGraph* graph, const Check
     {
         for (uint32_t node = 0; node < count; node += 1)
         {
-            evaluated[node] = parents[node] == BUSTER_CHECK_NONE;
+            // (A dropped range's root, as check_common_evaluated leaves it out.)
+            evaluated[node] = parents[node] == BUSTER_CHECK_NONE &&
+                              (program == NULL || program->dropped_range_count == 0 || !check_program_token_dropped(program, graph->tokens[node]));
         }
-        // An unreachable initializer's roots, which no parent makes evaluated (check_common_unreachable); NULL in a unit
-        // without one, whose propagation then reads no barrier.
+        // An unreachable initializer's roots under a parent (check_common_unreachable's barriers), cleared below.
         uint8_t* blocked = NULL;
         if (program != NULL && program->controls != NULL && !check_common_unreachable(program, graph, evaluated, &blocked, scratch))
         {
@@ -5049,47 +5084,6 @@ static uint8_t* check_common_evaluated_tree(const CheckGraph* graph, const Check
         for (uint32_t node = 0; node < count; node += 1)
         {
             evaluated[node] |= parents[node] != BUSTER_CHECK_NONE;
-        }
-        // The scalar path's blocked[] barriers: an unreachable initializer's nodes and everything below them stay
-        // unevaluated though a discard wrapper reads them. Each barrier's subtree is cleared once, as a cleared root's.
-        if (blocked != NULL)
-        {
-            for (uint32_t at = 0; at < count; at += 1)
-            {
-                if (blocked[at] != 0 && evaluated[at] != 0)
-                {
-                    uint32_t depth = 0;
-                    stack[depth++] = at;
-                    while (depth != 0)
-                    {
-                        const uint32_t below = stack[--depth];
-                        if (evaluated[below] != 0)
-                        {
-                            evaluated[below] = 0;
-                            const uint32_t children[] = { graph->operand0[below], graph->operand1[below], graph->operand2[below] };
-                            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(children); i += 1)
-                            {
-                                if (children[i] < count)
-                                {
-                                    stack[depth++] = children[i];
-                                }
-                            }
-                            if (check_graph_has_arguments(graph->ops[below]) && graph->argument_offsets != NULL &&
-                                graph->argument_counts != NULL)
-                            {
-                                for (uint32_t i = 0; i < graph->argument_counts[below]; i += 1)
-                                {
-                                    const uint32_t argument = graph->argument_nodes[graph->argument_offsets[below] + i];
-                                    if (argument < count)
-                                    {
-                                        stack[depth++] = argument;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         }
         CheckCommonScan roots = { 0 };
         const CheckCommonOps masked = check_common_ops(check_common_mask_ops, BUSTER_ARRAY_LENGTH(check_common_mask_ops));
@@ -5122,32 +5116,15 @@ static uint8_t* check_common_evaluated_tree(const CheckGraph* graph, const Check
                 }
                 node = check_common_next_op(graph, &masked, &masks, true);
             }
-            while (depth != 0)
+            check_common_clear_below(graph, evaluated, stack, depth);
+        }
+        // Each barrier, with every node below it: the scalar walk's evaluation never reaches them.
+        for (uint32_t node = 0; blocked != NULL && node < count; node += 1)
+        {
+            if (blocked[node] != 0)
             {
-                const uint32_t at = stack[--depth];
-                if (evaluated[at] != 0)
-                {
-                    evaluated[at] = 0;
-                    const uint32_t children[] = { graph->operand0[at], graph->operand1[at], graph->operand2[at] };
-                    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(children); i += 1)
-                    {
-                        if (children[i] < count)
-                        {
-                            stack[depth++] = children[i];
-                        }
-                    }
-                    if (check_graph_has_arguments(graph->ops[at]) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
-                    {
-                        for (uint32_t i = 0; i < graph->argument_counts[at]; i += 1)
-                        {
-                            const uint32_t argument = graph->argument_nodes[graph->argument_offsets[at] + i];
-                            if (argument < count)
-                            {
-                                stack[depth++] = argument;
-                            }
-                        }
-                    }
-                }
+                stack[0] = node;
+                check_common_clear_below(graph, evaluated, stack, 1);
             }
         }
     }
