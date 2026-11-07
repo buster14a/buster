@@ -103,8 +103,8 @@ static Tier0BenchmarkReading ir_source_run(uint32_t variant, const IrSourceCorpu
         IrCheck check = { .error = IR_OK };
         switch (variant)
         {
-        case BUSTER_IR_SOURCE_LOWER: check = ir_lower_typed(source->function, source->result_type, source->symbol_count, output, scratch, &result); break;
-        case BUSTER_IR_SOURCE_LOWER_SCALAR: check = ir_lower_typed_scalar(source->function, source->result_type, source->symbol_count, output, scratch, &result); break;
+        case BUSTER_IR_SOURCE_LOWER: check = ir_lower_typed_target(source->function, source->result_type, source->symbol_count, source->target_features, output, scratch, &result); break;
+        case BUSTER_IR_SOURCE_LOWER_SCALAR: check = ir_lower_typed_target_scalar(source->function, source->result_type, source->symbol_count, source->target_features, output, scratch, &result); break;
         case BUSTER_IR_SOURCE_VERIFY: check = ir_verify(lowered, scratch, 0); break;
         case BUSTER_IR_SOURCE_VERIFY_SCALAR: check = ir_verify_scalar(lowered, scratch, 0); break;
         case BUSTER_IR_SOURCE_PROMOTE: check = ssa_ir_promote(lowered, output, scratch, &result); break;
@@ -168,8 +168,9 @@ static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char
         // function), so that its bytes, alignment gaps and all, don't depend on the functions before it.
         const uint64_t padding = (64 - (kept->length & 63)) & 63;
         bool lowers = padding == 0 || arena_push(kept, padding, 1) != 0;
-        lowers = lowers && ir_lower_typed(source->function, source->result_type, source->symbol_count, kept, scratch, vector).error == IR_OK &&
-                            ir_lower_typed_scalar(source->function, source->result_type, source->symbol_count, output, scratch, &scalar).error == IR_OK &&
+        // The producer chose rows for this function's target, including its target attribute. Both paths must retain it.
+        lowers = lowers && ir_lower_typed_target(source->function, source->result_type, source->symbol_count, source->target_features, kept, scratch, vector).error == IR_OK &&
+                            ir_lower_typed_target_scalar(source->function, source->result_type, source->symbol_count, source->target_features, output, scratch, &scalar).error == IR_OK &&
                             ir_lower_test_equal(vector, &scalar);
         // Each promotion from the same mark, an arena of its own's start, as test-ir-source's are.
         arena_pop_to(output, mark);
