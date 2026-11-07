@@ -1353,6 +1353,66 @@ The control's wall time was within 0.09% of main's, and its cycles within 0.15%.
 - the reader's fills of its scratch columns (#628);
 - what #1530 removes.
 
+### The binding answers and the deprecated marks (#529, #1489, 7 November)
+
+**Where the stage went.** At main `53854a7c`, `check-input` took 48.2 ms of `-c sqlite3.c`'s 129.9 ms span on the
+9700X. These are shares of the compile's cycles samples, by inlined frame:
+- **The walk in source order** (`check_input_resolve_range`): 4.95%.
+- **The expressions' coded walk**: 3.76%, plus the functions of its actions.
+- **The declaration steps**: about 5% together.
+- **`check_input_binding_answers`**: 1.26%. Of that, 0.65% is `check_input_unused_events`; `check_input_binding_answer`
+  adds another 0.70%.
+- **`check_input_deprecated_marked`**: 0.69%.
+
+The walks' and the steps' cost is spread over their lines, and their branch misses don't account for it. The coded
+walk has 5.6% of the compile's misses and the walk in source order 2.5%.
+
+#1642 and #1646 change the two passes outside the walks. Each change keeps its scalar twin: given no list, the
+binding passes visit every event, as before.
+
+| pass | before | now |
+| --- | --- | --- |
+| `check_input_deprecated_marked` | gathered each declaration's object and mark, 16 at a time | tests 16 declarations at a time against a filter of the marked keys in two registers (`CheckInputFilter`), and gathers only for those that pass; it skips the scan of the objects when no key is marked |
+| `check_input_unused_events`' three passes | every binding event, with a branch on its operation | only the declare events, listed once by `check_input_operation_events`, which compares 64 operations at a time and compress-stores the matches' indices |
+| the answers loop | every event | only the use events, from a list built the same way |
+| the walk that marks declarations used | back to the chain's start | stops at a declaration already marked |
+| `chain_marked`, `chain_definition` | filled whole | cleared only at the declare events the passes visit |
+
+The deprecated marks' `latest` column is cleared by walking the attributed tokens again, not by a second fill.
+
+**The splice.** #1642 also made `check_input_expression_values`, the expressions' walk's splice of its children's
+values, branch-free. Those branches are 0.57% of the compile's misses. The walk's actions took 10.39 ms with the
+branch-free form, against 10.02 to 10.03 ms without it, in every comparison. So #1646 puts the branches back, and
+the function's comment records the measurement.
+
+#1175 had found neither of its branch-free forms helped ("The checker's rare tests and their layout", below). There,
+clang made a branch of the conditional store, and a shared sink slot would race between lanes. #1642's form stores the
+link through a selected pointer, into a local where there is no chain, so no lanes share a slot. It measured slower
+all the same.
+
+**Measured on the 9700X.** Each A/B was 8 interleaved rounds of `perf stat -r 3` on CPU 2, then `measure-compile` each
+way. Every run held the lock on its own, with a receipt. Every build's object is the same bytes.
+[The record](https://github.com/buster14a/buster-performance/tree/26334fb1ebb0b405d8cbad5bf3ba5dc5858f0ddd/docs/measurements/check-input-529-answers-2026-11-07)
+keeps the profiles, the `measure-compile` of each step of #1642 and the receipts.
+
+| against main `53854a7c` | wall time | user cycles | user instructions | `check-input` |
+| --- | ---: | ---: | ---: | ---: |
+| #1642 (`9ce56d36`) | −1.21% | −1.23% | +0.58% | 48.20 → 47.46 ms |
+| #1646 (`6d1f7cfc`) | −1.45% | −1.57% | −0.19% | 48.07 → 47.12 ms |
+
+By symbol, `check_input_binding_answers` went from 1.16% to 0.87% of the cycles, and `check_input_deprecated_marked`
+from 0.73% to 0.27%.
+
+**What is left in the stage**, at 47.1 ms:
+- the expressions' coded walk, about 13 ms, of which its actions are 10 ms;
+- the walk in source order, about 6.7 ms;
+- the declaration steps, about 6.6 ms;
+- the binding answers, about 1.9 ms;
+- the reader's fills of its scratch columns (#628).
+
+The walks and the steps are flat profiles, so what is left of them needs a change to the walks themselves. Trimming
+another pass around them won't reach it.
+
 ## The passes after checking (#592)
 
 #641 removes more token-domain work from the same handoffs. Initializer plans keep only their ascending
