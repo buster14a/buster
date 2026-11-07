@@ -754,7 +754,7 @@ static void check_test_literal_tables(CheckTest* test, const char* clang)
         if (used > 0 && (uint64_t)used < sizeof(source))
         {
             used += snprintf(source + used, sizeof(source) - (uint64_t)used,
-                             "};%s{const struct R*r=&table[(unsigned)n%%40];return r->a+r->b+(int)((long)r->c%%1000)+r->d+r->e+(int)sizeof table;}%s\n",
+                             "};%s{const struct R*r;r=&table[(unsigned)n%%40];return r->a+r->b+(int)((long)r->c%%1000)+r->d+r->e+(int)sizeof table;}%s\n",
                              form == 1 ? "" : "int tested(int n)", form == 1 ? "}" : "");
         }
         const bool fits = used > 0 && (uint64_t)used < sizeof(source);
