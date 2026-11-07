@@ -39,6 +39,65 @@ retains the final CFG and dominators in a caller-owned analysis arena for
 [the analysis-handoff guide](ir-analysis-handoff.md). `ir_optimize` remains the
 independent rebuilding control.
 
+### Scalar diamond/triangle if-conversion (#1382)
+
+The C driver's `ir_if_convert.c` runs after SSA promotion, wide-value splitting
+and integer truth simplification, before the ordinary optimizer prepares any
+analysis. It finds conditional terminators with a bounded 64-byte opcode mask
+and an exact scalar twin. A function without one needs no CFG or output
+allocation. Reachability and exact predecessor sets then identify local
+diamonds and triangles: each arm has a single entry from the head and an
+unconditional exit to the same two-predecessor join. A join may head a later
+region, so sequential clamps convert in the same pass. An arm cannot overlap
+another accepted region, and joins with extra predecessors or general nested
+decision trees remain control flow.
+
+Every initial phi in an accepted join becomes an `IR_SELECT` of the head's
+condition and that phi's true/false incoming values. Arm rows move, in
+dependency order, before these selects; the head branches directly to the
+join. Original arm blocks retain only unreachable branch stubs for the
+ordinary SCCP/DCE/CFG pass to remove. Rows are permuted without duplication,
+and block identities remain stable. The subsequent optimizer validates the
+rewritten SSA and publishes its usual final analysis revision.
+
+The admissible values are `i1`, `i8`, `i16`, `i32`, `i64` and pointers, matching
+the scalar select consumer. Arms may contain constants, copies, wrapping
+integer arithmetic, bitwise operations, integer comparisons, scalar selects
+and integer/pointer conversions. Scalar shifts require a direct constant
+count strictly below the result width. Loads, stores, atomics, calls, division,
+remainder, floating operations and conversions, allocation/stack operations,
+lifetime markers, fences, undefined-value producers and unknown operations
+refuse the whole region. A load needs a dereferenceability proof which this
+pass does not attempt. Functions containing indirect-branch labels remain
+unchanged.
+
+Each arm has at most four rows and each join at most four phis. The combined
+cost limit is eight: an integer multiply costs three, a select costs two,
+and other admitted rows cost one. These conservative bounds limit speculation
+and additional live values; they are not measured target latencies. The IR has
+no branch-probability metadata (`__builtin_expect` currently lowers to its
+value), so there is no retained profile hint for this pass to consult.
+
+`ir_if_convert(function, output, scratch, scalar, result)` requires verified
+SSA and distinct output/scratch arenas; scratch must own none of the input.
+The output arena may already contain the input. A changed result owns fresh
+row columns, block offsets, extra words and call records, borrowing immutable
+tables from the input until the ordinary optimizer materializes its output.
+Both lifetimes must cover that consumption. Shared or overlapping `extra`
+slices are never remapped in place: original switch/label words stay intact,
+and surviving phi/call occurrences get appended value slices. With no accepted
+region the result borrows the input and allocates no output. Failure preserves
+the result and output mark; scratch is restored on every outcome.
+
+The existing optimizer command covers the pass with independent execution,
+complete verification, exact twins, hostile speculation cases, guarded tails,
+side-table aliasing and allocation failures. The C driver tests also check
+native results against Clang and decode actual `cmov`/branch shapes. Generated
+code shape and runtime performance are separate evidence: approved-host
+measurements of unpredictable and predictable branches, code size, register
+pressure and compiler throughput remain necessary. No runtime speedup is
+claimed here.
+
 SCCP tracks a state and two-word constant per instruction and an executable
 byte per deduplicated CFG edge. It sweeps executable blocks in reverse
 postorder, with 16-instruction transfer batches; the scalar solver queues
