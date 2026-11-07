@@ -361,11 +361,12 @@ static uint32_t check_target_feature_noreturn_object(const CheckProgram* program
     {
         operand = graph->operand0[operand];
     }
-    const CheckValue value = operand < graph->count ? check_stream_value(program->stream, operand) : (CheckValue){ 0 };
+    // The designator's category and object, from the stream's columns.
+    const bool function = operand < graph->count && graph->ops[operand] == CHECK_OP_VALUE && check_stream_category(program->stream, operand) == CHECK_FUNCTION;
     *name = operand < graph->count ? graph->tokens[operand] : 0;
     const uint32_t overload = check_program_builtin_index(program->stream->overloads, program->stream->overload_count, sizeof(CheckOverloadEffect), node);
     const uint32_t object = overload != BUSTER_CHECK_NONE ? program->stream->overloads[overload].selected.object :
-                            operand < graph->count && graph->ops[operand] == CHECK_OP_VALUE && value.category == CHECK_FUNCTION ? value.object : 0;
+                            function ? check_stream_object(program->stream, operand) : 0;
     return object < program->object_count ? object : 0;
 }
 
