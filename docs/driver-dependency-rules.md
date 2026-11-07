@@ -136,10 +136,20 @@ and explicit primary-output destinations check the complete source/artifact
 set once, rather than repeating the same check per unit. No names are allocated
 for disabled, empty or stdout-only admission.
 
-The existing file, hard-link, directory-identity and dangling-symlink checks are
-retained. Distinct implicit dependency destinations still perform pairwise
-filesystem identity checks; this bounded change does not finish #1314's linear
-syscall target. The direct driver regressions check linear filename storage,
-late source/object collisions and exhausted storage alongside the existing CLI
-alias/publication suite. Approved-host end-to-end scaling remains outstanding;
-no measured speedup is claimed.
+Each path now collects its existing-file identity, dangling-symlink state and
+parent-directory identity once for admission. Distinct destinations reuse source
+and artifact observations in linear arena storage; a shared destination needs
+no identity arrays. File and parent probes are scalar OS calls. The overlap
+comparisons remain pairwise in memory, so CPU comparisons are still quadratic;
+this change removes the quadratic filesystem-probe count, not all admission
+scaling costs. As before, admission is not an atomic filesystem transaction and
+cannot guarantee safety against a concurrent external path replacement.
+
+The direct driver regressions bound filesystem probes by nine per source for
+implicit object output, six per source without a primary output, and three per
+source/destination plus one executable identity for default linking. They also
+check linear storage, late source/object collisions, stdin, exhausted storage
+and an explicit alias matrix covering hard links, symlinks, missing leaves,
+parent aliases and failed/overlong parent probes. Disabled, empty and stdout-only
+admission keep their no-storage paths. Approved-host end-to-end scaling remains
+outstanding; no measured speedup is claimed.
