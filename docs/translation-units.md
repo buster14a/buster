@@ -466,6 +466,13 @@ So a units lane does five things:
   with none left after it, and a command of one file, discard as before.
   `--shared-parts` reports how many units gave their pages back in whole huge
   pages.
+  The driver gives the scratch's pages back after the reader too, past 96
+  bytes a token beyond its length (`check_driver_discard_scratch`,
+  `BUSTER_CHECK_DRIVER_SCRATCH_REUSE`, #628): the stages up to the checker's
+  last pass push that much of it again, and would fault it in again cleared,
+  where they find it resident; a unit whose lane has another to compile
+  gives them back in whole huge pages by the same test
+  (`check_units_unit_left`), which `--shared-parts` doesn't count.
 - **It pools the arenas its units release** (`arena_pool`, which only the
   units' lanes set): `arena_release` frees an arena's pages with
   `MADV_DONTNEED`, which takes the address space's lock for reading and leaves

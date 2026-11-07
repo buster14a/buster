@@ -639,6 +639,67 @@ static IrSimdTypedStatus ir_simd_typed_intrinsic(const Tier0Operation* source, u
     return status;
 }
 
+// A row of the bit builtins (#1374, check_lower_bits_row): one integer operand of 32 or 64 bits, read by a count of the
+// form's width into the result's register (tzcnt, bsf, lzcnt, bsr or popcnt), an integer of 32 bits or of the operand's
+// width; or moved there and its bytes swapped (bswap), of the operand's class. Each is its IR intrinsic of the operand's
+// width (ir_typed_bits narrows a 64-bit count to the result's type), which needs the features its form does.
+static IrSimdTypedStatus ir_simd_typed_bits(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    static const IrSimdTypedIntrinsic counts[] = {
+        { { X86_FORM_TZCNT_R32_RM32, X86_FORM_TZCNT_R64_RM64 }, BUSTER_IR_INTRINSIC_TZCNT, false, BUSTER_X86_FEATURE(BMI) },
+        { { X86_FORM_BSF_R32_RM32, X86_FORM_BSF_R64_RM64 }, BUSTER_IR_INTRINSIC_BSF, false, 0 },
+        { { X86_FORM_LZCNT_R32_RM32, X86_FORM_LZCNT_R64_RM64 }, BUSTER_IR_INTRINSIC_LZCNT, false, BUSTER_X86_FEATURE(LZCNT) },
+        { { X86_FORM_BSR_R32_RM32, X86_FORM_BSR_R64_RM64 }, BUSTER_IR_INTRINSIC_BSR, false, 0 },
+        { { X86_FORM_POPCNT_R32_RM32, X86_FORM_POPCNT_R64_RM64 }, BUSTER_IR_INTRINSIC_POPCNT, false, BUSTER_X86_FEATURE(POPCNT) },
+    };
+    IrSimdTypedStatus status = source != NULL && result != NULL ? IR_SIMD_TYPED_UNSUPPORTED : IR_SIMD_TYPED_INVALID;
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    const uint8_t operand = source != NULL ? source->operand_classes[0] : 0;
+    const uint8_t class = source != NULL ? source->result_class : 0;
+    const uint32_t bytes = tier0_class_bytes(operand);
+    if (status != IR_SIMD_TYPED_INVALID && source->operand_count == 1 && tier0_class_integer(operand) && (bytes == 4 || bytes == 8) &&
+        source->operand_bytes[0] == 0 && tier0_class_integer(class) && source->result_bytes == 0)
+    {
+        const bool wide = bytes == 8;
+        const uint8_t r = BUSTER_TIER0_ROLE_INTEGER_RESULT;
+        const uint8_t i0 = BUSTER_TIER0_ROLE_INTEGER(0);
+        if (source->record_count == 1 && (tier0_class_bytes(class) == 4 || tier0_class_bytes(class) == bytes))
+        {
+            for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(counts); k += 1)
+            {
+                const X86Instruction expected = { .form = counts[k].forms[wide], .reg = r, .rm = i0, .mode = BUSTER_X86_REGISTER_DIRECT };
+                if (memcmp(&source->records[0], &expected, sizeof(expected)) == 0)
+                {
+                    candidate.intrinsic = (uint8_t)(counts[k].intrinsic + 1);
+                    candidate.required_features = counts[k].feature;
+                }
+            }
+        }
+        else if (source->record_count == 2 && class == operand)
+        {
+            const X86Instruction move = { .form = wide ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32, .reg = r, .rm = i0, .mode = BUSTER_X86_REGISTER_DIRECT };
+            const X86Instruction swap = { .form = wide ? X86_FORM_BSWAP_R64 : X86_FORM_BSWAP_R32, .rm = r, .mode = BUSTER_X86_REGISTER_DIRECT };
+            if (memcmp(&source->records[0], &move, sizeof(move)) == 0 && memcmp(&source->records[1], &swap, sizeof(swap)) == 0)
+            {
+                candidate.intrinsic = (uint8_t)(BUSTER_IR_INTRINSIC_BSWAP + 1);
+            }
+        }
+        if (candidate.intrinsic != 0)
+        {
+            status = (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_TARGET;
+        }
+    }
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.operand_count = 1;
+        candidate.operand_classes[0] = operand;
+        candidate.intrinsic_operands[0] = 0;
+        candidate.intrinsic_operands[1] = 0;
+        *result = candidate;
+    }
+    return status;
+}
+
 // The producer's single-record EVEX broadcasts (#1450). No decorated, memory or fixed-register row is inferred as a
 // splat. Floating forms copy bits without evaluating them; byte/word scalars are extended to a 32-bit register by the
 // producer, and a half's bits use the integer word form and its U32 source. Lowering truncates those carriers explicitly.
@@ -819,17 +880,21 @@ static IrSimdTypedStatus ir_simd_typed_compare_mask(const Tier0Operation* source
     return status;
 }
 
-// A row's decoding: masks, scalar intrinsics, lane operations, comparisons into a mask alone, then exact scalar splats;
-// other admitted forms stay machine rows. A semantic match whose target lacks a required feature stays refused, but a
-// comparison into a mask alone, whose machine row a target may still run, stays one.
+// A row's decoding: the bit builtins', masks, scalar intrinsics, lane operations, comparisons into a mask alone, then
+// exact scalar splats; other admitted forms stay machine rows. A semantic match whose target lacks a required feature
+// stays refused, but a comparison into a mask alone, whose machine row a target may still run, stays one.
 static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
 {
     const bool masks = source != NULL && source->operand_count != 0 && source->operand_classes[0] == BUSTER_TYPED_CLASS_MASK && tier0_class_integer(source->result_class);
     const bool scalar = source != NULL && (source->result_class == BUSTER_TYPED_CLASS_U32 || source->result_class == BUSTER_TYPED_CLASS_U64) && !masks;
-    IrSimdTypedStatus status = source != NULL && source->result_class == BUSTER_TYPED_CLASS_MASK ? ir_simd_typed_mask_row(source, target_features, result) :
-                                     masks                                                             ? ir_simd_typed_mask_test(source, target_features, result) :
-                                     scalar                                                            ? ir_simd_typed_intrinsic(source, target_features, result) :
-                                                                                                         ir_simd_typed_operation(source, target_features, result);
+    IrSimdTypedStatus status = ir_simd_typed_bits(source, target_features, result);
+    if (status == IR_SIMD_TYPED_UNSUPPORTED)
+    {
+        status = source->result_class == BUSTER_TYPED_CLASS_MASK ? ir_simd_typed_mask_row(source, target_features, result) :
+                 masks                                           ? ir_simd_typed_mask_test(source, target_features, result) :
+                 scalar                                          ? ir_simd_typed_intrinsic(source, target_features, result) :
+                                                                   ir_simd_typed_operation(source, target_features, result);
+    }
     if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_MASK)
     {
         status = ir_simd_typed_compare_mask(source, target_features, result);

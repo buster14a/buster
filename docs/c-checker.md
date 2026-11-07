@@ -1690,7 +1690,10 @@ pool, and corpus comparisons include the retained indices.
 
 Static-assert messages contribute no expression value. The reader's existing
 constant-context pass marks each message span once, after identifying its
-assertion's top-level comma. String operands in the condition remain checked.
+assertion's top-level comma; the walk's action at the assertion's `)` reads the
+message's escape sequences (clang's unevaluated string literal, "Unevaluated
+string literals (#147)"), and one it refuses drops the assertion.
+String operands in the condition remain checked.
 This removes a parser-ancestor walk per string, whose repeated traversal of a
 long initializer's separator chain was quadratic (#593). Both changes consume
 existing reader facts; they add no search pass or per-initializer allocation.
@@ -1725,6 +1728,89 @@ random groups of one to three parts both ways, each part ending at a
 (`check_test_string_literal_blocks`), and both must agree on every field and
 byte. On #1388's megabyte of `\xhh` escapes in 32-character pieces the
 checker's input stage went from 53.7 ms to 11.0 ms (Ice Lake server, 11 runs).
+
+### Unevaluated string literals (#147)
+
+clang's parser reads an attribute's string argument (the argument places
+clang-tblgen's string switches give, `c_check_attribute_arguments.inc`, also
+of a GNU attribute clang doesn't know, `__attribute__((nodiscard("…")))`, by
+its name; parentheses around it peeled), a static assertion's message and a
+`#line` directive's or line marker's file name as an *unevaluated* string
+literal. Only the simple escapes (`\\ \' \" \? \a \b \f \n \r \t \v`) and the
+universal character names are valid there; every other escape sequence (octal,
+including `\0`; hexadecimal; `\e` and `\E`; GNU's `\( \{ \[ \%`; C2y's
+delimited `\x{…}` and `\o{…}`; an unknown one, after its
+-Wunknown-escape-sequence warning) is "invalid escape sequence 'S' in an
+unevaluated string literal", S as written (`'\x64e'` is the whole hexadecimal
+run, `'\0123'` the octal escape's three digits). Its reading's errors come
+first: "hex escape sequence out of range" and "octal escape sequence out of
+range" (the characters are a byte wide whatever the prefix), a delimited
+escape's, "\x used with no following hex digits" (with no unevaluated error).
+Each is at its escape's backslash, in source order across the literal's
+concatenated tokens. clang's literal-wide error state is kept across them:
+after any earlier error of the literal, hexadecimal and delimited octal
+escapes have no range error (a plain octal one still does), and `\x` without
+digits sets none. `check_literal_unevaluated_escapes`
+(`c_check_literal_diagnostic.c`) is clang's `ProcessCharEscape` of such a
+literal: it finds the backslashes with `memchr` and reads only escape
+sequences byte by byte, a cold path of short, rare strings with no vector
+twin; both checker paths call it the same way.
+
+The universal character names valid there are those clang's
+`ProcessUCNEscape` takes in any string literal, which it checks there too
+(`check_literal_unevaluated_ucn`), each error at the backslash:
+- **Digits:** "\u used with no following hex digits" (or `\U`), and
+  "incomplete universal character name" short of four (eight).
+- **Value:** "invalid universal character" for a surrogate or a value past
+  U+10FFFF.
+- **Before C23:** a value below U+00A0 other than `$`, `@` and `` ` `` is
+  "universal character name refers to a control character" or "character 'c'
+  cannot be specified by a universal character name".
+- **Delimited `\u{…}`:** the delimited escapes' errors, and an overflow is
+  "hex escape sequence out of range".
+- **Named `\N{…}`:** only its braces are checked ("expected '{' after '\N'
+  escape sequence", incomplete, empty).
+
+Such an error drops the construct as the others do, with no unevaluated error.
+
+clang then drops what the literal belonged to, and its diagnostics stop there.
+The reader (`check_input_unevaluated_strings`) reports
+`CHECK_INPUT_UNEVALUATED_ESCAPE` once at the literal's first refused token
+and the driver words each escape's diagnostics, the warning by its options
+and pragmas (`-w`, `-Werror`, `-pedantic-errors`,
+`-Wno-unknown-escape-sequence`). An attribute (`check_input_attribute_read_item`)
+is dropped where its first argument that fails does, and its list and
+declaration go on without it; in a declaration of no declarator
+(`check_input_attribute_ignored_lists`) the error ends the reading, as
+"expected string literal" does. A dropped C23 `deprecated` or `nodiscard`
+gives clang's parser's error of the attribute its specifier sequence parsed
+before it, at its `(`: "parentheses must be omitted if 'X' attribute's argument
+list is empty", or "attribute 'X' cannot have an argument list" where that
+one takes none (`check_input_attribute_standard_previous`). A static assertion
+whose message is refused is checked no further: its condition, an expression
+in a constant context (`BUSTER_CHECK_CONTEXT_VALUE`, without the runtime
+behavior's warnings), is neither required to be an integer constant nor
+asserted. Where the parse failed, a repaired view keeps the report
+(`check_repair_input_report`), and the tokens before the first syntax error
+that no view checked are read as `check_driver_unparsed_literals` reads their
+numeric constants (`check_driver_unparsed_strings`: GNU attributes' and known C23
+attributes' string arguments, a standard one's or a `gnu::` or `clang::` one's,
+and static assertions' messages). A `#line` directive's is dropped
+by the preprocessor (`pp_decode_file_name`), whose unknown-escape warning has
+no flag, as its other warnings haven't. Asm labels and statements, pragmas'
+strings and `_Pragma` read evaluated literals, as clang's do.
+
+Not clang's yet: the encoding prefix's -Winvalid-unevaluated-string warning
+(a prefixed argument stays "expected string literal"), -pedantic's warnings of
+the non-standard escapes, the "expanded from macro" note of a literal that is
+a macro's argument, and what follows `\x` without digits, which clang alone
+keeps (its attribute still applies). A named universal character name's name:
+clang decodes `\N{…}` by Unicode's names, and checks a name against them
+("'x' is not a valid Unicode character name" with its notes), while the
+compiler takes no named escape anywhere, so a well-formed one stays the
+decoders' refusal; so does a valid delimited `\u{…}`, which the decoders
+don't read either. Like the checker's other errors, the
+first one ends the unit's semantic diagnostics after its declaration.
 
 ### Large integer literal tables (#658)
 
@@ -4488,6 +4574,30 @@ tokens it may act at, and tests there only what may make it act. On SQLite
   the reader's arena of rare columns. It skips the tokens it doesn't act
   at, whose first values, `NONE`, the pass writes, and tests the sparse
   columns only of the tokens that have an entry.
+- **The rare columns' pages** (#628): the token columns of the reader's
+  arena of rare columns (the specifier jobs, the declarations' bases,
+  storage, flags and ABIs, the builtins and the rest of
+  `BUSTER_CHECK_SPARSE_COLUMNS`) are written at few tokens and read at most:
+  the classes above load the specifier finishes and the builtins at every
+  token, and each declaration reads its first token's. A reading in source
+  order keeps a bit per 64 bytes of them (`CheckInputReader.rare_marks`,
+  `BUSTER_CHECK_RARE_GRANULE_SHIFT`), which every write's claim sets
+  (`check_input_rare_claim`), and its vector path's hot reads give 0 for
+  bytes with no bit without touching their page: a scalar read reads the
+  column's first entry instead and clears it, and a vector load reads a static
+  line of zeros, by masks rather than branches, which the marks, alternating,
+  would mispredict (`check_input_rare_mask`, `BUSTER_CHECK_RARE`,
+  `check_input_rare_line`). A vector load masked to no lanes would give the
+  zeros too, but at a page nothing had touched it took the 9700X 174 TSC
+  ticks, against 35 at a written page, every time (`docs/compile-time.md`'s
+  "The rare columns read only where written").
+  So the columns are base pages that only their writes
+  fault in: of `sqlite3.c`'s 6,673 pages the walks write 688, which in huge
+  pages, spread over the columns, had taken 20 MB at the reader's end. The
+  scalar path, the twin, reads every entry, and counts the 64 bytes with a
+  byte other than 0 and no bit in `CheckInput.visit_misses`
+  (`check_input_rare_verify`), which a small fixture's columns, sharing a
+  page, would hide in a page's bit.
 - **Deferred bodies** (#113) need no marks of their own: each starts at an
   `OPEN_BODY`, which the walk tests, and the walk jumps over the body from
   there. Lanes share the column, each writing only its own body's tokens.
@@ -6159,7 +6269,8 @@ arguments against the function. The checker now gives these as clang does.
   parameters only for the attributes clang parses in the function's scope or
   after the declaration (`enable_if`, `diagnose_if`, the thread-safety
   analysis's). An attribute whose arguments clang parses its own way
-  (`availability`, `counted_by` and the like) is its own.
+  (`availability`, `external_source_symbol`, `counted_by` and the like) is
+  its own.
 
   Five have rules of their own, with their handlers' checks and effects:
   - `lifetimebound` changes nothing in C. On a parameter of a function that
@@ -6308,6 +6419,85 @@ arguments against the function. The checker now gives these as clang does.
   read, a call of other than a const or pure function; an operand of sizeof or
   typeof aside: `check_input_assume_effects`). Left: clang's -Wunused-value
   warnings inside it, which come from its expression's walk.
+
+  clang's checks-only attributes (#1447) change nothing on Linux past their
+  handlers' checks, which are clang's (`check_input_attribute_checks`,
+  `c_check_attribute_checks_input.c`), and are taken in each spelling (GNU's,
+  its keyword's underscores and `clang::`) but where said:
+  - `availability`'s arguments are read as clang's parser reads them
+    (`check_input_availability_parse`): a platform, then `introduced`,
+    `deprecated` and `obsoleted` with versions, `unavailable`, `strict`,
+    `message`, `replacement` and `environment` (clang's error in C), each
+    malformed one clang's error at the token it names ("expected a version of
+    the form 'major[.minor[.subminor]]'", "redundant 'introduced'
+    availability change", "'x' is not an availability stage" and the
+    others). Its handler's checks follow (`check_input_availability_handle`),
+    with platforms named as clang names them: an unknown platform, stages out
+    of order ("feature cannot be deprecated in macOS version 10.2 before it
+    was introduced in version 10.4; attribute ignored"), `unavailable`
+    overriding the others, mixed version separators, an Apple platform's
+    version that its release numbering skipped
+    (`-Winvalid-version-availability`, noted with the version clang takes
+    instead), and anyAppleOS's, swift's and fuchsia's versions. A
+    redeclaration's attribute for a platform its earlier declarations have
+    with other versions is "availability does not match previous
+    declaration", noted at the earlier one
+    (`check_input_availability_redeclaration`). No platform is Linux's, so no
+    use is deprecated or unavailable by it.
+  - `external_source_symbol`'s clauses (`language`, `defined_in`,
+    `generated_declaration`, `USR`), each once, are read as clang's parser
+    reads them (`check_input_external_source_parse`), with its errors at the
+    token or the offset it names.
+  - `enforce_tcb` and `enforce_tcb_leaf` name a TCB by a string; both kinds
+    with one name on a function, on a declaration or across its
+    redeclarations, are "attributes ... are mutually exclusive", noted at the
+    other. In the body of a function its `enforce_tcb` attributes put in TCBs
+    (its own and its earlier declarations', in the order clang merges them, a
+    duplicate twice), each call of a function its callee names directly
+    (through parentheses and `&`, an implicit declaration too) that isn't a
+    library builtin is `-Wtcb-enforcement`'s "calling 'g' is a violation of
+    trusted computing base 'x'" for each of those TCBs the callee's own
+    attributes don't name, at the call's first token once the call is
+    complete (`check_input_tcb_calls`). Operands of `sizeof`, `typeof` and
+    `_Alignof` and a `_Generic`'s controlling expression aren't evaluated,
+    and a call through a pointer names no function.
+  - `callback`'s arguments are its callee and its payload among the
+    function's parameters, by name or index (`__` an unknown one, `__this`
+    unavailable in C): one callee, a parameter of function pointer type, not
+    variadic, whose parameter count is the payload's, with clang's errors in
+    its order (`check_input_attribute_callback`). It is LLVM's metadata, which
+    -O0's code doesn't need.
+  - `swift_async`'s kind (`none`, `swift_private`, `not_swift_private`) and,
+    but for `none`, its completion handler's parameter index, a parameter
+    that must be a block pointer returning void: no C parameter is, so that
+    is its error.
+  - `ns_error_domain`'s identifier, on an enum, must name a variable.
+  - `modular_format`'s identifier and its aspects' strings (each once); its
+    function needs `format` ("'modular_format' attribute requires 'format'
+    attribute", once its declaration's attributes are merged), and a
+    redeclaration's other arguments are "attribute 'modular_format' is
+    already applied with different arguments". It is an optimization's hint.
+  - `objc_ownership` and `objc_gc` are a declarator's type's, applied as
+    clang's GetFullTypeForDeclarator distributes them
+    (`check_input_attribute_objc`): the specifiers' to the declarator's
+    outermost pointer, a chunk's from its pointer or its group outward, one
+    after the declarator to the innermost pointer outside its outermost
+    function, in type names too. Where no pointer takes one it is "'X' only
+    applies to (Objective-C object or block) pointer types; type here is 'T'",
+    naming the type where it stopped, before the declaration's attributes'
+    checks. Where a pointer takes it, its argument must be an identifier;
+    `objc_ownership(none)` and `(weak)` (named `__weak`) warn that C has no
+    Objective-C object, `strong` and `autoreleasing` change nothing outside
+    ARC, and another argument is "argument not supported". On a declaration
+    of no declarator `objc_ownership` is "only applies to variables", and on a
+    statement both are "cannot be applied to a statement", a wrong count's
+    error first, as neither has subjects. `objc_gc(weak)` and
+    `objc_gc(strong)` on a pointer make a garbage-collection qualifier that
+    changes the type (`int *__weak`, which redeclarations, `_Generic` and the
+    types' spellings see): they are refused by name, and so are both
+    attributes' C23
+    spellings, which apply to other types than GNU's (clang 23 crashes on
+    `[[clang::objc_gc(weak)]]`).
 
   Other targets' calling conventions (`aarch64_sve_pcs`,
   `aarch64_vector_pcs`, `m68k_rtd`, `pcs`) are conventions x86-64 hasn't, as
@@ -6515,7 +6705,9 @@ arguments against the function. The checker now gives these as clang does.
   - Strings and identifiers: clang's parser reads a string argument as an
     unevaluated string literal, so one that is none is "expected string
     literal as argument of 'X' attribute" at it, wherever the attribute is
-    (before a C23 one's place is decided); visibility's identifier is its
+    (before a C23 one's place is decided), and an escape sequence it refuses
+    in one is its error, which drops the attribute ("Unevaluated string
+    literals (#147)"); visibility's identifier is its
     handler's "'visibility' attribute requires a string"; "'mode' attribute
     requires an identifier" and format's "requires parameter 1 to be an
     identifier" at the attribute; tls_model's other string is its
@@ -6788,6 +6980,20 @@ arguments against the function. The checker now gives these as clang does.
     stops at "requested alignment is not a power of 2", where clang goes on
     to the second declaration's errors); a unit's later parse errors are
     printed.
+  - The checks-only attributes (#1447): through a macro, `objc_ownership`'s
+    warning on a pointer is at the attribute with the macro's notes, where
+    clang puts it at the macro's immediate expansion, and clang names either
+    attribute `__weak` or `__strong` when the outermost macro is spelled so;
+    `objc_gc(weak)`, `objc_gc(strong)` and both C23 spellings are refused (see
+    above). In a `_Generic` association's type their warnings aren't made,
+    and a `typeof` type name that starts with a GNU attribute isn't read as
+    one, as for every attribute there. `availability` on a tag's
+    redeclaration isn't compared with the earlier one's. As everywhere, a
+    declaration's first error ends the unit: a shared specifiers'
+    `objc_ownership` with a count's error warns and errs for the first
+    declarator alone, and a TCB function's call clang declares implicitly
+    with an error (C99 and later) has no `-Wtcb-enforcement` warning after
+    it.
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
   counts and five rows, and conflicting conventions on a function and on
   another type (`c_check_attribute_test.c`). `test-checker-driver` compares
@@ -6837,9 +7043,16 @@ arguments against the function. The checker now gives these as clang does.
   `c_check_attribute_arguments_driver_test.c` compares complete diagnostic
   streams for malformed expressions, custom empty lists, annotate constants,
   deferred format/allocation checks, secondary mode errors and escaped target
-  strings. `c_check_attribute_effects_driver_test.c` covers complete
+  strings, and the escape sequences of unevaluated string literals in every
+  context, mode and warning option ("Unevaluated string literals (#147)",
+  `check_test_driver_unevaluated_strings`).
+  `c_check_attribute_effects_driver_test.c` covers complete
   thread-safety expressions with their warning option, loader diagnostics and
   loader section bytes and flags, through the scalar and vector paths.
+  `c_check_attribute_checks_driver_test.c` compares the whole output of the
+  checks-only attributes (#1447) in their valid uses, wrong subjects and wrong
+  arguments, TCB calls, availability's merges and the Objective-C pointer
+  attributes' types, with the warnings' options and GNU C89's implicit calls.
 
 ## Operand errors (#147)
 

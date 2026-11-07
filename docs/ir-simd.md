@@ -237,6 +237,18 @@ mask, index or control. Tier 1 selects each as its one VEX instruction
 (`TIER1_RULE_INTRINSIC`), whose three registers are its own; its emission's
 target allow-list refuses one for a target without the feature.
 
+Before them, `ir_simd_typed_bits` decodes the bit builtins' rows (#1374,
+`check_lower_bits_row`): one operand of an integer class of 32 or 64 bits, and
+one record of `tzcnt`, `bsf`, `lzcnt`, `bsr` or `popcnt` of the operand's width,
+its `reg` `INTEGER_RESULT` and its `rm` `INTEGER(0)`, into an integer of 32 bits
+or of the operand's width; or a move of the operand into `INTEGER_RESULT` and
+`bswap` of it there, of the operand's class. Each is the IR's unary `intrinsic`
+of its name, of the operand's type (a 64-bit count truncated to an `i32`
+result), refused as `IR_SIMD_TYPED_TARGET` without its form's feature (BMI,
+LZCNT, POPCNT). `test-ir-simd` decodes each written out, of each class and
+result, checks its features against `x86_target_requirement`'s, and refuses ten
+changes of each as anything but at most a machine row.
+
 ## Scalar splats (#1450)
 
 The opcode table already fills its 64-entry byte-permute register. A scalar

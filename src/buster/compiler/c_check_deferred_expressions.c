@@ -508,6 +508,9 @@ static void check_deferred_expression_lane(void* argument)
                 input.graph = part->graph;
                 input.graph.const_values = &input.const_values;
                 reader.value_next = part->next;
+                // The part's nodes are its own, numbered apart from the top level's hops (CheckInputReader.walk_ends).
+                reader.walk_ends = NULL;
+                reader.walk_counts = NULL;
                 check_input_expressions_coded_range(&reader, part->begin, part->end);
                 if (!input.resource)
                 {

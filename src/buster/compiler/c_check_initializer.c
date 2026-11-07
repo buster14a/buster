@@ -79,6 +79,9 @@ struct CheckInitializer
     uint32_t failed_source;
     uint32_t warning_count;
     uint32_t warning_token;
+    // A value part whose source is floating (#147): the only plans whose literal conversions the common warnings read
+    // (check_common_initializer_roots), so that they never visit the others' parts.
+    bool floating_values;
 };
 
 static __attribute__((unused)) bool check_initializer_run(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
@@ -488,6 +491,8 @@ static void check_init_append(CheckInitWalker* walker, const CheckInitPart* part
             }
             *slot = *part;
             walker->result->count += 1;
+            walker->result->floating_values |= part->kind == CHECK_INIT_VALUE && walker->stream != NULL && part->node < walker->stream->count &&
+                                               check_action_kind(walker->types, check_stream_type(walker->stream, part->node)) == BUSTER_TYPE_KIND_FLOATING;
         }
     }
 }

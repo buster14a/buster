@@ -155,7 +155,9 @@ Each upper bound is the time the item would save if its cost went to zero.
      `check_input_expressions`, `check_input_resolve_range` and `check_input_run`'s
      own pre-passes.
    - Upper bound: about 70 ms of user time.
-   - Follow-up: [#529](https://github.com/buster14a/buster/issues/529).
+   - Follow-up: [#529](https://github.com/buster14a/buster/issues/529), which
+     closed with the stage at 47.3 ms ("#529's outcome" below);
+     [#1671](https://github.com/buster14a/buster/issues/1671) carries the rest.
      [#113](https://github.com/buster14a/buster/issues/113)'s deferred bodies
      are its multicore route.
 2. **Memory first touched**, 728 MB of peak RSS.
@@ -1138,6 +1140,118 @@ With the step's options the change is faster in each round, by 4.77 to 6.44 ms:
 its 80 M fewer instructions are the replay's. With `-w`, which never replayed,
 the time is the same.
 
+### The scratch after the reader, and the rare columns' pages (#628)
+
+After the change above, on the VM's peak-map build, the reader's end is 255.9 MB,
+`static-data`'s end 256.6 MB and the backend 250.0 MB. Four variants that lower
+them were measured on the 9700X against it (`fb2b4af1`), each compile under its
+own grant of the lock, every object and diagnostic the same bytes
+([the record](https://github.com/buster14a/buster-performance/tree/a760df46a6040b235b6ee365da81cd1b23fa6698/docs/measurements/scratch-rare-628-2026-11-07),
+with the variants' patches). None is in, since each raises the kernel's cycles:
+
+| variant | peak RSS (KiB) | task clock (ms) | kernel cycles (M) |
+| --- | --- | --- | --- |
+| the whole scratch given back after the reader and the common warnings | 258,172 → 257,824 | 124.04 → 126.16 | 85.41 → 100.53 |
+| the same, with the rare columns in base pages, populated | 258,208 → 239,876 | 124.43 → 125.19 | 87.64 → 104.94 |
+| the rare columns alone | 258,168 → 258,172 | 124.17 → 122.71 | 87.16 → 89.19 |
+| the rare columns, the scratch given back past 96 bytes a token | 258,172 → 248,564 | 124.29 → 123.25 | 86.81 → 88.89 |
+
+- **The scratch.** After the reader it holds the parse's and the reader's pages,
+  dead, to `static-data`'s end: giving them all back takes that plateau from
+  256.6 to 174.1 MB on the VM. But `check-expressions`, `check-declarations`,
+  `static-data` and `check_program` push about 64 MB of it again before
+  `check_program` gives it back, and fault those pages in again, from huge pages
+  the kernel clears: 15 M kernel cycles. Keeping 96 bytes a token past the
+  scratch's length costs nothing, and still takes that plateau to 233.5 MB. The
+  common warnings never pop what they push (21.7 MB of `sqlite3.c`'s), which the
+  backend then pushes past; popping it lets the backend reuse those pages.
+- **The rare columns** (`check_input_sparse_arena`'s token columns) hold 46 MB
+  of huge pages at the reader's end. In base pages, populated by one
+  `MADV_POPULATE_READ`, the reader's end falls 17.7 MB and `check-input` takes
+  1.6 ms less, but the kernel's cycles rise 2.0 M. Of the columns' 6,673 pages
+  the reader writes 688 and only reads 5,985 more, each of which the populate
+  maps to the zero page. The reads that reach nearly every page are the
+  expressions' walk's classes, which load `specifier_finishes` and `builtins` at
+  every token, and the reads at every declaration of the specifier jobs, the
+  storage, the bases and the VLA scopes' ends; for `sqlite3.c`, seven of the 16
+  columns are never written. A mark a token of the columns' writes, as the
+  reader's sparse marks are (`check_input_sparse_mark`), would let those reads
+  skip what nothing wrote, so that the columns could be base pages that fault
+  only where written, with no populate.
+
+### The rare columns read only where written (#628)
+
+What the section above found to make the rare columns pay is in, with its two
+free scratch changes:
+- **The scratch after the reader** goes back past 96 bytes a token beyond its
+  length (`check_driver_discard_scratch`), which the stages up to
+  `check_program` push again, and the common warnings pop what they push.
+- **The rare columns** of a reading in source order are base pages, with a bit
+  per 64 bytes of them that every write's claim sets
+  (`CheckInputReader.rare_marks`). The vector path's hot reads (the
+  expressions' classes, the declarations' first tokens, the builtins' count)
+  give 0 where no bit is set, without touching the page: a scalar read reads
+  the column's first entry and clears it, and a vector load reads a static line
+  of zeros (`check_input_rare_line`). The scalar path reads every entry, and
+  counts the 64 bytes a mark misses (`check_input_rare_verify`,
+  `CheckInput.visit_misses`). A page's bit would do
+  for the reads, but the tests' small fixtures put several columns in a page,
+  where one column's write hid another's missing mark: with a claim left out
+  on purpose, `test-checker` found none by pages and 212 by 64 bytes.
+
+A tracer that protected the columns' pages and logged each first touch
+counted the pages `sqlite3.c`'s compile maps there: 6,660 before the marks,
+of which about 6,170 were first read, and 884 after, 685 first written and
+199 first read, nearly all by two byte gathers (of `static_initializers` and
+`declaration_flags`, in the expressions' batches), which the marks don't
+gate.
+
+On the VM with huge pages, main `4e5abcb0` against the change's first version
+on it: the peak is 255,160 → 249,208 KiB, for 893 more faults, with the objects the same
+bytes. The backend's end is now the compile's peak.
+
+On the 9700X, main `872cb8fe` against the change (the record's `pr4`), each
+compile under its own grant of the lock, the order alternating by round
+([the record](https://github.com/buster14a/buster-performance/tree/a27a3d5175cdbbc10f95231b055bd2c564d51420/docs/measurements/rare-marks-628-2026-11-07),
+with the earlier versions' patches), every object the same bytes in six modes
+and the diagnostics too (medians):
+
+| measure | main | the change |
+| --- | ---: | ---: |
+| task clock, the step's options (9 rounds) | 122.03 ms | 120.43 ms |
+| user cycles | 591.42 M | 582.72 M |
+| kernel cycles | 86.08 M | 84.25 M |
+| `check-input` | 46.70 ms | 44.77 ms |
+| page faults | 5,840 | 6,650 |
+| peak RSS | 258,196 KiB | 248,284 KiB |
+| task clock, `-w` (5 rounds) | 107.02 ms | 105.72 ms |
+| kernel cycles, `-w` | 86.33 M | 84.62 M |
+| peak RSS, `-w` | 258,200 KiB | 248,284 KiB |
+
+The change is faster in each round, by 1.06 to 2.39 ms, and by 0.75 to 2.20 ms
+with `-w`. Its 810 more faults are the base pages', which fault 4 KiB at a
+time.
+
+**A load masked to no lanes.** The first three versions of the gate cost 4.0
+to 5.0 ms each on the 9700X, for the same peak. All of it was in the
+expressions' classes' pass, which took 5.3 ms rather than 0.48: it masked its
+vector loads of `builtins` and `specifier_finishes` to no lanes where no bit
+was set, ten of them every 64 tokens. A masked-off lane doesn't fault its page
+in, and at a page that isn't mapped such a load cost far more than a load.
+Timed alone, a load a page over 16,384
+base pages, in TSC ticks a load:
+
+| load | ticks |
+| --- | ---: |
+| every lane, at written pages | 35.5 |
+| no lanes, at written pages | 37.5 |
+| no lanes, at pages a read mapped to the zero page | 8.4 |
+| no lanes, at untouched pages | 174.1 |
+
+Since no fault maps those pages, every later load there costs the same again.
+The gated loads now read `check_input_rare_line`'s static line of zeros
+instead, and the classes' pass takes 0.43 ms.
+
 ## The checker's graph and program passes (#530)
 
 **Measured against `main` on the 9700X.** Medians of 15 interleaved
@@ -1412,6 +1526,136 @@ from 0.73% to 0.27%.
 
 The walks and the steps are flat profiles, so what is left of them needs a change to the walks themselves. Trimming
 another pass around them won't reach it.
+
+### #529's outcome (7 November)
+
+**Done when.** #529 asked for the 9700X step to show the stage's time down, with the objects unchanged, and for
+this file to record it.
+
+| 9700X step, `-c sqlite3.c` | `check-input` | span |
+| --- | ---: | ---: |
+| at the filing (`1677a3b`) | 81.2 ms | 189.2 ms |
+| at its close (#1646's PR job, run 42371769735) | 47.3 ms | 126.6 ms |
+
+Every change on the way kept the objects the same bytes. The close's step compares them with `cmp`, and its log is in
+[the outcome record](https://github.com/buster14a/buster-performance/tree/cf5e1d1023573ad61ba91c707fc3a0e53177fe33/docs/measurements/check-input-529-outcome-2026-11-07).
+The sections above record each step.
+
+**The issue's work items:**
+1. **Profile the stage.** Each section above starts from a 9700X profile by function and line.
+2. **Separate the per-token work from the per-declaration and per-expression work:**
+   - **The full-token pre-passes** are folded: #568's single counting pass, then #1563's vector passes.
+   - **The expression graph's construction** is data-parallel (#1038, closed by #1478).
+   - **Skipping the system-header declarations nothing uses** was measured and not taken. See below.
+3. **The multicore route** is #113's deferred bodies on lanes, outside this issue.
+
+**The system headers' declarations.** Measured on the 9700X, each run under its own hold of the lock:
+- **The unit.** `sqlite3.c`'s system-header lines are about 6.4% of its preprocessed tokens.
+- **The ceiling.** Compiled alone as a unit, those lines cost the reader 3.85 ms, against 0.018 ms for an empty unit and
+  46.4 ms for the whole preprocessed unit. So a skip could take at most 3.8 ms, 8.1% of the stage.
+- **The declarations.** The unit's own lines name 114 of the 2,683 system declarations.
+- **Why the default mode doesn't skip them.** Skipping would stop the reader diagnosing those declarations: a malformed
+  system header's errors, and the constructs it refuses there. The default mode checks every declaration as clang does
+  ("Every body is parsed and checked by default" in [the checker's design](c-checker.md)), and #155 allows a skip only
+  behind `-flazy-system-headers`.
+- **The opt-in mode today.** It skips only unreferenced system bodies, and its plan makes `check-input` slower: 73.0 ms
+  against 47.4 ms, for the same object (#1364).
+
+So item 2's skip is settled by the default mode's contract, with its ceiling measured; a skip of declarations would
+belong to the opt-in mode, whose plan must first stop costing more than it saves (#1364).
+
+**Past the done-when,** #1671 tracks the stage's remaining time: the two walks and the declaration steps, 26 ms of the
+47.3 ms, with flat profiles.
+
+## The walk in source order's plain and ignored visits (#1671)
+
+**What bounds the walks.** One `perf record` of cycles, instructions, branch misses and fills from memory, by symbol,
+on the 9700X ([#1671](https://github.com/buster14a/buster/issues/1671#issuecomment-6707704992)):
+- **The walk in source order** (`check_input_resolve_range`) runs at about 2.4 IPC, with 1.5% of the compile's
+  branch misses.
+- **The coded walk** runs at about 3.0 IPC.
+- **The declarator step** runs at about 2.9 IPC.
+
+So the walks are bound by the instructions they retire, not by their branches or loads. The walk in source order
+retired about 290 instructions a visit.
+
+**Its visits, by class.** A probe of `-c sqlite3.c` counted them:
+
+| visit | count | now |
+| --- | ---: | --- |
+| a plain name: an identifier operand, marked for its syntax alone, of no syntax bit | 124,581 of 254,391 | the label's test and the name's step alone |
+| a token an earlier step ignored, marked for its syntax alone, not a return's or a for's | 40,290 | passed over |
+| another token marked for its syntax alone | 55,876 | the general visit |
+| a visit with another mark's reason | 33,643 | the general visit |
+
+**Why the two paths are exact.**
+- **A plain name.** Each of the walk's tests is false at it except the label's and the name's own:
+  - the tests of the other marks' reasons, by its mark;
+  - the tests of roles, kinds and syntax bits, by its own;
+  - C89's implicit declaration, by the standard, so a C89 unit's names take the general visit.
+- **An ignored token.** Every step tests that its token isn't ignored, except a return's and a for's. The label's test
+  would only set again the mark, which holds a bool.
+- **Shared code.** Both paths call the two steps as functions of their own, `check_input_resolve_ignored` and
+  `check_input_resolve_name`.
+- **The twin.** The scalar path visits every token and makes every test.
+
+**What the visits left do.** Every visit the general path still takes acts:
+- declarations' starts, blocks, conditions, casts and returns;
+- scopes' ends and activations.
+
+**Measured on the 9700X.** Main `cb021b04` against #1676's head, in 8 interleaved rounds, then `measure-compile` each
+way. Every run held the lock on its own. The objects are the same bytes.
+[The record](https://github.com/buster14a/buster-performance/tree/8bac1f50af1a9e5885304a223e6e7942ac3ef617/docs/measurements/check-input-1671-walk-visits-2026-11-07)
+keeps the receipts, each build's profile and the probe.
+
+| measure | main | head | difference |
+| --- | ---: | ---: | ---: |
+| wall time | 122.510 ms | 121.830 ms | −0.56% |
+| user cycles | 595.868 M | 592.436 M | −0.58% |
+| user instructions | 1,320.752 M | 1,302.454 M | −1.39% |
+| `check-input` | 47.115 ms | 46.908 ms | −0.21 ms |
+
+**Instructions against cycles.** The head retires 18.3 M fewer instructions per compile, about 110 a visit the two
+paths take. `check_input_resolve_range` went from 5.58% to 4.60% of the cycles. The compile's cycles fell by about a
+fifth as much as its instructions: the tests a visit no longer makes were cheap and well predicted.
+
+## The declaration steps' frames without attributes (#1671)
+
+**Where the declaration steps' time goes.** Probes summed `__rdtsc` deltas by class over `-c sqlite3.c`'s declarators.
+They ran off the 9700X, so their shares are what count, not their values:
+
+| declarator | count | TSC cycles per call |
+| --- | ---: | ---: |
+| a name | 5,431 | about 200 |
+| pointers and a name | 3,834 | about 330 |
+| empty or pointers alone, mostly casts' type names | 9,342 | about 200 |
+| a function's, with its parameters | 5,914 | about 4,000 |
+
+The function declarators take about 80% of the declarators' time. Within them:
+- **Attribute lists.** 1,895 lists, mostly glibc's prototypes', are read at about 3,000 cycles each: about 20%.
+- **Parameters' specifiers.** The 14,783 parameters' specifiers take about 11%.
+- **Type warnings.** `check_input_attribute_type_warnings` takes about 10%.
+- **The rest.** About 60% goes to each parameter's bookkeeping and the function type.
+
+**The change.** 40,403 of the 42,404 frames, the declarations' and the parameters', have no attribute list. Two steps
+now return at once there:
+- **`check_input_attribute_type_warnings`** walked the type to its function before loops over no list. Without lists it
+  warns of nothing and marks nothing.
+- **`check_input_declarator_abi`**, called twice per frame, walked the type again. With no list,
+  `check_input_attribute_requested_abi` gives no ABI, so `check_input_attribute_abi_origin` keeps the origin and
+  `check_input_attribute_abi_with_override` keeps the type.
+
+**Measured on the 9700X.** Main `07b78e0f` against #1680's head, in 8 interleaved rounds, then `measure-compile` each
+way. Every run held the lock on its own. The objects are the same bytes.
+[The record](https://github.com/buster14a/buster-performance/tree/97d4731b20dc4a334c49381ed6dade2473f932dd/docs/measurements/check-input-1671-declarators-2026-11-07)
+keeps the probes and the receipts.
+
+| measure | main | head | difference |
+| --- | ---: | ---: | ---: |
+| wall time | 121.740 ms | 121.490 ms | −0.21% |
+| user cycles | 590.785 M | 589.415 M | −0.23% |
+| user instructions | 1,304.696 M | 1,299.420 M | −0.40% |
+| `check-input` | 46.614 ms | 46.388 ms | −0.23 ms |
 
 ## The passes after checking (#592)
 

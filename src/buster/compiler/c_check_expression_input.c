@@ -200,6 +200,10 @@ static inline __attribute__((always_inline)) uint32_t check_input_batch_add(Chec
         batch->leaves += leaf;
         batch->count = place + 1;
         reader->value_next[node] = BUSTER_CHECK_NONE;
+        if (reader->walk_ends != NULL)
+        {
+            reader->walk_ends[node] = BUSTER_CHECK_NONE;
+        }
         result = node;
     }
     else
@@ -375,7 +379,7 @@ static void check_input_expression_list(CheckInputReader* reader, CheckInputBatc
     reader->first_value[token] = values.first;
     reader->last_value[token] = values.last;
     reader->value_counts[token] = values.count;
-    if (reader->static_initializers[token])
+    if (BUSTER_CHECK_RARE(reader, static_initializers, token))
     {
         // A braced static initializer's elements are constant expressions, which initializer planning diagnoses:
         // the same constant evaluation its scalar form's INITIALIZE gets (check_input_expression_act's list).

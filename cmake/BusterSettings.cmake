@@ -76,7 +76,8 @@ set(BUSTER_SOURCES
     src/buster/compiler/tier1_schedule_benchmark.c
     src/buster/compiler/tier1_select_benchmark.c
     src/buster/compiler/tier1_model_measure.c
-    src/buster/compiler/emission_metadata_test.c)
+    src/buster/compiler/emission_metadata_test.c
+    src/buster/compiler/c_check_target_feature_emission_test.c)
 
 # The order a clean build starts the compiles in, each source's file name once, the longest first by their times on
 # the 9700X (#270): one compile per core at a time (build.sh's --jobs), so a long one that started late would make the
@@ -92,7 +93,8 @@ set(BUSTER_COMPILE_ORDER
     c_lexer_benchmark.c branch_sizing_benchmark.c object_writer_benchmark.c x86_64_disassembler_benchmark.c
     calling_convention_benchmark.c tier1_schedule_benchmark.c x86_semantics_benchmark.c tier1_model_measure.c
     c_types_benchmark.c dominators_benchmark.c tier1_frame_benchmark.c tier1_allocate_benchmark.c lane_benchmark.c
-    floors_benchmark.c dataflow_benchmark.c c_builtin_benchmark.c emission_metadata_test.c)
+    floors_benchmark.c dataflow_benchmark.c c_builtin_benchmark.c emission_metadata_test.c
+    c_check_target_feature_emission_test.c)
 
 # The sources' indices in BUSTER_SOURCES, in BUSTER_COMPILE_ORDER's order, into `output`. Fails, naming it, for two
 # sources of one file name, which the order couldn't tell apart, for a file that the order names twice or that isn't a

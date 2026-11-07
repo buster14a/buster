@@ -58,7 +58,8 @@ static uint32_t ir_dataflow_test_direct(const IrFunction* f, uint32_t node, uint
         case IR_INTRINSIC:
         {
             values[count++] = f->a[node];
-            if (f->c[node] != BUSTER_IR_INTRINSIC_SPLAT)
+            // Splat and the bit operations (#1374) take one operand.
+            if (f->c[node] < BUSTER_IR_INTRINSIC_SPLAT)
             {
                 values[count++] = f->b[node];
             }

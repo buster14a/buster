@@ -205,6 +205,13 @@ fully audited merely because this rule was added.
   partial chunk. A `mmap` length or a `String8.length` does **not** authorize
   a full-width load across the end of the logical input. Use a proved padding
   contract, a bounded tail buffer, or masked loads as appropriate.
+- A masked load's inactive lanes don't fault, but they aren't free at a page
+  that isn't mapped: on the 9700X a load masked to no lanes at an untouched
+  base page took 174 TSC ticks, against 35 at a written page, and every later
+  one there costs as much, since nothing maps the page. Where a gate turns off
+  every lane of a load over memory nothing wrote, load a line of zeros instead
+  (`check_input_rare_line`, and `docs/compile-time.md`'s "The rare columns
+  read only where written", #628).
 - Spell out assumptions about sentinel bytes, alignment, vector widths,
   overlap, and inactive lanes. Test empty inputs, short inputs, page edges,
   and lengths around every vector/chunk boundary.
