@@ -1733,7 +1733,7 @@ batch's nodes one at a time: about 0.8% of `-c sqlite3.c`'s cycles on the 9700X,
 **Measured on the 9700X.** Main `219e7e9b`, with #1692, against the head `38152245` (this change merged with it), in 8
 interleaved rounds, then `measure-compile` each way. Every run held the lock on its own. The objects are the same bytes.
 Against main `73fcf006`, before #1692, it measured −0.56% wall and −0.67 ms of `check-input`.
-[The record](https://github.com/buster14a/buster-performance/tree/b3a5bd2bce97d070abf1c2ee520fca48ea0f3d35/docs/measurements/check-input-1671-coded-record-2026-11-07)
+[The record](https://github.com/buster14a/buster-performance/tree/ee69c4a5186a0308078c67be14623f4baefd9ecd/docs/measurements/check-input-1671-coded-record-2026-11-07)
 keeps both A/Bs' receipts, each build's profile and the probe.
 
 | measure | main | head | difference |
@@ -1743,6 +1743,18 @@ keeps both A/Bs' receipts, each build's profile and the probe.
 | user instructions | 1,288.534 M | 1,279.602 M | −0.69% |
 | `check-input` | 43.966 ms | 43.183 ms | −0.78 ms |
 | `expressions.actions` | 9.660 ms | 8.868 ms | −0.79 ms |
+
+**A refinement that didn't pay.** The recording's gathers then took most of the flush's samples:
+- a leaf's type and overload head from its record;
+- its operands' purity.
+
+A version replaced them, keeping a leaf's purity as a batch byte written with the leaf and taking the operands lane by
+lane in node order. Against this change it was no faster:
+- `check-input` was 43.11 against 43.12 ms;
+- user cycles were −0.27%, lower in only 5 of 8 rounds;
+- user instructions were +0.41%.
+
+The gathers had overlapped with the flush's other work, so the change keeps them. The record holds both A/Bs.
 
 ## The passes after checking (#592)
 
