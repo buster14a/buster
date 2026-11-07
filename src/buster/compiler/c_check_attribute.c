@@ -1335,10 +1335,14 @@ static bool check_input_attribute_argument(const CheckInputAttribute* attribute,
     return valid;
 }
 
+static CheckStringLiteral check_input_strings_extended(CheckInputReader* reader, uint32_t token, const CheckStringPart* parts, uint32_t count);
+
 // Ordinary string tokens may concatenate. The shared literal decoder retains embedded NULs and UTF-8/escapes;
 // consumers must not treat these bounded payloads as C strings. Decoded bytes live in the output arena, while the
-// spelling views and the one-part-per-token array are scratch storage and disappear after this operation.
-static bool check_input_attribute_string(CheckInputReader* reader, uint32_t first, uint32_t end, String8* text)
+// spelling views and the one-part-per-token array are scratch storage and disappear after this operation. An `evaluated`
+// one (an asm label's, which clang reads as an evaluated string literal, #1447) takes the escapes the fast decoding
+// refuses that clang takes, a delimited one's and an unknown one's with its warning (check_input_strings_extended).
+static bool check_input_attribute_string(CheckInputReader* reader, uint32_t first, uint32_t end, bool evaluated, String8* text)
 {
     const uint64_t mark = reader->scratch->length;
     bool valid = first < end;
@@ -1361,8 +1365,12 @@ static bool check_input_attribute_string(CheckInputReader* reader, uint32_t firs
     }
     if (valid)
     {
-        const CheckStringLiteral decoded = check_literal_strings(parts, end - first, reader->pp->options.language.standard >= 2023, reader->arena);
+        CheckStringLiteral decoded = check_literal_strings(parts, end - first, reader->pp->options.language.standard >= 2023, reader->arena);
         reader->output->resource |= decoded.resource;
+        if (evaluated && !decoded.valid && !decoded.resource)
+        {
+            decoded = check_input_strings_extended(reader, first, parts, end - first);
+        }
         valid = decoded.valid && decoded.byte_count != 0;
         if (valid)
         {
@@ -1750,7 +1758,7 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
                 string_first += 1;
                 string_end -= 1;
             }
-            const bool decoded = check_input_attribute_string(reader, string_first, string_end, &text);
+            const bool decoded = check_input_attribute_string(reader, string_first, string_end, attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL, &text);
             valid = decoded;
             error = CHECK_ATTRIBUTE_ERROR_STRING;
             if (valid && attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF && argument == 2)
@@ -1765,7 +1773,19 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             // clang's error of an argument that is no string literal, at it (#147): visibility's own wording, the others'
             // checkStringLiteralArgumentAttr's.
             // visibility's argument is an enumerator's, which clang's parser reads as an identifier: one is its own error.
-            if (!decoded)
+            // An asm label's string literal that refuses its escapes is the literal's error (#1447, clang's literal parser's
+            // escape errors: check_driver_literal_escapes).
+            const bool label_literal = !decoded && attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !reader->output->resource &&
+                                       string_first < string_end && parser->tokens.kinds[string_first] == PARSE_KIND_STRING;
+            if (label_literal && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+            {
+                // (The attribute's error, which then gives no other.)
+                attributes->error = CHECK_ATTRIBUTE_ERROR_STRING;
+                attributes->error_first = string_first;
+                attributes->error_end = string_end;
+                check_input_report(reader, string_first, CHECK_INPUT_LITERAL);
+            }
+            else if (!decoded)
             {
                 const bool named = first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER;
                 check_input_attribute_argument_error(reader, attributes, attribute, first,
@@ -5004,7 +5024,7 @@ static bool check_input_attribute_handled(CheckInputReader* reader, CheckInputAt
                                   type_kind(reader->types, type_strip_aligned(reader->types, reader->types->types.base[type_index(bare)])) == BUSTER_TYPE_KIND_FUNCTION;
     const bool destroy = check_input_attribute_equal(spelled, "always_destroy") || check_input_attribute_equal(spelled, "no_destroy");
     const String8 text = attribute->argument_first < attribute->argument_end && parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_STRING &&
-                         check_input_attribute_string(reader, attribute->argument_first, attribute->argument_end, &attribute->text) ? attribute->text : (String8){ 0 };
+                         check_input_attribute_string(reader, attribute->argument_first, attribute->argument_end, false, &attribute->text) ? attribute->text : (String8){ 0 };
     bool valid = true;
     if (attribute->count_check != BUSTER_CHECK_COUNT_NONE)
     {
@@ -5491,7 +5511,7 @@ static bool check_input_attribute_annotations(CheckInputReader* reader, CheckInp
     else if (check_input_attribute_equal(spelled, "type_visibility") && tag)
     {
         const bool string = attribute->argument_first < attribute->argument_end && parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_STRING &&
-                            check_input_attribute_string(reader, attribute->argument_first, attribute->argument_end, &attribute->text);
+                            check_input_attribute_string(reader, attribute->argument_first, attribute->argument_end, false, &attribute->text);
         if (string && !check_input_attribute_equal(attribute->text, "default") && !check_input_attribute_equal(attribute->text, "hidden") &&
             !check_input_attribute_equal(attribute->text, "protected"))
         {
@@ -5747,7 +5767,7 @@ static String8 check_input_checks_string(CheckInputReader* reader, uint32_t firs
 {
     String8 text = { "", 0 };
     const bool string = first < end && reader->parser->tokens.kinds[first] == PARSE_KIND_STRING;
-    if (!(string && check_input_attribute_string(reader, first, end, &text)))
+    if (!(string && check_input_attribute_string(reader, first, end, false, &text)))
     {
         text = (String8){ "", 0 };
     }
@@ -6832,7 +6852,7 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             uint32_t first = attribute->argument_first;
             uint32_t end = attribute->argument_end;
             String8 sanitizer = { 0 };
-            const bool string = check_input_attribute_argument(attribute, argument, &first, &end) && check_input_attribute_string(reader, first, end, &sanitizer);
+            const bool string = check_input_attribute_argument(attribute, argument, &first, &end) && check_input_attribute_string(reader, first, end, false, &sanitizer);
             const PredefinesSanitizers known = string ? predefines_sanitizer_value(sanitizer.pointer, sanitizer.length) : (PredefinesSanitizers){ 0 };
             const bool unknown = string && known.kinds == 0 && known.groups == 0 && !check_input_attribute_equal(sanitizer, "coverage");
             const bool global = (declaration & (BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_GLOBAL)) == (BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_GLOBAL);

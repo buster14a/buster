@@ -3963,6 +3963,14 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "unsigned long mask=((unsigned long)&x&31)|((unsigned long)page&4095)|((unsigned long)&s&63)|((unsigned long)&d&15)|((unsigned long)&e&31);"
             "x+=7;d*=3;return x+page[0]+page[99]+s.a+(int)s.b+(int)d+(int)e+(int)mask*1000;}",
             "objects-aligned-past-16", clang);
+        // Escapes clang takes that the checker's fast decoding refuses (#1447, check_literal_strings_extended): delimited ones
+        // (\x{...}, \o{...}, \u{...}), unknown ones (their character) and GNU's \E, in strings of each width and in
+        // character constants, their values against clang's build.
+        check_test_program_source(test,
+            "int tested(int n){const char*s=\"\\x{41}\\o{102}\\u{e9}\\q\\E\\(\\%\";const unsigned short*u=u\"\\x{1234}\\u{1F600}\";const int*w=L\"\\o{7777777}\\Q\";"
+            "int c='\\x{43}'+'\\o{104}'*3+'\\E'*5+'\\z'*7;unsigned long h=0;for(int i=0;s[i];i++)h=h*31+(unsigned char)s[i];"
+            "for(int i=0;u[i];i++)h=h*37+u[i];for(int i=0;w[i];i++)h=h*41+(unsigned)w[i];return (int)(h%1000003)+c+n;}",
+            "extended-escapes", clang);
         // Variable-length arrays aligned past 16 bytes (their storage rounded up within a larger allocation), beside a fixed
         // object aligned to 128 (a realigned frame with a base, r15, since the arrays move rsp), across calls with stack
         // arguments whose outgoing area the allocations keep aligned.
