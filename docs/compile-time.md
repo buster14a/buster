@@ -1140,6 +1140,45 @@ With the step's options the change is faster in each round, by 4.77 to 6.44 ms:
 its 80 M fewer instructions are the replay's. With `-w`, which never replayed,
 the time is the same.
 
+### The scratch after the reader, and the rare columns' pages (#628)
+
+After the change above, on the VM's peak-map build, the reader's end is 255.9 MB,
+`static-data`'s end 256.6 MB and the backend 250.0 MB. Four variants that lower
+them were measured on the 9700X against it (`fb2b4af1`), each compile under its
+own grant of the lock, every object and diagnostic the same bytes
+([the record](https://github.com/buster14a/buster-performance/tree/a760df46a6040b235b6ee365da81cd1b23fa6698/docs/measurements/scratch-rare-628-2026-11-07),
+with the variants' patches). None is in, since each raises the kernel's cycles:
+
+| variant | peak RSS (KiB) | task clock (ms) | kernel cycles (M) |
+| --- | --- | --- | --- |
+| the whole scratch given back after the reader and the common warnings | 258,172 → 257,824 | 124.04 → 126.16 | 85.41 → 100.53 |
+| the same, with the rare columns in base pages, populated | 258,208 → 239,876 | 124.43 → 125.19 | 87.64 → 104.94 |
+| the rare columns alone | 258,168 → 258,172 | 124.17 → 122.71 | 87.16 → 89.19 |
+| the rare columns, the scratch given back past 96 bytes a token | 258,172 → 248,564 | 124.29 → 123.25 | 86.81 → 88.89 |
+
+- **The scratch.** After the reader it holds the parse's and the reader's pages,
+  dead, to `static-data`'s end: giving them all back takes that plateau from
+  256.6 to 174.1 MB on the VM. But `check-expressions`, `check-declarations`,
+  `static-data` and `check_program` push about 64 MB of it again before
+  `check_program` gives it back, and fault those pages in again, from huge pages
+  the kernel clears: 15 M kernel cycles. Keeping 96 bytes a token past the
+  scratch's length costs nothing, and still takes that plateau to 233.5 MB. The
+  common warnings never pop what they push (21.7 MB of `sqlite3.c`'s), which the
+  backend then pushes past; popping it lets the backend reuse those pages.
+- **The rare columns** (`check_input_sparse_arena`'s token columns) hold 46 MB
+  of huge pages at the reader's end. In base pages, populated by one
+  `MADV_POPULATE_READ`, the reader's end falls 17.7 MB and `check-input` takes
+  1.6 ms less, but the kernel's cycles rise 2.0 M. Of the columns' 6,673 pages
+  the reader writes 688 and only reads 5,985 more, each of which the populate
+  maps to the zero page. The reads that reach nearly every page are the
+  expressions' walk's classes, which load `specifier_finishes` and `builtins` at
+  every token, and the reads at every declaration of the specifier jobs, the
+  storage, the bases and the VLA scopes' ends; for `sqlite3.c`, seven of the 16
+  columns are never written. A mark a token of the columns' writes, as the
+  reader's sparse marks are (`check_input_sparse_mark`), would let those reads
+  skip what nothing wrote, so that the columns could be base pages that fault
+  only where written, with no populate.
+
 ## The checker's graph and program passes (#530)
 
 **Measured against `main` on the 9700X.** Medians of 15 interleaved
