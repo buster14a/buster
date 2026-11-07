@@ -74,7 +74,7 @@ static void check_test_power_divmod(CheckTest* test, const char* clang)
             }
         }
         fprintf(text, "unsigned positive(unsigned x){return x/(short)16384;}"
-                      "unsigned long positive64(unsigned long x){return x%(signed char)64;}"
+                      "unsigned long positive64(unsigned long x){return x%%(signed char)64;}"
                       "unsigned compound(unsigned x){x/=16u;x%%=64u;return x;}"
                       "unsigned normalized(unsigned x){return x/(-2147483647-1);}"
                       "int tested(int n){unsigned a[]={0u,1u,15u,16u,0x7fffffffu,0x80000000u,0xffffffffu,(unsigned)n};"
