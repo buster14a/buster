@@ -512,10 +512,14 @@ splits, widens, merges, eliminates, forwards or moves past another access, a
 call or a fence: the guarantees of a volatile access (`BUSTER_IR_OBSERVABLE`,
 which promotion, private-field replacement, Tier 1's folding and both
 interpreters read in place of `BUSTER_IR_VOLATILE`) and those of its order. Its
-machine obligations are an ordinary access's, since a naturally aligned access
-of 1, 2, 4 or 8 bytes is atomic on x86-64 and its total store order gives a
-load's and a release store's orders, and, for a seq_cst store, the
-`fence.void seq_cst` after it, which the producer writes as its own instruction.
+machine obligations are an ordinary access's for loads and relaxed/release
+stores, since naturally aligned accesses of 1, 2, 4 or 8 bytes are atomic on
+x86-64 and its total store order gives their orders. A seq_cst store remains
+`store` in the IR and both native tiers emit memory `xchg`, discarding the old
+value without adding a fence instruction (#1396). It still has write-only
+source semantics: an initializing store never reads undefined bytes in either
+interpreter. Tier 1 copies a live desired value into its reserved scratch before
+the destructive exchange. An explicit `fence.void seq_cst` still emits `mfence`.
 Both verifiers check the flags (`ir_access_flags_valid`; the vector path sends
 any row with flags past `volatile` to the scalar rule), and the type and the
 alignment (`ir_atomic_access`): an atomic access declared below its natural
@@ -529,7 +533,12 @@ cases refuse an order a kind doesn't take, an order without the flag and an
 order past `seq_cst` and an 8-byte access aligned to 1 or 4 (as `test-ir-parse`
 refuses one written as text), and `tests/ir-source/atomics.c` runs through both
 lowerings, promotion, the text's round trip and the IR's three forms against
-clang, its `long`'s accesses printed `align=8`.
+clang, its `long`'s accesses printed `align=8`. `tests/ir-source/atomic-stores.c`
+also runs through the typed interpreter and strict native Tier 1: initial stores,
+nested assignments, operands evaluated once, desired values live past a store,
+and narrow integer, bool, pointer and floating representation results. Both
+interpreter unit suites check initializing seq_cst stores with memory and
+undefined-byte checking enabled; read/modify/write checks remain strict.
 
 ### Atomic read/modify/writes (#1059)
 
