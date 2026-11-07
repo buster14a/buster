@@ -12412,7 +12412,12 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
             }
             context->position = stop;
             more = false;
-            if (stop < run_end && !pp->fatal && pp->options.preprocessed && pp_target(pp) == &pp->output)
+            // _Pragma is the one builtin still valid in already-preprocessed text: it is an operator, not a macro to
+            // keep literal, so it expands as it does in any file (#1552's review). values[] is an IdentId only for a
+            // raw identifier; anything else the run stopped on is an offset, not an index into macro_of.
+            const PPMacroId stopped_macro = stop < run_end && (data->kinds[stop] & 0x7F) == C_TOKEN_RAW_IDENTIFIER ? pp->macro_of[data->values[stop]] : 0;
+            const bool pragma = stopped_macro != 0 && pp->macros[stopped_macro].builtin == PP_BUILTIN_PRAGMA;
+            if (stop < run_end && !pp->fatal && pp->options.preprocessed && pp_target(pp) == &pp->output && !pragma)
             {
                 // The file was already expanded. Keep the macro's name as an identifier. #if still expands, because
                 // that capture is not the output.
@@ -18551,7 +18556,8 @@ static const char* pp_read_error(const Preprocessor* pp, uint32_t file)
 // Runs what comes before the main file: the predefines (or PPOptions.predefines_path's), then the command line's -D,
 // -U and -include. Returns false, after a fatal error, if the predefines can't be read, a part of the prelude can't be
 // made (out of memory, or the unit's files table full) or running a part was fatal; the parts after it don't run.
-// Bytes of `text` before a newline. A command-line -D or -include must not paste the rest into the next directive.
+// Bytes of `text` before a newline, less any backslashes at its end: the synthesized directive's own newline must not
+// be a line splice's other half, which would join the next directive onto this one's last line.
 static uint32_t pp_command_line_length(const char* text)
 {
     uint32_t length = 0;
@@ -18559,21 +18565,30 @@ static uint32_t pp_command_line_length(const char* text)
     {
         length += 1;
     }
+    while (length != 0 && text[length - 1] == '\\')
+    {
+        length -= 1;
+    }
     return length;
 }
 
+// Whether `path` can be pasted as `#include "..."`'s spelling: no '"' to end the literal, no newline to break the
+// directive, and no '\' whose escape would change the name (a trailing one would splice the next line).
 static bool pp_command_include_safe(const char* path)
 {
     bool safe = true;
     for (uint32_t i = 0; safe && path[i] != 0; i += 1)
     {
-        safe = path[i] != '"' && path[i] != '\n' && path[i] != '\r';
+        safe = path[i] != '"' && path[i] != '\\' && path[i] != '\n' && path[i] != '\r';
     }
     return safe;
 }
 
-// An -include path that cannot be pasted as `#include "..."`. A newline is rejected. A quote is opened as the path
-// itself, which is what the option names, rather than as the end of the directive's string.
+// A raw -include's file run with the parentage a synthesized `#include` inside <built-in> would give it: entered at
+// include depth 1 under a <built-in> range, so __INCLUDE_LEVEL__ is 1, the __BASE_FILE__ root walk names <built-in>,
+// and #include_next resumes the search the raw lookup made. The <built-in> file is made, entered and popped for its
+// range alone — its dead conditional gives the range a span — then the depth the popped context would have kept is
+// added by hand for the raw file's run.
 static bool pp_command_include_raw(Preprocessor* pp, const char* path)
 {
     bool result = true;
@@ -18596,13 +18611,36 @@ static bool pp_command_include_raw(Preprocessor* pp, const char* path)
         }
         if (file != BUSTER_PP_NONE)
         {
-            pp_run_file(pp, file);
+            const uint32_t built_in = pp_virtual_file(pp, "<built-in>", "#if 0\n#endif\n", 13, BUSTER_PP_USER_FILE);
+            uint32_t built_in_range = BUSTER_PP_NONE;
+            const uint32_t depth = pp->context_count;
+            if (built_in != BUSTER_PP_NONE)
+            {
+                pp_enter_file(pp, built_in, BUSTER_PP_NONE, 0, BUSTER_PP_NONE, 0, 0);
+                PPContext* base = pp->context_count != 0 ? &pp->contexts[pp->context_count - 1] : 0;
+                if (base != 0 && base->kind == BUSTER_PP_CONTEXT_FILE && base->file == built_in)
+                {
+                    built_in_range = base->range;
+                }
+                pp_pop_context(pp);
+            }
+            if (built_in_range != BUSTER_PP_NONE && pp->context_count == depth)
+            {
+                pp->include_depth += 1;
+                pp_enter_file(pp, file, built_in_range, pp->ranges[built_in_range].base, found_in, 0, 0);
+                pp_run_contexts(pp, depth);
+            }
+            else
+            {
+                pp_run_file(pp, file);
+            }
         }
         result = file != BUSTER_PP_NONE && !pp->fatal;
     }
     return result;
 }
 
+// Runs the main file, then gives the output's keywords their kinds. Returns false if there were errors.
 static bool pp_run_prelude(Preprocessor* pp)
 {
     bool result = true;
@@ -18668,12 +18706,18 @@ static bool pp_run_prelude(Preprocessor* pp)
         {
             const char* macro = pp->options.macros[i];
             const uint32_t line = pp_command_line_length(macro + 1);
-            const bool cut = macro[1 + line] != 0;
+            // `line` lost any backslashes spliced onto the break, so the break's presence is asked of the text itself:
+            // a -D ending in one has text cut but no embedded newline to warn of.
+            const bool cut = strpbrk(macro + 1, "\n\r") != NULL;
             const char* equals = memchr(macro + 1, '=', line);
             if (cut)
             {
                 const uint32_t name = equals != NULL ? (uint32_t)(equals - (macro + 1)) : line;
-                fprintf(stderr, "warning: macro '%.*s' contains embedded newline; text after the newline is ignored\n", (int)name, macro + 1);
+                // A warning like the preprocessor's others: -w silences it, -Werror promotes it (negative_conversion_error
+                // is pp_parse_options' -Werror). ALWAYS: the command line is no system header, and location 0 would read as
+                // one to the visibility gate.
+                const PPSeverity severity = pp->options.negative_conversion_error && !pp->options.suppress_warnings ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING_ALWAYS;
+                pp_diagnose(pp, severity, 0, "macro '%.*s' contains embedded newline; text after the newline is ignored", (int)name, macro + 1);
             }
             if (macro[0] == 'U')
             {
@@ -18760,7 +18804,6 @@ static bool pp_run_prelude(Preprocessor* pp)
     return result;
 }
 
-// Runs the main file, then gives the output's keywords their kinds. Returns false if there were errors.
 static bool pp_run_main(Preprocessor* pp, uint32_t file)
 {
     pp->main_file = file;
@@ -21641,6 +21684,13 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         {
             warning_errors = strcmp(argument, "-Werror") == 0;
         }
+        else if (strcmp(argument, "-fpreprocessed") == 0)
+        {
+            // Rejected as an option here, where operands of value options were already skipped, rather than by scanning
+            // the filtered vector, which keeps operands and post-`--` inputs (#1552's review).
+            fprintf(stderr, "error: unsupported option '-fpreprocessed' (already-preprocessed input is not read that way)\n");
+            result = false;
+        }
         else if (strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0)
         {
             // The other code generation and warning options: none changes what -E gives (predefines_option takes the
@@ -21842,16 +21892,6 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
     bool parsed = filtered != NULL && inputs != NULL && dependencies != NULL && pp_parse_options((int)filtered_count, filtered, &options, &arena, &input, &output, &markers);
     options.expansion_starts = markers;
     options.defer_history = true;
-    bool refused_preprocessed = false;
-    for (uint32_t i = 0; filtered != NULL && i < filtered_count; i += 1)
-    {
-        refused_preprocessed |= strcmp(filtered[i], "-fpreprocessed") == 0;
-    }
-    if (parsed && refused_preprocessed)
-    {
-        fprintf(stderr, "error: unsupported option '-fpreprocessed' (already-preprocessed input is not read that way)\n");
-        parsed = false;
-    }
     if (parsed && ((output != NULL && input_count > 1) || stdin_count > 1))
     {
         fprintf(stderr, "error: -o and standard input each require a single output/input respectively\n");
