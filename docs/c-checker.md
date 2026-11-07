@@ -4122,16 +4122,52 @@ and check that file-spelled candidates and suppressed warnings do not replay his
 not an unused-but-set statement write. The `-Wswitch` definition is the one its
 selector's tag type names, so a fixed underlying type and a shadowing tag in
 another scope resolve correctly. The return-flow walk runs for non-aggregate
-functions only where `-Wreturn-type` is enabled.
+functions only where `-Wreturn-type` is enabled, and for them takes only the
+warning's walk: the first walk is an aggregate return's alone, whose lowering
+reads its result (#1340). The walk's per-node facts, whether an expression
+guaranteedly stops or may not return (`check_program_return_facts`), come from
+its calls, miscellaneous and x86 builtins and queries: the vector path
+(`check_program_return_sparse`) tests each node's operands' and arguments'
+facts, a byte each, and computes only a source's (found 16 operators at a time)
+or a node's with an operand that has facts; the scalar path, its twin and
+oracle, computes every node's (`test-checker` compares the two on every program
+fixture). The `analyzer_noreturn` scan takes the attributes column's tokens,
+and each callee name's answer from clang's builtin table is looked up once.
 
-The graph's passes share one pass in graph order, `check_common_facts`, which
-gives each node its parent, whether another node uses its value, whether it is
-evaluated, a conditional's or comma's arm effect, and its reach: a bit each for
-whether its subtree holds a node whose own warning may fire, a division by a
-constant, or a comparison (#1340). The expression walk starts only at a root that
-reaches something or whose discarded expression may get the statement's
-unused-value warning, and enters only the subtrees that hold its walk's bit;
-every warning keeps its order. The default-ignored warnings' work runs only
+The graph's passes share their facts, `check_common_facts`, which give each
+node its parent, whether another node uses its value, whether it is evaluated,
+a conditional's or comma's arm effect, and its reach: a bit each for whether
+its subtree holds a node whose own warning may fire, a division by a constant
+zero, or a comparison (#1340). A node's own bit counts only where its tests can
+warn (`check_common_own_candidate`): a constant whose value an initialization's,
+an assignment's, a conversion's or a call's argument's conversion changes (the
+types alone rule out a widening conversion, before the value's row is read), a
+self-assignment's names, a constant index outside its array, a source comma.
+What its warning tests past them only takes warnings away. The scalar path
+makes the facts in one pass in graph order and the evaluated nodes by a pass
+from the roots down. The vector path works on the graph's tree
+(`check_common_parents`: each node's reader, 16 nodes at a time, each operand
+slot's present children compressed to the front and written a child at a time,
+since a scatter costs as much whatever its mask and most slots are absent; a
+tree where every operand and argument precedes its node and no node has two
+readers, which counting the distinct children against the edges tells, and
+otherwise the scalar path). It visits only the nodes whose operators may have a
+bit of their own, 16 at a time, and carries each bit up to the first ancestor
+that has it; computes the arm effects of the operators that have them; and
+takes the evaluated nodes as everything with a parent, then clears, with all
+below them, the roots the control and selection walks left out and the
+operands a `sizeof` or a constant condition leaves out. A root that reaches
+nothing runs its statement's unused-value marker alone, without the walk's
+frames, which would find nothing else. The comma markers' subtree starts come
+from a search back from the operand by doubling steps, then halving, each
+probe's climb stopping at a token shallower than the operand
+(`check_common_emission_subtree_start`), rather than from a column of every
+token's start. `test-checker-driver` checks the parents by both paths and the
+starts against their definitions on random graphs and trees whose columns end
+at `PROT_NONE` pages (`c_check_common_tree_test.c`).
+The expression walk starts only at a root that reaches something or whose
+discarded expression may get the statement's unused-value warning, and enters
+only the subtrees that hold its walk's bit; every warning keeps its order. The default-ignored warnings' work runs only
 where the command line or a source pragma may enable them: the comparison bit
 for `-Wsign-compare`, a plain `x = y` for `-Wself-assign`, and the
 `-Wuninitialized` pass for it and `-Wunused-but-set-parameter`, as Clang skips
