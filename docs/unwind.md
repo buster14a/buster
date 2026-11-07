@@ -103,6 +103,14 @@ proves their rules by their whole, undecorated stores and loads
 (`emitted_verify_saved_vectors`).
 Such a frame has no tail calls and no `eh_return`.
 
+An interrupt service routine's frame (`Tier0Code.frame_interrupt`, the Tier 0
+guide's "Interrupt service routines") is a preserving frame whose epilogue
+ends in `iretq`, after an add over the error code where there is one. With an
+error code, its CFA is 8 bytes further up than a call's frame's
+(`emitted_tier0_interrupt_rows`): the processor's frame holds the interrupted
+rip, the routine's return address, above the error code. The verifier starts
+such a frame with rsp 16 below the CFA (`EmittedCode.entry_error_code`).
+
 ### Tail calls (#147)
 
 A function with tail calls (clang's `musttail`, the Tier 0 guide's "Tail calls")

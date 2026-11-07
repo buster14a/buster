@@ -109,6 +109,15 @@ struct CheckDebugValues
     NativeDebugAddress* addresses;
     uint32_t field_count;
     uint32_t address_count;
+    // The spans' index of the function `span_body` names (#1640, check_debug_value_index): each span's next address break,
+    // the starts of its runs of non-decreasing tokens (and the span count after them), and the runs' token tree. Null where
+    // the scratch had no room, which leaves every list to check_debug_value_range_scan.
+    uint32_t* span_breaks;
+    uint32_t* span_segments;
+    uint32_t* span_tree;
+    uint32_t span_leaves;
+    uint32_t span_segment_count;
+    uint32_t span_body;
 };
 
 static String8 check_debug_name(const CheckDebugValues* values, uint32_t identifier)
@@ -345,10 +354,23 @@ static void check_debug_value_type(CheckDebugValues* values, TypeId type)
 // Each list describes precisely the sized entry spans belonging to a lexical interval. Coalesce adjacent spans,
 // including zero-length source entries, but never span a hole such as a tail call's frame teardown. This is shared
 // by lexical ranges and locations; their DWARF 5 base_addressx/offset_pair codes are equal.
-static void check_debug_value_range(CheckDebugValues* values, uint32_t body, uint32_t first, uint32_t last, const uint8_t* expression, uint32_t bytes)
+static void check_debug_value_pair(DebugWriter* out, uint32_t begin, uint32_t end, const uint8_t* expression, uint32_t bytes)
 {
-    const CheckDebugBody* source = values->rows->values + body;
-    DebugWriter* out = expression != NULL ? &values->locations : &values->ranges;
+    debug_integer(out, 4, 1); // DW_RLE/DW_LLE_offset_pair
+    debug_uleb(out, begin);
+    debug_uleb(out, end);
+    if (expression != NULL)
+    {
+        debug_uleb(out, bytes);
+        debug_bytes(out, expression, bytes);
+    }
+}
+
+// The list by every span of the function, keeping those whose token lies in [first, last]: check_debug_value_range's
+// twin and test oracle, and its path where the spans have no index.
+static void check_debug_value_range_scan(const CheckDebugBody* source, DebugWriter* out, uint32_t body, uint32_t first, uint32_t last, const uint8_t* expression,
+                                         uint32_t bytes)
+{
     debug_integer(out, 1, 1); // DW_RLE/DW_LLE_base_addressx
     debug_uleb(out, body);
     uint32_t begin = 0;
@@ -360,14 +382,7 @@ static void check_debug_value_range(CheckDebugValues* values, uint32_t body, uin
         const bool keep = s < count && span.token >= first && span.token <= last;
         if (begin < end && (!keep || span.begin != end))
         {
-            debug_integer(out, 4, 1); // DW_RLE/DW_LLE_offset_pair
-            debug_uleb(out, begin);
-            debug_uleb(out, end);
-            if (expression != NULL)
-            {
-                debug_uleb(out, bytes);
-                debug_bytes(out, expression, bytes);
-            }
+            check_debug_value_pair(out, begin, end, expression, bytes);
             begin = end;
         }
         if (keep)
@@ -377,6 +392,184 @@ static void check_debug_value_range(CheckDebugValues* values, uint32_t body, uin
         }
     }
     debug_integer(out, 0, 1);
+}
+
+// The leaves of the token tree over `segments` runs: the next power of two at or past it.
+static uint32_t check_debug_value_leaves(uint32_t segments)
+{
+    uint32_t leaves = 1;
+    while (leaves < segments)
+    {
+        leaves *= 2;
+    }
+    return leaves;
+}
+
+// A function's spans' index (#1640): `breaks[i]`, the first span past i that doesn't begin where the one before it ends
+// (or the count); `segments`, the starts of the maximal runs of non-decreasing tokens, then the count; and `tree`, the
+// runs' smallest and largest tokens in an implicit binary tree of `leaves` leaves (its nodes' minima, then their maxima),
+// so that a scope reaches only the runs its tokens overlap. Code runs in source order but around loops and branches placed
+// apart, each a run of its own. Returns the leaves, and the runs in `segment_count`.
+static uint32_t check_debug_value_index(const CheckDebugValueSpan* spans, uint32_t count, uint32_t* breaks, uint32_t* segments, uint32_t* tree,
+                                        uint32_t* runs)
+{
+    uint32_t segment_count = 0;
+    for (uint32_t i = count; i-- > 0;)
+    {
+        breaks[i] = i + 1 == count || spans[i + 1].begin != spans[i].end ? i + 1 : breaks[i + 1];
+    }
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        if (i == 0 || spans[i].token < spans[i - 1].token)
+        {
+            segments[segment_count++] = i;
+        }
+    }
+    segments[segment_count] = count;
+    *runs = segment_count;
+    const uint32_t leaves = check_debug_value_leaves(segment_count);
+    uint32_t* minima = tree;
+    uint32_t* maxima = tree + 2 * (uint64_t)leaves;
+    for (uint32_t leaf = 0; leaf < leaves; leaf += 1)
+    {
+        const bool run = leaf < segment_count;
+        minima[leaves + leaf] = run ? spans[segments[leaf]].token : UINT32_MAX;
+        maxima[leaves + leaf] = run ? spans[segments[leaf + 1] - 1].token : 0;
+    }
+    for (uint32_t node = leaves; node-- > 1;)
+    {
+        minima[node] = minima[2 * node] < minima[2 * node + 1] ? minima[2 * node] : minima[2 * node + 1];
+        maxima[node] = maxima[2 * node] > maxima[2 * node + 1] ? maxima[2 * node] : maxima[2 * node + 1];
+    }
+    return leaves;
+}
+
+// A list's pair in progress (check_debug_value_range_scan's begin and end) and the index after its last kept span.
+typedef struct CheckDebugValueWalk CheckDebugValueWalk;
+struct CheckDebugValueWalk
+{
+    DebugWriter* out;
+    const uint8_t* expression;
+    uint32_t bytes;
+    uint32_t begin;
+    uint32_t end;
+    uint32_t after;
+};
+
+// The kept spans [start, stop), in the scan's state machine: spans outside the scope before them end the pair, and so does
+// each address break among them, which `breaks` reaches without visiting the spans between.
+static void check_debug_value_walk(CheckDebugValueWalk* walk, const CheckDebugValueSpan* spans, const uint32_t* breaks, uint32_t start, uint32_t stop)
+{
+    if (start != walk->after && walk->begin < walk->end)
+    {
+        check_debug_value_pair(walk->out, walk->begin, walk->end, walk->expression, walk->bytes);
+        walk->begin = walk->end;
+    }
+    for (uint32_t i = start; i < stop;)
+    {
+        if (walk->begin < walk->end && spans[i].begin != walk->end)
+        {
+            check_debug_value_pair(walk->out, walk->begin, walk->end, walk->expression, walk->bytes);
+            walk->begin = walk->end;
+        }
+        walk->begin = walk->begin == walk->end ? spans[i].begin : walk->begin;
+        const uint32_t run = breaks[i] < stop ? breaks[i] : stop;
+        walk->end = spans[run - 1].end;
+        i = run;
+    }
+    walk->after = stop;
+}
+
+// check_debug_value_range_scan's list from the spans' index (#1640): the token tree gives the runs the scope's tokens
+// overlap, in span order. A node whose runs' tokens all lie in the scope keeps all its spans, one range of indices taken
+// whole; a leaf's run holds the scope's spans as one range, found by two binary searches. Each range is walked from address
+// break to address break, in the scan's state machine (check_debug_value_walk), so the bytes are the scan's, in time for
+// the tree's nodes the scope's bounds cut through and its pairs rather than for every span.
+static void check_debug_value_range_indexed(const CheckDebugBody* source, const uint32_t* breaks, const uint32_t* segments, uint32_t segment_count,
+                                            const uint32_t* tree, uint32_t leaves, DebugWriter* out, uint32_t body, uint32_t first, uint32_t last,
+                                            const uint8_t* expression, uint32_t bytes)
+{
+    const CheckDebugValueSpan* spans = source->spans;
+    const uint32_t* minima = tree;
+    const uint32_t* maxima = tree + 2 * (uint64_t)leaves;
+    debug_integer(out, 1, 1); // DW_RLE/DW_LLE_base_addressx
+    debug_uleb(out, body);
+    CheckDebugValueWalk walk = { .out = out, .expression = expression, .bytes = bytes };
+    // The tree's nodes left to visit, left first: a node and its right sibling's at most at each of its 32 levels.
+    uint32_t stack[66];
+    uint32_t depth = source->span_count != 0 ? 1 : 0;
+    stack[0] = 1;
+    while (depth != 0)
+    {
+        const uint32_t node = stack[--depth];
+        if (minima[node] > last || maxima[node] < first)
+        {
+            continue;
+        }
+        // The node's leaves: its level's share of them, from its place in the level.
+        const uint32_t level = 31 - (uint32_t)__builtin_clz(node);
+        const uint32_t width = leaves >> level;
+        const uint32_t leaf = node * width - leaves;
+        if (minima[node] >= first && maxima[node] <= last)
+        {
+            const uint32_t end_leaf = leaf + width < segment_count ? leaf + width : segment_count;
+            check_debug_value_walk(&walk, spans, breaks, segments[leaf], segments[end_leaf]);
+        }
+        else if (node < leaves)
+        {
+            stack[depth++] = 2 * node + 1;
+            stack[depth++] = 2 * node;
+        }
+        else
+        {
+            uint32_t low = segments[leaf];
+            uint32_t high = segments[leaf + 1];
+            while (low < high)
+            {
+                const uint32_t middle = low + (high - low) / 2;
+                low = spans[middle].token < first ? middle + 1 : low;
+                high = spans[middle].token < first ? high : middle;
+            }
+            const uint32_t start = low;
+            high = segments[leaf + 1];
+            while (low < high)
+            {
+                const uint32_t middle = low + (high - low) / 2;
+                low = spans[middle].token <= last ? middle + 1 : low;
+                high = spans[middle].token <= last ? high : middle;
+            }
+            if (start < low)
+            {
+                check_debug_value_walk(&walk, spans, breaks, start, low);
+            }
+        }
+    }
+    if (walk.begin < walk.end)
+    {
+        check_debug_value_pair(out, walk.begin, walk.end, expression, bytes);
+    }
+    debug_integer(out, 0, 1);
+}
+
+static void check_debug_value_range(CheckDebugValues* values, uint32_t body, uint32_t first, uint32_t last, const uint8_t* expression, uint32_t bytes)
+{
+    const CheckDebugBody* source = values->rows->values + body;
+    DebugWriter* out = expression != NULL ? &values->locations : &values->ranges;
+    if (values->span_breaks != NULL && values->span_body != body)
+    {
+        values->span_body = body;
+        values->span_leaves = check_debug_value_index(source->spans, source->span_count, values->span_breaks, values->span_segments, values->span_tree,
+                                                      &values->span_segment_count);
+    }
+    if (values->span_breaks != NULL)
+    {
+        check_debug_value_range_indexed(source, values->span_breaks, values->span_segments, values->span_segment_count, values->span_tree, values->span_leaves,
+                                        out, body, first, last, expression, bytes);
+    }
+    else
+    {
+        check_debug_value_range_scan(source, out, body, first, last, expression, bytes);
+    }
 }
 
 static uint32_t check_debug_home_expression(Tier0Home home, uint8_t class, bool indirect, uint8_t* bytes)
@@ -550,6 +743,17 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
     values.enum_owners = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->enum_value_count + 1);
     values.local_ids = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1);
     values.scopes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1);
+    // The spans' index (#1640), room for the largest function's; without it, each list scans its function's spans.
+    uint32_t most_spans = 0;
+    for (uint32_t b = 0; b < program->body_count; b += 1)
+    {
+        most_spans = rows->values[b].span_count > most_spans ? rows->values[b].span_count : most_spans;
+    }
+    values.span_breaks = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)most_spans + 1);
+    values.span_segments = values.span_breaks != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)most_spans + 1) : NULL;
+    values.span_tree = values.span_segments != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 4 * (uint64_t)check_debug_value_leaves(most_spans + 1)) : NULL;
+    values.span_breaks = values.span_tree != NULL ? values.span_breaks : NULL;
+    values.span_body = BUSTER_CHECK_NONE;
     // The driver uses tree_only parsing: the checker's derived traversal was scratch-owned and is gone now.
     // Reuse the bounded statement-end derivation without changing the already checked program's status.
     CheckProgram traversal = *program;

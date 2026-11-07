@@ -2687,10 +2687,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     uint32_t worked = 0;
     if (valid && count != 0)
     {
-        memset(run.lane_states, 0, (uint64_t)states * sizeof(CheckEmitLane));
         // The lanes' run, or the calling thread's alone; lanes that couldn't start, or a part that ran out of room, go
         // again on the calling thread alone, from the arenas as they were (each body sets what it reads of the shared
-        // tables before it reads it, and puts local_map's entries back).
+        // tables before it reads it, and puts local_map's entries back). The run alone writes every field of lane 0's
+        // state (check_program_emit_alone), and the lanes' start from zero (#1629).
         const uint64_t output_before = output->length;
         const uint64_t bytes_before = bytes->length;
         const uint64_t scratch_before = scratch->length;
@@ -2698,6 +2698,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const bool laned = active > 1 || growing;
         if (laned)
         {
+            memset(run.lane_states, 0, (uint64_t)states * sizeof(CheckEmitLane));
             if (growing)
             {
                 active = check_program_emit_growing(lanes->flow, &run, &growth, room, active, lanes->budget, leases, &lease_count);
@@ -2752,7 +2753,6 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             arena_pop_to(bytes, bytes_before);
             arena_pop_to(scratch, scratch_before);
             arena_pop_to(columns, columns_before);
-            memset(run.lane_states, 0, sizeof(CheckEmitLane));
             if (run.tier1_outcomes != NULL)
             {
                 memset(run.tier1_outcomes, 0, (uint64_t)count * sizeof(CheckTier1Outcome));

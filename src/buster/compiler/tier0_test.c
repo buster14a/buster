@@ -5071,6 +5071,11 @@ static const Tier0TestBreak tier0_test_breaks[] = {
     { "32 vector registers preserved 32 bytes each", 3, true, BUSTER_TIER0_TEST_METADATA },
     { "mask registers preserved 4 bytes each", 3, true, BUSTER_TIER0_TEST_METADATA },
     { "a preserving frame with __builtin_eh_return", 3, true, BUSTER_TIER0_TEST_METADATA },
+    // An interrupt service routine (#147, Tier0Function.interrupt): one of its two kinds, a preserving frame, and its
+    // frame's address and error code at their System V locations alone.
+    { "an interrupt service routine of an unknown kind", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "an interrupt service routine that keeps no register", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "an interrupt service routine of more parameters than its frame's address and error code", 3, true, BUSTER_TIER0_TEST_METADATA },
 };
 
 // Applies break `b` to a caller or a function built from its fixture.
@@ -5342,6 +5347,17 @@ static void tier0_test_aggregate_break(uint32_t b, Tier0TestCaller* caller, Tier
         case 71:
             callee->function.preserve_general = 1u << X86_REGISTER_RCX;
             callee->function.eh_return = true;
+            break;
+        case 72:
+            callee->function.preserve_general = 1u << X86_REGISTER_RCX;
+            callee->function.interrupt = 3;
+            break;
+        case 73:
+            callee->function.interrupt = BUSTER_TIER0_INTERRUPT_HANDLER;
+            break;
+        case 74:
+            callee->function.preserve_general = 1u << X86_REGISTER_RCX;
+            callee->function.interrupt = BUSTER_TIER0_INTERRUPT_ERROR_CODE;
             break;
         default:
             break;
