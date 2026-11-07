@@ -2945,6 +2945,125 @@ static void check_test_driver_tier1_bits(CheckTest* test, const char* clang, con
     }
 }
 
+// The overflow builtins' fixture (#1385): signed longs' sums, differences and products (check_lower_overflow_row's rows,
+// the IR's saddo, ssubo and smulo, Tier 1's operation and seto), ints' 64-bit operations, unsigned longs' carries and
+// 128-bit products and mixed signedness (c_builtin_lower.c's recipes), each alone; a chain whose values and flags stay
+// live across each other; and the issue's loop of a running sum and products, on the other unit's (clang -O2's) operands,
+// many of them at the types' boundaries.
+static const char check_test_tier1_overflow_header[] =
+    "int o_add(long a, long b, long* r);\n"
+    "int o_sub(long a, long b, long* r);\n"
+    "int o_mul(long a, long b, long* r);\n"
+    "int o_smull(long a, long b, long* r);\n"
+    "int o_addi(int a, int b, int* r);\n"
+    "int o_muli(int a, int b, int* r);\n"
+    "int o_addu(unsigned long a, unsigned long b, unsigned long* r);\n"
+    "int o_subu(unsigned long a, unsigned long b, unsigned long* r);\n"
+    "int o_mulu(unsigned long a, unsigned long b, unsigned long* r);\n"
+    "int o_mixed(long a, unsigned long b, int* r);\n"
+    "long o_chain(long a, long b);\n"
+    "long o_sum(const long* p, unsigned n);\n";
+
+static const char check_test_tier1_overflow_source[] =
+    "#include \"tier1-overflow.h\"\n"
+    "int o_add(long a, long b, long* r) { return __builtin_add_overflow(a, b, r); }\n"
+    "int o_sub(long a, long b, long* r) { return __builtin_sub_overflow(a, b, r); }\n"
+    "int o_mul(long a, long b, long* r) { return __builtin_mul_overflow(a, b, r); }\n"
+    "int o_smull(long a, long b, long* r) { return __builtin_smull_overflow(a, b, r); }\n"
+    "int o_addi(int a, int b, int* r) { return __builtin_add_overflow(a, b, r); }\n"
+    "int o_muli(int a, int b, int* r) { return __builtin_mul_overflow(a, b, r); }\n"
+    "int o_addu(unsigned long a, unsigned long b, unsigned long* r) { return __builtin_add_overflow(a, b, r); }\n"
+    "int o_subu(unsigned long a, unsigned long b, unsigned long* r) { return __builtin_sub_overflow(a, b, r); }\n"
+    "int o_mulu(unsigned long a, unsigned long b, unsigned long* r) { return __builtin_mul_overflow(a, b, r); }\n"
+    "int o_mixed(long a, unsigned long b, int* r)\n"
+    "{\n"
+    "    int s = 0;\n"
+    "    int f = __builtin_add_overflow(a, b, &s);\n"
+    "    return __builtin_mul_overflow(a, b, r) * 2 + f + (s & 1) * 4;\n"
+    "}\n"
+    "long o_chain(long a, long b)\n"
+    "{\n"
+    "    long x = 0, y = 0, z = 0;\n"
+    "    int f = __builtin_mul_overflow(a, b, &x);\n"
+    "    int g = __builtin_sub_overflow(x, a, &y);\n"
+    "    g += __builtin_add_overflow(y, b, &z) * 2;\n"
+    "    int h = __builtin_smull_overflow(z, 3, &x);\n"
+    "    return (long)((unsigned long)x * 7 + (unsigned long)y * 5 + (unsigned long)z * 3 + (unsigned long)(f * 1000 + g * 100 + h * 10) + (unsigned long)a);\n"
+    "}\n"
+    "long o_sum(const long* p, unsigned n)\n"
+    "{\n"
+    "    long s = 0, r = 0;\n"
+    "    int ov = 0;\n"
+    "    for (unsigned i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        ov += __builtin_add_overflow(s, p[i], &s);\n"
+    "        ov += __builtin_mul_overflow(p[i], p[n - 1 - i], &r);\n"
+    "        s ^= r;\n"
+    "    }\n"
+    "    return (long)((unsigned long)s + (unsigned long)ov);\n"
+    "}\n";
+
+static const char check_test_tier1_overflow_other_source[] =
+    "#include <stdio.h>\n"
+    "#include \"tier1-overflow.h\"\n"
+    "static unsigned long long state = 0x9e3779b97f4a7c15ull;\n"
+    "static unsigned long long next(void) { state ^= state << 13; state ^= state >> 7; state ^= state << 17; return state; }\n"
+    "static long value(int i)\n"
+    "{\n"
+    "    static const long edges[] = { 0, 1, -1, 2, 0x7fffffffffffffffL, -0x7fffffffffffffffL - 1, 3037000499L, 3037000500L, -3037000500L, 0x80000000L, -0x80000000L };\n"
+    "    unsigned long long r = next();\n"
+    "    return (i & 3) == 0 ? (long)((unsigned long)edges[r % 11] + (r >> 62) - 1) : (long)r >> (r % 64);\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned long long hash = 0;\n"
+    "    long p[64];\n"
+    "    for (int i = 0; i < 4096; i += 1)\n"
+    "    {\n"
+    "        long a = value(i), b = value(i + 1), r = 0;\n"
+    "        unsigned long u = 0;\n"
+    "        int k = 0, f = 0;\n"
+    "        f = o_add(a, b, &r);\n"
+    "        hash = hash * 31 + (unsigned)f + (unsigned long long)r;\n"
+    "        f = o_sub(a, b, &r);\n"
+    "        hash = hash * 31 + (unsigned)f + (unsigned long long)r;\n"
+    "        f = o_mul(a, b, &r);\n"
+    "        hash = hash * 31 + (unsigned)f + (unsigned long long)r;\n"
+    "        f = o_smull(a, b, &r);\n"
+    "        hash = hash * 31 + (unsigned)f + (unsigned long long)r;\n"
+    "        f = o_addi((int)a, (int)b, &k);\n"
+    "        hash = hash * 31 + (unsigned)f + (unsigned)k;\n"
+    "        f = o_muli((int)a, (int)b, &k);\n"
+    "        hash = hash * 31 + (unsigned)f + (unsigned)k;\n"
+    "        f = o_addu((unsigned long)a, (unsigned long)b, &u);\n"
+    "        hash = hash * 31 + (unsigned)f + u;\n"
+    "        f = o_subu((unsigned long)a, (unsigned long)b, &u);\n"
+    "        hash = hash * 31 + (unsigned)f + u;\n"
+    "        f = o_mulu((unsigned long)a, (unsigned long)b, &u);\n"
+    "        hash = hash * 31 + (unsigned)f + u;\n"
+    "        f = o_mixed(a, (unsigned long)b, &k);\n"
+    "        hash = hash * 31 + (unsigned)f + (unsigned)k;\n"
+    "        hash = hash * 31 + (unsigned long long)o_chain(a, b);\n"
+    "        p[i % 64] = a;\n"
+    "        if (i % 64 == 63) hash = hash * 31 + (unsigned long long)o_sum(p, 64);\n"
+    "        if (i < 2)\n"
+    "        {\n"
+    "            int added = o_add(a, b, &r);\n"
+    "            int multiplied = o_mul(a, b, &r);\n"
+    "            printf(\"%lx %lx %d %d %lx %lx\\n\", a, b, added, multiplied, r, o_chain(a, b));\n"
+    "        }\n"
+    "    }\n"
+    "    printf(\"%llx\\n\", hash);\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds at x86-64's baseline, whose forms are every target's, run on every host.
+static void check_test_driver_tier1_overflow(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-overflow", "overflow builtins'", check_test_tier1_overflow_header, check_test_tier1_overflow_source,
+                                  check_test_tier1_overflow_other_source, "-march=x86-64", true, 0);
+}
+
 // The wide vectors' fixture (#1624): GNU C's 32- and 64-byte vectors at targets whose registers are narrower (x86-64's
 // and x86-64-v2's 16 bytes, x86-64-v3's 32), which ir_vector_split.c splits into the target's widest: the scalar host's
 // emulations' shape (host_scalar_vectors.h: a union of a vector and its lanes, the lanes computed, the vector returned),

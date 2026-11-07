@@ -566,6 +566,7 @@ static bool ir_source_text_tests(Arena* sources, Arena* original_output, Arena* 
         "tests/ir/wide.ir",
         "tests/ir/intrinsics.ir",
         "tests/ir/bit-intrinsics.ir",
+        "tests/ir/overflow-intrinsics.ir",
         "tests/ir/splats.ir",
     };
     IrSourceTextTests tests = { 0 };

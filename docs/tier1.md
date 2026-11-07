@@ -337,7 +337,8 @@ but its naked one. The scalar ones, BMI2's
 `pdep`, `pext` and `bzhi` and BMI1's `bextr`, are the IR's `intrinsic` (#141,
 [the SIMD IR guide](ir-simd.md)'s "Scalar x86 builtins"), each one VEX
 instruction of selection's `TIER1_RULE_INTRINSIC`, and so are the C bit builtins'
-rows (#1374: `tzcnt`, `bsf`, `lzcnt`, `bsr`, `popcnt` and `bswap`).
+rows (#1374: `tzcnt`, `bsf`, `lzcnt`, `bsr`, `popcnt` and `bswap`) and the signed
+overflow builtins' (#1385: `saddo`, `ssubo` and `smulo`, the operation and `seto`).
 
 ### Inlining (#1282)
 

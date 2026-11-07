@@ -700,6 +700,52 @@ static IrSimdTypedStatus ir_simd_typed_bits(const Tier0Operation* source, uint64
     return status;
 }
 
+// A row of a signed overflow builtin's flag (#1385, check_lower_overflow_row): two integer operands of one class, an int's
+// or a long's, and an int result, the operation's overflow flag, setcc'd into the first scratch register and zero-extended
+// into the result's: the second operand added to the first's register (add) or multiplied into it (imul), or the two
+// compared (cmp, a difference). Each is its IR intrinsic of the operands' type (saddo, smulo, ssubo), narrowed to the
+// result's; baseline x86-64's forms, which every target has.
+static IrSimdTypedStatus ir_simd_typed_overflow(const Tier0Operation* source, IrSimdTypedOperation* result)
+{
+    IrSimdTypedStatus status = source != NULL && result != NULL ? IR_SIMD_TYPED_UNSUPPORTED : IR_SIMD_TYPED_INVALID;
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    const uint8_t operand = source != NULL ? source->operand_classes[0] : 0;
+    const bool wide = operand == BUSTER_TYPED_CLASS_I64;
+    if (status != IR_SIMD_TYPED_INVALID && (operand == BUSTER_TYPED_CLASS_I32 || wide) && source->operand_count == 2 && source->operand_classes[1] == operand &&
+        source->operand_bytes[0] == 0 && source->operand_bytes[1] == 0 && source->result_class == BUSTER_TYPED_CLASS_I32 && source->result_bytes == 0)
+    {
+        const uint8_t r = BUSTER_TIER0_ROLE_INTEGER_RESULT;
+        const uint8_t i0 = BUSTER_TIER0_ROLE_INTEGER(0);
+        const uint8_t i1 = BUSTER_TIER0_ROLE_INTEGER(1);
+        const uint8_t s0 = BUSTER_TIER0_ROLE_SCRATCH(0);
+        const uint8_t direct = BUSTER_X86_REGISTER_DIRECT;
+        const X86Instruction set = { .form = X86_FORM_SETO_RM8, .rm = s0, .mode = direct };
+        const X86Instruction extend = { .form = X86_FORM_MOVZX_R32_RM8, .reg = r, .rm = s0, .mode = direct };
+        const X86Instruction add = { .form = wide ? X86_FORM_ADD_R64_RM64 : X86_FORM_ADD_R32_RM32, .reg = i0, .rm = i1, .mode = direct };
+        const X86Instruction multiply = { .form = wide ? X86_FORM_IMUL_R64_RM64 : X86_FORM_IMUL_R32_RM32, .reg = i0, .rm = i1, .mode = direct };
+        const X86Instruction compare = { .form = wide ? X86_FORM_CMP_R64_RM64 : X86_FORM_CMP_R32_RM32, .reg = i0, .rm = i1, .mode = direct };
+        const X86Instruction* records = source->records;
+        if (source->record_count == 3 && memcmp(&records[1], &set, sizeof(set)) == 0 && memcmp(&records[2], &extend, sizeof(extend)) == 0)
+        {
+            candidate.intrinsic = memcmp(&records[0], &add, sizeof(add)) == 0             ? (uint8_t)(BUSTER_IR_INTRINSIC_SADDO + 1)
+                                  : memcmp(&records[0], &compare, sizeof(compare)) == 0   ? (uint8_t)(BUSTER_IR_INTRINSIC_SSUBO + 1)
+                                  : memcmp(&records[0], &multiply, sizeof(multiply)) == 0 ? (uint8_t)(BUSTER_IR_INTRINSIC_SMULO + 1)
+                                                                                          : 0;
+        }
+        status = candidate.intrinsic != 0 ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_UNSUPPORTED;
+    }
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.operand_count = 2;
+        candidate.operand_classes[0] = operand;
+        candidate.operand_classes[1] = operand;
+        candidate.intrinsic_operands[0] = 0;
+        candidate.intrinsic_operands[1] = 1;
+        *result = candidate;
+    }
+    return status;
+}
+
 // The producer's single-record EVEX broadcasts (#1450). No decorated, memory or fixed-register row is inferred as a
 // splat. Floating forms copy bits without evaluating them; byte/word scalars are extended to a 32-bit register by the
 // producer, and a half's bits use the integer word form and its U32 source. Lowering truncates those carriers explicitly.
@@ -880,14 +926,19 @@ static IrSimdTypedStatus ir_simd_typed_compare_mask(const Tier0Operation* source
     return status;
 }
 
-// A row's decoding: the bit builtins', masks, scalar intrinsics, lane operations, comparisons into a mask alone, then
-// exact scalar splats; other admitted forms stay machine rows. A semantic match whose target lacks a required feature
-// stays refused, but a comparison into a mask alone, whose machine row a target may still run, stays one.
+// A row's decoding: the bit builtins', the signed overflow builtins', masks, scalar intrinsics, lane operations,
+// comparisons into a mask alone, then exact scalar splats; other admitted forms stay machine rows. A semantic match whose
+// target lacks a required feature stays refused, but a comparison into a mask alone, whose machine row a target may still
+// run, stays one.
 static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
 {
     const bool masks = source != NULL && source->operand_count != 0 && source->operand_classes[0] == BUSTER_TYPED_CLASS_MASK && tier0_class_integer(source->result_class);
     const bool scalar = source != NULL && (source->result_class == BUSTER_TYPED_CLASS_U32 || source->result_class == BUSTER_TYPED_CLASS_U64) && !masks;
     IrSimdTypedStatus status = ir_simd_typed_bits(source, target_features, result);
+    if (status == IR_SIMD_TYPED_UNSUPPORTED)
+    {
+        status = ir_simd_typed_overflow(source, result);
+    }
     if (status == IR_SIMD_TYPED_UNSUPPORTED)
     {
         status = source->result_class == BUSTER_TYPED_CLASS_MASK ? ir_simd_typed_mask_row(source, target_features, result) :

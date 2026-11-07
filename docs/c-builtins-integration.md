@@ -128,8 +128,13 @@ Capacity refusals from integer recipes name the recipe bound, the per-function
 entry or local limit, or the lowering storage that actually ran out (#665).
 
 The recipes use the existing target-independent `BUSTER_TYPED_*` operations.
-Byte swaps and counts use fixed shifts, masks and arithmetic. Full overflow
-products use four 32-by-32 products and exact two-limb correction. With a
+Byte swaps and counts use fixed shifts, masks and arithmetic. An overflow
+builtin's recipe computes its exact result as cheaply as its operands allow
+(#1385, "The overflow builtins' instructions" below): one 64-bit operation of
+operands of at most 32 bits, the 64-bit operation with its own carry or sign test
+for a sum or a difference of operands of the destination's signedness, one U128
+product for a product of a 64-bit operand, and two limbs for a sum or a
+difference of mixed signedness. With a
 128-bit operand or destination, the exact result is three limbs of 64 bits for a
 sum or a difference and four for a product, whose columns' 64-by-64 products are
 U128 multiplications of zero-extended limbs, less 2^128 times the other
@@ -189,6 +194,52 @@ level, clang's time. The kernel is 16 instructions by Tier 0 and 11 by Tier 1 at
 132.46 ms, its one `__builtin_clzll`). [The
 record](https://github.com/buster14a/buster-performance/tree/28689ea8be9e0bbbe4e6b91a0371ed36093510b6/docs/measurements/bit-builtins-1374-2026-11-07)
 has the commands, receipts and limitations.
+
+### The overflow builtins' instructions (#1385)
+
+`__builtin_add_overflow`, `sub_overflow` and `mul_overflow`, and clang's typed
+ones (`sadd_overflow` to `umulll_overflow`, which reach the same runtime
+builtins), were two-limb recipes for every type: the exact result's low and high
+64 bits from the operands' sign words and an unsigned compare's carry, a 64-bit
+product from four 32-by-32 products corrected for the signs by two more, then
+both limbs compared with the destination's extension of the low one (66 to 103
+instructions by Tier 0 where clang -O0 has 15). Now:
+
+| operands and destination | exact result | overflow |
+| --- | --- | --- |
+| signed 64-bit, one class (`long`, `long long`, a signed `_BitInt(64)`) | the operation, typed | an `X86` row of `add`, `cmp` or `imul` and `seto` (`check_lower_overflow_row`) |
+| operands of at most 32 bits, any destination | one 64-bit operation of the extended operands (an unsigned 32-bit product unsigned) | the destination's extension of the low bits differs, or past 64 bits the result's sign (`cbuiltin_lower_overflow_narrow`) |
+| a 64-bit sum or difference of operands of the destination's signedness | the 64-bit operation | its carry (`low < a`), borrow (`a < b`) or the sign of `(low ^ a) & (low ^ b)` (`(a ^ b) & (a ^ low)`), or the low bits' mismatch (`cbuiltin_lower_overflow_same`) |
+| a product with a 64-bit operand | the 64-bit product, and the 128-bit product's high limb, one `mul` or `imul` where the operands share an extension | both limbs against the destination (`cbuiltin_lower_overflow_product`) |
+| a 64-bit sum or difference of mixed signedness | two limbs, as before | both limbs (`cbuiltin_lower_overflow_mixed`) |
+
+The row's operation adds the second operand into the first's register or
+multiplies it in (which a row may write), or compares them, then `seto` sets the
+first scratch register's low byte and `movzx` extends it into the int result's;
+the value stored through the pointer is the typed operation's, computed beside
+it. A function with such a row is one with vectors (`Tier0Function.vectors`), as
+any function with an `X86` entry is. The IR takes each row as its intrinsic
+(`saddo`, `ssubo`, `smulo`: [the IR guide](ir.md)'s "Intrinsics"), a pure
+operation of the operands' type, 1 where the exact result leaves its signed range,
+which Tier 1 selects as the operation and `seto` ([the selection
+guide](tier1-selection.md)), and the typed stream's interpreter evaluates the
+rows by the same semantics (`ir_intrinsic_overflow`). The recipes' typed
+operations are the same everywhere; 128-bit operands and destinations keep their
+limbs' recipe (`cbuiltin_lower_overflow_wide`), and the destination stores its
+value before the recipe's last entry, the flag, which stays on the value stack.
+
+`test-builtin-lowering` runs every recipe natively against clang's builtins:
+every ordinary signed and unsigned 8/16/32/64-bit and `_Bool` operand and
+destination, `_BitInt` destinations, and `_BitInt` operands narrower than their
+slot class beside whole ones (each recipe's: at most 32 bits, past them, an
+unsigned 32-bit product past 2^63 into a signed `_BitInt(63)`, whose extension
+of the low bits alone would give them back). `test-checker`'s
+`overflow-instruction-rows` program runs signed longs', ints', unsigned longs'
+and mixed calls of boundary values by both paths against clang -O0's build and
+checks that the signed longs' rows are `add`, `imul` and `cmp` with `seto`;
+`test-checker-driver`'s Tier 1 fixture `tier1-overflow` runs them by `--tier1`,
+and `tests/ir-source/overflow-builtins.c` through the IR's lowerings, both
+interpreters and Tier 1 (`test-ssa-source --typed --tier1`).
 
 Tier 0 can consume the complete ordinary-width recipes. The current separate
 Tier 1 pipeline only supports a subset: straight-line 32/64-bit integer and
