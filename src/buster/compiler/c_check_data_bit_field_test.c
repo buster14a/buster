@@ -207,7 +207,7 @@ static void check_data_test_bit_field_plans(CheckTest* test, TypeTable* types)
                 };
                 CheckDataPlan plan;
                 const CheckDataStatus status = check_data_plan_object(types, NULL, &object, map, BUSTER_ARRAY_LENGTH(map), &fixture.link,
-                                                                      &fixture.bytes, &fixture.scratch, &plan);
+                                                                      &fixture.bytes, &fixture.scratch, NULL, &plan);
                 check_data_test_bit_field_reference(expected, field_base + shift, width, first_bits, false);
                 check_data_test_bit_field_reference(expected, field_base + 3 + shift, width + 3, 0, true);
                 check_data_test_bit_field_reference(expected, field_base + 1 + shift, width, value ^ (value >> 1), false);
