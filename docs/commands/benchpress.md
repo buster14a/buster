@@ -12,13 +12,22 @@ owner's tailnet; a cloud session doesn't need a CI job or the owner to measure.
 - **Joining:** `.claude/hooks/join-tailnet.sh`, the SessionStart hook of Claude
   Code's and Codex's sessions, joins the tailnet with the environment's
   `TS_AUTHKEY`, as a `tag:llm` node named `claude-cloud-…`, in userspace
-  networking (`tailscaled --tun=userspace-networking
+  networking (`tailscaled --tun=userspace-networking --state=mem:
   --socks5-server=localhost:1055`, the default socket). It replaces a daemon
   that isn't up, and one that is up but can't reach benchpress while the control
   server lists benchpress online (a stale daemon: `tailscale status` lists peers
   that no ping reaches). A session whose checkout predates the hook, or whose
   hook ran before the daemon went stale, runs it again by hand:
   `bash .claude/hooks/join-tailnet.sh`.
+- **One node per container:** the daemon keeps its node key in memory, and the
+  hook removes a `/var/lib/tailscale/tailscaled.state` an earlier hook left. A
+  key on disk outlives the container in its saved filesystem, and #653's session
+  saw its node used from elsewhere, most likely by a container started from such
+  a copy: the IP stayed the same while the hostname changed every few seconds to
+  names the session never chose (`grep 'active login'
+  /var/lib/tailscale/log`), and pings to benchpress failed until the state file
+  was moved aside. A session that sees this runs the hook again by hand after
+  stopping its daemon (`pkill -x tailscaled`).
 - **Checking:** `tailscale status` lists `benchpress`;
   `tailscale ping -c 2 --until-direct=false benchpress` must answer `pong`
   (through a DERP relay: the cloud egress has no UDP, so no direct connection is

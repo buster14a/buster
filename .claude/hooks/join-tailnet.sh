@@ -14,6 +14,13 @@
 # session: the proxy given as an IP literal, which its control dialer refused), so that no peer answers it although
 # `tailscale status` lists them. Where the control server lists benchpress online and it doesn't answer a ping, even
 # through a DERP relay, the daemon is replaced the same way.
+#
+# The daemon keeps its node key in memory (`--state=mem:`), as the environment's setup script starts its own. A key in
+# /var/lib/tailscale/tailscaled.state outlives the container in its saved filesystem, and #653's session saw its node
+# used from elsewhere, most likely by a container started from such a copy: its IP stayed the same while its hostname
+# changed every few seconds to names the session never chose, and pings to benchpress failed until the state file was
+# moved aside. A key left by an earlier hook is removed when the daemon is replaced. Each daemon start then registers a
+# new node, under a new random hostname as before.
 
 benchpress_unreachable()
 {
@@ -32,9 +39,9 @@ if [ -n "$TS_AUTHKEY" ] && command -v tailscaled > /dev/null && { ! tailscale st
             kill -9 $pid 2> /dev/null
         fi
     done
-    rm -f /var/run/tailscale/tailscaled.sock
+    rm -f /var/run/tailscale/tailscaled.sock /var/lib/tailscale/tailscaled.state
     mkdir -p /var/run/tailscale /var/lib/tailscale
-    nohup tailscaled --tun=userspace-networking --socks5-server=localhost:1055 > /var/lib/tailscale/log 2>&1 &
+    nohup tailscaled --tun=userspace-networking --state=mem: --socks5-server=localhost:1055 > /var/lib/tailscale/log 2>&1 &
     for i in $(seq 40); do
         [ -S /var/run/tailscale/tailscaled.sock ] && break
         sleep 0.5
