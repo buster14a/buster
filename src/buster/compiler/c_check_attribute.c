@@ -1613,12 +1613,14 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             }
             // clang's error of an argument that is no string literal, at it (#147): visibility's own wording, the others'
             // checkStringLiteralArgumentAttr's.
-            // visibility's argument is an enumerator's, which clang's parser reads as an identifier: one is its own error.
+            // visibility's and pcs's arguments are enumerators', which clang's parser reads as identifiers: one is "requires a
+            // string" (pcs's then also "invalid PCS type", which the first error's stop leaves out).
             if (!decoded)
             {
                 const bool named = first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER;
-                check_input_attribute_argument_error(reader, attributes, attribute, first,
-                                                     attribute->kind == CHECK_ATTRIBUTE_VISIBILITY && named ? CHECK_ARGUMENT_STRING : CHECK_ARGUMENT_STRING_LITERAL, 0);
+                const bool enumerated = attribute->kind == CHECK_ATTRIBUTE_VISIBILITY ||
+                                        (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "pcs"));
+                check_input_attribute_argument_error(reader, attributes, attribute, first, enumerated && named ? CHECK_ARGUMENT_STRING : CHECK_ARGUMENT_STRING_LITERAL, 0);
             }
         }
         else if (valid)
@@ -3023,12 +3025,6 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
     if (valid)
     {
         attribute.name = parser->tokens.names[i++];
-        // The parser recognizes a definition's suffix before Sema processes its attributes. Keep its warning even
-        // when a type attribute's arguments (for example regparm or pcs) prevent the declarator from completing.
-        if (definition)
-        {
-            check_input_attribute_gcc_one(reader, &attribute);
-        }
         const String8 name = check_input_attribute_name(reader, attribute.name);
         // The name's rows, a GNU spelling's, whose rule is any spelling's of the name.
         const CheckInputGnuRows* rows = check_input_attribute_gnu_rows(reader, attribute.name);
@@ -3119,6 +3115,13 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         {
             check_input_attribute_argument_error(reader, attributes, &attribute, literal, CHECK_ARGUMENT_STRING_LITERAL, 0);
             valid = false;
+        }
+        // The parser recognizes a definition's suffix before Sema processes its attributes: its warning holds even
+        // where a type attribute's arguments (regparm's or pcs's) then keep the declarator from completing. An attribute
+        // whose argument the parser itself refused (pcs(1)'s, above) it dropped first, with no warning.
+        else if (definition)
+        {
+            check_input_attribute_gcc_one(reader, &attribute);
         }
         // A type argument's (ParseTypeName's): an identifier that names no type is "unknown type name"; any other start of
         // no type "expected a type" and, in a GNU list, "expected ')'" there; a type followed by a `,` is "expected ')'"
