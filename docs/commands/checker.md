@@ -193,6 +193,15 @@ unused-warning fixtures also check exact scope-completion tokens.
   ordinary, scalar and deferred readers against Clang, with independent warning counts.
   `c_check_data.c` and `c_check_data_input.c` turn selected static scalar definitions into real
   Link atoms/fixups; their tests compare emitted ELF bytes with Clang objects.
+  `c_check_string_pool.c` shares exact decoded literal storage after selection, keeping
+  symbols and addends intact and named/predefined arrays distinct (#1474).
+  The default `test-checker` data tests cover unique atom/byte demand, transaction
+  rollback, embedded-NUL storage, guarded invalid descriptors and scalar/vector
+  hash/sort boundaries. The program-selection tests include a dead first occurrence
+  followed by live duplicates. `test-checker-driver --executable build/compiler`
+  runs `c_check_string_pool_driver_test.c` through both tiers and readers, using
+  direct linking and object output linked by the system toolchain, with Clang and
+  independently stated results as oracles.
   `benchmark-checker --shape wide|chain` measures synthetic graph checking,
   including scheduling and output materialization. `docs/c-checker.md`
   records the checker contract, declaration/initializer and control-flow

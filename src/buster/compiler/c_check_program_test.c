@@ -1658,6 +1658,7 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
                 .literal_bytes = string->bytes,
                 .literal_size = string->byte_count,
                 .string_pool = true,
+                .mergeable_string = !string->predefined,
             };
             result->reference_offsets[at] = result->reference_count;
             result->reference_counts[at] = 0;
@@ -1725,7 +1726,7 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
             const CheckDataObject* b = dense.objects + i;
             same = a->type == b->type && a->object == b->object && a->initializer == b->initializer && a->token == b->token &&
                    a->initializer_plan == b->initializer_plan && a->literal_bytes == b->literal_bytes && a->literal_size == b->literal_size &&
-                   a->string_pool == b->string_pool && a->alignment_log2 == b->alignment_log2;
+                   a->string_pool == b->string_pool && a->mergeable_string == b->mergeable_string && a->alignment_log2 == b->alignment_log2;
         }
         for (uint32_t object = 0; same && object <= count + 1; object += 1)
         {
