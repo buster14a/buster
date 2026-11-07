@@ -290,9 +290,11 @@ static bool check_init_value_nonconstant(const CheckStream* stream, const TypeTa
     const bool designator = type_kind_is_array(from) || from == BUSTER_TYPE_KIND_FUNCTION;
     const bool pointer = from == BUSTER_TYPE_KIND_POINTER || designator;
     const bool integer = from == BUSTER_TYPE_KIND_INTEGER || from == BUSTER_TYPE_KIND_ENUM || from == BUSTER_TYPE_KIND_BIT_INT;
-    const bool converted = (to == BUSTER_TYPE_KIND_INTEGER && pointer) || (to == BUSTER_TYPE_KIND_POINTER && (pointer || integer));
+    // (An enumeration's and a _BitInt's targets are integers too, as check_driver_conversion_kind takes them.)
+    const bool to_integer = to == BUSTER_TYPE_KIND_INTEGER || to == BUSTER_TYPE_KIND_ENUM || to == BUSTER_TYPE_KIND_BIT_INT;
+    const bool converted = (to_integer && pointer) || (to == BUSTER_TYPE_KIND_POINTER && (pointer || integer));
     const bool read = value.category == CHECK_LVALUE && !designator;
-    const bool narrowed = to == BUSTER_TYPE_KIND_INTEGER && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && type_size(types, target) < 8;
+    const bool narrowed = to_integer && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && type_size(types, target) < 8;
     return converted && (read || !check_value_static_initializer(&value, false) || narrowed);
 }
 

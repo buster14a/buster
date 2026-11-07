@@ -7122,8 +7122,6 @@ arguments against the function. The checker now gives these as clang does.
     prints without its typedef's name, and so does a member's type
     (`x.f++` of a member `uu f` prints `'struct u'` where clang's is
     `'uu' (aka 'struct u')`): a record's members keep no declaration.
-  - A braced scalar initializer's failed conversion (`static long x = { p };`)
-    is still "invalid initializer", with no non-constant error.
   - `(*p)++` of a `void *p` lacks clang's `-Wvoid-ptr-dereference` warning
     before its error, and `c++` of a const variable clang's "variable 'c'
     declared const here" note.
