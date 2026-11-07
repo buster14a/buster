@@ -3020,6 +3020,177 @@ static uint8_t* tier1_masks_test_load(Tier1MasksTest* test, Tier1EmitResult* emi
     return ok ? machine : MAP_FAILED;
 }
 
+// The native MXCSR fixtures (#1450): a function of four float lanes, `left` and `right` by `op` (an equality vcmp where
+// `op` is IR_VCMP), its lanes compared with `expected`'s as integers unless it is the comparison, so that the floating
+// value reaches the result through an integer mask alone, and returned as an i8. Optimized, selected for x86-64-v4,
+// emitted and loaded (MAP_FAILED where a step fails). `folded` says whether SCCP made the returned mask a constant
+// while keeping the floating operation's row for its effects (ir_optimize_simd_effect). The arenas are the caller's to
+// pop once the code is unmapped.
+static uint8_t* tier1_masks_test_mxcsr_code(Tier1MasksTest* test, uint32_t op, uint32_t left, uint32_t right, uint32_t expected, bool* folded, uint64_t* mapped)
+{
+    IrFunction input = { 0 };
+    const bool compare = op == IR_VCMP;
+    const IrSizes sizes = { .instruction_count = compare ? 5 : 7, .block_count = 1, .vector_constant_count = compare ? 2 : 3 };
+    bool ok = tier1_masks_test_expect(test, ir_create(&test->execution, &sizes, &input) == IR_OK, "create MXCSR optimizer fixture");
+    uint8_t* code = MAP_FAILED;
+    *folded = false;
+    if (ok)
+    {
+        input.result_type = IR_I8;
+        input.block_offsets[1] = sizes.instruction_count;
+        for (uint32_t lane = 0; lane < 4; lane += 1)
+        {
+            ir_simd_lane_write(&input.vector_constants[0], 32, lane, left);
+            ir_simd_lane_write(&input.vector_constants[1], 32, lane, right);
+            if (!compare)
+            {
+                ir_simd_lane_write(&input.vector_constants[2], 32, lane, expected);
+            }
+        }
+        ir_optimize_test_instruction(&input, 0, IR_VCONST, IR_V4I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&input, 1, IR_VCONST, IR_V4I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&input, 2, op, compare ? IR_M8 : IR_V4I32, 0, 1, compare ? IR_EQ : BUSTER_IR_NONE);
+        input.flags[2] = IR_SIMD_LANE_F32;
+        if (!compare)
+        {
+            ir_optimize_test_instruction(&input, 3, IR_VCONST, IR_V4I32, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&input, 4, IR_VCMP, IR_M8, 2, 3, IR_EQ);
+            input.flags[4] = IR_SIMD_LANE_I32;
+        }
+        const uint32_t cast = compare ? 3 : 5;
+        ir_optimize_test_instruction(&input, cast, IR_BITCAST, IR_I8, compare ? 2 : 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&input, cast + 1, IR_RET, IR_VOID, cast, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        IrOptimizeResult optimized = { 0 };
+        const IrCheck check = ir_optimize(&input, &test->output, &test->scratch, ir_optimize_options(), &optimized);
+        ok = tier1_masks_test_expect(test, check.error == IR_OK, "optimize MXCSR fixture");
+        const IrFunction* out = &optimized.function;
+        if (ok)
+        {
+            uint32_t effects = 0;
+            for (uint32_t i = 0; i < out->instruction_count; i += 1)
+            {
+                effects += ir_optimize_simd_effect(out, i);
+            }
+            const uint32_t ret = out->instruction_count - 1;
+            *folded = out->op[ret] == IR_RET && out->op[out->a[ret]] == IR_CONST && effects == 1;
+        }
+        IrDominance dominance;
+        ok = ok && tier1_masks_test_dominance(test, out, &dominance);
+        Tier1SelectPlan plan;
+        uint32_t node = BUSTER_IR_NONE;
+        const Tier1SelectError selected = ok ? tier1_select_plan(out, &dominance, &test->output, &test->scratch, true, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+        ok = tier1_masks_test_expect(test, selected == TIER1_SELECT_OK, "select MXCSR fixture");
+        const Tier1EmitOptions options = { .certify = true, .register_mask = tier1_liveness_register_mask(), .vector = true, .rematerialize = true };
+        Tier1EmitResult emitted = { 0 };
+        const Tier1EmitError error = ok ? tier1_emit_function(&plan, &options, test->v4, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+        ok = tier1_masks_test_expect(test, error == TIER1_EMIT_OK, "emit MXCSR fixture");
+        code = ok ? tier1_masks_test_load(test, &emitted, mapped) : MAP_FAILED;
+    }
+    return code;
+}
+
+// The fixture's code called under `mxcsr` (its status flags clear unless the caller sets them): its result, and in
+// `flags` the status flags it raised. The caller's MXCSR is restored.
+static __attribute__((no_sanitize("function"))) uint8_t tier1_masks_test_mxcsr_call(const uint8_t* code, uint32_t mxcsr, uint32_t* flags)
+{
+    typedef uint8_t (*Entry)(void);
+    Entry entry;
+    memcpy(&entry, &code, sizeof(entry));
+    const uint32_t saved = _mm_getcsr();
+    _mm_setcsr(mxcsr);
+    const uint8_t result = entry();
+    *flags = _mm_getcsr() & 0x3fu;
+    _mm_setcsr(saved);
+    return result;
+}
+
+// Constant SIMD operations must still use the caller's MXCSR after SCCP. Execute the actual optimized Tier 1
+// output under both default and changed controls; the integer mask compares its result bits without FP arithmetic.
+// Each of these results depends on the environment, so SCCP must not fold it.
+static void tier1_masks_test_mxcsr(Tier1MasksTest* test)
+{
+    if (!test->native)
+    {
+        return;
+    }
+    // Rounding upward of 1 + 2^-24; flush-to-zero of min-normal * 0.5; denormals-are-zero comparison.
+    static const uint8_t ops[] = { IR_FADD, IR_FMUL, IR_VCMP };
+    static const uint32_t left[] = { 0x3f800000u, 0x00800000u, 1u };
+    static const uint32_t right[] = { 0x33800000u, 0x3f000000u, 0u };
+    static const uint32_t expected[] = { 0x3f800000u, 0x00400000u, 0u };
+    static const uint32_t controls[] = { 0x5f80u, 0x9f80u, 0x1fc0u };
+    for (uint32_t shape = 0; shape < 3; shape += 1)
+    {
+        const uint64_t input_mark = test->execution.length;
+        const uint64_t output_mark = test->output.length;
+        const bool compare = ops[shape] == IR_VCMP;
+        bool folded = true;
+        uint64_t mapped = 0;
+        uint8_t* code = tier1_masks_test_mxcsr_code(test, ops[shape], left[shape], right[shape], expected[shape], &folded, &mapped);
+        tier1_masks_test_expect(test, !folded, "SCCP folds no SIMD result that rounding, FTZ or DAZ changes");
+        if (code != MAP_FAILED)
+        {
+            uint32_t flags = 0;
+            const uint8_t standard = tier1_masks_test_mxcsr_call(code, 0x1f80u, &flags);
+            const uint8_t changed = tier1_masks_test_mxcsr_call(code, controls[shape], &flags);
+            tier1_masks_test_expect(test, standard == (compare ? 0 : 15) && changed == (compare ? 15 : 0), "optimized native SIMD observes runtime rounding, FTZ and DAZ");
+            munmap(code, mapped);
+        }
+        arena_pop_to(&test->output, output_mark);
+        arena_pop_to(&test->execution, input_mark);
+    }
+}
+
+// A floating SIMD operation SCCP folds keeps its row (#1450's review): the optimized native code still raises its
+// exception. 0/0, a quiet NaN plus a signaling one and an equality comparison of a signaling NaN set MXCSR's invalid
+// flag, 1/0 its divide-by-zero flag, and with that exception unmasked each traps (SIGFPE, in a child process).
+static void tier1_masks_test_folded_effects(Tier1MasksTest* test)
+{
+    if (!test->native)
+    {
+        return;
+    }
+    static const uint8_t ops[] = { IR_FDIV, IR_FDIV, IR_FADD, IR_VCMP };
+    static const uint32_t left[] = { 0u, 0x3f800000u, 0x7fc00001u, 0x7f800001u };
+    static const uint32_t right[] = { 0u, 0u, 0x7f800002u, 0x3f800000u };
+    // The default NaN, an infinity, the first operand's quiet NaN (x86's rule), and an unordered lane's 0.
+    static const uint32_t expected[] = { 0xffc00000u, 0x7f800000u, 0x7fc00001u, 0u };
+    // MXCSR's IE and ZE status flags; each one's mask bit is 7 bits above it.
+    static const uint32_t raised[] = { 0x01u, 0x04u, 0x01u, 0x01u };
+    for (uint32_t shape = 0; shape < 4; shape += 1)
+    {
+        const uint64_t input_mark = test->execution.length;
+        const uint64_t output_mark = test->output.length;
+        const bool compare = ops[shape] == IR_VCMP;
+        bool folded = false;
+        uint64_t mapped = 0;
+        uint8_t* code = tier1_masks_test_mxcsr_code(test, ops[shape], left[shape], right[shape], expected[shape], &folded, &mapped);
+        tier1_masks_test_expect(test, folded, "SCCP folds an environment-free SIMD result and keeps its floating row");
+        if (code != MAP_FAILED)
+        {
+            uint32_t flags = 0;
+            const uint8_t result = tier1_masks_test_mxcsr_call(code, 0x1f80u, &flags);
+            tier1_masks_test_expect(test, result == (compare ? 0 : 15) && (flags & raised[shape]) != 0, "a folded SIMD operation still raises its status flag natively");
+            fflush(0);
+            const pid_t child = fork();
+            if (child == 0)
+            {
+                alarm(5);
+                signal(SIGFPE, SIG_DFL);
+                uint32_t unused = 0;
+                (void)tier1_masks_test_mxcsr_call(code, 0x1f80u & ~(raised[shape] << 7), &unused);
+                _exit(0);
+            }
+            int status = 0;
+            const bool waited = child > 0 && waitpid(child, &status, 0) == child;
+            tier1_masks_test_expect(test, waited && WIFSIGNALED(status) && WTERMSIG(status) == SIGFPE, "a folded SIMD operation still traps where its exception is unmasked");
+            munmap(code, mapped);
+        }
+        arena_pop_to(&test->output, output_mark);
+        arena_pop_to(&test->execution, input_mark);
+    }
+}
+
 // The interpreter's buffer after the function, from `input`: the buffer bound as memory, the pointer its address.
 static bool tier1_masks_test_interpret(Tier1MasksTest* test, const IrFunction* function, const uint8_t* input, uint64_t count, uint8_t* output)
 {
@@ -4440,6 +4611,8 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
                 tier1_masks_test_fixture(&test, &tier1_masks_test_fixtures[f_index]);
             }
             test.v4_features = v4.features;
+            tier1_masks_test_mxcsr(&test);
+            tier1_masks_test_folded_effects(&test);
             tier1_masks_test_typed(&test);
             tier1_masks_test_builtins(&test);
             tier1_masks_test_refusals(&test, baseline, foundation);

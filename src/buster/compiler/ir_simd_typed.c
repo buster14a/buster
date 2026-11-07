@@ -79,6 +79,9 @@ struct IrSimdTypedOperation
     // (BUSTER_IR_INTRINSIC_* + 1, 0 for any other row), and the operands its a and b are, the source and the other.
     uint8_t intrinsic;
     uint8_t intrinsic_operands[2];
+    // A scalar's bit splat (#1450): the bytes repeated by the exact broadcast form, zero for every other row.
+    // Integer rows may use a wider scalar register; lowering truncates it to these bytes before the splat.
+    uint8_t splat_bytes;
     // A row the IR has no operation of its own for (#141, ir_simd_typed_machine_row): the row itself, which a row call
     // runs (IrFunction.rows).
     bool machine;
@@ -615,8 +618,60 @@ static IrSimdTypedStatus ir_simd_typed_intrinsic(const Tier0Operation* source, u
     return status;
 }
 
-// A row's decoding: a mask result's by ir_simd_typed_mask_row, an int's of mask operands by ir_simd_typed_mask_test, an
-// unsigned int's or long's of integers by ir_simd_typed_intrinsic, any other's by ir_simd_typed_operation.
+// The producer's single-record EVEX broadcasts (#1450). No decorated, memory or fixed-register row is inferred as a
+// splat. Floating forms copy bits without evaluating them; byte/word scalars are extended to a 32-bit register by the
+// producer, and a half's bits use the integer word form and its U32 source. Lowering truncates those carriers explicitly.
+static IrSimdTypedStatus ir_simd_typed_splat(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    static const uint16_t forms[6][3] = {
+        { X86_FORM_VPBROADCASTB_X_R32, X86_FORM_VPBROADCASTB_Y_R32, X86_FORM_VPBROADCASTB_Z_R32 },
+        { X86_FORM_VPBROADCASTW_X_R32, X86_FORM_VPBROADCASTW_Y_R32, X86_FORM_VPBROADCASTW_Z_R32 },
+        { X86_FORM_VPBROADCASTD_X_R32, X86_FORM_VPBROADCASTD_Y_R32, X86_FORM_VPBROADCASTD_Z_R32 },
+        { X86_FORM_VPBROADCASTQ_X_R64, X86_FORM_VPBROADCASTQ_Y_R64, X86_FORM_VPBROADCASTQ_Z_R64 },
+        { X86_FORM_VBROADCASTSS_X_XM32_EVEX, X86_FORM_VBROADCASTSS_Y_XM32_EVEX, X86_FORM_VBROADCASTSS_Z_XM32 },
+        { X86_FORM_VPBROADCASTQ_X_XM64_EVEX, X86_FORM_VBROADCASTSD_Y_XM64_EVEX, X86_FORM_VBROADCASTSD_Z_XM64 },
+    };
+    static const uint8_t bytes[6] = { 1, 2, 4, 8, 4, 8 };
+    IrSimdTypedStatus status = source != NULL && result != NULL ? IR_SIMD_TYPED_UNSUPPORTED : IR_SIMD_TYPED_INVALID;
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR &&
+        (source->result_bytes == 16 || source->result_bytes == 32 || source->result_bytes == 64) &&
+        source->operand_count == 1 && source->record_count == 1 && source->operand_bytes[0] == 0)
+    {
+        const uint32_t width = source->result_bytes == 16 ? 0 : source->result_bytes == 32 ? 1 : 2;
+        const uint8_t class = source->operand_classes[0];
+        for (uint32_t form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            const bool floating = form >= 4;
+            const bool scalar = floating ? class == (form == 4 ? BUSTER_TYPED_CLASS_F32 : BUSTER_TYPED_CLASS_F64) :
+                                          tier0_class_integer(class) && tier0_class_bytes(class) >= (bytes[form] == 8 ? 8u : 4u) && tier0_class_bytes(class) <= 8;
+            const X86Instruction expected = {
+                .form = forms[form][width],
+                .reg = BUSTER_TIER0_ROLE_VECTOR(0),
+                .rm = floating ? BUSTER_TIER0_ROLE_FLOATING(0) : BUSTER_TIER0_ROLE_INTEGER(0),
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+            };
+            if (scalar && memcmp(source->records, &expected, sizeof(expected)) == 0)
+            {
+                const uint64_t required = ir_typed_vector_moves(source->result_bytes, target_features) | (x86_target_requirement(expected.form) & ~BUSTER_X86_TARGET_KNOWN);
+                status = (target_features & required) == required ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_TARGET;
+                if (status == IR_SIMD_TYPED_OK)
+                {
+                    IrSimdTypedOperation candidate = {
+                        .operation = IR_SIMD_OPERATION_COUNT,
+                        .shape = (IrSimdShape)(IR_SIMD_V4I32 + width),
+                        .required_features = required,
+                        .operand_count = 1,
+                        .splat_bytes = bytes[form],
+                    };
+                    candidate.operand_classes[0] = class;
+                    *result = candidate;
+                }
+            }
+        }
+    }
+    return status;
+}
+
 // Any other X86 row (#141): one whose operands and result are of classes a row call takes (ir_row_type: integers of 1
 // to 8 bytes, floats and doubles, vectors of 4, 8, 16, 32 or 64 bytes whatever their elements, masks and, for its
 // result, void), IR_SIMD_TYPED_UNSUPPORTED otherwise, and whose records' forms the target has, IR_SIMD_TYPED_TARGET
@@ -662,14 +717,20 @@ static IrSimdTypedStatus ir_simd_typed_machine_row(const Tier0Operation* source,
     return status;
 }
 
+// A row's decoding: masks, scalar intrinsics, lane operations, then exact scalar splats; other admitted forms stay
+// machine rows. A semantic match whose target lacks a required feature stays refused.
 static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
 {
     const bool masks = source != NULL && source->operand_count != 0 && source->operand_classes[0] == BUSTER_TYPED_CLASS_MASK && tier0_class_integer(source->result_class);
     const bool scalar = source != NULL && (source->result_class == BUSTER_TYPED_CLASS_U32 || source->result_class == BUSTER_TYPED_CLASS_U64) && !masks;
-    const IrSimdTypedStatus status = source != NULL && source->result_class == BUSTER_TYPED_CLASS_MASK ? ir_simd_typed_mask_row(source, target_features, result) :
+    IrSimdTypedStatus status = source != NULL && source->result_class == BUSTER_TYPED_CLASS_MASK ? ir_simd_typed_mask_row(source, target_features, result) :
                                      masks                                                             ? ir_simd_typed_mask_test(source, target_features, result) :
                                      scalar                                                            ? ir_simd_typed_intrinsic(source, target_features, result) :
                                                                                                          ir_simd_typed_operation(source, target_features, result);
+    if (status == IR_SIMD_TYPED_UNSUPPORTED)
+    {
+        status = ir_simd_typed_splat(source, target_features, result);
+    }
     // A row the IR's own operations don't take is its machine row (#141); one they take but the target refuses stays
     // refused.
     return status == IR_SIMD_TYPED_UNSUPPORTED ? ir_simd_typed_machine_row(source, target_features, result) : status;

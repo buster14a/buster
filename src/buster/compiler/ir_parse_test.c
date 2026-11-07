@@ -698,6 +698,7 @@ static int run_ir_parse_tests(int argc, char** argv)
                 "tests/ir/atomics.ir",
                 "tests/ir/wide.ir",
                 "tests/ir/intrinsics.ir",
+                "tests/ir/splats.ir",
                 "tests/ir/rows.ir",
                 "tests/ir/carrier-rows.ir",
             };

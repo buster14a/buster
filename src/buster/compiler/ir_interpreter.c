@@ -965,7 +965,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
             bool defined = true;
             // The operand table describes value operands, not metadata. Select and phi consume only their chosen
             // incoming value; dead undef alternatives remain legal. COPY can carry undef until a semantic use.
-            uint8_t operands = ir_operand_table[op];
+            uint8_t operands = (uint8_t)ir_value_mask(function, i);
             if (op == IR_RET && a != BUSTER_IR_NONE)
             {
                 operands = 1;

@@ -69,7 +69,8 @@ The partition is the same either way; only class labels differ.
 Eight contiguous `uint64_t` key columns feed two eight-lane hash groups per
 16-instruction batch. Every column has its exact logical length, partial
 loads/stores are masked, and zero length performs no column access. Phi tails
-are hashed separately. `ir_gvn_partition_group` interns those already materialized
+and the upper six words of vector constants are hashed separately.
+`ir_gvn_partition_group` interns those already materialized
 keys in a bounded scratch hash table. A folded hash selects a bucket; the
 original full-key and predecessor-ordered phi comparison establishes equality.
 The analysis owns these columns in scratch. They are not persistent IR fields.
@@ -131,6 +132,16 @@ floating comparisons are excluded. `undef` and every value transitively
 depending on it are excluded, including copies, to avoid strengthening the
 unspecified-value contract. Unreachable copy cycles are never followed as
 aliases and are removed with their blocks.
+
+SIMD functions are admitted (#1450). The same keys include each operation's
+lane flags and each `vcmp` predicate. `vconst` identity covers all 64 canonical
+payload bytes, including collision comparisons; identical constants at
+different table indices can merge, while different upper lanes cannot.
+Integer lane operations, masks, `vselect` and exact-bit scalar splats are pure.
+Floating lane arithmetic/comparisons retain the environment-sensitive exclusion.
+Tests exercise duplicate payloads, differences confined to the last word,
+forced hash collisions, different lane widths and retained floating effects,
+with shared-interpreter execution on both transformation paths.
 
 Substitution rebuilds private operand columns and each variable side-table
 slice before compaction. This matters because valid input slices can overlap
@@ -315,4 +326,3 @@ default therefore waits for a variant that accounts for allocation cost; the
 option stays as the reproducible measurement, and [the measurement
 record](https://github.com/buster14a/buster-performance/tree/126886e46a23f095709bffb36c3c57aaafac35b3/docs/measurements/gvn-866-tier1-2026-11-01)
 has the commands, the host and the raw logs.
-

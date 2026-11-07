@@ -717,7 +717,7 @@ static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
                 a->deferred == b->deferred && a->label_count == b->label_count && a->deep == b->deep && a->entry_count == b->entry_count &&
                 (a->entry_records == 0) == (b->entry_records == 0) && a->frame_saved == b->frame_saved && a->frame_size == b->frame_size &&
                 a->frame_pointer == b->frame_pointer && a->frame_alignment_log2 == b->frame_alignment_log2 && a->frame_base == b->frame_base &&
-                a->frame_probe == b->frame_probe;
+                a->frame_probe == b->frame_probe && a->frame_moves == b->frame_moves;
     same = same && (a->error != TIER0_OK || a->entry_records == 0 || memcmp(a->entry_records, b->entry_records, ((uint64_t)a->entry_count + 1) * sizeof(uint32_t)) == 0);
     same = same && (a->count == 0 || memcmp(a->records, b->records, a->count * sizeof(X86Instruction)) == 0);
     same = same && (a->branch_count == 0 || memcmp(a->branches, b->branches, a->branch_count * sizeof(uint32_t)) == 0);
@@ -5784,12 +5784,14 @@ static void tier0_test_probes(Tier0TestTally* tally)
                 Tier0Frame frame;
                 memset(&frame, 0, sizeof(frame));
                 frame.probe = (probe & 1) != 0;
-                // A frame pointer's, which a realigned frame has (#177: probed whatever its size).
-                frame.pointer = (probe & 2) != 0 || alignments[a] != 0;
+                // A body that moves rsp (#177 and #1450: probed whatever its size), which has a frame pointer as a
+                // realigned frame does.
+                frame.moves = (probe & 2) != 0;
+                frame.pointer = frame.moves || alignments[a] != 0;
                 frame.size = sizes[s];
                 frame.alignment_log2 = alignments[a];
                 Tier0Writer reservation = { 0 };
-                if (tier0_probes_reservation(frame.probe, frame.size, frame.alignment_log2, frame.pointer))
+                if (tier0_probes_reservation(frame.probe, frame.size, frame.alignment_log2, frame.moves))
                 {
                     tier0_emit_probed_reservation(frame.size, &reservation);
                 }
@@ -5802,10 +5804,10 @@ static void tier0_test_probes(Tier0TestTally* tally)
                 {
                     tier0_emit_realignment(&frame, &realignment);
                 }
-                tier0_test_expect(tally, reservation.count == tier0_reservation_records(frame.probe, frame.size, frame.alignment_log2, frame.pointer) &&
+                tier0_test_expect(tally, reservation.count == tier0_reservation_records(frame.probe, frame.size, frame.alignment_log2, frame.moves) &&
                                              realignment.count == tier0_realignment_records(frame.probe, frame.alignment_log2) &&
                                              reservation.branch_count + realignment.branch_count == tier0_prologue_branches(&frame),
-                                  "probes", "probe %u size %u alignment %u pointer %u: %u and %u records, %u branches", probe & 1, frame.size, frame.alignment_log2, frame.pointer,
+                                  "probes", "probe %u size %u alignment %u moves %u: %u and %u records, %u branches", probe & 1, frame.size, frame.alignment_log2, frame.moves,
                                   reservation.count, realignment.count, reservation.branch_count + realignment.branch_count);
             }
         }

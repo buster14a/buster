@@ -721,6 +721,18 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_intrinsic(IrTyped
     return ir_typed_emit(sink, IR_INTRINSIC, type, operands[operation->intrinsic_operands[0]], operands[operation->intrinsic_operands[1]], operation->intrinsic - 1u, 0);
 }
 
+static __attribute__((always_inline)) inline uint32_t ir_typed_splat(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, uint32_t scalar)
+{
+    const IrType source = (IrType)ir_typed_types[operation->operand_classes[0]];
+    const uint32_t bits = 8u * operation->splat_bytes;
+    if (ir_type_bits[source] != bits)
+    {
+        const IrType narrowed = bits == 8 ? IR_I8 : bits == 16 ? IR_I16 : IR_I32;
+        scalar = ir_typed_emit(sink, IR_TRUNC, narrowed, scalar, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    }
+    return ir_typed_emit(sink, IR_INTRINSIC, type, scalar, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_SPLAT, 0);
+}
+
 // Any other X86 row (#141, ir_simd_typed_machine_row) as a row call of the operands on the stack, in their order: the row
 // itself, the IR's machine row (IrFunction.rows), whose call's types are its classes' (ir_row_type).
 static __attribute__((always_inline)) inline uint32_t ir_typed_machine_row(IrTypedSink* sink, const Tier0Operation* row, IrType type, const uint32_t* operands)
