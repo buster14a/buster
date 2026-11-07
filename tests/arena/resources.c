@@ -519,8 +519,9 @@ static bool memory_log_has(const char* log, const char* text)
 // thread to compact reservations, after which every arena held 64 MB and the unit failed as "can't reserve type table"
 // or "checker input capacity exhausted"; now the tables take their compact shape and the other arenas keep theirs.
 // Without --strict, the same unit also runs where the address space refuses the tables' mapping (memory_refuse's
-// layout refusal), which does switch the thread to compact reservations: it compiles, or fails saying that its
-// arenas held 64 MiB each, rather than with a capacity error alone.
+// layout refusal), which does switch the thread to compact reservations, and under a 2 GiB RLIMIT_DATA, which may
+// refuse a later commit: each compiles, or fails saying that its arenas held 64 MiB each or that a commit was refused,
+// rather than with a capacity error alone.
 static bool memory_large_unit(char* compiler, const char* directory, bool strict)
 {
     char source[PATH_MAX];
@@ -550,12 +551,21 @@ static bool memory_large_unit(char* compiler, const char* directory, bool strict
     if (valid && !strict)
     {
         snprintf(log, sizeof(log), "%s/large-layout.log", directory);
-        const int status = memory_run(arguments, log, RLIM_INFINITY, RLIM_INFINITY, 3);
+        int status = memory_run(arguments, log, RLIM_INFINITY, RLIM_INFINITY, 3);
         valid = status == 0 || (status == 1 && memory_log_has(log, "note: memory reservations were limited to 64 MiB each"));
         if (!valid)
         {
             memory_report(arguments, log);
         }
+        snprintf(log, sizeof(log), "%s/large-short.log", directory);
+        status = valid ? memory_run(arguments, log, RLIM_INFINITY, UINT64_C(2) << 30, 0) : -1;
+        const bool said = memory_log_has(log, "fatal error: can't commit memory") || memory_log_has(log, "note: the system refused to commit");
+        const bool short_valid = status == 0 || (status == 1 && said);
+        if (valid && !short_valid)
+        {
+            memory_report(arguments, log);
+        }
+        valid = valid && short_valid;
     }
     return valid;
 }

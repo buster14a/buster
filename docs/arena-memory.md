@@ -46,9 +46,18 @@ what its pushes reach. It sets `arena_commit_refused` instead, the thread's
 from then on, after which `arena_capacity_shift` gives the compact shape to the
 tables committed whole (the preprocessor's and its file caches'), and the
 thread's other reservations keep their capacities. Compact reservations remain
-what a refused mapping (the address space) switches a thread to; a C-driver
-unit that fails on such a thread ends with a note that its arenas held 64 MiB
-each, since a capacity error before it may be that limit's.
+what a refused mapping (the address space) switches a thread to.
+
+A stage that fails because a push was refused reports its own capacity, as
+`checker input capacity exhausted` or `can't reserve type table` do, which
+says nothing about memory. So a C-driver unit that fails, without having
+reported a memory failure itself, ends with a note where memory may explain
+it: that its thread's arenas held 64 MiB each, on a thread in compact
+reservations, and that the system refused to commit so many bytes, with the
+error, where a commit was refused since the unit started. On the 9700X, the
+large unit below under an `RLIMIT_DATA` of 1.75 to 2.5 GiB failed as `can't
+reserve type table`, `checker input capacity exhausted` and `code output
+capacity exhausted` without saying so; it compiles under 3 GiB.
 
 ## Page sizes
 
@@ -241,8 +250,9 @@ also refused by child-only seccomp rules for inaccessible reservations and
 writable commits, with a fatal byte-count diagnostic and without usage text.
 The large unit runs once more where the address space refuses the
 preprocessor's tables' mapping, which switches the thread to compact
-reservations: it must compile, or fail with the note that its arenas held
-64 MiB each. The loader is allowed to map its ELF
+reservations, and under a 2 GiB `RLIMIT_DATA`: each must compile, or fail with
+the note that its arenas held 64 MiB each, or with a commit's refusal (the
+note, or a fatal `can't commit memory`). The loader is allowed to map its ELF
 segments and make RELRO read-only; the test does not assume that a small fixed
 address-space limit must always fail.
 
