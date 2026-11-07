@@ -1070,10 +1070,18 @@ static uint32_t check_lower_vector_register_bytes(uint64_t features)
     return (features & BUSTER_X86_FEATURE(AVX512F)) != 0 ? 64 : (features & BUSTER_X86_FEATURE(AVX)) != 0 ? 32 : 16;
 }
 
-// The most distinct machine operations a function may have (CheckLowerWriter.operations), and vector constants
-// (CheckLowerWriter.vector_constants).
+// The non-asm machine-operation allowance (CheckLowerWriter.operations), and vector constants. Each lane also
+// reserves one operation per placed asm statement in the largest body (CheckProgramAsms.row_capacity, #1359).
 #define BUSTER_CHECK_LOWER_OPERATIONS 4096u
 #define BUSTER_CHECK_LOWER_VECTOR_CONSTANTS 4096u
+
+static bool check_lower_operation_room(uint32_t asm_rows, uint32_t* room)
+{
+    const uint64_t count = (uint64_t)BUSTER_CHECK_LOWER_OPERATIONS + asm_rows;
+    const bool valid = count <= UINT32_MAX;
+    *room = valid ? (uint32_t)count : 0;
+    return valid;
+}
 
 #include "c_check_program_vectors.c"
 #include "c_check_program_x86.c"
@@ -2587,7 +2595,7 @@ static uint32_t check_lower_operation_add(CheckLowerWriter* writer, const Tier0O
     }
     else if (index == writer->operation_count)
     {
-        check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+        check_lower_resource(writer, "lowering machine-operation storage");
     }
     return index;
 }
@@ -13341,6 +13349,7 @@ struct CheckLowerShared
     uint8_t* incoming;
     uint32_t capacity;
     uint32_t local_capacity;
+    uint32_t operation_capacity;
     uint32_t abi_capacity;
     uint32_t argument_capacity;
     uint32_t x87_constant_capacity;
@@ -13732,6 +13741,12 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     {
         lowered->status = lowered->asms.status;
         lowered->token = lowered->asms.token;
+        valid = false;
+    }
+    if (valid && !check_lower_operation_room(lowered->asms.row_capacity, &shared->operation_capacity))
+    {
+        lowered->status = CHECK_PROGRAM_RESOURCE;
+        lowered->reason = "lowering machine-operation storage";
         valid = false;
     }
     // Freeze each type's class and by-value containment facts before pooling. Bodies and pool eligibility read
@@ -14130,9 +14145,10 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     BUSTER_CHECK_LOWER_COLUMN(floating, CBuiltinFloatLowerCall, (uint64_t)program->stream->floating_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(atomics, CheckLowerAtomic, (uint64_t)shared->atomic_capacity + 1);
     BUSTER_CHECK_LOWER_COLUMN(x87_constants, uint64_t, 2 * (uint64_t)shared->x87_constant_capacity);
-    // The rows' room and the vector constants': reserved, and touched only by functions with vectors.
-    writer->operation_capacity = BUSTER_CHECK_LOWER_OPERATIONS;
-    BUSTER_CHECK_LOWER_COLUMN(operations, Tier0Operation, BUSTER_CHECK_LOWER_OPERATIONS);
+    // The rows' room and the vector constants': reserved, and touched only by functions with X86 entries. Every
+    // function resets the row count and copies its rows to output before the next body reuses this lane's table.
+    writer->operation_capacity = shared->operation_capacity;
+    BUSTER_CHECK_LOWER_COLUMN(operations, Tier0Operation, shared->operation_capacity);
     writer->vector_constant_capacity = BUSTER_CHECK_LOWER_VECTOR_CONSTANTS;
     BUSTER_CHECK_LOWER_COLUMN(vector_constants, uint64_t, 8 * (uint64_t)BUSTER_CHECK_LOWER_VECTOR_CONSTANTS);
     BUSTER_CHECK_LOWER_COLUMN(vector_constant_bytes, uint8_t, BUSTER_CHECK_LOWER_VECTOR_CONSTANTS);
