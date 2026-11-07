@@ -59,7 +59,25 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
     {
         const uint32_t previous = report->subject - 1;
         const uint8_t kind = input->declaration_kinds[token];
-        if (kind == C_BINDING_ENUMERATOR && previous < count && input->declaration_kinds[previous] == kind)
+        if (report->detail == CHECK_REDECLARATION_OBJECT_TYPE)
+        {
+            const String8 current = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
+            const uint32_t prior_spelling = previous < count ? check_input_typedef_spelling(input, parser, previous) : 0;
+            const String8 prior = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, prior_spelling);
+            result = current.length == 0 || prior.length == 0 ? NULL : check_warning_text(scratch,
+                "redefinition of '%.*s' with a different type: %.*s vs %.*s", (int)name.length, name.pointer,
+                (int)current.length, current.pointer, (int)prior.length, prior.pointer);
+        }
+        else if (report->detail > CHECK_REDECLARATION_GENERIC && report->detail <= CHECK_REDECLARATION_NON_STATIC)
+        {
+            const char* format = report->detail == CHECK_REDECLARATION_FUNCTION_TYPE ? "conflicting types for '%.*s'" :
+                                 report->detail == CHECK_REDECLARATION_PARAMETER ? "redefinition of parameter '%.*s'" :
+                                 report->detail == CHECK_REDECLARATION_STATIC ? "static declaration of '%.*s' follows non-static declaration" :
+                                 report->detail == CHECK_REDECLARATION_NON_STATIC ? "non-static declaration of '%.*s' follows static declaration" :
+                                 "redefinition of '%.*s'";
+            result = check_warning_text(scratch, format, (int)name.length, name.pointer);
+        }
+        else if (kind == C_BINDING_ENUMERATOR && previous < count && input->declaration_kinds[previous] == kind)
         {
             result = check_warning_text(scratch, "redefinition of enumerator '%.*s'", (int)name.length, name.pointer);
         }

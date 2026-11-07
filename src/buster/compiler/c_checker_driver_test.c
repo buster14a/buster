@@ -5212,6 +5212,12 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
             }
             uint32_t flags = show_warnings && (repair == NULL || check_repair_warning_token(repair, token)) ?
                              warnings[token].flags : 0;
+            const uint32_t pointer_flags = flags & (CHECK_WARNING_POINTER_SIGN | CHECK_WARNING_DISCARDED_QUALIFIERS);
+            if (pointer_flags != 0 && check_driver_pointer_arguments(parser, pp, input, stream, types, &spell, token, pointer_flags,
+                warnings[token].enabled, parser->tokens.sources[token], PP_DIAGNOSTIC_SEMANTIC, scratch))
+            {
+                flags &= ~pointer_flags;
+            }
             while (!pp->fatal && flags != 0)
             {
                 const uint32_t warning = flags & (0u - flags);
@@ -5226,12 +5232,13 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                     const bool promoted = severity >= CHECK_WARNING_ERROR;
                     const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", promoted ? "-Werror," : "", option) :
                                          promoted ? " [-Werror]" : "";
-                    const char* message = warning == CHECK_WARNING_POINTER_SIGN ?
-                                          check_driver_pointer_sign_message(parser, pp, input, stream, types, &spell, token, scratch) :
+                    uint32_t located = token;
+                    const char* message = warning == CHECK_WARNING_POINTER_SIGN || warning == CHECK_WARNING_DISCARDED_QUALIFIERS ?
+                                          check_driver_pointer_conversion_message(parser, pp, input, stream, types, &spell, token, warning, &located, scratch) :
                                           check_diagnostic_message(warning);
                     if (suffix != NULL)
                     {
-                        pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s%s", message, suffix);
+                        pp_diagnose_output(pp, pp_severity, parser->tokens.sources[located], "%s%s", message, suffix);
                     }
                 }
                 flags &= flags - 1;
@@ -6941,7 +6948,7 @@ static void check_test_driver_inline_modes(CheckTest* test, const char* clang, c
     char* conflict[] = { (char*)executable, "-std=c17", "-fsyntax-only", conflict_source, NULL };
     char* conflict_text = NULL;
     const int conflict_status = conflict_written ? check_test_driver_spawn(conflict, &conflict_text) : -1;
-    const bool conflict_said = conflict_text != NULL && strstr(conflict_text, "conflicting declaration") != NULL;
+    const bool conflict_said = conflict_text != NULL && strstr(conflict_text, "redefinition of 'same'") != NULL;
     free(conflict_text);
     check_test_expect(test, conflict_status == 1 && conflict_said, "C17 keeps the extern inline followed by a definition a redefinition");
     unlink(conflict_source);
@@ -7523,6 +7530,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 }
 #include "c_check_initializer_warning_test.c"
 #include "c_check_warning_driver_test.c"
+#include "c_check_redefinition_driver_test.c"
 #include "c_check_format_bitint_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
 
@@ -7725,7 +7733,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             .name = "a function body after an alias is a redefinition",
             .source = "int g(void) { return 0; }\nint h(void) __attribute__((alias(\"g\")));\nint h(void) { return 1; }\n",
             .rejected = true,
-            .message = "conflicting declaration",
+            .message = "redefinition of 'h'",
             .column = 5,
         },
         {
@@ -8311,6 +8319,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_default_warnings(&test, clang, executable, directory);
+            if (executable != NULL)
+            {
+                check_test_driver_redefinitions(&test, clang, executable, directory);
+            }
             check_test_driver_format_bitints(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())

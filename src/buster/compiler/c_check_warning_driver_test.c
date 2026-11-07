@@ -36,6 +36,584 @@ static const char check_driver_format_attributed_source[] =
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        .name = "return flow conservative no-fallthrough and reachable fallthrough",
+        .source = "int a(int c){if(c)return 1;return 2;}int b(int c){if(c)return 1;}int d(void){while(1){}}_Noreturn void r(void){while(1){}}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "floating literal file and local initializers",
+        .source = "int a=1.5;\nint f(void){int b=2.5;return b;}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "floating literal assignment return and call conversions",
+        .source = "int f(void){int a;a=1.5;return -2.5;}\nvoid g(int);void h(void){g(3.5);}\n",
+        .warnings = 3,
+    },
+    {
+        .name = "floating literal source formats",
+        .source = "int a=1.1f;int b=1.1;int c=1.1L;\n",
+        .warnings = 3,
+    },
+    {
+        .name = "floating literal array and record initializer elements",
+        .source = "int values[2]={1.5,2.5};\nstruct S{int n;}object={1.5};\n",
+        .warnings = 3,
+    },
+    {
+        .name = "floating literal local brace initializer order",
+        .source = "int f(void){int a[2]={1.5,2.5};int b={3.5};return a[0]+b;}\n",
+        .warnings = 3,
+    },
+    {
+        .name = "floating literal scalar and aggregate declaration order",
+        .source = "int f(void){int x=4.5;int a[2]={1.5,2.5};int y=3.5;return x+a[0]+y;}\n",
+        .warnings = 4,
+    },
+    {
+        .name = "floating literal range initializer conversions",
+        .source = "int values[4]={[0 ... 3]=1.5};\n",
+        .warnings = 4,
+    },
+    {
+        .name = "floating literal decimal and hexadecimal spelling",
+        .source = "int a=0.9999999999999999;int b=1e-30;int c=0x1.8p0;\n",
+        .warnings = 3,
+    },
+    {
+        .name = "floating literal adjacent integer precision",
+        .source = "int a=1.9999999999999998;int b=1.0000000000000002;\n",
+        .warnings = 2,
+    },
+    {
+        .name = "floating literal call argument subtrees follow right to left conversion order",
+        .source = "void f(int,int);int g(int);void h(void){f(g(1.5),2.5);f(3.5,g(4.5));f(5.5,6.5);}\n",
+        .warnings = 6,
+    },
+    {
+        .name = "floating literal nested call and comma conversions are emitted once",
+        .source = "void f(int,int);int g(int);void h(void){f(g(1.5),g(2.5));f(3.5,4.5),f(5.5,6.5);}\n",
+        .warnings = 6,
+    },
+    {
+        .name = "binary operand calls visit literal conversions right to left",
+        .source = "int f(int);int h(void){return f(1.5)+f(2.5);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "comma assignment conversions visit the right operand first",
+        .source = "int h(void){int a,b;a=1.5,b=2.5;return a+b;}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "reverse conversions precede source ordered bounds and unused results",
+        .source = "int f(int);void h(void){int a[1];(f(1.5)+a[2]),(f(2.5)+a[3]);}\n",
+        .warnings = 6,
+        .notes = 2,
+    },
+    {
+        .name = "reverse conversions preserve each inner comma marker before its bounds warning",
+        .source = "void f(int);void h(void){int a[1];(a[2],f(1.5)),(a[3],f(2.5));}\n",
+        .warnings = 6,
+        .notes = 2,
+    },
+    {
+        .name = "comma integer call conversions follow the same reverse walk",
+        .source = "short f(short);void h(void){f(65536),f(65537);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "brace initializer conversions precede nested call conversions",
+        .source = "int f(int);int h(void){int a[2]={(f(1.5),2.5),(f(3.5),4.5)};return a[0];}\n",
+        .warnings = 4,
+    },
+    {
+        .name = "unreachable return and local initializer retain literal conversion warnings",
+        .source = "int f(void){if(0)return 1.5;if(0){int a=2.5;(void)a;}return 0;}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "unreachable call conversion precedes the later reachable conversion",
+        .source = "void f(int);void h(void){if(0)f(1.5);f(2.5);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "unreachable literal conversions do not enable runtime warning families",
+        .source = "int f(void){int a[1];if(0){int x=1.5;(void)x;1;a[2];return 1/0;}return 0;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "short-circuited and conditional call literals remain source checks",
+        .source = "int g(int);int f(void){return 0&&g(1.5);}int h(void){return 1?0:g(2.5);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "conditional call arms retain literal conversions",
+        .source = "int f(int); void h(int c){c ? f(1.5) : f(2.5);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "comma conditional arms do not acquire outer conversion",
+        .source = "int side(void);void take(int);int f(int c){int x=c?(side(),2.5):3.0;x=c?3.0:(side(),2.5);take(c?(side(),2.5):3.0);return c?(side(),2.5):3.0;}\n",
+        .options = { "-Werror=literal-conversion" },
+        .c23 = true,
+    },
+    {
+        .name = "nested comma and conditional comma results do not inherit literal conversion",
+        .source = "int side(void);int f(int c){return (side(),(side(),2.5));}int g(int c){return (side(),(c?2.5:2.5));}\n",
+        .options = { "-Werror=literal-conversion" },
+        .c23 = true,
+    },
+    {
+        .name = "integer conversion of comma results uses the whole result expression",
+        .source = "int side(void);short f(int c){return (side(),(c?65536:65537));}short g(void){return (side(),(1?65536:65537));}short h(void){return (side(),(side(),65536));}short i(int c){return c?(side(),65536):65537;}\n",
+        .warnings = 4,
+    },
+    {
+        .name = "top level comma still receives outer conversion",
+        .source = "int side(void);int f(void){return (side(),2.5);}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "unevaluated sizeof and generic arms suppress literal conversions",
+        .source = "int f(void){return sizeof((int){1.5})+_Generic(0,int:0,default:(int){2.5});}\n",
+    },
+    {
+        .name = "conditional literal arms inherit initializer and return targets",
+        .source = "int a=0?1.5:2.5;int b=1?3.5:4.5;int f(int c){return c?5.5:6.5;}\n",
+        .warnings = 6,
+    },
+    {
+        .name = "conditional brace initializer and unreachable argument targets",
+        .source = "int a[1]={0?1.5:2.5};void f(int);void h(int c){if(0)f(c?3.5:4.5);}\n",
+        .warnings = 4,
+    },
+    {
+        .name = "conditional integer conversions retain selected-arm pruning",
+        .source = "short a=0?65536:65537;short b=1?65538:65539;\n",
+        .warnings = 2,
+    },
+    {
+        .name = "nested integer argument conversions follow right to left order",
+        .source = "void f(short,short);short g(short);void h(void){f(g(65536),65537);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "unreachable integer conversion families remain suppressed",
+        .source = "void f(short);short g(void){if(0)return 65536;if(0){short a=65536;(void)a;}return 0;}"
+                  "void h(void){if(0)f(65536);f(65537);}int i(void){return 0&&(f(65536),1);}int j(void){return 1?0:(f(65536),1);}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "initializers after return retain only literal source conversions",
+        .source = "int h(void){return 0;short a=65536;int b=1.5;(void)a;(void)b;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "floating literal boolean conversions",
+        .source = "_Bool a=1.5;_Bool b=2.0;_Bool c=1.0;\n",
+        .warnings = 2,
+    },
+    {
+        .name = "floating literal out of range conversions",
+        .source = "unsigned char a=1000.5;unsigned b=-1.5;int c=1e30;\n",
+        .warnings = 3,
+    },
+    {
+        .name = "floating literal macro expansion note",
+        .source = "#define VALUE 1.5\nint a=VALUE;\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "floating literal parentheses retain the literal warning",
+        .source = "int a=((1.5));int b=+2.5;int c=-3.5;\n",
+        .warnings = 3,
+    },
+    {
+        .name = "explicit and nonliteral floating conversions stay quiet by default",
+        .source = "int a=(double)1.5f;int b=(int)1.5;int c=2.5-1.0;int d=2.5+0.0;int e=1.0;\n"
+                  "int f(double a){return a;}int g(void){double a=1.5;return a;}\nint h=__builtin_nan(\"\");int i=__builtin_inf();\n",
+    },
+    {
+        .name = "floating literal conversion group disabled",
+        .source = "int a=1.5;\n",
+        .options = { "-Wno-literal-conversion" },
+    },
+    {
+        .name = "floating literal conversion parent group disabled",
+        .source = "int a=1.5;\n",
+        .options = { "-Wno-conversion" },
+    },
+    {
+        .name = "floating literal conversion source policy",
+        .source = "#pragma clang diagnostic error \"-Wliteral-conversion\"\nint a=1.5;\n",
+        .errors = 1,
+    },
+    {
+        .name = "float conversion error does not promote literal conversion",
+        .source = "int a=1.5;\n",
+        .options = { "-Werror=float-conversion" },
+        .warnings = 1,
+    },
+    {
+        .name = "float conversion disabled does not suppress literal conversion",
+        .source = "int a=1.5;\n",
+        .options = { "-Wno-float-conversion" },
+        .warnings = 1,
+    },
+    {
+        .name = "literal disabled before float conversion error",
+        .source = "int a=1.5;\n",
+        .options = { "-Wno-literal-conversion", "-Werror=float-conversion" },
+    },
+    {
+        .name = "literal error after float conversion disabled",
+        .source = "int a=1.5;\n",
+        .options = { "-Wno-float-conversion", "-Werror=literal-conversion" },
+        .errors = 1,
+    },
+    {
+        .name = "float conversion source policy does not promote literal conversion",
+        .source = "#pragma clang diagnostic error \"-Wfloat-conversion\"\nint a=1.5;\n",
+        .warnings = 1,
+    },
+    {
+        .name = "literal source policy remains disabled across float conversion error",
+        .source = "#pragma clang diagnostic ignored \"-Wliteral-conversion\"\n#pragma clang diagnostic error \"-Wfloat-conversion\"\nint a=1.5;\n",
+    },
+    {
+        .name = "file initializer discards pointer qualifiers at its declaration",
+        .source = "const int b=1;\nint *c=&b;\n",
+        .warnings = 1,
+    },
+    {
+        .name = "local initializer discards pointer qualifiers",
+        .source = "int f(void){const int b=1;int *c=&b;return *c;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "assignment discards pointer qualifiers",
+        .source = "void f(const int *a,int *b){b=a;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "return discards pointer qualifiers at its expression",
+        .source = "const int b=1;\nint *f(void){return &b;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "discarded pointer qualifiers follow named policy",
+        .source = "const int b=1;\nint *c=&b;\n",
+        .options = { "-Wno-incompatible-pointer-types-discards-qualifiers" },
+    },
+    {
+        .name = "discarded pointer qualifiers honor source severity",
+        .source = "#pragma clang diagnostic error \"-Wincompatible-pointer-types-discards-qualifiers\"\nconst int b=1;\nint *c=&b;\n",
+        .errors = 1,
+    },
+    {
+        .name = "discarded pointer qualifiers retain typedef spellings",
+        .source = "typedef const int CI;CI b=1;typedef int *P;P c=&b;\n",
+        .warnings = 1,
+    },
+    {
+        .name = "discarded array qualifiers retain the source array type",
+        .source = "const int b[2]={1,2};int *c=b;\n",
+        .warnings = 1,
+    },
+    {
+        .name = "discarded pointer qualifiers retain outer const spelling",
+        .source = "const int b=1;int *const c=&b;\n"
+                  "void f(const int *const a){int *const b=a;(void)b;}\n"
+                  "int *g(const int *const a){return a;}\n",
+        .warnings = 3,
+    },
+    {
+        .name = "plain char pointer initializer and return conversion",
+        .source = "unsigned char a[2];char *b=a;\nchar *f(void){return a;}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "direct call qualifier warnings retain named and unnamed parameter notes",
+        .source = "void f(int *,int *b);void g(const int *p){f(p,p);}\n",
+        .warnings = 2,
+        .notes = 2,
+    },
+    {
+        .name = "direct call parameter note uses the visible redeclaration",
+        .source = "void f(int *first);void f(int *second);void g(const int *p){f(p);}\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "empty-list redeclaration retains conversion checks without a parameter note",
+        .source = "void f(int *first);void f();void g(const int *p){f(p);}\n",
+        .options = { "-Wno-deprecated-non-prototype" },
+        .warnings = 1,
+    },
+    {
+        .name = "closed-block prototype supplies no parameter note to an unprototyped call",
+        .source = "void earlier(void){void f(int *hidden);}void f();void g(const int *p){f(p);}\n",
+        .options = { "-Wno-deprecated-non-prototype" },
+    },
+    {
+        .name = "function pointer variable call has no parameter declaration note",
+        .source = "void (*f)(int *parameter);void g(const int *p){f(p);}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "function pointer typedef and parameter calls have no declaration notes",
+        .source = "typedef void (*F)(int *parameter);F f;void g(const int *p){f(p);}\n"
+                  "void h(void (*callback)(int *parameter),const int *p){callback(p);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "dereferenced and cast callees have no parameter declaration notes",
+        .source = "void f(int *parameter);void g(const int *p){(*f)(p);((void(*)(int *))f)(p);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "pointer argument warning is located at the expression beginning",
+        .source = "void f(int *parameter);void g(const int *p){f(p+1);}\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "nested pointer qualifier wording includes the parameter note",
+        .source = "void f(int **parameter);void g(const int **p){f(p);}\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "pointer call macro expansion precedes its parameter note",
+        .source = "#define F f\n#define P p\nvoid f(int *parameter);void g(const int *p){F(P);}\n",
+        .warnings = 1,
+        .notes = 2,
+    },
+    {
+        .name = "mixed pointer conversion groups follow argument order",
+        .source = "void f(int *a,int *b);void g(const int *p,unsigned int *q){f(q,p);f(p,q);}\n",
+        .warnings = 4,
+        .notes = 4,
+    },
+    {
+        .name = "plain char signedness overrides an array qualifier discard",
+        .source = "void f(char *p);void g(void){const unsigned char a[2]={1,2};f(a);}\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "pointer parameter notes skip intervening scalar and callback parameters",
+        .source = "void f(int *,int count,void callback(int *),int *last);\n"
+                  "void g(const int *p){f(p,0,0,p);}\n",
+        .warnings = 2,
+        .notes = 2,
+    },
+    {
+        .name = "pointer parameter type spelling belongs to its own specifiers",
+        .source = "typedef int *P;void f(P first,int *second);void g(const int *p){f(p,p);}\n",
+        .warnings = 2,
+        .notes = 2,
+    },
+    {
+        .name = "pointer call qualifiers and signedness obey independent group policy",
+        .source = "void f(int *a,int *b);void g(const int *p,unsigned int *q){f(p,q);}\n",
+        .options = { "-Wno-incompatible-pointer-types-discards-qualifiers" },
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "pointer call warning promotion retains its parameter note",
+        .source = "#pragma clang diagnostic error \"-Wincompatible-pointer-types-discards-qualifiers\"\n"
+                  "void f(int *parameter);void g(const int *p){f(p);}\n",
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "nested pointer initialization assignment and return wording",
+        .source = "void f(const int **p,int **q){int **r=p;q=p;(void)r;}\nint **g(const int **p){return p;}\n",
+        .warnings = 3,
+    },
+    {
+        .name = "nonconstant file initializer",
+        .source = "int a;\nint b=a;\n",
+        .errors = 1,
+    },
+    {
+        .name = "nonconstant aggregate initializer element",
+        .source = "int a;\nint values[2]={1,a};\n",
+        .errors = 1,
+    },
+    {
+        .name = "nonconstant static local initializer",
+        .source = "int read(void);\nint f(void){static int value=read();return value;}\n",
+        .errors = 1,
+    },
+    {
+        .name = "duplicate qualifiers and declaration specifiers",
+        .source = "const const int a;\nvolatile volatile int b;\n_Atomic _Atomic int c;\nextern extern int d;\n"
+                  "static static int e;\ntypedef typedef int T;\nunsigned unsigned int f;\n",
+        .warnings = 7,
+    },
+    {
+        .name = "duplicate function specifiers",
+        .source = "inline inline void f(void){}\n_Noreturn _Noreturn void g(void){for(;;){}}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "duplicate separated noreturn specifiers",
+        .source = "_Noreturn void _Noreturn f(void){for(;;){}}\n_Noreturn extern _Noreturn void g(void);\n",
+        .warnings = 2,
+    },
+    {
+        .name = "duplicate parameter and pointer qualifiers",
+        .source = "int f(const const int x,int *volatile volatile p){return x+*p;}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "duplicate declaration specifier group disabled",
+        .source = "const const int value;\n",
+        .options = { "-Wno-duplicate-decl-specifier" },
+    },
+    {
+        .name = "duplicate declaration specifier source policy",
+        .source = "#pragma clang diagnostic ignored \"-Wduplicate-decl-specifier\"\nconst const int value;\n",
+    },
+    {
+        .name = "noreturn fall off",
+        .source = "_Noreturn void f(void){}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn explicit return",
+        .source = "_Noreturn void f(void){return;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn valued return",
+        .source = "__attribute__((noreturn)) int f(void){return 1;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn dead explicit return",
+        .source = "_Noreturn void f(void){if(0)return;for(;;){}}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn ordinary call can return",
+        .source = "void g(void);_Noreturn void f(void){g();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn call ends the path",
+        .source = "_Noreturn void g(void);_Noreturn void f(void){g();}\n",
+    },
+    {
+        .name = "noreturn partial terminal path",
+        .source = "_Noreturn void g(void);_Noreturn void f(int x){if(x)g();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn trap ends the path",
+        .source = "_Noreturn void f(void){__builtin_trap();}\n",
+    },
+    {
+        .name = "noreturn cast terminal path",
+        .source = "_Noreturn int g(void);_Noreturn void f(void){(void)g();}\n",
+    },
+    {
+        .name = "noreturn partial cast terminal path",
+        .source = "_Noreturn int g(void);_Noreturn void f(int x){if(x)(void)g();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn partial trap path",
+        .source = "_Noreturn void f(int x){if(x)__builtin_trap();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn independent of return type warning policy",
+        .source = "_Noreturn void f(void){}\n",
+        .options = { "-Wno-return-type" },
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn group disabled",
+        .source = "_Noreturn void f(void){return;}\n",
+        .options = { "-Wno-invalid-noreturn" },
+    },
+    {
+        .name = "noreturn source policy",
+        .source = "#pragma clang diagnostic ignored \"-Winvalid-noreturn\"\n_Noreturn void f(void){}\n",
+    },
+    {
+        .name = "scalar return fall off after ordinary call",
+        .source = "void g(void);int f(void){g();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "scalar return partial terminal path",
+        .source = "_Noreturn void g(void);int f(int x){if(x)g();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "scalar return terminal call",
+        .source = "_Noreturn int g(void);int f(void){(void)g();}\n",
+    },
+    {
+        .name = "scalar return partial trap path",
+        .source = "int f(int x){if(x)__builtin_trap();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "private extern declarations",
+        .source = "__private_extern__ int x;\n__private_extern__ int f(void);\nvoid g(void){__private_extern__ int y;}\n",
+        .warnings = 2,
+        .notes = 2,
+    },
+    {
+        .name = "private extern definitions",
+        .source = "__private_extern__ int x=7;\n__private_extern__ int f(void){return x;}\n",
+    },
+    {
+        .name = "private extern direct initializer after attribute",
+        .source = "__private_extern__ int x __attribute__((unused)) (3);\n",
+    },
+    {
+        .name = "private extern thread local declaration",
+        .source = "__private_extern__ __thread int x;\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "private extern redeclarations",
+        .source = "__private_extern__ int x;int x;\nint y;__private_extern__ int y;\n__private_extern__ int z;int z=3;\n",
+        .warnings = 3,
+        .notes = 3,
+    },
+    {
+        .name = "private extern multiple declarators",
+        .source = "__private_extern__ int x,y=2,z;\n",
+        .warnings = 2,
+        .notes = 2,
+    },
+    {
+        .name = "private extern duplicate specifier",
+        .source = "__private_extern__ __private_extern__ int x;\n",
+        .warnings = 2,
+        .notes = 1,
+    },
+    {
+        .name = "private extern group disabled",
+        .source = "__private_extern__ int x;\n",
+        .options = { "-Wno-private-extern" },
+    },
+    {
+        .name = "private extern source policy",
+        .source = "#pragma clang diagnostic ignored \"-Wprivate-extern\"\n__private_extern__ int x;\n",
+    },
+    {
         .name = "first block annotation survives its own later bare declaration",
         .source = "void declare(void){extern int printf(const char*,...)__attribute__((format(printf,1,2)));"
                   "extern int printf(const char*,...);}\nint printf(const char*,...);\n"
@@ -647,6 +1225,7 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
     {
         const CheckDriverDefaultWarningFixture* fixture = fixtures + f;
         const bool written = parse_test_write(source, fixture->source, strlen(fixture->source));
+        bool mismatch_printed = false;
         check_test_expect(test, written, "original default-warning fixture is written");
         for (uint32_t policy = 0; written && policy < BUSTER_ARRAY_LENGTH(policies); policy += 1)
         {
@@ -700,7 +1279,14 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
                                                   strstr(actual != NULL ? actual : "", policy == 1 ? "error: " : "warning: ") : NULL;
                         const bool diagnostics_match = expected_text != NULL ? actual_text != NULL && strcmp(actual_text, expected_text) == 0 :
                                                        actual != NULL && strcmp(actual, expected) == 0;
-                        check_test_expect(test, status == oracle && diagnostics_match, description);
+                        const bool same = status == oracle && diagnostics_match;
+                        check_test_expect(test, same, description);
+                        if (!same && !mismatch_printed)
+                        {
+                            fprintf(stderr, "%s: status %d (clang %d)\nBuster:\n%s\nClang:\n%s\n", description,
+                                    status, oracle, actual != NULL ? actual : "<no output>\n", expected);
+                            mismatch_printed = true;
+                        }
                         if (preserve)
                         {
                             FILE* retained = fopen(objects[scalar], "rb");
