@@ -1757,6 +1757,58 @@ static void check_test_driver_unevaluated_strings(CheckTest* test, const char* c
         { "__attribute__((deprecated(\"\\x61\"))) void f(void);\n", "-std=gnu17", "-w" },
         { "#pragma clang diagnostic ignored \"-Wunknown-escape-sequence\"\n__attribute__((deprecated(\"\\q\"))) void f(void);\n", "-std=gnu17", NULL },
         { "#pragma clang diagnostic error \"-Wunknown-escape-sequence\"\n_Static_assert(1, \"\\q\");\n", "-std=gnu17", NULL },
+        // Evaluated literals (#1447): the escapes clang takes that the checker's fast decoding refuses (delimited ones, an
+        // unknown one with its warning, GNU's \E), and a refused one's errors worded at its escape (a universal character
+        // name's, a numeric escape's range by the literal's code unit, a delimited one's) or at a character constant whose
+        // character its type can't hold; through concatenated tokens, in a body, and by the warning's options and pragmas.
+        { "const char *a = \"\\u12\";\n", "-std=gnu17", NULL },
+        { "const char *a = \"\\uD800\";\n", "-std=gnu17", NULL },
+        { "const char *a = \"\\U00110000\";\n", "-std=gnu17", NULL },
+        { "const char *a = \"\\u0041\";\n", "-std=gnu17", NULL },
+        { "const char *a = \"\\u0041\";\n", "-std=gnu23", NULL },
+        { "const char *a = \"\\u\";\n", "-std=gnu17", NULL },
+        { "const char *a = \"\\u{e9}\\x{41}\\o{101}\";\n", "-std=gnu17", NULL },
+        { "const char *a = \"\\u{}\";\n", "-std=gnu17", NULL },
+        { "const char *a = \"\\x{4g}\";\n", "-std=gnu17", NULL },
+        { "const char *a = \"\\x{41\";\n", "-std=gnu17", NULL },
+        { "const char *a = \"\\o5\";\n", "-std=gnu17", NULL },
+        { "const char *a = \"\\q\\E\\(\\%\\8\";\n", "-std=gnu17", NULL },
+        { "const char *a = \"\\x100\";\n", "-std=gnu17", NULL },
+        { "const char *a = \"\\777\";\n", "-std=gnu17", NULL },
+        { "const char *a = \"\\x\";\n", "-std=gnu17", NULL },
+        // A \x without digits is an error that leaves the next escapes' range errors, through a concatenation too.
+        { "const char *a = \"\\x\" \"\\x100\";\n", "-std=gnu17", NULL },
+        { "const char *a = \"\\x\\x{100}\";\n", "-std=gnu17", NULL },
+        { "const char *a = \"\\x\" \"\\o{400}\";\n", "-std=gnu17", NULL },
+        { "const unsigned short *a = u\"\\x10000\";\n", "-std=gnu17", NULL },
+        { "const unsigned short *a = u\"\\xFFFF\\777\";\n", "-std=gnu17", NULL },
+        { "const int *a = L\"\\x123456789\";\n", "-std=gnu17", NULL },
+        { "const char *a = \"ok\" \"\\q\" \"\\u12\";\n", "-std=gnu17", NULL },
+        { "int a = '\\u00e9';\n", "-std=gnu17", NULL },
+        { "int a = '\\q';\n", "-std=gnu17", NULL },
+        { "int a = '\\x{41}' + '\\o{101}' + '\\E';\n", "-std=gnu17", NULL },
+        { "int a = L'\\x123456789';\n", "-std=gnu17", NULL },
+        { "int a = '\\u12';\n", "-std=gnu17", NULL },
+        { "void f(void) { const char *s = \"\\q\"; (void)s; }\n", "-std=gnu17", NULL },
+        { "const char *a = \"\\q\";\n", "-std=gnu17", "-Wno-unknown-escape-sequence" },
+        { "const char *a = \"\\q\";\n", "-std=gnu17", "-Werror" },
+        { "#pragma clang diagnostic ignored \"-Wunknown-escape-sequence\"\nconst char *a = \"\\q\";\n", "-std=gnu17", NULL },
+        // A refused literal's error alone, without its declaration's (a char array's initializer, a call's argument too), and an
+        // asm label's and an asm statement's strings, which clang reads as evaluated literals.
+        { "char a[] = \"\\u12\";\n", "-std=gnu17", NULL },
+        { "int g(const char *);\nvoid f(void) { g(\"\\u12\"); }\n", "-std=gnu17", NULL },
+        { "int x __asm__(\"a\\q\");\n", "-std=gnu17", NULL },
+        { "int x __asm__(\"a\\x{4g}\");\n", "-std=gnu17", NULL },
+        { "void f(void) { __asm__(\"nop\\q\"); }\n", "-std=gnu17", NULL },
+        { "void f(void) { __asm__(\"nop\\x{4g}\"); }\n", "-std=gnu17", NULL },
+        // Multi-character constants: an ordinary one's warnings (-Wmultichar, four characters' -Wfour-char-constants, past
+        // four "too long"), a wide one's and a Unicode one's errors.
+        { "int a = 'ab';\nint b = 'abcd';\nint c = 'abcde';\nint d = '\\q\\z';\n", "-std=gnu17", NULL },
+        { "int a = 'abcd';\n", "-std=gnu17", "-Wfour-char-constants" },
+        { "int a = 'ab';\n", "-std=gnu17", "-Wno-multichar" },
+        { "int a = L'ab';\n", "-std=gnu17", NULL },
+        { "int a = u8'ab';\n", "-std=gnu23", NULL },
+        { "int a = U'ab';\n", "-std=gnu17", NULL },
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);

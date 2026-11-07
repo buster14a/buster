@@ -741,6 +741,85 @@ static const char* check_driver_initializer_field_message(const Parser* parser, 
 }
 
 static bool check_driver_literal(Preprocessor* pp, const Parser* parser, uint32_t token, uint32_t source, uint32_t publication, Arena* scratch);
+static bool check_driver_literal_escapes(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t publication, Arena* scratch);
+
+// One escape sequence's diagnostic (check_literal_unevaluated_escapes', check_literal_evaluated_escapes'), at its
+// backslash in `token`'s spelling, published where `publication` puts it: an unknown escape's -Wunknown-escape-sequence
+// warning as the warning options and `input`'s pragmas map it, or an error.
+static void check_driver_escape(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, String8 spelling, const CheckEscapeDiagnostic* diagnostic,
+                                uint32_t publication)
+{
+    const uint32_t source = parser->tokens.sources[token];
+    const uint32_t offset = diagnostic->offset;
+    const char character = (char)diagnostic->character;
+    switch (diagnostic->kind)
+    {
+        case CHECK_ESCAPE_DIAGNOSTIC_UNKNOWN:
+        {
+            const CheckWarningSeverity severity = check_common_severity(pp, parser, input, token, CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE, false);
+            // "[-Werror,-Wflag]" while the promoted warning is an ordinary error, "[-Wflag]" once it is fatal.
+            const bool error = severity == CHECK_WARNING_ERROR;
+            const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL : error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+            // clang prints a character that isn't printable as its value, sign-extended from char, in hexadecimal.
+            const bool printable = diagnostic->character >= 0x20 && diagnostic->character < 0x7f;
+            char escaped[16];
+            if (printable)
+            {
+                snprintf(escaped, sizeof(escaped), "%c", character);
+            }
+            else
+            {
+                snprintf(escaped, sizeof(escaped), "x%X", (unsigned)(int32_t)(int8_t)diagnostic->character);
+            }
+            if (severity != CHECK_WARNING_IGNORE)
+            {
+                pp_diagnose_output_offset_at(pp, disposition, source, offset, publication, "unknown escape sequence '\\%s' [%s-Wunknown-escape-sequence]", escaped,
+                                             error ? "-Werror," : "");
+            }
+            break;
+        }
+        case CHECK_ESCAPE_DIAGNOSTIC_HEX_DIGITS:
+            pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "\\x used with no following hex digits");
+            break;
+        case CHECK_ESCAPE_DIAGNOSTIC_HEX_RANGE:
+        case CHECK_ESCAPE_DIAGNOSTIC_OCTAL_RANGE:
+            pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "%s escape sequence out of range",
+                                         diagnostic->kind == CHECK_ESCAPE_DIAGNOSTIC_HEX_RANGE ? "hex" : "octal");
+            break;
+        case CHECK_ESCAPE_DIAGNOSTIC_EMPTY:
+            pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "delimited escape sequence cannot be empty");
+            break;
+        case CHECK_ESCAPE_DIAGNOSTIC_DIGIT:
+            pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "invalid digit '%c' in escape sequence", character);
+            break;
+        case CHECK_ESCAPE_DIAGNOSTIC_OPEN_BRACE:
+            pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "expected '{' after '\\%c' escape sequence", character);
+            break;
+        case CHECK_ESCAPE_DIAGNOSTIC_CLOSE_BRACE:
+            pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "expected '}'");
+            break;
+        case CHECK_ESCAPE_DIAGNOSTIC_UCN_DIGITS:
+            pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "\\%c used with no following hex digits", character);
+            break;
+        case CHECK_ESCAPE_DIAGNOSTIC_UCN_INCOMPLETE:
+            pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "incomplete universal character name");
+            break;
+        case CHECK_ESCAPE_DIAGNOSTIC_UCN_INVALID:
+            pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "invalid universal character");
+            break;
+        case CHECK_ESCAPE_DIAGNOSTIC_UCN_CONTROL:
+            pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "universal character name refers to a control character");
+            break;
+        case CHECK_ESCAPE_DIAGNOSTIC_UCN_BASIC:
+            pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "character '%c' cannot be specified by a universal character name",
+                                         character);
+            break;
+        default:
+            pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "invalid escape sequence '%.*s' in an unevaluated string literal",
+                                         (int)diagnostic->length, spelling.pointer + offset);
+            break;
+    }
+}
 
 // The escape sequences' diagnostics of an unevaluated string literal's tokens from `first` to `end` (#147), each at its
 // escape's backslash, in clang's order, published where `publication` puts them: an unknown escape's
@@ -752,83 +831,13 @@ static void check_driver_escapes(const Parser* parser, Preprocessor* pp, const C
     for (uint32_t token = first; token < end && token < parser->tokens.count && !pp->fatal; token += 1)
     {
         const uint64_t mark = scratch->length;
-        const uint32_t source = parser->tokens.sources[token];
         const String8 spelling = check_warning_string_spelling(parser, pp, token, scratch);
         const uint32_t length = (uint32_t)spelling.length;
         CheckEscapeDiagnostic* diagnostics = length != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length)) : NULL;
         const uint32_t count = diagnostics != NULL ? check_literal_unevaluated_escapes((const uint8_t*)spelling.pointer, length, pp->options.language.standard >= 2023, diagnostics, &had_error) : 0;
         for (uint32_t i = 0; i < count && !pp->fatal; i += 1)
         {
-            const CheckEscapeDiagnostic* diagnostic = diagnostics + i;
-            const uint32_t offset = diagnostic->offset;
-            const char character = (char)diagnostic->character;
-            switch (diagnostic->kind)
-            {
-                case CHECK_ESCAPE_DIAGNOSTIC_UNKNOWN:
-                {
-                    const CheckWarningSeverity severity = check_common_severity(pp, parser, input, token, CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE, false);
-                    // "[-Werror,-Wflag]" while the promoted warning is an ordinary error, "[-Wflag]" once it is fatal.
-                    const bool error = severity == CHECK_WARNING_ERROR;
-                    const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL : error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
-                    // clang prints a character that isn't printable as its value, sign-extended from char, in hexadecimal.
-                    const bool printable = diagnostic->character >= 0x20 && diagnostic->character < 0x7f;
-                    char escaped[16];
-                    if (printable)
-                    {
-                        snprintf(escaped, sizeof(escaped), "%c", character);
-                    }
-                    else
-                    {
-                        snprintf(escaped, sizeof(escaped), "x%X", (unsigned)(int32_t)(int8_t)diagnostic->character);
-                    }
-                    if (severity != CHECK_WARNING_IGNORE)
-                    {
-                        pp_diagnose_output_offset_at(pp, disposition, source, offset, publication, "unknown escape sequence '\\%s' [%s-Wunknown-escape-sequence]", escaped,
-                                                     error ? "-Werror," : "");
-                    }
-                    break;
-                }
-                case CHECK_ESCAPE_DIAGNOSTIC_HEX_DIGITS:
-                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "\\x used with no following hex digits");
-                    break;
-                case CHECK_ESCAPE_DIAGNOSTIC_HEX_RANGE:
-                case CHECK_ESCAPE_DIAGNOSTIC_OCTAL_RANGE:
-                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "%s escape sequence out of range",
-                                                 diagnostic->kind == CHECK_ESCAPE_DIAGNOSTIC_HEX_RANGE ? "hex" : "octal");
-                    break;
-                case CHECK_ESCAPE_DIAGNOSTIC_EMPTY:
-                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "delimited escape sequence cannot be empty");
-                    break;
-                case CHECK_ESCAPE_DIAGNOSTIC_DIGIT:
-                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "invalid digit '%c' in escape sequence", character);
-                    break;
-                case CHECK_ESCAPE_DIAGNOSTIC_OPEN_BRACE:
-                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "expected '{' after '\\%c' escape sequence", character);
-                    break;
-                case CHECK_ESCAPE_DIAGNOSTIC_CLOSE_BRACE:
-                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "expected '}'");
-                    break;
-                case CHECK_ESCAPE_DIAGNOSTIC_UCN_DIGITS:
-                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "\\%c used with no following hex digits", character);
-                    break;
-                case CHECK_ESCAPE_DIAGNOSTIC_UCN_INCOMPLETE:
-                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "incomplete universal character name");
-                    break;
-                case CHECK_ESCAPE_DIAGNOSTIC_UCN_INVALID:
-                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "invalid universal character");
-                    break;
-                case CHECK_ESCAPE_DIAGNOSTIC_UCN_CONTROL:
-                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "universal character name refers to a control character");
-                    break;
-                case CHECK_ESCAPE_DIAGNOSTIC_UCN_BASIC:
-                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "character '%c' cannot be specified by a universal character name",
-                                                 character);
-                    break;
-                default:
-                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "invalid escape sequence '%.*s' in an unevaluated string literal",
-                                                 (int)diagnostic->length, spelling.pointer + offset);
-                    break;
-            }
+            check_driver_escape(parser, pp, input, token, spelling, diagnostics + i, publication);
         }
         arena_pop_to(scratch, mark);
     }
@@ -1024,8 +1033,105 @@ static void check_driver_unparsed_strings(const Parser* parser, Preprocessor* pp
         {
             check_driver_unparsed_escapes(parser, pp, &none, comma + 1, k, scratch);
         }
-        t = gnu || standard || assertion ? k : t + 1;
+        // Another string literal, with those adjacent to it, or a character constant: an evaluated one, whose escapes'
+        // diagnostics and refusal clang gives as it gives the checked ones' (#1447, check_driver_literal_escapes).
+        const bool evaluated = !gnu && !standard && !assertion && (kind == PARSE_KIND_STRING || kind == PARSE_KIND_CHARACTER);
+        if (evaluated)
+        {
+            check_driver_literal_escapes(parser, pp, &none, t, parser->tokens.sources[t], scratch);
+            k = t + 1;
+            while (kind == PARSE_KIND_STRING && k < end && kinds[k] == PARSE_KIND_STRING)
+            {
+                k += 1;
+            }
+        }
+        t = gnu || standard || assertion || evaluated ? k : t + 1;
     }
+}
+
+// What clang refuses of the character constant `bytes` (#1447) past its escapes' errors, which come first: a character
+// past what its type holds (1, "character too large for enclosing character literal type": a universal character name's
+// or a UTF-8 character's past 0x7F in an ordinary or u8 one, past 0xFFFF in a u one), or more than one character in a
+// wide one (2, "wide character literals may not contain multiple characters") or a Unicode one (3, "Unicode character
+// literals ..."); 0 for none.
+static uint8_t check_driver_character_refusal(const uint8_t* bytes, uint32_t length, bool c23)
+{
+    const bool wide = length != 0 && bytes[0] == 'L';
+    const bool unicode = length != 0 && (bytes[0] == 'u' || bytes[0] == 'U');
+    const uint32_t most = length > 1 && bytes[0] == 'u' && bytes[1] != '8' ? 0xFFFFu : length != 0 && (bytes[0] == 'U' || wide) ? 0x10FFFFu : 0x7Fu;
+    uint32_t position = 0;
+    while (position < length && bytes[position] != '\'')
+    {
+        position += 1;
+    }
+    position += 1;
+    uint8_t result = 0;
+    uint32_t characters = 0;
+    while (result == 0 && position + 1 < length)
+    {
+        const uint32_t begin = position;
+        uint32_t value = 0;
+        const bool decoded = check_literal_character_unit_by(bytes, length - 1, &position, &value, c23, true);
+        const bool numeric = bytes[begin] == '\\' && (bytes[begin + 1] == 'x' || bytes[begin + 1] == 'o' || (bytes[begin + 1] >= '0' && bytes[begin + 1] <= '7'));
+        result = decoded && !numeric && value > most ? 1 : 0;
+        characters += 1;
+        position = decoded && position > begin ? position : length;
+    }
+    return result != 0 ? result : characters > 1 && wide ? 2 : characters > 1 && unicode ? 3 : 0;
+}
+
+// A string literal or a character constant the checker refused (#1447), worded and placed as clang does: its escape
+// sequences' diagnostics (check_literal_evaluated_escapes, check_driver_escape), from the token at `token` on through the
+// string literals adjacent to it, its warnings among them; or a character constant's refusal at the constant
+// (check_driver_character_refusal). False where clang has no error for it (a named universal
+// character, which the checker doesn't decode), which leaves the checker's own message.
+static bool check_driver_literal_escapes(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t publication, Arena* scratch)
+{
+    const bool c23 = pp->options.language.standard >= 2023;
+    const bool character = token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_CHARACTER;
+    const bool string = token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_STRING;
+    uint32_t end = token + (character || string ? 1 : 0);
+    while (string && end < parser->tokens.count && parser->tokens.kinds[end] == PARSE_KIND_STRING)
+    {
+        end += 1;
+    }
+    // Whether any is an error, then each in turn.
+    bool errors = false;
+    uint8_t refusal = 0;
+    for (uint32_t pass = 0; pass < 2 && (pass == 0 || errors) && !pp->fatal; pass += 1)
+    {
+        bool had_error = false;
+        for (uint32_t t = token; t < end && !pp->fatal; t += 1)
+        {
+            const uint64_t mark = scratch->length;
+            const String8 spelling = check_warning_string_spelling(parser, pp, t, scratch);
+            const uint32_t length = (uint32_t)spelling.length;
+            CheckEscapeDiagnostic* diagnostics = length != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length)) : NULL;
+            const uint32_t count = diagnostics != NULL ? check_literal_evaluated_escapes((const uint8_t*)spelling.pointer, length, c23, diagnostics, &had_error) : 0;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                errors |= diagnostics[i].kind != CHECK_ESCAPE_DIAGNOSTIC_UNKNOWN;
+                if (pass == 1)
+                {
+                    check_driver_escape(parser, pp, input, t, spelling, diagnostics + i, publication);
+                }
+            }
+            if (pass == 0 && character && !errors)
+            {
+                refusal = check_driver_character_refusal((const uint8_t*)spelling.pointer, length, c23);
+                errors = refusal != 0;
+            }
+            arena_pop_to(scratch, mark);
+        }
+    }
+    if (refusal != 0)
+    {
+        pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[token], publication, "%s",
+                              refusal == 1 ? "character too large for enclosing character literal type" :
+                              refusal == 2 ? "wide character literals may not contain multiple characters" :
+                                             "Unicode character literals may not contain multiple characters");
+    }
+    return errors;
 }
 
 // A numeric constant the checker refused, worded and placed as clang does (c_check_literal_diagnostic.c, #1127): false if
@@ -2993,9 +3099,12 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                 pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'_Complex %s' is invalid", first);
                             }
                         }
-                        else if (phase == 0 && kind == CHECK_INPUT_LITERAL && check_driver_literal(pp, parser, located, source, publication, scratch))
+                        else if (phase == 0 && kind == CHECK_INPUT_LITERAL &&
+                                 (check_driver_literal(pp, parser, located, source, publication, scratch) ||
+                                  check_driver_literal_escapes(parser, pp, input, located, publication, scratch)))
                         {
-                            // A numeric constant's error, worded and placed as clang's.
+                            // A numeric constant's error, or a string literal's or a character constant's escapes' (#1447),
+                            // worded and placed as clang's.
                         }
                         else if ((kind == CHECK_INPUT_UNDECLARED || kind == CHECK_INPUT_UNKNOWN_BUILTIN) && named)
                         {

@@ -4411,6 +4411,86 @@ static bool check_input_assertion_escaped(CheckInputReader* reader, uint32_t fir
     return result && check_input_unevaluated_refused(reader, first, &message_end) != BUSTER_CHECK_NONE;
 }
 
+// The unknown escape sequences of the evaluated literal at `token` (#1447), whose spelling is `bytes`: each one's
+// -Wunknown-escape-sequence warning at its backslash (CHECK_WARNING_EVENT_UNKNOWN_ESCAPE), as clang's literal parser
+// gives it. The cold path of a literal the extended decoding read, which has one at least.
+static __attribute__((noinline, cold)) void check_input_unknown_escapes(CheckInputReader* reader, uint32_t token, const uint8_t* bytes, uint32_t length, bool once)
+{
+    const uint64_t mark = reader->scratch->length;
+    CheckEscapeDiagnostic* diagnostics = length != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length)) : NULL;
+    bool had_error = false;
+    const uint32_t count = diagnostics != NULL ? check_literal_evaluated_escapes(bytes, length, reader->parser->language.standard >= 2023, diagnostics, &had_error) : 0;
+    reader->output->resource |= length != 0 && diagnostics == NULL;
+    // (A character constant's, which the constant evaluator may read again (`once`): each of its escapes', at its first
+    // read alone.)
+    const uint64_t key = (uint64_t)CHECK_WARNING_EVENT_UNKNOWN_ESCAPE << 32 | ((uint64_t)token + 1);
+    bool first = !once || !check_warning_set_contains(&reader->source_warning_keys, key);
+    if (once && first)
+    {
+        first = check_warning_set_add(&reader->source_warning_keys, key);
+        reader->output->resource |= !first;
+    }
+    for (uint32_t i = 0; first && i < count; i += 1)
+    {
+        if (diagnostics[i].kind == CHECK_ESCAPE_DIAGNOSTIC_UNKNOWN)
+        {
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE,
+                .kind = CHECK_WARNING_EVENT_UNKNOWN_ESCAPE,
+                .token = token,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = token + 1,
+                .payload = { .name = diagnostics[i].character, .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = diagnostics[i].offset },
+            };
+            check_input_warning_event(reader, &event, NULL, 0);
+        }
+    }
+    arena_pop_to(reader->scratch, mark);
+}
+
+// A string literal's tokens from `token` (`count` parts) the fast decoding refused, read again with the escapes clang
+// takes that it doesn't (#1447, check_literal_strings_extended): a delimited escape and an unknown one, whose warnings
+// it gives. A literal it refuses too is the driver's to word (check_driver_literal).
+static __attribute__((noinline, cold)) CheckStringLiteral check_input_strings_extended(CheckInputReader* reader, uint32_t token, const CheckStringPart* parts, uint32_t count)
+{
+    const CheckStringLiteral literal = check_literal_strings_extended(parts, count, reader->parser->language.standard >= 2023, reader->arena);
+    reader->output->resource |= literal.resource;
+    for (uint32_t i = 0; literal.valid && i < count; i += 1)
+    {
+        check_input_unknown_escapes(reader, token + i, parts[i].bytes, parts[i].length, false);
+    }
+    return literal;
+}
+
+// An ordinary character constant's warnings of its `characters` (#1447, more than one), as clang's CharLiteralParser gives
+// them at the constant: -Wmultichar's, or for exactly four -Wfour-char-constants' (ignored by default), and past four
+// "character constant too long for its type" too (whose value keeps the last four). Once each, as the constant evaluator
+// may read the constant again.
+static __attribute__((noinline, cold)) void check_input_multichar(CheckInputReader* reader, uint32_t token, uint32_t characters)
+{
+    const CheckWarningEvent multichar =
+    {
+        .id = characters == 4 ? CHECK_WARNING_ID_FOUR_CHAR_CONSTANTS : CHECK_WARNING_ID_MULTICHAR,
+        .kind = CHECK_WARNING_EVENT_MULTICHAR,
+        .token = token,
+        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+        .flags = characters == 4 ? BUSTER_CHECK_WARNING_DEFAULT_IGNORED : 0,
+        .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+        .completion = token + 1,
+        .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+    };
+    check_input_warning_once(reader, &multichar);
+    if (characters > 4)
+    {
+        CheckWarningEvent long_event = multichar;
+        long_event.id = CHECK_WARNING_ID_CHARACTER_TOO_LONG;
+        long_event.kind = CHECK_WARNING_EVENT_CHARACTER_TOO_LONG;
+        check_input_warning_once(reader, &long_event);
+    }
+}
+
 static const CheckInitString* check_input_string(CheckInputReader* reader, uint32_t token)
 {
     const Parser* parser = reader->parser;
@@ -4449,6 +4529,13 @@ static const CheckInitString* check_input_string(CheckInputReader* reader, uint3
                 literal = check_literal_strings_by(parts, count, parser->language.standard >= 2023, BUSTER_SCALAR_PATH(parser->options.scalar), reader->arena);
                 reader->output->resource |= literal.resource;
                 valid = literal.valid;
+                // (Not a static assertion's message, an unevaluated string literal, whose escapes are the driver's:
+                // check_driver_escapes.)
+                if (!valid && !literal.resource && !check_input_assertion_escaped(reader, token, end))
+                {
+                    literal = check_input_strings_extended(reader, token, parts, count);
+                    valid = literal.valid;
+                }
             }
             const TypeId type = valid ? check_input_type_result(reader, type_array(reader->types, literal.element_type, literal.unit_count)) : 0;
             valid &= type != 0;
@@ -4534,6 +4621,19 @@ static inline __attribute__((always_inline)) void check_input_literal(CheckInput
         if (reader->parser->tokens.kinds[token] == PARSE_KIND_CHARACTER)
         {
             *result = check_literal_character(bytes, length, reader->pp->options.language.standard >= 2023, reader->types->char_unsigned);
+            if (!result->valid)
+            {
+                // clang's escapes the fast decoding refuses (#1447, check_input_unknown_escapes).
+                *result = check_literal_character_by(bytes, length, reader->pp->options.language.standard >= 2023, reader->types->char_unsigned, true);
+                if (result->valid)
+                {
+                    check_input_unknown_escapes(reader, token, bytes, length, true);
+                }
+            }
+            if (result->valid && result->characters > 1 && length != 0 && bytes[0] == '\'')
+            {
+                check_input_multichar(reader, token, result->characters);
+            }
         }
         else
         {
