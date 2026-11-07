@@ -7298,14 +7298,11 @@ static void check_input_deprecated_use(CheckInputReader* reader, CheckInputDepre
     }
 }
 
-// Bit t of `words`, a word for each 64 tokens: whether the identifier at t is a use or a declaration whose key a
-// deprecated or unavailable attribute marks (`marks`, check_input_deprecated_key's), 16 identifiers a gather. The vector
-// path's walks (check_input_availability_events, check_input_deprecated_block) visit these and few other tokens.
-// Keep this whole-column leaf out of the large reader's frame: LLVM 23.1.4 MSan can allocate wide callback
-// shadows at a check inside the loop after inlining (#1610). Its own small instrumentation context retains every
-// check without inheriting the reader's callback threshold. The loop and its vector-only admission stay unchanged.
-// The keys `marks` marks, of `count` (its entries that aren't 0), as a filter (CheckInputFilter): a unit marks few.
-static CheckInputFilter check_input_deprecated_mark_filter(const uint32_t* marks, uint32_t count)
+// The keys `marks` marks, of `count` (its entries that aren't 0), as a filter's halves (CheckInputFilter), which also
+// take every token whose object's first declaration (`objects`, where not null) is such a key: the declarations whose
+// key is marked, as check_input_deprecated_marked gives a declaration its key. A unit marks few keys. Two scans, 16
+// entries at a time: the marks, then the objects, whose first declarations the marked keys' own filter tests.
+static CheckInputFilter check_input_deprecated_mark_filter(const uint32_t* marks, const uint32_t* objects, uint32_t count)
 {
     uint32_t low[16] = { 0 };
     uint32_t high[16] = { 0 };
@@ -7320,9 +7317,36 @@ static CheckInputFilter check_input_deprecated_mark_filter(const uint32_t* marks
             high[(key / 16384) % 16] |= UINT32_C(1) << ((key / 512) % 32);
         }
     }
+    const CheckInputFilter keys = { .low = _mm512_loadu_si512(low), .high = _mm512_loadu_si512(high) };
+    const __m512i limit = _mm512_set1_epi32((int32_t)count);
+    for (uint32_t first = 0; objects != NULL && first < count; first += 16)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, count - first < 16 ? count - first : 16);
+        const __m512i object_first = _mm512_sub_epi32(_mm512_maskz_loadu_epi32(lanes, objects + first), _mm512_set1_epi32(1));
+        const __mmask16 owned = _mm512_mask_cmplt_epu32_mask(lanes, object_first, limit);
+        for (uint32_t selected = check_input_filter_test(&keys, object_first, owned); selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
+            if (marks[objects[token] - 1] != 0)
+            {
+                low[(token / 32) % 16] |= UINT32_C(1) << (token % 32);
+                high[(token / 16384) % 16] |= UINT32_C(1) << ((token / 512) % 32);
+            }
+        }
+    }
     return (CheckInputFilter){ .low = _mm512_loadu_si512(low), .high = _mm512_loadu_si512(high) };
 }
 
+// Bit t of `words`, a word for each 64 tokens: whether the identifier at t is a use or a declaration whose key a
+// deprecated or unavailable attribute marks (`marks`, check_input_deprecated_key's): its declaration's object's first
+// declaration where it has one, else its declaration. The vector path's walks (check_input_availability_events,
+// check_input_deprecated_block) visit these and few other tokens. 16 identifiers' declarations are tested against a
+// filter of the declarations whose key is marked (check_input_deprecated_mark_filter), and only those 16 that pass
+// gather their objects and their keys' marks (#529): the two gathers at every 16 identifiers took 0.7% of
+// -c sqlite3.c's cycles, for the few keys glibc's headers mark.
+// Keep this whole-column leaf out of the large reader's frame: LLVM 23.1.4 MSan can allocate wide callback
+// shadows at a check inside the loop after inlining (#1610). Its own small instrumentation context retains every
+// check without inheriting the reader's callback threshold. The loop and its vector-only admission stay unchanged.
 static __attribute__((noinline)) void check_input_deprecated_marked(const CheckInputReader* reader, const uint32_t* marks, uint64_t* words)
 {
     const Parser* parser = reader->parser;
@@ -7331,9 +7355,7 @@ static __attribute__((noinline)) void check_input_deprecated_marked(const CheckI
     const uint32_t* objects = reader->objects;
     const __m512i limit = _mm512_set1_epi32((int32_t)count);
     const __m512i one = _mm512_set1_epi32(1);
-    // The marks are gathered only for the 16 identifiers whose keys the marked keys' filter passes (#529): a gather at
-    // every 16 identifiers took 0.5% of -c sqlite3.c's cycles, for the few keys glibc's headers mark.
-    const CheckInputFilter filter = check_input_deprecated_mark_filter(marks, count);
+    const CheckInputFilter filter = check_input_deprecated_mark_filter(marks, objects, count);
     uint32_t first = 0;
     while (first < count)
     {
@@ -7347,15 +7369,15 @@ static __attribute__((noinline)) void check_input_deprecated_marked(const CheckI
             const __mmask16 lanes = (__mmask16)(identifiers >> lane);
             if (lanes != 0)
             {
-                // Its declaration, then that declaration's object's first declaration where it has one.
                 const __m512i declared = _mm512_maskz_loadu_epi32(lanes, declarations + first + lane);
                 const __mmask16 known = _mm512_mask_cmplt_epu32_mask(lanes, declared, limit);
-                const __m512i object = objects != NULL ? _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), known, declared, objects, 4) : _mm512_setzero_si512();
-                const __m512i object_first = _mm512_sub_epi32(object, one);
-                const __m512i key = _mm512_mask_mov_epi32(declared, _mm512_cmplt_epu32_mask(object_first, limit), object_first);
-                const __mmask16 candidates = check_input_filter_test(&filter, key, known);
+                const __mmask16 candidates = check_input_filter_test(&filter, declared, known);
                 if (candidates != 0)
                 {
+                    // Its declaration, then that declaration's object's first declaration where it has one.
+                    const __m512i object = objects != NULL ? _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), candidates, declared, objects, 4) : _mm512_setzero_si512();
+                    const __m512i object_first = _mm512_sub_epi32(object, one);
+                    const __m512i key = _mm512_mask_mov_epi32(declared, _mm512_cmplt_epu32_mask(object_first, limit), object_first);
                     const __m512i mark = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), candidates, key, marks, 4);
                     word |= (uint64_t)_mm512_mask_test_epi32_mask(candidates, mark, mark) << lane;
                 }
