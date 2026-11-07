@@ -76,15 +76,15 @@ rules would otherwise defer the call to an external definition. This retains
 the wrapper's checking calls and printf security flags and avoids publishing
 duplicate definitions when several translation units include the same header.
 
-On size-annotated wrappers and in system headers, the accompanying
-`diagnose_if(condition, message, severity)` attributes retain
-their ranges and validate their strings, but do not issue conditional call-site
-diagnostics. `enable_if` accepts an integer constant true condition, as used by
-glibc's unconditional overload preference; conditional candidate filtering is
-still refused. Both attributes remain unsupported on user functions without
-size annotations. The system-header case includes glibc 2.44's `openat2`
-wrapper, whose diagnostic concerns a structure size rather than a hidden
-object size. These limits are separate from libc's runtime checking calls.
+On size-annotated wrappers, the accompanying
+`diagnose_if(condition, message, severity)` attributes retain their ranges and
+validate their strings, but do not issue conditional call-site diagnostics. In
+system headers and in user code, `diagnose_if` and `enable_if` are evaluated as
+clang evaluates them (#1447, `docs/c-checker.md`'s "diagnose_if and
+enable_if"); a system header's condition that the evaluator doesn't take
+(`__builtin_object_size` of a parameter, for one) is kept and decides nothing.
+The system-header case includes glibc 2.44's `openat2` wrapper, whose
+diagnostic concerns a structure size rather than a hidden object size. These limits are separate from libc's runtime checking calls.
 
 The real-header regression now also runs on glibc 2.40 and newer. It includes
 `stdio.h`, `string.h`, `strings.h`, `stdlib.h`, `unistd.h`, `wchar.h`, `poll.h`,

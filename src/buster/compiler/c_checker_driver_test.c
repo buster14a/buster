@@ -7529,6 +7529,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 }
 #include "c_check_initializer_warning_test.c"
 #include "c_check_warning_driver_test.c"
+#include "c_check_condition_driver_test.c"
 #include "c_check_format_bitint_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
 
@@ -8319,6 +8320,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_default_warnings(&test, clang, executable, directory);
             check_test_driver_format_bitints(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_conditions(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {

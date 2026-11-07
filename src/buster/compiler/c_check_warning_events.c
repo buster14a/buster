@@ -80,6 +80,8 @@ enum
     // An unknown escape sequence in an unevaluated string literal, before its error (#147): the driver's alone, no event's.
     CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE = 88,
     CHECK_WARNING_ID_VOID_PTR_DEREFERENCE = 89,
+    // A warning diagnose_if's condition gives (#1447, c_check_condition.c): -Wuser-defined-warnings.
+    CHECK_WARNING_ID_USER_DEFINED_WARNINGS = 90,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -291,6 +293,9 @@ typedef enum CheckWarningEventKind
     // An indirection through a pointer to void (#147, clang's CheckIndirectionOperand: -Wvoid-ptr-dereference), at its `*`:
     // payload.first_type the operand's type, payload.data its typedef's spelling.
     CHECK_WARNING_EVENT_VOID_PTR_DEREFERENCE,
+    // A warning diagnose_if's condition gives (#1447, c_check_condition.c), at the call's `)` or at the function's use:
+    // payload.token the message's first string token, with a CHECK_WARNING_NOTE_DIAGNOSE_IF at the attribute.
+    CHECK_WARNING_EVENT_DIAGNOSE_IF,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -321,6 +326,8 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_PREVIOUS_ATTRIBUTE,
     // "'f' declared here" (clang's note_entity_declared_at), payload.name the entity's name.
     CHECK_WARNING_NOTE_DECLARED_HERE,
+    // "from 'diagnose_if' attribute on 'f':" (#1447), payload.name the function's name.
+    CHECK_WARNING_NOTE_DIAGNOSE_IF,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 
