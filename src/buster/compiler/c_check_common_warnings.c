@@ -645,6 +645,9 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
 static void check_common_conversion_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
                                             TypeId target, bool evaluated, Arena* scratch);
+static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                         TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
+                                         TypeId target, uint32_t completion, Arena* scratch);
 
 // Query preparation suppresses every unevaluated constant-warning family before graph construction; runtime
 // selections suppress overflow alone. The retained full mask also identifies detached initializer roots inside
@@ -902,6 +905,35 @@ static bool check_common_conversion_source(CheckConstantKind constant, bool arms
     return constant == CHECK_CONSTANT_INTEGER || constant == CHECK_CONSTANT_FLOATING || arms;
 }
 
+// The operands a truth context converts to _Bool (#147, clang's CheckBoolLikeConversion), `count` of them in `operands`:
+// a static assertion's own (BUSTER_CHECK_CONTEXT_ASSERT), then `!`'s, `&&`'s and `||`'s, a statement's condition
+// (CHECK_OP_CONDITION) and a conditional's first. Only a floating literal's conversion there warns, -Wliteral-conversion's
+// "changes value from 1.5 to true"; clang carries it into no conditional's arms or comma's result.
+static uint32_t check_common_truth_operands(const CheckGraph* graph, uint32_t node, uint32_t operands[3])
+{
+    const CheckOp op = graph->ops[node];
+    const uint32_t assertion = graph->contexts != NULL && (graph->contexts[node] & BUSTER_CHECK_CONTEXT_ASSERT) != 0 ? 1u : 0u;
+    const uint32_t count = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR ? 2u :
+                           op == CHECK_OP_NOT || op == CHECK_OP_CONDITION || op == CHECK_OP_CONDITIONAL ? 1u : 0u;
+    operands[0] = node;
+    operands[assertion] = graph->operand0[node];
+    operands[assertion + 1] = graph->operand1[node];
+    return assertion + count;
+}
+
+// Whether a truth context's operand is a floating constant, the one source its conversion to _Bool can warn of.
+static bool check_common_truth_floating(const CheckGraph* graph, const CheckStream* stream, uint32_t node)
+{
+    uint32_t operands[3];
+    const uint32_t count = check_common_truth_operands(graph, node, operands);
+    bool result = false;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        result |= operands[i] < graph->count && operands[i] < stream->count && check_stream_constant_kind(stream, operands[i]) == CHECK_CONSTANT_FLOATING;
+    }
+    return result;
+}
+
 // The division-warning visit one scan frame runs after its subtree: `emit_children`'s other half.
 static void check_common_div_own(CheckCommonEmission* emission, uint32_t node)
 {
@@ -1090,6 +1122,22 @@ static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t 
             const TypeId target = check_stream_type(stream, node);
             check_common_conversion_warning(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell,
                                             source, &value, target, evaluated, emission->scratch);
+        }
+    }
+    else if (evaluated || (emission->emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0)
+    {
+        // A truth context's floating literal, converted to _Bool: its operands' in order, the leaf's warning alone.
+        uint32_t operands[3];
+        const uint32_t count = check_common_truth_operands(graph, node, operands);
+        for (uint32_t i = 0; i < count && !emission->pp->fatal; i += 1)
+        {
+            const uint32_t source = operands[i];
+            if (source < graph->count && check_stream_constant_kind(stream, source) == CHECK_CONSTANT_FLOATING)
+            {
+                const CheckValue value = check_stream_value(stream, source);
+                check_common_conversion_leaf(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, source, &value,
+                                             BUSTER_TYPE_BOOL, check_common_function_boundary(emission->parser, graph->tokens[source]), emission->scratch);
+            }
         }
     }
 }
@@ -2631,6 +2679,10 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
         const uint32_t token = graph->tokens[node];
         own = token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_COMMA;
     }
+    else
+    {
+        conversion = check_common_truth_floating(graph, stream, node);
+    }
     const uint8_t result = (uint8_t)((own ? BUSTER_CHECK_REACH_TREE : 0u) | (conversion ? BUSTER_CHECK_REACH_CONVERSION : 0u));
     return result;
 }
@@ -2696,9 +2748,13 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
     bool source_contexts = false;
     if (evaluated != NULL)
     {
-        // Only conversion and call nodes can need a literal-only source context. The vector path skips
+        // Only conversion, call and truth-context nodes can need a literal-only source context. The vector path skips
         // other operators in batches; the scalar twin visits all nodes and applies the same tests.
-        static const CheckOp context_ops[] = { CHECK_OP_INITIALIZE, CHECK_OP_ASSIGN, CHECK_OP_CONVERT, CHECK_OP_CALL };
+        static const CheckOp context_ops[] =
+        {
+            CHECK_OP_INITIALIZE, CHECK_OP_ASSIGN, CHECK_OP_CONVERT, CHECK_OP_CALL, CHECK_OP_NOT, CHECK_OP_LOGICAL_AND, CHECK_OP_LOGICAL_OR, CHECK_OP_CONDITION,
+            CHECK_OP_CONDITIONAL,
+        };
         const CheckCommonOps set = check_common_ops(context_ops, BUSTER_ARRAY_LENGTH(context_ops));
         const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
         CheckCommonScan scan = { 0 };
@@ -2712,6 +2768,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                 source_contexts |= source < graph->count &&
                                    (check_stream_constant_kind(stream, source) == CHECK_CONSTANT_FLOATING || check_common_conversion_arms(graph, source));
             }
+            source_contexts |= evaluated[node] == 0 && check_common_truth_floating(graph, stream, node);
             if (evaluated[node] == 0 && op == CHECK_OP_CALL && graph->argument_offsets != NULL && graph->argument_counts != NULL)
             {
                 for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
@@ -2722,6 +2779,13 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                 }
             }
         }
+    }
+    // A static assertion's operand is no runtime operator's: each has a constant-warning entry (check_input_const_warning).
+    for (uint32_t i = 0; evaluated != NULL && graph->contexts != NULL && i < graph->const_warning_count && !source_contexts; i += 1)
+    {
+        const uint32_t node = graph->const_warnings[i].node;
+        source_contexts |= node < graph->count && evaluated[node] == 0 && (graph->contexts[node] & BUSTER_CHECK_CONTEXT_ASSERT) != 0 &&
+                           check_common_truth_floating(graph, stream, node);
     }
     uint8_t* emitted = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
     if (graph->count != 0 && emitted == NULL)
