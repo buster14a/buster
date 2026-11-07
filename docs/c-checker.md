@@ -4000,7 +4000,7 @@ function specifiers carry `-Wduplicate-decl-specifier` at the repeated token,
 including pointer and parameter qualifiers. These warnings use the common
 command-line and source pragma policy.
 
-Literal floating-to-integer conversions warn for the supported initializer, assignment, return and call-argument paths, including conditional arms and top-level comma values. Literal conversion warnings do not descend through a comma inside a conditional arm, or through a nested comma or conditional inside a comma's value. The logical operators' implicit float-to-bool conversions are not yet covered.
+Literal floating-to-integer conversions warn for the supported initializer, assignment, return and call-argument paths, including conditional arms and top-level comma values. Literal conversion warnings do not descend through a comma inside a conditional arm, or through a nested comma or conditional inside a comma's value. A floating literal a truth context converts to `_Bool` warns as clang's CheckBoolLikeConversion gives it ("changes value from 1.5 to true"): the operands of `!`, `&&` and `||`, a statement's or a conditional's condition and a static assertion's, never a conditional's arms, a comma's result or `sizeof`'s operand (`check_common_truth_operands`).
 
 The graph's passes share one pass in graph order, `check_common_facts`, which
 gives each node its parent, whether another node uses its value, whether it is
@@ -6315,7 +6315,12 @@ arguments against the function. The checker now gives these as clang does.
   warning where they meet a function, which ignores them, and "only applies to
   function types" off one; `pcs`'s argument is checked first where it meets a
   function or a tag ("'pcs' attribute takes one argument", "invalid PCS
-  type"). The GPU kernels' (`amdgpu_kernel`, `device_kernel`,
+  type"). An identifier there (`pcs(x)`) is "'pcs' attribute requires a
+  string" at it, then clang's handler goes on with its text: `aapcs`'s
+  unsupported convention warning (and on a tag the one of no function), any
+  other's "invalid PCS type" at the attribute (`check_input_attribute_pcs`,
+  CheckInputAttribute.deferred); on another type the attribute's warning alone,
+  as clang's type processing never reads the argument. The GPU kernels' (`amdgpu_kernel`, `device_kernel`,
   `nvptx_kernel`) are a function declaration's: the same warning on one, and
   "'X' attribute only applies to functions" (an error) on any other
   declaration. A convention on a tag's declaration, or GNU's `noreturn`, is

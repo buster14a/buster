@@ -295,6 +295,8 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_EXPECTED_TYPE: snprintf(text, capacity, "expected a type"); break;
         case CHECK_ARGUMENT_EXPECTED_PAREN: snprintf(text, capacity, "expected ')'"); break;
         case CHECK_ARGUMENT_PCS_TYPE: snprintf(text, capacity, "invalid PCS type"); break;
+        case CHECK_ARGUMENT_CONVENTION_UNSUPPORTED: snprintf(text, capacity, "'%s' calling convention is not supported for this target", parsed); break;
+        case CHECK_ARGUMENT_FUNCTIONS_METHODS: snprintf(text, capacity, "'%s' attribute only applies to functions and methods", parsed); break;
         case CHECK_ARGUMENT_DESTROY_STORAGE:
             snprintf(text, capacity, "%s attribute can only be applied to a variable with static or thread storage duration", number != 0 ? "always_destroy" : "no_destroy");
             break;
@@ -2783,6 +2785,38 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                            constant ? "subexpression not valid in a constant expression" : "to match this '('",
                             };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, matched ? 1u : 0u, "%s", text);
+                            // pcs's argument that is no string (#147): clang's checkStringLiteralArgumentAttr goes on with the
+                            // identifier's text, and CheckCallingConvAttr then words it at the attribute's first token: aapcs a
+                            // convention x86-64 warns of and ignores (on a tag, `value` 1, then one of no function), any other
+                            // "invalid PCS type".
+                            const uint32_t named = report->attribute;
+                            const bool scoped = named + 2 < count && parser->tokens.kinds[named + 1] == PARSE_KIND_COLON;
+                            const uint32_t name = !scoped ? named : parser->tokens.kinds[named + 2] == PARSE_KIND_COLON && named + 3 < count ? named + 3 : named + 2;
+                            if ((report->detail & 0xffu) == CHECK_ARGUMENT_STRING && token < count &&
+                                check_input_attribute_equal(check_warning_attribute_normalized(check_driver_attribute_spelling(parser, pp, name, false)), "pcs"))
+                            {
+                                const uint32_t at = parser->tokens.sources[named];
+                                if (check_input_attribute_equal(check_driver_attribute_spelling(parser, pp, token, false), "aapcs"))
+                                {
+                                    const CheckWarningSeverity severity = check_common_severity(pp, parser, input, named, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, false);
+                                    // "[-Werror,-Wflag]" while the promoted warning is an ordinary error, "[-Wflag]" once it is fatal.
+                                    const bool error = severity == CHECK_WARNING_ERROR;
+                                    const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL : error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+                                    for (uint32_t warning_index = 0; warning_index < (report->value == 1 ? 2u : 1u); warning_index += 1)
+                                    {
+                                        check_driver_attribute_argument(parser, pp, named, warning_index == 0 ? CHECK_ARGUMENT_CONVENTION_UNSUPPORTED : CHECK_ARGUMENT_FUNCTIONS_METHODS, 0,
+                                                                        (String8){ "", 0 }, text, sizeof(text));
+                                        if (severity != CHECK_WARNING_IGNORE)
+                                        {
+                                            pp_diagnose_output_at(pp, disposition, at, publication, "%s [%s-Wignored-attributes]", text, error ? "-Werror," : "");
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, at, publication, "invalid PCS type");
+                                }
+                            }
                             arena_pop_to(scratch, type_mark);
                         }
                         else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT && input->reports[index].attribute < count)
