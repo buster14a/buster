@@ -638,8 +638,9 @@ static bool check_query_published(const CheckGraph* graph, const CheckStream* st
            graph->argument_counts[node] == 1 && stream->diagnostics[node] == CHECK_DIAG_NONE;
 }
 
+// `replay`: replay every node whatever the queries' results (CheckOptions.replay_queries).
 static bool check_graph_query_runtime(TypeTable* types, const CheckGraph* graph, CheckStream* stream, Arena* scratch,
-                                      uint8_t* marked, uint32_t* indices, CheckValue* arguments, uint32_t maximum_arguments, bool scalar)
+                                      uint8_t* marked, uint32_t* indices, CheckValue* arguments, uint32_t maximum_arguments, bool scalar, bool replay)
 {
     (void)scalar;
 
@@ -747,7 +748,7 @@ static bool check_graph_query_runtime(TypeTable* types, const CheckGraph* graph,
     // no node's value changes, so the replay would write every other node as the first evaluation did, the vector path
     // and the scalar one being twins, and every side table as it holds it (#1628). Then only the replay's own writes are
     // left: the marked nodes' source warnings and the published queries' effects.
-    bool unchanged = true;
+    bool unchanged = !replay;
     for (uint32_t node = 0; unchanged && node < graph->count; node += 1)
     {
         if (marked[node] != 0 && check_query_published(graph, stream, node))
