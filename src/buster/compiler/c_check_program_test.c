@@ -1977,9 +1977,9 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         }
         if (lowered)
         {
-            if (strcmp(name, "bits-classic-boundary-values") == 0)
+            if (strcmp(name, "bits-classic-boundary-values") == 0 || strcmp(name, "bits-generic-boundary-values") == 0)
             {
-                // The classic bit builtins' rows (#1374, check_lower_bits_row): each count's form the target's, on both paths.
+                // The classic and generic/C23 bit builtins' rows (#1374/#1652): each count's form the target's, on both paths.
                 const uint64_t features = target != NULL ? target->features : 0;
                 static const uint16_t forms[][2] = {
                     { X86_FORM_TZCNT_R32_RM32, X86_FORM_TZCNT_R64_RM64 }, { X86_FORM_BSF_R32_RM32, X86_FORM_BSF_R64_RM64 },
@@ -2013,7 +2013,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                     {
                         exact &= expected[f] ? found[f][0] != 0 && found[f][1] != 0 : found[f][0] == 0 && found[f][1] == 0;
                     }
-                    check_test_expect(test, exact, "the classic bit builtins' rows are the target's forms, of both widths, on both paths");
+                    check_test_expect(test, exact, "the bit builtins' rows are the target's forms, of both widths, on both paths");
                 }
             }
             if (strcmp(name, "overflow-instruction-rows") == 0)
