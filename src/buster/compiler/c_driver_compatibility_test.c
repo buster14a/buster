@@ -368,6 +368,131 @@ static void cc_compat_cleanup(CCCompatibilityTest* test)
     }
 }
 
+// These preprocessing-only fixtures have no string literals or whitespace-sensitive token boundaries. Compare their
+// independent expected spellings with Clang and both Buster kernels, ignoring only printer whitespace.
+static bool cc_compat_language_output(const char* text, const char* expected)
+{
+    bool result = text != NULL;
+    for (size_t i = 0; result && text[i] != 0; i += 1)
+    {
+        const char byte = text[i];
+        if (byte != ' ' && byte != '\t' && byte != '\n' && byte != '\r' && byte != '\f' && byte != '\v')
+        {
+            result = *expected != 0 && byte == *expected;
+            expected += result;
+        }
+    }
+    return result && *expected == 0;
+}
+
+static void cc_compat_preprocessor_languages(CCCompatibilityTest* test)
+{
+    const char* source = "#define N 3\n#ifdef __ASSEMBLER__\nasm_mode\n#else\nc_mode\n#endif\n$N\n";
+    bool files = cc_compat_write(test, "language.c", source) && cc_compat_write(test, "language.S", source) &&
+                 cc_compat_write(test, "language.s", "#error raw assembly must not be preprocessed\n") &&
+                 cc_compat_write(test, "-xassembler-with-cpp.S", source) &&
+                 cc_compat_write(test, "-xassembler-with-cpp", "#define FORCED_LANGUAGE 1\n");
+    cc_compat_expect(test, files, "write positional preprocessing language fixtures");
+    static const struct
+    {
+        const char* name;
+        const char* arguments[16];
+        const char* expected;
+    } cases[] =
+    {
+        { "suffixes select C and preprocessed assembly independently", { "-E", "-P", "language.c", "language.S", NULL }, "c_mode$Nasm_mode$3" },
+        { "suffixes select assembly then C independently", { "-E", "-P", "language.S", "language.c", NULL }, "asm_mode$3c_mode$N" },
+        { "separate -x is positional", { "-E", "-P", "-x", "c", "language.S", "-x", "assembler-with-cpp", "language.c", NULL }, "c_mode$Nasm_mode$3" },
+        { "joined -x and separate none restore suffixes", { "-E", "-P", "-xc", "language.S", "-x", "none", "language.S", "language.c", NULL }, "c_mode$Nasm_mode$3c_mode$N" },
+        { "joined none restores raw and cpp suffixes", { "-E", "-P", "-xassembler-with-cpp", "language.c", "-xnone", "language.s", "language.S", NULL }, "asm_mode$3asm_mode$3" },
+        { "a later -x does not change an earlier input", { "-E", "-P", "language.c", "-xassembler-with-cpp", NULL }, "c_mode$N" },
+        { "raw assembly suffix has no preprocessing action", { "-E", "-P", "language.s", NULL }, "" },
+        { "separate assembler language has no preprocessing action", { "-E", "-P", "-x", "assembler", "language.c", NULL }, "" },
+        { "joined assembler language has no preprocessing action", { "-E", "-P", "-xassembler", "language.S", NULL }, "" },
+        { "an include operand is not a language option", { "-E", "-P", "-include", "-xassembler-with-cpp", "language.c", NULL }, "c_mode$N" },
+        { "a dependency target is not a language option", { "-E", "-P", "-MT", "-xassembler-with-cpp", "language.c", NULL }, "c_mode$N" },
+        { "a filename after -- is not a language option", { "-E", "-P", "--", "-xassembler-with-cpp.S", NULL }, "asm_mode$3" },
+    };
+    for (uint32_t i = 0; files && i < sizeof(cases) / sizeof(cases[0]); i += 1)
+    {
+        CCCompatibilityRun oracle = cc_compat_run(test, test->clang, NULL, cases[i].arguments);
+        cc_compat_expect(test, oracle.status == 0 && cc_compat_language_output(oracle.output, cases[i].expected), cases[i].name);
+        cc_compat_release(&oracle);
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            const char* arguments[18] = { 0 };
+            uint32_t count = 0;
+            if (scalar != 0)
+            {
+                arguments[count++] = "--scalar";
+            }
+            for (uint32_t a = 0; cases[i].arguments[a] != NULL; a += 1)
+            {
+                arguments[count++] = cases[i].arguments[a];
+            }
+            CCCompatibilityRun run = cc_compat_run(test, test->compiler, NULL, arguments);
+            cc_compat_expect(test, run.status == 0 && cc_compat_language_output(run.output, cases[i].expected), cases[i].name);
+            if (run.status != 0)
+            {
+                fprintf(stderr, "  language diagnostics: %s\n", run.errors != NULL ? run.errors : "(missing)");
+            }
+            cc_compat_release(&run);
+        }
+    }
+    const bool kept = cc_compat_write(test, "raw-output.s", "previous output\n");
+    const char* const raw_output[] = { "-E", "language.s", "-o", "raw-output.s", NULL };
+    CCCompatibilityRun raw = cc_compat_run(test, test->compiler, NULL, raw_output);
+    char* previous = cc_compat_read(test, "raw-output.s");
+    cc_compat_expect(test, kept && raw.status == 0 && previous != NULL && strcmp(previous, "previous output\n") == 0,
+                     "raw assembly leaves -o untouched");
+    free(previous);
+    cc_compat_release(&raw);
+    const char* const raw_stdin[] = { "-E", "-xassembler", "-", NULL };
+    raw = cc_compat_run(test, test->compiler, "language.s", raw_stdin);
+    cc_compat_expect(test, raw.status == 0 && raw.output != NULL && raw.output[0] == 0, "raw assembly stdin is not preprocessed");
+    cc_compat_release(&raw);
+    const char* const invalid_language[] = { "-E", "language.c", "-x", "unknown-language", NULL };
+    raw = cc_compat_run(test, test->compiler, NULL, invalid_language);
+    cc_compat_expect(test, raw.status != 0 && raw.output != NULL && raw.output[0] == 0, "invalid later language fails before output");
+    cc_compat_release(&raw);
+    const char* const mixed_zvector[] = { "-E", "-fzvector", "language.S", "language.c", NULL };
+    raw = cc_compat_run(test, test->compiler, NULL, mixed_zvector);
+    cc_compat_expect(test, raw.status != 0 && raw.output != NULL && raw.output[0] == 0,
+                     "assembly-only option exceptions do not bypass a C input's refusal");
+    cc_compat_release(&raw);
+
+    // Reassemble the actual -E text as raw .s, then execute a C consumer. An unexpanded $VALUE becomes a symbol
+    // relocation rather than the intended immediate, so linking and execution catch the original silent change.
+    files = cc_compat_write(test, "roundtrip.S", "#define VALUE 42\n.text\n.globl language_value\n.type language_value,@function\nlanguage_value:\n mov $VALUE, %eax\n ret\n.section .note.GNU-stack,\"\",@progbits\n") &&
+            cc_compat_write(test, "roundtrip.c", "int language_value(void); int main(void) { return language_value() != 42; }\n");
+    const char* const preprocess[] = { "-E", "roundtrip.S", "-o", "roundtrip.s", NULL };
+    CCCompatibilityRun expanded = cc_compat_run(test, test->compiler, NULL, preprocess);
+    cc_compat_expect(test, files && expanded.status == 0, "preprocess .S round-trip source");
+    cc_compat_release(&expanded);
+    const char* sources[] = { "roundtrip.S", "roundtrip.s" };
+    for (uint32_t i = 0; files && i < 2; i += 1)
+    {
+        const char* const assemble[] = { "-c", sources[i], "-o", "roundtrip.o", NULL };
+        CCCompatibilityRun object = cc_compat_run(test, test->compiler, NULL, assemble);
+        cc_compat_expect(test, object.status == 0, "assemble original or preprocessed assembly");
+        if (object.status == 0)
+        {
+            const char* const link[] = { "roundtrip.c", "roundtrip.o", "-o", "roundtrip", NULL };
+            CCCompatibilityRun program = cc_compat_run(test, test->compiler, NULL, link);
+            cc_compat_expect(test, program.status == 0, "link original or preprocessed assembly");
+            if (program.status == 0)
+            {
+                const char* const arguments[] = { NULL };
+                CCCompatibilityRun executed = cc_compat_run(test, "./roundtrip", NULL, arguments);
+                cc_compat_expect(test, executed.status == 0, "original and -E assembly return the same immediate");
+                cc_compat_release(&executed);
+            }
+            cc_compat_release(&program);
+        }
+        cc_compat_release(&object);
+    }
+}
+
 static int driver_compatibility_tests(const char* compiler, const char* clang)
 {
     CCCompatibilityTest test = { .clang = clang != NULL ? clang : "clang" };
@@ -399,6 +524,7 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
         files &= cc_compat_write(&test, "space.c", "#include \"space #$.h\"\nint space;\n");
         files &= cc_compat_write(&test, "main.c", "extern int puts(const char*);\n_Thread_local int local = 7;\nint main(void) { puts(\"CC smoke\"); return local != 7; }\n");
         cc_compat_expect(&test, files, "write CC fixtures");
+        cc_compat_preprocessor_languages(&test);
         const char* const basic[] = { "-M", "./a.c", NULL };
         cc_compat_oracle(&test, "-M defaults and leading ./ normalization", NULL, basic, NULL);
         const char* const system_all[] = { "-M", "-isystem", "sys", "system.c", NULL };

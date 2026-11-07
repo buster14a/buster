@@ -253,6 +253,16 @@ typedef enum PPRawStrings
     PP_RAW_STRINGS_OFF,
 } PPRawStrings;
 
+#include "c_driver_inputs.c"
+
+typedef struct PPDriverInput PPDriverInput;
+struct PPDriverInput
+{
+    char* path;
+    CheckDriverInputKind kind;
+    bool explicit_language;
+};
+
 typedef struct PPOptions PPOptions;
 struct PPOptions
 {
@@ -21236,9 +21246,10 @@ static bool pp_parse_error_limit(const char* argument, uint32_t* output)
     return valid;
 }
 
-// The preprocessor's options from clang-style arguments (the ones -E needs). `input` gets the source file, `output`
-// the -o file (or null), `markers` false for -P. Returns false for an argument it doesn't know.
-BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPOptions* options, Arena* arena, const char** input, const char** output, bool* markers)
+// One option grammar serves the single-input API and -E's ordered input collection. A non-null `inputs` has room for
+// count entries and retains each input's language at that operand; option values and names after -- are never flags.
+// All other options apply to the whole command. Their language-sensitive refusals must hold for every active input.
+static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* options, Arena* arena, const char** input, const char** output, bool* markers, PPDriverInput* inputs, uint32_t* input_count)
 {
     bool result = true;
     const char** quote = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)count + 1);
@@ -21265,6 +21276,8 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     bool implicit_everything = false;
     bool warning_errors = false;
     bool end_options = false;
+    CheckDriverInputKind language = CHECK_DRIVER_INPUT_AUTO;
+    bool assembly_only = inputs != NULL;
     uint32_t dependency_modes = 0;
     // The last -std= or -ansi, the only one clang's driver reads.
     const char* standard = 0;
@@ -21283,12 +21296,23 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
             end_options = true;
             continue;
         }
-        if (end_options)
+        if (end_options || arguments[i][0] != '-' || strcmp(arguments[i], "-") == 0)
         {
-            result = *input == NULL;
+            result = inputs != NULL || *input == NULL;
             if (result)
             {
-                *input = arguments[i];
+                const CheckDriverInput classified = check_driver_classify(arguments[i], language);
+                if (inputs != NULL)
+                {
+                    inputs[(*input_count)++] = (PPDriverInput){ .path = arguments[i], .kind = classified.kind, .explicit_language = language != CHECK_DRIVER_INPUT_AUTO };
+                    assembly_only &= classified.kind == CHECK_DRIVER_INPUT_ASSEMBLY_CPP || classified.kind == CHECK_DRIVER_INPUT_ASSEMBLY;
+                }
+                if (*input == NULL)
+                {
+                    *input = arguments[i];
+                    options->explicit_language = language != CHECK_DRIVER_INPUT_AUTO;
+                    options->assembly = language == CHECK_DRIVER_INPUT_ASSEMBLY_CPP;
+                }
             }
             continue;
         }
@@ -21542,11 +21566,16 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         {
             standard = argument;
         }
-        else if (strcmp(argument, "-x") == 0 && next != 0 && (strcmp(next, "c") == 0 || strcmp(next, "assembler-with-cpp") == 0))
+        else if (strncmp(argument, "-x", 2) == 0)
         {
-            options->explicit_language = true;
-            options->assembly = strcmp(next, "assembler-with-cpp") == 0;
-            i += 1;
+            const char* value = argument[2] != 0 ? argument + 2 : next;
+            i += argument[2] == 0;
+            language = value != NULL ? check_driver_language(value) : CHECK_DRIVER_INPUT_INVALID;
+            result = language != CHECK_DRIVER_INPUT_INVALID;
+            if (!result)
+            {
+                fprintf(stderr, "error: unsupported or missing input language '%s'\n", value != NULL ? value : "");
+            }
         }
         else if ((strcmp(argument, "-o") == 0 || strcmp(argument, "--predefines") == 0 || strcmp(argument, "-include") == 0 || strcmp(argument, "-isystem") == 0 ||
                   strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0) && next != 0)
@@ -21611,10 +21640,6 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
                 }
             }
         }
-        else if ((argument[0] != '-' || strcmp(argument, "-") == 0) && *input == 0)
-        {
-            *input = argument;
-        }
         else
         {
             fprintf(stderr, "unknown argument: %s\n", argument);
@@ -21648,6 +21673,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     options->trigraphs = trigraphs >= 0 ? trigraphs != 0 : !options->language.gnu && options->language.standard < 2023;
     options->macros = macros;
     options->includes = includes;
+    options->assembly = inputs != NULL ? assembly_only : options->assembly;
     // The -f families, after the language mode (pp_settle_families).
     result = result && pp_settle_families(&families, options);
     options->embed_directories = embeds;
@@ -21657,6 +21683,12 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     result = result && predefines_finish(&options->predefines);
     result = result && predefines_target(&options->predefines, &options->target, &options->tune);
     return result && *input != 0;
+}
+
+// The preprocessor's single-input API. Later -x options are validated but do not change the selected input's language.
+BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPOptions* options, Arena* arena, const char** input, const char** output, bool* markers)
+{
+    return pp_parse_options_inputs(count, arguments, options, arena, input, output, markers, NULL, NULL);
 }
 
 static bool pp_option_takes_value(const char* argument);
@@ -21684,44 +21716,25 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
     const char* input = NULL;
     const char* output = NULL;
     bool markers = true;
-    char** filtered = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, (uint64_t)count + 1);
-    char** inputs = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, (uint64_t)count + 1);
+    PPDriverInput* inputs = BUSTER_ARENA_PUSH_ARRAY(&arena, PPDriverInput, (uint64_t)count + 1);
+    char** paths = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, (uint64_t)count + 1);
     DependencyOutput* dependencies = BUSTER_ARENA_PUSH_ARRAY(&arena, DependencyOutput, (uint64_t)count + 1);
     uint32_t input_count = 0;
-    uint32_t filtered_count = 0;
+    uint32_t active_count = 0;
     uint32_t stdin_count = 0;
-    bool end_options = false;
-    for (int i = 0; filtered != NULL && inputs != NULL && i < count; i += 1)
+    bool parsed = inputs != NULL && paths != NULL && dependencies != NULL &&
+                  pp_parse_options_inputs(count, arguments, &options, &arena, &input, &output, &markers, inputs, &input_count);
+    for (uint32_t i = 0; parsed && i < input_count; i += 1)
     {
-        const char* argument = arguments[i];
-        if (!end_options && strcmp(argument, "--") == 0)
+        // Plain assembly has no preprocessing action, including on stdin. Do not read or publish it as C text.
+        if (inputs[i].kind != CHECK_DRIVER_INPUT_ASSEMBLY)
         {
-            end_options = true;
-            filtered[filtered_count++] = arguments[i];
-        }
-        else if (!end_options && pp_option_takes_value(argument))
-        {
-            filtered[filtered_count++] = arguments[i];
-            if (i + 1 < count)
-            {
-                filtered[filtered_count++] = arguments[++i];
-            }
-        }
-        else if (end_options || argument[0] != '-' || strcmp(argument, "-") == 0)
-        {
-            if (input_count == 0)
-            {
-                filtered[filtered_count++] = arguments[i];
-            }
-            inputs[input_count++] = arguments[i];
-            stdin_count += strcmp(argument, "-") == 0;
-        }
-        else
-        {
-            filtered[filtered_count++] = arguments[i];
+            inputs[active_count] = inputs[i];
+            paths[active_count++] = inputs[i].path;
+            stdin_count += strcmp(inputs[i].path, "-") == 0;
         }
     }
-    bool parsed = filtered != NULL && inputs != NULL && dependencies != NULL && pp_parse_options((int)filtered_count, filtered, &options, &arena, &input, &output, &markers);
+    input_count = active_count;
     options.expansion_starts = markers;
     options.defer_history = true;
     if (parsed && ((output != NULL && input_count > 1) || stdin_count > 1))
@@ -21729,7 +21742,7 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
         fprintf(stderr, "error: -o and standard input each require a single output/input respectively\n");
         parsed = false;
     }
-    parsed = parsed && dependency_check_destinations(&options.dependencies, inputs, input_count, output, false, false, &arena);
+    parsed = parsed && dependency_check_destinations(&options.dependencies, paths, input_count, output, false, false, &arena);
     if (parsed && stdin_count != 0)
     {
         parsed = driver_read_stdin(&arena, &options.stdin_source);
@@ -21750,7 +21763,9 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
         result = 0;
         for (uint32_t unit = 0; unit < input_count; unit += 1)
         {
-            input = inputs[unit];
+            input = inputs[unit].path;
+            options.assembly = inputs[unit].kind == CHECK_DRIVER_INPUT_ASSEMBLY_CPP;
+            options.explicit_language = inputs[unit].explicit_language;
             dependencies[unit] = (DependencyOutput){ 0 };
             pp_driver_verbose(&options, input);
             if (!intern_initialize(&table) || !pp_initialize(&pp, &options, &table))

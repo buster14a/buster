@@ -185,6 +185,18 @@ a warning; the foreign reader diagnoses their actual format.
 suffix for following inputs only; `-x none` restores suffix inference. Joined
 `-xLANG` works too. Stdin requires an explicit language at that operand.
 
+The `-E`, `-M` and `-MM` driver uses the same positional language classification:
+`.S` and `-x assembler-with-cpp` enable assembly tokenization and
+`__ASSEMBLER__` for that input alone; `.s` and `-x assembler` have no
+preprocessing action. `-x c` overrides either suffix and `-x none` restores it.
+Preprocessing stdin defaults to C. Option operands never select a language, and
+after `--` every argument is an input filename. The shared option parser collects
+per-input language records once, then each unit initializes its own preprocessor
+from the command's common options and its recorded language. The single-input
+`pp_parse_options` API retains its existing callers and default C behavior.
+`test-checker-driver`'s compatibility cases check mixed language order, both
+kernels, option boundaries and a `.S` preprocessing/reassembly execution round-trip.
+
 C-only commands retain the existing direct path. Mixed commands compile C and
 assembly on the unit scheduler's lanes, retain their ELF objects in memory,
 and use the built-in foreign resolver and writer with the discovered C runtime.
