@@ -173,13 +173,19 @@ struct CheckUnitsRun
     uint32_t started;
 };
 
-// Whether `lane`'s unit gives its scratch's pages back in whole huge pages (CheckProgramOptions.discard_huge, #777),
-// counted on the lane: when a unit of its run is still to be taken, which a lane that finishes its unit takes next,
-// likely this one, pushing as far into its scratch again. The count may lag a take, which only frees a unit's pages in
-// whole huge pages where none was left to take.
+// Whether a unit of `lane`'s run is still to be taken, which a lane that finishes its unit takes next, likely this one,
+// pushing as far into its scratch again. The count may lag a take, which only frees a unit's pages in whole huge pages
+// where none was left to take.
+static bool check_units_unit_left(const CheckUnitsLane* lane)
+{
+    return lane->run != NULL && __atomic_load_n(&lane->run->started, __ATOMIC_RELAXED) < lane->run->count;
+}
+
+// Whether `lane`'s unit gives its scratch's pages back in whole huge pages after check_program
+// (CheckProgramOptions.discard_huge, #777), counted on the lane: when a unit is left (check_units_unit_left).
 static bool check_units_discard_huge(CheckUnitsLane* lane)
 {
-    const bool result = lane->run != NULL && __atomic_load_n(&lane->run->started, __ATOMIC_RELAXED) < lane->run->count;
+    const bool result = check_units_unit_left(lane);
     lane->discarded_huge += result ? 1 : 0;
     return result;
 }
