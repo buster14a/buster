@@ -675,6 +675,15 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
                   "  { int d = a[5]; int e = n / 0; int z = *(int *)0; (void)d; (void)e; (void)z; }\n}\n",
     },
     {
+        // An unreachable initializer's barriers outlive its body's scratch (#1447): the next body's marks and queue
+        // must not reuse them, which made a later body's initialized variables "uninitialized when used here".
+        .name = "unreachable initializer barriers outlive their body",
+        .source = "int f(int n) {\n  return n;\n  int dead = n;\n  return dead;\n}\n"
+                  "int g(int n) {\n  int a = n + 1;\n  if (n > 1) n = a;\n  int b = n + 2;\n  if (n > 2) n = b;\n"
+                  "  int c = n + 3;\n  if (n > 3) n = c;\n  int d = n + 4;\n  if (n > 4) n = d;\n  return n;\n}\n",
+        .options = { "-Wall" },
+    },
+    {
         // A logical operator one operand decides though the other isn't known (#1447, clang's CFG tryEvaluateBool):
         // `x && 0` and `x || 1`, through `!` and casts, prune the arm they leave out for the runtime warnings and for
         // -Wreturn-type alike; `x && (x || 1)` and `x && 1` decide nothing.
