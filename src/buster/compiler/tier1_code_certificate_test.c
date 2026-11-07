@@ -882,6 +882,72 @@ static void tier1_code_certificate_exchange(Tier1EmitTest* test, bool vector, Ti
     arena_pop_to(&test->input, 0);
 }
 
+// A seq_cst source store remains IR_STORE and preserves a desired value live past it. Its certified kernel must retain
+// both the copy into the scratch and the locked memory exchange, including when its return takes a different CFG edge.
+static void tier1_code_certificate_store(Tier1EmitTest* test, bool vector)
+{
+    const IrSizes sizes = { .instruction_count = 9, .block_count = 3, .constant_count = 1, .parameter_count = 3 };
+    IrFunction function;
+    const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+    if (created)
+    {
+        function.result_type = IR_I64;
+        function.parameter_types[0] = IR_PTR;
+        function.parameter_types[1] = IR_I64;
+        function.parameter_types[2] = IR_I64;
+        function.incoming = (AbiCall){ .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .integer_registers = 3 };
+        function.block_offsets[1] = 6;
+        function.block_offsets[2] = 8;
+        function.block_offsets[3] = 9;
+        tier1_select_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 2, IR_PARAM, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 3, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 4, IR_ICMP, IR_I1, 2, 3, IR_NE);
+        tier1_select_test_node(&function, 5, IR_CBR, IR_VOID, 4, 1, 2);
+        tier1_select_test_node(&function, 6, IR_STORE, IR_VOID, 0, 1, BUSTER_IR_NONE);
+        function.flags[6] = BUSTER_IR_ATOMIC | BUSTER_IR_FENCE_SEQ_CST << BUSTER_IR_ORDER_SHIFT;
+        function.alignment_log2[6] = 3;
+        tier1_select_test_node(&function, 7, IR_RET, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 8, IR_RET, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    }
+    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    tier1_emit_test_expect(test, valid, "the code certificate's seq_cst store fixture is valid IR");
+    IrDominance dominance;
+    const bool dominated = valid && tier1_terminal_dominance(test, &function, vector, &dominance);
+    Tier1SelectPlan plan;
+    uint32_t node = BUSTER_IR_NONE;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const Tier1EmitOptions options = { .vector = vector, .certify = true };
+    Tier1EmitResult emitted;
+    const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+    const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
+    tier1_emit_test_expect(test, certified, "a seq_cst store that keeps its desired SSA value passes the emitted-code certificate");
+    uint32_t mutations = 0;
+    for (uint32_t r = 1; certified && r < emitted.code.count; r += 1)
+    {
+        const X86Instruction record = emitted.code.records[r];
+        if (record.form == X86_FORM_XCHG_RM64_R64 && (record.mode & BUSTER_X86_MODE_MEMORY) != 0)
+        {
+            const X86Instruction copy = emitted.code.records[r - 1];
+            const bool preserves = record.reg == BUSTER_TIER1_SELECT_SCRATCH && copy.form == X86_FORM_MOV_R64_RM64 &&
+                                   copy.mode == BUSTER_X86_REGISTER_DIRECT && copy.reg == BUSTER_TIER1_SELECT_SCRATCH && copy.rm != copy.reg;
+            tier1_emit_test_expect(test, preserves, "the seq_cst store copies its live desired value before exchanging the scratch");
+            X86Instruction store = record;
+            store.form = X86_FORM_MOV_RM64_R64;
+            const bool weakened = tier1_code_certificate_refuses(test, &plan, &emitted, r, store, UINT32_MAX);
+            const X86Instruction missing = { .form = X86_FORM_MOV_R64_RM64, .reg = BUSTER_TIER1_SELECT_SCRATCH, .rm = BUSTER_TIER1_SELECT_SCRATCH };
+            const bool stale = tier1_code_certificate_refuses(test, &plan, &emitted, r - 1, missing, UINT32_MAX);
+            tier1_emit_test_expect(test, weakened && stale, "the certificate refuses a seq_cst store weakened to mov or deprived of its desired-value copy");
+            mutations += weakened + stale;
+        }
+    }
+    tier1_emit_test_expect(test, mutations == 2, "both seq_cst store mutants were exercised and refused");
+    arena_pop_to(&test->output, 0);
+    arena_pop_to(&test->scratch, 0);
+    arena_pop_to(&test->input, 0);
+}
+
 // The producer's row owners are assertions, not evidence. Corrupt them without
 // touching the allocation, and corrupt the predecessor's store without changing
 // its metadata: both must be refused even though the register assertion remains.
@@ -1018,6 +1084,7 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
     for (uint32_t variant = 0; variant < 2; variant += 1)
     {
         tier1_code_certificate_exchange(test, variant != 0, &counts);
+        tier1_code_certificate_store(test, variant != 0);
     }
     for (uint32_t variant = 0; variant < 2; variant += 1)
     {

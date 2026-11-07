@@ -215,6 +215,15 @@ static bool check_test_helper_contract(const CheckProgramHelper* helper, const T
     const bool orders = (physical.memory & (BUSTER_X86_MEMORY_EFFECT_FENCE | BUSTER_X86_MEMORY_EFFECT_ATOMIC)) != 0;
     const bool environment = (physical.reads & (BUSTER_X86_RESOURCE_MXCSR | BUSTER_X86_RESOURCE_X87_CONTROL)) != 0;
     const bool raises = (physical.properties & BUSTER_X86_EFFECT_FP_EXCEPTION) != 0;
+    // A source store is write-only. Its memory xchg also reads the old bits into caller-saved RSI, then RET discards
+    // them. Admit that exact body, not an arbitrary helper read or another locked read/modify/write operation.
+    const uint32_t exchange = helper->bytes == 1 ? X86_FORM_XCHG_RM8_R8 : helper->bytes == 2 ? X86_FORM_XCHG_RM16_R16 :
+                              helper->bytes == 4 ? X86_FORM_XCHG_RM32_R32 : helper->bytes == 8 ? X86_FORM_XCHG_RM64_R64 : 0;
+    const bool store_exchange = family == CHECK_PROGRAM_HELPER_ATOMIC_ACCESS && helper->id == CBUILTIN_ATOMIC_STORE_N &&
+                                exchange != 0 && code->count == 2 && code->records != NULL && code->records[0].form == exchange &&
+                                code->records[0].mode == BUSTER_X86_MEMORY_BASE && code->records[0].reg == X86_REGISTER_RSI &&
+                                code->records[0].rm == X86_REGISTER_RDI && code->records[1].form == X86_FORM_RET &&
+                                (physical.memory & BUSTER_X86_MEMORY_EFFECT_ATOMIC) != 0;
     // Every uncovered form a known gap (check_test_helper_unknown_forms), where its contract models every effect.
     const bool known_gap = check_test_helper_unknown_forms(helper, code) == 0;
     const bool ends = physical.traps && !physical.returns;
@@ -235,7 +244,7 @@ static bool check_test_helper_contract(const CheckProgramHelper* helper, const T
     {
         *reason = "its code writes memory its contract doesn't";
     }
-    else if (physical.reads_object && (effects & BUSTER_CHECK_HELPER_READS) == 0 && !unmodeled)
+    else if (physical.reads_object && (effects & BUSTER_CHECK_HELPER_READS) == 0 && !unmodeled && !store_exchange)
     {
         *reason = "its code reads memory its contract doesn't";
     }
@@ -259,12 +268,11 @@ static bool check_test_helper_contract(const CheckProgramHelper* helper, const T
     {
         *reason = "its code doesn't return where its contract does";
     }
-    else if (family == CHECK_PROGRAM_HELPER_ATOMIC_ACCESS && (physical.reads_object != ((effects & BUSTER_CHECK_HELPER_READS) != 0) ||
+    else if (family == CHECK_PROGRAM_HELPER_ATOMIC_ACCESS && (physical.reads_object != (((effects & BUSTER_CHECK_HELPER_READS) != 0) || store_exchange) ||
                                                                physical.writes_object != ((effects & BUSTER_CHECK_HELPER_WRITES) != 0) ||
-                                                               ((effects & BUSTER_CHECK_HELPER_WRITES) != 0 && (physical.memory & BUSTER_X86_MEMORY_EFFECT_FENCE) == 0)))
+                                                               ((effects & BUSTER_CHECK_HELPER_WRITES) != 0 && !store_exchange)))
     {
-        // A load reads its object, and a store writes it and fences: the helpers' seq_cst.
-        *reason = "an atomic load's or store's code doesn't access its object as its contract says, or a store doesn't fence";
+        *reason = "an atomic load doesn't read its object, or a store isn't a locked exchange discarding the old value";
     }
     else if (family == CHECK_PROGRAM_HELPER_ATOMIC_RMW && !physical.writes_object)
     {
