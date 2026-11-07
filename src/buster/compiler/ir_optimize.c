@@ -26,9 +26,9 @@ struct IrOptimizeOptions
     uint32_t passes;
     uint32_t sweep_limit;
     // The caller's requested path. AUTO picks the passes' twin by the function's size (#860): the vector passes'
-    // per-call set-up (the dominator rows and the CFG's pointer jumping, in prepare and again in result verification)
-    // doesn't pay on small functions, so below the measured bound the scalar passes run; the verifier runs its vector
-    // twin at every size, which since #786 is the faster everywhere, unless `scalar` asks for the scalar twins. VECTOR
+    // per-call set-up doesn't pay on small functions, so below the measured bound the scalar passes run. Dominators
+    // use their own AUTO matrix budget, independently of this pass heuristic (#1352); the verifier runs its vector
+    // twin unless `scalar` asks for the scalar twins. VECTOR
     // and SCALAR force a twin on every size: tests and benchmarks request them so each stays checked everywhere.
     uint32_t path;
     // The twin the internals run, resolved from `path` and the function's size by ir_optimize. The modules that call
@@ -1300,7 +1300,8 @@ static __attribute__((aligned(64))) void ir_optimize_dce(IrOptimizeWork* work, I
 // `simd`: admission for callers that model vectors and masks. SCCP, GVN and LICM set it; SROA's default does not.
 // The first SIMD SCCP transfer allocates its sparse wide lattice, so this common preparation stays scalar-sized.
 // `scalar` picks the passes' twin, and `verify_scalar` the verifier's (ir_optimize's AUTO verifies with the vector
-// twin whatever the passes' size bound picks, #786).
+// twin whatever the passes' size bound picks, #786). Dominators follow that explicit caller policy too (#1352),
+// not the pass heuristic: the analysis owns its matrix budget and scalar fallback.
 static __attribute__((aligned(64))) IrCheck ir_optimize_prepare_twins(IrOptimizeWork* work, const IrFunction* function, Arena* output, Arena* scratch, bool scalar, bool verify_scalar, bool simd)
 {
     (void)scalar;
@@ -1343,7 +1344,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare_twins(IrOptimize
         };
         DominatorOptions options = dominators_options();
         options.outputs = 0;
-        options.path = BUSTER_SCALAR_PATH(scalar) ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
+        options.path = BUSTER_SCALAR_PATH(verify_scalar) ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
         const DominatorStatus status = dominators_analyze(scratch, output, &cfg, options, &work->dominators);
         check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_DOMINANCE;
     }

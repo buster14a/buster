@@ -152,13 +152,16 @@ static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified(const I
     IrOptimizeWork work = { 0 };
     IrVerifiedAnalysis candidate = { 0 };
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, options.passes);
+    // Capture the caller's policy before AUTO chooses the transformation passes' twin.
+    const bool verify_scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR || (options.path == BUSTER_IR_OPTIMIZE_AUTO && options.scalar);
+    (void)verify_scalar;
     if (revision->number != UINT64_MAX && output != scratch && analyses != scratch && analyses != output &&
         options.path <= BUSTER_IR_OPTIMIZE_SCALAR &&
         (options.passes & ~(BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG)) == 0)
     {
         options.scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR ||
                          (options.path == BUSTER_IR_OPTIMIZE_AUTO && (options.scalar || ir_optimize_auto_scalar(function)));
-        check = ir_optimize_prepare(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
+        check = ir_optimize_prepare_twins(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), BUSTER_SCALAR_PATH(verify_scalar), true);
     }
     if (check.error == IR_OK)
     {
@@ -217,7 +220,7 @@ static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified(const I
     arena_pop_to(scratch, scratch_mark);
     if (check.error == IR_OK)
     {
-        check = ir_verified_build(&work.statistics.function, analyses, scratch, BUSTER_SCALAR_PATH(options.scalar), &candidate);
+        check = ir_verified_build(&work.statistics.function, analyses, scratch, BUSTER_SCALAR_PATH(verify_scalar), &candidate);
     }
     if (check.error == IR_OK)
     {
