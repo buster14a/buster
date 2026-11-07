@@ -1078,7 +1078,9 @@ static X86Instruction tier1_select_carrier_move(uint8_t destination, uint8_t sou
 }
 
 // TIER1_RULE_INTRINSIC's record: pdep and pext read their source from vvvv and their mask from rm, bzhi and bextr their
-// source from rm and their index or control from vvvv (the IR's a is the source, b the other).
+// source from rm and their index or control from vvvv (the IR's a is the source, b the other). The bit operations
+// (#1374) read their one operand from rm into reg, but bswap, which swaps its rm in place: the destination, where the
+// rule's move put the operand.
 static X86Instruction tier1_select_intrinsic(const Tier1SelectHoles* holes)
 {
     static const uint16_t forms[BUSTER_IR_INTRINSIC_COUNT][2] = {
@@ -1086,14 +1088,22 @@ static X86Instruction tier1_select_intrinsic(const Tier1SelectHoles* holes)
         [BUSTER_IR_INTRINSIC_PEXT] = { X86_FORM_PEXT_R32_R32_RM32, X86_FORM_PEXT_R64_R64_RM64 },
         [BUSTER_IR_INTRINSIC_BZHI] = { X86_FORM_BZHI_R32_RM32_R32, X86_FORM_BZHI_R64_RM64_R64 },
         [BUSTER_IR_INTRINSIC_BEXTR] = { X86_FORM_BEXTR_R32_RM32_R32, X86_FORM_BEXTR_R64_RM64_R64 },
+        [BUSTER_IR_INTRINSIC_TZCNT] = { X86_FORM_TZCNT_R32_RM32, X86_FORM_TZCNT_R64_RM64 },
+        [BUSTER_IR_INTRINSIC_BSF] = { X86_FORM_BSF_R32_RM32, X86_FORM_BSF_R64_RM64 },
+        [BUSTER_IR_INTRINSIC_LZCNT] = { X86_FORM_LZCNT_R32_RM32, X86_FORM_LZCNT_R64_RM64 },
+        [BUSTER_IR_INTRINSIC_BSR] = { X86_FORM_BSR_R32_RM32, X86_FORM_BSR_R64_RM64 },
+        [BUSTER_IR_INTRINSIC_POPCNT] = { X86_FORM_POPCNT_R32_RM32, X86_FORM_POPCNT_R64_RM64 },
+        [BUSTER_IR_INTRINSIC_BSWAP] = { X86_FORM_BSWAP_R32, X86_FORM_BSWAP_R64 },
     };
     const uint32_t operation = holes->immediate < BUSTER_IR_INTRINSIC_COUNT ? (uint32_t)holes->immediate : BUSTER_IR_INTRINSIC_MULHU;
     const bool deposit = operation == BUSTER_IR_INTRINSIC_PDEP || operation == BUSTER_IR_INTRINSIC_PEXT;
+    const bool unary = operation >= BUSTER_IR_INTRINSIC_TZCNT;
+    const bool swap = operation == BUSTER_IR_INTRINSIC_BSWAP;
     return (X86Instruction){
         .form = forms[operation][holes->width == 8],
-        .reg = holes->destination,
-        .vvvv = deposit ? holes->left : holes->right,
-        .rm = deposit ? holes->right : holes->left,
+        .reg = swap ? 0 : holes->destination,
+        .vvvv = unary ? 0 : deposit ? holes->left : holes->right,
+        .rm = swap ? holes->destination : deposit ? holes->right : holes->left,
         .mode = BUSTER_X86_REGISTER_DIRECT,
     };
 }
@@ -1446,6 +1456,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_UD2 });
         break;
     case TIER1_RULE_INTRINSIC:
+        if (holes->immediate == BUSTER_IR_INTRINSIC_BSWAP && destination != holes->left)
+        {
+            tier1_select_append(&result, tier1_select_move(width, destination, holes->left));
+        }
         tier1_select_append(&result, tier1_select_intrinsic(holes));
         break;
     case TIER1_RULE_FENCE:

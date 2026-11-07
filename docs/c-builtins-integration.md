@@ -140,6 +140,46 @@ not grant AVX-512, POPCNT, LZCNT or TZCNT to output code. Zero arguments to clz
 or ctz remain undefined by the source contract, independently of the sequence's
 incidental numeric result. Zero ffs returns zero.
 
+### The bit builtins' instructions (#1374)
+
+The source producer doesn't take the recipes for the byte swaps and counts
+where an instruction computes them: `check_lower_bits_row`
+(`c_check_program_lower.c`) lowers `__builtin_bswap16` to `__builtin_ffsll`
+to an `X86` row of one instruction, as clang -O0's code does, by the function's
+own target (its `-march` and `target` attribute), and keeps
+`c_builtin_lower.c`'s recipe (whose module and tests are unchanged) for
+popcount and parity at a target without POPCNT alone:
+
+| builtin | x86-64 | with the feature |
+| --- | --- | --- |
+| `ctz` | `bsf` | `tzcnt` (BMI) |
+| `clz` | `bsr`, then `xor` with the width less one | `lzcnt` (LZCNT) |
+| `popcount` | the recipe | `popcnt` (POPCNT) |
+| `parity` | the recipe | `popcnt`, then `and 1` |
+| `ffs` | `bsf`, plus one, times whether the operand isn't 0 | `tzcnt`, likewise |
+| `bswap16/32/64` | the operand moved into the result's register and `bswap` there (`bswap16`'s 32-bit swap shifted right by 16) | |
+
+`bsf`, `bsr`, `tzcnt` and `lzcnt` agree on every operand but 0, whose ctz and
+clz the source leaves undefined; `ffs`'s product makes its 0 whatever the
+count's instruction gives. A row's operand is the parameter's class (`bswap16`'s
+zero-extended to 32 bits), its result an int's, or the byte swap's unsigned
+class, and the steps after it (the `xor`, the `and`, the sum and product, the
+shift) are ordinary typed entries, which Tier 0 fuses as any. A function with
+such a row is one with vectors (`Tier0Function.vectors`), as any function with
+an `X86` entry is. The IR takes each row as its intrinsic (`tzcnt`, `bsf`,
+`lzcnt`, `bsr`, `popcnt`, `bswap`: [the IR guide](ir.md)'s "Intrinsics"), a
+pure operation rather than a row call, and the typed stream's interpreter
+evaluates the rows by the same intrinsics' semantics (`ir_intrinsic_bits`).
+`test-checker --program-bits` runs every one of them of boundary values at
+`x86-64`, `x86-64-v2`, `x86-64-v3` and `znver5` by both paths against clang -O0's
+build at the same `-march`, and checks that the rows' forms are the target's;
+`test-checker-driver`'s Tier 1 fixture of them does so for `--tier1` at the
+first three.
+
+On the issue's kernel (`__builtin_popcountl(x) + __builtin_ctzl(x | 1) +
+__builtin_clzl(x | 1)` for 20 M values, and the byte swaps of #1374's comment),
+the measurement is in the pull request's record.
+
 Tier 0 can consume the complete ordinary-width recipes. The current separate
 Tier 1 pipeline only supports a subset: straight-line 32/64-bit integer and
 pointer operations, fixed shifts and 32/64-bit memory accesses. Narrow stores,

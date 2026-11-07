@@ -359,6 +359,50 @@ static void ir_test_simd_lane_execution(IrTestTally* test, Arena* output, Arena*
     }
 }
 
+// The bit operations' intrinsics (#1374): one operand, an I32 or an I64 of the result's type, and no second one.
+static void ir_test_bit_intrinsics(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    for (uint32_t operation = BUSTER_IR_INTRINSIC_TZCNT; operation < BUSTER_IR_INTRINSIC_COUNT; operation += 1)
+    {
+        for (uint32_t type = IR_I1; type < IR_TYPE_COUNT; type += 1)
+        {
+            IrFunction function = {0};
+            const IrSizes sizes = {
+                .instruction_count = 3,
+                .block_count = 1,
+                .parameter_count = 1,
+            };
+            const bool created = ir_create(output, &sizes, &function) == IR_OK;
+            ir_test_expect(test, created, "bit intrinsic verifier fixture allocation");
+            if (created)
+            {
+                const bool admitted = type == IR_I32 || type == IR_I64;
+                function.result_type = IR_VOID;
+                function.parameter_types[0] = (uint8_t)type;
+                function.block_offsets[1] = 3;
+                ir_test_instruction(&function, 0, IR_PARAM, (IrType)type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 1, IR_INTRINSIC, (IrType)type, 0, BUSTER_IR_NONE, operation);
+                ir_test_instruction(&function, 2, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_pair(test, &function, scratch, NULL, admitted, "a bit intrinsic takes an I32 or an I64 operand of its result's type");
+                if (admitted)
+                {
+                    ir_test_expect(test, ir_operand_count(&function, 1) == 1 && ir_value_mask(&function, 1) == 1, "a bit intrinsic has one SSA use");
+                    function.b[1] = 0;
+                    ir_test_pair(test, &function, scratch, NULL, false, "a bit intrinsic refuses a second operand");
+                    function.b[1] = BUSTER_IR_NONE;
+                    function.type[1] = type == IR_I32 ? IR_I64 : IR_I32;
+                    ir_test_pair(test, &function, scratch, NULL, false, "a bit intrinsic's result has its operand's type");
+                    function.type[1] = (uint8_t)type;
+                    function.c[1] = BUSTER_IR_INTRINSIC_COUNT;
+                    ir_test_pair(test, &function, scratch, NULL, false, "an intrinsic past the operations is refused");
+                }
+            }
+            arena_pop_to(output, mark);
+        }
+    }
+}
+
 static void ir_test_splats(IrTestTally* test, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
@@ -421,6 +465,7 @@ static void ir_test_splats(IrTestTally* test, Arena* output, Arena* scratch)
 
 static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
 {
+    ir_test_bit_intrinsics(test, output, scratch);
     ir_test_splats(test, output, scratch);
     ir_test_simd_bitcasts(test, output, scratch);
     ir_test_simd_rows(test, output, scratch);

@@ -328,7 +328,8 @@ AVX-512"). By `--tier1 -march=native`, main.c compiles every function by Tier 1
 but its naked one. The scalar ones, BMI2's
 `pdep`, `pext` and `bzhi` and BMI1's `bextr`, are the IR's `intrinsic` (#141,
 [the SIMD IR guide](ir-simd.md)'s "Scalar x86 builtins"), each one VEX
-instruction of selection's `TIER1_RULE_INTRINSIC`.
+instruction of selection's `TIER1_RULE_INTRINSIC`, and so are the C bit builtins'
+rows (#1374: `tzcnt`, `bsf`, `lzcnt`, `bsr`, `popcnt` and `bswap`).
 
 ### Inlining (#1282)
 

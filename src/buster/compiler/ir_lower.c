@@ -715,10 +715,26 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
     return value;
 }
 
-// A scalar BMI instruction's row (#141, ir_simd_typed_intrinsic) as its IR intrinsic of the operands its record places.
+// A scalar BMI instruction's row (#141, ir_simd_typed_intrinsic) as its IR intrinsic of the operands its record places;
+// a bit builtin's (#1374, ir_simd_typed_bits) as its intrinsic of its operand's type, a count of 64 bits narrowed to its
+// result's type.
 static __attribute__((always_inline)) inline uint32_t ir_typed_intrinsic(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands)
 {
-    return ir_typed_emit(sink, IR_INTRINSIC, type, operands[operation->intrinsic_operands[0]], operands[operation->intrinsic_operands[1]], operation->intrinsic - 1u, 0);
+    uint32_t value = BUSTER_IR_NONE;
+    if (operation->operand_count == 1)
+    {
+        const IrType source = (IrType)ir_typed_types[operation->operand_classes[0]];
+        value = ir_typed_emit(sink, IR_INTRINSIC, source, operands[0], BUSTER_IR_NONE, operation->intrinsic - 1u, 0);
+        if (source != type)
+        {
+            value = ir_typed_emit(sink, IR_TRUNC, type, value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        }
+    }
+    else
+    {
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[operation->intrinsic_operands[0]], operands[operation->intrinsic_operands[1]], operation->intrinsic - 1u, 0);
+    }
+    return value;
 }
 
 static __attribute__((always_inline)) inline uint32_t ir_typed_splat(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, uint32_t scalar)

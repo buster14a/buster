@@ -720,8 +720,9 @@ static void ssa_source_file(SsaSourceTotals* totals, const char* name, char** op
     for (uint32_t f = 0; checked && f < file.count; f += 1)
     {
         const IrSourceFunction* source = &file.functions[f];
-        const IrCheck lowered = ir_lower_typed(source->function, source->result_type, source->symbol_count, &arenas->forms[BUSTER_SSA_SOURCE_MEMORY], &arenas->scratch,
-                                               &forms[BUSTER_SSA_SOURCE_MEMORY][f]);
+        // At the function's own target (IrSourceFunction.target_features), whose rows' forms (#1374's bit builtins') it takes.
+        const IrCheck lowered = ir_lower_typed_target(source->function, source->result_type, source->symbol_count, source->target_features,
+                                                      &arenas->forms[BUSTER_SSA_SOURCE_MEMORY], &arenas->scratch, &forms[BUSTER_SSA_SOURCE_MEMORY][f]);
         bool promoted = lowered.error == IR_OK;
         IrCheck failed = lowered;
         const char* rule = "lowering";
