@@ -1470,6 +1470,10 @@ struct ParseMeanings
     uint32_t capacity;
     // The scalar parser reads attribute spellings only where they decide declaration versus statement syntax.
     const InternTable* table;
+    // availability's and external_source_symbol's names, and their keyword spellings (#1447), found once in `table` where the
+    // meanings are made (0 for a name the unit doesn't have): parse_flag_custom_attributes reads these, not the table, which
+    // a caller may have released by then (the parser benchmark's is).
+    IdentId custom_attributes[4];
 };
 
 typedef struct ParseScalar ParseScalar;
@@ -12641,13 +12645,11 @@ static bool parse_statements_vector(ParseKernels* kernels, uint32_t count, Parse
 // (nearly every one: the interner finds no such name) looks at no token; one that has them, 16 tokens a compare.
 static void parse_flag_custom_attributes(ParseKernels* kernels, const ParseInput* input)
 {
-    static const char* const spellings[4] = { "availability", "__availability__", "external_source_symbol", "__external_source_symbol__" };
-    const InternTable* table = input->meanings != NULL ? input->meanings->table : NULL;
     IdentId names[4] = { 0, 0, 0, 0 };
     bool any = false;
-    for (uint32_t s = 0; table != NULL && s < 4; s += 1)
+    for (uint32_t s = 0; input->meanings != NULL && s < 4; s += 1)
     {
-        names[s] = intern_find(table, (const uint8_t*)spellings[s], (uint32_t)strlen(spellings[s]));
+        names[s] = input->meanings->custom_attributes[s];
         any |= names[s] != 0;
     }
     const uint32_t count = input->count;
@@ -13227,6 +13229,11 @@ static bool parse_prepare_meanings(Parser* parser, InternTable* table)
     parser->meanings.meanings = !result ? 0 : capacity <= parser->meaning_room ? parser->meaning_column : parse_column(parser, 9, capacity, 1);
     parser->meanings.capacity = capacity;
     parser->meanings.table = table;
+    static const char* const custom_spellings[4] = { "availability", "__availability__", "external_source_symbol", "__external_source_symbol__" };
+    for (uint32_t s = 0; s < 4; s += 1)
+    {
+        parser->meanings.custom_attributes[s] = intern_find(table, (const uint8_t*)custom_spellings[s], (uint32_t)strlen(custom_spellings[s]));
+    }
     result = result && parser->meanings.meanings != 0;
     if (result)
     {
