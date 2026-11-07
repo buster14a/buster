@@ -4652,7 +4652,9 @@ static int check_driver_one_unit(const CheckDriverRun* run)
     static CheckDeferred deferred;
     const bool interned = intern_initialize(&identifiers);
     DependencyOutput dependency = { 0 };
-    int result = check_driver_unit(run->command, &run->command->options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
+    PPOptions options = run->command->options;
+    options.preprocessed = run->command->inputs != NULL && run->command->inputs[0].preprocessed;
+    int result = check_driver_unit(run->command, &options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
                                   run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, stderr, NULL, run->release, &dependency, run->arena,
                                   run->command->deferred_bodies ? &deferred : NULL, NULL);
     if (result == 0)

@@ -284,6 +284,8 @@ struct PPOptions
     PPStreamInput* streams;
     uint32_t stream_count;
     bool explicit_language;
+    // A .i input is already preprocessed. Tokens copied to the output are not expanded again; directives still run.
+    bool preprocessed;
     bool verbose;
     // The checker's implicit-function diagnostic: 0 follows the language mode, 1 ignores, 2 warns, 3 errors.
     uint8_t implicit_function_diagnostic;
@@ -7155,7 +7157,7 @@ static uint32_t pp_copy_file_text_vector(Preprocessor* pp, const PPFileData* dat
                 const PPMacro* macro = &pp->macros[pp->macro_of[value]];
                 const PPFileData* body = &pp->datas[macro->data];
                 const uint32_t b = macro->body_begin;
-                const bool direct = (macro->flags & (BUSTER_PP_MACRO_FUNCTION | BUSTER_PP_MACRO_BUILTIN | BUSTER_PP_MACRO_PASTES)) == 0 && macro->disabled == 0 &&
+                const bool direct = !pp->options.preprocessed && (macro->flags & (BUSTER_PP_MACRO_FUNCTION | BUSTER_PP_MACRO_BUILTIN | BUSTER_PP_MACRO_PASTES)) == 0 && macro->disabled == 0 &&
                                     macro->body_end - b == 1 && ((body->kinds[b] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro_vector(pp, body->values[b]));
                 if (!direct)
                 {
@@ -12766,7 +12768,26 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
             }
             context->position = stop;
             more = false;
-            if (stop < run_end && !pp->fatal)
+            // _Pragma is the one builtin still valid in already-preprocessed text: it is an operator, not a macro to
+            // keep literal, so it expands as it does in any file (#1552's review). values[] is an IdentId only for a
+            // raw identifier; anything else the run stopped on is an offset, not an index into macro_of.
+            const PPMacroId stopped_macro = stop < run_end && (data->kinds[stop] & 0x7F) == C_TOKEN_RAW_IDENTIFIER ? pp->macro_of[data->values[stop]] : 0;
+            const bool pragma = stopped_macro != 0 && pp->macros[stopped_macro].builtin == PP_BUILTIN_PRAGMA;
+            if (stop < run_end && !pp->fatal && pp->options.preprocessed && pp_target(pp) == &pp->output && !pragma)
+            {
+                // The file was already expanded. Keep the macro's name as an identifier. #if still expands, because
+                // that capture is not the output.
+                PPToken token = pp_file_token(data, base, context->position);
+                if (context->pending_flags != 0)
+                {
+                    token.flags = pp_with_pending(token.flags, context->pending_flags, true);
+                    context->pending_flags = 0;
+                }
+                context->position += 1;
+                pp_emit(pp, token);
+                more = context->position < limit && !pp->fatal;
+            }
+            else if (stop < run_end && !pp->fatal)
             {
                 more = BUSTER_VECTOR_PATH(pp->vectorized) && pp_expand_file_direct(pp, context, data, base);
                 // A simple invocation whose expansion goes straight into the output, after which the main loop's next step
@@ -18172,7 +18193,7 @@ static uint32_t pp_predefines(const PPOptions* options, char* buffer, uint32_t* 
     {
         length += (uint32_t)sprintf(buffer + length, "#define __STRICT_ANSI__ 1\n");
     }
-    else if (!options->undefine)
+    else if (!options->undefine && !options->preprocessed)
     {
         length += (uint32_t)sprintf(buffer + length, "#define linux 1\n#define unix 1\n");
     }
@@ -18896,6 +18917,91 @@ static const char* pp_read_error(const Preprocessor* pp, uint32_t file)
 // Runs what comes before the main file: the predefines (or PPOptions.predefines_path's), then the command line's -D,
 // -U and -include. Returns false, after a fatal error, if the predefines can't be read, a part of the prelude can't be
 // made (out of memory, or the unit's files table full) or running a part was fatal; the parts after it don't run.
+// Bytes of `text` before a newline, less any backslashes at its end: the synthesized directive's own newline must not
+// be a line splice's other half, which would join the next directive onto this one's last line.
+static uint32_t pp_command_line_length(const char* text)
+{
+    uint32_t length = 0;
+    while (text[length] != 0 && text[length] != '\n' && text[length] != '\r')
+    {
+        length += 1;
+    }
+    while (length != 0 && text[length - 1] == '\\')
+    {
+        length -= 1;
+    }
+    return length;
+}
+
+// Whether `path` can be pasted as `#include "..."`'s spelling: no '"' to end the literal, no newline to break the
+// directive, and no '\' whose escape would change the name (a trailing one would splice the next line).
+static bool pp_command_include_safe(const char* path)
+{
+    bool safe = true;
+    for (uint32_t i = 0; safe && path[i] != 0; i += 1)
+    {
+        safe = path[i] != '"' && path[i] != '\\' && path[i] != '\n' && path[i] != '\r';
+    }
+    return safe;
+}
+
+// A raw -include's file run with the parentage a synthesized `#include` inside <built-in> would give it: entered at
+// include depth 1 under a <built-in> range, so __INCLUDE_LEVEL__ is 1, the __BASE_FILE__ root walk names <built-in>,
+// and #include_next resumes the search the raw lookup made. The <built-in> file is made, entered and popped for its
+// range alone — its dead conditional gives the range a span — then the depth the popped context would have kept is
+// added by hand for the raw file's run.
+static bool pp_command_include_raw(Preprocessor* pp, const char* path)
+{
+    bool result = true;
+    const bool newline = strpbrk(path, "\n\r") != NULL;
+    if (newline)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, 0, "-include path contains a newline");
+        result = false;
+    }
+    else
+    {
+        uint32_t found_in = 0;
+        const uint64_t bytes = strlen(path);
+        // A quoted include searches the includer's directory first. The command line has none, so "." stands in for it.
+        const uint32_t anchor = pp_virtual_file(pp, ".", "", 0, BUSTER_PP_USER_FILE);
+        const uint32_t file = bytes <= UINT32_MAX && anchor != BUSTER_PP_NONE ? pp_find_include(pp, (const uint8_t*)path, (uint32_t)bytes, false, false, anchor, 0, &found_in, 0) : BUSTER_PP_NONE;
+        if (file == BUSTER_PP_NONE && !pp->fatal)
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "'%s' file not found", path);
+        }
+        if (file != BUSTER_PP_NONE)
+        {
+            const uint32_t built_in = pp_virtual_file(pp, "<built-in>", "#if 0\n#endif\n", 13, BUSTER_PP_USER_FILE);
+            uint32_t built_in_range = BUSTER_PP_NONE;
+            const uint32_t depth = pp->context_count;
+            if (built_in != BUSTER_PP_NONE)
+            {
+                pp_enter_file(pp, built_in, BUSTER_PP_NONE, 0, BUSTER_PP_NONE, 0, 0);
+                PPContext* base = pp->context_count != 0 ? &pp->contexts[pp->context_count - 1] : 0;
+                if (base != 0 && base->kind == BUSTER_PP_CONTEXT_FILE && base->file == built_in)
+                {
+                    built_in_range = base->range;
+                }
+                pp_pop_context(pp);
+            }
+            if (built_in_range != BUSTER_PP_NONE && pp->context_count == depth)
+            {
+                pp->include_depth += 1;
+                pp_enter_file(pp, file, built_in_range, pp->ranges[built_in_range].base, found_in, 0, 0);
+                pp_run_contexts(pp, depth);
+            }
+            else
+            {
+                pp_run_file(pp, file);
+            }
+        }
+        result = file != BUSTER_PP_NONE && !pp->fatal;
+    }
+    return result;
+}
+
+// Runs the main file, then gives the output's keywords their kinds. Returns false if there were errors.
 static bool pp_run_prelude(Preprocessor* pp)
 {
     bool result = true;
@@ -18960,18 +19066,33 @@ static bool pp_run_prelude(Preprocessor* pp)
         for (uint32_t i = 0; i < pp->options.macro_count; i += 1)
         {
             const char* macro = pp->options.macros[i];
-            const char* equals = strchr(macro + 1, '=');
+            const uint32_t line = pp_command_line_length(macro + 1);
+            // `line` lost any backslashes spliced onto the break, so the break's presence is asked of the text itself:
+            // a -D ending in one has text cut but no embedded newline to warn of.
+            const bool cut = strpbrk(macro + 1, "\n\r") != NULL;
+            const char* equals = memchr(macro + 1, '=', line);
+            if (cut)
+            {
+                const uint32_t name = equals != NULL ? (uint32_t)(equals - (macro + 1)) : line;
+                // A warning like the preprocessor's others: -w silences it, -Werror promotes it (negative_conversion_error
+                // is pp_parse_options' -Werror). ALWAYS: the command line is no system header, and location 0 would read as
+                // one to the visibility gate.
+                const PPSeverity severity = pp->options.negative_conversion_error && !pp->options.suppress_warnings ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING_ALWAYS;
+                pp_diagnose(pp, severity, 0, "macro '%.*s' contains embedded newline; text after the newline is ignored", (int)name, macro + 1);
+            }
             if (macro[0] == 'U')
             {
-                length += (uint64_t)sprintf(command_line + length, "#undef %s\n", macro + 1);
+                length += (uint64_t)sprintf(command_line + length, "#undef %.*s\n", (int)line, macro + 1);
             }
-            else if (equals != 0)
+            else if (equals != NULL)
             {
-                length += (uint64_t)sprintf(command_line + length, "#define %.*s %s\n", (int)(equals - macro - 1), macro + 1, equals + 1);
+                const uint32_t name = (uint32_t)(equals - (macro + 1));
+                const uint32_t body = pp_command_line_length(equals + 1);
+                length += (uint64_t)sprintf(command_line + length, "#define %.*s %.*s\n", (int)name, macro + 1, (int)body, equals + 1);
             }
             else
             {
-                length += (uint64_t)sprintf(command_line + length, "#define %s 1\n", macro + 1);
+                length += (uint64_t)sprintf(command_line + length, "#define %.*s 1\n", (int)line, macro + 1);
             }
         }
         const uint32_t file = pp_virtual_file(pp, "<command line>", command_line, (uint32_t)length, BUSTER_PP_USER_FILE);
@@ -18990,27 +19111,60 @@ static bool pp_run_prelude(Preprocessor* pp)
     // after the command line's macros, which __BASE_FILE__ in a forced header gives. Without -include there is no file.
     if (result && pp->options.include_count != 0)
     {
-        uint64_t length = 0;
-        for (uint32_t i = 0; i < pp->options.include_count; i += 1)
+        bool raw = false;
+        for (uint32_t i = 0; !raw && i < pp->options.include_count; i += 1)
         {
-            length += (uint64_t)sprintf(command_line + length, "#include \"%s\"\n", pp->options.includes[i]);
+            raw = !pp_command_include_safe(pp->options.includes[i]);
         }
-        const uint32_t includes = pp_virtual_file(pp, "<built-in>", command_line, (uint32_t)length, BUSTER_PP_USER_FILE);
-        result = includes != BUSTER_PP_NONE;
-        if (result)
+        if (!raw)
         {
-            pp_run_file(pp, includes);
-            result = !pp->fatal;
+            uint64_t length = 0;
+            for (uint32_t i = 0; i < pp->options.include_count; i += 1)
+            {
+                length += (uint64_t)sprintf(command_line + length, "#include \"%s\"\n", pp->options.includes[i]);
+            }
+            const uint32_t includes = pp_virtual_file(pp, "<built-in>", command_line, (uint32_t)length, BUSTER_PP_USER_FILE);
+            result = includes != BUSTER_PP_NONE;
+            if (result)
+            {
+                pp_run_file(pp, includes);
+                result = !pp->fatal;
+            }
+            else
+            {
+                pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't make the file of the command line's -include options: %s", pp_virtual_file_error(pp));
+            }
         }
         else
         {
-            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't make the file of the command line's -include options: %s", pp_virtual_file_error(pp));
+            for (uint32_t i = 0; result && i < pp->options.include_count; i += 1)
+            {
+                const char* path = pp->options.includes[i];
+                if (pp_command_include_safe(path))
+                {
+                    const uint64_t length = (uint64_t)sprintf(command_line, "#include \"%s\"\n", path);
+                    const uint32_t includes = pp_virtual_file(pp, "<built-in>", command_line, (uint32_t)length, BUSTER_PP_USER_FILE);
+                    result = includes != BUSTER_PP_NONE;
+                    if (result)
+                    {
+                        pp_run_file(pp, includes);
+                        result = !pp->fatal;
+                    }
+                    else
+                    {
+                        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't make the file of the command line's -include options: %s", pp_virtual_file_error(pp));
+                    }
+                }
+                else
+                {
+                    result = pp_command_include_raw(pp, path);
+                }
+            }
         }
     }
     return result;
 }
 
-// Runs the main file, then gives the output's keywords their kinds. Returns false if there were errors.
 static bool pp_run_main(Preprocessor* pp, uint32_t file)
 {
     pp->main_file = file;
@@ -22005,6 +22159,13 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
         {
             warning_errors = strcmp(argument, "-Werror") == 0;
         }
+        else if (strcmp(argument, "-fpreprocessed") == 0)
+        {
+            // Rejected as an option here, where operands of value options were already skipped, rather than by scanning
+            // the filtered vector, which keeps operands and post-`--` inputs (#1552's review).
+            fprintf(stderr, "error: unsupported option '-fpreprocessed' (already-preprocessed input is not read that way)\n");
+            result = false;
+        }
         else if (strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0)
         {
             // The other code generation and warning options: none changes what -E gives (predefines_option takes the
@@ -22156,6 +22317,15 @@ static void pp_driver_verbose(const PPOptions* options, const char* input)
 
 // `compiler -E/-M/-MM`: option operands are never inputs or actions. Each input has a private preprocessor and rule;
 // explicit -o requires a single input, while shared -MF publication follows argv order after all units succeed.
+// `.i` with no explicit -x is already preprocessed. `-x c file.i` stays ordinary C; -E's one -x applies to every input.
+static bool pp_suffix_preprocessed(const char* path, bool explicit_language)
+{
+    const char* slash = path != NULL ? strrchr(path, '/') : NULL;
+    const char* name = slash != NULL ? slash + 1 : path;
+    const char* dot = name != NULL ? strrchr(name, '.') : NULL;
+    return !explicit_language && dot != NULL && strcmp(dot, ".i") == 0;
+}
+
 static __attribute__((unused)) int run_preprocessor_command_mode(int count, char** arguments, bool release)
 {
     arena_failure = (ArenaFailure){ 0 };
@@ -22217,6 +22387,7 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
             options.assembly = inputs[unit].kind == CHECK_DRIVER_INPUT_ASSEMBLY_CPP;
             options.explicit_language = inputs[unit].explicit_language;
             dependencies[unit] = (DependencyOutput){ 0 };
+            options.preprocessed = pp_suffix_preprocessed(input, options.explicit_language);
             pp_driver_verbose(&options, input);
             if (!intern_initialize(&table) || !pp_initialize(&pp, &options, &table))
             {

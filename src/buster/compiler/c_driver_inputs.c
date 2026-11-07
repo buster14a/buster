@@ -23,6 +23,8 @@ struct CheckDriverInput
     CheckDriverInputKind kind;
     uint32_t argument;
     bool unknown;
+    // .i, and no explicit -x: the text is already preprocessed.
+    bool preprocessed;
 };
 
 static CheckDriverInputKind check_driver_language(const char* name)
@@ -56,9 +58,14 @@ static CheckDriverInput check_driver_classify(const char* path, CheckDriverInput
         const char* name = slash != NULL ? slash + 1 : path;
         const char* suffix = strrchr(name, '.');
         result.kind = CHECK_DRIVER_INPUT_LINK;
-        if (suffix != NULL && (strcmp(suffix, ".c") == 0 || strcmp(suffix, ".h") == 0 || strcmp(suffix, ".i") == 0))
+        if (suffix != NULL && (strcmp(suffix, ".c") == 0 || strcmp(suffix, ".h") == 0))
         {
             result.kind = CHECK_DRIVER_INPUT_C;
+        }
+        else if (suffix != NULL && strcmp(suffix, ".i") == 0)
+        {
+            result.kind = CHECK_DRIVER_INPUT_C;
+            result.preprocessed = true;
         }
         else if (suffix != NULL && (strcmp(suffix, ".s") == 0 || strcmp(suffix, ".S") == 0))
         {
