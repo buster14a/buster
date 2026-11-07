@@ -143,6 +143,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   comparison pairs and unparenthesized bitwise chains (#1390). Parenthesized operands retain their explicit
   grouping. Original default-warning fixtures compare complete diagnostics and independent counts against
   pinned Clang through scalar/vector and one/three-lane readers, including warning promotion and suppression.
+  Explicit void casts on a conditional arm's value path suppress the conditional's unused-result marker (#1390).
+  The existing postorder conditional/comma and selected-value facts carry that discard intent through nested
+  arms and transparent GNU/generic wrappers, while inner comma and division diagnostics still run.
+  `c_check_void_conditional_driver_test.c` covers those boundaries,
+  scalar-result controls, for clauses, macros and source policy through default, scalar and deferred readers.
   `c_check_return_flow.c` supplies source return-warning facts for checked graphs. Ordinary direct calls no longer
   suppress a function's `-Wreturn-type` warning; a proven direct `noreturn` call or terminating builtin ends only its
   own warning-flow edge. Short circuit, conditional and unevaluated operands retain their execution rules, and
