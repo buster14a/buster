@@ -400,6 +400,59 @@ static void cc_compat_language_expect(CCCompatibilityTest* test, const char* nam
     }
 }
 
+// A raw forced header may be skipped without pushing a context. Later ordinary forced headers still start at level 1.
+static void cc_compat_forced_include_depth(CCCompatibilityTest* test)
+{
+    static const char* const headers[] = { "once\"1616.h", "guard\"1616.h", "plain\"1616.h" };
+    const bool written = cc_compat_write(test, "once\"1616.h", "#pragma once\n#if __INCLUDE_LEVEL__ != 1\n#error raw_depth\n#endif\n#define RAW_VISITED_1616 1\n") &&
+                         cc_compat_write(test, "guard\"1616.h", "#ifndef RAW_GUARD_1616\n#define RAW_GUARD_1616\n#if __INCLUDE_LEVEL__ != 1\n#error raw_depth\n#endif\n#define RAW_VISITED_1616 1\n#endif\n") &&
+                         cc_compat_write(test, "plain\"1616.h", "#if __INCLUDE_LEVEL__ != 1\n#error raw_depth\n#endif\n#define RAW_VISITED_1616 1\n") &&
+                         cc_compat_write(test, "depth1616.h", "#if __INCLUDE_LEVEL__ != 1\n#error safe_depth\n#endif\n#include \"depth-child1616.h\"\n") &&
+                         cc_compat_write(test, "depth-child1616.h", "#if __INCLUDE_LEVEL__ != 2\n#error child_depth\n#endif\n") &&
+                         cc_compat_write(test, "forced1616.c", "#if __INCLUDE_LEVEL__ != 0\n#error main_depth\n#endif\n#ifndef RAW_VISITED_1616\n#error missing_raw_header\n#endif\nint forced_depth1616=RAW_VISITED_1616;\n");
+    cc_compat_expect(test, written, "raw forced-include depth fixtures are written");
+    for (uint32_t h = 0; written && h < sizeof(headers) / sizeof(headers[0]); h += 1)
+    {
+        for (uint32_t action = 0; action < 2; action += 1)
+        {
+            for (uint32_t route = 0; route < 3; route += 1)
+            {
+                const char* arguments[16] = { "-std=gnu17", action != 0 ? "-E" : "-fsyntax-only" };
+                uint32_t used = 2;
+                if (action != 0)
+                {
+                    arguments[used++] = "-P";
+                }
+                arguments[used++] = "-include";
+                arguments[used++] = headers[h];
+                arguments[used++] = "-include";
+                arguments[used++] = headers[h];
+                arguments[used++] = "-include";
+                arguments[used++] = "depth1616.h";
+                arguments[used++] = "forced1616.c";
+                if (route == 2)
+                {
+                    arguments[used++] = "--scalar";
+                }
+                arguments[used] = NULL;
+                CCCompatibilityRun run = cc_compat_run(test, route == 0 ? test->clang : test->compiler, NULL, arguments);
+                const char* expected = action != 0 ? "intforced_depth1616=1;" : "";
+                const bool good = run.status == 0 && run.errors != NULL && run.errors[0] == 0 &&
+                                  cc_compat_language_output(run.output, expected);
+                char description[256];
+                snprintf(description, sizeof(description), "repeated %s preserves later include levels, action %u route %u", headers[h], action, route);
+                cc_compat_expect(test, good, description);
+                if (!good)
+                {
+                    fprintf(stderr, "  status %d\n  stdout: %s\n  stderr: %s\n", run.status,
+                            run.output != NULL ? run.output : "(missing)", run.errors != NULL ? run.errors : "(missing)");
+                }
+                cc_compat_release(&run);
+            }
+        }
+    }
+}
+
 static void cc_compat_preprocessor_languages(CCCompatibilityTest* test)
 {
     const char* source = "#define N 3\n#ifdef __ASSEMBLER__\nasm_mode\n#else\nc_mode\n#endif\n$N\n";
@@ -1083,6 +1136,7 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
             fprintf(stderr, "  raw include base output: %s\n", base_run.output != NULL ? base_run.output : "(missing)");
         }
         cc_compat_release(&base_run);
+        cc_compat_forced_include_depth(&test);
         // A -include path ending in a backslash can't splice the generated directive's line; it is looked up literally
         // and reported missing (#1552's review).
         const char* const trailing_args[] = { "-fsyntax-only", "-include", "quote/a\".h\\", "quoted.c", NULL };
