@@ -222,6 +222,8 @@ static inline __attribute__((always_inline)) void check_input_batch_set_leaf(Che
     check_graph_set_leaf_at(&reader->output->graph, batch->leaf_slots[node - batch->base], value);
 }
 
+static inline __m512i check_input_gather_bytes(__mmask16 lanes, __m512i indices, const uint8_t* column);
+
 _Static_assert(sizeof(CheckGraphLeaf) == 32 && offsetof(CheckGraphLeaf, type) == 0 && offsetof(CheckGraphLeaf, overload_head) == 12,
                "a leaf's record is eight dwords, its type the first and its overload head the fourth");
 
@@ -576,6 +578,18 @@ static void check_input_identifier_entry(const CheckInputReader* reader, uint32_
     identifiers->declarations[at] = declaration;
     identifiers->status[at] = (acted ? BUSTER_CHECK_IDENTIFIER_ACTED : 0) | (acted && type != 0 ? BUSTER_CHECK_IDENTIFIER_NODE : 0) |
                               (enumeration ? BUSTER_CHECK_IDENTIFIER_ENUMERATOR : 0);
+}
+
+// The bytes of `column` at the 16 `indices` in `lanes`, a dword each: the aligned dword that holds each byte, which never
+// crosses a page the column's bytes aren't on (the column's start rounded down to four bytes), shifted down to the byte.
+static inline __m512i check_input_gather_bytes(__mmask16 lanes, __m512i indices, const uint8_t* column)
+{
+    const uintptr_t start = (uintptr_t)column & ~(uintptr_t)3;
+    const __m512i offsets = _mm512_add_epi32(indices, _mm512_set1_epi32((int32_t)((uintptr_t)column - start)));
+    const __m512i aligned = _mm512_andnot_si512(_mm512_set1_epi32(3), offsets);
+    const __m512i shifts = _mm512_slli_epi32(_mm512_and_si512(offsets, _mm512_set1_epi32(3)), 3);
+    const __m512i dwords = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, aligned, (const void*)start, 1);
+    return _mm512_and_si512(_mm512_srlv_epi32(dwords, shifts), _mm512_set1_epi32(0xff));
 }
 
 // The entries of the chunk's identifiers, the `acting` tokens and classes whose class is CHECK_INPUT_CODE_IDENTIFIER, in

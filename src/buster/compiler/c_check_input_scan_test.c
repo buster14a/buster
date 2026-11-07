@@ -721,9 +721,9 @@ static void check_test_declaration_starts(CheckTest* test)
     check_test_expect(test, differences == 0, "the declaration-start column's paths give the walk's start for every random role");
 }
 
-// The walk in source order's label marks by lines (check_input_resolve_label_marks, #1671) against its per-token tests
-// (check_input_resolve_ignored), its twin, over random roles, kinds and parents: each token's bit is the ignored mark the
-// tests give it, for counts that end in and between lines.
+// The walk in source order's label marks (check_input_resolve_label_lines, #1671) against its per-token tests
+// (check_input_resolve_ignored), its twin, over random roles, kinds and parents, whose child lists are built from them:
+// each token's bit is the ignored mark the tests give it, for counts that end in and between lines.
 static void check_test_label_marks(CheckTest* test)
 {
     enum { MAXIMUM = 300 };
@@ -733,7 +733,10 @@ static void check_test_label_marks(CheckTest* test)
     uint8_t roles[MAXIMUM];
     uint8_t kinds[MAXIMUM];
     uint32_t parents[MAXIMUM];
+    uint32_t first_child[MAXIMUM + 1];
+    uint32_t next_child[MAXIMUM + 1];
     uint8_t ignored[MAXIMUM + 1];
+    uint64_t lines[MAXIMUM / 64 + 1];
     uint32_t differences = 0;
     uint32_t marked = 0;
     // This test's own generator, so that its draws leave the default run's seed for the fixtures after it unchanged.
@@ -742,6 +745,11 @@ static void check_test_label_marks(CheckTest* test)
     {
         state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
         const uint32_t count = 1 + (uint32_t)(state >> 32) % (MAXIMUM - 1);
+        for (uint32_t token = 0; token <= count; token += 1)
+        {
+            first_child[token] = BUSTER_CHECK_NONE;
+            next_child[token] = BUSTER_CHECK_NONE;
+        }
         for (uint32_t token = 0; token < count; token += 1)
         {
             state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
@@ -749,6 +757,14 @@ static void check_test_label_marks(CheckTest* test)
             roles[token] = roles_drawn[draw % BUSTER_ARRAY_LENGTH(roles_drawn)];
             kinds[token] = kinds_drawn[(draw >> 8) % BUSTER_ARRAY_LENGTH(kinds_drawn)];
             parents[token] = (draw >> 16) % 7 == 0 ? BUSTER_CHECK_NONE : (draw >> 20) % count;
+        }
+        for (uint32_t token = count; token-- > 0;)
+        {
+            if (parents[token] < count)
+            {
+                next_child[token] = first_child[parents[token]];
+                first_child[parents[token]] = token;
+            }
         }
         Parser parser = { 0 };
         parser.tokens.count = count;
@@ -763,15 +779,12 @@ static void check_test_label_marks(CheckTest* test)
         {
             check_input_resolve_ignored(&reader, token, roles[token], kinds[token], parents[token]);
         }
-        for (uint32_t line = 0; line < count; line += 64)
+        check_input_resolve_label_lines(&parser, first_child, next_child, lines);
+        for (uint32_t token = 0; token < (count + 63) / 64 * 64; token += 1)
         {
-            const uint64_t marks = check_input_resolve_label_marks(&parser, line);
-            for (uint32_t token = line; token < line + 64; token += 1)
-            {
-                const uint32_t bit = (uint32_t)(marks >> (token - line)) & 1u;
-                differences += token < count ? bit != ignored[token] : bit != 0;
-                marked += token < count && bit != 0;
-            }
+            const uint32_t bit = (uint32_t)(lines[token / 64] >> (token % 64)) & 1u;
+            differences += token < count ? bit != ignored[token] : bit != 0;
+            marked += token < count && bit != 0;
         }
     }
     check_test_expect(test, differences == 0 && marked != 0, "the walk's label marks by lines are its per-token tests' for every random role, kind and parent");
