@@ -3475,6 +3475,52 @@ static uint8_t check_lower_binary(CheckOp op)
     return kind;
 }
 
+// An unsigned 32/64-bit division or remainder by a proven constant power of two. Use the source operand's proof,
+// not the last emitted CONST: a conditional expression can put a label between that entry and its consumer.
+// The replacement constant is normalized to the arithmetic class before the test (e.g. a signed constant converted
+// to unsigned). Evaluated effects and faults, _BitInt conversions and the 128-bit runtime path keep their old rules.
+static bool check_lower_unsigned_power(const CheckLowerWriter* writer, uint32_t node, uint8_t class, uint8_t* kind, uint64_t* right)
+{
+    bool replace = false;
+    if ((*kind == BUSTER_TYPED_DIV || *kind == BUSTER_TYPED_MOD) && (class == BUSTER_TYPED_CLASS_U32 || class == BUSTER_TYPED_CLASS_U64))
+    {
+        const CheckProgram* program = writer->program;
+        const CheckStream* stream = program->stream;
+        const CheckGraph* graph = &program->input->graph;
+        const uint32_t operand = graph->operand1[node];
+        const TypeId converted = stream->conversions[node].operands[1].type;
+        if (operand < stream->count && (check_lower_facts(writer, converted) & BUSTER_CHECK_LOWER_TYPE_BIT_INT) == 0)
+        {
+            const CheckValue value = check_stream_value(stream, operand);
+            const CheckOp op = graph->ops[operand];
+            const uint8_t source_class = check_lower_class(writer, value.type);
+            const bool plain_integer = source_class >= BUSTER_TYPED_CLASS_I8 && source_class <= BUSTER_TYPED_CLASS_U64 &&
+                                       (check_lower_facts(writer, value.type) & BUSTER_CHECK_LOWER_TYPE_BIT_INT) == 0;
+            uint64_t bits = (uint64_t)value.integer;
+            // CheckValue stores bits masked to its own type. Restore that type's sign before converting to the
+            // unsigned arithmetic width; e.g. (short)-32768 becomes 0xffff8000, not the power of two 0x8000.
+            if (plain_integer && source_class <= BUSTER_TYPED_CLASS_U32)
+            {
+                const uint32_t width = 8u << ((source_class - 1) / 2);
+                const uint64_t mask = (UINT64_C(1) << width) - 1;
+                bits &= mask;
+                bits |= (source_class & 1) != 0 && (bits >> (width - 1)) != 0 ? ~mask : 0;
+            }
+            const uint64_t divisor = class == BUSTER_TYPED_CLASS_U32 ? (uint32_t)bits : bits;
+            replace = plain_integer && value.constant_kind == CHECK_CONSTANT_INTEGER && value.fault == CHECK_FAULT_NONE && value.category == CHECK_RVALUE &&
+                      value.overload_head == 0 && (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 &&
+                      op != CHECK_OP_STATEMENT_VALUE && op != CHECK_OP_INITIALIZE && op != CHECK_OP_BUILTIN_QUERY &&
+                      divisor != 0 && (divisor & (divisor - 1)) == 0;
+            if (replace)
+            {
+                *right = *kind == BUSTER_TYPED_DIV ? (uint64_t)__builtin_ctzll(divisor) : divisor - 1;
+                *kind = *kind == BUSTER_TYPED_DIV ? BUSTER_TYPED_SHR : BUSTER_TYPED_AND;
+            }
+        }
+    }
+    return replace;
+}
+
 // Whether a class is an integer narrower than 32 bits, which Tier 0 compares only once converted (`!E` is `0 == E`,
 // where E is promoted).
 static bool check_lower_narrow(uint8_t class)
@@ -7026,17 +7072,23 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     }
     else
     {
-        const uint8_t kind = increment ? subtract ? BUSTER_TYPED_SUB : BUSTER_TYPED_ADD : check_lower_binary(op);
+        uint8_t kind = increment ? subtract ? BUSTER_TYPED_SUB : BUSTER_TYPED_ADD : check_lower_binary(op);
+        uint64_t power_right = 0;
+        const bool power = !increment && !bit_int && check_lower_unsigned_power(writer, node, computing, &kind, &power_right);
         if (bit_int)
         {
             check_lower_bit_int_extend(writer, calculated, true, true);
         }
         check_lower_operation(writer, kind, computing);
-        if (!increment)
+        if (!increment && !power)
         {
             check_lower_count(writer, kind, right_type);
         }
-        if (increment)
+        if (power)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, computing, power_right);
+        }
+        else if (increment)
         {
             uint64_t one = 1;
             if (calculated_class == BUSTER_TYPED_CLASS_F32)
@@ -11692,7 +11744,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (check_lower_binary(op) != BUSTER_TYPED_NONE)
     {
-        const uint8_t kind = check_lower_binary(op);
+        uint8_t kind = check_lower_binary(op);
         // A compare of narrow operands, which only a program with a _BitInt type has (CheckLowerWriter.bit_ints), compares
         // in their computing class (check_lower_bit_int_node).
         if (bit_ints && kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE && check_lower_narrow(check_lower_class(writer, type_a)))
@@ -11701,9 +11753,18 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         }
         else
         {
+            uint64_t power_right = 0;
+            const bool power = check_lower_unsigned_power(writer, node, class, &kind, &power_right);
             check_lower_operation(writer, kind, class);
-            check_lower_count(writer, kind, type_b);
-            check_lower_operand(writer, node, 1, false, type_b);
+            if (power)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_CONST, class, power_right);
+            }
+            else
+            {
+                check_lower_count(writer, kind, type_b);
+                check_lower_operand(writer, node, 1, false, type_b);
+            }
             check_lower_operand(writer, node, 0, false, type_a);
         }
     }
@@ -15219,3 +15280,4 @@ static __attribute__((noinline)) bool check_program_lower_templates(CheckProgram
     const uint32_t templates = BUSTER_CHECK_LOWER_TEMPLATES | (check ? BUSTER_CHECK_LOWER_TEMPLATES_CHECKED : 0);
     return check_program_lower_body(lowered, program, true, false, NULL, templates, output, scratch);
 }
+
