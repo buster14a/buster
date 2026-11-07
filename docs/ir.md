@@ -291,6 +291,23 @@ preparation uses the scalar twin on its scalar path. Placing a use is still
 a dependent increment of its value's cursor, so a value with many uses
 serializes its own increments in both twins.
 
+On the 9700X, against `687f44c3` (before the twins), `BUSTER_DEBUG_INFO=0`,
+CPU 2, three `ab` rounds:
+
+| Measurement | Change | Controls |
+| --- | ---: | --- |
+| `benchmark-ir`'s `uses` (verification and building), 32 instructions, 3 placements | −14.9% to −17.6% | vector verifier, CFG builder and scalar verifier −4.4% to +4.3% |
+| the same, 262,144 instructions | −5.5% to −8.1% | same |
+| `benchmark-ir-source` on the frozen `sqlite3.c`, `gvn` per typed entry | 129.99 → 118.87 ns (−8.6%) | `gvn-scalar` −0.5% |
+| the same, `optimize` per typed entry | 123.31 → 114.67 ns (−7.0%) | `optimize-scalar` +0.0% |
+| `-c --tier1` of that file | 388.40 → 386.40 ms (−0.51%) | objects byte-identical |
+
+The scalar paths build their lists with the unchanged scalar twin, so they
+serve as controls. The large synthetic function gains less because three
+quarters of its instructions use value 0, the serial chain above.
+[The measurement record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/uses-1634-2026-11-07)
+has the scripts, the logs and the dropped first version's round.
+
 ## Verification
 
 `ir_verify` checks common instruction rules 16 rows at a time. Byte-permute tables

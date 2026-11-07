@@ -514,6 +514,18 @@ against the measurements above and below:
   bucket's vector. Clang turns `matches != 0 ? id : 0` there into a branch
   around the id's load, and keeps it with `__builtin_unpredictable`; an empty
   `asm` on the loaded id and a mask instead of the `?:` give a `cmov`.
+- Stage 1's plain 32-byte loads at each identifier's start cross a cache line
+  about half the time: `refine_pass_b_64_plain` has 3.8% to 4.5% of the
+  line-crossing loads sampled in `-c` of `sqlite3.c` (#1555). Masked loads
+  don't avoid them. On Zen 5, a masked load bounded by the identifier's length
+  is counted as crossing when only its masked-off bytes are past the line.
+  With stage 1's masked path for every batch, `-c` of `sqlite3.c` counted as
+  many line-crossing loads, stage 1's share of the samples didn't fall, and
+  over six placements the whole driver stayed within main's own floor. So the
+  plain loads stay. (The same experiment took 18.80 instructions per token in
+  `benchmark-refinement` against 19.80, with fewer cycles in three
+  alternating rounds, but in two builds at one placement each, which the
+  record doesn't qualify: [the record](https://github.com/buster14a/buster-performance/tree/f6ce6bcb2ffaf8f8386a1a04e81433d849fb5668/docs/measurements/line-crossing-loads-1555-repeat-2026-11-07).)
 
 Identifier lengths per occurrence, which set the prefix and the loads' widths:
 

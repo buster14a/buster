@@ -2232,6 +2232,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             .tier1_gvn = command->tier1_gvn,
             .tier1_no_lifetimes = command->tier1_no_lifetimes,
             .tier1_no_inline = command->tier1_no_inline,
+            .tier1_schedule = command->tier1_schedule,
             .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
             .helper_reporting = command->helper_report != NULL,
             .units_lane = lane,
@@ -2310,6 +2311,8 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             __atomic_fetch_add(&report->machine_rows, unit_report->machine_rows, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->row_moves, unit_report->row_moves, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->inlined_calls, unit_report->inlined_calls, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->schedule_blocks, unit_report->schedule_blocks, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->schedule_moved, unit_report->schedule_moved, __ATOMIC_RELAXED);
         }
         check_program_lanes_settle(&lane->functions);
         Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena, &lane->functions.arenas[0].scratch };

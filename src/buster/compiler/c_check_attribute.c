@@ -125,6 +125,9 @@ typedef enum CheckInputAttributeKind
     CHECK_ATTRIBUTE_ENABLE_IF,
     CHECK_ATTRIBUTE_SELECTANY,
     CHECK_ATTRIBUTE_NODEREF,
+    // x86's interrupt (#147): an interrupt service routine, clang's handleAnyX86InterruptAttr's checks
+    // (check_input_interrupt_handler), with its implicit used; its arguments are expressions it never counts.
+    CHECK_ATTRIBUTE_INTERRUPT,
 } CheckInputAttributeKind;
 
 typedef enum CheckInputAttributeError
@@ -464,6 +467,8 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     // clang's: the library functions a definition's code may not become calls of, every one without arguments.
     { "no_builtin", CHECK_ATTRIBUTE_NO_BUILTIN, CHECK_ATTRIBUTE_STRING_LIST, 0, 255 },
     { "naked", CHECK_ATTRIBUTE_NAKED, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    // x86's, whose arguments clang's parser reads as expressions and its handler ignores, whatever their count.
+    { "interrupt", CHECK_ATTRIBUTE_INTERRUPT, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 255 },
     { "no_stack_protector", CHECK_ATTRIBUTE_NO_STACK_PROTECTOR, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "fallthrough", CHECK_ATTRIBUTE_FALLTHROUGH, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     // clang's, on a return statement alone (check_input_statement_attributes, c_check_musttail.c): GNU's spelling and
@@ -1789,6 +1794,7 @@ static bool check_input_attribute_late_kind(const CheckInputAttribute* attribute
 }
 
 // One bit per late attribute class. Standard and GNU noreturn are different classes.
+#define BUSTER_CHECK_LATE_USED (1u << 3)
 static uint8_t check_input_attribute_late_bit(const CheckInputAttribute* attribute)
 {
     uint8_t bit = 0;
@@ -1799,7 +1805,7 @@ static uint8_t check_input_attribute_late_bit(const CheckInputAttribute* attribu
             case CHECK_ATTRIBUTE_WEAK: bit = 1u << 0; break;
             case CHECK_ATTRIBUTE_CONSTRUCTOR: bit = 1u << 1; break;
             case CHECK_ATTRIBUTE_DESTRUCTOR: bit = 1u << 2; break;
-            case CHECK_ATTRIBUTE_USED: bit = 1u << 3; break;
+            case CHECK_ATTRIBUTE_USED: bit = BUSTER_CHECK_LATE_USED; break;
             case CHECK_ATTRIBUTE_RETAIN: bit = 1u << 4; break;
             case CHECK_ATTRIBUTE_GNU_INLINE: bit = 1u << 5; break;
             case CHECK_ATTRIBUTE_NORETURN: bit = 1u << 6; break;
@@ -1809,6 +1815,8 @@ static uint8_t check_input_attribute_late_bit(const CheckInputAttribute* attribu
     return bit;
 }
 
+// The late classes (check_input_attribute_late_bit) a declaration's `attributes` give their entity: an interrupt's implicit
+// used too (#147), after which a used that comes after the definition is no new attribute.
 static uint8_t check_input_attribute_late_mask(const CheckInputAttributes* attributes, uint8_t function_flags)
 {
     uint8_t mask = 0;
@@ -1816,7 +1824,8 @@ static uint8_t check_input_attribute_late_mask(const CheckInputAttributes* attri
     {
         const CheckInputAttribute* attribute = attributes->records + i;
         const bool missing_inline = attribute->kind == CHECK_ATTRIBUTE_GNU_INLINE && (function_flags & CHECK_INPUT_FUNCTION_INLINE) == 0;
-        mask |= !attribute->ignored && !missing_inline ? check_input_attribute_late_bit(attribute) : 0;
+        const bool interrupt = attribute->kind == CHECK_ATTRIBUTE_INTERRUPT && !attribute->subject_ignored;
+        mask |= !attribute->ignored && !missing_inline ? check_input_attribute_late_bit(attribute) | (interrupt ? BUSTER_CHECK_LATE_USED : 0u) : 0u;
     }
     return mask;
 }
@@ -2061,11 +2070,13 @@ struct CheckInputSubjectRow
 };
 
 // The subjects of attributes that clang's handlers check themselves, rather than its generated diagAppertainsToDecl,
-// as rows, in byte order (check_input_subject_row): GCC's, GNU's spelling and gnu::'s, handleSentinelAttr's and
-// handleTransparentUnionAttr's; and clang's own, GNU's spelling and clang::'s, handleWeakImportAttr's (#147), whose
-// definitions it ignores with its own warning (check_input_attribute_subjects).
+// as rows, in byte order (check_input_subject_row): GCC's, GNU's spelling and gnu::'s, x86's interrupt's (#147, a
+// target's attribute of no generated row: handleAnyX86InterruptAttr's, a function's or a function pointer's with a
+// prototype), handleSentinelAttr's and handleTransparentUnionAttr's; and clang's own, GNU's spelling and clang::'s,
+// handleWeakImportAttr's (#147), whose definitions it ignores with its own warning (check_input_attribute_subjects).
 static const CheckInputSubjectRow check_input_subject_handlers[] =
 {
+    { "interrupt", 9, BUSTER_CHECK_SUBJECT_PROTOTYPED, false, "non-K&R-style functions" },
     { "sentinel", 8, BUSTER_CHECK_SUBJECT_FUNCTION | BUSTER_CHECK_SUBJECT_FUNCTION_POINTER_VARIABLE, false, "functions, methods and blocks" },
     { "transparent_union", 17, BUSTER_CHECK_SUBJECT_UNION | BUSTER_CHECK_SUBJECT_UNION_TYPEDEF, false, "unions" },
 };
@@ -3249,6 +3260,12 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             reader->deprecated_attributes |= rule->kind == CHECK_ATTRIBUTE_DEPRECATED || rule->kind == CHECK_ATTRIBUTE_UNAVAILABLE;
             // A lane cannot publish attribute state to later declarations; source-order replay handles this case.
             check_input_lane_refuse(reader, reader->lane && late_kind, "a body declares an attribute with linked state");
+            // x86's interrupt and no_caller_saved_registers (#147): only a unit with either has its calls looked through
+            // after checking (CheckInput.interrupt_calls). A body's interrupt routine is its entity's, which source order
+            // publishes to the calls after it.
+            const bool interrupt = rule->kind == CHECK_ATTRIBUTE_INTERRUPT;
+            reader->output->interrupt_calls |= interrupt || (rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_call(name) == CHECK_CALL_NO_CALLER_SAVED);
+            check_input_lane_refuse(reader, reader->lane && interrupt, "a body declares an interrupt service routine");
             // An argument count other than clang's is its error, worded as clang's (#147). cleanup's is checked after its
             // subject's already (check_input_cleanup_declaration).
             uint32_t bound = 0;
@@ -3261,8 +3278,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             const bool convention = rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_call(name) != CHECK_CALL_NO_CALLER_SAVED;
             uint32_t convention_bound = 0;
             const uint8_t convention_count = convention ? check_input_attribute_count_check(counted, count, &convention_bound) : BUSTER_CHECK_COUNT_NONE;
-            uint8_t count_check = rule->kind == CHECK_ATTRIBUTE_MUSTTAIL || rule->kind == CHECK_ATTRIBUTE_CLEANUP || rule->kind == CHECK_ATTRIBUTE_COUNTED_BY || convention ?
-                                  BUSTER_CHECK_COUNT_NONE : check_input_attribute_count_check(counted, count, &bound);
+            // (interrupt's arguments x86's handler never counts.)
+            uint8_t count_check = rule->kind == CHECK_ATTRIBUTE_MUSTTAIL || rule->kind == CHECK_ATTRIBUTE_CLEANUP || rule->kind == CHECK_ATTRIBUTE_COUNTED_BY || convention ||
+                                  interrupt ? BUSTER_CHECK_COUNT_NONE : check_input_attribute_count_check(counted, count, &bound);
             // Attr.td leaves these variadic lists' minimum at zero; the handlers call checkAtLeastNumArgs(1).
             // Keep that constraint after the subject, with the same diagnostic as a generated minimum.
             const bool least_one = rule->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || rule->kind == CHECK_ATTRIBUTE_CPU_DISPATCH ||
@@ -3337,6 +3355,14 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                 // Its arguments aren't read: its count is its error where it meets a function, and nothing elsewhere.
                 attribute.convention_count = convention_count;
                 attribute.convention_bound = (uint8_t)convention_bound;
+                attribute.argument_count = count;
+            }
+            else if (interrupt)
+            {
+                // interrupt's arguments are expressions to clang's parser, whose errors drop it (an undeclared name, a
+                // missing operand: check_input_attribute_expressions), and nothing to x86's handler, whatever they are.
+                attribute.parse_arguments = count != 0;
+                attribute.parsed_schema = (uint8_t)CHECK_ATTRIBUTE_INTEGER_LIST;
                 attribute.argument_count = count;
             }
             else
@@ -5510,6 +5536,194 @@ static void check_input_attribute_ownership(CheckInputReader* reader, CheckInput
     }
 }
 
+// Whether `type` is the second parameter's that x86's interrupt takes on x86-64 (#147, handleAnyX86InterruptAttr): an
+// unsigned integer type of 64 bits (clang's isUnsignedIntegerType: an unsigned builtin integer, an unsigned _BitInt, or a
+// complete enumeration of an unsigned underlying type), qualified or not, but not an atomic one.
+static bool check_input_interrupt_code(const TypeTable* types, TypeId type)
+{
+    const TypeId bare = type_unqualified(type_strip_aligned(types, type));
+    const bool enumeration = type_kind(types, bare) == BUSTER_TYPE_KIND_ENUM && type_is_complete(types, bare);
+    const TypeId integer = enumeration ? type_unqualified(type_strip_aligned(types, types->types.base[type_index(bare)])) : bare;
+    const uint8_t kind = type_kind(types, integer);
+    const bool bit_int = kind == BUSTER_TYPE_KIND_BIT_INT && (types->types.flags[type_index(integer)] & BUSTER_TYPE_FLAG_UNSIGNED) != 0 &&
+                         types->types.extent[type_index(integer)] == 64;
+    return (kind == BUSTER_TYPE_KIND_INTEGER && (integer == BUSTER_TYPE_ULONG || integer == BUSTER_TYPE_ULLONG)) || bit_int;
+}
+
+// The first token of parameter `index` of the parameter list opening at `open`, as clang's ParmVarDecl's range begins: its
+// declaration's first token past leading C23 attribute specifiers and __extension__ (check_input_attribute_begin); or
+// BUSTER_CHECK_NONE past the list's parameters. One walk over the list's tokens, its own commas counted at its depth.
+static uint32_t check_input_interrupt_parameter(const Parser* parser, uint32_t open, uint32_t index)
+{
+    const uint32_t close = parser->tree.parents[open];
+    uint32_t start = open + 1;
+    uint32_t seen = 0;
+    uint32_t depth = 0;
+    for (uint32_t t = open + 1; seen < index && t < close; t += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        depth += kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE ? 1u : 0u;
+        depth -= (kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE) && depth != 0 ? 1u : 0u;
+        if (depth == 0 && kind == PARSE_KIND_COMMA)
+        {
+            seen += 1;
+            start = t + 1;
+        }
+    }
+    return seen == index && start < close ? check_input_attribute_begin(parser, start, close) : BUSTER_CHECK_NONE;
+}
+
+// The first token of a K&R definition's declaration of its identifier list's name `listed`, among its declarations after
+// the list's `)` up to its body's `{`, as clang's ParmVarDecl's range begins (that declaration's first token past leading
+// C23 attribute specifiers and __extension__); BUSTER_CHECK_NONE where none declares it (an implicit int's).
+static uint32_t check_input_interrupt_kr_parameter(const Parser* parser, uint32_t open, uint32_t listed)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t first = parser->tree.parents[open] + 1;
+    uint32_t start = first;
+    uint32_t depth = 0;
+    uint32_t result = BUSTER_CHECK_NONE;
+    for (uint32_t t = first; result == BUSTER_CHECK_NONE && t < count && parser->tree.roles[t] != PARSE_ROLE_OPEN_BODY; t += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        depth += kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE ? 1u : 0u;
+        depth -= (kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE) && depth != 0 ? 1u : 0u;
+        start = depth == 0 && kind == PARSE_KIND_SEMI ? t + 1 : start;
+        const bool named = kind == PARSE_KIND_IDENTIFIER && parser->tokens.names[t] == parser->tokens.names[listed] &&
+                           parser->tree.roles[t] == PARSE_ROLE_OPERAND && parser->tokens.kinds[t - 1] != PARSE_KIND_PERIOD &&
+                           parser->tokens.kinds[t - 1] != PARSE_KIND_ARROW;
+        result = named ? check_input_attribute_begin(parser, start, t + 1) : BUSTER_CHECK_NONE;
+    }
+    return result;
+}
+
+// Where a function declaration's result type begins, as clang's FunctionDecl::getReturnTypeSourceRange has it for
+// interrupt's first error: the first type specifier among its specifiers from `first` (past storage classes, function
+// specifiers, qualifiers, calling conventions and attributes; `_Complex` isn't its type's start, and `_Atomic(T)`'s is T's)
+// when its own parameter list `list` follows its name `name` (past grouping parentheses) with no array or function
+// declarator after it. BUSTER_CHECK_NONE otherwise, where clang's range is empty: a function declared by a typedef's name,
+// or one that returns a pointer to an array or a function, whose result's type is written around the name.
+static uint32_t check_input_interrupt_result(const Parser* parser, uint32_t first, uint32_t name, uint32_t list)
+{
+    uint32_t after_name = name + 1;
+    while (after_name < list && parser->tokens.kinds[after_name] == PARSE_KIND_R_PAREN)
+    {
+        after_name += 1;
+    }
+    uint32_t after_list = list < parser->tokens.count ? parser->tree.parents[list] + 1 : parser->tokens.count;
+    while (after_list < parser->tokens.count && parser->tokens.kinds[after_list] == PARSE_KIND_R_PAREN)
+    {
+        after_list += 1;
+    }
+    const uint8_t next = after_list < parser->tokens.count ? parser->tokens.kinds[after_list] : PARSE_KIND_END;
+    const bool placed = list < parser->tokens.count && after_name == list && next != PARSE_KIND_L_SQUARE && next != PARSE_KIND_L_PAREN;
+    uint32_t result = BUSTER_CHECK_NONE;
+    for (uint32_t t = first; placed && result == BUSTER_CHECK_NONE && t < name;)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const uint32_t word = parser->tokens.names[t];
+        const bool complex = word == C_NAME_COMPLEX_C99 || word == C_NAME_GNU_COMPLEX || word == C_NAME_GNU_COMPLEX2;
+        const bool opened = t + 1 < name && parser->tokens.kinds[t + 1] == PARSE_KIND_L_PAREN;
+        if ((kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_ALIGNAS) && opened)
+        {
+            t = parser->tree.parents[t + 1] + 1;
+        }
+        else if (kind == PARSE_KIND_L_SQUARE && t + 1 < name && parser->tokens.kinds[t + 1] == PARSE_KIND_L_SQUARE)
+        {
+            t = parser->tree.parents[t] + 1;
+        }
+        else if (kind == PARSE_KIND_ATOMIC && opened)
+        {
+            t += 2;
+        }
+        else if ((kind == PARSE_KIND_TYPE && !complex) || kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
+                 kind == PARSE_KIND_IDENTIFIER)
+        {
+            result = t;
+        }
+        else
+        {
+            t += 1;
+        }
+    }
+    return result;
+}
+
+// x86's interrupt on a declaration its subjects take (#147, clang's handleAnyX86InterruptAttr on x86-64): a function's, or a
+// variable's, a member's, a parameter's or a typedef's of a pointer to a function, with a prototype. Its function type must
+// return void, at its result type's start (check_input_interrupt_result); have one or two parameters (a variadic one's
+// named ones), at the declaration's start (`begin`); a pointer first, at that parameter's start; and an unsigned 64-bit
+// integer second (check_input_interrupt_code), at its start. A function declared by a typedef's name has its parameters at
+// its name; a declaration of no function (a pointer's) has neither those places nor its result's, where clang's errors
+// have none (BUSTER_CHECK_INTERRUPT_UNLOCATED). The first rule broken is the declaration's error. Whether none is.
+static bool check_input_interrupt_handler(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute, uint32_t declaration,
+                                          TypeId type, uint32_t begin, uint32_t name)
+{
+    const Parser* parser = reader->parser;
+    const TypeTable* types = reader->types;
+    const uint32_t count = parser->tokens.count;
+    const TypeId bare = type_strip_aligned(types, type);
+    const TypeId function = type_kind(types, bare) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, bare)) : bare;
+    // A function's declaration: its own parameter list (an identifier list's, of a K&R definition), where it has one.
+    const bool declared = (declaration & BUSTER_CHECK_SUBJECT_FUNCTION) != 0;
+    const uint32_t list = declared && reader->subject_function_list < count ? reader->subject_function_list : BUSTER_CHECK_NONE;
+    const bool typed = type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION;
+    uint32_t parameter_count = 0;
+    const TypeId* parameters = typed ? type_parameters(types, function, &parameter_count) : NULL;
+    const TypeId result = typed ? type_return(types, function) : BUSTER_TYPE_VOID;
+    uint32_t rule = UINT32_MAX;
+    uint32_t token = BUSTER_CHECK_NONE;
+    if (type_kind(types, type_strip_aligned(types, result)) != BUSTER_TYPE_KIND_VOID)
+    {
+        rule = BUSTER_CHECK_INTERRUPT_RESULT;
+        token = list != BUSTER_CHECK_NONE && name < count ? check_input_interrupt_result(parser, begin, name, list) : BUSTER_CHECK_NONE;
+    }
+    else if (parameter_count < 1 || parameter_count > 2)
+    {
+        rule = BUSTER_CHECK_INTERRUPT_COUNT;
+        token = begin;
+    }
+    else
+    {
+        const bool pointer = type_kind(types, type_strip_aligned(types, parameters[0])) == BUSTER_TYPE_KIND_POINTER;
+        const uint32_t index = !pointer ? 0 : parameter_count == 2 && !check_input_interrupt_code(types, parameters[1]) ? 1 : 2;
+        rule = index == 0 ? BUSTER_CHECK_INTERRUPT_POINTER : index == 1 ? BUSTER_CHECK_INTERRUPT_CODE : UINT32_MAX;
+        // A K&R definition's parameters' types are its declarations', whose places are theirs (its identifier list's names,
+        // a comma between each two); another prototype's are its list's, and a typedef's function's its name's.
+        const uint32_t named = list + 1 + 2 * index;
+        if (index < 2 && list != BUSTER_CHECK_NONE && reader->subject_identifier_list)
+        {
+            token = named < count && parser->tokens.kinds[named] == PARSE_KIND_IDENTIFIER ? check_input_interrupt_kr_parameter(parser, list, named) : BUSTER_CHECK_NONE;
+        }
+        else if (index < 2 && list != BUSTER_CHECK_NONE)
+        {
+            token = check_input_interrupt_parameter(parser, list, index);
+        }
+        else if (index < 2 && declared)
+        {
+            token = name;
+        }
+    }
+    if (rule != UINT32_MAX)
+    {
+        const bool located = token < count;
+        const uint32_t before = reader->output->report_count;
+        check_input_report(reader, located ? token : attribute->name_token, CHECK_INPUT_INTERRUPT_HANDLER);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].detail = rule | (located ? 0u : BUSTER_CHECK_INTERRUPT_UNLOCATED);
+            reader->output->reports[before].attribute = attribute->first;
+        }
+        if (attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+        {
+            attributes->error = CHECK_ATTRIBUTE_ERROR_SUBJECT;
+            attributes->error_first = attribute->first;
+            attributes->error_end = attribute->end;
+        }
+    }
+    return rule == UINT32_MAX;
+}
+
 static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t declaration, TypeId type, uint32_t begin,
                                            uint32_t name)
 {
@@ -5711,6 +5925,15 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         if (valid && generic && !attribute->ignored && !attribute->subject_ignored)
         {
             valid = check_input_attribute_annotations(reader, attributes, attribute, declaration, type, name, begin);
+        }
+        // x86's interrupt where its subjects take it (#147): its handler's checks of the function's type. One that fails
+        // them is no handler, as clang's handleAnyX86InterruptAttr returns before adding the attribute: no direct call's
+        // error, no implicit used, no -Wexcessive-regsave of its body's calls.
+        if (valid && attribute->kind == CHECK_ATTRIBUTE_INTERRUPT && !attribute->ignored && !attribute->subject_ignored)
+        {
+            valid = check_input_interrupt_handler(reader, attributes, attribute, declaration, type, begin, name);
+            attribute->ignored = !valid;
+            attribute->subject_ignored = !valid;
         }
         // A GPU kernel's convention off a function (#147): clang's "'X' attribute only applies to functions" error.
         if (valid && kernel && (declaration & BUSTER_CHECK_SUBJECT_FUNCTION) == 0)
@@ -6246,6 +6469,16 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
                     .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
                 };
                 check_input_warning_event(reader, &event, missing_inline ? NULL : &note, missing_inline ? 0 : 1);
+                // x86's interrupt's implicit used (#147), which clang drops after it with the same warning at no location,
+                // unless the definition has a used already.
+                const bool implicit_used = attribute->kind == CHECK_ATTRIBUTE_INTERRUPT && !attribute->subject_ignored &&
+                                           (reader->late_attribute_masks[reader->objects[previous]] & BUSTER_CHECK_LATE_USED) == 0;
+                if (implicit_used)
+                {
+                    CheckWarningEvent unlocated = event;
+                    unlocated.flags = BUSTER_CHECK_WARNING_UNLOCATED;
+                    check_input_warning_event(reader, &unlocated, &note, 1);
+                }
             }
         }
     }
@@ -7448,6 +7681,7 @@ static CheckInputFilter check_input_deprecated_mark_filter(const uint32_t* marks
 {
     uint32_t low[16] = { 0 };
     uint32_t high[16] = { 0 };
+    uint32_t marked = 0;
     for (uint32_t first = 0; first < count; first += 16)
     {
         const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, count - first < 16 ? count - first : 16);
@@ -7457,11 +7691,13 @@ static CheckInputFilter check_input_deprecated_mark_filter(const uint32_t* marks
             const uint32_t key = first + (uint32_t)__builtin_ctz(keys);
             low[(key / 32) % 16] |= UINT32_C(1) << (key % 32);
             high[(key / 16384) % 16] |= UINT32_C(1) << ((key / 512) % 32);
+            marked += 1;
         }
     }
     const CheckInputFilter keys = { .low = _mm512_loadu_si512(low), .high = _mm512_loadu_si512(high) };
     const __m512i limit = _mm512_set1_epi32((int32_t)count);
-    for (uint32_t first = 0; objects != NULL && first < count; first += 16)
+    // Without a marked key, no object's first declaration is one, and the scan is left out.
+    for (uint32_t first = 0; objects != NULL && marked != 0 && first < count; first += 16)
     {
         const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, count - first < 16 ? count - first : 16);
         const __m512i object_first = _mm512_sub_epi32(_mm512_maskz_loadu_epi32(lanes, objects + first), _mm512_set1_epi32(1));

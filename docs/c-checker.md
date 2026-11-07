@@ -3982,7 +3982,9 @@ return it. `-Wempty-body` leaves an `if` that has an
 invocations' columns, including an argument-first or nested expansion (#1339).
 Only an enabled candidate whose position comes from a macro requests deferred
 expansion history; file-spelled positions and units without empty-body candidates keep
-that history deferred. The driver tests compare quiet, indented and same-line
+that history deferred. A macro's position that the file alone gives, one
+invocation between two file tokens (`pp_output_invocation_place`), keeps it
+deferred too; `--scalar` asks the history, its twin (#628). The driver tests compare quiet, indented and same-line
 body, object, argument, nested and pasted macro cases with Clang on both paths,
 and check that file-spelled candidates and suppressed warnings do not replay history.
 `-Wparentheses` covers a `for` condition as well as an `if`,
@@ -6369,9 +6371,66 @@ arguments against the function. The checker now gives these as clang does.
   types' warning. With `sysv_abi` or `cdecl` it is the same type. With
   another convention, which clang also takes, it is refused by name.
 
+  x86's `interrupt` has its own rule (`CHECK_ATTRIBUTE_INTERRUPT`), clang's
+  `handleAnyX86InterruptAttr` on x86-64. Its subjects are functions and
+  pointers to functions with prototypes (a variable's, a member's, a
+  parameter's, a typedef's: "only applies to non-K&R-style functions"
+  elsewhere, which a K&R declaration is and a K&R definition isn't). Its
+  arguments are expressions to clang's parser (an undeclared name, a missing
+  operand: their errors drop it) and nothing to its handler, whatever their
+  count. Then, the first rule broken being the declaration's error
+  (`check_input_interrupt_handler`): a result that isn't void, at its type's
+  start (`check_input_interrupt_result`: past storage classes, qualifiers and
+  attributes; `_Complex`'s type's, `_Atomic(T)`'s T's); a count of parameters
+  but one or two (a variadic one's named ones), at the declaration's start; a
+  first parameter that isn't a pointer (adjusted, an array's or a function's
+  is one), and a second that isn't an unsigned integer of 64 bits (`unsigned
+  long`, `unsigned long long`, `unsigned _BitInt(64)`, an enumeration of one,
+  qualified but not atomic), at its declaration's start (a K&R definition's
+  declaration of it). A function declared by a typedef's name has its
+  parameters at its name; the other errors clang places nowhere have no
+  place here either (an invalid SourceLocation: a pointer's, a typedef's, a
+  member's, a parameter's, and the result of a function declared by a
+  typedef's name or returning a pointer to an array or a function,
+  `pp_diagnose_unlocated_notes`). It keeps the type as it is and adds
+  clang's implicit `used`: a static handler is emitted and never
+  -Wunused-function's, and a `used` after the definition is none new. A
+  redeclaration inherits it; one after the definition drops it with "attribute
+  declaration must precede definition" and its implicit `used`'s again at no
+  place, unless the definition has a `used`. After checking, in a unit that
+  read `interrupt` or `no_caller_saved_registers`
+  (`CheckInput.interrupt_calls`), the calls are looked through
+  (`check_input_interrupt_calls`): a direct call of a function an
+  interrupt attribute marks, at or before the declaration its name finds
+  (through parentheses, `_Generic`, `__builtin_choose_expr` and one
+  address-of, as `ActOnCallExpr` finds it; in `sizeof` and `_Generic`'s
+  operands too), is clang's "interrupt service routine cannot be called
+  directly" at the callee (Expr::getExprLoc's place: a parenthesized one's
+  `(`, a member's name, a subscript's base's), and in the body of a function
+  either marks, any other call whose callee no `no_caller_saved_registers`
+  marks (the declaration's attribute, which a typedef's function type
+  doesn't give) is -Wexcessive-regsave's warning, interrupt's message where
+  both mark it, with "'g' declared here" at the declaration the callee's name
+  finds (a builtin's at its name's first use in the unit, where clang
+  declares it) and no note through a pointer; a call around a direct call's
+  error, which clang doesn't build, has none. Builtins are calls but those
+  clang parses as keywords' forms (`va_arg`, `convertvector`, `offsetof`,
+  `types_compatible_p`, `choose_expr`). The calls are the graph's in its
+  postorder, clang's order: a call's callee's and arguments' calls first. An
+  interrupt service routine's definition is Tier 0's handler frame
+  (`Tier0Function.interrupt`, `docs/tier0.md`): `CheckProgram.object_interrupt`
+  holds each function's first declaration with the attribute,
+  `check_program_interrupt(program, b)` says whether body `b` is a routine's
+  (that declaration at or before its definition), and the lowering gives it
+  `no_caller_saved_registers`' set of every register (`check_lower_preserve`,
+  LLVM's `CSR_64_AllRegs` of `x86_intrcc`) and its 1 or 2 parameters' kind.
+  A variadic routine, which clang compiles, is refused by name ("unsupported:
+  variadic interrupt service routines"), as are `__builtin_eh_return`,
+  `__builtin_setjmp` and musttail calls in one, as in any preserving frame.
+
   The rest stay refused by name: the attributes whose handlers clang has its
-  own (`pass_object_size`, `interrupt` and others). Recognizing their names
-  does not supply those handlers or their ABI effects.
+  own (`pass_object_size` and others). Recognizing their names does not
+  supply those handlers or their ABI effects.
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,
   and C++'s `Owner`, `Pointer`, `contained_type` and
@@ -6703,6 +6762,20 @@ arguments against the function. The checker now gives these as clang does.
       "incompatible operand or conversion types", where clang's is
       "incompatible function pointer types assigning to …";
     - a typedef's type prints without clang's `'F *' (aka '…')`.
+  - x86's `interrupt` (#147):
+    - the calls in operands the reader's evaluator alone reads (a `typeof`'s,
+      a constant array bound's `sizeof`) have no graph node: a direct call of
+      an interrupt service routine there isn't clang's error, nor any call
+      there -Wexcessive-regsave's warning;
+    - a declaration's interrupt and no_caller_saved_registers are an entity's
+      first declarations' with them, up to the declaration a call's name finds
+      (or the definition): a block's redeclaration that clang's chain doesn't
+      link is taken as linked;
+    - the checker's first error in a declaration ends it, as everywhere:
+      `_Alignas` on a handler is its error alone, where clang gives
+      interrupt's first and then `_Alignas`';
+    - a unit with a direct call's error stops before its later checks (asm
+      operands, initializers' warnings), whose diagnostics clang gives too.
   - After a missing `;`'s recovery, as everywhere, a declaration's checker
     error ends what is published (`int x _Alignas(3) int y _Alignas(4);`
     stops at "requested alignment is not a power of 2", where clang goes on
@@ -6741,6 +6814,15 @@ arguments against the function. The checker now gives these as clang does.
     exclusions, against the declarations each sees, by both paths and with the
     bodies on 1, 2 and 4 lanes (`check_test_driver_lane_attributes`,
     `c_check_lane_attribute_driver_test.c`).
+  - x86's `interrupt` (`check_test_driver_interrupts`,
+    `c_check_interrupt_driver_test.c`), with the lines of no place too, by
+    both paths and deferred bodies on two lanes: each of its handler's errors
+    at its place or none, its subjects, arguments and C23 places,
+    redeclarations and its implicit `used`, K&R declarations and definitions,
+    direct calls through each callee's form and in unevaluated operands, and
+    -Wexcessive-regsave in both callers' kinds, with ncsr and other callees,
+    builtins' notes, nested calls' order, its options and pragmas; then `-c`
+    of definitions, refused by name.
 
   `test-checker` checks the exclusions table's order and pairs, and that the
   facts tell C's attributes from another language's. The binding tests retain

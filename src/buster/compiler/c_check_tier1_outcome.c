@@ -93,6 +93,9 @@ static const char* const check_tier1_call_kind_names[CHECK_TIER1_CALL_KIND_COUNT
 #define BUSTER_CHECK_TIER1_ARENA_RESERVE 1u
 #define BUSTER_CHECK_TIER1_ARENA_OUTPUT 2u
 #define BUSTER_CHECK_TIER1_FRAME_PUBLICATION 1u
+// --tier1-schedule=post's order of a block that the scalar reference refused (--verify), or no room for its scratch.
+#define BUSTER_CHECK_TIER1_SCHEDULE 2u
+#define BUSTER_CHECK_TIER1_ARENA_SCHEDULE 3u
 
 typedef struct CheckTier1Outcome CheckTier1Outcome;
 struct CheckTier1Outcome

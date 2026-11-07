@@ -2080,6 +2080,33 @@ own diagnostics, which may have recorded the history). It takes the files the
 run read from the cache the run filled, as a later unit with that cache does.
 The unit preprocesses nothing more after its run.
 
+Nothing reads the files' token columns after the run either: the parser, the
+checker and the diagnostics read the output, the ranges, and the files' bytes
+and line tables. So the checker's driver gives them back once the run is over
+(`pp_release_file_columns`, #628): a unit with a file cache of its own empties
+the columns' arenas (the kinds, starts and values, 9 bytes a token, and the
+leading-space words: 11.5 MB of `sqlite3.c`'s, which stayed to the backend)
+and marks its records unprepared. A replay then prepares each file again
+through the same cache, as the first unit to read it would. A unit whose replay
+ran with the run (its own diagnostics) keeps them, since the replay's files
+read them, and so does a cache that units share (`PPOptions.files`). With the
+driver's `--poison-arenas` the pages stay mapped but unreadable, and later
+pushes go past them, so that a reader left behind faults.
+
+A reader that needs only where an output token's outermost invocation starts
+can often have it without the history. `pp_output_invocation_place` finds
+the file tokens that the output has before and after the token's run of
+tokens from macros, and lexes the file's bytes between them (at most 2 KB, 256
+tokens each way). If they hold one invocation alone, a plainly spelled name
+(no `_Pragma`) with at most one balanced argument list, and no directive, all
+of the run's tokens are that invocation's, and it starts at the name, as
+clang's `getExpansionLoc` puts it. Anything else returns 0, and the history
+answers. `-Wempty-body`'s indentation check asks it first: on `sqlite3.c`,
+an `assert` after a `for (...);` replayed the whole unit only for that.
+`test-preprocessor` checks it against `pp_output_expansion_begin` at the
+edges of every run of tokens from macros in each file it compiles, and with a
+fixture of the invocations it places and those it leaves to the history.
+
 `-E`, `parse` and the checker's driver defer the history. The checker judges
 whether a token is in a system header by where its expansion is, as clang
 does, from runs the main loop keeps ("System levels" below); it records the

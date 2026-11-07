@@ -33,7 +33,9 @@ unit of less than 1 MB of source start with 16 MB of base pages
 which every reservation took for writing, were what limited the lanes.
 `--poison-arenas`, a test option, overwrites what a unit left in its lane's
 three arenas (`arena_poison`), so that a compile that read a byte it didn't
-write would show. A unit whose lane has another unit to take gives back its
+write would show; and a unit with a file cache of its own makes its files'
+token columns unreadable after its run where it would give them back
+(`pp_release_file_columns`, #628), so that a reader left would fault. A unit whose lane has another unit to take gives back its
 scratch's pages past the checker's columns in whole huge pages, keeping the
 one that holds the peak rather than splitting it into base pages that the
 next unit faults in one by one (`check_units_discard_huge`,

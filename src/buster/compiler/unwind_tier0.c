@@ -445,7 +445,11 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     const uint32_t realignment = tier0_realignment_records(probe, alignment_log2) + (base ? 1 : 0);
     const uint32_t prologue = (pointer ? 2 + pushes + eh_pushes + kept + blocked + reservation + realignment : pushes + (reserved ? reservation : 0));
     const uint32_t teardown = pointer ? 1 + kept + pushes + 1 : pushes + (reserved ? 1 : 0);
-    const uint32_t epilogue = open ? 0 : teardown + 1;
+    // An interrupt service routine's (#147, Tier0Code.frame_interrupt): a preserving frame's, whose ret is iretq, after
+    // the error code's add where it has one, no transition of the fixed shape (emitted_tier0_interrupt_rows).
+    const uint32_t interrupt = code != 0 ? code->frame_interrupt : 0;
+    const uint32_t stepped = interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE ? 1 : 0;
+    const uint32_t epilogue = open ? 0 : teardown + stepped + 1;
     // A realigned frame has a frame pointer, past 16 bytes' alignment and within an and's immediate, and its base is r15,
     // one of its pushes.
     const bool realigned = alignment_log2 == 0 ? !base : pointer && alignment_log2 > 4 && alignment_log2 <= 31 && (!base || (saved & (1u << BUSTER_TIER0_SAVED_R15)) != 0);
@@ -453,6 +457,7 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     // tier0_frame_events anchors them before branch sizing: `size` is then the record count.
     if (code == 0 || output == 0 || code->error != TIER0_OK || code->records == 0 || code->count == 0 || saved >= 64 || (eh && (!pointer || open)) ||
         ((preserved != 0 || block != 0) && (!pointer || open || eh || code->tail_count != 0 || (preserved & ~UNWIND_TIER0_PRESERVABLE) != 0)) ||
+        (interrupt != 0 && (interrupt > BUSTER_TIER0_INTERRUPT_ERROR_CODE || (preserved == 0 && block == 0))) ||
         (pointer && (saved & 2) != 0) || !realigned || prologue + epilogue + (block != 0 ? stores : 0) > code->count || size == 0 || (final_offsets != 0 && final_offsets[0] != 0) ||
         (final_offsets == 0 && size != code->count))
     {
@@ -577,8 +582,17 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
         events[count++] = at;
         at += 1;
     }
+    if (records != 0 && error == UNWIND_OK && stepped != 0)
+    {
+        // An interrupt service routine's add over its error code.
+        uint32_t stepped_bytes = 0;
+        error = unwind_tier0_adjustment(&records[at], false, &stepped_bytes) && stepped_bytes == 8 ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+        at += 1;
+    }
     const bool frameless = saved == 0 && !pointer && code != 0 && code->frame_size == 0;
-    error = records != 0 && error == UNWIND_OK && !open && !(at == code->count - 1 && unwind_tier0_end(&records[at], frameless)) ? UNWIND_ERROR_UNSUPPORTED : error;
+    const bool ended = records != 0 && at == code->count - 1 &&
+                       (interrupt != 0 ? records[at].form == X86_FORM_IRETQ : unwind_tier0_end(&records[at], frameless));
+    error = records != 0 && error == UNWIND_OK && !open && !ended ? UNWIND_ERROR_UNSUPPORTED : error;
     // An open frame's last record is no epilogue's ret: one that is would be its epilogue, read as the body's.
     error = records != 0 && error == UNWIND_OK && open && records[code->count - 1].form == X86_FORM_RET ? UNWIND_ERROR_UNSUPPORTED : error;
     // The transitions' ends, each after the one before and before the ret's end, as branch sizing's offsets have them.
