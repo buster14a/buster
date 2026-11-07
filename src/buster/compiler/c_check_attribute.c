@@ -7306,6 +7306,7 @@ static CheckInputFilter check_input_deprecated_mark_filter(const uint32_t* marks
 {
     uint32_t low[16] = { 0 };
     uint32_t high[16] = { 0 };
+    uint32_t marked = 0;
     for (uint32_t first = 0; first < count; first += 16)
     {
         const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, count - first < 16 ? count - first : 16);
@@ -7315,11 +7316,13 @@ static CheckInputFilter check_input_deprecated_mark_filter(const uint32_t* marks
             const uint32_t key = first + (uint32_t)__builtin_ctz(keys);
             low[(key / 32) % 16] |= UINT32_C(1) << (key % 32);
             high[(key / 16384) % 16] |= UINT32_C(1) << ((key / 512) % 32);
+            marked += 1;
         }
     }
     const CheckInputFilter keys = { .low = _mm512_loadu_si512(low), .high = _mm512_loadu_si512(high) };
     const __m512i limit = _mm512_set1_epi32((int32_t)count);
-    for (uint32_t first = 0; objects != NULL && first < count; first += 16)
+    // Without a marked key, no object's first declaration is one, and the scan is left out.
+    for (uint32_t first = 0; objects != NULL && marked != 0 && first < count; first += 16)
     {
         const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, count - first < 16 ? count - first : 16);
         const __m512i object_first = _mm512_sub_epi32(_mm512_maskz_loadu_epi32(lanes, objects + first), _mm512_set1_epi32(1));

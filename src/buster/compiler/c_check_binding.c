@@ -387,7 +387,7 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
     // twin, visits every event (#529).
     const bool listed = !BUSTER_SCALAR_PATH(parser->options.scalar);
     const uint64_t list_mark = reader->scratch != NULL ? reader->scratch->length : 0;
-    uint32_t* uses = valid && listed && reader->scratch != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)events->count + 15) : NULL;
+    uint32_t* uses = valid && listed && reader->scratch != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count) : NULL;
     const uint32_t use_count = uses != NULL ? check_input_operation_events(events, C_BINDING_USE, uses) : events->count;
     const bool deferred = valid && reader->deferred != NULL && check_deferred_binding_answers(reader->deferred, reader, resolved);
     for (uint32_t at = 0; valid && !deferred && at < use_count; at += 1)
@@ -410,7 +410,7 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
             memset(used_tokens, 0, count);
             memset(parameters, 0, count);
             memset(reported, 0, count);
-            uint32_t* declares = uses != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)events->count + 15) : NULL;
+            uint32_t* declares = uses != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count) : NULL;
             const uint32_t declare_count = declares != NULL ? check_input_operation_events(events, C_BINDING_DECLARE, declares) : events->count;
             for (uint32_t at_use = 0; at_use < use_count; at_use += 1)
             {
