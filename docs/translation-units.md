@@ -1050,7 +1050,9 @@ driver as a process, in a directory of its own:
   exit and how many units gave back their scratch's pages in whole huge
   pages), each object its own alone, the six lanes without a unit having taken
   parts of the large one's, one lane alone leaving its memory to the exit and
-  every unit giving back its scratch's pages as alone; again without the board
+  at most one unit giving back its scratch's pages in whole huge pages (a lane
+  counts its unit after taking it, and may wake late, so the unit that reaches
+  the checker first may find the other untaken); again without the board
   (`BUSTER_TEST_NO_UNITS_BOARD`, a test hook that stands for its allocation
   failing), with no part shared and still one lane alone leaving its memory;
   with `-c` by one lane, each object its own alone and the large unit, taken

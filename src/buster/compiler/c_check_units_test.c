@@ -53,12 +53,12 @@
 //   sum, beside small.c's main, which checks the sum against the test's own: with -c by --lanes 8 and --shared-parts
 //   (its emission pauses after each part it takes itself), each object its own alone, the six lanes that take no unit
 //   take parts of big.c's functions, one lane alone, the last to stop taking units, leaves its memory to the exit, and
-//   every unit gives back its scratch's pages as a unit alone does, none being left to take, by the command's report;
-//   again without the board (BUSTER_TEST_NO_UNITS_BOARD, as if its allocation failed), where no lane takes parts and
-//   still one lane alone leaves its memory; with -c by --lanes 1, each object its own alone and big.c alone giving its
-//   scratch's pages back in whole huge pages, for small.c (CheckProgramOptions.discard_huge); linked by --lanes 1, by 8
-//   and by the scalar path on 8, the same bytes, a program whose sum is the test's, and on 8 lanes the parts taken so
-//   and no lane's memory left to the exit.
+//   one unit at most gives back its scratch's pages in whole huge pages, finding the other untaken, by the command's
+//   report; again without the board (BUSTER_TEST_NO_UNITS_BOARD, as if its allocation failed), where no lane takes
+//   parts and still one lane alone leaves its memory; with -c by --lanes 1, each object its own alone and big.c alone
+//   giving its scratch's pages back in whole huge pages, for small.c (CheckProgramOptions.discard_huge); linked by
+//   --lanes 1, by 8 and by the scalar path on 8, the same bytes, a program whose sum is the test's, and on 8 lanes the
+//   parts taken so and no lane's memory left to the exit.
 // - The units' memory (#1109, check_units_test_memory): the budget read from files of the test's own for each branch of
 //   check_units_memory_read (without MemAvailable, the free pages: a page at least, bounded; a limit whose use can't
 //   be read: nothing); two equal units by two lanes with a byte of memory, one of which must wait for the other's
@@ -1430,8 +1430,12 @@ static void check_units_test_shared(CheckUnitsTestTally* tally, const char* exec
         check_units_test_expect(tally, status == 0 && (boardless ? shared == 0 : shared != 0),
                                 "-c of the few large units by 8 lanes: the lanes without units take the large one's parts with the board, none without it", runs[b]);
         check_units_test_expect(tally, status != 0 || kept == 1, "-c of the few large units by 8 lanes: the last lane alone leaves its memory to the exit", runs[b]);
-        check_units_test_expect(tally, status != 0 || scratch == 0,
-                                "-c of the few large units by 8 lanes: no unit is left to take, so each gives its scratch's pages back as alone", runs[b]);
+        // Each lane counts its unit after taking it, and a lane may wake after the other unit reaches the checker: the
+        // unit that reaches it first may still find the other untaken (check_units_discard_huge), and the second can't,
+        // since the first was counted before it was compiled. So one unit at most gives its pages back in whole huge
+        // pages.
+        check_units_test_expect(tally, status != 0 || scratch <= 1,
+                                "-c of the few large units by 8 lanes: one unit at most finds a unit left to take, the other none", runs[b]);
         for (uint32_t o = 0; status == 0 && o < BUSTER_ARRAY_LENGTH(objects); o += 1)
         {
             char first[PATH_MAX];
