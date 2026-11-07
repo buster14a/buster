@@ -35,12 +35,15 @@ static void cc_mixed_refusal(CCCompatibilityTest* test, const char* name, const 
     CCCompatibilityRun run = cc_compat_run(test, test->compiler, NULL, arguments);
     char* executable = cc_compat_read(test, "program");
     char* dependency = cc_compat_read(test, "keep.d");
-    cc_compat_expect(test, prepared && run.status != 0 && run.errors != NULL && strstr(run.errors, diagnostic) != NULL &&
-                           executable != NULL && strcmp(executable, "previous executable\n") == 0 &&
-                           dependency != NULL && strcmp(dependency, "previous dependencies\n") == 0, name);
-    if (run.status == 0 || run.errors == NULL || strstr(run.errors, diagnostic) == NULL)
+    const bool diagnosed = run.status != 0 && run.errors != NULL && strstr(run.errors, diagnostic) != NULL;
+    const bool executable_kept = executable != NULL && strcmp(executable, "previous executable\n") == 0;
+    const bool dependency_kept = dependency != NULL && strcmp(dependency, "previous dependencies\n") == 0;
+    cc_compat_expect(test, prepared && diagnosed && executable_kept && dependency_kept, name);
+    if (!prepared || !diagnosed || !executable_kept || !dependency_kept)
     {
-        fprintf(stderr, "  status %d: %s\n", run.status, run.errors != NULL ? run.errors : "(missing)");
+        fprintf(stderr, "  prepared=%u diagnosed=%u executable-kept=%u dependency-kept=%u; status %d: %s\n",
+                (unsigned)prepared, (unsigned)diagnosed, (unsigned)executable_kept, (unsigned)dependency_kept,
+                run.status, run.errors != NULL ? run.errors : "(missing)");
     }
     free(executable);
     free(dependency);

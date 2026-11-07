@@ -3,6 +3,20 @@
 //
 // Source links whose selected named archives use the same foreign resolver as positional archives (#1470). Included
 // after the mixed-driver helpers. Clang/ar make independent archive and DSO inputs; Buster links and runs them.
+static void cc_mixed_library_needed(CCCompatibilityTest* test, const char* expected, const char* description)
+{
+    const char* const dynamic[] = { "-d", "program", NULL };
+    CCCompatibilityRun needed = cc_compat_run(test, "readelf", NULL, dynamic);
+    const bool correct = needed.status == 0 && needed.output != NULL && strstr(needed.output, expected) != NULL;
+    cc_compat_expect(test, correct, description);
+    if (!correct)
+    {
+        fprintf(stderr, "  readelf status %d, expected %s:\n%s\n%s\n", needed.status, expected,
+                needed.output != NULL ? needed.output : "(missing output)", needed.errors != NULL ? needed.errors : "(missing errors)");
+    }
+    cc_compat_release(&needed);
+}
+
 static void cc_mixed_named_libraries(CCCompatibilityTest* test)
 {
     bool files = cc_compat_write(test, "named-main.c", "#ifndef EXPECTED\n#define EXPECTED 42\n#endif\nextern int answer(void); int main(void) { return answer() != EXPECTED; }\n") &&
@@ -18,6 +32,7 @@ static void cc_mixed_named_libraries(CCCompatibilityTest* test)
         { "-c", "named-tail.c", "-o", "named-tail.o", NULL },
         { "-shared", "-fPIC", "helper.c", "-Wl,-soname,libchoice1470.so", "-o", "libchoice1470.so", NULL },
         { "-shared", "-fPIC", "helper.c", "-o", "libnoname1470.so", NULL },
+        { "-shared", "-fPIC", "helper.c", "-Wl,-soname,libcontract1470.so", "-o", "libsoname1470.so", NULL },
         { "-shared", "-fPIC", "named-optional.c", "-Wl,-soname,liboptional1470.so", "-o", "liboptional1470.so", NULL },
     };
     for (uint32_t i = 0; i < sizeof(objects) / sizeof(objects[0]); i += 1)
@@ -59,6 +74,7 @@ static void cc_mixed_named_libraries(CCCompatibilityTest* test)
         { "named-main.c", "-DEXPECTED=17", "-L.", "-l:libchoice1470.a", "-o", "program", NULL },
         { "main.c", "-L.", "-l:named-renamed.data", "-o", "program", NULL },
         { "named-main.c", "-L.", "-lchoice1470", "-lempty1470", "-Wl,-rpath,$ORIGIN", "-o", "program", NULL },
+        { "named-main.c", "-L.", "-l:libnoname1470.so", "-larchiveonly1470", "-Wl,-rpath,$ORIGIN", "-o", "program", NULL },
         { "named-main.c", "-L.", "-lnoname1470", "-larchiveonly1470", "-Wl,-rpath,$ORIGIN", "-o", "program", NULL },
     };
     for (uint32_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i += 1)
@@ -67,11 +83,13 @@ static void cc_mixed_named_libraries(CCCompatibilityTest* test)
         snprintf(name, sizeof(name), "source named-library link %u (%s)", i + 1, cases[i][0]);
         cc_mixed_command(test, name, cases[i], NULL, true);
     }
-    const char* const dynamic[] = { "-d", "program", NULL };
-    CCCompatibilityRun needed = cc_compat_run(test, "readelf", NULL, dynamic);
-    cc_compat_expect(test, needed.status == 0 && needed.output != NULL && strstr(needed.output, "[libnoname1470.so]") != NULL,
-                     "a named DSO beside an archive retains basename DT_NEEDED without a SONAME");
-    cc_compat_release(&needed);
+    cc_mixed_library_needed(test, "[libnoname1470.so]", "a named DSO beside an archive retains basename DT_NEEDED without a SONAME");
+    const char* const positional[] = { "named-main.c", "./libnoname1470.so", "-L.", "-larchiveonly1470", "-o", "program", NULL };
+    cc_mixed_command(test, "a positional DSO beside an archive retains its input path", positional, NULL, true);
+    cc_mixed_library_needed(test, "[./libnoname1470.so]", "a positional DSO without a SONAME retains path DT_NEEDED");
+    const char* const soname[] = { "named-main.c", "-L.", "-lsoname1470", "-larchiveonly1470", "-o", "program", NULL };
+    cc_mixed_command(test, "a named DSO with a distinct SONAME links beside an archive", soname, NULL, false);
+    cc_mixed_library_needed(test, "[libcontract1470.so]", "SONAME overrides a named DSO's search filename");
     const char* const standard_input[] = { "-x", "c", "-", "-x", "none", "-DEXPECTED=17", "-L.", "-l:libchoice1470.a", "--id-order", "7", "-o", "program", NULL };
     cc_mixed_command(test, "named archive with buffered C stdin and changed identifier order", standard_input, "named-main.c", true);
     const char* const state[][16] = {
@@ -115,4 +133,3 @@ static void cc_mixed_named_libraries(CCCompatibilityTest* test)
     }
     cc_compat_expect(test, emitted, "compile-only with an unresolved library still emits an ELF object");
 }
-
