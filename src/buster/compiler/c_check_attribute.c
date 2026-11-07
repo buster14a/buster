@@ -5894,10 +5894,14 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         {
             valid = check_input_attribute_annotations(reader, attributes, attribute, declaration, type, name, begin);
         }
-        // x86's interrupt where its subjects take it (#147): its handler's checks of the function's type.
+        // x86's interrupt where its subjects take it (#147): its handler's checks of the function's type. One that fails
+        // them is no handler, as clang's handleAnyX86InterruptAttr returns before adding the attribute: no direct call's
+        // error, no implicit used, no -Wexcessive-regsave of its body's calls.
         if (valid && attribute->kind == CHECK_ATTRIBUTE_INTERRUPT && !attribute->ignored && !attribute->subject_ignored)
         {
             valid = check_input_interrupt_handler(reader, attributes, attribute, declaration, type, begin, name);
+            attribute->ignored = !valid;
+            attribute->subject_ignored = !valid;
         }
         // A GPU kernel's convention off a function (#147): clang's "'X' attribute only applies to functions" error.
         if (valid && kernel && (declaration & BUSTER_CHECK_SUBJECT_FUNCTION) == 0)
