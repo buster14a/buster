@@ -7523,6 +7523,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 }
 #include "c_check_initializer_warning_test.c"
 #include "c_check_warning_driver_test.c"
+#include "c_check_sign_compare_driver_test.c"
 
 // The terminal CLI may leave mappings for exit, but callers that go on compiling must retain the reusable command's
 // cleanup contract. Warm each route once so lazy thread scratch and libc state are outside the comparison.
@@ -7655,6 +7656,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     const char* clang = "clang";
     const char* executable = NULL;
     bool lazy = false;
+    bool sign_compare_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -7665,6 +7667,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--executable") == 0 && i + 1 < argc)
         {
             executable = argv[++i];
+        }
+        else if (strcmp(argv[i], "--sign-compare-only") == 0)
+        {
+            sign_compare_only = true;
         }
         else if (strcmp(argv[i], "--lazy-system-headers") == 0)
         {
@@ -7684,6 +7690,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             options = false;
         }
     }
+    options &= !sign_compare_only || (!lazy && check_driver_part.count == 1);
     check_test_expect(&test, options, "driver test options are recognized");
     // The library-builtin table is pinned to BUSTER_CLANG_REFERENCE_VERSION: a different clang release is reported with
     // both versions, and the library comparisons then skip only the names that depend on its table (#1131).
@@ -7696,7 +7703,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     // _optimize_pragmas and _kr_policy), whose gates below have no `!lazy`. Every other check runs the same commands
     // either way, so the eager command's run of them is the lazy one's too; repeating them took 90% of the lazy
     // command's time. A section that comes to take `lazy` loses the `!lazy` of its gate.
-    if (!lazy && check_test_driver_takes())
+    if (!sign_compare_only && !lazy && check_test_driver_takes())
     {
         check_test_driver_warning_order(&test);
         check_test_driver_unselected_roots(&test);
@@ -8167,12 +8174,16 @@ static int run_checker_driver_tests(int argc, char** argv)
     char directory[] = "/tmp/buster-checker-driver-XXXXXX";
     const bool temporary = options && mkdtemp(directory) != NULL;
     check_test_expect(&test, temporary, "driver test directory is available");
+    if (temporary && sign_compare_only)
+    {
+        check_test_driver_sign_compare(&test, clang, executable, directory);
+    }
     const char* clang_arguments[] = { "-std=gnu17", "-w" };
-    if (temporary && !lazy && check_test_driver_takes())
+    if (temporary && !sign_compare_only && !lazy && check_test_driver_takes())
     {
         check_test_driver_deep(&test, clang, executable, directory);
     }
-    for (uint32_t i = 0; temporary && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    for (uint32_t i = 0; temporary && !sign_compare_only && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
         if (check_test_driver_takes())
         {
@@ -8238,7 +8249,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             unlink(source);
         }
     }
-    if (temporary)
+    if (temporary && !sign_compare_only)
     {
         if (!lazy && check_test_driver_takes())
         {
@@ -8751,6 +8762,9 @@ static int run_checker_driver_tests(int argc, char** argv)
                 check_test_driver_cpu_pinning(&test, executable, directory);
             }
         }
+    }
+    if (temporary)
+    {
         rmdir(directory);
     }
     check_test_expect(&test, check_driver_part.taken != 0, "the driver test's part runs some of its checks");

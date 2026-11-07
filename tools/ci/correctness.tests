@@ -172,6 +172,9 @@ if "$BUSTER_COMPILER" test-preprocessor --part 1/4 --part 2/4; then exit 1; fi
 "$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 3/4
 == Test the semantic driver's diagnostics and emission against clang (part 4 of 4)
 "$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 4/4
+== Check narrow-unsigned sign comparisons and admitted deferred diagnostics [2 CPUs]
+# This focused route compiles two bodies, requests two lanes and asserts the reported deferred admission.
+"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --sign-compare-only
 == Test the per-file jobs on the frozen musl units
 # #262's corpora: musl's 1,355 units with its build's options, the cache filled on 1, 2, 3 and 8 lanes and with
 # the ids in another order, as test-files does for the repository's units.
