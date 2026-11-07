@@ -636,6 +636,18 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 10,
     },
     {
+        // Clang decides by the context its parser is in (#147): an unselected _Generic association or choose_expr operand in
+        // an alignof's operand is unevaluated with it, as are a _Generic's controlling expression and a statement
+        // expression in sizeof's; an array declarator's bound, in a sizeof's type name too, is evaluated; and a sizeof of a
+        // variable array's element evaluates its operand.
+        .name = "void pointer dereferences by context",
+        .source = "void *p; int i;\nunsigned long f(int n) {\n  char v[n][n]; int w[(*p, 3)];\n"
+                  "  return _Alignof(_Generic(i, int: i, default: *p)) + _Alignof(__builtin_choose_expr(0, i, *p)) + _Generic(*p, void: 1, default: 2)\n"
+                  "    + sizeof(({ (void)*p; 1; })) + sizeof(char (*)[(*p, n)]) + sizeof(int[(*p, n)]) + sizeof(v[(*p, 0)]) + sizeof(w);\n}\n"
+                  "void g(int a[(*p, 3)]) { (void)a; }\n",
+        .warnings = 12,
+    },
+    {
         // An assignment to a const variable, through an array's subscripts or a record's members to it, or through a
         // pointer to a const record (#147): the variable named with its declared type and the "declared const here" note at
         // its name; a pointer's target is the generic error.

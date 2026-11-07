@@ -463,8 +463,8 @@ static void check_input_interrupt_calls(CheckInputReader* reader)
 }
 
 // An indirection through a pointer to void (#147, clang's CheckIndirectionOperand): whether `node` is one clang warns of,
-// -Wvoid-ptr-dereference, in dead code too, but not right after a unary `&` (`&*p`, clang's IsAfterAmp; `&(*p)` warns) nor
-// in sizeof's operand (the unevaluated warnings' mark; alignof's, which has none, check_warning_graph_void_dereferences).
+// -Wvoid-ptr-dereference, in dead code too, but not right after a unary `&` (`&*p`, clang's IsAfterAmp; `&(*p)` warns).
+// Whether its context is an evaluated one is check_warning_graph_void_context's.
 static bool check_warning_graph_void_candidate(const CheckInput* input, const Parser* parser, const TypeTable* types, const CheckStream* stream, uint32_t node)
 {
     const CheckGraph* graph = &input->graph;
@@ -474,54 +474,162 @@ static bool check_warning_graph_void_candidate(const CheckInput* input, const Pa
     const TypeId pointer = type != 0 ? type_unqualified(type_strip_aligned(types, type)) : 0;
     const bool through_void = pointer != 0 && type_kind(types, pointer) == BUSTER_TYPE_KIND_POINTER &&
                               type_kind(types, type_unqualified(type_strip_aligned(types, type_element(types, pointer)))) == BUSTER_TYPE_KIND_VOID;
-    const uint32_t mask = check_constant_unevaluated_warnings();
-    const bool query = graph->warning_suppressed != NULL && (graph->warning_suppressed[node] & mask) == mask;
     const uint32_t before = star != 0 && star < parser->tokens.count && parser->tokens.kinds[star - 1] == PARSE_KIND_AMP && input->token_nodes != NULL ?
                             input->token_nodes[star - 1] : BUSTER_CHECK_NONE;
     const bool after_amp = before < graph->count && graph->ops[before] == CHECK_OP_ADDRESS;
-    return through_void && !query && !after_amp && star < parser->tokens.count;
+    return through_void && !after_amp && star < parser->tokens.count;
+}
+
+// A token's context as clang's parser enters it (Sema's expression evaluation contexts), which decides whether a void
+// dereference warns: 0 while not yet known, else KNOWN, and UNEVALUATED in an unevaluated operand. TRANSFORMED marks
+// what a sizeof of a variable array evaluates after all, and SELECTION a _Generic's separators.
+typedef enum CheckVoidContext
+{
+    CHECK_VOID_CONTEXT_KNOWN = 1,
+    CHECK_VOID_CONTEXT_UNEVALUATED = 2,
+    CHECK_VOID_CONTEXT_TRANSFORMED = 4,
+    CHECK_VOID_CONTEXT_SELECTION = 8,
+} CheckVoidContext;
+
+// Whether a token of `role` is a declaration's specifiers' (a type name's root, as a declarator's tokens hang from it).
+static bool check_warning_graph_void_specifiers(uint8_t role)
+{
+    return role == PARSE_ROLE_SPECIFIER || role == PARSE_ROLE_TAG || role == PARSE_ROLE_CLOSE_SPECIFIER || role == PARSE_ROLE_CLOSE_STRUCT ||
+           role == PARSE_ROLE_CLOSE_ENUM || role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
+}
+
+// Whether the `]` at `close` ends an array declarator's bound, in a declaration or a type name, rather than a subscript:
+// up the declarator's own tokens (`*`, groups, qualifiers, other bounds, the declarators' commas, a function
+// declarator's parentheses, attributes) come the declaration's specifiers. A subscript's climb stops at an operator, a
+// statement or another group first.
+static bool check_warning_graph_void_declarator(const Parser* parser, uint32_t close)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t up = parser->tree.parents[close];
+    bool chain = true;
+    for (uint32_t steps = 0; chain && up < count && steps < count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[up];
+        chain = role == PARSE_ROLE_CLOSE_SUBSCRIPT || role == PARSE_ROLE_CLOSE_GROUP || role == PARSE_ROLE_QUALIFIER_LEFT || role == PARSE_ROLE_COMMA ||
+                role == PARSE_ROLE_CLOSE_CALL || role == PARSE_ROLE_CLOSE_FUNCTION || role == PARSE_ROLE_CLOSE_ATTRIBUTE ||
+                (role == PARSE_ROLE_PREFIX && parser->tokens.kinds[up] == PARSE_KIND_STAR);
+        up = chain ? parser->tree.parents[up] : up;
+    }
+    return !chain && up < count && check_warning_graph_void_specifiers(parser->tree.roles[up]);
+}
+
+// The opener of the group `close` closes: the nearest token before it at its depth, as the group's contents are deeper.
+static uint32_t check_warning_graph_void_opener(const Parser* parser, uint32_t close)
+{
+    const uint32_t depth = parser->tree.depths[close];
+    uint32_t open = close;
+    while (open > 0 && parser->tree.depths[open - 1] > depth)
+    {
+        open -= 1;
+    }
+    return open > 0 ? open - 1 : BUSTER_CHECK_NONE;
+}
+
+// The context of `child` of `parent`, whose context is `context`: the parent's, but in an operand that opens another.
+// A sizeof's or an alignof's operand (CLOSE_SIZEOF's, or the keyword's without parentheses), a typeof's and a
+// _Generic's controlling expression (left of its first separator) are unevaluated; an array declarator's bound is
+// evaluated again (ConstantEvaluated), so `sizeof(char (*)[(*p, n)])` warns, and so is the rest of a specifier's group
+// (_Atomic, _BitInt). A sizeof whose operand is an expression (not a type name) of variable array type (the graph's
+// CHECK_OP_SIZEOF_VLA), itself in an evaluated context, evaluates the operand after all (clang's
+// TransformToPotentiallyEvaluated), which warns of its dereferences outside other queries then, a bound's a second time.
+static uint8_t check_warning_graph_void_step(const CheckInput* input, const Parser* parser, uint32_t parent, uint8_t context, uint32_t child)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint8_t role = parser->tree.roles[parent];
+    const uint8_t transformed = context & CHECK_VOID_CONTEXT_TRANSFORMED;
+    uint8_t result = context & (uint8_t)~CHECK_VOID_CONTEXT_SELECTION;
+    if ((context & CHECK_VOID_CONTEXT_SELECTION) != 0)
+    {
+        const bool left = child < parent;
+        result = left && parser->tree.roles[child] == PARSE_ROLE_SEPARATOR ? context : left ? CHECK_VOID_CONTEXT_KNOWN | CHECK_VOID_CONTEXT_UNEVALUATED : result;
+    }
+    else if (role == PARSE_ROLE_CLOSE_SIZEOF ||
+             (role == PARSE_ROLE_PREFIX && parser->tokens.kinds[parent] == PARSE_KIND_SIZEOF && parser->tree.roles[child] != PARSE_ROLE_CLOSE_SIZEOF))
+    {
+        const uint32_t keyword = role == PARSE_ROLE_CLOSE_SIZEOF ? parser->tree.parents[parent] : parent;
+        const uint32_t node = keyword < count && input->token_nodes != NULL ? input->token_nodes[keyword] : BUSTER_CHECK_NONE;
+        // (A type name's, `sizeof(int[n])`, isn't: its bounds were evaluated where they were read.)
+        const bool runtime = node < input->graph.count && input->graph.ops[node] == CHECK_OP_SIZEOF_VLA && !check_warning_graph_void_specifiers(parser->tree.roles[child]);
+        const bool evaluated = (context & CHECK_VOID_CONTEXT_UNEVALUATED) == 0 || transformed != 0;
+        result = CHECK_VOID_CONTEXT_KNOWN | CHECK_VOID_CONTEXT_UNEVALUATED | (runtime && evaluated ? CHECK_VOID_CONTEXT_TRANSFORMED : 0);
+    }
+    else if (role == PARSE_ROLE_CLOSE_SPECIFIER || role == PARSE_ROLE_CLOSE_KEYWORD)
+    {
+        const uint32_t open = check_warning_graph_void_opener(parser, parent);
+        const uint8_t keyword = open != BUSTER_CHECK_NONE && open > 0 ? parser->tokens.kinds[open - 1] : PARSE_KIND_UNKNOWN;
+        const bool inside = open != BUSTER_CHECK_NONE && child > open;
+        if (inside && role == PARSE_ROLE_CLOSE_SPECIFIER)
+        {
+            result = keyword == PARSE_KIND_TYPEOF ? CHECK_VOID_CONTEXT_KNOWN | CHECK_VOID_CONTEXT_UNEVALUATED : CHECK_VOID_CONTEXT_KNOWN | transformed;
+        }
+        else if (inside && keyword == PARSE_KIND_GENERIC && parser->tree.roles[child] == PARSE_ROLE_SEPARATOR)
+        {
+            result = context | CHECK_VOID_CONTEXT_SELECTION;
+        }
+    }
+    else if (role == PARSE_ROLE_CLOSE_SUBSCRIPT && check_warning_graph_void_declarator(parser, parent))
+    {
+        result = CHECK_VOID_CONTEXT_KNOWN | transformed;
+    }
+    return result;
+}
+
+// `token`'s context (check_warning_graph_void_step's), each token's once: a climb stops at the first token whose
+// context is known, or at a root, whose context is evaluated, and writes the contexts down the path it took (`path`,
+// room for every token). A unit's climbs then cost O(tokens) however many dereferences ask, as comma or operator chains
+// would otherwise make them quadratic.
+static uint8_t check_warning_graph_void_context(const CheckInput* input, const Parser* parser, uint8_t* known, uint32_t* path, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t length = 0;
+    uint32_t up = token;
+    while (up < count && known[up] == 0 && length < count)
+    {
+        path[length] = up;
+        length += 1;
+        up = parser->tree.parents[up];
+    }
+    uint8_t context = up < count && known[up] != 0 ? known[up] : CHECK_VOID_CONTEXT_KNOWN;
+    for (uint32_t i = length; i-- > 0;)
+    {
+        const uint32_t child = path[i];
+        context = up < count ? check_warning_graph_void_step(input, parser, up, context, child) : CHECK_VOID_CONTEXT_KNOWN;
+        known[child] = context;
+        up = child;
+    }
+    return token < count && known[token] != 0 ? known[token] : CHECK_VOID_CONTEXT_KNOWN;
 }
 
 // The void dereferences' warnings (check_warning_graph_void_candidate's `count` nodes), at each `*`, of the operand's type as
-// clang prints it (its top-level qualifiers dropped, its typedef kept). One reverse pass over the graph, whose operands
-// precede their nodes, first marks every node under a sizeof or alignof query, which clang never evaluates. Units without
-// such a dereference take none of it.
+// clang prints it (its top-level qualifiers dropped, its typedef kept), once in an evaluated context, twice in a bound a
+// sizeof of a variable array evaluates again, and none in an unevaluated one (check_warning_graph_void_context). Units
+// without such a dereference take none of it.
 static void check_warning_graph_void_dereferences(CheckInputReader* reader, const CheckStream* stream, const uint32_t* candidates, uint32_t count)
 {
     const CheckGraph* graph = &reader->output->graph;
-    uint8_t* queried = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, graph->count);
-    reader->output->resource |= queried == NULL;
-    if (queried != NULL)
+    const Parser* parser = reader->parser;
+    const uint32_t tokens = parser->tokens.count;
+    uint8_t* known = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, tokens);
+    uint32_t* path = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, tokens);
+    const bool valid = known != NULL && path != NULL;
+    reader->output->resource |= !valid;
+    if (valid)
     {
-        memset(queried, 0, graph->count);
+        memset(known, 0, tokens);
     }
-    for (uint32_t node = graph->count; queried != NULL && node-- > 0;)
-    {
-        if (queried[node] != 0 || graph->ops[node] == CHECK_OP_SIZEOF || graph->ops[node] == CHECK_OP_ALIGNOF)
-        {
-            const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
-            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
-            {
-                if (operands[i] < node)
-                {
-                    queried[operands[i]] |= 1u;
-                }
-            }
-            for (uint32_t i = 0; check_graph_has_arguments(graph->ops[node]) && graph->argument_counts != NULL && i < graph->argument_counts[node]; i += 1)
-            {
-                const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
-                if (argument < node)
-                {
-                    queried[argument] |= 1u;
-                }
-            }
-        }
-    }
-    for (uint32_t i = 0; queried != NULL && i < count; i += 1)
+    for (uint32_t i = 0; valid && i < count; i += 1)
     {
         const uint32_t node = candidates[i];
         const uint32_t operand = graph->operand0[node];
-        if (queried[node] == 0)
+        const uint32_t star = graph->tokens[node];
+        const uint8_t context = check_warning_graph_void_context(reader->output, parser, known, path, star);
+        const uint32_t warnings = ((context & CHECK_VOID_CONTEXT_UNEVALUATED) == 0 ? 1u : 0u) + ((context & CHECK_VOID_CONTEXT_TRANSFORMED) != 0 ? 1u : 0u);
+        if (warnings != 0)
         {
             // (Through inner dereferences to the object they name: `**b`'s operand spells `VP *b`'s VP.)
             uint32_t named = operand;
@@ -529,7 +637,6 @@ static void check_warning_graph_void_dereferences(CheckInputReader* reader, cons
             {
                 named = graph->operand0[named];
             }
-            const uint32_t star = graph->tokens[node];
             const CheckWarningEvent event =
             {
                 .id = CHECK_WARNING_ID_VOID_PTR_DEREFERENCE,
@@ -541,7 +648,13 @@ static void check_warning_graph_void_dereferences(CheckInputReader* reader, cons
                 .payload = { .first_type = type_unqualified(check_stream_type(stream, operand)), .token = BUSTER_CHECK_WARNING_NO_SOURCE,
                              .data = check_input_operand_spelling(reader, named) },
             };
+            const uint64_t key = (uint64_t)event.kind << 32 | ((uint64_t)star + 1);
+            const bool first = !check_warning_set_contains(&reader->source_warning_keys, key);
             check_input_warning_once(reader, &event);
+            if (first && warnings == 2)
+            {
+                check_input_warning_event(reader, &event, NULL, 0);
+            }
         }
     }
 }

@@ -7053,9 +7053,20 @@ arguments against the function. The checker now gives these as clang does.
   kept, through inner dereferences to the object they name; its top-level
   qualifiers dropped), in dead code too, and before an error the expression
   then has (`(*p)++`). Not right after a unary `&` (`&*p`; `&(*p)` warns, as
-  clang's IsAfterAmp is the token's), nor in sizeof's or alignof's operand
-  (`check_warning_graph_void_dereferences`, one reverse pass marking the
-  queries' operands, only in a unit that has such a dereference).
+  clang's IsAfterAmp is the token's), nor where clang's parser is in an
+  unevaluated context (`check_warning_graph_void_context`, a climb up the
+  parse tree from the `*`, each token's context found once, only in a unit
+  that has such a dereference): a sizeof's or alignof's operand, with its
+  unselected `_Generic` associations and `__builtin_choose_expr` operands and
+  its statement expressions, and a `_Generic`'s controlling expression. An
+  array declarator's bound is evaluated again, in a sizeof's type name too
+  (`sizeof(char (*)[(*p, n)])` warns). A sizeof whose operand is an
+  expression of variable array type evaluates it after all (clang's
+  `TransformToPotentiallyEvaluated`): it warns there, and twice in a bound
+  inside it. Still quiet, as the graph doesn't have them: dereferences the
+  constant evaluator reads alone (`__builtin_offsetof`'s designators,
+  `__builtin_types_compatible_p`'s type names) and a `typeof`'s operand,
+  which clang evaluates again when its type is variably modified.
 - **A const variable's assignment.** "cannot assign to variable 'x' with
   const-qualified type 'const int'" with clang's "variable 'x' declared const
   here" note at its name, as clang's `DiagnoseConstAssignment` walks to it:
