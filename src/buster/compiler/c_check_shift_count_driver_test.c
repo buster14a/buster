@@ -307,6 +307,8 @@ static const CheckDriverDefaultWarningFixture check_driver_shift_count_fixtures[
     {
         .name = "vector shifts retain their separate count semantics",
         .source = "typedef int V __attribute__((vector_size(16)));V f(V x){return x<<32;}\n",
+        // Baseline x86-64 cannot lower this vector shift; the ordinary expression still checks warning exclusion.
+        .syntax_only = true,
     },
     {
         .name = "macro shift counts retain expansion notes",

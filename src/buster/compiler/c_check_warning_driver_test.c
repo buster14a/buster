@@ -15,6 +15,7 @@ struct CheckDriverDefaultWarningFixture
     uint32_t notes;
     bool c23;
     bool compare_warning_text;
+    bool syntax_only;
 };
 
 static const char check_driver_format_plain_source[] =
@@ -694,7 +695,7 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
         check_test_expect(test, written, "original default-warning fixture is written");
         for (uint32_t policy = 0; written && policy < BUSTER_ARRAY_LENGTH(policies); policy += 1)
         {
-            for (uint32_t mode = 0; mode < 2; mode += 1)
+            for (uint32_t mode = 0; mode < (fixture->syntax_only ? 1u : 2u); mode += 1)
             {
                 char* arguments[20] = { (char*)clang, fixture->c23 ? "-std=c23" : "-std=gnu17", "-fno-caret-diagnostics", "-fno-color-diagnostics",
                                         mode == 0 ? "-fsyntax-only" : "-c", source, "-o", objects[2] };

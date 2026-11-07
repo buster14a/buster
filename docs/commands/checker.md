@@ -199,6 +199,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   shift directions, narrow promotions, 128-bit and bit-precise widths, compound assignments, side effects, macros
   and warning policy. The shared default-warning harness covers syntax checking and object publication through
   both kernels and requested one/three-lane options, including `-Werror`, output preservation and `-w`.
+  The ordinary vector-shift exclusion control is syntax-only because baseline x86-64 cannot lower its vector shift.
   `c_check_return_flow.c` supplies source return-warning facts for checked graphs. Ordinary direct calls no longer
   suppress a function's `-Wreturn-type` warning; a proven direct `noreturn` call or terminating builtin ends only its
   own warning-flow edge. Short circuit, conditional and unevaluated operands retain their execution rules, and

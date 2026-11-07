@@ -777,6 +777,7 @@ typedef struct CheckCommonEmission
     Preprocessor* pp;
     const CheckInput* input;
     const CheckStream* stream;
+    const CheckProgram* program;
     TypeTable* types;
     CheckWarningSpelling* spell;
     CheckCommonShiftWarnings* shifts;
@@ -1103,7 +1104,7 @@ static uint32_t check_common_shift_warning(const CheckGraph* graph, const CheckS
 // Runtime shift counts do not need a constant left operand (#1394). Use the checked operand conversion for an
 // ordinary shift's promoted width; Clang diagnoses compound shifts against the original lvalue type instead.
 // Constant folding retains its own warnings, including their required-constant and source-suppression rules.
-static void check_common_shift_count(CheckCommonEmission* emission, uint32_t node)
+static void check_common_shift_count(CheckCommonEmission* emission, uint32_t node, bool detached)
 {
     const CheckGraph* graph = &emission->input->graph;
     const CheckStream* stream = emission->stream;
@@ -1118,8 +1119,11 @@ static void check_common_shift_count(CheckCommonEmission* emission, uint32_t nod
     const uint32_t contexts = graph->contexts != NULL ? graph->contexts[node] : 0;
     const bool ice = (contexts & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0;
     const bool replayed = check_common_shift_replay(emission->pp, emission->shifts, token);
+    // Constant if/switch folding removes dead arms before the control walk can mark their roots unreachable.
+    // Their ordinary counts stay quiet; detached static-selection arms still have no CFG block in Clang.
+    const bool dropped = !detached && emission->program != NULL && check_program_token_dropped(emission->program, token);
     if (!replayed && !ice && ((retained | suppressed) & counts) == 0 && left < graph->count && right < graph->count &&
-        !check_common_integer_constant(stream, left) && check_common_integer_constant(stream, right))
+        !check_common_integer_constant(stream, left) && check_common_integer_constant(stream, right) && !dropped)
     {
         const uint32_t warning = check_common_shift_warning(graph, stream, emission->types, node);
         if (warning != 0)
@@ -1157,7 +1161,7 @@ static void check_common_arithmetic_own(CheckCommonEmission* emission, uint32_t 
     }
     else if (check_common_shift_op(op))
     {
-        check_common_shift_count(emission, node);
+        check_common_shift_count(emission, node, false);
     }
 }
 
@@ -1812,7 +1816,7 @@ static void check_common_emit_run(CheckCommonEmission* emission)
             case BUSTER_CHECK_EMIT_SHIFT_OWN:
                 if (check_common_shift_op(graph->ops[node]))
                 {
-                    check_common_shift_count(emission, node);
+                    check_common_shift_count(emission, node, true);
                 }
                 break;
             case BUSTER_CHECK_EMIT_DETACHED_SCAN:
@@ -2713,7 +2717,7 @@ static bool check_common_shift_extras(const Parser* parser, const CheckInput* in
 
 static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                         TypeTable* types, CheckWarningSpelling* spell, const CheckCommonFacts* facts,
-                                        CheckCommonShiftWarnings* shifts, Arena* scratch)
+                                        const CheckProgram* program, CheckCommonShiftWarnings* shifts, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
     // Division and subscript warnings apply only to evaluated operands (facts->evaluated): sizeof and alignof operands,
@@ -2754,6 +2758,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             .pp = pp,
             .input = input,
             .stream = stream,
+            .program = program,
             .types = types,
             .spell = spell,
             .shifts = shifts,
@@ -5769,7 +5774,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     {
         check_common_exhausted(pp);
     }
-    check_common_graph_warnings(parser, pp, input, stream, types, &spell, &facts, shifts, scratch);
+    check_common_graph_warnings(parser, pp, input, stream, types, &spell, &facts, program, shifts, scratch);
     check_common_return_stack(parser, pp, input, stream, types, scratch);
     if (enabled.uninitialized)
     {
