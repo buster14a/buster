@@ -8,7 +8,15 @@ the C driver as `--tier1-schedule=post` and `--tier1-schedule=pre`, opt-in
 measurement options, and [the 9700X's measurement](#the-measurement-on-the-9700x)
 below is the answer.
 
-@@DECISION@@
+**The answer: neither variant pays on Zen 5, and both stay off by default.**
+Scheduling after allocation moves 16% of speedtest1's and Lua's records and
+changes neither program's run time beyond noise, for 3% to 6% more compile
+time. Scheduling before selection takes 1.9% off Lua's five scripts, robustly
+over eight link orders, but nothing measurable off speedtest1 (+0.6% in its one
+layout), for 4% to 7% more compile time; its gain is in instructions per cycle,
+not in fewer instructions, and its sign changes from script to script. The
+options remain, as `--tier1-gvn` does, to measure a better model (#181) or a
+pressure-aware preallocation order the same way.
 
 Scheduling is machine-dependent: the order that pays depends on the target's
 latencies, ports, decoding and fusion, and on how much of a block its
@@ -233,7 +241,108 @@ both orders. It is a stage boundary, not a compiler benchmark.
 
 ## The measurement on the 9700X
 
-@@MEASUREMENT@@
+The record, with the scripts, the analysis tools and every run:
+[buster-performance's `tier1-scheduling-172-2026-11-07`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-scheduling-172-2026-11-07).
+
+**What was measured.** The Ryzen 7 9700X under its lock, every timing on CPU 2.
+The compiler is this guide's tree `54489389` (the variants and the harnesses'
+`--variant`, on `main` `53854a7c`; what follows it changes no generated code),
+built `BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0`, with clang 23.1.1. The
+programs are #1189's: speedtest1 from the frozen `sqlite3.c` (`0a409f16…`) and
+SQLite 3.53.2's `speedtest1.c` (`b5eaf4bb…`) with #136's flags and options, and
+Lua 5.4.8 (`4f18ddae…`) running the `cc3387f` record's five scripts, each by
+`--tier1 -fno-asynchronous-unwind-tables` with and without each variant.
+
+**Correctness.** Compiled with `--verify`, every function of both programs is
+Tier 1's with each variant, every scheduled block passes its scalar reference
+and every frame passes the emission's frame verifier. Every build gives
+speedtest1's verification hash `1248168 a7fa3957…`, every script prints clang
+-O0's output, and so do the 24 relinked Lua executables below.
+
+**What moved** (`--tier1-report`):
+
+| | `--tier1` | `post` | `pre` |
+| --- | ---: | ---: | ---: |
+| speedtest1: records | 310,550 | 310,550, 48,581 moved in 30,666 blocks | 311,481 |
+| speedtest1: spill stores / reloads | 13,928 / 17,232 | the same | 13,919 / 17,404 |
+| speedtest1: edge moves | 46,804 | the same | 46,753 |
+| speedtest1: text bytes | 1,328,967 | 1,328,967 | 1,331,895 |
+| speedtest1: IR instructions moved | | | 248,675 in 38,308 segments |
+| Lua: records | 61,486 | 61,486, 9,724 moved in 6,042 blocks | 61,468 |
+| Lua: spill stores / reloads | 889 / 1,018 | the same | 884 / 1,021 |
+| Lua: edge moves | 4,499 | the same | 4,450 |
+| Lua: text bytes | 257,028 | 257,028 | 255,044 |
+
+The postallocation variant only permutes records within blocks, so every
+function and block keeps its size and place. The preallocation one changes the
+allocation: on speedtest1 172 more reloads and 0.41% more instructions run
+(3,576.4 M against 3,561.7 M); on Lua's `lvm.c` alone, 11 fewer spill stores
+and 51 fewer edge moves.
+
+**Run time, one layout.** `measure-tier1-programs --runs 21 --variant
+--tier1-schedule=post --variant --tier1-schedule=pre`, three processes, each
+build of each program once a round in a rotating order. Each round's ratio of a
+variant's user cycles to `--tier1`'s, their median over the 63 rounds (the
+three processes' medians in parentheses):
+
+| Program | `post` / `--tier1` | `pre` / `--tier1` |
+| --- | ---: | ---: |
+| speedtest1 | 1.0019 (1.0054, 1.0001, 1.0022) | 1.0063 (1.0042, 1.0097, 1.0039) |
+| Lua's five scripts | 0.9968 (0.9984, 0.9999, 0.9897) | 0.9852 (0.9884, 0.9868, 0.9813) |
+
+For scale, `--tier1` ran speedtest1 in 196 ms and 994 M cycles (clang -O2: 130
+ms, 633 M) and Lua's scripts in 245 ms and 1,338 M (clang -O2: 166 ms, 902 M).
+The postallocation variant leaves the layout as it was, so its comparison is
+complete in one layout. The preallocation variant changes code sizes, so its
+comparison also moves functions, which alone moved Lua by up to 1.5% in #1450.
+
+**Run time, eight layouts of Lua** ([the profiling guide's](commands/profiling.md)
+method): Lua's 33 units compiled once by each variant (`-c`), linked by clang in
+the Makefile's order and seven recorded permutations of it, the same for each
+variant; `time-runs --runs 11` of each script over the 24 executables. The mean
+of the paired log ratios over the eight orders, with its 95% interval (Student's
+t, seven degrees of freedom):
+
+| Script | `post` / `--tier1` | `pre` / `--tier1` |
+| --- | ---: | ---: |
+| calls | −0.02% [−0.95, +0.92] | −1.36% [−2.18, −0.54] |
+| tables | −0.36% [−0.85, +0.14] | −2.04% [−3.28, −0.78] |
+| strings | +0.31% [−0.01, +0.63] | +0.54% [+0.26, +0.82] |
+| arithmetic | +0.79% [+0.54, +1.04] | +0.08% [−1.32, +1.51] |
+| closures | +0.09% [−0.38, +0.57] | −5.27% [−6.71, −3.82] |
+| **the sum** | **+0.18% [−0.01, +0.37]** | **−1.90% [−2.26, −1.53]** |
+
+The sums agree with the one-layout runs. The scripts don't all: `arithmetic`
+by `pre` is −3.7% in all three one-layout processes and +0.1% over the eight
+orders, so a single script's figure is the layout's as much as the schedule's.
+speedtest1 is one translation unit, whose functions' order no link changes
+(the driver refuses `-ffunction-sections`), so its `pre` figure stays a
+single-layout one.
+
+**Compile time.** `measure-compile --runs 11 --variant --tier1-schedule=V`: the
+whole compile against the same compiler without the option, on CPU 2.
+
+| Compile | `--tier1` | `post` | `pre` |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c` and `speedtest1.c`, `-c` | 426.7 ms | 450.0 ms (+5.5%) | 456.2 ms (+7.0%) |
+| Lua's 33 units, linked | 158.1 ms | 162.7 ms (+2.9%) | 164.7 ms (+3.9%) |
+
+The postallocation scheduler's quadratic graph and selection are 23 ms of
+speedtest1's 310,550 records; the preallocation pass, with its renaming, 30 ms.
+
+**The decision.** The question was the run time saved against the compile
+time spent. After allocation nothing is saved, as a window as large as Zen
+5's would suggest: the order the allocator leaves in a block costs nothing it
+can measure. Before selection, Lua gains 1.9% and speedtest1 nothing (its one
+layout says 0.6% slower, inside what a layout moves it), while both compiles pay
+4% to 7%. Lua's gain comes with as many instructions as before (0.1% more), so
+it is cycles the new order saves (or the code placement inside its functions,
+which no link order varies), not spills it removes, and `closures` holds most of
+it. That is not the uniform gain that would
+justify the compile time on every function, so neither variant is enabled; the
+breaking of false dependencies the issue lists is already Tier 1's selection's
+for conversions from integers (`xorps` before `cvtsi2s*`), and a resize's
+(`cvtss2sd`, `cvtsd2ss`) still merges.
 
 ## Boundary audit #298
 
