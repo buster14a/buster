@@ -209,16 +209,57 @@ names once that pays:
   whole run, as #653 says, so no unit could have seen it after looking once.
   A process out of descriptors gets "not found" for a ruled-out name, where an
   `open` would have failed with EMFILE: as clang's search, which `stat`s, does.
+- **What a lookup pays.** A unit keeps its search directories'
+  `FileCacheDirectory` pointers (`Preprocessor.directory_entries`). A lookup
+  finds a directory by its path only after a probe failed there, or once some
+  directory of the cache has a listing (`FileCache.listed_directories`). A
+  lookup that finds a file, in a unit that lists nothing, does no directory
+  work. Hashing every uncached path's directory instead had cost a unit with
+  only `<stdio.h>` 14,000 instructions (0.18%) on the 9700X.
 - **Across units and the walk.** The listings live in the cache, so every unit
   of a run that shares it uses them. The walk (`files_advance`) moves past a
   candidate a listing rules out without waiting for a wave's probes. It counts
   a wave's failed probes as it adds them (`files_add_probes`, on one lane, in
   the probes' order), so every lane count lists the same directories at the
-  same point. `main.c`'s walk took 27 waves instead of 46, and made 1,912 opens
-  instead of 2,688.
+  same point. On this repository's Ubuntu image, `main.c`'s walk took 31 waves
+  instead of 46, and made 2,082 opens instead of 2,688.
 - **No vector path.** A listing is a few hundred names, read once, and a
   lookup hashes one component. The system calls are the cost; scalar code
   is enough here.
+- **Measured** on the 9700X (CPU 2, under the lock), against `ec5f0f6b`:
+  - Failed `openat`s (`strace -f -c` of `-c`):
+    - `#include <stdio.h>` alone: 52, unchanged;
+    - zlib 1.3.1's `uncompr.c`: 88 → 75;
+    - `deflate.c`: 110 → 86;
+    - `sqlite3.c` (3.53.4): 310 → 188.
+
+    Every object is byte-identical.
+  - The include searches' time (`benchmark-preprocessor --listing-misses
+    32,0`, one executable):
+    - the one-header unit: 62 and 61 µs;
+    - `uncompr.c`: 131 and 127 µs, and 127 and 128 in another run;
+    - `deflate.c`: 160 and 159 µs;
+    - `sqlite3.c`: 580 and 600 µs.
+
+    So a small or zlib-sized unit's searches are as before, within the
+    medians' ±4 µs.
+  - Whole processes (`time-runs`, two copies each, three rounds) can't tell
+    these apart. With no include, `tiny.c` ran 2% fewer user cycles and 16%
+    to 22% less wall time in this build than in the base, which is the two
+    executables, not the searches (#502).
+  - Many `-I` directories (`-fsyntax-only`, each of H guarded headers in
+    the last of D+1 directories, the D before it empty, #653's case):
+
+    | D | H | failed `openat` | wall time |
+    | ---: | ---: | --- | --- |
+    | 10 | 2,000 | 20,000 → 320 | 17.2 → 7.8 ms |
+    | 100 | 2,000 | 200,000 → 3,200 | 125.4 → 34.6 ms |
+    | 200 | 4,000 | 800,000 → 6,400 | 553.9 → 187.5 ms |
+
+    #653 measured clang at 31.5, 126.8 and 455.9 ms on these shapes.
+  - `benchmark-files` on `main.c`: 28 waves instead of 40, and 2,057 opens
+    instead of 2,647. Its run times are the same, within 0.1 ms on 1 to 8
+    lanes: the searches' time it saves goes to lane 0's listings.
 
 ### Per-file jobs on lanes
 
