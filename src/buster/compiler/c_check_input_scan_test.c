@@ -721,6 +721,62 @@ static void check_test_declaration_starts(CheckTest* test)
     check_test_expect(test, differences == 0, "the declaration-start column's paths give the walk's start for every random role");
 }
 
+// The walk in source order's label marks by lines (check_input_resolve_label_marks, #1671) against its per-token tests
+// (check_input_resolve_ignored), its twin, over random roles, kinds and parents: each token's bit is the ignored mark the
+// tests give it, for counts that end in and between lines.
+static void check_test_label_marks(CheckTest* test)
+{
+    enum { MAXIMUM = 300 };
+    static const uint8_t roles_drawn[] = { PARSE_ROLE_OPERAND, PARSE_ROLE_LABEL, PARSE_ROLE_PREFIX, PARSE_ROLE_OPEN_CASE, PARSE_ROLE_TERMINATOR,
+                                           PARSE_ROLE_OPEN_GROUP, PARSE_ROLE_CLOSE_CALL };
+    static const uint8_t kinds_drawn[] = { PARSE_KIND_IDENTIFIER, PARSE_KIND_GOTO, PARSE_KIND_SWITCH, PARSE_KIND_AMPAMP, PARSE_KIND_STAR, PARSE_KIND_SEMI };
+    uint8_t roles[MAXIMUM];
+    uint8_t kinds[MAXIMUM];
+    uint32_t parents[MAXIMUM];
+    uint8_t ignored[MAXIMUM + 1];
+    uint32_t differences = 0;
+    uint32_t marked = 0;
+    // This test's own generator, so that its draws leave the default run's seed for the fixtures after it unchanged.
+    uint64_t state = 0x1671;
+    for (uint32_t round = 0; round < 400; round += 1)
+    {
+        state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+        const uint32_t count = 1 + (uint32_t)(state >> 32) % (MAXIMUM - 1);
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+            const uint32_t draw = (uint32_t)(state >> 32);
+            roles[token] = roles_drawn[draw % BUSTER_ARRAY_LENGTH(roles_drawn)];
+            kinds[token] = kinds_drawn[(draw >> 8) % BUSTER_ARRAY_LENGTH(kinds_drawn)];
+            parents[token] = (draw >> 16) % 7 == 0 ? BUSTER_CHECK_NONE : (draw >> 20) % count;
+        }
+        Parser parser = { 0 };
+        parser.tokens.count = count;
+        parser.tokens.kinds = kinds;
+        parser.tree.roles = roles;
+        parser.tree.parents = parents;
+        CheckInputReader reader = { 0 };
+        reader.parser = &parser;
+        reader.ignored = ignored;
+        memset(ignored, 0, sizeof(ignored));
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            check_input_resolve_ignored(&reader, token, roles[token], kinds[token], parents[token]);
+        }
+        for (uint32_t line = 0; line < count; line += 64)
+        {
+            const uint64_t marks = check_input_resolve_label_marks(&parser, line);
+            for (uint32_t token = line; token < line + 64; token += 1)
+            {
+                const uint32_t bit = (uint32_t)(marks >> (token - line)) & 1u;
+                differences += token < count ? bit != ignored[token] : bit != 0;
+                marked += token < count && bit != 0;
+            }
+        }
+    }
+    check_test_expect(test, differences == 0 && marked != 0, "the walk's label marks by lines are its per-token tests' for every random role, kind and parent");
+}
+
 static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
 {
     check_test_output_none(test);
@@ -728,6 +784,7 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
     check_test_sparse_wide(test);
     check_test_sparse_lanes(test);
     check_test_declaration_starts(test);
+    check_test_label_marks(test);
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     // The columns, each in two pages, the second PROT_NONE: kinds, roles, names (or 32-bit values), and the
     // syntax bits and the marks count_tokens writes; then the expressions' classes' inputs (ignored tokens, first children

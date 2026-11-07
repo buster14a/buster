@@ -2604,6 +2604,18 @@ static void check_input_kr_diagnostic(CheckInputReader* reader, uint32_t token, 
     }
 }
 
+// The bytes of `column` at the 16 `indices` in `lanes`, a dword each: the aligned dword that holds each byte, which never
+// crosses a page the column's bytes aren't on (the column's start rounded down to four bytes), shifted down to the byte.
+static inline __m512i check_input_gather_bytes(__mmask16 lanes, __m512i indices, const uint8_t* column)
+{
+    const uintptr_t start = (uintptr_t)column & ~(uintptr_t)3;
+    const __m512i offsets = _mm512_add_epi32(indices, _mm512_set1_epi32((int32_t)((uintptr_t)column - start)));
+    const __m512i aligned = _mm512_andnot_si512(_mm512_set1_epi32(3), offsets);
+    const __m512i shifts = _mm512_slli_epi32(_mm512_and_si512(offsets, _mm512_set1_epi32(3)), 3);
+    const __m512i dwords = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, aligned, (const void*)start, 1);
+    return _mm512_and_si512(_mm512_srlv_epi32(dwords, shifts), _mm512_set1_epi32(0xff));
+}
+
 // Scans of a token column for the reader's passes that act on few tokens (#529): each gives the tokens from `first`
 // (of the next 64, 16 or 8 below `count`, by the column's width) it selects, a bit each, for its pass's vector path to
 // visit in order. The pass's scalar path, its twin, visits every token instead (check_input_scan_all), and its body
@@ -9114,6 +9126,47 @@ static bool check_input_starts_implicit_declaration(const CheckInputReader* read
     return candidate && (direct || declarator);
 }
 
+// check_input_resolve_ignored's marks of the 64 tokens from `line`, a bit each (#1671): the walk in source order computes a
+// line's when it first visits a token of it, from the parser's columns alone, which no step writes, and each visit ORs its
+// bit into its ignored mark. The roles, kinds and next tokens' roles are loaded 64 at a time; the parents' roles and kinds
+// are gathered 16 at a time, for the operands with a parent alone. The scalar path, which computes each visit's mark
+// itself (check_input_resolve_ignored), is the twin.
+static uint64_t check_input_resolve_label_marks(const Parser* parser, uint32_t line)
+{
+    const uint32_t count = parser->tokens.count;
+    const __mmask64 lanes = check_input_scan_all(line, count);
+    const __mmask64 nexts = check_input_scan_all(line + 1, count) & lanes;
+    const __m512i roles = _mm512_maskz_loadu_epi8(lanes, parser->tree.roles + line);
+    const __m512i kinds = _mm512_maskz_loadu_epi8(lanes, parser->tokens.kinds + line);
+    const __m512i next_roles = _mm512_maskz_loadu_epi8(nexts, parser->tree.roles + line + 1);
+    const __mmask64 operands = _mm512_mask_cmpeq_epi8_mask(lanes, roles, _mm512_set1_epi8((char)PARSE_ROLE_OPERAND));
+    const __mmask64 labeled = _mm512_mask_cmpeq_epi8_mask(lanes, kinds, _mm512_set1_epi8((char)PARSE_KIND_IDENTIFIER)) &
+                              _mm512_mask_cmpeq_epi8_mask(nexts, next_roles, _mm512_set1_epi8((char)PARSE_ROLE_LABEL));
+    uint64_t named = 0;
+    for (uint32_t group = 0; group < 4; group += 1)
+    {
+        const __mmask16 candidates = (__mmask16)(operands >> (group * 16));
+        if (candidates != 0)
+        {
+            const __m512i parents = _mm512_maskz_loadu_epi32(candidates, parser->tree.parents + line + group * 16);
+            const __mmask16 parented = _mm512_mask_cmplt_epu32_mask(candidates, parents, _mm512_set1_epi32((int32_t)count));
+            const __m512i parent_roles = check_input_gather_bytes(parented, parents, parser->tree.roles);
+            const __m512i parent_kinds = check_input_gather_bytes(parented, parents, parser->tokens.kinds);
+            const __mmask16 above = _mm512_mask_cmpeq_epi32_mask(parented, parent_roles, _mm512_set1_epi32(PARSE_ROLE_LABEL)) |
+                                    _mm512_mask_cmpeq_epi32_mask(parented, parent_kinds, _mm512_set1_epi32(PARSE_KIND_GOTO)) |
+                                    (_mm512_mask_cmpeq_epi32_mask(parented, parent_roles, _mm512_set1_epi32(PARSE_ROLE_PREFIX)) &
+                                     _mm512_mask_cmpeq_epi32_mask(parented, parent_kinds, _mm512_set1_epi32(PARSE_KIND_AMPAMP)));
+            const __mmask16 name = above | (parented & (__mmask16)(labeled >> (group * 16)));
+            named |= (uint64_t)name << (group * 16);
+        }
+    }
+    const __mmask64 keywords = _mm512_mask_cmpeq_epi8_mask(lanes, roles, _mm512_set1_epi8((char)PARSE_ROLE_LABEL)) |
+                               _mm512_mask_cmpeq_epi8_mask(lanes, kinds, _mm512_set1_epi8((char)PARSE_KIND_GOTO)) |
+                               _mm512_mask_cmpeq_epi8_mask(lanes, kinds, _mm512_set1_epi8((char)PARSE_KIND_SWITCH)) |
+                               _mm512_mask_cmpeq_epi8_mask(lanes, roles, _mm512_set1_epi8((char)PARSE_ROLE_OPEN_CASE));
+    return named | keywords;
+}
+
 // The walk in source order's tokens of no ordinary scope's identifier, which its later steps ignore: a label's name, a
 // goto's, and an address of a label's (GNU C's &&label), and the keywords of labels, gotos, switches and cases. A label's
 // name is right before its colon, whose child it is but after attributes (`[[x]] l:`, #147), whose closer the parser
@@ -9134,6 +9187,27 @@ static inline __attribute__((always_inline)) void check_input_resolve_ignored(Ch
                              ((kind == PARSE_KIND_IDENTIFIER) & has_next & (parser->tree.roles[next] == PARSE_ROLE_LABEL)));
     reader->ignored[i] |= label_name | (role == PARSE_ROLE_LABEL) | (kind == PARSE_KIND_GOTO) | (kind == PARSE_KIND_SWITCH) |
                           (role == PARSE_ROLE_OPEN_CASE);
+}
+
+// The walk in source order's label marks at `i` (check_input_resolve_ignored): on the vector path (`lined`), its bit of its
+// line's marks, which a line's first visit computes into `*marks` (check_input_resolve_label_marks, #1671); on the scalar
+// path, its twin, the token's own tests.
+static inline __attribute__((always_inline)) void check_input_resolve_label(CheckInputReader* reader, uint32_t i, uint8_t role, uint8_t kind, uint32_t parent, bool lined,
+                                                                            uint32_t* line, uint64_t* marks)
+{
+    if (lined)
+    {
+        if ((i & ~63u) != *line)
+        {
+            *line = i & ~63u;
+            *marks = check_input_resolve_label_marks(reader->parser, *line);
+        }
+        reader->ignored[i] |= (uint8_t)((*marks >> (i & 63u)) & 1u);
+    }
+    else
+    {
+        check_input_resolve_ignored(reader, i, role, kind, parent);
+    }
 }
 
 // The walk in source order's step at a name (an identifier other than a member's, a tag's or a designator's) that no
@@ -9268,6 +9342,11 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
     // C89's implicit declarations start at a name (check_input_starts_implicit_declaration), which a plain name's visit
     // leaves to the general one.
     const bool modern = parser->language.standard >= 1999;
+    // The vector path's label marks (check_input_resolve_label_marks) of the line of 64 tokens it last visited; gathers
+    // index by signed 32-bit offsets.
+    const bool lined = !BUSTER_SCALAR_PATH(scalar) && parser->tokens.count <= (uint32_t)INT32_MAX - 4;
+    uint32_t label_line = UINT32_MAX;
+    uint64_t label_marks = 0;
     uint32_t visits = 0;
     for (uint32_t i = begin; i <= end && reader->output->report_count == 0 && !reader->output->resource; i = check_input_resolve_next(reader, i, end))
     {
@@ -9357,7 +9436,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         {
             if (kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND && syntax == 0 && modern)
             {
-                check_input_resolve_ignored(reader, i, role, kind, parent);
+                check_input_resolve_label(reader, i, role, kind, parent, lined, &label_line, &label_marks);
                 if (!reader->ignored[i])
                 {
                     check_input_resolve_name(reader, i, role);
@@ -9412,7 +9491,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         const bool syntactic = check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_SYNTAX);
         if (syntactic)
         {
-            check_input_resolve_ignored(reader, i, role, kind, parent);
+            check_input_resolve_label(reader, i, role, kind, parent, lined, &label_line, &label_marks);
         }
         if (__builtin_expect(role == PARSE_ROLE_OPEN_GROUP, 0) && syntactic && !reader->ignored[i] && i + 1 < parser->tokens.count &&
             parser->tree.roles[i + 1] == PARSE_ROLE_OPEN_BLOCK)
