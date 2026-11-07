@@ -3870,6 +3870,8 @@ struct CheckDriverCommand
     bool tier1_gvn;
     bool tier1_no_lifetimes;
     bool tier1_no_inline;
+    // --tier1-schedule=post|pre (#172): BUSTER_CHECK_TIER1_SCHEDULE_*.
+    uint8_t tier1_schedule;
     CheckTier1Report* tier1_report;
     FILE* tier1_refusals;
     // The report its units' emissions sum their helper plans into, atomically (#1059's --helper-report), null without the
@@ -4949,6 +4951,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // 1's functions spilling the values it would recompute (#178's comparison: the report's spills and frames).
     bool tier1_report = false;
     bool tier1_gvn = false;
+    bool tier1_schedule_seen = false;
+    bool invalid_tier1_schedule = false;
     // --helper-report prints, on standard error, how many uses of each helper family the lowering took directly and how
     // many call their helper, the helpers planned and the units refused (#1059, CheckHelperReport).
     bool helper_report = false;
@@ -5167,6 +5171,22 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             lanes->tier1_no_lifetimes = true;
         }
+        else if (strncmp(arguments[i], "--tier1-schedule=", 17) == 0)
+        {
+            // #172's measurement: Tier 1's code scheduled block by block after allocation (post) or before selection
+            // (pre); none, the default, as without the option.
+            const char* variant = arguments[i] + 17;
+            const bool known = strcmp(variant, "none") == 0 || strcmp(variant, "post") == 0 || strcmp(variant, "pre") == 0;
+            lanes->tier1_schedule = strcmp(variant, "post") == 0 ? BUSTER_CHECK_TIER1_SCHEDULE_POST :
+                                    strcmp(variant, "pre") == 0  ? BUSTER_CHECK_TIER1_SCHEDULE_PRE :
+                                                                   BUSTER_CHECK_TIER1_SCHEDULE_NONE;
+            tier1_schedule_seen = true;
+            if (!known)
+            {
+                fprintf(stderr, "error: --tier1-schedule= takes none, post or pre\n");
+            }
+            invalid_tier1_schedule |= !known;
+        }
         else if (strcmp(arguments[i], "--lane-cpus") == 0 || strncmp(arguments[i], "--lane-cpus=", 12) == 0)
         {
             const char* value = arguments[i][11] == '=' ? arguments[i] + 12 : i + 1 < count ? arguments[++i] : NULL;
@@ -5356,7 +5376,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL && linker_ready;
     invalid_lanes |= pinned_cpus_seen && (!lanes->every_lane || pinned_cpu_count != lanes->lanes);
     bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value &&
-                  !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_helper_forms && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+                  !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_helper_forms && !invalid_tier1_schedule && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     if (parsed && (stdin_count > 1 || invalid_stdin))
     {
         fprintf(stderr, "error: standard input may appear once and requires -x c, assembler or assembler-with-cpp when compiling\n");
@@ -5380,7 +5400,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // instrumentation, ABI layouts and the language/target. The Tier 1 combination check has no source dependency.
     const CheckRequestRefusal refusal = parsed ? check_request_refusal(&request, &options, emit_object || link) : codegen;
     const bool invalid_tier1 = !lanes->tier1 && (lanes->tier1_strict || tier1_report || lanes->tier1_refusals != NULL || lanes->tier1_no_rematerialize ||
-                                               tier1_gvn || lanes->tier1_no_lifetimes || lanes->tier1_no_inline);
+                                               tier1_gvn || lanes->tier1_no_lifetimes || lanes->tier1_no_inline || tier1_schedule_seen);
     const bool libraries_ready = !parsed || refusal.error != CHECK_REQUEST_ACCEPTED || !link || mixed_inputs || libraries.count == 0 ||
                                  worker_budget.dry_run || invalid_tier1 || check_driver_named_archives(&libraries, runtime_kind, &arena, &mixed_inputs);
     if (parsed && libraries_ready && stdin_count != 0)
@@ -5455,6 +5475,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_gvn = lanes->tier1_gvn,
         .tier1_no_lifetimes = lanes->tier1_no_lifetimes,
         .tier1_no_inline = lanes->tier1_no_inline,
+        .tier1_schedule = lanes->tier1_schedule,
         .tier1_report = &lanes->tier1_report,
         .tier1_refusals = lanes->tier1_refusals,
         .helper_report = helper_report ? &lanes->helper_report : NULL,
@@ -5489,7 +5510,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     else if (!parsed)
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
-                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }
     // The rest of the request's refusals (check_request_refusal), before any source, worker session or output is
@@ -5513,7 +5534,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         fprintf(stderr, "error: %s needs --tier1\n", lanes->tier1_strict ? "--tier1-strict" : tier1_report ? "--tier1-report" : lanes->tier1_refusals != NULL ? "--tier1-refusals" :
                                                     lanes->tier1_no_rematerialize ? "--tier1-no-rematerialize" : tier1_gvn ? "--tier1-gvn" :
-                                                    lanes->tier1_no_lifetimes ? "--tier1-no-lifetimes" : "--tier1-no-inline");
+                                                    lanes->tier1_no_lifetimes ? "--tier1-no-lifetimes" : lanes->tier1_no_inline ? "--tier1-no-inline" :
+                                                    "--tier1-schedule");
     }
     else
     {
