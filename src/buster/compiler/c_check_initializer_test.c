@@ -1266,8 +1266,46 @@ static void check_init_test_half_vector_constants(CheckTest* test, const char* c
     check_init_test_source(test, automatic, NULL, 0, true, false, clang);
 }
 
+// Vector-to-scalar reads decode the cached lane bytes. No arithmetic or source bit-cast is needed to retain
+// NaN representations, and the scalar constructors are controls independent of that decoder (#1598).
+static void check_init_test_half_lane_encodings(CheckTest* test, const char* clang)
+{
+    static const char source[] =
+        "typedef _Float16 H __attribute__((vector_size(8)));typedef __bf16 B __attribute__((vector_size(8)));\n"
+        "_Float16 half_scalar=__builtin_nansf16(\"\");\n"
+        "H half_lanes={__builtin_nansf16(\"\"),-__builtin_nansf16(\"5\"),__builtin_nanf16(\"3\"),-0.0};\n"
+        "_Float16 half_signal=((H){__builtin_nansf16(\"\"),0,0,0})[0];\n"
+        "_Float16 half_negative=((H){0,-__builtin_nansf16(\"5\"),0,0})[1];\n"
+        "_Float16 half_quiet=((H){0,0,__builtin_nanf16(\"3\"),0})[2];\n"
+        "_Float16 half_zero=((H){0,0,0,-0.0})[3];\n"
+        "_Float16 half_subnormal=((H){0x1p-24,0,0,0})[0];\n"
+        "__bf16 brain_scalar=(__bf16)__builtin_nanf(\"0x10000\");\n"
+        "B brain_lanes={(__bf16)__builtin_nanf(\"0x10000\"),-(__bf16)__builtin_nanf(\"0x30000\"),0x1p-133,-0.0};\n"
+        "__bf16 brain_quiet=((B){(__bf16)__builtin_nanf(\"0x10000\"),0,0,0})[0];\n"
+        "__bf16 brain_negative=((B){0,-(__bf16)__builtin_nanf(\"0x30000\"),0,0})[1];\n"
+        "__bf16 brain_subnormal=((B){0,0,0x1p-133,0})[2];\n"
+        "__bf16 brain_zero=((B){0,0,0,-0.0})[3];\n";
+    static const CheckInitExpected expected[] = {
+        { .name = "half_scalar", .bytes = { 0,0x7d }, .size = 2, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "half_lanes", .bytes = { 0,0x7d,5,0xfc,3,0x7e,0,0x80 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "half_signal", .bytes = { 0,0x7d }, .size = 2, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "half_negative", .bytes = { 5,0xfc }, .size = 2, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "half_quiet", .bytes = { 3,0x7e }, .size = 2, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "half_zero", .bytes = { 0,0x80 }, .size = 2, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "half_subnormal", .bytes = { 1,0 }, .size = 2, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "brain_scalar", .bytes = { 0xc1,0x7f }, .size = 2, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "brain_lanes", .bytes = { 0xc1,0x7f,0xc3,0xff,1,0,0,0x80 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "brain_quiet", .bytes = { 0xc1,0x7f }, .size = 2, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "brain_negative", .bytes = { 0xc3,0xff }, .size = 2, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "brain_subnormal", .bytes = { 1,0 }, .size = 2, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "brain_zero", .bytes = { 0,0x80 }, .size = 2, .class = BUSTER_LINK_CLASS_DATA },
+    };
+    check_init_test_source(test, source, expected, BUSTER_ARRAY_LENGTH(expected), true, true, clang);
+}
+
 static void check_init_test_vectors(CheckTest* test, const char* clang)
 {
+    check_init_test_half_lane_encodings(test, clang);
     check_init_test_half_vector_constants(test, clang);
     check_init_test_vector_objects(test, clang);
     check_init_test_vector_constants(test, clang);
