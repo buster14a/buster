@@ -643,6 +643,15 @@ static void check_debug_value_typedef(CheckDebugValues* values, uint32_t token)
     check_debug_type_reference(values, values->program->input->declared_types[token]);
 }
 
+// Named parameters keep checker records even when they belong only to a function type. Only a definition's
+// parameters acquire a body owner. The others neither name a variable nor root their source qualifiers in DWARF;
+// their adjusted types remain reachable through the function signature.
+static bool check_debug_value_declaration(const CheckInput* input, uint32_t token)
+{
+    return input->declarations[token] == token && (check_sparse_get(input->parameters, token) == BUSTER_CHECK_NONE ||
+                                                  check_sparse_get(input->declaration_bodies, token) != BUSTER_CHECK_NONE);
+}
+
 static void check_debug_values_write(CheckDebugValues* values)
 {
     const CheckProgram* program = values->program;
@@ -663,7 +672,7 @@ static void check_debug_values_write(CheckDebugValues* values)
     }
     for (uint32_t token = 0; token < input->token_count; token += 1)
     {
-        const bool declaration = input->declarations[token] == token && type_is_valid(program->types, input->declared_types[token]);
+        const bool declaration = check_debug_value_declaration(input, token) && type_is_valid(program->types, input->declared_types[token]);
         const bool file = declaration && check_sparse_get(input->declaration_bodies, token) == BUSTER_CHECK_NONE;
         if (file && input->declaration_kinds[token] == C_BINDING_TYPEDEF)
         {
@@ -706,7 +715,7 @@ static void check_debug_values_write(CheckDebugValues* values)
                 check_debug_value_range(values, b, token, end, NULL, 0);
                 values->scopes[depth++] = end;
             }
-            if (input->declarations[token] == token && type_is_valid(program->types, input->declared_types[token]) && parser->tokens.names[token] != 0)
+            if (check_debug_value_declaration(input, token) && type_is_valid(program->types, input->declared_types[token]) && parser->tokens.names[token] != 0)
             {
                 if (input->declaration_kinds[token] == C_BINDING_OBJECT)
                 {
@@ -733,9 +742,10 @@ static void check_debug_values_write(CheckDebugValues* values)
 
 static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, const CheckProgramRows* rows, const Parser* parser, Arena* arena, Arena* scratch)
 {
+    const CheckInput* input = program->input;
     const TypeTable* table = program->types;
     const uint64_t room = (uint64_t)table->types.count << BUSTER_TYPE_INDEX_SHIFT;
-    const uint32_t tokens = program->input->token_count;
+    const uint32_t tokens = input->token_count;
     CheckDebugValues values = { .program = program, .rows = rows, .parser = parser, .original = debug };
     values.type_offsets = room <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, room) : NULL;
     values.types = room <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(scratch, TypeId, room) : NULL;
@@ -766,9 +776,9 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
         memset(values.local_ids, 0xff, ((uint64_t)tokens + 1) * sizeof(uint32_t));
         for (uint32_t t = 0; t < tokens; t += 1)
         {
-            if (program->input->declarations[t] == t)
+            if (check_debug_value_declaration(input, t))
             {
-                check_debug_type_add(&values, program->input->declared_types[t]);
+                check_debug_type_add(&values, input->declared_types[t]);
             }
         }
         for (uint32_t e = 0; e < program->input->enum_definition_count; e += 1)
