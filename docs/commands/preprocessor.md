@@ -66,8 +66,11 @@ requirements. [Command index](README.md).
   headers' tokens from runs the main loop keeps (`pp_system_levels`, "System
   levels"), with the history's judgment (`pp_system_levels_history`) as twin.
   The checker's driver gives the files' token columns back after the run
-  (`pp_release_file_columns`), and a replay prepares the files again;
-  `pp_test_deferred_history` replays after that release. `-Wempty-body` places
+  (`pp_release_file_columns`), and a replay prepares the files again; and
+  the output's columns before the backend (`pp_release_output`), which a
+  replay gives back to a reader that asks (`pp_output_ensure`).
+  `pp_test_deferred_history` releases both and replays after that release,
+  comparing the output it gives back with the recorded run's. `-Wempty-body` places
   a lone invocation from the file's bytes (`pp_output_invocation_place`),
   which `test-preprocessor` checks against the history's place in every file
   it compiles (`pp_test_invocation_places`) and in a fixture
