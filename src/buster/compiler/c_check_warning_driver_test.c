@@ -451,7 +451,8 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
     },
 };
 
-static void check_test_driver_default_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_warning_fixtures(CheckTest* test, const char* clang, const char* executable, const char* directory,
+                                               const CheckDriverDefaultWarningFixture* fixtures, uint32_t fixture_count)
 {
     static const char* const policies[] = { NULL, "-Werror", "-w" };
     static const char* const lanes[] = { "1", "3" };
@@ -462,9 +463,9 @@ static void check_test_driver_default_warnings(CheckTest* test, const char* clan
     {
         snprintf(objects[route], sizeof(objects[route]), "%s/default-warning-%u.o", directory, route);
     }
-    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(check_driver_default_warning_fixtures); f += 1)
+    for (uint32_t f = 0; f < fixture_count; f += 1)
     {
-        const CheckDriverDefaultWarningFixture* fixture = check_driver_default_warning_fixtures + f;
+        const CheckDriverDefaultWarningFixture* fixture = fixtures + f;
         const bool written = parse_test_write(source, fixture->source, strlen(fixture->source));
         check_test_expect(test, written, "original default-warning fixture is written");
         for (uint32_t policy = 0; written && policy < BUSTER_ARRAY_LENGTH(policies); policy += 1)
@@ -563,6 +564,11 @@ static void check_test_driver_default_warnings(CheckTest* test, const char* clan
         }
     }
     unlink(source);
+}
+
+static void check_test_driver_default_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_default_warning_fixtures, BUSTER_ARRAY_LENGTH(check_driver_default_warning_fixtures));
 }
 
 // -flazy-system-headers defers only system-header bodies. A unit with no deferred body must still publish its

@@ -2375,7 +2375,8 @@ static bool check_common_format_integer_class(TypeTable* types, TypeId type, cha
     uint32_t width = 0;
     bool sign = false;
     const TypeId stripped = type_unqualified(type_strip_aligned(types, type));
-    bool result = check_action_integer_type(types, type, &width, &sign);
+    // Equal widths do not make a _BitInt a printf builtin integer class, including through a %n pointer.
+    bool result = type_kind(types, stripped) != BUSTER_TYPE_KIND_BIT_INT && check_action_integer_type(types, type, &width, &sign);
     if (result)
     {
         if (w_width != 0)
@@ -2426,7 +2427,8 @@ static bool check_common_format_width(TypeTable* types, TypeId type)
 {
     uint32_t width = 0;
     bool sign = false;
-    const bool result = check_action_integer_type(types, type, &width, &sign) && width <= 32;
+    const TypeId stripped = type_unqualified(type_strip_aligned(types, type));
+    const bool result = type_kind(types, stripped) != BUSTER_TYPE_KIND_BIT_INT && check_action_integer_type(types, type, &width, &sign) && width <= 32;
     return result;
 }
 
@@ -2455,7 +2457,8 @@ static bool check_common_format_char_pointer(TypeTable* types, TypeId type, bool
     }
     uint32_t width = 0;
     bool sign = false;
-    const bool integer = check_action_integer_type(types, element, &width, &sign);
+    const TypeId stripped = type_unqualified(type_strip_aligned(types, element));
+    const bool integer = type_kind(types, stripped) != BUSTER_TYPE_KIND_BIT_INT && check_action_integer_type(types, element, &width, &sign);
     const bool result = indirect && integer && (wide ? width == 32 && sign : width == 8);
     return result;
 }
@@ -2466,6 +2469,35 @@ static bool check_common_format_floating(TypeTable* types, TypeId type, bool lon
     const uint8_t kind = type_kind(types, stripped);
     const bool result = long_double ? kind == BUSTER_TYPE_KIND_FLOATING && stripped == BUSTER_TYPE_LONG_DOUBLE :
                                      kind == BUSTER_TYPE_KIND_FLOATING && stripped != BUSTER_TYPE_LONG_DOUBLE;
+    return result;
+}
+
+// Whether this source/parameter type belongs to a bit-precise format class, directly or through one pointer/array.
+static bool check_common_format_bit_precise(const TypeTable* types, TypeId type)
+{
+    const TypeId stripped = type_unqualified(type_strip_aligned(types, type));
+    const uint8_t kind = type_kind(types, stripped);
+    const bool indirect = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind);
+    const bool result = kind == BUSTER_TYPE_KIND_BIT_INT ||
+                        (indirect && type_kind(types, type_unqualified(type_strip_aligned(types, type_element(types, stripped)))) == BUSTER_TYPE_KIND_BIT_INT);
+    return result;
+}
+
+// A fixed parameter has already converted an argument before format checking. Honor that conversion when
+// either class is bit-precise; variadic promotions retain the source class. Other existing classes stay unchanged.
+static TypeId check_common_format_argument_type(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t offset, uint32_t argument)
+{
+    const uint32_t node = graph->argument_nodes[offset + argument];
+    TypeId result = node < graph->count ? check_stream_type(stream, node) : 0;
+    if (stream->argument_conversions != NULL)
+    {
+        const CheckConversion conversion = stream->argument_conversions[offset + argument];
+        if ((conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && conversion.type != 0 &&
+            (check_common_format_bit_precise(types, result) || check_common_format_bit_precise(types, conversion.type)))
+        {
+            result = conversion.type;
+        }
+    }
     return result;
 }
 
@@ -2738,7 +2770,7 @@ static void check_common_format_report_type(const Parser* parser, Preprocessor* 
                                             uint32_t format_token, const char* expected, bool width, uint32_t* order, Arena* scratch)
 {
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
-    const TypeId type = argument_node < graph->count ? check_stream_type(stream, argument_node) : 0;
+    const TypeId type = check_common_format_argument_type(graph, stream, types, offset, argument);
     const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type);
     const uint32_t at_token = argument_node < graph->count ? check_common_argument_start(parser, graph->tokens[argument_node]) : format_token;
     if (actual.length != 0)
@@ -2763,7 +2795,7 @@ static void check_common_format_width_report(const Parser* parser, Preprocessor*
                                              uint32_t format_token, uint64_t literal_offset, bool precision, uint32_t* order, Arena* scratch)
 {
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
-    const TypeId type = argument_node < graph->count ? check_stream_type(stream, argument_node) : 0;
+    const TypeId type = check_common_format_argument_type(graph, stream, types, offset, argument);
     const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type);
     if (actual.length != 0)
     {
@@ -3318,8 +3350,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         {
                             break;
                         }
-                        const uint32_t width_node = graph->argument_nodes[offset + width_index];
-                        const TypeId width_type = width_node < graph->count ? check_stream_type(stream, width_node) : 0;
+                        const TypeId width_type = check_common_format_argument_type(graph, stream, types, offset, width_index);
                         if (!check_common_format_width(types, width_type))
                         {
                             check_common_format_width_report(parser, pp, input, stream, types, spell, graph, offset, width_index, format_token,
@@ -3371,8 +3402,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         {
                             break;
                         }
-                        const uint32_t precision_node = graph->argument_nodes[offset + precision_index];
-                        const TypeId precision_type = precision_node < graph->count ? check_stream_type(stream, precision_node) : 0;
+                        const TypeId precision_type = check_common_format_argument_type(graph, stream, types, offset, precision_index);
                         if (!check_common_format_width(types, precision_type))
                         {
                             check_common_format_width_report(parser, pp, input, stream, types, spell, graph, offset, precision_index, format_token,
@@ -3448,7 +3478,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                     else if (conversion_argument && value_checked && args_checked)
                     {
                         const uint32_t argument_node = graph->argument_nodes[offset + value_index];
-                        const TypeId type = argument_node < graph->count ? check_stream_type(stream, argument_node) : 0;
+                        const TypeId type = check_common_format_argument_type(graph, stream, types, offset, value_index);
                         const bool long_double = length_modifier == 'L';
                         const bool w_check = length_modifier == 'w' && w_digits;
                         // `I`+`c` never reaches this block and `I`+`C` keeps `C`'s own `wchar_t` check, so
