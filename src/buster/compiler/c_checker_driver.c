@@ -4393,6 +4393,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     bool driver_fatal = false;
     Arena type_arena = { 0 };
     Arena index_arena = { 0 };
+    // The thread's last arena failure as the unit starts, against which its end tells a commit the unit was refused.
+    const ArenaFailure failure_before = arena_failure;
     const bool scalar = command->scalar;
     const bool verify = command->verify;
     const bool dump = command->dump;
@@ -4415,10 +4417,13 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     const ParseOptions parser_options = { .scalar = scalar, .tree_only = true, .scratch = scratch };
     bool ready = identifiers != NULL && (!id_ordered || check_driver_id_order(identifiers, options, path, id_order)) && pp_initialize(pp, options, identifiers) &&
                  parse_initialize(parser, &parser_options, options->language);
+    // Whether the unit reported its memory failure itself (arena_report_failure), which the notes at its end then don't.
+    bool memory_reported = false;
     if (!ready || scratch->base == 0 || output_arena->base == 0)
     {
         arena_report_failure(errors, "checking", UINT64_C(1) << 36);
         driver_fatal = true;
+        memory_reported = true;
     }
     else
     {
@@ -5002,6 +5007,22 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     pp_diagnostic_publish(pp);
     pp_diagnostic_summary(pp);
     result = pp->errors != 0 || driver_fatal ? 1 : result;
+    // A failure that memory may explain (#1521), which the stage that failed may have reported as its capacity: on a
+    // thread switched to compact reservations, each arena it reserved since then holds at most
+    // BUSTER_ARENA_COMPACT_BYTES; and a commit refused since the unit started (strict overcommit, a finite RLIMIT_DATA)
+    // left a push short of memory.
+    const ArenaFailure failure = arena_failure;
+    const bool refused = failure.commit && (failure.bytes != failure_before.bytes || failure.error != failure_before.error || !failure_before.commit);
+    if (result != 0 && arena_compact && !memory_reported)
+    {
+        fprintf(errors, "note: memory reservations were limited to %llu MiB each after the address space refused a larger one; a capacity error above may be that limit\n",
+                (unsigned long long)(BUSTER_ARENA_COMPACT_BYTES >> 20));
+    }
+    if (result != 0 && refused && !memory_reported)
+    {
+        fprintf(errors, "note: the system refused to commit %llu bytes of memory (%s); a capacity error above may be that refusal\n",
+                (unsigned long long)failure.bytes, strerror(failure.error != 0 ? failure.error : ENOMEM));
+    }
     if (fatal != NULL)
     {
         *fatal = pp->fatal || driver_fatal;
