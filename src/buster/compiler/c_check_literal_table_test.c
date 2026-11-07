@@ -710,6 +710,25 @@ static void check_test_literal_tables(CheckTest* test, const char* clang)
             check_test_program_source(test, source, "literal-table-records", clang);
         }
     }
+    // Block-scope statics (#1383) take the table path from the source-order reader; an automatic table keeps the
+    // ordinary one. Each runs against clang's build.
+    for (uint32_t form = 0; form < 4; form += 1)
+    {
+        const char* type = form == 1 ? "const long" : form == 2 ? "unsigned short" : "const unsigned char";
+        char table[16384];
+        const bool made = check_test_literal_table_source(table, sizeof(table), type, 129, form == 1 ? 2 : 0, form != 2);
+        const char* declaration = made ? strchr(table, '\n') : NULL;
+        const int length = declaration != NULL ? (int)strlen(declaration + 1) - 1 : 0;
+        const int used = declaration != NULL && length > 0 ?
+                         snprintf(source, sizeof(source), "#define V 13\nint tested(int n){%s%.*s return (int)table[(unsigned)n%%129]+(int)sizeof table;}\n",
+                                  form == 3 ? "" : "static ", length, declaration + 1) : -1;
+        const bool fits = used > 0 && (uint64_t)used < sizeof(source);
+        check_test_expect(test, fits, "block-scope literal table native fixture fits");
+        if (fits)
+        {
+            check_test_program_source(test, source, form == 3 ? "literal-table-automatic" : "literal-table-block-static", clang);
+        }
+    }
     check_test_literal_table_rows_shapes(test);
     {
         typedef struct
