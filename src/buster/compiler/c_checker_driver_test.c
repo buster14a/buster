@@ -8568,6 +8568,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_tier1_reproducible(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_tier1_rematerialization(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
