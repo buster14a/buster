@@ -84,9 +84,10 @@ struct IrOptimizeWork
     uint32_t head;
     uint32_t tail;
     uint32_t queued_count;
-    // SCCP's worklist visits a queued phi only once no other instruction is queued (#1729), so that the edges and
-    // values reaching a join in one wave share a visit of its phis. Allocated by the worklist, null where it couldn't
-    // be: phis then wait in the shared queue. An instruction is in one of the two queues at most (`queued`).
+    // SCCP's worklist visits a phi queued again (by a new edge into its executable block, or a changed incoming value)
+    // only once no other instruction is queued (#1729), so that the edges and values reaching a join in one wave share
+    // a visit of its phis; its first visit keeps its place in its block. Allocated by the worklist, null where it
+    // couldn't be: phis then wait in the shared queue. An instruction is in one of the two queues at most (`queued`).
     uint32_t* phis;
     uint32_t phi_head;
     uint32_t phi_tail;
@@ -714,10 +715,11 @@ static uint32_t ir_optimize_dequeue(IrOptimizeWork* work)
     return instruction;
 }
 
-// SCCP's queueing: a phi waits in the phis' queue (IrOptimizeWork.phis), every other instruction in the shared one.
-static void ir_optimize_enqueue_sccp(IrOptimizeWork* work, uint32_t instruction)
+// A phi queued again, by a new edge into its executable block or a change of an incoming value, waits in the phis'
+// queue (IrOptimizeWork.phis), or in the shared one where there is none.
+static void ir_optimize_enqueue_phi(IrOptimizeWork* work, uint32_t instruction)
 {
-    if (work->phis != NULL && work->function->op[instruction] == IR_PHI)
+    if (work->phis != NULL)
     {
         if (work->queued[instruction] == 0)
         {
@@ -762,7 +764,15 @@ static void ir_optimize_enqueue_users(IrOptimizeWork* work, uint32_t value)
 {
     for (uint32_t use = work->uses.offsets[value]; use < work->uses.offsets[(uint64_t)value + 1]; use += 1)
     {
-        ir_optimize_enqueue_sccp(work, work->uses.uses[use].instruction);
+        const uint32_t user = work->uses.uses[use].instruction;
+        if (work->function->op[user] == IR_PHI)
+        {
+            ir_optimize_enqueue_phi(work, user);
+        }
+        else
+        {
+            ir_optimize_enqueue(work, user);
+        }
     }
 }
 
@@ -959,14 +969,18 @@ static bool ir_optimize_mark_edge(IrOptimizeWork* work, uint32_t edge, bool queu
     if (changed)
     {
         const uint32_t block = work->cfg.successors[edge];
+        const bool reached = work->blocks[block] != 0;
         work->edges[edge] = 1;
         work->blocks[block] = 1;
-        if (queue)
+        const uint32_t end = work->function->block_offsets[(uint64_t)block + 1];
+        // A block reached before has had its instructions visited; a new edge into it changes only its phis (#1729).
+        for (uint32_t i = work->function->block_offsets[block]; queue && !reached && i < end; i += 1)
         {
-            for (uint32_t i = work->function->block_offsets[block]; i < work->function->block_offsets[(uint64_t)block + 1]; i += 1)
-            {
-                ir_optimize_enqueue_sccp(work, i);
-            }
+            ir_optimize_enqueue(work, i);
+        }
+        for (uint32_t i = work->function->block_offsets[block]; queue && reached && i < end && work->function->op[i] == IR_PHI; i += 1)
+        {
+            ir_optimize_enqueue_phi(work, i);
         }
     }
     return changed;
@@ -1081,7 +1095,7 @@ static __attribute__((aligned(64))) void ir_optimize_sccp_worklist(IrOptimizeWor
     {
         if (work->blocks[work->cfg.instruction_blocks[i]] != 0)
         {
-            ir_optimize_enqueue_sccp(work, i);
+            ir_optimize_enqueue(work, i);
         }
     }
     bool pending = true;
