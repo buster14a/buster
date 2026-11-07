@@ -2331,7 +2331,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
         const CheckOverloadCandidate* p = graph->overload_candidates + candidate;
         const CheckOverloadCandidate* q = other->overload_candidates + candidate;
         equal = p->type == q->type && p->declaration == q->declaration && p->canonical == q->canonical && p->object == q->object &&
-                p->previous == q->previous && p->scope == q->scope && p->position == q->position && p->flags == q->flags;
+                p->previous == q->previous && p->scope == q->scope && p->position == q->position && p->flags == q->flags && p->library_call == q->library_call;
     }
     for (uint32_t call = 0; equal && !a->resource && call < graph->overload_count; call += 1)
     {
