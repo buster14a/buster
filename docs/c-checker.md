@@ -7047,19 +7047,41 @@ arguments against the function. The checker now gives these as clang does.
   an object's value read, or an address converted to an integer narrower
   than a pointer (`check_init_converted_nonconstant`); an absolute address
   (`(int *)5`) stays a constant.
+- **Indirection through a pointer to void** (`-Wvoid-ptr-dereference`, clang's
+  `CheckIndirectionOperand`): "ISO C does not allow indirection on operand of
+  type 'void *'" at the `*`, of the operand's type as written (its typedef
+  kept, through inner dereferences to the object they name; its top-level
+  qualifiers dropped), in dead code too, and before an error the expression
+  then has (`(*p)++`). Not right after a unary `&` (`&*p`; `&(*p)` warns, as
+  clang's IsAfterAmp is the token's), nor in sizeof's or alignof's operand
+  (`check_warning_graph_void_dereferences`, one reverse pass marking the
+  queries' operands, only in a unit that has such a dereference).
+- **A const variable's assignment.** "cannot assign to variable 'x' with
+  const-qualified type 'const int'" with clang's "variable 'x' declared const
+  here" note at its name, as clang's `DiagnoseConstAssignment` walks to it:
+  through an array's subscripts (named with its declared type,
+  `'const int[2]'`), a record's `.` members that aren't const themselves, and
+  an arrow to the pointer variable (`p->a` of a `const struct s *p` names
+  `p`). A pointer's target stays "read-only variable is not assignable".
+- **Arithmetic on a pointer to an incomplete type**: clang's "arithmetic on a
+  pointer to an incomplete type 'struct s'" (a subscript's "subscript of
+  pointer to incomplete type", at its `[`), of the pointee as written, with its
+  "forward declaration of 'struct s'" note at the tag's declaring name.
 - **Differences left.**
-  - Arithmetic on a pointer to an incomplete type is "incomplete type is not
-    permitted here", where clang's is "arithmetic on a pointer to an incomplete
-    type" with a "forward declaration" note.
   - A vector type reached through a pointer typedef (`typedef v4si *pv;`)
     prints without its typedef's name, and so does a member's type
     (`x.f++` of a member `uu f` prints `'struct u'` where clang's is
     `'uu' (aka 'struct u')`): a record's members keep no declaration.
   - A braced scalar initializer's failed conversion (`static long x = { p };`)
     is still "invalid initializer", with no non-constant error.
-  - `(*p)++` of a `void *p` lacks clang's `-Wvoid-ptr-dereference` warning
-    before its error, and `c++` of a const variable clang's "variable 'c'
-    declared const here" note.
+  - An assignment to a member that is const itself is "read-only variable is
+    not assignable", where clang names the member with its note: a record's
+    members keep no declaration. A typedef'd array's variable prints its
+    element's typedef unspelled (`'const int[2]'` for clang's
+    `'CI[2]' (aka 'const int[2]')`).
+  - A typedef inside another typedef (`typedef VP *VPP`) loses its inner name
+    in the void dereference's operand type (`**b`'s `'void *'` for clang's
+    `'VP'`).
   - Conversion errors other than an initializer's pointer and integer ones are
     "incompatible operand or conversion types": an assignment's, a return's, an
     argument's, an integer converted to a pointer and a record or floating
