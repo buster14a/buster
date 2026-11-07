@@ -265,6 +265,31 @@ struct CheckProgramAlias
 #define BUSTER_CHECK_PROGRAM_ALIAS_WEAK 1u
 #define BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED 2u
 
+// A group of clang's cpu_specific and cpu_dispatch functions of one name (#1447, c_check_program_cpu_dispatch.c): its
+// first declaration with an attribute (its name and linkage), its reference object R (its symbol f.ifunc, which every
+// reference reaches), its dispatcher's object and declaration with cpu_dispatch (0 and BUSTER_CHECK_NONE for none), and
+// its versions, `version_count` of CheckProgram.cpu_versions from `version_first`.
+typedef struct CheckProgramCpuGroup CheckProgramCpuGroup;
+struct CheckProgramCpuGroup
+{
+    uint32_t first;
+    uint32_t reference;
+    uint32_t dispatch;
+    uint32_t dispatch_declaration;
+    uint32_t version_first;
+    uint32_t version_count;
+    bool internal;
+};
+
+// A cpu_specific version: its object, its first declaration with the attribute (its CPU list) and its group.
+typedef struct CheckProgramCpuVersion CheckProgramCpuVersion;
+struct CheckProgramCpuVersion
+{
+    uint32_t object;
+    uint32_t declaration;
+    uint32_t group;
+};
+
 typedef struct CheckProgram CheckProgram;
 struct CheckProgram
 {
@@ -323,6 +348,15 @@ struct CheckProgram
     CheckProgramAlias* aliases;
     uint8_t* alias_states;
     uint32_t alias_count;
+    // clang's cpu_specific and cpu_dispatch multiversioning (#1447, c_check_program_cpu_dispatch.c): the unit's groups and
+    // versions, null in a unit without them, the usual one; a selection shares them. And each program's own symbols of the
+    // versions (cpu_version_count of them, 0 for a version without a body) and of the groups' dispatchers (after them, 0
+    // for none): their objects take their groups' reference symbols, as references reach them.
+    CheckProgramCpuGroup* cpu_groups;
+    CheckProgramCpuVersion* cpu_versions;
+    SymbolId* cpu_symbols;
+    uint32_t cpu_group_count;
+    uint32_t cpu_version_count;
     uint32_t control_count;
     uint32_t switch_count;
     uint32_t body_count;
@@ -590,6 +624,12 @@ struct CheckProgramTargetEvents
     uint32_t alias_capacity;
     bool room;
 };
+
+// clang's cpu_specific and cpu_dispatch multiversioning (#1447), defined in c_check_program_cpu_dispatch.c.
+static bool check_program_cpu_groups(CheckProgram* program, const CheckProgramTargetEvents* events, Arena* output);
+static void check_program_cpu_needed(const CheckProgram* program, uint8_t* needed);
+static bool check_program_cpu_number(CheckProgram* program, Arena* output);
+static String8 check_program_cpu_version_features(const CheckProgram* program, const CheckInputAttribute* attribute, Arena* output);
 
 // Appends the key of `object`'s declaration at `token` to one of the events' arrays, which grows by doubling. It and
 // check_program_attribute_keys stay out of line: few declarations reach them, and inlined, they changed how clang
@@ -3339,6 +3379,8 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
         PredefinesTargetAttribute kind = PREDEFINES_TARGET_ATTRIBUTE_IGNORED;
         int32_t cpu = -1;
         bool versions = false;
+        // A cpu_specific version's (#1447): the features of its CPUs, as a target attribute's text.
+        const CheckInputAttribute* specific = 0;
         for (uint32_t e = low; e < count && (uint32_t)(keys[e] >> 32) == body.object; e += 1)
         {
             const uint32_t token = (uint32_t)keys[e];
@@ -3355,8 +3397,8 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
                 }
                 const PredefinesTargetAttribute attribute_kind = readable ? last_kind : PREDEFINES_TARGET_ATTRIBUTE_IGNORED;
                 const int32_t attribute_cpu = readable ? last_cpu : -1;
-                versions |= (attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES || attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
-                             attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH) && !attribute->ignored;
+                versions |= (attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES || attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH) && !attribute->ignored;
+                specific = specific == 0 && attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC && !attribute->ignored ? attribute : specific;
                 if (attribute_kind != PREDEFINES_TARGET_ATTRIBUTE_IGNORED && applied == 0 && token <= body.declaration)
                 {
                     applied = attribute;
@@ -3370,14 +3412,18 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
             }
         }
         uint32_t target = versions ? BUSTER_CHECK_PROGRAM_TARGET_VERSIONS : 0;
-        if (!versions && kind == PREDEFINES_TARGET_ATTRIBUTE_VERSION && options->predefines != NULL)
+        const String8 text = specific != 0 && !versions ? check_program_cpu_version_features(program, specific, output) : applied != 0 ? applied->text : (String8){ 0 };
+        valid &= specific == 0 || versions || text.pointer != 0;
+        cpu = specific != 0 ? -1 : cpu;
+        kind = specific != 0 ? PREDEFINES_TARGET_ATTRIBUTE_VERSION : kind;
+        if (valid && !versions && kind == PREDEFINES_TARGET_ATTRIBUTE_VERSION && options->predefines != NULL)
         {
             // The target of the same string (the last body's, as a header's functions share theirs, first), or a new one.
-            uint32_t found = last_target < program->target_count && check_program_text_equal(texts[last_target], applied->text) ? last_target :
-                                                                                                                                  program->target_count;
+            uint32_t found = last_target < program->target_count && check_program_text_equal(texts[last_target], text) ? last_target :
+                                                                                                                         program->target_count;
             for (uint32_t t = 0; t < program->target_count && found == program->target_count; t += 1)
             {
-                found = check_program_text_equal(texts[t], applied->text) ? t : found;
+                found = check_program_text_equal(texts[t], text) ? t : found;
             }
             if (found == program->target_count)
             {
@@ -3390,9 +3436,9 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
                 }
                 if (valid)
                 {
-                    program->targets[found] = predefines_function_target(options->predefines, &program->host, program->target, applied->text.pointer,
-                                                                         (uint32_t)applied->text.length, cpu);
-                    texts[found] = applied->text;
+                    program->targets[found] = predefines_function_target(options->predefines, &program->host, program->target, text.pointer,
+                                                                         (uint32_t)text.length, cpu);
+                    texts[found] = text;
                     program->target_count += 1;
                 }
             }
@@ -3705,6 +3751,15 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             }
         }
         body_count = check_program_openings(input, node_count, openings, initializers, initialized, BUSTER_SCALAR_PATH(options.scalar));
+        // A cpu_dispatch function's body, which clang ignores (#1447), is no body of the program's.
+        uint32_t kept = 0;
+        for (uint32_t b = 0; input->cpu_dispatch && b < body_count; b += 1)
+        {
+            const uint32_t declaration = check_sparse_get(input->body_declarations, openings[b]);
+            openings[kept] = openings[b];
+            kept += check_cpu_dispatch_kind(check_input_attributes_at(input, declaration)) != CHECK_CPU_DISPATCH_DISPATCH;
+        }
+        body_count = input->cpu_dispatch ? kept : body_count;
         for (uint32_t node = node_count; node-- > 0;)
         {
             const uint32_t token = input->graph.tokens[node];
@@ -4003,10 +4058,13 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 check_program_fail(program, CHECK_PROGRAM_INVALID, 0);
             }
         }
+        // clang's cpu_specific and cpu_dispatch groups (#1447), whose members' references take their groups' symbols as
+        // the symbols are numbered.
+        const bool grouped = !program->input->cpu_dispatch || check_program_cpu_groups(program, &target_events, output);
         // GNU's alias, ifunc and weakref attributes (#147): the unit's entries, whose aliases' and ifuncs' objects are
         // needed, and whose referenced weakrefs take their targets' symbols as the symbols are numbered.
-        const bool aliased = target_events.alias_count == 0 ||
-                             check_program_aliases(program, &target_events, needed, BUSTER_SCALAR_PATH(options.scalar), output, scratch);
+        const bool aliased = grouped && (target_events.alias_count == 0 ||
+                                         check_program_aliases(program, &target_events, needed, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
         valid = naked_room && aliased && check_program_alias_number(program, needed, program->alias_states, BUSTER_SCALAR_PATH(options.scalar), output);
     }
     if (valid && program->status == CHECK_PROGRAM_OK && !check_program_targets(program, &options, &target_events, output, scratch))

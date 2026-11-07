@@ -15506,6 +15506,19 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
             runtimes = true;
         }
     }
+    // cpu_dispatch's resolvers (#1447, check_program_cpu_atoms) call __cpu_indicator_init and read the CPU model.
+    for (uint32_t g = 0; valid && g < program->cpu_group_count; g += 1)
+    {
+        static const CheckLowerRuntime model[3] = { CHECK_LOWER_RUNTIME_CPU_INDICATOR_INIT, CHECK_LOWER_RUNTIME_CPU_MODEL, CHECK_LOWER_RUNTIME_CPU_FEATURES2 };
+        for (uint32_t m = 0; program->cpu_groups[g].dispatch != 0 && m < 3; m += 1)
+        {
+            if (lowered->runtime_symbols[model[m]] == 0)
+            {
+                lowered->runtime_symbols[model[m]] = (SymbolId)((uint64_t)program->symbol_count + lowered->helpers.count + lowered->initializers.count + lowered->runtime_symbol_count + 1);
+                lowered->runtime_order[lowered->runtime_symbol_count++] = (uint16_t)model[m];
+            }
+        }
+    }
     lowered->label_symbol_count = valid ? written : 0;
     // Every call of a runtime function takes its symbol (check_lower_runtime's provisional one until now).
     for (uint32_t b = 0; valid && runtimes && b < program->body_count; b += 1)

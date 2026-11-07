@@ -203,6 +203,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_MS_STRUCT_ALIGNMENT: result = "ms_struct bit-field storage with non-power-of-two size is not supported"; break;
         case CHECK_INPUT_INTERRUPT_HANDLER: result = "x86-64 'interrupt' attribute only applies to functions that have a 'void' return type"; break;
         case CHECK_INPUT_INTERRUPT_CALLED: result = "interrupt service routine cannot be called directly"; break;
+        case CHECK_INPUT_CPU_DISPATCH: result = "invalid cpu_specific or cpu_dispatch declaration"; break;
     }
     return result;
 }
@@ -1273,8 +1274,10 @@ static void check_driver_return_reports(const Parser* parser, const Parser* orig
     {
         const CheckProgramBody* body = program->bodies + b;
         const uint32_t token = parser->tree.parents[body->opening];
+        // A cpu_dispatch function's body may fall off its end (#1447: clang's CheckFallThroughForBody permits it).
         if (body->return_warning != 0 && token < parser->tokens.count &&
-            (pp->options.system_header_warnings || !check_graph_system_token(&program->input->graph, token)))
+            (pp->options.system_header_warnings || !check_graph_system_token(&program->input->graph, token)) &&
+            check_cpu_dispatch_kind(check_input_attributes_at(program->input, body->declaration)) != CHECK_CPU_DISPATCH_DISPATCH)
         {
             // The body's analysis boundary: the queued diagnostics' boundary is the `}` lookahead, and the
             // return warning's RETURN phase keeps it after them, before the uninit SEMANTICs.
@@ -2442,6 +2445,55 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                         "attribute '%s' multiversioning cannot be combined with attribute '%.*s'", multiversion,
                                         (int)attribute.length, attribute.pointer);
                                 }
+                            }
+                        }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_CPU_DISPATCH)
+                        {
+                            // clang's cpu_specific and cpu_dispatch errors (#1447, c_check_cpu_dispatch.c), as its messages word
+                            // them, with the note at the previous declaration or the one that caused multiversioning.
+                            const CheckInputReport* report = input->reports + index;
+                            const uint32_t cpu = report->attribute < count ? parser->tokens.names[report->attribute] : 0;
+                            const bool noted = report->note_kind != CHECK_INPUT_NOTE_NONE && report->note_token < count;
+                            const PPOutputDiagnosticNote note = {
+                                .token = noted ? parser->tokens.sources[report->note_token] : 0,
+                                .message = report->note_kind == CHECK_INPUT_NOTE_MULTIVERSIONING_CAUSED ? "function multiversioning caused by this declaration" :
+                                                                                                         "previous declaration is here",
+                            };
+                            const char* different = report->detail == CHECK_CPU_DISPATCH_RETURN_TYPE ? "return type" :
+                                                    report->detail == CHECK_CPU_DISPATCH_INLINE      ? "inline specification" :
+                                                                                                       "linkage";
+                            switch ((CheckCpuDispatchError)report->detail)
+                            {
+                                case CHECK_CPU_DISPATCH_INVALID_OPTION:
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "invalid option '%.*s' for %s", (int)intern_length(pp->table, cpu),
+                                                          intern_bytes(pp->table, cpu), report->value != 0 ? "cpu_dispatch" : "cpu_specific");
+                                    break;
+                                case CHECK_CPU_DISPATCH_MAIN:
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'main' cannot be a multiversioned function");
+                                    break;
+                                case CHECK_CPU_DISPATCH_PROTOTYPE:
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, noted ? 1u : 0u, "multiversioned function must have a prototype");
+                                    break;
+                                case CHECK_CPU_DISPATCH_REQUIRED:
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                                          "function declaration is missing 'cpu_specific' or 'cpu_dispatch' attribute in a multiversioned function");
+                                    break;
+                                case CHECK_CPU_DISPATCH_MIXED:
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, noted ? 1u : 0u, "multiversioning attributes cannot be combined");
+                                    break;
+                                case CHECK_CPU_DISPATCH_MISMATCH:
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, noted ? 1u : 0u, "'cpu_dispatch' function redeclared with different CPUs");
+                                    break;
+                                case CHECK_CPU_DISPATCH_SAME_CPU:
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, noted ? 1u : 0u,
+                                                                "multiple 'cpu_specific' functions cannot specify the same CPU: '%.*s'", (int)intern_length(pp->table, cpu),
+                                                                intern_bytes(pp->table, cpu));
+                                    break;
+                                case CHECK_CPU_DISPATCH_RETURN_TYPE:
+                                case CHECK_CPU_DISPATCH_INLINE:
+                                case CHECK_CPU_DISPATCH_LINKAGE:
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "multiversioned function declaration has a different %s", different);
+                                    break;
                             }
                         }
                         else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ALIAS_TENTATIVE && token < count)
