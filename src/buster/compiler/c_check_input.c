@@ -8911,19 +8911,30 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         const uint8_t kind = parser->tokens.kinds[i];
         const uint32_t parent = parser->tree.parents[i];
         const uint8_t syntax = reader->syntax[i];
-        // A plain name's visit, half of them on sqlite3.c (#1671): an identifier operand of no syntax bit, marked for its
-        // syntax alone, in C99 or later. Each of the walk's other tests is false at it: those of the other marks' reasons by
-        // its mark, those of roles, kinds and syntax bits by its own, and C89's implicit declaration by the standard. So it
-        // takes the label's test and the name's step alone, where the general visit below makes every test; the scalar
-        // path, which visits every token and makes every test, is its twin.
-        if (!scalar && mark == BUSTER_CHECK_RESOLVE_SYNTAX && kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND && syntax == 0 && modern)
+        // Two kinds of visit marked for their syntax alone take paths of their own on the vector path (#1671), where the
+        // general visit below makes every test; the scalar path, which visits every token and makes every test, is their
+        // twin. Each of the walk's tests of the other marks' reasons is false at them by their mark.
+        // - A plain name, half of sqlite3.c's visits: an identifier operand of no syntax bit, in C99 or later. The tests of
+        //   roles, kinds and syntax bits are false at it by its own, and C89's implicit declaration by the standard, so it
+        //   takes the label's test and the name's step alone.
+        // - A token an earlier step ignored, a sixth of them, nearly all a declaration's later specifiers, which its
+        //   declaration's step read: every step tests that the token isn't ignored, but a return's and a for's, so one of
+        //   another role does nothing. The label's test would set its ignored mark again, which holds a bool.
+        if (!scalar && mark == BUSTER_CHECK_RESOLVE_SYNTAX)
         {
-            check_input_resolve_ignored(reader, i, role, kind, parent);
-            if (!reader->ignored[i])
+            if (kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND && syntax == 0 && modern)
             {
-                check_input_resolve_name(reader, i, role);
+                check_input_resolve_ignored(reader, i, role, kind, parent);
+                if (!reader->ignored[i])
+                {
+                    check_input_resolve_name(reader, i, role);
+                }
+                continue;
             }
-            continue;
+            if (reader->ignored[i] && role != PARSE_ROLE_RETURN && role != PARSE_ROLE_OPEN_FOR)
+            {
+                continue;
+            }
         }
         if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->designator_valid[i] == 2 && !check_input_initializer_designator(reader, i))
         {
