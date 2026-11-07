@@ -19000,20 +19000,26 @@ static bool pp_command_include_raw(Preprocessor* pp, const char* path)
             if (built_in != BUSTER_PP_NONE)
             {
                 pp_enter_file(pp, built_in, BUSTER_PP_NONE, 0, BUSTER_PP_NONE, 0, 0);
-                PPContext* base = pp->context_count != 0 ? &pp->contexts[pp->context_count - 1] : 0;
+                PPContext* base = pp->context_count > depth ? &pp->contexts[pp->context_count - 1] : 0;
                 if (base != 0 && base->kind == BUSTER_PP_CONTEXT_FILE && base->file == built_in)
                 {
                     built_in_range = base->range;
+                    pp_pop_context(pp);
                 }
-                pp_pop_context(pp);
             }
             if (built_in_range != BUSTER_PP_NONE && pp->context_count == depth)
             {
+                const uint32_t include_depth = pp->include_depth;
                 pp->include_depth += 1;
                 pp_enter_file(pp, file, built_in_range, pp->ranges[built_in_range].base, found_in, 0, 0);
+                if (pp->context_count == depth)
+                {
+                    // A skipped/refused file has no context whose pop would consume the synthetic level.
+                    pp->include_depth = include_depth;
+                }
                 pp_run_contexts(pp, depth);
             }
-            else
+            else if (!pp->fatal)
             {
                 pp_run_file(pp, file);
             }

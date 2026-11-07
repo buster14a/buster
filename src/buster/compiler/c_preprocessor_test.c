@@ -5405,6 +5405,8 @@ static bool pp_test_prelude_failures(void)
     return result;
 }
 
+#include "c_preprocessor_forced_include_test.c"
+
 // An option set of #281's families, or one beside them (%d stands for the test's directory): `refused` is in the message
 // of the option pp_parse_options must refuse, or null for a set it must take without a message.
 typedef struct PPTestOptionSet PPTestOptionSet;
@@ -8735,6 +8737,7 @@ static bool pp_test_sections(PPTestDeal* deal, const char* directory, bool with_
     passed &= PP_TEST_SECTION(deal, 1, pp_test_named_ucn_scaling(directory));
     passed &= PP_TEST_SECTION(deal, 2, pp_test_named_ucn_boundaries(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_prelude_failures());
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_raw_forced_include_contexts(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_direct_argument_failures());
     passed &= PP_TEST_SECTION(deal, 2, pp_test_nested_arguments());
     passed &= PP_TEST_SECTION(deal, 1, pp_test_argument_links());
