@@ -6600,6 +6600,19 @@ arguments against the function. The checker now gives these as clang does.
   (that declaration at or before its definition), and the lowering gives it
   `no_caller_saved_registers`' set of every register (`check_lower_preserve`,
   LLVM's `CSR_64_AllRegs` of `x86_intrcc`) and its 1 or 2 parameters' kind.
+
+  x86's `force_align_arg_pointer` (`CHECK_ATTRIBUTE_FORCE_ALIGN_ARG_POINTER`,
+  #1447) is clang's `handleForceAlignArgPointerAttr`'s: a function's, with
+  no arguments ("takes no arguments" otherwise). It ignores the attribute
+  without a word on a function pointer (a variable's, a parameter's, a
+  member's) and on a typedef of a function's type or of a pointer to one,
+  and with "only applies to functions" on anything else
+  (`check_input_subject_handlers`' row). A redeclaration inherits it; one
+  after the definition drops it with "attribute declaration must precede
+  definition". `CheckProgram.object_realign` holds each function's first
+  declaration with it, and `check_program_realign(program, b)` says whether
+  body `b` realigns its stack (`Tier0Function.realign_stack`,
+  `docs/tier0.md`'s realigned frames: 16 bytes' at least).
   A variadic routine, which clang compiles, is refused by name ("unsupported:
   variadic interrupt service routines"), as are `__builtin_eh_return`,
   `__builtin_setjmp` and musttail calls in one, as in any preserving frame.

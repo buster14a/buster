@@ -15138,6 +15138,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             check_lower_preserve(types, type, writer->target.features, handler, function);
         }
         function->interrupt = handler ? (uint8_t)function->parameter_count : 0;
+        // x86's force_align_arg_pointer (#1447, CheckProgram.object_realign): a realigned frame, whatever its objects need.
+        function->realign_stack = !bare && check_program_realign(program, b);
         if (tier0_preserving(function) && (writer->tails || writer->eh_return || writer->returns_twice))
         {
             const bool every = type_function_abi_kind(types, type) == TYPE_FUNCTION_ABI_NO_CALLER_SAVED;

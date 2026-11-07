@@ -4012,6 +4012,22 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "unsigned long mask=((unsigned long)&x&31)|((unsigned long)page&4095)|((unsigned long)&s&63)|((unsigned long)&d&15)|((unsigned long)&e&31);"
             "x+=7;d*=3;return x+page[0]+page[99]+s.a+(int)s.b+(int)d+(int)e+(int)mask*1000;}",
             "objects-aligned-past-16", clang);
+        // x86's force_align_arg_pointer (#1447, Tier0Function.realign_stack): a function entered with rsp 8 bytes off a call's
+        // alignment (an inline asm call that aligns rsp below the red zone, then moves it by 8) realigns its frame, so that
+        // an object aligned to 16 is; with a call of its own and with a variable-length array (a realigned frame with a
+        // base, r15). Without the attribute, such an object's address is 8 bytes off.
+        check_test_program_source(test,
+            "__attribute__((force_align_arg_pointer)) static unsigned long leaf(void){_Alignas(16) char b[16];b[0]=1;"
+            "__asm__ volatile(\"\"::\"r\"(b):\"memory\");return ((unsigned long)b&15)+b[0];}"
+            "__attribute__((force_align_arg_pointer)) static unsigned long calls(void){_Alignas(16) char b[16];b[0]=2;"
+            "__asm__ volatile(\"\"::\"r\"(b):\"memory\");return leaf()*100+((unsigned long)b&15)+b[0];}"
+            "__attribute__((force_align_arg_pointer)) static unsigned long vla(void){volatile int k=5;char v[k];_Alignas(16) char b[16];v[0]=3;b[0]=4;"
+            "__asm__ volatile(\"\"::\"r\"(b),\"r\"(v):\"memory\");return ((unsigned long)b&15)+v[0]+b[0];}"
+            "static unsigned long misaligned(unsigned long (*f)(void)){unsigned long r;"
+            "__asm__ volatile(\"movq %%rsp, %%rbx\\n\\tsubq $128, %%rsp\\n\\tandq $-16, %%rsp\\n\\tsubq $8, %%rsp\\n\\tcallq *%1\\n\\tmovq %%rbx, %%rsp\""
+            ":\"=a\"(r):\"r\"(f):\"rbx\",\"rcx\",\"rdx\",\"rsi\",\"rdi\",\"r8\",\"r9\",\"r10\",\"r11\",\"memory\",\"cc\");return r;}"
+            "int tested(int n){return (int)(misaligned(leaf)+misaligned(calls)*1000+misaligned(vla)*100000+leaf()+calls()+vla())+n;}",
+            "force-align-arg-pointer", clang);
         // Variable-length arrays aligned past 16 bytes (their storage rounded up within a larger allocation), beside a fixed
         // object aligned to 128 (a realigned frame with a base, r15, since the arrays move rsp), across calls with stack
         // arguments whose outgoing area the allocations keep aligned.

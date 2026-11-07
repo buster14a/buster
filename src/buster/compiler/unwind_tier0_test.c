@@ -756,8 +756,9 @@ static void unwind_tier0_test_frame_result(UnwindTier0Test* test, const UnwindTi
 }
 
 // The published frame's reader (unwind_tier0_frame): every mask with and without a frame pointer, at every kind of
-// reservation, and realigned (to 32 and 4096, the and's two forms, with r15 its base where the mask has it), then each
-// record and field it checks broken in turn, refused with the descriptor left alone.
+// reservation, and realigned (to 16, a force_align_arg_pointer function's, and to 32 and 4096, the and's two forms, with
+// r15 its base where the mask has it), then each record and field it checks broken in turn, refused with the descriptor
+// left alone.
 static void unwind_tier0_test_frames(UnwindTier0Test* test)
 {
     static const uint32_t frames[] = { 0, 8, 4096 };
@@ -781,6 +782,12 @@ static void unwind_tier0_test_frames(UnwindTier0Test* test)
                                                              "build each realigned frame", id))
             {
                 unwind_tier0_test_frame_result(test, &fixture, UNWIND_OK, id + 2000);
+            }
+            // A force_align_arg_pointer function's (#1447, Tier0Function.realign_stack): realigned to 16 bytes alone.
+            if ((saved & 2) == 0 && unwind_tier0_test_expect(test, unwind_tier0_test_pointer_fixture(&fixture, (uint8_t)saved, frames[frame], 4, (saved & 32) != 0),
+                                                             "build each frame realigned to 16 bytes", id))
+            {
+                unwind_tier0_test_frame_result(test, &fixture, UNWIND_OK, id + 3000);
             }
         }
     }
@@ -870,9 +877,10 @@ static void unwind_tier0_test_frames(UnwindTier0Test* test)
             case 7: records[7].reg = X86_REGISTER_RBP; break;
             case 8: records[7].mode = BUSTER_X86_MEMORY_BASE; break;
             case 9: fixture.code.frame_alignment_log2 = 7; break;
-            // A published alignment past 16 that the and's immediate can't hold, or with no frame pointer, or a base without
-            // a realignment, or without r15 among the pushes, is no frame Tier 0 makes.
-            case 10: fixture.code.frame_alignment_log2 = 4; wanted = UNWIND_ERROR_INVALID; break;
+            // A published alignment of 16 (a force_align_arg_pointer function's, #1447) that the and doesn't make is
+            // unsupported, as another's is. One that the and's immediate can't hold, or with no frame pointer, or a base
+            // without a realignment, or without r15 among the pushes, is no frame Tier 0 makes.
+            case 10: fixture.code.frame_alignment_log2 = 4; break;
             case 11: fixture.code.frame_alignment_log2 = 32; wanted = UNWIND_ERROR_INVALID; break;
             case 12: fixture.code.frame_pointer = false; wanted = UNWIND_ERROR_INVALID; break;
             case 13: fixture.code.frame_alignment_log2 = 0; wanted = UNWIND_ERROR_INVALID; break;
