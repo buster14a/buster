@@ -1647,7 +1647,9 @@ static void tier1_select_test_atomic_stores(Tier1SelectTest* test)
                             uint64_t actual_memory[3] = { UINT64_C(0xa5a5a5a5a5a5a5a5), UINT64_C(0xfedcba98f0f1f2f3), UINT64_C(0x5a5a5a5a5a5a5a5a) };
                             uint64_t expected_memory[3];
                             memcpy(expected_memory, actual_memory, sizeof(actual_memory));
-                            const uint64_t desired = UINT64_C(0x8182838485868788);
+                            // The raw selector consumer receives canonical I8/I16 parameters; the production CFG
+                            // consumer establishes them with entry MOVZX. Keep I32's upper bits to exercise its ZEXT.
+                            const uint64_t desired = UINT64_C(0x8182838485868788) & (type == IR_I8 ? UINT8_MAX : type == IR_I16 ? UINT16_MAX : UINT64_MAX);
                             const uint64_t expected = tier1_select_test_interpret(&function, (uintptr_t)&expected_memory[1 - folded], desired, 0);
                             const uint64_t actual = tier1_select_test_call(test, (uintptr_t)&actual_memory[1 - folded], desired, 0);
                             tier1_select_test_expect(test, expected == actual && memcmp(actual_memory, expected_memory, sizeof(actual_memory)) == 0,
