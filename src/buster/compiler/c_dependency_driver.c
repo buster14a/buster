@@ -152,7 +152,14 @@ static bool dependency_same_file(const char* a, const char* b)
 static bool dependency_check_destinations(const DependencyOptions* options, char** sources, uint32_t count, const char* primary, bool objects, bool executable, Arena* arena)
 {
     bool result = true;
-    for (uint32_t i = 0; options->enabled && result && i < count; i += 1)
+    // These option values and source names are immutable during admission. A shared destination still checks
+    // every source and artifact, but repeating that same complete check for each unit adds no information.
+    const bool enabled = options->enabled;
+    const bool only = options->only;
+    const bool shared = options->path != NULL || only || primary != NULL;
+    const uint32_t destinations = shared && count != 0 ? 1 : count;
+    const char** artifacts = NULL;
+    for (uint32_t i = 0; enabled && result && i < destinations; i += 1)
     {
         const char* destination = dependency_destination(options, sources[i], primary, arena);
         result = destination != NULL && destination[0] != 0;
@@ -162,9 +169,21 @@ static bool dependency_check_destinations(const DependencyOptions* options, char
             {
                 result = strcmp(sources[j], "-") == 0 || !dependency_same_file(destination, sources[j]);
             }
-            for (uint32_t j = 0; result && !options->only && j < count; j += 1)
+            // Materialize implicit object names only when a non-stdout destination needs them. The array and
+            // strings remain in the command arena, so later destinations reuse the exact same bounded storage.
+            if (result && !only && objects && primary == NULL && artifacts == NULL)
             {
-                const char* artifact = primary != NULL ? primary : objects ? dependency_filename(arena, sources[j], NULL, 'o') : executable ? "a.out" : NULL;
+                artifacts = arena_push(arena, (uint64_t)count * sizeof(*artifacts), _Alignof(const char*));
+                result = artifacts != NULL;
+                for (uint32_t j = 0; result && j < count; j += 1)
+                {
+                    artifacts[j] = dependency_filename(arena, sources[j], NULL, 'o');
+                    result = artifacts[j] != NULL;
+                }
+            }
+            for (uint32_t j = 0; result && !only && j < count; j += 1)
+            {
+                const char* artifact = primary != NULL ? primary : objects ? artifacts[j] : executable ? "a.out" : NULL;
                 result = (!objects || artifact != NULL) && (artifact == NULL || !dependency_same_file(destination, artifact));
             }
         }
