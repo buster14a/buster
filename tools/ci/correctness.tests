@@ -744,13 +744,14 @@ rm -rf "$errors" "$directory"
 # promotions and the text's round trip keep, and which the program's run in the IR's three forms passes through.
 "$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/fences.c
 "$BUSTER_COMPILER" test-ssa-source --clang clang tests/ir-source/fences.c
-# Each aligned atomic load and store of a constant order is the typed stream's marked LOAD or SET (and a seq_cst
-# store's FENCE) and the IR's atomic access, which promotion leaves in memory and the run passes through alike.
+# Each aligned atomic load and weaker store of a constant order is the typed stream's marked LOAD or SET; a seq_cst
+# store is an exchange with source-store provenance. Promotion leaves those accesses in memory and preserves the tag.
 "$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/atomics.c
 "$BUSTER_COMPILER" test-ssa-source --clang clang tests/ir-source/atomics.c
-# The verifier refuses an atomic access aligned below its size; the long's store and load, lowered and promoted,
-# print their natural alignment.
-test "$("$BUSTER_COMPILER" test-ir-source --print published tests/ir-source/atomics.c | grep -c 'align=8 atomic')" -eq 4
+# The verifier refuses an atomic access aligned below its size; the long's load and source-store exchange, lowered
+# and promoted, each print their natural alignment twice.
+test "$("$BUSTER_COMPILER" test-ir-source --print published tests/ir-source/atomics.c | grep -c 'align=8 atomic')" -eq 2
+test "$("$BUSTER_COMPILER" test-ir-source --print published tests/ir-source/atomics.c | grep -c 'align=8 store seq_cst')" -eq 2
 # Each compare-exchange of the fixture's (GNU's, __sync's, C11's and the generic one, twice each, and three implicit
 # objects' loops) is the typed stream's ATOMIC_CAS and the IR's `rmw ... cas`, none a helper's call, in both forms.
 test "$("$BUSTER_COMPILER" test-ir-source --print exchanged tests/ir-source/atomics.c | grep -c ' cas ')" -eq 26
