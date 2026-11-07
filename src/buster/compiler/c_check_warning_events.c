@@ -77,6 +77,8 @@ enum
     CHECK_WARNING_ID_EXCESSIVE_REGSAVE = 85,
     CHECK_WARNING_ID_TCB_ENFORCEMENT = 86,
     CHECK_WARNING_ID_INVALID_VERSION_AVAILABILITY = 87,
+    // An unknown escape sequence in an unevaluated string literal, before its error (#147): the driver's alone, no event's.
+    CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE = 88,
     CHECK_WARNING_ID_COUNT,
 };
 

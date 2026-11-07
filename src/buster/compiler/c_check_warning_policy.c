@@ -10,7 +10,8 @@ static bool check_warning_extension(uint32_t id)
     const bool extension = id == CHECK_WARNING_ID_GNU_CONSTANT || id == CHECK_WARNING_ID_ORDERED_POINTER_INTEGER ||
                            id == CHECK_WARNING_ID_MISSING_DECLARATIONS || id == CHECK_WARNING_ID_PLAIN_COMPLEX ||
                            id == CHECK_WARNING_ID_VARIABLE_SIZED_MEMBER || id == CHECK_WARNING_ID_MANY_SCALAR_BRACES ||
-                           id == CHECK_WARNING_ID_UNDEFINED_INTERNAL || id == CHECK_WARNING_ID_C23_PARAMETER;
+                           id == CHECK_WARNING_ID_UNDEFINED_INTERNAL || id == CHECK_WARNING_ID_C23_PARAMETER ||
+                           id == CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE;
     return extension;
 }
 
