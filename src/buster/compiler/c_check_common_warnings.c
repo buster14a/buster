@@ -5023,7 +5023,7 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
             continue;
         }
         // Each body's marks and queue in the same scratch as the last body's, cache-warm, given back after it.
-        const uint64_t mark = scratch->length;
+        uint64_t mark = scratch->length;
         uint8_t* seen = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, body->count);
         uint32_t* queue = CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, body->count);
         if (seen == NULL || queue == NULL)
@@ -5046,12 +5046,14 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
             if (kind == CHECK_CONTROL_INITIALIZE && seen[i] == 0 && program->initializers != NULL &&
                 entries[i].target < program->initializers->count && *blocked == NULL)
             {
-                // (The barriers' bytes, which a unit without such an initializer never takes.)
+                // (The barriers' bytes, which a unit without such an initializer never takes. They outlive this body's
+                // marks and queue, whose scratch is given back above them, so that the next bodies' don't reuse them.)
                 *blocked = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count);
                 valid = *blocked != NULL;
                 if (valid)
                 {
                     memset(*blocked, 0, graph->count);
+                    mark = scratch->length;
                 }
             }
             if (valid && kind == CHECK_CONTROL_INITIALIZE && seen[i] == 0 && program->initializers != NULL &&

@@ -223,6 +223,15 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 1,
     },
     {
+        // An unreachable initializer's barriers outlive its body's scratch (#1447): the next body's marks and queue
+        // must not reuse them, which made a later body's initialized variables "uninitialized when used here".
+        .name = "unreachable initializer barriers outlive their body",
+        .source = "int f(int n) {\n  return n;\n  int dead = n;\n  return dead;\n}\n"
+                  "int g(int n) {\n  int a = n + 1;\n  if (n > 1) n = a;\n  int b = n + 2;\n  if (n > 2) n = b;\n"
+                  "  int c = n + 3;\n  if (n > 3) n = c;\n  int d = n + 4;\n  if (n > 4) n = d;\n  return n;\n}\n",
+        .options = { "-Wall" },
+    },
+    {
         .name = "initializers after return retain only literal source conversions",
         .source = "int h(void){return 0;short a=65536;int b=1.5;(void)a;(void)b;}\n",
         .warnings = 1,
