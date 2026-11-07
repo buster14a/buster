@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <math.h>
+#include <float.h>
 #include "host_math.h"
 #include "host_isa.h"
 #include "c_check_warning_events.c"
@@ -722,17 +723,35 @@ static uint16_t check_action_half_bits(CheckHalf format, long double value)
     return bits;
 }
 
-// A format's bits' value, exactly (a float's too).
+// A format's bits' value, exactly (a float's too). Decoding a NaN preserves its representation: semantic
+// conversions and arithmetic decide whether to quiet it, not a vector lane's read from constant bytes (#1598).
 static long double check_action_half_value(CheckHalf format, uint16_t bits)
 {
+    _Static_assert(sizeof(long double) == 16 && LDBL_MANT_DIG == 64 && LDBL_MAX_EXP == 16384, "the checker host uses x87 extended precision");
     const uint32_t precision = format == CHECK_HALF_IEEE ? 11 : 8;
     const uint32_t greatest = format == CHECK_HALF_IEEE ? 15 : 127;
     const uint32_t mantissa = bits & ((1u << (precision - 1)) - 1);
     const uint32_t field = (bits & 0x7fffu) >> (precision - 1);
-    const long double magnitude = field == 2 * greatest + 1 ? (mantissa != 0 ? __builtin_nanl("") : __builtin_infl()) :
-                                  field == 0                ? host_ldexpl((long double)mantissa, 1 - (int)greatest - (int)(precision - 1)) :
-                                                              host_ldexpl((long double)(mantissa | (1u << (precision - 1))), (int)field - (int)greatest - (int)(precision - 1));
-    return (bits & 0x8000u) != 0 ? -magnitude : magnitude;
+    long double result = 0;
+    if (field == 2 * greatest + 1 && mantissa != 0)
+    {
+        // The fraction occupies the x87 significand's top bits, as check_action_nan_bits reads it. Construct
+        // even the sign from bytes: a host floating conversion or arithmetic must not quiet a signaling NaN.
+        const uint64_t significand = UINT64_C(0x8000000000000000) | ((uint64_t)mantissa << (64 - precision));
+        const uint16_t exponent = (uint16_t)(0x7fffu | (bits & 0x8000u));
+        uint8_t bytes[16] = { 0 };
+        memcpy(bytes, &significand, sizeof(significand));
+        memcpy(bytes + 8, &exponent, sizeof(exponent));
+        memcpy(&result, bytes, sizeof(result));
+    }
+    else
+    {
+        const long double magnitude = field == 2 * greatest + 1 ? __builtin_infl() :
+                                      field == 0                ? host_ldexpl((long double)mantissa, 1 - (int)greatest - (int)(precision - 1)) :
+                                                                  host_ldexpl((long double)(mantissa | (1u << (precision - 1))), (int)field - (int)greatest - (int)(precision - 1));
+        result = (bits & 0x8000u) != 0 ? -magnitude : magnitude;
+    }
+    return result;
 }
 
 static long double check_action_round_float(TypeId type, long double value)

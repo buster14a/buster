@@ -263,6 +263,55 @@ static void check_test_fp_graph(CheckTest* test, TypeTable* table)
     arena_release(&storage);
 }
 
+// Exercise the x87 return ABI too: inlining the decoder could hide a signaling NaN changed by a host load/store.
+static __attribute__((noinline)) long double check_test_half_decode(CheckHalf format, uint16_t bits)
+{
+    return check_action_half_value(format, bits);
+}
+
+// Representation, not arithmetic: decoding and re-encoding every 16-bit value must preserve all bits. The raw
+// x87 field fixtures are independent of the encoder and distinguish payload preservation from canonicalization.
+static void check_test_half_encodings(CheckTest* test)
+{
+    const CheckHalf formats[] = { CHECK_HALF_IEEE, CHECK_HALF_BRAIN };
+    for (uint32_t format = 0; format < BUSTER_ARRAY_LENGTH(formats); format += 1)
+    {
+        bool exact = true;
+        for (uint32_t bits = 0; bits <= UINT16_MAX; bits += 1)
+        {
+            const long double value = check_test_half_decode(formats[format], (uint16_t)bits);
+            exact &= check_action_half_bits(formats[format], value) == bits;
+        }
+        check_test_expect(test, exact, "every half encoding survives decode, the host return ABI and re-encoding");
+    }
+    static const struct
+    {
+        CheckHalf format;
+        uint16_t bits;
+        uint64_t significand;
+        uint16_t exponent;
+    } nans[] = {
+        { CHECK_HALF_IEEE, 0x7d00, UINT64_C(0xa000000000000000), 0x7fff },
+        { CHECK_HALF_IEEE, 0xfd05, UINT64_C(0xa0a0000000000000), 0xffff },
+        { CHECK_HALF_IEEE, 0x7e35, UINT64_C(0xc6a0000000000000), 0x7fff },
+        { CHECK_HALF_IEEE, 0xffff, UINT64_C(0xffe0000000000000), 0xffff },
+        { CHECK_HALF_BRAIN, 0x7f81, UINT64_C(0x8100000000000000), 0x7fff },
+        { CHECK_HALF_BRAIN, 0xffa5, UINT64_C(0xa500000000000000), 0xffff },
+        { CHECK_HALF_BRAIN, 0x7fc5, UINT64_C(0xc500000000000000), 0x7fff },
+        { CHECK_HALF_BRAIN, 0xffff, UINT64_C(0xff00000000000000), 0xffff },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(nans); i += 1)
+    {
+        const long double value = check_test_half_decode(nans[i].format, nans[i].bits);
+        uint64_t significand = 0;
+        uint16_t exponent = 0;
+        memcpy(&significand, &value, sizeof(significand));
+        memcpy(&exponent, (const uint8_t*)&value + 8, sizeof(exponent));
+        check_test_expect(test, significand == nans[i].significand && exponent == nans[i].exponent,
+                          "half NaN decoding preserves raw sign, signaling and payload fields");
+    }
+}
+
 // Source constant evaluation and executable half arithmetic have different rounding boundaries (#1497).
 // Keep an independent expected value for each operation and ensure runtime action batches never acquire it.
 static void check_test_half_constant_actions(CheckTest* test, TypeTable* table)
@@ -405,6 +454,7 @@ static __attribute__((noinline)) void check_test_fp_actions(CheckTest* test, Typ
     check_test_pragma_extensions(test);
     check_test_fp_action_guards(test, table);
     check_test_fp_action_values(test, table);
+    check_test_half_encodings(test);
     check_test_half_constant_actions(test, table);
     check_test_half_constant_graph(test, table);
     check_test_fp_evaluation_actions(test, table);
