@@ -6224,6 +6224,7 @@ static CheckSparseWide check_input_attributes_from(Arena* arena, CheckInputAttri
 #include "c_check_initializer_test.c"
 #include "c_check_data_source_test.c"
 #include "c_check_attribute_test.c"
+#include "c_check_deprecated_walk_test.c"
 #include "c_check_program_test.c"
 #include "c_check_direct_initializer_test.c"
 #include "c_check_typeof_compound_test.c"
@@ -6924,6 +6925,10 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_attribute_sources(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_deprecated_walks(&test);
             }
             // Deals its programs itself.
             check_test_programs(&test, clang);
