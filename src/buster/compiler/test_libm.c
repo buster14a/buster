@@ -28,7 +28,6 @@
 
 #include <dlfcn.h>
 #include <stddef.h>
-#include <stdlib.h>
 #include <string.h>
 
 #if defined(BUSTER_HOST_STATIC) && BUSTER_HOST_STATIC
@@ -221,12 +220,6 @@ static __attribute__((unused)) void* test_libm(const char* name)
         library = dlopen("libm.so.6", RTLD_NOW | RTLD_LOCAL);
     }
     result = library != NULL ? dlsym(library, name) : NULL;
-    // A dynamic executable's C library can supply atexit through a hidden nonshared entry, which dlsym cannot find.
-    // Its linked address still registers with this process's C library and preserves its own exit-handler state.
-    if (result == NULL && strcmp(name, "atexit") == 0)
-    {
-        result = (void*)&atexit;
-    }
 #endif
     return result;
 }
