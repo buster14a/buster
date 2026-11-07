@@ -1030,6 +1030,51 @@ alone at 287.2 MB against main's 293.7 MB, with 396 more faults. Its observed
 medians were 138.7 against 139.9 ms, from three unpaired runs each, which
 establish no difference in time.
 
+### Partly used huge pages, and three changes not taken (#628)
+
+A map of each push's resident pages at the three peaks of `-c sqlite3.c`, with
+huge pages and with base pages (`BUSTER_HUGE_PAGES=1` and `=0`, the peak map
+above, on the VM), finds about 30 MB of 2 MB pages that their pushes touch in
+part, in all three. On #1574's tree (the VM, huge pages) the peaks are within
+3 MB of each other: 277.3 MB at the reader's end, 279.9 MB at
+`check-declarations`' end and 278.0 MB in the backend. A change lowers the
+compile's peak only by what it takes off all three, or off the highest down to
+the next. Three changes were measured and aren't in:
+- **The reader's sparse output in base pages.** The sparse columns' directories
+  and pool (`check_sparse_reserve_wide`) and the graph's leaf rows
+  (`leaf_payloads`), each with room for a value a token or a leaf, of which the
+  reader writes few, went to an arena of base pages that the C driver reserved
+  for each unit (#1584's first commit, `b6708929`).
+  - **The VM.** Every peak was 6.0 MB lower on #1574's tree, and on main
+    `faef1f98` the peak was 281,776 KiB against 287,848, for 1,575 more faults.
+    The leaf rows alone changed nothing: the pool's pages are the 6 MB, and its
+    faults.
+  - **The 9700X.** Main `faef1f98` against the change (`dd32e723`): 7
+    interleaved rounds, each compile under its own grant of the lock, with every
+    object the same bytes. The peak was 288,328 KiB against 290,936, only
+    2.6 MB lower. The task clock was 137.11 ms against 136.31, slower in each
+    of the 7 rounds, with the same user instructions, 1,522 more faults and 1%
+    more kernel cycles; `check-input` took 0.94 ms more
+    ([the record](https://github.com/buster14a/buster-performance/tree/7626df3211c5cde011c00cb818af2698e6976b57/docs/measurements/sparse-output-628-2026-11-07)).
+- **The rare columns in base pages**, for a reading in source order
+  (`check_input_sparse_arena`, as a large unit's deferred reading has them).
+  The reader's end fell 17.7 MB on the VM, for 6,800 more faults in
+  `check-input` and the same system time there. `static-data`'s end stayed the
+  peak.
+- **The stream's conversions in 16 bytes a node** (its first two operands'),
+  with the third operand's and the stored value's (667 and 3,818 of 323,557
+  nodes) in two wide sparse columns. The column fell from 10.1 to 5.1 MB. But
+  the sparse pool's room, a block for each directory entry, starts a 2 MB page
+  for 0.5 MB of blocks, and the output arena's later pushes start other 2 MB
+  pages. The peak fell 0.2 MB.
+
+What would lower all three is in the huge pages that columns of unknown length
+touch in part: the graph's node columns (about 8 MB, a node a token of room,
+42% of it used), the preprocessor's token columns (5.6 MB) and its file's
+windows (5.6 MB). Each needs its count, or a bound close to it, before it is
+pushed, so that its columns can sit side by side. Base pages for them trade
+faults for the memory, as the sparse output's did.
+
 ## The checker's graph and program passes (#530)
 
 **Measured against `main` on the 9700X.** Medians of 15 interleaved
@@ -1388,9 +1433,12 @@ Every change keeps both paths' objects and diagnostics byte for byte.
 - **The lowering's tables.** `switch_locals` is set to none only at the cases' owners, its only reads. `local_first` is
   set to none only at the bodies' openings, where it is read, and at the locals' bodies, where it is written. Both used
   to be filled at every token. `local_map` is read for any object an expression names, a global's included, and must
-  read as none for all but the body's own. Only its parameters' and locals' entries are ever written, so preparation
-  clears just those and marks them in a bitset (`locals`, a bit an object), before any lane lowers a body. Its readers
-  go through `check_lower_local_of`, which reads none for an unmarked object; the lanes only read the bits.
+  read as none for all but the body's own. So preparation fills it with none, 2.9 MB for `sqlite3.c`, and its readers go
+  through `check_lower_local_of`.
+  - **#1067's bitset.** #1067 cleared only the bodies' parameters' and locals' entries and marked them in a bitset
+    (`locals`), which every read tested first.
+  - **Back to the fill.** On the 9700X that test cost the lowering more than the fill did, so #1580 restored the fill
+    ("On the 9700X, matched", below).
 - **The asm labels** (`check_input_asm_labels`). The reader swept the `attributes` column three times for its
   attributed tokens: for any label, for the labelled objects, and for the register variables' labels (which moved
   here from `check_input_asm_finish`, in the same order).
@@ -1413,23 +1461,44 @@ statement expressions run through the columns, and every unit without them skips
 readings of their own too, each ending at a `PROT_NONE` page: `initialized` against the tokens' initializer nodes on
 random columns; `planned` against a walk of random initializers' parents to their statements, whose lists must be their
 plans in order and which may write no other entry of `plan_first` or `plan_next` (`check_program_plans`), with as many
-plans as tokens, fewer, and none; and `locals`
-against each program fixture's bodies' parameters and automatic declarations, and through its accessors on random
-objects.
+plans as tokens, fewer, and none. Every program fixture's preparation must leave `local_map` none at every object
+(#1580).
 
-**On the 9700X.** The pull request's `compile_time` step, at its first head (`f0084098`,
-[job 124825289835](https://github.com/buster14a/buster/actions/runs/41297067398/job/124825289835)), on the frozen
-`sqlite3.c` with the step's options: `-c` took 130.239 ms wall (129.656 to 131.298), the median of 11 runs pinned to
-CPU 2. Its stages' medians:
+**On the 9700X, matched.** [The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/sparse-constructs-877-2026-11-06)
+([buster-performance#305](https://github.com/buster14a/buster-performance/pull/305)) compares each pull request with
+its base on `-c` of the frozen `sqlite3.c`, with the `compile_time` step's options.
 
-| stage | ms | range |
-| --- | ---: | --- |
-| `check-input` | 56.694 | 56.288 to 57.042 |
-| `check-program` | 11.992 | 11.892 to 12.021 |
-| `lower` | 14.114 | 13.918 to 14.355 |
+- **Placements.** Each tree is built at eight offsets of the checker's code (`BUSTER_CHECKER_OFFSET`, backported to
+  these trees).
+- **Holds.** `measure-compile`'s stages ran in three holds of the lock. `time-runs`, over the offsets and fresh copies
+  with the base again as the floor, ran in five.
+- **Objects.** Every build wrote the same object.
 
-`main`'s pushes that day were cancelled or stopped before the 9700X job, so there is no base from the same step and day.
-A matched comparison of the stages, interleaved and over code placements (`time-runs`, #509), is still to be made.
+| | this change (#1025) | the bitsets (#1067) |
+| --- | --- | --- |
+| wall, `time-runs`, by round | −3.03% to −3.17% | −0.01% to +0.17% (the base against itself: −0.13% to +0.14%) |
+| user cycles, by round | −3.54% to −3.77% | −0.02% to +0.25% (the base against itself: −0.08% to +0.18%) |
+| instructions | −26.8 M (−1.90%) | +2.96 M (+0.21%) |
+| `check-input` | 58.97 → 57.06 ms (−3.2%) | 55.91 → 55.76 ms (−0.3%) |
+| `check-program` | 13.78 → 11.85 ms (−14.1%) | 10.16 → 10.09 ms (−0.7%) |
+| `lower` | 14.28 → 14.19 ms (−0.7%) | 13.45 → 13.61 ms (+1.2%) |
+
+**This change (#1025).** Its `check-input`, `check-program` and wall are below the base's at every offset: all 64
+pairs of offset medians. Every `time-runs` round's range over the placements excludes zero. Its `lower` is within the
+placements.
+
+**The bitsets (#1067).** `check-program` is below the base's in 62 of 64 pairs. But `lower` is above in 53 of 64 pairs
+and in every round. Every read of `local_map` tested the bitset first, which cost more than the 2.9 MB fill it
+replaced. That fill is a `rep stosb` on the 9700X, a handful of instructions, while the tests added 3.0 M.
+
+**#1580** restored the fill. The record's second campaign measured that on main `5fb062a4`, against main and against a
+branch-free read of the bitset:
+
+- **The fill.** `lower` is 0.07 ms (0.7%) faster in every round, with 1.27 M fewer instructions. As a whole process it
+  is within main against itself.
+- **The branch-free read** gains nothing.
+
+The lowering is cheaper on today's main: 10.4 ms, against 13.5 ms at #1067's merge. The bitset's cost shrank with it.
 
 **Instructions.** Callgrind counted the same compile's user instructions on baseline (`-march=x86-64`) builds of `main`
 (`91cfe9e0`) and of this change. Those builds take the scalar paths, so the selections' change doesn't show; the
@@ -1448,8 +1517,8 @@ other three are on both paths. Both wrote the same object.
 instruction counts, not time: the fills cost the 9700X mostly memory traffic and fresh pages, which only its own
 comparison shows. Callgrind needs a finite address space to run the compiler (`ulimit -v 67108864`, docs/arena-memory.md).
 
-The later bitsets (`planned`, `initialized` and `locals`), counted the same way on baseline builds of `main`
-(`92252c30`) and of that change, which wrote the same object:
+The later bitsets (`planned`, `initialized` and `locals`, which #1580 removed again), counted the same way on baseline
+builds of `main` (`92252c30`) and of that change, which wrote the same object:
 
 | | `main` | the bitsets | change |
 | --- | ---: | ---: | ---: |

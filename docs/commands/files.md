@@ -78,6 +78,10 @@ the guard spelled the same, and the walk must do what it did:
   that go forward on every traced lane from the walk's start to its end;
 - dollars: a cache filled with `$` as punctuation (`-fno-dollars-in-identifiers`,
   #281), whose unit must split `aa$bb` into three tokens on every lane count;
+- listings (#653): a walk whose second round's candidates a listed search
+  directory rules out leaves the cache the same paths, each with a file or none
+  and the same error, as a walk with listings off, on every lane count and
+  before any unit runs; a unit of its root then opens no path through either;
 - special paths: a FIFO that an `#include` under `#if 0` names (the walk's
   probe mustn't block) and an active one names (an error, as alone), and a
   quoted name of 2,400 bytes in a directory of 2,539, three requests of which

@@ -3,10 +3,11 @@
 //
 // The baked tables (#590, baked.h). `bake-tables OUTPUT` writes this executable with its buster_baked section as the
 // initializers leave it, so that a compile starts with x86_encode's templates, the x86 semantics' tables, Tier 0's, the
-// Zen 5 cost model's, the unwind templates, Tier 1's selection state tables and the parser's tables (#652) built.
-// build.sh runs it on each executable it links. It runs in the checker's unit, whose Tier 0, unwind, Zen 5 and Tier 1
-// copies the C driver uses (main.c), and builds the parser's in the frontend's unit, their home, through
-// parse_tables_initialize: it zeroes the section, runs the seven initializers, checks that they wrote nothing in the image's writable memory outside the
+// Zen 5 cost model's, the unwind templates, Tier 1's selection state tables, the parser's tables (#652) and the
+// lowering's runtime functions' names' hashes (#442) built.
+// build.sh runs it on each executable it links. It runs in the checker's unit, whose Tier 0, unwind, Zen 5, Tier 1 and
+// lowering copies the C driver uses (main.c), and builds the parser's in the frontend's unit, their home, through
+// parse_tables_initialize: it zeroes the section, runs the eight initializers, checks that they wrote nothing in the image's writable memory outside the
 // section (but the GOT, which the loader may fill as functions are first called), and copies the section's bytes over
 // its place in /proc/self/exe's. The file's GNU build ID is then recomputed over the baked bytes, since the linker's
 // note is over the pre-bake file. A PIE, whose section would hold its load address's pointers if any table had one, and
@@ -274,7 +275,7 @@ static bool bake_build(const BakeImage* image)
         }
         memset(__start_buster_baked, 0, bake_section_size());
         const bool built = x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize() && tier0_initialize() && unwind_initialize() &&
-                           tier1_select_initialize() && parse_tables_initialize();
+                           tier1_select_initialize() && parse_tables_initialize() && check_lower_runtime_names_initialize();
         const uint64_t changed = outside_checked ? bake_hashes(image, NULL, before) : 0;
         valid = built && changed == 0;
         if (!valid)
@@ -458,9 +459,9 @@ static int run_baked_tables_test(int argc, char** argv)
     const bool tier1_ready = tier1_select_initialized();
     const bool parser_ready = parse_tables_initialized();
     const bool initialized = result == 0 && (x86_encoder_initialized || x86_semantics_initialized || x86_zen5_initialized || tier0_initialized ||
-                                             unwind_ready || tier1_ready || parser_ready);
+                                             unwind_ready || tier1_ready || parser_ready || check_lower_runtime_names_ready);
     const bool complete = initialized && x86_encoder_initialized && x86_semantics_initialized && x86_zen5_initialized && tier0_initialized &&
-                          unwind_ready && tier1_ready && parser_ready;
+                          unwind_ready && tier1_ready && parser_ready && check_lower_runtime_names_ready;
     uint8_t* first = result == 0 ? malloc(bake_section_size()) : NULL;
     if (argc != 1)
     {

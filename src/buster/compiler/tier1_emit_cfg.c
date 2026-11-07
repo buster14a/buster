@@ -3073,6 +3073,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     uint32_t* spill_ids = ok ? ir_allocate(scratch, (uint64_t)count + 1, 4, &ok) : 0;
     uint32_t* cursors = ok ? ir_allocate(scratch, (uint64_t)input->position_count + 1, 4, &ok) : 0;
     uint32_t* entry_offsets = ok ? ir_allocate(scratch, (uint64_t)blocks + 1, 4, &ok) : 0;
+    uint32_t* entry_edges = ok ? ir_allocate(scratch, blocks, 4, &ok) : 0;
     uint32_t* block_first = ok ? ir_allocate(scratch, (uint64_t)blocks + 1, 4, &ok) : 0;
     uint32_t* stub_first = ok ? ir_allocate(scratch, (uint64_t)input->edge_count + 1, 4, &ok) : 0;
     uint32_t* pending_branches = ok ? ir_allocate(scratch, branch_capacity + 1, 4, &ok) : 0;
@@ -3099,6 +3100,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         memset(transitions.registers, UINT8_MAX, (uint64_t)count + 1);
         memset(spill_ids, 0xff, ((uint64_t)count + 1) * 4);
         memset(entry_offsets, 0, ((uint64_t)blocks + 1) * 4);
+        tier1_cfg_single_predecessor_edges(input, entry_edges);
         for (uint32_t v = 0; v < input->value_count; v += 1)
         {
             spill_ids[emitted->value_nodes[v]] = allocation->spill_ids[v];
@@ -3221,11 +3223,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         // The single incoming edge's moves, where tier1_cfg placed them at this block's start.
         if (only != UINT32_MAX)
         {
-            uint32_t e = input->successor_offsets[only];
-            while (input->successors[e] != b)
-            {
-                e += 1;
-            }
+            const uint32_t e = entry_edges[b];
             if (cfg->edge_placements[e] == TIER1_CFG_EDGE_SUCCESSOR)
             {
                 error = tier1_emit_cfg_moves(emitted, e, &buffer);
@@ -3856,3 +3854,4 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     }
     return error;
 }
+

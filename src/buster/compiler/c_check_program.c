@@ -2321,12 +2321,13 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
     }
 }
 
+#include "c_check_return_flow.c"
+
 // Aggregate returns need an address even at a reachable implicit return. Reuse the completed writer's label and
 // task scratch for a bounded CFG worklist; each control enters once. The first walk retains both conditional edges,
 // as Tier 0 validates them, and removes dead transfers without renumbering labels. The second selects constant
 // conditions for the source warning. Statement-expression regions keep the lowering's existing stack tracking.
-static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, uint32_t* node_marks, uint32_t* node_stack, uint64_t* work,
-                                     bool return_warnings)
+static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, const uint8_t* return_facts, bool return_warnings)
 {
     CheckProgram* program = writer->program;
     const TypeId result = type_conversion_operand(program->types, type_return(program->types, program->input->declared_types[body->declaration]));
@@ -2340,21 +2341,10 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
         uint8_t* seen = (uint8_t*)writer->tasks;
         uint32_t* queue = writer->labels;
         const CheckGraph* graph = &program->input->graph;
-        // Reference epochs are body identities, below token_count < 2^29. Temporarily OR the disjoint high bit
-        // into their already initialized node marks, then restore every touched word before references consume it.
-        // This avoids clearing the whole unit's graph for each small aggregate body. The task records are dead;
-        // their suffix holds the visited IDs apart from the control marks. capacity is 8 * token_count + 16 plus
-        // the cleanups' room, so round its byte offset up to a u32's and keep graph->count <= capacity within the
-        // existing allocation.
-        const uint32_t warning_mark = UINT32_C(1) << 31;
-        _Static_assert(sizeof(CheckControlTask) >= 8, "control tasks hold byte marks and an aligned u32 visited list");
-        const uint64_t touched_offset = ((uint64_t)writer->capacity + 3) & ~(uint64_t)3;
-        uint32_t* touched = (uint32_t*)((uint8_t*)writer->tasks + touched_offset);
-        for (uint32_t pass = 0; pass < 2; pass += 1)
+        for (uint32_t pass = 0; pass < (return_warnings ? 2u : 1u); pass += 1)
         {
-            bool warning_safe = graph->count <= writer->capacity;
+            bool warning_safe = true;
             memset(seen, 0, body->count);
-            uint32_t touched_count = 0;
             uint32_t head = 0;
             uint32_t tail = 1;
             queue[0] = 0;
@@ -2435,75 +2425,28 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                     }
                     next = entry->kind != CHECK_CONTROL_JUMP_INDIRECT;
                 }
-                // Calls may be declared noreturn. Query operands also affect Clang's source-flow warning even
-                // when unevaluated. Until these contracts reach controls, keep their warnings conservative.
-                if (pass != 0 && warning_safe && entry->node < graph->count && (node_marks[entry->node] & warning_mark) == 0)
+                if (pass != 0)
                 {
-                    uint32_t depth = 1;
-                    node_stack[0] = entry->node;
-                    node_marks[entry->node] |= warning_mark;
-                    touched[touched_count++] = entry->node;
-                    while (depth != 0 && warning_safe)
+                    uint8_t fact = entry->node < graph->count ? return_facts[entry->node] : 0;
+                    if (entry->kind == CHECK_CONTROL_INITIALIZE && program->initializers != NULL && entry->target < program->initializers->count)
                     {
-                        const uint32_t node = node_stack[--depth];
-                        if (work != NULL)
+                        const CheckInitializer* plan = program->initializers->plans + entry->target;
+                        for (uint32_t part = 0; part < plan->count; part += 1)
                         {
-                            *work += 1;
+                            const CheckInitPart* value = plan->parts + part;
+                            fact |= value->kind == CHECK_INIT_VALUE && value->node < graph->count ? return_facts[value->node] : 0;
                         }
-                        const CheckOp op = graph->ops[node];
-                        warning_safe = op != CHECK_OP_CALL && op != CHECK_OP_BUILTIN_MISC && op != CHECK_OP_BUILTIN_QUERY;
-                        if (warning_safe && op != CHECK_OP_VALUE && op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
-                        {
-                            uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
-                            if (op == CHECK_OP_VARARGS)
-                            {
-                                const uint32_t effect = graph->argument_offsets[node];
-                                warning_safe = effect < program->stream->varargs_count && program->stream->varargs[effect].node == node;
-                                const uint32_t evaluated = warning_safe ? program->stream->varargs[effect].evaluated_operands : 0;
-                                for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(operands); o += 1)
-                                {
-                                    operands[o] = (evaluated & (1u << o)) != 0 ? operands[o] : BUSTER_CHECK_NONE;
-                                }
-                            }
-                            bool truth = false;
-                            if ((op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL) &&
-                                check_program_runtime_truth(program, node, operands[0], &truth))
-                            {
-                                if (op == CHECK_OP_CONDITIONAL)
-                                {
-                                    operands[truth ? 2 : 1] = BUSTER_CHECK_NONE;
-                                }
-                                else if (truth == (op == CHECK_OP_LOGICAL_OR))
-                                {
-                                    operands[1] = BUSTER_CHECK_NONE;
-                                }
-                            }
-                            for (uint32_t o = 0; warning_safe && o < BUSTER_ARRAY_LENGTH(operands); o += 1)
-                            {
-                                const uint32_t operand = operands[o];
-                                if (operand < graph->count && (node_marks[operand] & warning_mark) == 0)
-                                {
-                                    node_marks[operand] |= warning_mark;
-                                    touched[touched_count++] = operand;
-                                    node_stack[depth++] = operand;
-                                }
-                            }
-                            if (warning_safe && check_graph_has_arguments(op))
-                            {
-                                const uint32_t mask = check_program_argument_mask(program, node);
-                                for (uint32_t a = 0; a < graph->argument_counts[node]; a += 1)
-                                {
-                                    const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
-                                    const bool evaluated = op == CHECK_OP_BUILTIN_X86 || (a < 32 && (mask & (1u << a)) != 0);
-                                    if (evaluated && argument < graph->count && (node_marks[argument] & warning_mark) == 0)
-                                    {
-                                        node_marks[argument] |= warning_mark;
-                                        touched[touched_count++] = argument;
-                                        node_stack[depth++] = argument;
-                                    }
-                                }
-                            }
-                        }
+                    }
+                    // A guaranteed nonreturning expression ends only this CFG edge. Unknown contracts retain the
+                    // previous conservative warning policy; an unrelated proven stop never hides another fall-off.
+                    if ((fact & BUSTER_CHECK_RETURN_STOPS) != 0)
+                    {
+                        targets[0] = BUSTER_CHECK_NONE;
+                        next = false;
+                    }
+                    else
+                    {
+                        warning_safe &= (fact & BUSTER_CHECK_RETURN_UNKNOWN) == 0;
                     }
                 }
                 targets[1] = next && index + 1 < body->count ? index + 1 : BUSTER_CHECK_NONE;
@@ -2516,10 +2459,6 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                         queue[tail++] = target;
                     }
                 }
-            }
-            for (uint32_t t = 0; t < touched_count; t += 1)
-            {
-                node_marks[touched[t]] &= ~warning_mark;
             }
             const bool falls = body->count != 0 && seen[body->count - 1] != 0;
             if (pass == 0)
@@ -3528,7 +3467,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint32_t* lifetime_next = lifetimes ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* lifetime_stamps = lifetimes ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     valid = valid && (!lifetimes || (lifetime_first != 0 && lifetime_next != 0 && lifetime_stamps != 0));
-    const uint64_t lifetime_room = valid && lifetimes ? check_program_lifetime_blocks(parser, input, lifetime_first, lifetime_next) : 0;
+    const uint64_t lifetime_room = valid && lifetimes ? check_program_lifetime_blocks(parser, input, lifetime_first, lifetime_next, lifetime_stamps) : 0;
     valid = valid && cleanup_room + lifetime_room <= UINT32_MAX - ((uint64_t)count * 8 + 16);
     const uint32_t capacity = valid ? (uint32_t)((uint64_t)count * 8 + 16 + cleanup_room + lifetime_room) : 0;
     // The bodies' labels, the worklist of a body's controls and the unit's controls, with room for 8 a token: each body
@@ -3824,6 +3763,11 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         .fold_capacity = node_count + 1,
         .capacity = capacity,
     };
+    // Source warning contracts are a single postorder reduction, reused by every body's CFG walk. They neither
+    // alter emission reachability nor run on a rejected stream. Warning-disabled commands keep no extra facts.
+    const uint8_t* return_facts = valid && program->status == CHECK_PROGRAM_OK && options.return_warnings && node_count != 0 ?
+                                    check_program_return_facts(program, scratch, options.return_flow_work) : NULL;
+    valid = valid && (!options.return_warnings || node_count == 0 || return_facts != NULL) && program->status == CHECK_PROGRAM_OK;
     uint32_t reference_count = 0;
     for (uint32_t b = 0; valid && b < body_count && program->status == CHECK_PROGRAM_OK; b += 1)
     {
@@ -3856,7 +3800,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             const uint32_t name = parser->tokens.names[declaration];
             body->is_main = intern_length(options.identifiers, name) == 4 && memcmp(intern_bytes(options.identifiers, name), "main", 4) == 0;
         }
-        check_program_return_flow(&writer, body, nodes, stack, options.return_flow_work, options.return_warnings);
+        check_program_return_flow(&writer, body, return_facts, options.return_warnings);
         body->reference_count = check_program_references(program, entries + start, body->entry_count, program->body_count, seen, nodes, stack, reference_items, needed);
         if (body->reference_count > UINT32_MAX - reference_count)
         {
@@ -4018,3 +3962,4 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 #include "c_check_program_emit.c"
 
 #endif
+

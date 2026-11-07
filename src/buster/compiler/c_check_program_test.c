@@ -11,6 +11,7 @@
 #include "c_check_program_helpers_test.c"
 #include "c_check_program_diagnostic_test.c"
 #include "c_check_control_input_test.c"
+#include "c_check_program_lifetime_test.c"
 
 static void check_test_program_addressed(CheckTest* test)
 {
@@ -2558,9 +2559,10 @@ static void check_test_program_refused(CheckTest* test)
 // The table of every type's class and facts that the bodies read (check_lower_classify_types) against its twin's, on the
 // types of random worlds of every kind (the type table's tests' world: pointers, arrays, functions, vectors, atomic
 // types, aligned typedefs, complex types of _BitInts, enums and records; and the calling convention's tests' world:
-// complex types of every floating type among them): of the whole world and of every count of its types to 300; then with
-// the kinds' column and both tables ending at a PROT_NONE page, for every count to 200, so that a read or a write past the
-// last type faults. And a function's memory classes from its entries' (check_lower_entry_classes), at the page's end too.
+// complex types of every floating type among them): of the whole world and of every count of its types to 300, with plain
+// char signed and unsigned; then with the kinds' column and both tables ending at a PROT_NONE page, for every count to
+// 200, so that a read or a write past the last type faults. And a function's memory classes from its entries'
+// (check_lower_entry_classes), at the page's end too.
 static __attribute__((noinline)) void check_test_program_type_facts(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -2591,21 +2593,29 @@ static __attribute__((noinline)) void check_test_program_type_facts(CheckTest* t
             const uint32_t count = table->types.count;
             uint8_t* columns = malloc(4 * ((uint64_t)count + 1));
             check_test_expect(test, columns != 0 && count > 300, "the world's types and their columns");
-            for (uint32_t prefix = 0; columns != 0 && prefix <= count; prefix = prefix < 300 ? prefix + 1 : prefix < count ? count : prefix + 1)
+            // In both char modes: the vector path copies the builtins' rows, plain char's class by the mode, which the
+            // twin classifies by the rules (#442).
+            for (uint32_t mode = 0; columns != 0 && mode < 2; mode += 1)
             {
-                uint8_t* scalar_classes = columns;
-                uint8_t* scalar_facts = columns + count + 1;
-                uint8_t* vector_classes = columns + 2 * ((uint64_t)count + 1);
-                uint8_t* vector_facts = columns + 3 * ((uint64_t)count + 1);
-                memset(vector_classes, 0xa5, prefix + 1);
-                memset(vector_facts, 0xa5, prefix + 1);
-                check_lower_classify_types_scalar(table, prefix, scalar_classes, scalar_facts);
-                check_lower_classify_types(table, prefix, vector_classes, vector_facts);
-                const bool same = memcmp(scalar_classes, vector_classes, prefix) == 0 && memcmp(scalar_facts, vector_facts, prefix) == 0 &&
-                                  vector_classes[prefix] == 0xa5 && vector_facts[prefix] == 0xa5;
-                char description[160];
-                snprintf(description, sizeof(description), "the first %u of world %u's %u types: their classes and facts by both paths", prefix, round, count);
-                check_test_expect(test, same, description);
+                TypeTable flipped = *table;
+                flipped.char_unsigned = mode != 0;
+                for (uint32_t prefix = 0; prefix <= count; prefix = prefix < 300 ? prefix + 1 : prefix < count ? count : prefix + 1)
+                {
+                    uint8_t* scalar_classes = columns;
+                    uint8_t* scalar_facts = columns + count + 1;
+                    uint8_t* vector_classes = columns + 2 * ((uint64_t)count + 1);
+                    uint8_t* vector_facts = columns + 3 * ((uint64_t)count + 1);
+                    memset(vector_classes, 0xa5, prefix + 1);
+                    memset(vector_facts, 0xa5, prefix + 1);
+                    check_lower_classify_types_scalar(&flipped, prefix, scalar_classes, scalar_facts);
+                    check_lower_classify_types(&flipped, prefix, vector_classes, vector_facts);
+                    const bool same = memcmp(scalar_classes, vector_classes, prefix) == 0 && memcmp(scalar_facts, vector_facts, prefix) == 0 &&
+                                      vector_classes[prefix] == 0xa5 && vector_facts[prefix] == 0xa5;
+                    char description[192];
+                    snprintf(description, sizeof(description), "the first %u of world %u's %u types, plain char %s: their classes and facts by both paths", prefix,
+                             round, count, mode != 0 ? "unsigned" : "signed");
+                    check_test_expect(test, same, description);
+                }
             }
             for (uint32_t prefix = 0; columns != 0 && guarded && prefix <= 200 && prefix <= count; prefix += 1)
             {
@@ -2766,11 +2776,9 @@ static __attribute__((noinline)) void check_test_program_fpclassify(CheckTest* t
                                true, "fpclassify-argument-twice", clang);
 }
 
-// A small aggregate body must not clear its unit's unrelated graph. Poison the dead control-task suffix, as the
-// next body's builder may, and retain reference epochs for nodes reached by earlier bodies. Both a completed walk
-// and its conservative early stop must restore those marks before builtin/reference selection reads them. The
-// capacities end in every remainder of four: a capacity that isn't a multiple of four is the cleanup-room case
-// (#147) that once left the visited list misaligned, which UBSan catches and the poisoned suffix locates.
+// The warning walk borrows only control marks and the label queue. Poison every suffix and retain facts at every
+// capacity remainder, including conservative and proven terminating edges. No graph marks or alignment ledger are
+// borrowed by this walk now; only the body's two control bytes and queue entries may change.
 static void check_test_program_return_marks(CheckTest* test)
 {
     enum { TOKENS = 1024, BASE_CAPACITY = 8 * TOKENS + 16, CAPACITY = BASE_CAPACITY + 3, NODES = 4096 };
@@ -2781,60 +2789,98 @@ static void check_test_program_return_marks(CheckTest* test)
     const TypeMember member = { .name = 1, .type = BUSTER_TYPE_LONG, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD };
     ready = ready && record != 0 && type_complete_record(&types.table, record, &member, 1, (TypeRecordAttributes){ 0 });
     TypeId function = ready ? type_function(&types.table, record, NULL, 0, 0) : 0;
-    CheckOp* ops = BUSTER_ARENA_PUSH_ARRAY(&scratch, CheckOp, NODES);
-    uint32_t* operands = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES);
-    uint32_t* seconds = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES);
-    uint32_t* absent = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES);
-    uint32_t* marks = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES + 1);
-    uint32_t* stack = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES + 1);
+    uint8_t* facts = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, NODES + 1);
     uint32_t* labels = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, CAPACITY + 1);
     CheckControlTask* tasks = BUSTER_ARENA_PUSH_ARRAY(&scratch, CheckControlTask, CAPACITY);
-    ready = ready && function != 0 && ops != NULL && operands != NULL && seconds != NULL && absent != NULL && marks != NULL && stack != NULL && labels != NULL && tasks != NULL;
-    check_test_expect(test, ready, "return warning mark fixture has bounded graph and control scratch");
+    ready = ready && function != 0 && facts != NULL && labels != NULL && tasks != NULL;
+    check_test_expect(test, ready, "return warning fixture has bounded facts and control scratch");
+    static const uint8_t contracts[] = { 0, BUSTER_CHECK_RETURN_UNKNOWN, BUSTER_CHECK_RETURN_STOPS };
     for (uint32_t capacity = BASE_CAPACITY; ready && capacity <= CAPACITY; capacity += 1)
     {
-        for (uint32_t unsafe = 0; ready && unsafe < 2; unsafe += 1)
+        for (uint32_t contract = 0; contract < BUSTER_ARRAY_LENGTH(contracts); contract += 1)
         {
-            for (uint32_t node = 0; node < NODES; node += 1)
+            for (uint32_t node = 0; node <= NODES; node += 1)
             {
-                ops[node] = CHECK_OP_VALUE;
-                operands[node] = seconds[node] = absent[node] = BUSTER_CHECK_NONE;
-                marks[node] = node == 0 ? unsafe : node % 2;
+                facts[node] = node == 0 ? contracts[contract] : 0x73;
             }
-            ops[0] = unsafe ? CHECK_OP_COMMA : CHECK_OP_VALUE;
-            ops[1] = unsafe ? CHECK_OP_CALL : CHECK_OP_VALUE;
-            operands[0] = unsafe ? 2 : BUSTER_CHECK_NONE;
-            seconds[0] = unsafe ? 1 : BUSTER_CHECK_NONE;
-            marks[NODES] = stack[NODES] = labels[capacity] = UINT32_C(0x71625344);
+            for (uint32_t label = 0; label <= CAPACITY; label += 1)
+            {
+                labels[label] = UINT32_C(0x71625344);
+            }
             memset(tasks, 0xa5, (uint64_t)CAPACITY * sizeof(*tasks));
-            const CheckInput input = { .token_count = TOKENS, .declared_types = &function,
-                                       .graph = { .count = NODES, .ops = ops, .operand0 = operands, .operand1 = seconds, .operand2 = absent } };
+            const CheckInput input = { .token_count = TOKENS, .declared_types = &function, .graph = { .count = NODES } };
             CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input, .body_count = 2 };
-            CheckControl entries[] = { { .kind = CHECK_CONTROL_RETURN, .node = 0 }, { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE } };
+            CheckControl entries[] = { { .kind = CHECK_CONTROL_EVALUATE, .node = 0 }, { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE } };
             CheckControlWriter writer = { .program = &program, .entries = entries, .tasks = tasks, .labels = labels, .capacity = capacity };
             CheckProgramBody body = { .count = BUSTER_ARRAY_LENGTH(entries), .entry_count = BUSTER_ARRAY_LENGTH(entries) };
-            check_program_return_flow(&writer, &body, marks, stack, NULL, true);
-            const uint32_t touched_offset = (capacity + 3) & ~UINT32_C(3);
-            bool same = body.return_flow && !body.falls && body.return_warning == 0 &&
-                        marks[NODES] == UINT32_C(0x71625344) && stack[NODES] == UINT32_C(0x71625344) && labels[capacity] == UINT32_C(0x71625344);
-            for (uint32_t node = 0; same && node < NODES; node += 1)
+            check_program_return_flow(&writer, &body, facts, true);
+            bool same = body.return_flow && body.falls && body.return_warning == (contract == 0 ? 1 : 0);
+            for (uint32_t node = 0; same && node <= NODES; node += 1)
             {
-                same = marks[node] == (node == 0 ? unsafe : node % 2);
+                same = facts[node] == (node == 0 ? contracts[contract] : 0x73);
             }
-            // The call stops its comma expression with the other operand still queued. Only one or three ledger words
-            // change, after the bytes a capacity that isn't a multiple of four leaves as alignment padding.
+            for (uint32_t label = BUSTER_ARRAY_LENGTH(entries); same && label <= CAPACITY; label += 1)
+            {
+                same = labels[label] == UINT32_C(0x71625344);
+            }
             const uint8_t* bytes = (const uint8_t*)tasks;
-            for (uint32_t byte = capacity; same && byte < touched_offset; byte += 1)
+            for (uint32_t byte = BUSTER_ARRAY_LENGTH(entries); same && byte < (uint64_t)CAPACITY * sizeof(*tasks); byte += 1)
             {
                 same = bytes[byte] == 0xa5;
             }
-            for (uint32_t byte = touched_offset + (1 + 2 * unsafe) * sizeof(uint32_t); same && byte < touched_offset + NODES; byte += 1)
-            {
-                same = bytes[byte] == 0xa5;
-            }
-            check_test_expect(test, same, "small return warning walks preserve liveness epochs and touch only visited-node scratch at every capacity remainder, including early stops");
+            check_test_expect(test, same, "return warning walks retain immutable facts and every unused control/queue byte at each capacity remainder");
         }
     }
+    if (ready)
+    {
+        // An attested query runtime plan may evaluate its argument. That alone does not attest the source-warning
+        // CFG contract: its guaranteed terminating child must leave the query itself conservative.
+        CheckOp ops[] = { CHECK_OP_BUILTIN_MISC, CHECK_OP_BUILTIN_QUERY };
+        uint32_t absent[] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+        uint32_t members[] = { CBUILTIN_TRAP, CBUILTIN_CONSTANT_P };
+        uint32_t offsets[] = { 0, 0 };
+        uint32_t counts[] = { 0, 1 };
+        uint32_t arguments[] = { 0 };
+        CheckBuiltinMiscEffect misc = { .node = 0, .terminates = true };
+        CheckBuiltinQueryEffect query = {
+            .node = 1,
+            .runtime_value = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE, .constant_kind = CHECK_CONSTANT_INTEGER,
+                               .flags = BUSTER_CHECK_SIDE_EFFECT },
+            .evaluated_operands = 1,
+            .known = true,
+            .source_proof = CHECK_BUILTIN_QUERY_PROOF_ZERO,
+            .runtime_plan = CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_KNOWN,
+            .runtime_effects = { .flags = BUSTER_CHECK_SIDE_EFFECT },
+        };
+        const CheckInput input = { .graph = { .count = BUSTER_ARRAY_LENGTH(ops), .ops = ops, .operand0 = absent,
+                                            .operand1 = absent, .operand2 = absent, .members = members,
+                                            .argument_offsets = offsets, .argument_counts = counts, .argument_nodes = arguments } };
+        const CheckStream stream = { .misc = &misc, .misc_count = 1, .queries = &query, .query_count = 1 };
+        CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input, .stream = &stream };
+        const uint8_t* query_facts = check_program_return_facts(&program, &scratch, NULL);
+        check_test_expect(test, query_facts != NULL && query_facts[0] == BUSTER_CHECK_RETURN_STOPS &&
+                               query_facts[1] == BUSTER_CHECK_RETURN_UNKNOWN,
+                          "an evaluated query operand never promotes its conservative warning contract to a guaranteed stop");
+    }
+    if (ready)
+    {
+        // Reader-independent inputs may have a checked function designator without source declaration bindings.
+        // Missing optional provenance keeps the call conservative instead of indexing an absent column.
+        CheckOp ops[] = { CHECK_OP_VALUE, CHECK_OP_CALL };
+        uint32_t tokens[] = { 0, 0 };
+        uint32_t first[] = { BUSTER_CHECK_NONE, 0 };
+        uint32_t absent[] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+        CheckValue values[] = { { .type = function, .category = CHECK_FUNCTION, .object = 1 },
+                                { .type = record, .category = CHECK_RVALUE } };
+        const CheckInput input = { .token_count = 1, .graph = { .count = BUSTER_ARRAY_LENGTH(ops), .ops = ops,
+                                       .tokens = tokens, .operand0 = first, .operand1 = absent, .operand2 = absent } };
+        const CheckStream stream = { .dense_values = values };
+        const CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input,
+                                       .stream = &stream, .object_count = 2 };
+        check_test_expect(test, check_program_return_call(&program, 1, NULL) == BUSTER_CHECK_RETURN_UNKNOWN,
+                          "a call without optional source declaration bindings remains conservative");
+    }
+
     arena_release(&scratch);
     check_test_types_close(&types);
 }
@@ -3323,6 +3369,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_control_masks(test);
         check_test_control_walks(test);
         check_test_program_addressed(test);
+        check_test_program_lifetime_planning(test);
         check_test_program_scans(test);
         check_test_program_resolve_labels(test);
         check_test_program_bodies(test, clang);
@@ -5135,3 +5182,4 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
 }
 
 #endif
+

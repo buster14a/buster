@@ -126,3 +126,20 @@ The implementation and fixtures are original project C under
 [Preprocessor Options](https://gcc.gnu.org/onlinedocs/gcc/Preprocessor-Options.html)
 and external GCC/Clang executions provide behavior facts only. No upstream
 implementation, test fixture, or generated metadata is imported.
+
+## Dependency admission storage (#1314, #1532)
+
+Admission constructs each implicit object filename once and reuses it for all
+non-stdout dependency destinations. The pointer array and filenames occupy
+linear command-arena storage. Explicit shared `-MF`, dependency-only output,
+and explicit primary-output destinations check the complete source/artifact
+set once, rather than repeating the same check per unit. No names are allocated
+for disabled, empty or stdout-only admission.
+
+The existing file, hard-link, directory-identity and dangling-symlink checks are
+retained. Distinct implicit dependency destinations still perform pairwise
+filesystem identity checks; this bounded change does not finish #1314's linear
+syscall target. The direct driver regressions check linear filename storage,
+late source/object collisions and exhausted storage alongside the existing CLI
+alias/publication suite. Approved-host end-to-end scaling remains outstanding;
+no measured speedup is claimed.

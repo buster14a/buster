@@ -48,3 +48,35 @@ requirements. [Command index](README.md).
   indirect jump's depth `assumed`. It compares each file's frames with the
   first's over the functions both have, leaving the unresolved out: #177's
   frame sizes against `clang -O2`.
+
+## Lifetime planning on deep trees (#1355)
+
+`check_program_lifetime_blocks` reads immutable parent/role columns and
+memoizes each token's nearest enclosing block, resetting at function bodies.
+It then links local declarations in token order. A second memoized pass counts
+enclosing blocks with locals and sums those counts at jump tokens to reserve
+controls. Each path stops at a cached answer and retraces only its previously
+unknown nodes; each node is filled once per pass. Total planning work is linear
+in the tokens, including a chain with many returns. With no blocks containing
+locals the second pass is omitted. No retained parser postorder is required:
+the C driver uses tree-only parsing, and parent token IDs may precede or follow
+their children.
+
+The planner borrows the existing `count + 1`-entry `lifetime_stamps` scratch
+column, disjoint from its inputs and retained `lifetime_first`/`lifetime_next`
+outputs. It uses the column first for nearest-block facts, then for counts.
+`check_program_lifetime_entered` initializes it again before bypass stamps,
+so no planning fact escapes into goto analysis and no extra allocation is
+introduced. Unknown facts are `NONE`; a resolved missing scope is `count`,
+and resolved depth counts include zero.
+
+`test-checker` includes `c_check_program_lifetime_test.c`: small forests with
+permuted token IDs and no retained postorder compare complete local lists and
+capacity against independent ancestor walks, including body boundaries and
+excluded declarations. Two 16,384-level fixtures, with and without locals,
+use closed-form expectations. The existing driver frame/lifetime fixture
+retains native semantic coverage. Goto/case bypass walks and the control writer
+are unchanged and may still have depth-dependent work. Approved-host
+measurements of #1355's source chain remain required before claiming the
+issue's scaling or wall-time acceptance.
+

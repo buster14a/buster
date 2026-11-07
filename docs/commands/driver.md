@@ -226,9 +226,19 @@ from the command's common options and its recorded language. The single-input
 `test-checker-driver`'s compatibility cases check mixed language order, both
 kernels, option boundaries and a `.S` preprocessing/reassembly execution round-trip.
 
-C-only commands retain the existing direct path. Mixed commands compile C and
-assembly on the unit scheduler's lanes, retain their ELF objects in memory,
-and use the built-in foreign resolver and writer with the discovered C runtime.
+C-only links retain the existing direct path, including its shared-library
+version validation and runtime snapshot. When a `-lNAME` or `-l:FILE` request
+selects a populated archive, the source command uses the mixed/foreign path
+(#1470), so that archive gets the same lazy member selection and input ordering
+as a positional archive. Empty archives retain the direct path. The selection
+keeps `-L` directory order and static runtime mode; named DSOs on an archive
+link keep their named-search identity and as-needed state. Exact `-l:FILE`
+DSO-only links retain the direct importer's existing refusal. No new runtime or
+writer mode is introduced. `-c` and syntax checking do not resolve libraries.
+
+Mixed commands compile C and assembly on the unit scheduler's lanes, retain
+their ELF objects in memory, and use the built-in foreign resolver and writer
+with the discovered C runtime.
 No host compiler/linker or temporary object files are used. Input order, `-l`
 state, archive extraction, named sections, C DWARF and unwind records survive
 this boundary. Each `.S` unit owns its preprocessing state on its lane, including
@@ -256,3 +266,4 @@ The last command runs the focused original argv-level fixtures, also included
 in `test-checker-driver`: own/Clang objects, object-only links, lazy archives,
 shared libraries, runtime modes, scalar/multiple lanes and worker caps, parallel
 `.S`, positional languages, stdin, compile-only output and failure preservation.
+

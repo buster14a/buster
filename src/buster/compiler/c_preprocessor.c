@@ -90,6 +90,8 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/statfs.h>
+#include <sys/syscall.h>
 #include "host_isa.h"
 #include "c_dependency_driver.c"
 #include "c_builtin_catalog.c"
@@ -639,6 +641,9 @@ struct PPFile
 // The system calls lookups made, counted for whoever made them: open attempts (one per uncached path, whether or not a
 // file is there), fstat attempts (one per successful open, even for a non-regular file or a failed fstat), and files
 // mapped/read (the latter counts file-read operations, not individual pread attempts). Each unit/lane owns its counts.
+// `listings` counts directories whose names were read (file_cache_list_directory: an open, an fstatfs, getdents64 to the
+// end and a close, or fewer system calls if one of them fails), and `listed` the paths a listing answered without a
+// system call.
 typedef struct FileCacheCounts FileCacheCounts;
 struct FileCacheCounts
 {
@@ -646,6 +651,8 @@ struct FileCacheCounts
     uint64_t fstats;
     uint64_t maps;
     uint64_t reads;
+    uint64_t listings;
+    uint64_t listed;
 };
 
 // What a probe of a path found (file_cache_probe): whether a regular file can be read there, its identity and
@@ -691,6 +698,32 @@ struct FileCachePath
     FileProbe probe;
 };
 
+// A directory the include search looked up paths in (a search directory, or an includer's), which the cache counts the
+// failed probes of: the paths in it that had no file (ENOENT). When the count reaches BUSTER_FILE_CACHE_LISTING_MISSES,
+// the cache reads the directory's names once (file_cache_list_directory). The listing then answers a path in the
+// directory whose first component it doesn't have, with no system call (file_cache_listed_absent). It is about as dear
+// as ten to twenty failed probes, so a short search path or a small unit never pays for one (#653).
+typedef struct FileCacheDirectory FileCacheDirectory;
+struct FileCacheDirectory
+{
+    uint64_t hash;
+    const char* path; // NUL-terminated.
+    uint32_t length;
+    uint32_t misses;
+    // The listed names' keys (file_cache_name_key, never 0), in name_mask + 1 slots, or null: not listed yet, put off
+    // (`deferred`: more names than a first look reads), or (`unlisted`) a directory a listing can't answer for exactly.
+    const uint32_t* names;
+    uint32_t name_mask;
+    bool deferred;
+    bool unlisted;
+    FileCacheDirectory* next;
+};
+
+// The chains of directories the cache looked up paths in, by hash: a search directory and every includer's directory
+// (for quoted names) get one. A lookup comes here only for a path the cache never looked up, which costs a probe or
+// skips one, so a few directories a chain are cheap.
+#define BUSTER_FILE_CACHE_DIRECTORY_SLOTS 256u
+
 // The arenas a lane prepares records into: the token columns (kinds, starts, values), each in an arena of its own as a
 // translation unit's are, the leading-space words and directive tables, and the bytes of the files it reads.
 typedef struct FileCacheArenas FileCacheArenas;
@@ -731,7 +764,13 @@ struct FileCache
     uint32_t path_count;
     uint32_t* path_slots;
     uint32_t path_slot_mask;
+    // The paths' bytes, and the directories (FileCacheDirectory) and their listings, which a directory gets at its
+    // `listing_misses`-th failed probe (BUSTER_FILE_CACHE_LISTING_MISSES; 0 for never, the tests' oracle).
     Arena path_arena;
+    FileCacheDirectory* directory_slots[BUSTER_FILE_CACHE_DIRECTORY_SLOTS];
+    uint32_t listing_misses;
+    // The directories with a listing: until there is one, a lookup that finds a file looks no directory up.
+    uint32_t listed_directories;
     Arena arrays[4];
     // Each lane's arenas, reserved when the lane first prepares a record.
     FileCacheArenas lanes[BUSTER_LANE_MAX_COUNT];
@@ -1408,6 +1447,8 @@ struct Preprocessor
     char** directories;
     uint32_t* directory_lengths;
     uint8_t* directory_system;
+    // Each one's directory in the file cache (FileCacheDirectory), once a lookup has needed it.
+    FileCacheDirectory** directory_entries;
     uint32_t directory_count;
     uint32_t angled_first; // The first directory <...> searches.
     // With --buster-headers: clang's resource directory, right after buster's (`buster_directory`, its path, as
@@ -3936,6 +3977,20 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
 // others', larger limits less, and reading every file (sqlite3.c's 9.5 MB too) made sqlite3.c's slower than mapping
 // them all (docs/c-preprocessor.md, "Files").
 #define BUSTER_FILE_CACHE_READ_LIMIT (16u << 10)
+// The failed probes of paths in a directory after which the cache first looks at its names (FileCacheDirectory), the
+// buffer of that look (about 25 names: a directory with more is put off), the factor of failed probes after which a
+// larger directory is read whole, the largest getdents64 record (its 19 bytes and a name of NAME_MAX bytes and its NUL,
+// aligned to 8), and the buffer a whole read reads with (about 200 names a call). A unit with only <stdio.h> fails 26
+// probes in each of clang's resource directory and /usr/local/include. On the 9700X, its include searches took 60 us
+// with first looks at 32 misses or none, and 64 us at 16; deflate.c's 159, 154 and 158 us, and sqlite3.c's 582, 576
+// and 601 us. Listing every directory whole at 16 made the first 77 us and sqlite3.c's 540 (file_cache_list_directory).
+#define BUSTER_FILE_CACHE_LISTING_MISSES 32u
+#define BUSTER_FILE_CACHE_SMALL_LISTING 1024u
+#define BUSTER_FILE_CACHE_LARGE_LISTING 8u
+#define BUSTER_FILE_CACHE_RECORD_MAX 280u
+#define BUSTER_FILE_CACHE_LISTING_BUFFER (8u << 10)
+// The longest name a directory entry has (NAME_MAX on every file system file_cache_exact_names takes).
+#define BUSTER_FILE_CACHE_NAME_MAX 255u
 
 // The capacity shift of a cache's arrays (arena_capacity_shift), for the larger of its records and paths.
 static uint32_t file_cache_shift(void)
@@ -3968,6 +4023,7 @@ static bool file_cache_start(FileCache* cache, InternTable* table, PPPrepare pre
     cache->prepare = prepare;
     cache->table = table;
     cache->read_limit = BUSTER_FILE_CACHE_READ_LIMIT;
+    cache->listing_misses = BUSTER_FILE_CACHE_LISTING_MISSES;
     cache->capacity_shift = shift;
     const bool reserved = arrays[0] != 0 && arrays[1] != 0 && arrays[2] != 0 && arrays[3] != 0;
     cache->path_arena = reserved ? arena_reserve(BUSTER_FILE_CACHE_PATH_BYTES) : (Arena){ 0 };
@@ -4296,22 +4352,296 @@ static void file_cache_identify(FileCache* cache, FileCachePath* entry)
     }
 }
 
+// Whether a lookup of a name on a file system of type `type` (fstatfs's f_type) finds what a listing of its directory
+// finds: the name byte for byte, or with ASCII letters' case folded, as file_cache_name_key folds them. Case folding
+// covers casefold directories (ext4, F2FS, tmpfs and bcachefs) and XFS's ascii-ci. Names with a byte past ASCII are
+// neither listed nor looked up (file_cache_list_directory, file_cache_listed_absent), so Unicode's foldings and
+// normalizations never apply to them. Some file systems alias names that their listings don't show (vfat's and NTFS's
+// short names and trailing dots), and network and FUSE file systems answer as their servers do. None of those is here:
+// their directories are probed as before.
+static bool file_cache_exact_names(uint64_t type)
+{
+    static const uint64_t types[] = {
+        0xEF53u,     // ext2, ext3 and ext4
+        0x58465342u, // XFS
+        0x9123683Eu, // Btrfs
+        0x01021994u, // tmpfs
+        0x794C7630u, // overlayfs
+        0xF2F52010u, // F2FS
+        0x73717368u, // SquashFS
+        0xE0F5E1E2u, // EROFS
+        0xCA451A4Eu, // bcachefs
+    };
+    bool result = false;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(types); i += 1)
+    {
+        result = result || type == types[i];
+    }
+    return result;
+}
+
+// The key of a name of `length` bytes (1 to BUSTER_FILE_CACHE_NAME_MAX, all ASCII) in a listing: 32 bits of the hash of
+// the name with its ASCII letters in lower case, never 0, which marks an empty slot. Two names with one key only cost
+// a probe: a listing rules out a name whose key it doesn't have.
+static uint32_t file_cache_name_key(const uint8_t* name, uint32_t length)
+{
+    uint8_t folded[BUSTER_FILE_CACHE_NAME_MAX];
+    for (uint32_t i = 0; i < length; i += 1)
+    {
+        const uint8_t c = name[i];
+        folded[i] = c >= 'A' && c <= 'Z' ? (uint8_t)(c + ('a' - 'A')) : c;
+    }
+    const uint64_t hash = intern_hash_bytes(folded, length);
+    const uint32_t key = (uint32_t)(hash ^ (hash >> 32));
+    return key != 0 ? key : 1;
+}
+
+// The directory of the first `length` bytes of `path`, with `hash` (intern_hash_bytes's), or null if the cache never
+// looked a path up in it. Lanes may find directories at once while no lane adds one.
+static FileCacheDirectory* file_cache_find_directory(const FileCache* cache, const char* path, uint32_t length, uint64_t hash)
+{
+    FileCacheDirectory* result = cache->directory_slots[hash & (BUSTER_FILE_CACHE_DIRECTORY_SLOTS - 1)];
+    while (result != 0 && !(result->hash == hash && result->length == length && memcmp(result->path, path, length) == 0))
+    {
+        result = result->next;
+    }
+    return result;
+}
+
+// The directory of the first `length` bytes of `path`, added (with no misses) if the cache never looked a path up in
+// it; null if the cache can't hold it. One lane at a time.
+static FileCacheDirectory* file_cache_directory(FileCache* cache, const char* path, uint32_t length)
+{
+    const uint64_t hash = intern_hash_bytes((const uint8_t*)path, length);
+    FileCacheDirectory* result = file_cache_find_directory(cache, path, length, hash);
+    if (result == 0)
+    {
+        FileCacheDirectory** slot = &cache->directory_slots[hash & (BUSTER_FILE_CACHE_DIRECTORY_SLOTS - 1)];
+        result = arena_push(&cache->path_arena, sizeof(FileCacheDirectory), _Alignof(FileCacheDirectory));
+        char* copy = result != 0 ? arena_push(&cache->path_arena, (uint64_t)length + 1, 1) : 0;
+        if (copy != 0)
+        {
+            memcpy(copy, path, length);
+            copy[length] = 0;
+            *result = (FileCacheDirectory){
+                .hash = hash,
+                .path = copy,
+                .length = length,
+                .next = *slot,
+            };
+            *slot = result;
+        }
+        result = copy != 0 ? result : 0;
+    }
+    return result;
+}
+
+// Whether the first `directory_length` bytes of `path` (`length` bytes) are a directory a path is looked up in: a
+// '/' follows them, and the path has more after it. BUSTER_PP_NONE is none.
+static bool file_cache_in_directory(const char* path, uint32_t length, uint32_t directory_length)
+{
+    return directory_length < length && path[directory_length] == '/';
+}
+
+// The table of a listing's names, grown to `*slots` (twice as many as `count` + 1 names at least, and at least 64) in the
+// cache's path arena, with the names of `names` (`*slots` before) placed again; null if the arena can't hold it.
+static uint32_t* file_cache_grow_names(FileCache* cache, uint32_t* names, uint32_t count, uint32_t* slots)
+{
+    const uint32_t old = *slots;
+    uint32_t grown = old != 0 ? old : 64;
+    while ((uint64_t)grown < 2 * ((uint64_t)count + 1))
+    {
+        grown *= 2;
+    }
+    uint32_t* result = grown != old ? arena_push_array(&cache->path_arena, grown, sizeof(uint32_t), 64) : names;
+    if (result != 0 && grown != old)
+    {
+        memset(result, 0, (uint64_t)grown * sizeof(uint32_t));
+        for (uint32_t i = 0; i < old; i += 1)
+        {
+            uint32_t slot = names[i] & (grown - 1);
+            while (names[i] != 0 && result[slot] != 0)
+            {
+                slot = (slot + 1) & (grown - 1);
+            }
+            result[slot] = names[i] != 0 ? names[i] : result[slot];
+        }
+        *slots = grown;
+    }
+    return result;
+}
+
+// Adds the names of `got` bytes of getdents64's records to a listing's table (file_cache_grow_names), `*count` of them
+// so far in `*slots`. False if a name has a byte past ASCII, which the listing can't answer for, or the table can't grow.
+static bool file_cache_list_names(FileCache* cache, const uint8_t* buffer, long got, uint32_t** names, uint32_t* slots, uint32_t* count)
+{
+    bool result = true;
+    // Each record (struct linux_dirent64): an 8-byte inode, an 8-byte offset, its 2-byte length, a type byte, and the
+    // NUL-terminated name.
+    for (long offset = 0; result && offset < got;)
+    {
+        uint16_t record;
+        memcpy(&record, buffer + offset + 16, sizeof(record));
+        const bool whole = record > 19 && offset + record <= got;
+        const uint8_t* name = buffer + offset + 19;
+        const uint32_t length = whole ? (uint32_t)strnlen((const char*)name, (uint64_t)record - 19) : 0;
+        result = length != 0 && length <= BUSTER_FILE_CACHE_NAME_MAX;
+        for (uint32_t i = 0; result && i < length; i += 1)
+        {
+            result = name[i] < 0x80;
+        }
+        *names = result && 2 * ((uint64_t)*count + 1) > *slots ? file_cache_grow_names(cache, *names, *count, slots) : *names;
+        result = result && *names != 0;
+        if (result)
+        {
+            uint32_t* table = *names;
+            const uint32_t key = file_cache_name_key(name, length);
+            uint32_t slot = key & (*slots - 1);
+            while (table[slot] != 0 && table[slot] != key)
+            {
+                slot = (slot + 1) & (*slots - 1);
+            }
+            *count += table[slot] == 0;
+            table[slot] = key;
+        }
+        offset += record;
+    }
+    return result;
+}
+
+// Reads a directory's names into its listing: their keys (file_cache_name_key) in a table at least twice as large. The
+// directory is then `unlisted` instead if a listing can't answer for it exactly: its file system's lookups don't match
+// its listings (file_cache_exact_names), it has a name with a byte past ASCII, or it can't be read whole.
+//
+// A directory's first look reads one small buffer (BUSTER_FILE_CACHE_SMALL_LISTING, about 25 names) and, unless that is
+// filled to within a record of its end, finds the directory's end with one more call. A directory with more names is
+// `deferred`, unread, and read whole at BUSTER_FILE_CACHE_LARGE_LISTING times the failed probes (256). On the 9700X (Btrfs) a
+// failed probe took 0.24 to 0.31 us, and the calls of a small directory's listing (open, two getdents64, fstatfs, close)
+// about 1.2 us, which the probes it saves next repay; a first look at clang's resource directory or /usr/include took
+// 2.3 to 3.5 us in its getdents64 alone, and reading the 263 names of the former whole about 20 us in the compiler.
+// One lane at a time. The names are read once; a directory that changes during the run is no concern, as files that
+// change aren't (the cache keeps every path's answer for the whole run).
+static void file_cache_list_directory(FileCache* cache, FileCacheDirectory* directory, FileCacheCounts* counts)
+{
+    const int fd = open(directory->path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
+    counts->listings += 1;
+    // On the stack, whose pages a lookup's callers have touched, rather than in an arena's fresh ones.
+    uint8_t buffer[BUSTER_FILE_CACHE_LISTING_BUFFER] __attribute__((aligned(8)));
+    const bool first = !directory->deferred;
+    long got = fd >= 0 ? syscall(SYS_getdents64, fd, buffer, first ? BUSTER_FILE_CACHE_SMALL_LISTING : BUSTER_FILE_CACHE_LISTING_BUFFER) : -1;
+    const bool full = first && got > (long)(BUSTER_FILE_CACHE_SMALL_LISTING - BUSTER_FILE_CACHE_RECORD_MAX);
+    const long end = first && got > 0 && !full ? syscall(SYS_getdents64, fd, buffer + BUSTER_FILE_CACHE_SMALL_LISTING, BUSTER_FILE_CACHE_SMALL_LISTING) : 0;
+    const bool more = full || end > 0;
+    struct statfs system;
+    const bool exact = !more && got >= 0 && end == 0 && fstatfs(fd, &system) == 0 && file_cache_exact_names((uint64_t)system.f_type);
+    uint32_t* names = 0;
+    uint32_t slots = 0;
+    uint32_t count = 0;
+    // A first look's one buffer is the whole directory; a whole read goes on to getdents64's end.
+    long chunk = exact ? got : -1;
+    while (chunk > 0)
+    {
+        const bool added = file_cache_list_names(cache, buffer, chunk, &names, &slots, &count);
+        chunk = !added ? -1 : first ? 0 : syscall(SYS_getdents64, fd, buffer, BUSTER_FILE_CACHE_LISTING_BUFFER);
+    }
+    if (fd >= 0)
+    {
+        close(fd);
+    }
+    // A listing read to its end (getdents64 returned 0) with no name it can't answer for, or a large directory put off.
+    const bool listed = exact && chunk == 0 && names != 0;
+    directory->deferred = directory->deferred || more;
+    cache->listed_directories += listed;
+    directory->names = listed ? names : 0;
+    directory->name_mask = listed ? slots - 1 : 0;
+    directory->unlisted = !listed && !more;
+}
+
+// Whether directory `directory`'s listing says no file can be at `path` (`length` bytes), whose first
+// `directory->length` bytes are the directory and next a '/': the listing doesn't have the path's next component, with
+// ASCII letters' case folded. A component the listing can't rule out is probed: one it has (in any case, or another name
+// with its key), one with a byte past ASCII, "." and "..", an empty one, and one longer than a name can be, whose
+// lookup fails with ENAMETOOLONG, not ENOENT.
+static bool file_cache_listed_absent(const FileCacheDirectory* directory, const char* path, uint32_t length)
+{
+    const uint32_t* names = directory->names;
+    const uint32_t start = directory->length + 1;
+    uint32_t end = start;
+    bool ascii = true;
+    while (end < length && path[end] != '/')
+    {
+        ascii = ascii && (uint8_t)path[end] < 0x80;
+        end += 1;
+    }
+    const uint32_t component = end > start ? end - start : 0;
+    const bool dots = component != 0 && component <= 2 && path[start] == '.' && path[end - 1] == '.';
+    bool result = names != 0 && ascii && component != 0 && component <= BUSTER_FILE_CACHE_NAME_MAX && !dots;
+    if (result)
+    {
+        const uint32_t key = file_cache_name_key((const uint8_t*)path + start, component);
+        const uint32_t mask = directory->name_mask;
+        uint32_t slot = key & mask;
+        while (names[slot] != 0 && names[slot] != key)
+        {
+            slot = (slot + 1) & mask;
+        }
+        result = names[slot] == 0;
+    }
+    return result;
+}
+
+// After a probe of a path in `directory` (null for none): a path without a file there (ENOENT, which also says the
+// directory could be searched) counts towards the directory's listing, which the cache reads at the
+// cache->listing_misses-th, or BUSTER_FILE_CACHE_LARGE_LISTING times that for a directory its first look found large
+// (file_cache_list_directory). One lane at a time.
+static void file_cache_count_miss(FileCache* cache, FileCacheDirectory* directory, const FileProbe* probe, FileCacheCounts* counts)
+{
+    if (directory != 0 && probe->error == ENOENT)
+    {
+        directory->misses += 1;
+        const uint64_t at = (uint64_t)cache->listing_misses * (directory->deferred ? BUSTER_FILE_CACHE_LARGE_LISTING : 1);
+        if (cache->listing_misses != 0 && directory->misses == at && directory->names == 0 && !directory->unlisted)
+        {
+            file_cache_list_directory(cache, directory, counts);
+        }
+    }
+}
+
 // The record of the file at `path` (`length` bytes, NUL-terminated), probing the file system only the first time the
 // cache is asked about the path; BUSTER_PP_NONE if no file can be read there, or if the cache is full, with why in
 // `*error` (the probe's errno value or -1, or EMFILE for a full cache). A file of up to the cache's read limit is read
 // into the calling lane's bytes arena, which the cache keeps as long as its records, and a larger one is mapped with
 // MAP_POPULATE (all of them if the arena can't be reserved, so that the file's preparation, which needs the lane's other
-// arenas, says why it fails). One lane at a time.
-static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint32_t length, FileCacheCounts* counts, int* error)
+// arenas, says why it fails). A path whose first `directory_length` bytes are a directory the search looks in, followed
+// by a '/' (BUSTER_PP_NONE for none), is answered by the directory's listing once it has one (file_cache_listed_absent):
+// a path the listing rules out gets the entry a probe that found no file there (ENOENT) gives it, without the probe.
+// `*known` (if `known` isn't null) caches the directory's FileCacheDirectory for its caller: a search directory's.
+// Until some directory has a listing, only a failed probe looks its directory up. One lane at a time.
+static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint32_t length, uint32_t directory_length, FileCacheDirectory** known,
+                                       FileCacheCounts* counts, int* error)
 {
     const uint64_t hash = intern_hash_bytes((const uint8_t*)path, length);
     FileCachePath* entry = file_cache_find_path(cache, path, length, hash);
     int unheld = 0;
     if (entry == 0)
     {
-        Arena* bytes = &file_cache_arenas(cache, lane_index())->bytes;
-        FileProbe probe;
-        file_cache_probe(cache, path, FILE_CACHE_MAP_POPULATED, cache->read_limit, bytes->base != 0 ? bytes : 0, &probe, counts);
+        const bool in_directory = file_cache_in_directory(path, length, directory_length);
+        FileCacheDirectory* directory = known != 0 ? *known : 0;
+        directory = directory == 0 && in_directory && cache->listed_directories != 0 ? file_cache_directory(cache, path, directory_length) : directory;
+        FileProbe probe = { .record = BUSTER_PP_NONE, .error = ENOENT };
+        const bool absent = directory != 0 && file_cache_listed_absent(directory, path, length);
+        counts->listed += absent;
+        if (!absent)
+        {
+            Arena* bytes = &file_cache_arenas(cache, lane_index())->bytes;
+            file_cache_probe(cache, path, FILE_CACHE_MAP_POPULATED, cache->read_limit, bytes->base != 0 ? bytes : 0, &probe, counts);
+            directory = directory == 0 && in_directory && probe.error == ENOENT ? file_cache_directory(cache, path, directory_length) : directory;
+            file_cache_count_miss(cache, directory, &probe, counts);
+        }
+        if (known != 0 && directory != 0)
+        {
+            *known = directory;
+        }
         *error = probe.error;
         entry = file_cache_add_path(cache, path, length, hash, &probe);
         if (entry != 0)
@@ -4480,8 +4810,11 @@ static void pp_grow_file_slots(Preprocessor* pp)
 // file cache (file_cache_lookup_path), which probes the file system only for a path it never looked up. Its data is
 // BUSTER_PP_NONE if no file can be read there, and its error why, when that isn't that there is no file there (no such
 // file, a part of the path that isn't a directory, or a directory, which clang's header search takes as none there:
-// HeaderSearch::getFileAndSuggestModule). Returns BUSTER_PP_NONE if memory runs out.
-static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t length, uint8_t system)
+// HeaderSearch::getFileAndSuggestModule). `search_length` is the length of the directory the search looked for the path
+// in (a search directory's, or the includer's), which the path's next byte, a '/', ends, or BUSTER_PP_NONE for none:
+// the file cache answers from the directory's listing once it has one (file_cache_lookup_path), through `search`, the
+// unit's FileCacheDirectory of a search directory (or null). Returns BUSTER_PP_NONE if memory runs out.
+static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t length, uint32_t search_length, FileCacheDirectory** search, uint8_t system)
 {
     const uint64_t hash = intern_hash_bytes((const uint8_t*)path, length);
     uint32_t slot = (uint32_t)hash & pp->file_slot_mask;
@@ -4519,7 +4852,7 @@ static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t leng
             }
             int error = 0;
             const uint64_t start = pp->options.timing ? __rdtsc() : 0;
-            const uint32_t record = file_cache_lookup_path(pp->cache, copy, length, &pp->probes, &error);
+            const uint32_t record = file_cache_lookup_path(pp->cache, copy, length, search_length, search, &pp->probes, &error);
             const uint32_t data = record != BUSTER_PP_NONE ? pp_data_of_record(pp, record) : BUSTER_PP_NONE;
             error = record != BUSTER_PP_NONE && data == BUSTER_PP_NONE ? EMFILE : error;
             pp->ticks[PP_PHASE_READ] += pp->options.timing ? __rdtsc() - start : 0;
@@ -4558,7 +4891,7 @@ static bool pp_buster_supplies(Preprocessor* pp, const uint8_t* name, uint32_t l
         memcpy(path, pp->buster_directory, directory_length);
         path[directory_length] = '/';
         memcpy(path + directory_length + 1, name, length);
-        const uint32_t record = pp_lookup_path(pp, path, directory_length + 1 + length, BUSTER_PP_SYSTEM_FILE);
+        const uint32_t record = pp_lookup_path(pp, path, directory_length + 1 + length, directory_length, 0, BUSTER_PP_SYSTEM_FILE);
         result = record != BUSTER_PP_NONE && pp->files[record].data != BUSTER_PP_NONE;
     }
     return result;
@@ -4719,7 +5052,8 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
         int error = candidate == PP_CANDIDATE_SKIP && !shadowed ? ENAMETOOLONG : 0;
         if (candidate == PP_CANDIDATE_PATH && !shadowed)
         {
-            const uint32_t file = pp_lookup_path(pp, path, path_length, system);
+            const uint32_t file = pp_lookup_path(pp, path, path_length, absolute ? BUSTER_PP_NONE : prefix_length,
+                                                 directory != BUSTER_PP_NONE ? &pp->directory_entries[directory] : 0, system);
             result = file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE ? file : BUSTER_PP_NONE;
             *found_in = result != BUSTER_PP_NONE ? directory : BUSTER_PP_NONE;
             error = file != BUSTER_PP_NONE ? pp->files[file].error : 0;
@@ -16512,7 +16846,7 @@ static void pp_embed_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
         uint64_t size;
         bool regular;
         const bool found = pp_find_embed(pp, context, name, length, angled, path, &path_length, &size, &regular);
-        const uint32_t file = regular ? pp_lookup_path(pp, path, path_length, BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
+        const uint32_t file = regular ? pp_lookup_path(pp, path, path_length, BUSTER_PP_NONE, 0, BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
         const uint32_t source = file != BUSTER_PP_NONE ? pp->files[file].data : BUSTER_PP_NONE;
         if (found && !regular)
         {
@@ -18033,6 +18367,7 @@ static bool pp_add_directory(Preprocessor* pp, const char* path, uint8_t system)
         pp->directories[pp->directory_count] = copy;
         pp->directory_lengths[pp->directory_count] = length;
         pp->directory_system[pp->directory_count] = system;
+        pp->directory_entries[pp->directory_count] = 0;
         pp->directory_count += 1;
     }
     return result;
@@ -18088,6 +18423,7 @@ static void pp_dedupe_directories(Preprocessor* pp)
                 pp->directories[written] = pp->directories[i];
                 pp->directory_lengths[written] = pp->directory_lengths[i];
                 pp->directory_system[written] = pp->directory_system[i];
+                pp->directory_entries[written] = 0;
                 written += 1;
             }
         }
@@ -18278,6 +18614,7 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     pp_table(&plan, (void**)&pp->directories, BUSTER_PP_MAX_PUSHED >> shift, sizeof(char*));
     pp_table(&plan, (void**)&pp->directory_lengths, BUSTER_PP_MAX_PUSHED >> shift, sizeof(uint32_t));
     pp_table(&plan, (void**)&pp->directory_system, BUSTER_PP_MAX_PUSHED >> shift, sizeof(uint8_t));
+    pp_table(&plan, (void**)&pp->directory_entries, BUSTER_PP_MAX_PUSHED >> shift, sizeof(FileCacheDirectory*));
     pp_table(&plan, (void**)&pp->line_directives, BUSTER_PP_MAX_LINE_DIRECTIVES >> shift, sizeof(PPLineDirective));
     pp_table(&plan, (void**)&pp->expansion_starts, (uint64_t)(BUSTER_PP_MAX_OUTPUT_TOKENS >> shift) + 1, sizeof(PPExpansionStart));
     pp_table(&plan, (void**)&pp->silent_pragmas, BUSTER_PP_MAX_SILENT_PRAGMAS >> shift, sizeof(PPExpansionStart));
@@ -18565,7 +18902,7 @@ static bool pp_run_prelude(Preprocessor* pp)
     // The predefines.
     if (pp->options.predefines_path != 0)
     {
-        const uint32_t file = pp_lookup_path(pp, pp->options.predefines_path, (uint32_t)strlen(pp->options.predefines_path), BUSTER_PP_SYSTEM_FILE);
+        const uint32_t file = pp_lookup_path(pp, pp->options.predefines_path, (uint32_t)strlen(pp->options.predefines_path), BUSTER_PP_NONE, 0, BUSTER_PP_SYSTEM_FILE);
         pp->flt_eval_method = predefines_eval_method(&pp->options.predefines);
         result = file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE;
         if (result)
@@ -18689,7 +19026,7 @@ static bool pp_run_main(Preprocessor* pp, uint32_t file)
 static bool pp_preprocess_file(Preprocessor* pp, const char* main_path)
 {
     bool result = pp_run_prelude(pp);
-    const uint32_t file = result && !pp->fatal ? pp_lookup_path(pp, main_path, (uint32_t)strlen(main_path), BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
+    const uint32_t file = result && !pp->fatal ? pp_lookup_path(pp, main_path, (uint32_t)strlen(main_path), BUSTER_PP_NONE, 0, BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
     if (file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE)
     {
         result = pp_run_main(pp, file);
@@ -18822,7 +19159,8 @@ static void pp_history_record(Preprocessor* pp, bool report)
         // The replay's output is the unit's, token for token (pp_tokens_same), and nothing reads it after that comparison:
         // its history and diagnostics name the unit's tokens, which the unit's own output holds. Its columns go now rather
         // than at pp_release, so that a unit with a diagnostic doesn't keep a second output to its end (#628: 12 MB of
-        // sqlite3.c's, in the backend's peak). Its origins stay, which a collected diagnostic's group may own.
+        // sqlite3.c's, in the backend's peak). The final output has no origin column: what the diagnostics render through
+        // stays, the replay's history runs, ranges, files, substitutions and generated tokens.
         arena_release(&replay->output.columns);
         replay->output.kinds = NULL;
         replay->output.flags = NULL;
@@ -19134,12 +19472,10 @@ static uint32_t pp_expansion_location(const Preprocessor* pp, uint32_t token, ui
     return valid ? pp_expansion_place(pp, pp->output.locations[token], origin) : 0;
 }
 
-// The end of output token `token`'s outermost expansion, as clang's SourceManager::getExpansionRange(...).getEnd()
-// resolves it (#148's source-location builtins, #1126's review): a function-like invocation's closing parenthesis, an
-// object-like macro's name, followed while that end was itself made by an expansion (PPExpansion.end_origin); an
-// argument's or a generated token's is the end of the expansion that substituted or made it; a file token's is its own
-// location. `origin` is the token's (pp_history_at's). Returns 0 when its history doesn't lead to a location.
-static __attribute__((unused)) uint32_t pp_output_expansion_end(const Preprocessor* pp, uint32_t token, uint32_t origin)
+// Either boundary of output token `token`'s outermost expansion. An argument or a generated token follows the
+// expansion that substituted or made it; a file token keeps its own location. `origin` is pp_history_at's, after
+// pp_history_ensure. Unlike pp_expansion_place, an argument reaches its invocation rather than its spelling place.
+static uint32_t pp_output_expansion_boundary(const Preprocessor* pp, uint32_t token, uint32_t origin, bool end)
 {
     bool valid = token < pp->output.count && pp->output.locations != 0;
     uint32_t location = valid ? pp->output.locations[token] : 0;
@@ -19161,12 +19497,27 @@ static __attribute__((unused)) uint32_t pp_output_expansion_end(const Preprocess
         else
         {
             valid = kind == 0 && index < pp->history_count;
-            location = valid ? pp->history[index].end : location;
-            origin = valid ? pp->history[index].end_origin : 0;
+            location = valid ? (end ? pp->history[index].end : pp->history[index].begin) : location;
+            origin = valid ? (end ? pp->history[index].end_origin : pp->history[index].parent) : 0;
         }
     }
     valid &= origin == 0;
     return valid ? location : 0;
+}
+
+// The begin of the outermost invocation, as clang's getExpansionLoc: the invocation's name even when its first
+// output token is an argument. Statement indentation uses this place, not the argument's spelling column (#1339).
+static __attribute__((unused)) uint32_t pp_output_expansion_begin(const Preprocessor* pp, uint32_t token, uint32_t origin)
+{
+    return pp_output_expansion_boundary(pp, token, origin, false);
+}
+
+// The end, as clang's SourceManager::getExpansionRange(...).getEnd() (#148's source-location builtins, #1126's
+// review): a function-like invocation's closing parenthesis or an object-like macro's name, followed while that
+// end was itself made by an expansion (PPExpansion.end_origin). Returns 0 for a history that leads to no location.
+static __attribute__((unused)) uint32_t pp_output_expansion_end(const Preprocessor* pp, uint32_t token, uint32_t origin)
+{
+    return pp_output_expansion_boundary(pp, token, origin, true);
 }
 
 // The deferred first run has no expansion graph. Its exact source-level runs already record where its current

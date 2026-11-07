@@ -364,11 +364,11 @@ static bool check_test_driver_needed(const char* path, char* names, uint64_t cap
     return valid;
 }
 
-// The direct path's -l libraries, through the production command (#145): a program that calls libm's functions, takes
+// The driver's -l libraries, through the production command (#145): a program that calls libm's functions, takes
 // one's address and reads libm's signgam (data, through its GOT slot), linked with -lm by both paths into the same bytes,
 // that runs and prints what this executable's own libm computes, needing libm.so.6 before libc.so.6; one that calls
-// none, with -lm, needing libc.so.6 alone; and the refusals, each named: no -lm, a library no directory has, and an
-// archive with members.
+// none, with -lm, needing libc.so.6 alone; and the refusals, each named: no -lm and a library no directory has.
+// An archive containing only its empty symbol index adds nothing and links the plain program (#1470).
 static void check_test_driver_libraries(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] = "#include <math.h>\n#include <stdio.h>\ndouble (*pick)(double) = cos;\n"
@@ -436,7 +436,6 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
     } const refusals[] = {
         { "no -lm", "undefined reference to 'cos'", { (char*)executable, "-o", outputs[0], source, NULL } },
         { "a library nowhere", "cannot find -lbuster_nowhere", { (char*)executable, "-o", outputs[0], source, "-lm", "-lbuster_nowhere", NULL } },
-        { "an archive with members", "unsupported: static libraries", { (char*)executable, "-o", outputs[0], source, "-L", (char*)directory, "-lbuster_members", NULL } },
     };
     for (uint32_t r = 0; written && r < BUSTER_ARRAY_LENGTH(refusals); r += 1)
     {
@@ -444,6 +443,19 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
         check_test_expect(test, status == 1 && text != NULL && strstr(text, refusals[r].message) != NULL, refusals[r].name);
         free(text);
     }
+    char* const indexed_arguments[] = { (char*)executable, "-o", outputs[0], plain_source, "-L", (char*)directory, "-lbuster_members", NULL };
+    const int indexed_status = written ? check_test_driver_spawn(indexed_arguments, &text) : -1;
+    if (written)
+    {
+        free(text);
+    }
+    check_test_expect(test, indexed_status == 0, "an archive containing only its empty symbol index links");
+    memset(captured, 0, sizeof(captured));
+    output = indexed_status == 0 ? popen(outputs[0], "r") : NULL;
+    const size_t indexed_got = output != NULL ? fread(captured, 1, sizeof(captured) - 1, output) : 0;
+    const int indexed_closed = output != NULL ? pclose(output) : -1;
+    check_test_expect(test, indexed_closed == 0 && indexed_got == sizeof("plain\n") - 1 && memcmp(captured, "plain\n", indexed_got) == 0,
+                      "the indexed-archive link replaces the math executable and runs the plain program");
     unlink(source);
     unlink(plain_source);
     unlink(archive_path);
@@ -2971,6 +2983,70 @@ static void check_test_driver_array_alignment(CheckTest* test, const char* clang
     }
     unlink(linked);
 }
+
+// Exercise admission directly so its command-arena growth is visible independently of compilation.
+static void check_test_dependency_admission(CheckTest* test, const char* directory)
+{
+    char names[32][512];
+    char* sources[32];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sources); i += 1)
+    {
+        snprintf(names[i], sizeof(names[i]), "%s/dependency-admission-%02u.c", directory, i);
+        sources[i] = names[i];
+    }
+    const uint32_t counts[] = { 0, 1, 16, 32 };
+    DependencyOptions options = { .enabled = true };
+    Arena arena = arena_reserve(UINT64_C(1) << 20);
+    check_test_expect(test, arena.base != NULL, "dependency admission scratch");
+    if (arena.base != NULL)
+    {
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(counts); i += 1)
+        {
+            arena_pop_to(&arena, 0);
+            const uint32_t count = counts[i];
+            const bool admitted = dependency_check_destinations(&options, sources, count, NULL, true, false, &arena);
+            check_test_expect(test, admitted && arena.length <= (uint64_t)count * 80 + 8,
+                              "distinct dependency destinations use linear filename storage");
+        }
+        arena_pop_to(&arena, 0);
+        options.path = "-";
+        check_test_expect(test, dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena) && arena.length == 0,
+                          "stdout dependency admission needs no object names");
+        options.path = names[31];
+        check_test_expect(test, !dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
+                          "shared dependency destination checks the last source");
+        options.path = "dependency-admission-31.o";
+        check_test_expect(test, !dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
+                          "shared dependency destination checks the last implicit object");
+        options.path = "dependency-admission-shared.d";
+        arena_pop_to(&arena, 0);
+        check_test_expect(test, dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena) && arena.length <= 32 * 40,
+                          "shared dependency destination reuses bounded object names");
+        const uint64_t capacity = arena.capacity;
+        arena_pop_to(&arena, 0);
+        arena.capacity = 0;
+        check_test_expect(test, !dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
+                          "object-name capacity exhaustion refuses admission");
+        options.path = "-";
+        check_test_expect(test, dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
+                          "stdout admission succeeds with exhausted scratch");
+        options.enabled = false;
+        options.path = "";
+        check_test_expect(test, dependency_check_destinations(&options, NULL, 32, NULL, true, false, &arena),
+                          "disabled admission does not read sources");
+        options.enabled = true;
+        check_test_expect(test, dependency_check_destinations(&options, NULL, 0, NULL, true, false, &arena),
+                          "empty admission does not inspect destination");
+        arena.capacity = capacity;
+        options.path = "dependency-admission-shared.d";
+        options.only = true;
+        arena_pop_to(&arena, 0);
+        check_test_expect(test, dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena) && arena.length == 0,
+                          "dependency-only admission needs no object names");
+    }
+    arena_release(&arena);
+}
+
 
 // A library that a needed library refers to (#398's review): main calls a_func, which libA defines and which calls
 // b_func, which libB defines. Where libA's DT_NEEDED doesn't name libB, the executable needs both, in the line's order,
@@ -6256,6 +6332,7 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
 #include "c_check_implicit_driver_test.c"
 #include "c_check_kr_driver_test.c"
 #include "c_check_return_driver_test.c"
+#include "c_check_return_call_driver_test.c"
 #include "c_check_fortify_driver_test.c"
 #include "c_check_library_driver_test.c"
 #include "c_check_transparent_driver_test.c"
@@ -8277,6 +8354,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_returns(&test, clang, executable, directory);
             }
+            if (!lazy)
+            {
+                check_test_driver_return_calls(&test, clang, executable, directory);
+            }
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_fortify(&test, clang, executable, directory);
@@ -8508,6 +8589,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_dependency_admission(&test, directory);
                 check_test_driver_dependencies(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())

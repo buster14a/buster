@@ -181,8 +181,11 @@ too). The tests that compare with compilers through the cache fix the
 epoch where it isn't set (`oracle_epoch_begin`: test-preprocessor,
 test-parser, test-checker, test-checker-asm, test-checker-driver, test-tier0,
 test-calling-convention, test-c-testsuite; test-checker-corpus fixes its
-own), for the compilers and their own preprocessor alike. A run with `-M`
-options of its own, or more than 8 roots, isn't kept.
+own), for the compilers and their own preprocessor alike. A compiler run with
+`-M` options or either `DEPENDENCIES_OUTPUT` or `SUNPRO_DEPENDENCIES` set
+(including an empty value) is not kept: these can write a dependency file that
+the caller has not declared for replay. The environment is still passed to
+the compiler, which runs normally. A run with more than 8 roots is not kept.
 
 The roots: a test makes its files in directories of `mkdtemp`'s under
 `$TMPDIR` (or `/tmp`), whose names differ from one run to the next. Tests build

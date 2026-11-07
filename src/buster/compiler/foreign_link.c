@@ -725,10 +725,25 @@ static ImportResult foreign_link_relocations(ForeignLink* output, const Foreign*
 
 // Preserve the resolver's needed-library choices, including an unversioned as-needed DSO. Original ELF version
 // indices are local to each library; the writer needs one global index space and version rows grouped by library.
-// A needed library's DT_NEEDED name: its soname, or its path without one.
+// A needed library's DT_NEEDED name: its soname, or without one the basename of a -l search's path and the full
+// path of a positional input. A searched library must remain relocatable through the loader's search directories.
 static String8 foreign_link_library_name(const Foreign* foreign, const ForeignLibrary* library)
 {
-    return library->library.soname.length != 0 ? library->library.soname : foreign->inputs[library->input].path;
+    const ForeignInput* input = &foreign->inputs[library->input];
+    String8 name = library->library.soname.length != 0 ? library->library.soname : input->path;
+    if (library->library.soname.length == 0 && (input->flags & BUSTER_FOREIGN_INPUT_LIBRARY) != 0)
+    {
+        for (uint64_t i = name.length; i != 0; i -= 1)
+        {
+            if (name.pointer[i - 1] == '/')
+            {
+                name.pointer += i;
+                name.length -= i;
+                break;
+            }
+        }
+    }
+    return name;
 }
 
 // The earlier needed library of the same DT_NEEDED name as needed library `l` (given twice, as g++'s driver gives -lgcc_s),

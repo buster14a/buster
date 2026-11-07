@@ -48,6 +48,9 @@ static __attribute__((noinline)) void check_test_generic_index(CheckTest* test)
     bool ready = check_test_types_open(&storage) && scratch.base != NULL;
     TypeId records[257] = { 0 };
     TypeId pointers[257] = { 0 };
+    TypeId returns[257] = { 0 };
+    TypeId vectors[257] = { 0 };
+    TypeId bitints[257] = { 0 };
     const TypeMember member = {
         .name = 1,
         .type = BUSTER_TYPE_INT,
@@ -59,6 +62,10 @@ static __attribute__((noinline)) void check_test_generic_index(CheckTest* test)
         ready = records[i] != 0 && type_complete_record(&storage.table, records[i], &member, 1, (TypeRecordAttributes){ 0 });
         pointers[i] = ready ? type_pointer(&storage.table, records[i]) : 0;
         ready &= pointers[i] != 0;
+        returns[i] = ready ? type_pointer(&storage.table, type_function(&storage.table, records[i], NULL, 0, BUSTER_TYPE_FLAG_PROTOTYPE)) : 0;
+        vectors[i] = ready ? type_vector(&storage.table, BUSTER_TYPE_INT, i + 1, true) : 0;
+        bitints[i] = ready ? type_bit_int(&storage.table, i + 2, false) : 0;
+        ready &= returns[i] != 0 && vectors[i] != 0 && bitints[i] != 0;
     }
     check_test_expect(test, ready, "generic nominal type family is constructed");
     const uint32_t counts[] = {
@@ -79,9 +86,9 @@ static __attribute__((noinline)) void check_test_generic_index(CheckTest* test)
     for (uint32_t scalar = 0; ready && scalar < 2; scalar += 1)
     {
         parser.options.scalar = scalar != 0;
-        for (uint32_t family = 0; family < 2; family += 1)
+        for (uint32_t family = 0; family < 5; family += 1)
         {
-            const TypeId* types = family == 0 ? records : pointers;
+            const TypeId* types = family == 0 ? records : family == 1 ? pointers : family == 2 ? returns : family == 3 ? vectors : bitints;
             for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
             {
                 const uint32_t count = counts[c];
@@ -98,7 +105,7 @@ static __attribute__((noinline)) void check_test_generic_index(CheckTest* test)
                     matched += matches;
                 }
                 check_test_expect(test, valid && !output.resource && matched == (count != 0) && set.duplicate_queries == 0 &&
-                                       set.control_queries == (count != 0), "generic distinct records and pointers perform no pairwise duplicate queries");
+                                       set.control_queries == (count != 0), "generic distinct records, return types, vector shapes and bit integers avoid pairwise duplicate queries");
                 if (valid && count != 0)
                 {
                     bool matches = false;
@@ -160,6 +167,13 @@ static __attribute__((noinline)) void check_test_generic_index(CheckTest* test)
             BUSTER_TYPE_INT,
             BUSTER_TYPE_UINT,
             enumeration,
+            BUSTER_TYPE_FLOAT,
+            BUSTER_TYPE_DOUBLE,
+            BUSTER_TYPE_COMPLEX_FLOAT,
+            BUSTER_TYPE_COMPLEX_DOUBLE,
+            bitints[29],
+            bitints[30],
+            type_bit_int(&storage.table, 32, true),
             type_qualify(&storage.table, BUSTER_TYPE_UINT, BUSTER_TYPE_CONST),
             records[0],
             records[1],
@@ -175,6 +189,12 @@ static __attribute__((noinline)) void check_test_generic_index(CheckTest* test)
             type_pointer(&storage.table, type_function(&storage.table, BUSTER_TYPE_INT, &record_pointer, 1, BUSTER_TYPE_FLAG_PROTOTYPE)),
             type_vector(&storage.table, BUSTER_TYPE_INT, 4, false),
             type_vector(&storage.table, BUSTER_TYPE_INT, 4, true),
+            type_vector(&storage.table, BUSTER_TYPE_FLOAT, 4, false),
+            type_vector(&storage.table, BUSTER_TYPE_INT, 8, true),
+            type_pointer(&storage.table, type_function(&storage.table, enumeration, NULL, 0, BUSTER_TYPE_FLAG_PROTOTYPE)),
+            type_pointer(&storage.table, type_function(&storage.table, BUSTER_TYPE_UINT, NULL, 0, BUSTER_TYPE_FLAG_PROTOTYPE)),
+            type_pointer(&storage.table, type_incomplete_array(&storage.table, BUSTER_TYPE_INT)),
+            type_pointer(&storage.table, type_array(&storage.table, BUSTER_TYPE_INT, 8)),
         };
         uint32_t activations[512] = { 0 };
         activations[storage.table.types.index[type_index(union_type)]] = 10;
@@ -202,6 +222,23 @@ static __attribute__((noinline)) void check_test_generic_index(CheckTest* test)
                 }
             }
         }
+        // Completing a tag changes enum/integer compatibility. Keys stored before completion must still admit the
+        // later exact query, both for an earlier association and for a control keyed while the enum was incomplete.
+        const TypeId later_enum = type_tag(&storage.table, BUSTER_TYPE_KIND_ENUM, 902);
+        const TypeId later_pointer = type_pointer(&storage.table, later_enum);
+        const TypeId integer_pointer = type_pointer(&storage.table, BUSTER_TYPE_UINT);
+        CheckGenericSet later;
+        CheckGenericSet control_later;
+        bool matches = false;
+        bool completion = later_enum != 0 && later_pointer != 0 && integer_pointer != 0 &&
+                          check_generic_initialize(&reader, &later, 8, later_pointer, 10) &&
+                          check_generic_initialize(&reader, &control_later, 8, later_pointer, 10);
+        completion = completion && check_generic_association(&reader, &later, later_pointer, &matches) && matches &&
+                     type_enum_complete(&storage.table, later_enum, BUSTER_TYPE_UINT, 0);
+        check_test_expect(test, completion && !check_generic_association(&reader, &later, integer_pointer, &matches),
+                          "generic enum completion does not stale an earlier association key");
+        check_test_expect(test, completion && check_generic_association(&reader, &control_later, integer_pointer, &matches) && matches,
+                          "generic enum completion does not stale an earlier control key");
         const uint64_t capacity = scratch.capacity;
         scratch.capacity = 31;
         CheckGenericSet full;
@@ -259,9 +296,55 @@ static __attribute__((noinline)) void check_test_generic_sources(CheckTest* test
         }
         unlink(path);
     }
+    for (uint32_t scenario = 0; ready && scenario < 6; scenario += 1)
+    {
+        const bool constant = (scenario & 1) != 0;
+        const uint32_t family = scenario / 2;
+        uint32_t length = 0;
+        for (uint32_t i = 0; i < 257; i += 1)
+        {
+            if (family == 0)
+            {
+                length += (uint32_t)snprintf(source + length, sizeof(source) - length, "typedef int G%u __attribute__((ext_vector_type(%u)));\n", i, i + 1);
+            }
+            else if (family == 1)
+            {
+                length += (uint32_t)snprintf(source + length, sizeof(source) - length, "typedef signed _BitInt(%u) G%u;\n", i + 2, i);
+            }
+            else
+            {
+                length += (uint32_t)snprintf(source + length, sizeof(source) - length, "struct R%u{int x;};typedef struct R%u(*G%u)(void);\n", i, i, i);
+            }
+        }
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, "%s_Generic(%s,", constant ? "enum{N=" : "int f(void){return ",
+                                     family == 0 ? "(G0){0}" : "(G0)0");
+        for (uint32_t i = 0; i < 257; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "G%u:%u,", i, i);
+        }
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, "default:1/0)%s\n",
+                                     constant ? "};_Static_assert(N==0,\"selected\");" : ";}");
+        ready = length < sizeof(source);
+        snprintf(path, sizeof(path), "%s/partition-%u.c", directory, scenario);
+        ready = ready && parse_test_write(path, source, length);
+        char* paths[] = { path };
+        ParseTestClang outcome = { 0 };
+        ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), paths, 1, &outcome);
+        check_test_expect(test, ready && !outcome.rejected, "generated generic stable-leaf families agree with Clang");
+        if (ready)
+        {
+            const CheckSourceFixture fixture = {
+                .name = "generated 257-association generic stable-leaf family",
+                .source = source,
+            };
+            check_test_source(test, &fixture, path, &outcome);
+        }
+        unlink(path);
+    }
     check_test_expect(test, ready, "generated generic source fixtures run without resource failures");
     if (directory[0] != 0)
     {
         rmdir(directory);
     }
 }
+

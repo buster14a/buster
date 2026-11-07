@@ -24,7 +24,7 @@
 //     __has_include found changes; __has_include's header created where it looked, in a directory other files go
 //     into; a nested header created in its includer's directory, before the one -I found; preprocessed text's
 //     #include; errors naming absolute paths, taken with the other directory's; a missing #include kept, and run
-//     again once its header is there; -M options, not kept;
+//     again once its header is there; -M options and dependency-output environment variables, not kept;
 //   - identities: a hard link replaced by a copy of its bytes, which #pragma once takes again; clang's __TIMESTAMP__,
 //     SOURCE_DATE_EPOCH's, its files' times changed and its entry taken; __DATE__, and __TIME__ pasted from two halves
 //     in a header in no root and on standard input, none kept without SOURCE_DATE_EPOCH and each with it; a header in
@@ -1075,6 +1075,117 @@ static void oracle_test_dependencies(OracleTest* test)
 }
 
 static bool oracle_test_traced(OracleCache* cache, const char* script, const char* directory, bool taken, const char* output);
+
+// GCC's dependency-output environment is forwarded, but a sidecar absent from run.files must be regenerated.
+static void oracle_test_dependency_environment(OracleTest* test)
+{
+    typedef struct OracleTestDependencyEnvironment OracleTestDependencyEnvironment;
+    struct OracleTestDependencyEnvironment
+    {
+        const char* environment;
+        bool sidecar;
+    };
+    static const OracleTestDependencyEnvironment cases[] = {
+        {
+            .environment = "DEPENDENCIES_OUTPUT=dependency-env.d",
+            .sidecar = true,
+        },
+        {
+            .environment = "SUNPRO_DEPENDENCIES=dependency-env.d",
+            .sidecar = true,
+        },
+        {
+            .environment = "DEPENDENCIES_OUTPUT=",
+            .sidecar = false,
+        },
+        {
+            .environment = "SUNPRO_DEPENDENCIES=",
+            .sidecar = false,
+        },
+    };
+    OracleCache use;
+    OracleCache check;
+    oracle_test_open(test, &use, "use", "dependency-environment");
+    oracle_test_open(test, &check, "check", "dependency-environment");
+    const char* directory = test->runs[0];
+    const bool ready = oracle_test_write_text(directory, "dependency-env.c", "int a;\n");
+    char object[BUSTER_ORACLE_PATH_BYTES + 32];
+    char sidecar[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(object, sizeof(object), "%s/dependency-env.o", directory);
+    snprintf(sidecar, sizeof(sidecar), "%s/dependency-env.d", directory);
+    const char* files[] = {
+        object,
+    };
+    char path[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(path, sizeof(path), "PATH=%s", getenv("PATH") != 0 ? getenv("PATH") : "/usr/bin:/bin");
+    char* arguments[] = {
+        "sh",
+        "-c",
+        "read source < dependency-env.c; printf '%s\\n' \"$source\" > dependency-env.o; "
+        "dependency=${DEPENDENCIES_OUTPUT-${SUNPRO_DEPENDENCIES-}}; "
+        "if test -n \"$dependency\"; then printf 'dependency-env.o: dependency-env.c\\n' > \"$dependency\"; fi",
+        0,
+    };
+    for (uint32_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c += 1)
+    {
+        char* environment[] = {
+            path,
+            "SOURCE_DATE_EPOCH=" BUSTER_ORACLE_EPOCH,
+            (char*)cases[c].environment,
+            0,
+        };
+        bool correct = ready;
+        for (uint32_t pass = 0; pass < 3; pass += 1)
+        {
+            unlink(object);
+            unlink(sidecar);
+            OracleRun run = {
+                .cache = pass == 2 ? &check : &use,
+                .purpose = "oracle test: dependency environment",
+                .arguments = arguments,
+                .environment = environment,
+                .directory = directory,
+                .files = files,
+                .file_count = 1,
+                .dependencies = true,
+            };
+            const bool ran = oracle_run(&run);
+            uint64_t length = 0;
+            char* object_bytes = oracle_test_read(object, &length);
+            char* sidecar_bytes = oracle_test_read(sidecar, &length);
+            correct &= ran && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0 &&
+                       !run.keyed && !run.taken &&
+                       object_bytes != 0 && strcmp(object_bytes, "int a;\n") == 0 &&
+                       (cases[c].sidecar ? sidecar_bytes != 0 && strcmp(sidecar_bytes, "dependency-env.o: dependency-env.c\n") == 0 : sidecar_bytes == 0);
+            free(sidecar_bytes);
+            free(object_bytes);
+            oracle_run_release(&run);
+        }
+        oracle_test_expect(test, correct, cases[c].environment);
+    }
+    char* environment[] = {
+        path,
+        "SOURCE_DATE_EPOCH=" BUSTER_ORACLE_EPOCH,
+        0,
+    };
+    OracleRun run = {
+        .cache = &use,
+        .purpose = "oracle test: dependency environment",
+        .arguments = arguments,
+        .environment = environment,
+        .directory = directory,
+        .files = files,
+        .file_count = 1,
+        .dependencies = true,
+    };
+    oracle_test_expect(test, oracle_run_key(&run), "dependency environment: unset variables permit admission");
+    oracle_test_expect(test, check.counts->stale == 0, "dependency environment: no stale entries in check mode");
+    oracle_test_unlink(directory, "dependency-env.c");
+    unlink(object);
+    unlink(sidecar);
+    oracle_cache_close(&check);
+    oracle_cache_close(&use);
+}
 
 // What a run reads of its files besides their bytes: which of them are one file (a hard link, which #pragma once takes
 // once), its time macros, which only SOURCE_DATE_EPOCH makes keepable, however its sources spell them, the bytes of the
@@ -3700,6 +3811,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
         oracle_test_runs(&test);
         oracle_test_diagnostic_environment(&test);
         oracle_test_dependencies(&test);
+        oracle_test_dependency_environment(&test);
         oracle_test_identities(&test);
         oracle_test_tracing(&test);
         oracle_test_variants(&test);
@@ -3753,7 +3865,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
                                                "listings/oracle",    "changes/oracle",      "streams/oracle",    "streams-other/oracle",
                                                "streams-terminal/oracle", "numbers/oracle", "path-spellings/oracle",
                                                "unfollowed/oracle",  "groups/oracle",       "check/oracle",      "damaged/oracle",
-                                               "writers/oracle",     "process/one/two/buster/oracle", "adapter/oracle", "fresh/oracle", "" };
+                                               "writers/oracle",     "process/one/two/buster/oracle", "adapter/oracle", "fresh/oracle", "dependency-environment/oracle", "" };
     for (uint32_t i = 0; made && i < sizeof(directories) / sizeof(directories[0]); i += 1)
     {
         oracle_test_remove(test.base, directories[i]);
