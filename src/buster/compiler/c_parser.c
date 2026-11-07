@@ -1296,6 +1296,11 @@ typedef enum ParseMode
 // parser instructions on every token (#430's review): a new mode's values moved the switch's cases, and a second call of
 // parse_scalar_operator made it a function of its own.
 #define BUSTER_PARSE_FRAME_AFTER_WIDTH 0x8000000u
+// A file-scope declaration's leading run of attribute lists, as clang's ParseTopLevelDecl reads them before its
+// ParseExternalDeclaration (#1447): C23's and GNU's in any order, then `__extension__`s, which the declaration's tokens
+// have been alone so far (the last of them just before the token). Another `__extension__` goes on with it, as one at a
+// declaration's start does; the specifiers after it are ParseDeclarationSpecifiers', where an `__extension__` isn't one.
+#define BUSTER_PARSE_FRAME_LEADING_ATTRIBUTES 0x20000000u
 
 // What a declarator's name is, from the derivation its declarator applies to it first (going out from the name, past
 // groups without a `*`), as clang's Declarator::isFunctionDeclarator decides it: none read yet, not known yet, a
@@ -2679,7 +2684,7 @@ BUSTER_INLINE ParseFrame* parse_scalar_open(ParseScalar* parser, uint32_t i, uin
                                        BUSTER_PARSE_FRAME_AFTER_STAR | BUSTER_PARSE_FRAME_EMPTY_OK | BUSTER_PARSE_FRAME_KR | BUSTER_PARSE_FRAME_SPECIFIED | \
                                        BUSTER_PARSE_FRAME_CONDITIONAL | BUSTER_PARSE_FRAME_NAME_REQUIRED | BUSTER_PARSE_FRAME_NAME_OPTIONAL | \
                                        BUSTER_PARSE_FRAME_ABSTRACT | BUSTER_PARSE_FRAME_AUTO | BUSTER_PARSE_FRAME_TYPELESS | \
-                                       BUSTER_PARSE_FRAME_LATER_DECLARATOR | BUSTER_PARSE_FRAME_AFTER_WIDTH)
+                                       BUSTER_PARSE_FRAME_LATER_DECLARATOR | BUSTER_PARSE_FRAME_AFTER_WIDTH | BUSTER_PARSE_FRAME_LEADING_ATTRIBUTES)
 
 // The end of a declaration's `;`, or of an expression statement's, in any frame that holds them.
 static void parse_scalar_terminator(ParseScalar* parser, uint32_t i, ParseFrame* frame, ParseStep* step)
@@ -3489,6 +3494,43 @@ BUSTER_INLINE bool parse_scalar_storage_class(const ParseScalar* parser, uint32_
     return name != C_NAME_INLINE && name != C_NAME_GNU_INLINE && name != C_NAME_GNU_INLINE2 && name != C_NAME_NORETURN && name != C_NAME_MODULE_PRIVATE;
 }
 
+// Whether the token at `i` comes just after a file-scope declaration's leading run of attribute lists and `__extension__`s
+// (BUSTER_PARSE_FRAME_LEADING_ATTRIBUTES), which nothing else has followed.
+static bool parse_scalar_leading_attributes(const ParseScalar* parser, uint32_t i, const ParseFrame* frame)
+{
+    return (frame->flags & BUSTER_PARSE_FRAME_LEADING_ATTRIBUTES) != 0 && i > 0 &&
+           (parser->kinds[i - 1] == PARSE_KIND_EXTENSION || parser->roles[i - 1] == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER);
+}
+
+// The first token of the first attribute list of the leading run (parse_scalar_leading_attributes) before `i`, past its
+// `__extension__`s: a GNU list's keyword or a C23 one's first `[`; `i` where the run has none.
+static uint32_t parse_scalar_leading_list(const ParseScalar* parser, uint32_t i)
+{
+    uint32_t result = i;
+    uint32_t at = i;
+    while (at > 0 && parser->kinds[at - 1] == PARSE_KIND_EXTENSION)
+    {
+        at -= 1;
+    }
+    // Back over the lists, each from its closer to its opener: a GNU one's `))` to its keyword, a C23 one's `]]` to its `[[`.
+    while (at > 0 && parser->roles[at - 1] == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER)
+    {
+        const uint8_t closer = parser->kinds[at - 1];
+        const uint8_t opener = closer == PARSE_KIND_R_PAREN ? PARSE_KIND_L_PAREN : PARSE_KIND_L_SQUARE;
+        uint32_t depth = 0;
+        uint32_t token = at;
+        do
+        {
+            token -= 1;
+            depth += parser->kinds[token] == closer;
+            depth -= parser->kinds[token] == opener;
+        } while (token > 0 && depth != 0);
+        at = closer == PARSE_KIND_R_PAREN && token > 0 && parser->kinds[token - 1] == PARSE_KIND_ATTRIBUTE ? token - 1 : token;
+        result = at;
+    }
+    return result;
+}
+
 static void parse_scalar_specifiers(ParseScalar* parser, uint32_t i, ParseFrame* frame, ParseStep* step)
 {
     const uint8_t kind = parser->kinds[i];
@@ -3543,10 +3585,18 @@ static void parse_scalar_specifiers(ParseScalar* parser, uint32_t i, ParseFrame*
         step->role = PARSE_ROLE_SPECIFIER;
         frame->flags |= BUSTER_PARSE_FRAME_TYPE_SEEN | BUSTER_PARSE_FRAME_SPECIFIED;
     }
-    else if (kind == PARSE_KIND_EXTENSION && (frame->flags & (BUSTER_PARSE_FRAME_SPECIFIED | BUSTER_PARSE_FRAME_TYPE_SEEN)) == 0)
+    else if (kind == PARSE_KIND_EXTENSION && ((frame->flags & (BUSTER_PARSE_FRAME_SPECIFIED | BUSTER_PARSE_FRAME_TYPE_SEEN)) == 0 ||
+                                              parse_scalar_leading_attributes(parser, i, frame)))
     {
-        // `__extension__` starts a declaration, before its specifiers.
+        // `__extension__` starts a declaration, before its specifiers, or after a file-scope one's leading attributes.
         step->role = PARSE_ROLE_SPECIFIER;
+    }
+    else if (kind == PARSE_KIND_STATIC_ASSERT && frame->role == PARSE_ROLE_NONE &&
+             ((frame->flags & (BUSTER_PARSE_FRAME_SPECIFIED | BUSTER_PARSE_FRAME_TYPE_SEEN)) == 0 || parse_scalar_leading_attributes(parser, i, frame)) &&
+             parse_scalar_leading_list(parser, i) != i)
+    {
+        // A static assertion after attribute lists at file scope: clang's error at the first of them.
+        parse_scalar_error(parser, parse_scalar_leading_list(parser, i), PARSE_MESSAGE_ATTRIBUTE_LIST_NOT_ALLOWED, BUSTER_PARSE_AT_TOKEN);
     }
     else if ((kind == PARSE_KIND_STORAGE || kind == PARSE_KIND_TYPEDEF) && (frame->flags & BUSTER_PARSE_FRAME_KR_DECLARATIONS) &&
              parse_scalar_storage_class(parser, i) && parser->names[i] != C_NAME_REGISTER)
@@ -3590,10 +3640,24 @@ static void parse_scalar_specifiers(ParseScalar* parser, uint32_t i, ParseFrame*
         frame->mode = PARSE_MODE_ATTRIBUTE_PAREN;
         frame->attribute_closer_role = PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
         frame->attribute_continuation = PARSE_MODE_SPECIFIERS;
-        frame->flags |= BUSTER_PARSE_FRAME_SPECIFIED;
+        // (A file-scope declaration's leading run, its first specifiers' or one's just after another list of it.)
+        const bool leading = frame->role == PARSE_ROLE_NONE && (i == 0 || parser->kinds[i - 1] != PARSE_KIND_EXTENSION) &&
+                             ((frame->flags & (BUSTER_PARSE_FRAME_SPECIFIED | BUSTER_PARSE_FRAME_TYPE_SEEN)) == 0 ||
+                              ((frame->flags & BUSTER_PARSE_FRAME_LEADING_ATTRIBUTES) != 0 && previous_role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER));
+        frame->flags = (frame->flags & ~BUSTER_PARSE_FRAME_LEADING_ATTRIBUTES) | BUSTER_PARSE_FRAME_SPECIFIED | (leading ? BUSTER_PARSE_FRAME_LEADING_ATTRIBUTES : 0);
+    }
+    else if (parse_scalar_standard_attribute(parser, i) && frame->role == PARSE_ROLE_NONE && i > 0 && parser->kinds[i - 1] == PARSE_KIND_EXTENSION)
+    {
+        // C23's attributes just after a file-scope `__extension__`, which clang's declaration specifiers don't take.
+        parse_scalar_error(parser, i, PARSE_MESSAGE_ATTRIBUTE_LIST_NOT_ALLOWED, BUSTER_PARSE_AT_TOKEN);
     }
     else if (parse_scalar_standard_attribute(parser, i))
     {
+        // (A file-scope declaration's leading run, its first specifiers' or one's just after another list of it.)
+        const bool leading = frame->role == PARSE_ROLE_NONE &&
+                             ((frame->flags & (BUSTER_PARSE_FRAME_SPECIFIED | BUSTER_PARSE_FRAME_TYPE_SEEN)) == 0 ||
+                              ((frame->flags & BUSTER_PARSE_FRAME_LEADING_ATTRIBUTES) != 0 && previous_role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER));
+        frame->flags = (frame->flags & ~BUSTER_PARSE_FRAME_LEADING_ATTRIBUTES) | (leading ? BUSTER_PARSE_FRAME_LEADING_ATTRIBUTES : 0);
         parse_scalar_standard_attribute_open(parser, i, PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER, PARSE_MODE_SPECIFIERS, step);
     }
     else if (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM)

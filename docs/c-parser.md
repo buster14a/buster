@@ -218,6 +218,19 @@ unbalanced closer at the end of the file; after a tag's body, the tokens clang's
 `_Generic` association's value), and none on a new line; a missing `,` or `]`
 in a C23 attribute list after the token before it.
 
+A file-scope declaration's leading attribute lists, C23's and GNU's in any
+order, may be followed by `__extension__`s before its specifiers (#1447), as
+clang's `ParseTopLevelDecl` reads the lists before `ParseExternalDeclaration`
+reads each `__extension__` (`BUSTER_PARSE_FRAME_LEADING_ATTRIBUTES`). After a
+specifier, or after a list that follows an `__extension__`, one is clang's
+"expected identifier or '('". A C23 list just after a file-scope
+`__extension__`, and the lists before a static assertion, are "an attribute
+list cannot appear here", at the first list. In a block, attributes before an
+`__extension__` stay the error they are in clang. The checker takes
+`__extension__;` and lists and `__extension__`s alone before a file-scope `;`
+as clang's extra `;`, without "declaration does not declare anything".
+`__extension__ _Static_assert(...)`, which clang takes, is still refused.
+
 It is the fallback for what the vector path flags, the oracle every kernel is
 tested against, and the parser of a unit with errors: the vector path sends the
 whole unit to it when the fallback finds one, so that its diagnostics are the

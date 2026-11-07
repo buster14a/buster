@@ -7669,6 +7669,24 @@ static void check_input_standalone_specifiers(CheckInputReader* reader, uint32_t
 
 // Read a declaration's specifiers and its declarators, using parser group boundaries and subtree ends to pass
 // over each initializer. Identifier uses within them are resolved later at their own source positions.
+// Whether the file-scope declaration from `first` to its `;` at `end` is GNU attribute lists and then `__extension__`s
+// alone, which clang's ParseExternalDeclaration reads as an extra `;` after them (#1447), with no warning by default.
+static bool check_input_extra_semi(const CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    uint32_t token = first;
+    while (token < end && parser->tokens.kinds[token] == PARSE_KIND_ATTRIBUTE && check_input_attribute_starts(parser, token, end))
+    {
+        token = check_input_skip_attributes(parser, token, end);
+    }
+    const uint32_t extensions = token;
+    while (token < end && parser->tokens.kinds[token] == PARSE_KIND_EXTENSION)
+    {
+        token += 1;
+    }
+    return reader->function_body == BUSTER_CHECK_NONE && token == end && token > extensions;
+}
+
 static void check_input_declaration(CheckInputReader* reader, uint32_t first)
 {
     const Parser* parser = reader->parser;
@@ -7797,7 +7815,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 check_input_warning(reader, CHECK_WARNING_ID_MISSING_DECLARATIONS, CHECK_WARNING_EVENT_TYPEDEF_NAMELESS, specifiers,
                                     CHECK_WARNING_COMPLETE_AFTER_DELIMITER, i);
             }
-            else if (!tag)
+            else if (!tag && !check_input_extra_semi(reader, first, i))
             {
                 check_input_warning(reader, CHECK_WARNING_ID_MISSING_DECLARATIONS, CHECK_WARNING_EVENT_EMPTY_DECLARATION, specifiers,
                                     CHECK_WARNING_COMPLETE_AFTER_DELIMITER, i);
