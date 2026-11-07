@@ -457,7 +457,9 @@ actions. The option remains off by default; the post-merge measurements below de
   constant contexts and independent expression parts run as rounds of the command's flow
   (`CheckDeferredFlow`), on the session's lanes. The other lanes run them from the emission's follow loop
   (`check_program_emit_follow`, `check_deferred_follow`). A session refuses `lane_run`'s threads,
-  which the reader started before.
+  which the reader started before. The post-merge rounds take the bodies' lanes only where those are
+  four or more (`BUSTER_CHECK_DEFERRED_POST_LANES`, #447): by `--lanes 2` or `3` they run on the
+  calling thread.
 - **The grant.** Before the top level's walk, the reader counts the bodies' tokens and asks the
   driver for the lanes its rule plans (`check_driver_deferred_grant`). The driver gives no more than
   the session asks for and started, and no more than the jobserver's spare tokens. It takes those

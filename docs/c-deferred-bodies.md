@@ -7,13 +7,19 @@ each file-scope function body apart from the top level, out of order and on
 any number of lanes. It then merges the bodies into the reader state that
 source order's walk leaves. The per-body controls, binding answers, constant
 contexts, expression construction and graph records also use those lanes
-([#1404](https://github.com/buster14a/buster/issues/1404)); their ordered
-publication preserves graph numbering and warning order. The result is source order's,
+([#1404](https://github.com/buster14a/buster/issues/1404)) where the bodies
+take four or more (#447); their ordered publication preserves graph numbering
+and warning order. The result is source order's,
 column for column, diagnostics among them: the tests below compare every
 column. A unit the reader can't merge yet is checked by `check_input` from
 nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
 
 ## The post-merge rounds
+
+The four rounds take the bodies' lanes only where those are
+`BUSTER_CHECK_DEFERRED_POST_LANES` (4) or more (`check_deferred_post_lanes`);
+on fewer, each runs on the calling thread, as a one-lane reading's do ("The
+post-merge rounds' lanes (#447)", below).
 
 Controls use private label tables and fallthrough suffixes, then complete the
 unit's indirect-goto checks after joining. Binding answers write only their
@@ -52,18 +58,17 @@ serial finishing. Success and retry return it exactly once.
 2. **The file scope's history.** `c_environment_build` (#319's index,
    [the environment guide](c-environments.md)) indexes the top level's
    file-scope declarations by name and activation position.
-3. **The lanes.** The reader runs one lane per
+3. **The lanes.** The reader runs one lane, and one more per
    `BUSTER_CHECK_DEFERRED_LANE_TOKENS` (3,072), and one more per
    `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` (3) of the top level's
-   tokens, of the bodies' tokens beyond their critical path, and at least one:
-   the critical path is the larger of the largest body, which the first lane
-   reads itself, and twice the second largest, which a woken lane reads at
-   about half the first lane's speed. It runs no more lanes than it is given or
-   than bodies. A lane costs its copy of the reader, which grows with the top
-   level, and its wake-up, which its share of the walks must pay for. A second
-   lane needs two shares, since it also puts the merge's pass and the
-   post-merge rounds on lanes ("How many lanes", below, and "The rule after the
-   post-merge rounds (#447)").
+   tokens, of the bodies' tokens beyond their critical path: the larger of the
+   largest body, which the first lane reads itself, and twice the second
+   largest, which a woken lane reads at about half the first lane's speed. It
+   runs no more lanes than it is given or than bodies. A lane costs its copy of
+   the reader, which grows with the top level, and its wake-up, which its share
+   of the walks must pay for. The post-merge rounds join the bodies' lanes only
+   from four of them ("How many lanes", below, and "The post-merge rounds'
+   lanes (#447)").
    `CheckDeferred.every_lane` runs every lane the bodies can take, as the tests
    and `test-checker-corpus` do.
 
@@ -743,7 +748,9 @@ Campaign A7, after #847 kept the huge pages of a unit below
 `BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS`, which its lanes claim, fits A4's
 constants again ("The rare columns' pages by the unit's size (#847)",
 below). #447 fits the rule again after #1404's post-merge rounds, with a new
-form ("The rule after the post-merge rounds (#447)", below).
+form ("The rule after the post-merge rounds (#447)", below), then keeps the
+post-merge rounds off fewer than four lanes and returns to this form with
+those constants ("The post-merge rounds' lanes (#447)").
 
 A count of one size for every unit can't fit both ends: sixteen bodies of 265
 tokens with no headers read 9.6% faster on four lanes than on one, and sixteen
@@ -888,6 +895,11 @@ more, and within the noise of readings of tens of microseconds on the others
 
 ### The rule after the post-merge rounds (#447)
 
+In this section "the rule" is #1567's: one lane per 3,072 tokens and a third
+of the top level's beyond the critical path, and at least one, with the
+post-merge rounds on every lane the bodies took. "The post-merge rounds'
+lanes (#447)", below, replaces it.
+
 #1404 put four post-merge rounds (the controls, binding answers, constant
 contexts and expression parts) on the bodies' lanes, beside the merge's pass
 (#697), by the same rule. A reading on more than one lane now pays six lane
@@ -1002,6 +1014,101 @@ lanes: 3.4% faster than its one-lane reading, and 22% slower than source
 order. The rule gives it 2, so the driver reads it in source order. Of the 76
 units, the driver reads 11 apart rather than 21: SQLite and ten synthetic
 units whose bodies hold 15,888 tokens or more.
+
+### The post-merge rounds' lanes (#447)
+
+#1567's rule left 25 of the 76 units more than a point from the best reading
+below. The phases after the merge explain most of it. On all 51 units below
+40,000 tokens that take 2 lanes, they took 11 to 120 µs longer on 2 lanes than
+on one, while the bodies' span and the merge's pass took less; with the rounds
+on the calling thread, 2 to 13 µs longer. The four post-merge rounds
+ran on every lane the bodies took. Each round on lanes costs its dispatch, its
+wake-ups and its parts' ordered publication, which on one lane the calling
+thread's original walks don't pay.
+
+[The record](https://github.com/buster14a/buster-performance/tree/bdc1b0204efded13a4bde0d2eb5104d7a12636cf/docs/measurements/deferred-post-lanes-447-2026-11-07) measures it on the 9700X with main `53854a7c2`
+against the same tree with the four rounds on the calling thread alone. Both
+read all 76 units on 2, 3, 4 and 8 forced lanes against one lane in the same
+process, three rounds. One lane runs the same code in both builds. The medians,
+in µs against one lane:
+
+| Unit | Lanes | Whole: on lanes / on the calling thread | The bodies' span | The merge | The phases after it: on lanes / on the calling thread |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `00204.c` | 2 | +16.4 / −19.6 | −19.9 | −10.0 | +46.1 / +9.6 |
+| musl `stdio/vfprintf.c` | 2 | +14.2 / −32.9 | −29.3 | −9.1 | +60.2 / +9.7 |
+| musl `regex/regcomp.c` | 2 | −18.8 / −72.5 | −62.8 | −17.8 | +73.6 / +12.0 |
+| musl `regex/regcomp.c` | 4 | −72.3 / −81.5 | −61.0 | −31.4 | +28.8 / +18.6 |
+| sixteen bodies of 993 tokens, no headers | 4 | −143.8 / −114.8 | −118.2 | −13.0 | −9.2 / +15.8 |
+| `sqlite3.c` | 4 | −15,424 / −13,136 | −10,869 | −2,091 | −2,126 / −49 |
+
+The rounds on lanes pay on large units: at each unit's best lane count,
+`sqlite3.c` reads 32.5% faster than one lane with them and 27.3% without, and
+sixteen bodies of 8,013 tokens 34.3% and 25.7%. On mid-sized units they cost
+more than the lanes save: `00204.c` reads 3.3% faster on 2 lanes without them
+and no faster with them; musl `internal/floatscan.c` 3.9%, `stdio/vfprintf.c`
+3.0% and `regex/regcomp.c` 8.0%, against 6.4% with them.
+
+The post-merge rounds' groups are whole bodies, so they pay where the bodies'
+work spreads over many lanes, which the bodies' rule measures. So
+`check_deferred_post_lanes` gives the rounds the bodies' lanes only where those
+are `BUSTER_CHECK_DEFERRED_POST_LANES` (4) or more, and otherwise one. A second
+lane then costs its copy and wake-up alone, so the bodies' rule returns to #683's
+form: one lane, and one more per 3,072 tokens and a third of the top level's
+beyond the critical path. Each unit's best is the least change of either build
+on any lane count; a policy reads a unit on its rule's lanes, as the first build
+from the gate on and as the second below it (`post` in the record):
+
+| Policy | Worst unit against one lane | Units within a point of their best | Gains forgone, summed |
+| --- | ---: | ---: | ---: |
+| #1567's: the rounds on every lane, `max(1, excess / (3,072 + top/3))` | +2.6% | 51 of 76 | 96.4 points |
+| the rounds never on lanes, the best rule | +0.0% | 52 | 95.8 |
+| the rounds from 3 lanes, the best rule (`1 + excess / (3,072 + top/3)`) | +0.0% | 55 | 57.6 |
+| the rounds from 4 lanes, `1 + excess / (3,072 + top/3)` (the policy) | +0.0% | 60 | 43.5 |
+| the rounds from 5 lanes, the same rule | +0.0% | 60 | 44.3 |
+| the rounds from 6 lanes, the best rule (`1 + excess / (2,560 + top/4)`) | +0.0% | 61 | 50.0 |
+
+A term for all of the unit's tokens, the merge's pass's share, forgoes 36.5
+points with a third constant. It changes only synthetic units' lanes, so it isn't
+taken.
+
+Then #1567's policy against this one, each by its build (`53854a7c2` and this
+change's `96a8d57ea`) on 8 permitted lanes against one lane in the same process,
+in processes whose order alternates by round, five rounds, on all 76 units. The
+medians of the rounds, and of each round's difference:
+
+| Unit | #1567's | This one's | Difference |
+| --- | ---: | ---: | ---: |
+| musl `regex/regcomp.c` | 2 lanes: −0.8% | 3: −7.5% | −6.6 points |
+| musl `internal/floatscan.c` | 1: −0.0% | 2: −3.0% | −2.9 |
+| sixteen bodies of 993 tokens after three headers | 2: +2.9% | 3: −3.6% | −6.0 |
+| one of 19,973 tokens beside fifteen of 525 | 1: +0.2% | 2: −5.5% | −5.4 |
+| one of 9,989 tokens beside fifteen of 993 | 2: −2.7% | 3: −6.9% | −4.3 |
+| sixteen bodies of 993 tokens, no headers | 4: −22.6% | 5: −20.3% | +2.4 |
+| one of 19,973 tokens beside fifteen of 1,981 | 4: −14.9% | 5: −12.3% | +2.5 |
+| `sqlite3.c` | 8: −32.8% | 8: −32.4% | +0.6 |
+
+Of the 23 units whose lanes change, this policy reads 14 more than a point
+faster than #1567's against one lane, 5 within a point and 4 more than a point
+slower. Those four are units it gives one lane more than #1567's, at 4 or 5
+lanes, which still read 8 to 20% faster than one lane. Summed over the 23, it
+gains 44.2 points. The 53 units both read on the same lanes came within −0.8 to
++2.0 points of each other. No unit reads more than 1.0% slower than one lane (a
+program of 9 tokens both read on one lane); #1567's read sixteen bodies of 993
+tokens after three headers 2.9% slower.
+
+On c-testsuite's 220 programs, both read every program on one lane. The memory
+(`--rss --cold`, two rounds) is #1567's but where a unit takes one lane more:
+`regcomp.c`'s reading grows by 17.5 MiB on 3 lanes against 17.4 on 2, and
+`floatscan.c`'s by 13.2 against 12.8 on one lane.
+
+Against each unit's best of either build on any lane count, 16 units stay more
+than a point behind, where #1567's policy left 25. The real units among them
+are three that 2 lanes without the rounds read about 3% faster than one lane,
+which the rule leaves on one: `00204.c`, musl `regex/regexec.c` and
+`stdio/vfprintf.c`. The largest gaps, 3.6 to 4.0 points, are synthetic: two
+equal bodies of 16,645 and of 24,965 tokens read on one lane, and one of 9,989
+beside fifteen of 993 on 3 lanes. That best counts readings no gate on the
+bodies' lanes can choose, such as 4 lanes without the rounds.
 
 ### The merge's serial work (#697)
 
