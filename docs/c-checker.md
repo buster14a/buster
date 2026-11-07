@@ -7059,7 +7059,11 @@ arguments against the function. The checker now gives these as clang does.
 - **Increments and decrements.** As clang's `CheckIncrementDecrementOperand`,
   the operand's type is tested before its modifiability
   (`check_action_steppable`). A real type (a complete enumeration's), a pointer
-  or a complex type is stepped. Any other is "cannot increment value of type
+  or a complex type is stepped: a complex one's real part by one, as C2y's and
+  clang's are (`check_lower_complex_update_emit`, a postfix one's value a copy
+  of the object before it; a complex of aggregate parts, past 128 bits, stays
+  "increments of complex values" in lowering, as a `__float128`'s increment
+  is "increments of __float128 values"). Any other is "cannot increment value of type
   T" (or "decrement"), an array's and a const record's too; a vector's, a
   record's and a function's are among them. T is the operand's type with its
   qualifiers, an `_Atomic` one's value type, spelled with the typedef its
@@ -7112,19 +7116,39 @@ arguments against the function. The checker now gives these as clang does.
   subobject whose converted value is then no constant gets clang's second
   error, "initializer element is not a compile-time constant", at it too
   (`check_init_value_nonconstant`).
+- **Indirection through a pointer to void** (`-Wvoid-ptr-dereference`, clang's
+  `CheckIndirectionOperand`): "ISO C does not allow indirection on operand of
+  type 'void *'" at the `*`, of the operand's type as written (its typedef
+  kept, through inner dereferences to the object they name; its top-level
+  qualifiers dropped), in dead code too, and before an error the expression
+  then has (`(*p)++`). Not right after a unary `&` (`&*p`; `&(*p)` warns, as
+  clang's IsAfterAmp is the token's), nor in sizeof's or alignof's operand
+  (`check_warning_graph_void_dereferences`, one reverse pass marking the
+  queries' operands, only in a unit that has such a dereference).
+- **A const variable's assignment.** "cannot assign to variable 'x' with
+  const-qualified type 'const int'" with clang's "variable 'x' declared const
+  here" note at its name, as clang's `DiagnoseConstAssignment` walks to it:
+  through an array's subscripts (named with its declared type,
+  `'const int[2]'`), a record's `.` members that aren't const themselves, and
+  an arrow to the pointer variable (`p->a` of a `const struct s *p` names
+  `p`). A pointer's target stays "read-only variable is not assignable".
+- **Arithmetic on a pointer to an incomplete type**: clang's "arithmetic on a
+  pointer to an incomplete type 'struct s'" (a subscript's "subscript of
+  pointer to incomplete type", at its `[`), of the pointee as written, with its
+  "forward declaration of 'struct s'" note at the tag's declaring name.
 - **Differences left.**
-  - `++` and `--` of a complex type are refused ("arithmetic operands
-    required"), where clang takes them.
-  - Arithmetic on a pointer to an incomplete type is "incomplete type is not
-    permitted here", where clang's is "arithmetic on a pointer to an incomplete
-    type" with a "forward declaration" note.
   - A vector type reached through a pointer typedef (`typedef v4si *pv;`)
     prints without its typedef's name, and so does a member's type
     (`x.f++` of a member `uu f` prints `'struct u'` where clang's is
     `'uu' (aka 'struct u')`): a record's members keep no declaration.
-  - `(*p)++` of a `void *p` lacks clang's `-Wvoid-ptr-dereference` warning
-    before its error, and `c++` of a const variable clang's "variable 'c'
-    declared const here" note.
+  - An assignment to a member that is const itself is "read-only variable is
+    not assignable", where clang names the member with its note: a record's
+    members keep no declaration. A typedef'd array's variable prints its
+    element's typedef unspelled (`'const int[2]'` for clang's
+    `'CI[2]' (aka 'const int[2]')`).
+  - A typedef inside another typedef (`typedef VP *VPP`) loses its inner name
+    in the void dereference's operand type (`**b`'s `'void *'` for clang's
+    `'VP'`).
 
 ## Ignorable and unsupported pragmas
 

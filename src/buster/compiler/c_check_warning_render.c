@@ -968,6 +968,12 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                      "function with attribute 'no_caller_saved_registers' should only call a function with attribute 'no_caller_saved_registers' or be compiled with "
                      "'-mgeneral-regs-only'";
             break;
+        case CHECK_WARNING_EVENT_VOID_PTR_DEREFERENCE:
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->data);
+            result = type.length != 0 ? check_warning_text(scratch, "ISO C does not allow indirection on operand of type %.*s", (int)type.length, type.pointer) : NULL;
+            break;
+        }
         case CHECK_WARNING_EVENT_DEPRECATED_USE:
         {
             // The message is the attribute's string as written, without its quotes or prefix. An anonymous tag's name is its

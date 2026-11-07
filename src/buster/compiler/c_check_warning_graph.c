@@ -462,6 +462,90 @@ static void check_input_interrupt_calls(CheckInputReader* reader)
     arena_pop_to(scratch, mark);
 }
 
+// An indirection through a pointer to void (#147, clang's CheckIndirectionOperand): whether `node` is one clang warns of,
+// -Wvoid-ptr-dereference, in dead code too, but not right after a unary `&` (`&*p`, clang's IsAfterAmp; `&(*p)` warns) nor
+// in sizeof's operand (the unevaluated warnings' mark; alignof's, which has none, check_warning_graph_void_dereferences).
+static bool check_warning_graph_void_candidate(const CheckInput* input, const Parser* parser, const TypeTable* types, const CheckStream* stream, uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t operand = graph->operand0[node];
+    const uint32_t star = graph->tokens[node];
+    const TypeId type = operand < graph->count ? type_unqualified(check_stream_type(stream, operand)) : 0;
+    const TypeId pointer = type != 0 ? type_unqualified(type_strip_aligned(types, type)) : 0;
+    const bool through_void = pointer != 0 && type_kind(types, pointer) == BUSTER_TYPE_KIND_POINTER &&
+                              type_kind(types, type_unqualified(type_strip_aligned(types, type_element(types, pointer)))) == BUSTER_TYPE_KIND_VOID;
+    const uint32_t mask = check_constant_unevaluated_warnings();
+    const bool query = graph->warning_suppressed != NULL && (graph->warning_suppressed[node] & mask) == mask;
+    const uint32_t before = star != 0 && star < parser->tokens.count && parser->tokens.kinds[star - 1] == PARSE_KIND_AMP && input->token_nodes != NULL ?
+                            input->token_nodes[star - 1] : BUSTER_CHECK_NONE;
+    const bool after_amp = before < graph->count && graph->ops[before] == CHECK_OP_ADDRESS;
+    return through_void && !query && !after_amp && star < parser->tokens.count;
+}
+
+// The void dereferences' warnings (check_warning_graph_void_candidate's `count` nodes), at each `*`, of the operand's type as
+// clang prints it (its top-level qualifiers dropped, its typedef kept). One reverse pass over the graph, whose operands
+// precede their nodes, first marks every node under a sizeof or alignof query, which clang never evaluates. Units without
+// such a dereference take none of it.
+static void check_warning_graph_void_dereferences(CheckInputReader* reader, const CheckStream* stream, const uint32_t* candidates, uint32_t count)
+{
+    const CheckGraph* graph = &reader->output->graph;
+    uint8_t* queried = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, graph->count);
+    reader->output->resource |= queried == NULL;
+    if (queried != NULL)
+    {
+        memset(queried, 0, graph->count);
+    }
+    for (uint32_t node = graph->count; queried != NULL && node-- > 0;)
+    {
+        if (queried[node] != 0 || graph->ops[node] == CHECK_OP_SIZEOF || graph->ops[node] == CHECK_OP_ALIGNOF)
+        {
+            const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
+            {
+                if (operands[i] < node)
+                {
+                    queried[operands[i]] |= 1u;
+                }
+            }
+            for (uint32_t i = 0; check_graph_has_arguments(graph->ops[node]) && graph->argument_counts != NULL && i < graph->argument_counts[node]; i += 1)
+            {
+                const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
+                if (argument < node)
+                {
+                    queried[argument] |= 1u;
+                }
+            }
+        }
+    }
+    for (uint32_t i = 0; queried != NULL && i < count; i += 1)
+    {
+        const uint32_t node = candidates[i];
+        const uint32_t operand = graph->operand0[node];
+        if (queried[node] == 0)
+        {
+            // (Through inner dereferences to the object they name: `**b`'s operand spells `VP *b`'s VP.)
+            uint32_t named = operand;
+            while (named < graph->count && graph->ops[named] == CHECK_OP_DEREFERENCE)
+            {
+                named = graph->operand0[named];
+            }
+            const uint32_t star = graph->tokens[node];
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_VOID_PTR_DEREFERENCE,
+                .kind = CHECK_WARNING_EVENT_VOID_PTR_DEREFERENCE,
+                .token = star,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = star + 1,
+                .payload = { .first_type = type_unqualified(check_stream_type(stream, operand)), .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                             .data = check_input_operand_spelling(reader, named) },
+            };
+            check_input_warning_once(reader, &event);
+        }
+    }
+}
+
 static bool check_input_warning_graph(CheckInput* input, const Parser* parser, TypeTable* types, const CheckStream* stream, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
@@ -495,6 +579,9 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
         valid = check_warning_set_add(&reader.source_warning_keys, key);
     }
     const CheckGraph* graph = &input->graph;
+    uint32_t* void_candidates = NULL;
+    uint32_t void_count = 0;
+    uint32_t void_capacity = 0;
     for (uint32_t first = 0; valid && first < graph->count; first += 16)
     {
         const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
@@ -508,7 +595,8 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
             selected |= _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_ASSIGN)) |
                         _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_INITIALIZE)) |
                         _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CONVERT)) |
-                        _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CALL));
+                        _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CALL)) |
+                        _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_DEREFERENCE));
         }
         for (; valid && selected != 0; selected &= selected - 1)
         {
@@ -550,6 +638,26 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                         check_warning_graph_null(&reader, stream, source, stream->conversions[node].operands[slot].type, lvalue, declared, completion);
                     }
                 }
+                else if (op == CHECK_OP_DEREFERENCE && check_warning_graph_void_candidate(&staged, parser, types, stream, node))
+                {
+                    // (Rare: a list that doubles, warned after the scan.)
+                    if (void_count == void_capacity)
+                    {
+                        const uint32_t capacity = void_capacity == 0 ? 16 : void_capacity * 2;
+                        uint32_t* grown = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity);
+                        if (grown != NULL && void_count != 0)
+                        {
+                            memcpy(grown, void_candidates, (uint64_t)void_count * sizeof(uint32_t));
+                        }
+                        staged.resource |= grown == NULL;
+                        void_candidates = grown;
+                        void_capacity = grown != NULL ? capacity : 0;
+                    }
+                    if (void_candidates != NULL)
+                    {
+                        void_candidates[void_count++] = node;
+                    }
+                }
                 else if (op == CHECK_OP_CALL)
                 {
                     const uint32_t begin = graph->argument_offsets[node];
@@ -565,6 +673,11 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
             }
             valid = !staged.resource;
         }
+    }
+    if (valid && void_count != 0)
+    {
+        check_warning_graph_void_dereferences(&reader, stream, void_candidates, void_count);
+        valid = !staged.resource;
     }
     if (valid && check_sparse_wide_present(input->noderef_types))
     {

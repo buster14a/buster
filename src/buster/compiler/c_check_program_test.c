@@ -4653,6 +4653,20 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "cf s=a*b,t=a/b,u=a+b*xf,w2=-a;cl v=c*d,w=c/d,y=c-d+xl,z=xl/d;cl mixed=a*c;cd half=b/(cd)c;"
             "return (int)(foldf(s)^foldf(t)*3^foldf(u)*5^foldl(v)*7^foldl(w)*11^foldl(y)*13^foldl(z)*17^foldl(mixed)*19^foldz(half)*23^foldf(w2)*29^(a==b)^(c!=d)*2);}",
             "complex-float-and-long-double", clang);
+        // Complex values' ++ and -- (#147, C2y's): one added to or subtracted from the real part, prefix and postfix, of
+        // double's, float's, long double's and a complex int's, through a pointer and an array element; a postfix one's
+        // value the object before it.
+        check_test_program_source(test,
+            "typedef _Complex double cd;typedef _Complex float cf;typedef _Complex long double cl;"
+            "static unsigned fold(double d){union{double d;unsigned long u;}x;x.d=d;return (unsigned)(x.u^(x.u>>29));}"
+            "static unsigned foldz(cd z){return fold(__real__ z)*3u^fold(__imag__ z);}"
+            "int tested(int n){cd a=n+0.5i;cf b=(n-3)-1.5fi;_Complex int k=n;cd arr[2]={a,-a};cd*p=&arr[1];"
+            "cd a1=a++;cd a2=++a;cf b1=b--;cf b2=--b;k++;--k;k++;cd p1=(*p)++;arr[0]--;"
+            "unsigned acc=foldz(a)^foldz(a1)*3^foldz(a2)*5^foldz((cd)b)*7^foldz((cd)b1)*11^foldz((cd)b2)*13^foldz(p1)*17^foldz(arr[0])*19^foldz(arr[1])*23;"
+            "acc^=(unsigned)__real__ k*29^(unsigned)__imag__ k*31;"
+            "cl l=n*0.25L+1.0Li;cl l1=l--;++l;acc^=fold((double)__real__ l)*37^fold((double)__real__ l1)*41^fold((double)__imag__ l)*43;"
+            "return (int)acc;}",
+            "complex-increments", clang);
         // Complex values passed and returned (in xmm registers, in st0 and st1, on the stack), in structs, read by va_arg,
         // through a function pointer, and in arrays.
         check_test_program_source(test,
