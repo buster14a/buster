@@ -249,6 +249,30 @@ coverage. A small direct caller alone need not reproduce LLVM's large-function
 threshold. The existing repository-translation-unit checking command is the
 previously failing MSan regression and remains required for crash validation.
 
+The first post-merge native MSan run passed the bitmap's 228 controls, then
+reported another stack overflow in `check_input_deprecated_marked` during the
+separate main.c compilation. That existing whole-column vector leaf is also
+kept `noinline`, preserving its body and `count <= INT32_MAX`/host-vector
+admission in `check_input_deprecated_uses`. It still scans the full input;
+isolation keeps its instrumentation separate from the large reader. The
+scalar warning walk, marked-declaration chains, contexts, ordering, allocation
+and scratch lifetime are unchanged. This follows the same pinned-compiler
+source inference, with every sanitizer check retained and no stack/flag
+adjustment. Actual native MSan main.c compilation and a clean final audit
+remain the decisive crash qualification; further wide-check sites must be
+judged by their own evidence.
+
+`c_check_deprecated_marked_test.c` adds 456 native-vector cases through the
+existing deprecated-walk section. It compares every word with independent
+per-token scalar key routing across lengths 0–65, 16/64-token boundaries and
+2,097,167 tokens, null/present objects, zero/valid/invalid object-first keys,
+invalid declarations, identifier densities and zero/high-bit marks. Exact
+input/table ends are protected; output prefixes, suffixes and unused final
+bits must be preserved. Baseline hosts retain the kernel's vector admission
+and report that this direct kernel control is skipped. Existing scalar/vector
+source diagnostic fixtures continue unchanged. A small direct caller is
+semantic/bounds coverage and need not reproduce the large-reader threshold.
+
 ## Object and linkage options (#1124)
 
 The C driver refuses an effective `-ffunction-sections`,

@@ -6,6 +6,8 @@
 // shifted by 0 to 66 tokens of empty declarations, so that every token, scope brace and use falls at each place in its
 // 64-token block. The scalar walk is the oracle; test-checker-driver compares both with clang.
 
+#include "c_check_deprecated_marked_test.c"
+
 static const char check_test_deprecated_delayed[] =
     "typedef int D __attribute__((deprecated));\n__attribute__((cold)) void (*f)(D, D), (*g)(D);\n";
 static const char check_test_unavailable_delayed[] =
@@ -163,6 +165,7 @@ static bool check_test_deprecated_walk_equal(const CheckInput* a, const CheckInp
 
 static __attribute__((noinline)) void check_test_deprecated_walks(CheckTest* test)
 {
+    check_test_deprecated_marked(test);
     // Up to 66 empty declarations before the source, then the source.
     char source[8192];
     uint32_t compared = 0;
