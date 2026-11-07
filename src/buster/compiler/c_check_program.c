@@ -2350,7 +2350,8 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
         uint8_t* seen = (uint8_t*)writer->tasks;
         uint32_t* queue = writer->labels;
         const CheckGraph* graph = &program->input->graph;
-        for (uint32_t pass = 0; pass < (return_warnings ? 2u : 1u); pass += 1)
+        // The second walk is the warnings': -Wreturn-type's, and -Winvalid-noreturn's, which -Wno-return-type keeps.
+        for (uint32_t pass = 0; pass < (return_warnings || (noreturn_warnings && noreturn) ? 2u : 1u); pass += 1)
         {
             bool warning_safe = true;
             memset(seen, 0, body->count);
@@ -2448,10 +2449,13 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                     }
                     // A guaranteed nonreturning expression ends only this CFG edge. Unknown contracts retain the
                     // previous conservative warning policy; an unrelated proven stop never hides another fall-off.
+                    // A path that ends so doesn't fall off: with another that does, clang's warning says "in all control
+                    // paths", as after a return.
                     if ((fact & BUSTER_CHECK_RETURN_STOPS) != 0)
                     {
                         targets[0] = BUSTER_CHECK_NONE;
                         next = false;
+                        returns = true;
                     }
                     else
                     {
