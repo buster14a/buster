@@ -2121,6 +2121,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
             left->string_count == right->string_count && left->region_count == right->region_count && left->vla_count == right->vla_count &&
             left->asm_count == right->asm_count && left->binding_event_count == right->binding_event_count &&
             left->parser_binding_event_count == right->parser_binding_event_count &&
+            left->typedef_result_contracts == right->typedef_result_contracts &&
             left->intrinsic_declaration_count == right->intrinsic_declaration_count && left->intrinsic_call_count == right->intrinsic_call_count &&
             (left->intrinsic_ids == NULL) == (right->intrinsic_ids == NULL) && (left->deferred_tokens == NULL) == (right->deferred_tokens == NULL) &&
             (left->overload_heads == NULL) == (right->overload_heads == NULL) && (left->explicit_abis == NULL) == (right->explicit_abis == NULL) &&

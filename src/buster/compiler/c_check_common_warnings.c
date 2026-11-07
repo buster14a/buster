@@ -651,8 +651,8 @@ typedef struct CheckCommonEmission
     const uint8_t* evaluated;
     const uint32_t* parents;
     uint8_t* emitted;
-    // Whether a discarded arm is quiet: an effect or explicit void cast along its value path. CONDITIONAL answers
-    // its arms', COMMA its result operand's, SELECT its chosen value's; others are checked directly (check_common_arm_of).
+    // The existing arm-discard fact and the stricter logical-operand fact (BUSTER_CHECK_DISCARD_*).
+    // CONDITIONAL answers its arms', COMMA its result operand's, SELECT its chosen value's.
     // Children precede parents in the graph, so one ascending pass fills it and every query stays iterative.
     const uint8_t* arm_effects;
     // What each node's subtree holds for the walks (BUSTER_CHECK_REACH_*), so that a walk enters only the subtrees where
@@ -772,6 +772,9 @@ static bool check_common_literal_zero(const Parser* parser, const CheckStream* s
     return result;
 }
 
+#define BUSTER_CHECK_DISCARD_ARM 0x01u
+#define BUSTER_CHECK_DISCARD_LOGICAL 0x02u
+
 // Whether an arm's value path accepts discard: an effect or an explicit cast to void. Conditional, comma and
 // selected-value results use postorder facts, so nested void casts stay quiet while inner diagnostics still run.
 // An implicit conversion is not an explicit discard, and a side effect off the comma's result path is not enough.
@@ -782,13 +785,24 @@ static bool check_common_arm_of(const CheckGraph* graph, const CheckStream* stre
     const bool void_cast = op == CHECK_OP_CAST &&
                            type_kind(types, type_unqualified(type_strip_aligned(types, check_stream_type(stream, node)))) == BUSTER_TYPE_KIND_VOID;
     const bool result = node < graph->count && (void_cast ||
-                        (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA || op == CHECK_OP_SELECT ? arm_effects[node] != 0 : check_common_node_effect(graph, node)));
+                        (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA || op == CHECK_OP_SELECT || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR ?
+                         (arm_effects[node] & BUSTER_CHECK_DISCARD_ARM) != 0 : check_common_node_effect(graph, node)));
     return result;
 }
 
 static bool check_common_arm_at(const CheckCommonEmission* emission, uint32_t node)
 {
     return check_common_arm_of(&emission->input->graph, emission->stream, emission->types, emission->arm_effects, node);
+}
+
+// Only logical roots add to the existing statement/comma discard policy. Other wrappers keep their old handling.
+static bool check_common_node_effect_at(const CheckCommonEmission* emission, uint32_t node)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const bool result = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR ? check_common_arm_at(emission, node) :
+                        check_common_node_effect(graph, node);
+    return result;
 }
 
 // One conditional, comma or selected-value entry, after every operand's entry.
@@ -801,6 +815,99 @@ static bool check_common_arm_effect(const CheckGraph* graph, const CheckStream* 
     const bool result = op == CHECK_OP_CONDITIONAL ? check_common_arm_of(graph, stream, types, arm_effects, first) || check_common_arm_of(graph, stream, types, arm_effects, second) :
                         op == CHECK_OP_COMMA ? check_common_arm_of(graph, stream, types, arm_effects, first) :
                         op == CHECK_OP_SELECT ? check_common_arm_of(graph, stream, types, arm_effects, graph->operand0[node]) : check_common_node_effect(graph, node);
+    return result;
+}
+
+// An ordinary direct call whose result Clang allows to be discarded. The use's visible declaration owns its
+// inherited contracts; a later annotation, an expired block declaration or an overloaded candidate must not leak.
+// Builtin and indirect-call discard contracts are separate work: keep their existing logical warning here.
+// Units with a result-contract typedef also keep their warning: canonical types do not retain its returned-type sugar.
+static bool check_common_logical_call(const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                      const Parser* parser, const Preprocessor* pp, uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    uint32_t callee = graph->operand0[node];
+    for (uint32_t steps = 0; callee < graph->count && steps < graph->count; steps += 1)
+    {
+        const CheckOp op = graph->ops[callee];
+        if (op != CHECK_OP_SELECT && op != CHECK_OP_ADDRESS && op != CHECK_OP_DEREFERENCE && op != CHECK_OP_CONVERT)
+        {
+            break;
+        }
+        callee = graph->operand0[callee];
+    }
+    const uint32_t token = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+    const uint32_t declaration = input->declarations != NULL && token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
+    const TypeId type = node < stream->count ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, node))) : 0;
+    bool result = !input->typedef_result_contracts && declaration < input->token_count && token < parser->tokens.count && input->declaration_kinds != NULL &&
+                  input->declaration_kinds[declaration] == C_BINDING_FUNCTION && check_stream_overload_head(stream, callee) == 0 &&
+                  type != 0 && type_kind(types, type) != BUSTER_TYPE_KIND_ENUM;
+    if (result)
+    {
+        const CheckInputAttributes* attributes = check_sparse_wide_present(input->attributes) ? check_input_attributes_at(input, declaration) : NULL;
+        for (uint32_t i = 0; result && attributes != NULL && i < attributes->count; i += 1)
+        {
+            const CheckInputAttribute* attribute = attributes->records + i;
+            const bool contract = attribute->kind == CHECK_ATTRIBUTE_CONST || attribute->kind == CHECK_ATTRIBUTE_PURE ||
+                                  attribute->kind == CHECK_ATTRIBUTE_WARN_UNUSED_RESULT;
+            result = !contract || attribute->ignored || attribute->subject_ignored;
+        }
+        const uint32_t name = parser->tokens.names[token];
+        result = result && !pp_library_builtin(&pp->options, intern_bytes(pp->table, name), intern_length(pp->table, name));
+    }
+    return result;
+}
+
+// Clang asks whether discarding each logical operand would itself warn, not whether any descendant has an effect.
+// Thus f()+x, (f(),x), and a nonvoid cast still warn. This separate bit leaves existing nonlogical discard policy
+// unchanged while carrying the precise result path through wrappers. It is syntactic, including short-circuited arms.
+static bool check_common_logical_operand(const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                         const Parser* parser, const Preprocessor* pp, const uint8_t* arm_effects, uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const TypeId type = node < stream->count ? type_strip_aligned(types, check_stream_type(stream, node)) : 0;
+    bool result = false;
+    if (node < graph->count && node < stream->count)
+    {
+        if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA || op == CHECK_OP_SELECT || op == CHECK_OP_CONVERT ||
+            op == CHECK_OP_STATEMENT_VALUE || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
+        {
+            result = (arm_effects[node] & BUSTER_CHECK_DISCARD_LOGICAL) != 0;
+        }
+        else if (op == CHECK_OP_CALL)
+        {
+            result = check_common_logical_call(input, stream, types, parser, pp, node);
+        }
+        else
+        {
+            const bool volatile_read = type != 0 && (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) != 0 &&
+                                       check_stream_category(stream, node) == CHECK_LVALUE && !type_kind_is_array(type_kind(types, type));
+            result = volatile_read || (op == CHECK_OP_CAST && type != 0 && type_kind(types, type) == BUSTER_TYPE_KIND_VOID) ||
+                     op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN) ||
+                     op == CHECK_OP_VARARGS || op == CHECK_OP_BUILTIN_ATOMIC;
+        }
+    }
+    return result;
+}
+
+static bool check_common_logical_fact(const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                      const Parser* parser, const Preprocessor* pp, const uint8_t* arm_effects, uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    const CheckOp op = graph->ops[node];
+    const uint32_t first = op == CHECK_OP_COMMA || op == CHECK_OP_CONDITIONAL ? graph->operand1[node] : graph->operand0[node];
+    const uint32_t second = op == CHECK_OP_CONDITIONAL ? graph->operand2[node] : graph->operand1[node];
+    const bool omitted = op == CHECK_OP_CONDITIONAL && graph->operand0[node] == first;
+    bool result = !omitted && check_common_logical_operand(input, stream, types, parser, pp, arm_effects, first);
+    if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
+    {
+        result |= check_common_logical_operand(input, stream, types, parser, pp, arm_effects, second);
+    }
+    else if (op == CHECK_OP_COMMA)
+    {
+        result |= check_common_literal_zero(parser, stream, graph, first);
+    }
     return result;
 }
 
@@ -1207,7 +1314,7 @@ static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t no
     const uint32_t left_result = check_common_result_root(graph, left_node);
     const bool left_effect = left_node < graph->count ?
                              (graph->ops[left_node] == CHECK_OP_CONDITIONAL ? check_common_arm_at(emission, left_node) :
-                              check_common_node_effect(graph, left_result)) :
+                              check_common_node_effect_at(emission, left_result)) :
                              check_common_expression_has_effect(parser, left_start, comma);
     // A left operand that resolves to a literal 0 through commas of its own stays quiet, like the
     // `expr, 0` result does — a bare `0, x` still reports the `0`, and so does a conditional's `0` arm.
@@ -1315,7 +1422,7 @@ static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node)
         const bool right_zero = check_common_literal_zero(parser, stream, graph, zero_node);
         const bool right_effect = right_node < graph->count ?
                                   (graph->ops[right_node] == CHECK_OP_CONDITIONAL ? check_common_arm_at(emission, right_node) :
-                                   check_common_node_effect(graph, right_result)) :
+                                   check_common_node_effect_at(emission, right_result)) :
                                   check_common_expression_has_effect(parser, right_start, parent);
         if (right_start < parent && !right_void && !right_zero && !right_effect)
         {
@@ -1381,7 +1488,7 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
              !(role == PARSE_ROLE_CLOSE_CAST && check_common_void_cast(parser, emission->pp, emission->input, emission->stream, emission->types, token)) &&
              parser->tokens.kinds[token] != PARSE_KIND_L_PAREN &&
              parser->tokens.kinds[token] != PARSE_KIND_PLUSPLUS && parser->tokens.kinds[token] != PARSE_KIND_MINUSMINUS &&
-             !check_common_node_effect(graph, node))
+             !check_common_node_effect_at(emission, node))
     {
         // A discarded member read points at the member's name, like the comma's left operand does.
         const uint32_t report = role == PARSE_ROLE_CLOSE_CAST ? check_common_cast_opener(parser, token) :
@@ -4548,9 +4655,10 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
 // effect, in one pass over the nodes in graph order, so that its operands' and arguments' already hold, and then which
 // nodes are evaluated. An operand that doesn't precede its node, which the graph's validation rules out, gives it every
 // bit of reach. False where scratch can't hold them.
-static bool check_common_facts(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
+static bool check_common_facts(const CheckInput* input, const CheckStream* stream, const TypeTable* types, const Parser* parser, const Preprocessor* pp,
                                const CheckProgram* program, const CheckCommonEnabled* enabled, Arena* scratch, CheckCommonFacts* facts)
 {
+    const CheckGraph* graph = &input->graph;
     uint32_t* parents = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, graph->count) : NULL;
     uint8_t* used = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
     uint8_t* reach = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
@@ -4591,9 +4699,13 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
                 }
             }
             reach[node] = bits;
-            if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA || op == CHECK_OP_SELECT)
+            if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA || op == CHECK_OP_SELECT || op == CHECK_OP_CONVERT ||
+                op == CHECK_OP_STATEMENT_VALUE || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
             {
-                arm_effects[node] = check_common_arm_effect(graph, stream, types, arm_effects, node);
+                const bool logical = check_common_logical_fact(input, stream, types, parser, pp, arm_effects, node);
+                const bool arm = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR ? logical :
+                                 check_common_arm_effect(graph, stream, types, arm_effects, node);
+                arm_effects[node] = (uint8_t)((arm ? BUSTER_CHECK_DISCARD_ARM : 0u) | (logical ? BUSTER_CHECK_DISCARD_LOGICAL : 0u));
             }
         }
         evaluated = check_common_evaluated(graph, stream, types, parser, program, parents, scratch);
@@ -5313,7 +5425,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     check_common_dangling_else(parser, pp, input, scratch);
     check_common_switches(parser, pp, input, stream, types, &spell, program, scratch);
     CheckCommonFacts facts = { 0 };
-    if (!check_common_facts(&input->graph, stream, types, parser, program, &enabled, scratch, &facts))
+    if (!check_common_facts(input, stream, types, parser, pp, program, &enabled, scratch, &facts))
     {
         check_common_exhausted(pp);
     }

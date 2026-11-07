@@ -4048,6 +4048,26 @@ expression, parenthesized or not; a comma operand with a call, assignment or
 increment has an effect and does not get the left-operand warning. Its reports
 complete with the function's closing brace, as Clang's do, after the body's
 own warnings and before an unused declaration's.
+Discarded scalar `&&` and `||` expressions also stay quiet when either
+operand's result path accepts discard (#1390): an ordinary direct call,
+assignment, increment, volatile read, or a nested logical expression with
+one of those operands. Commas follow their right operand (including the
+literal-zero sequencing idiom), ordinary conditionals follow their value
+arms, omitted-middle conditionals follow only their false arm, and statement
+expressions follow their final result. A call beneath arithmetic, a comparison,
+an explicit nonvoid cast, or a conditional's condition does not silence the
+unused logical result. The rule is syntactic even for a short-circuited operand.
+Accepted `pure`, `const`, and `warn_unused_result` function contracts retain
+the logical warning and inherit per kind through compatible source-visible
+redeclarations, without changing earlier uses or leaking block declarations.
+Indirect calls, calls resolved through overload tables, builtin-specific discard contracts and tagged
+return contracts remain outside this logical-warning slice. A unit containing
+an accepted `warn_unused_result` typedef conservatively keeps the existing
+logical-call warnings: canonical result types do not retain the typedef and
+`typeof` provenance needed to rule out such contracts safely.
+The original fixtures in `c_check_logical_unused_driver_test.c` compare the
+complete Clang output, warning policy, scalar/vector paths and requested lanes
+in syntax-only and object modes.
 `-Warray-bounds` reports a direct array object, including a nested subscript
 such as `b[1][5]` at `b`, treats a zero extent as unknown, and leaves
 struct-member arrays to a full bounds analysis. `-Wunused-function` reports a
@@ -4079,7 +4099,8 @@ functions only where `-Wreturn-type` is enabled.
 
 The graph's passes share one pass in graph order, `check_common_facts`, which
 gives each node its parent, whether another node uses its value, whether it is
-evaluated, a conditional's or comma's arm effect, and its reach: a bit each for
+evaluated, a conditional's or comma's arm effect, a separate logical-discard
+fact in the same byte, and its reach: a bit each for
 whether its subtree holds a node whose own warning may fire, a division by a
 constant, or a comparison (#1340). The expression walk starts only at a root that
 reaches something or whose discarded expression may get the statement's
