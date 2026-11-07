@@ -39,7 +39,7 @@ static void check_test_driver_sign_compare(CheckTest* test, const char* clang, c
         { "complemented narrow unsigned can be negative", "int f(unsigned short b,unsigned m){return ~b<m;}\n", 1, NULL },
         { "subtraction from narrow unsigned can be negative", "int f(unsigned short b,unsigned m){return b-1<m;}\n", 1, NULL },
         { "nonnegative constant remains quiet", "int f(unsigned long m){return 3<m;}\n", 0, NULL },
-        { "negative constant still warns", "int f(unsigned long m){return -1<m;}\n", 1, NULL },
+        { "negative constant still warns", "int f(unsigned long m){return -2<m;}\n", 1, NULL },
         { "wider signed type represents unsigned int", "int f(unsigned b,long m){return b<m;}\n", 0, NULL },
         { "wide signed and unsigned remain different", "int f(unsigned long b,long m){return b<m;}\n", 1, NULL },
         { "both narrow operands promote to signed int", "int f(signed char b,unsigned short m){return b<m;}\n", 0, NULL },
