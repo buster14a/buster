@@ -14,11 +14,11 @@
 //    each phi operand a use on its edge: USE[b] = U[b] | (P[b] & ~D[b]), then OUT[b] |= P[b] after the solve.
 // 2. A value gets an interval per block it is defined in or live into, from its definition or the block's start to its
 //    last use or the block's end, and an unused definition one position. A block continues its layout predecessor's
-//    ranges only along a straight-line CFG chain, when it has no phis and every value live into it leaves that
-//    predecessor live. Alternative handlers and loop headers start independent ranges, so pressure or clobbers in
-//    one handler do not constrain another handler's entry. Every value of a continuing entry state continues, so
-//    that a fragment transition at its start, which runs inside the block, never meets a value an edge brought
-//    there. A range is cut around each fixed range of its class that blocks every register the
+//    ranges when there is a CFG edge between them, it has no phis and every value live into it leaves that
+//    predecessor live. Unrelated layout neighbors, such as alternative dispatch handlers, have independent ranges:
+//    a handler must not inherit a sibling's spill state solely through layout order. Every value of a continuing
+//    entry state continues, so that a fragment transition at its start, which runs inside the block, never meets a
+//    value an edge brought there. A range is cut around each fixed range of its class that blocks every register the
 //    value may take (a call's clobbers for a double): the allocator takes a fixed range's registers from every
 //    interval it overlaps, so the piece over it goes to memory and the pieces around it keep their registers, where
 //    the whole range couldn't have one for a use that needs it. Intervals are numbered by value, then position, so
@@ -1206,25 +1206,30 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                 error = TIER1_CFG_INVALID;
             }
         }
-        // Only a straight-line CFG chain continues its layout predecessor's state (see 2. above). Layout adjacency
-        // alone can join mutually exclusive dispatch handlers: a spill in one then becomes another's entry contract,
-        // and a fixed clobber narrows registers for the entire merged interval. Keep both ends of branches/joins
-        // independent; the ordinary edge moves reconcile their locations. Count each entry state for those moves.
+        // Continuing a layout predecessor's state requires an actual CFG edge (see 2. above). Adjacency alone can
+        // join alternative dispatch handlers: a spill in one becomes another's entry contract even on paths that
+        // never visit it. Keep coalescing along real edges, including branches and joins; splitting every such edge
+        // adds intervals and moves unnecessarily. Count each entry state for the ordinary edge moves.
         uint8_t* merges = ready ? arena_push(scratch, blocks, 1) : 0;
         uint32_t* entering = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
         ready = ready && merges != 0 && entering != 0;
         const uint32_t* const predecessor_offsets = input->predecessor_offsets;
         const uint32_t* const predecessors = input->predecessors;
-        const uint32_t* const successor_offsets = input->successor_offsets;
         const uint32_t* const phi_offsets = input->phi_offsets;
         for (uint32_t b = 0; ready && b < blocks; b += 1)
         {
             const uint64_t* in = liveness.in + (uint64_t)b * words;
             const uint32_t incoming = predecessor_offsets[b];
-            const bool single_predecessor = predecessor_offsets[b + 1] - incoming == 1;
-            bool merge = b != 0 && single_predecessor && predecessors[incoming] == b - 1 &&
-                         successor_offsets[b] - successor_offsets[b - 1] == 1 &&
-                         phi_offsets[b] == phi_offsets[b + 1];
+            const uint32_t incoming_end = predecessor_offsets[b + 1];
+            bool merge = b != 0 && phi_offsets[b] == phi_offsets[b + 1];
+            if (merge)
+            {
+                merge = false;
+                for (uint32_t e = incoming; e < incoming_end; e += 1)
+                {
+                    merge |= predecessors[e] == b - 1;
+                }
+            }
             uint32_t count = phi_offsets[b + 1] - phi_offsets[b];
             for (uint64_t w = 0; w < words; w += 1)
             {

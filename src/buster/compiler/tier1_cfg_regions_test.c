@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #1216: allocation regions follow straight CFG chains. A cold sibling's pressure or clobbers must not dictate
+// #1216: allocation regions follow actual CFG edges. A cold sibling's pressure or clobbers must not dictate
 // the entry state of a hot handler just because it precedes that handler in layout. Included by tier1_cfg_test.c.
 
 static bool tier1_cfg_test_region_edge_registers(const Tier1CfgInput* input, const Tier1CfgAllocation* result, uint32_t from, uint32_t to)
@@ -37,11 +37,11 @@ static bool tier1_cfg_test_region_spilled(const Tier1CfgInput* input, const Tier
     return spilled;
 }
 
-// Entry 0 -> dispatch 1 -> cold 2 / hot 3; both handlers return to 1. The two carried values fit in registers.
-// With pressure, a required temporary in 2 evicts one, but neither 1 -> 3 nor 3 -> 1 visits that temporary.
+// Entry 0 -> dispatch 1 -> two sibling handlers; both return to 1. The two carried values fit in registers.
+// With pressure, cold 2's required temporary evicts one, but neither 1 -> hot 3 nor 3 -> 1 visits that temporary.
 // Merging by layout alone instead makes 3 inherit 2's spill, so the hot edge stores it and the handler reloads it.
-// With a partial clobber in 2, the old merged interval loses that register even at 1, before either branch is taken.
-// The phi-free variant also covers a join with several predecessors and a layout predecessor whose sole edge is to it.
+// With a partial clobber, hot 2 precedes cold 3: the old merged interval loses that register even in 1 and 2.
+// The phi-free variant also covers a join with several predecessors; its real preheader edge may remain merged.
 static void tier1_cfg_test_region_siblings(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
 {
     static Tier1CfgTestBuilder builder;
@@ -51,6 +51,8 @@ static void tier1_cfg_test_region_siblings(Tier1CfgTestTally* tally, Arena* outp
         {
             for (uint32_t clobber = 0; clobber < 2; clobber += 1)
             {
+                const uint32_t cold = clobber != 0 ? 3 : 2;
+                const uint32_t hot = clobber != 0 ? 2 : 3;
                 memset(&builder, 0, sizeof(builder));
                 builder.block_count = 4;
                 builder.instructions[0] = 2;
@@ -62,8 +64,8 @@ static void tier1_cfg_test_region_siblings(Tier1CfgTestTally* tally, Arena* outp
                 builder.registers[class] = class == BUSTER_TIER1_ALLOCATE_MASK ? 0x06 : 0x03;
                 const uint32_t registers = builder.registers[class];
                 tier1_cfg_test_edge(&builder, 0, 1);
-                tier1_cfg_test_edge(&builder, 2, 1);
-                tier1_cfg_test_edge(&builder, 3, 1);
+                tier1_cfg_test_edge(&builder, cold, 1);
+                tier1_cfg_test_edge(&builder, hot, 1);
                 tier1_cfg_test_edge(&builder, 1, 2);
                 tier1_cfg_test_edge(&builder, 1, 3);
                 uint32_t carried[2];
@@ -86,19 +88,19 @@ static void tier1_cfg_test_region_siblings(Tier1CfgTestTally* tally, Arena* outp
                 if (clobber != 0)
                 {
                     builder.fixed_count = 1;
-                    builder.fixed_block[0] = 2;
+                    builder.fixed_block[0] = cold;
                     builder.fixed_instruction[0] = 0;
                     builder.fixed_class[0] = class;
                     builder.fixed_register[0] = class == BUSTER_TIER1_ALLOCATE_MASK ? 0x02 : 0x01;
                 }
                 else
                 {
-                    const uint32_t temporary = tier1_cfg_test_value(&builder, 2, 0, class, registers);
+                    const uint32_t temporary = tier1_cfg_test_value(&builder, cold, 0, class, registers);
                     tier1_cfg_test_definition_use(&builder, temporary);
-                    tier1_cfg_test_use(&builder, temporary, 2, 1, true);
+                    tier1_cfg_test_use(&builder, temporary, cold, 1, true);
                 }
-                tier1_cfg_test_use(&builder, carried[0], 3, 0, true);
-                tier1_cfg_test_use(&builder, carried[1], 3, 1, true);
+                tier1_cfg_test_use(&builder, carried[0], hot, 0, true);
+                tier1_cfg_test_use(&builder, carried[1], hot, 1, true);
                 const uint64_t saved = output->length;
                 Tier1CfgInput input;
                 const bool built = tier1_cfg_test_build(&builder, output, &input);
@@ -121,15 +123,19 @@ static void tier1_cfg_test_region_siblings(Tier1CfgTestTally* tally, Arena* outp
                                 uint32_t location = 0;
                                 uint8_t kind = 0;
                                 const bool header = tier1_cfg_entry_location(&result, carried[v], input.block_starts[1], &location, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER;
-                                const bool hot = tier1_cfg_entry_location(&result, carried[v], input.block_starts[3], &location, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER;
-                                tier1_cfg_test_expect(tally, header && hot, "dispatch and hot-handler entries keep both carried values in registers");
-                                tier1_cfg_test_expect(tally, !tier1_cfg_test_region_spilled(&input, &result, carried[v], 1) && !tier1_cfg_test_region_spilled(&input, &result, carried[v], 3), "the carried values never spill on the hot path");
-                                cold_spilled |= tier1_cfg_test_region_spilled(&input, &result, carried[v], 2);
-                                const uint32_t interval = tier1_cfg_interval_oracle(&result, carried[v], input.block_starts[1]);
-                                tier1_cfg_test_expect(tally, interval != BUSTER_TIER1_CFG_NONE && result.intervals.starts[interval] == input.block_starts[1], "a loop entry does not continue its preheader's interval");
+                                const bool hot_entry = tier1_cfg_entry_location(&result, carried[v], input.block_starts[hot], &location, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER;
+                                tier1_cfg_test_expect(tally, header && hot_entry, "dispatch and hot-handler entries keep both carried values in registers");
+                                tier1_cfg_test_expect(tally, !tier1_cfg_test_region_spilled(&input, &result, carried[v], 1) && !tier1_cfg_test_region_spilled(&input, &result, carried[v], hot), "the carried values never spill on the hot path");
+                                cold_spilled |= tier1_cfg_test_region_spilled(&input, &result, carried[v], cold);
+                                const uint32_t cold_interval = tier1_cfg_interval_oracle(&result, carried[v], input.block_starts[cold]);
+                                const uint32_t hot_interval = tier1_cfg_interval_oracle(&result, carried[v], input.block_starts[hot]);
+                                tier1_cfg_test_expect(tally, cold_interval != BUSTER_TIER1_CFG_NONE && hot_interval != BUSTER_TIER1_CFG_NONE && cold_interval != hot_interval, "mutually exclusive siblings keep distinct intervals");
+                                const uint32_t header_interval = tier1_cfg_interval_oracle(&result, carried[v], input.block_starts[1]);
+                                const uint32_t following_interval = clobber != 0 ? hot_interval : cold_interval;
+                                tier1_cfg_test_expect(tally, header_interval != BUSTER_TIER1_CFG_NONE && header_interval == following_interval, "the dispatch's real layout edge may still continue an interval");
                             }
                             tier1_cfg_test_expect(tally, cold_spilled, "the cold region retains its necessary spill");
-                            tier1_cfg_test_expect(tally, tier1_cfg_test_region_edge_registers(&input, &result, 1, 3) && tier1_cfg_test_region_edge_registers(&input, &result, 3, 1), "the hot dispatch and back edge need no spill or reload moves");
+                            tier1_cfg_test_expect(tally, tier1_cfg_test_region_edge_registers(&input, &result, 1, hot) && tier1_cfg_test_region_edge_registers(&input, &result, hot, 1), "the hot dispatch and back edge need no spill or reload moves");
                             tier1_cfg_test_expect(tally, result.split_count == 0, "region boundaries use CFG edges, not within-block splits");
                         }
                         arena_pop_to(output, mark);

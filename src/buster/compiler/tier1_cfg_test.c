@@ -615,8 +615,23 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                     const uint32_t others = destination < BUSTER_TIER1_CFG_SPILL && destination / 32 == class && destination % 32 != input->scratch_registers[class] ? input->registers[class] & ~(UINT32_C(1) << (destination % 32)) : 0;
                     if (others != 0)
                     {
+                        const uint64_t refused = tally->destination_refused;
                         result.move_destinations[m] = class * 32 + (uint32_t)__builtin_ctz(others);
                         const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->destination_refused);
+                        if (rejected && tally->destination_refused == refused && tally->failures < 20)
+                        {
+                            // Keep the acceptance checks unchanged, but identify the exact mutant when the two
+                            // independent checkers disagree about a split's destination.
+                            Tier1CfgCheck diagnostic = { 0 };
+                            const bool accepted = tier1_cfg_verify(input, &result, scratch, &diagnostic);
+                            uint32_t split = 0;
+                            while (split < result.split_count && result.split_move_offsets[split + 1] <= m)
+                            {
+                                split += 1;
+                            }
+                            const uint32_t position = split < result.split_count ? result.split_positions[split] : BUSTER_TIER1_CFG_NONE;
+                            printf("test-tier1-cfg: %s: certificate accepted split destination mutant %u (value %u, source %u, destination %u -> %u, split %u at %u); verifier: %s (block %u value %u position %u); input %u blocks, %u values\n", name, m, result.move_values[m], result.move_sources[m], destination, result.move_destinations[m], split, position, accepted ? "accepted on repeat" : diagnostic.reason, diagnostic.block, diagnostic.value, diagnostic.position, input->block_count, input->value_count);
+                        }
                         result.move_destinations[m] = destination;
                         tally->destination_mutants += 1;
                         tally->destination_killed += rejected;
@@ -1494,7 +1509,9 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
                 {
                     tally.oracle = sample % oracle_every == 0;
                     tally.oracle_mutants = sample % (oracle_every * 4) == 0;
-                    tier1_cfg_test_case(&tally, &input, &output, &scratch, "generated case", sample % 8 == 0, 0, 0, false);
+                    char name[128];
+                    snprintf(name, sizeof(name), "generated case (seed=%" PRIu64 ", sample=%" PRIu64 ")", seed, sample);
+                    tier1_cfg_test_case(&tally, &input, &output, &scratch, name, sample % 8 == 0, 0, 0, false);
                 }
                 arena_pop_to(&output, output_saved);
                 arena_pop_to(&work, work_saved);
