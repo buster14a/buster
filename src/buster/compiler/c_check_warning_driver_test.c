@@ -20,6 +20,46 @@ struct CheckDriverDefaultWarningFixture
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        .name = "constant initializer comparison pairs",
+        .source = "int a=1<2 & 3<4; static int b=1==2 ^ 3!=4; int f(void){return a+b;}\n",
+    },
+    {
+        .name = "constant initializer single comparisons",
+        .source = "int a=1<2 & 3; static int b=1 ^ 2!=3; int f(void){return a+b;}\n",
+        .warnings = 2,
+        .notes = 4,
+    },
+    {
+        .name = "enum comparison pairs",
+        .source = "enum E{A=1<2 & 3<4,B=1==2 ^ 3!=4};int f(void){return A+B;}\n",
+    },
+    {
+        .name = "enum single comparisons",
+        .source = "enum E{A=1<2 & 3,B=1 ^ 2!=3};int f(void){return A+B;}\n",
+        .warnings = 2,
+        .notes = 4,
+    },
+    {
+        .name = "unevaluated comparison pairs",
+        .source = "unsigned long f(int a,int b,int c,int d){return sizeof(a<b & c<d);}\n",
+    },
+    {
+        .name = "unevaluated single comparison",
+        .source = "unsigned long f(int a,int b,int c){return sizeof(a<b & c);}\n",
+        .warnings = 1,
+        .notes = 2,
+    },
+    {
+        .name = "unselected generic comparison pair",
+        .source = "int f(int a,int b,int c,int d){return _Generic(0,int:1,default:a<b ^ c<d);}\n",
+    },
+    {
+        .name = "unselected generic single comparison",
+        .source = "int f(int a,int b,int c){return _Generic(0,int:1,default:a<b ^ c);}\n",
+        .warnings = 1,
+        .notes = 2,
+    },
+    {
         .name = "two relational operands of each bitwise operator",
         .source = "int f(int a,int b,int c,int d){return (a<b & c<d)+(a>b | c>d)+(a<=b ^ c>=d);}\n",
     },
