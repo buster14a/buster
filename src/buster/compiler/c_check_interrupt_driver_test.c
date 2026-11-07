@@ -310,12 +310,14 @@ static void check_test_driver_interrupts(CheckTest* test, const char* clang, con
     }
     free(expected_lines);
     free(actual_lines);
-    // A definition's code: its frame isn't the lowering's yet (check_program_interrupt), where clang compiles it.
+    // A definition's code: Tier 0's frame (Tier0Function.interrupt, which check_test_driver_interrupt_handlers runs), as clang
+    // compiles it; but a variadic one, which Tier 0's frame takes none of, refused by name.
     static const char* const definitions[] = {
         "__attribute__((interrupt)) void f(void *p) { (void)p; }\n",
         "__attribute__((interrupt)) static void f(void *p, unsigned long e) { (void)p; (void)e; }\n",
         "__attribute__((interrupt)) void f(void *p); void f(void *p) { (void)p; }\n",
         "__attribute__((no_caller_saved_registers)) void g(void); __attribute__((interrupt)) void f(void *p) { (void)p; g(); }\n",
+        "__attribute__((interrupt)) void f(void *p, ...) { (void)p; }\n",
     };
     char object[PATH_MAX];
     snprintf(object, sizeof(object), "%s/interrupt.o", directory);
@@ -332,9 +334,11 @@ static void check_test_driver_interrupts(CheckTest* test, const char* clang, con
             char* arguments[] = { (char*)executable, "-std=gnu17", "-c", source, "-o", object, p == 1 ? "--scalar" : NULL, NULL };
             const int status = check_test_driver_spawn(arguments, &text);
             char description[1024];
-            snprintf(description, sizeof(description), "interrupt definition %u by the %s path is refused by name where clang compiles it (status %d, clang %d: %s)", d,
-                     p == 1 ? "scalar" : "vector", status, oracle, text != NULL ? text : "");
-            check_test_expect(test, oracle == 0 && status == 1 && text != NULL && strstr(text, "unsupported: interrupt service routines") != NULL, description);
+            const bool variadic = d + 1 == BUSTER_ARRAY_LENGTH(definitions);
+            snprintf(description, sizeof(description), "interrupt definition %u by the %s path %s as clang compiles it (status %d, clang %d: %s)", d,
+                     p == 1 ? "scalar" : "vector", variadic ? "is refused by name" : "compiles", status, oracle, text != NULL ? text : "");
+            check_test_expect(test, oracle == 0 && (variadic ? status == 1 && text != NULL && strstr(text, "unsupported: variadic interrupt service routines") != NULL :
+                                                               status == 0 && text != NULL && text[0] == 0), description);
             free(text);
         }
     }

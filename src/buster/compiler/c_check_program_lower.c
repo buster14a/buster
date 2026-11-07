@@ -974,14 +974,15 @@ static const char* check_lower_convention(const TypeTable* types, TypeId functio
 // (CSR_64_RT_AllRegs and its _AVX, which AVX-512 keeps too); and no_caller_saved_registers' every one (CSR_64_AllRegs and
 // its _AVX and _AVX512): r11 too, xmm0 to xmm15, whole YMMs with AVX, and with AVX-512F zmm0 to zmm31 and k0 to k7, whole
 // with BW (a kmovq's 8 bytes) and a kmovw's 16 bits without, as LLVM spills them. (Its _NoSSE set, -mgeneral-regs-only's,
-// is never asked for: the checker takes no target without SSE.) Tier 0 leaves out the result's registers, which LLVM's
-// return lowering takes out of the set. Nothing for another convention.
-static void check_lower_preserve(const TypeTable* types, TypeId function, uint64_t target, Tier0Function* output)
+// is never asked for: the checker takes no target without SSE.) An interrupt service routine (`interrupt`, LLVM's
+// x86_intrcc) keeps that same set. Tier 0 leaves out the result's registers, which LLVM's return lowering takes out of the
+// set. Nothing for another convention.
+static void check_lower_preserve(const TypeTable* types, TypeId function, uint64_t target, bool interrupt, Tier0Function* output)
 {
     const TypeFunctionABI convention = type_function_abi_kind(types, function);
     const bool most = convention == TYPE_FUNCTION_ABI_PRESERVE_MOST;
     const bool all = convention == TYPE_FUNCTION_ABI_PRESERVE_ALL;
-    const bool every = convention == TYPE_FUNCTION_ABI_NO_CALLER_SAVED;
+    const bool every = convention == TYPE_FUNCTION_ABI_NO_CALLER_SAVED || interrupt;
     const bool wide = every && (target & BUSTER_X86_FEATURE(AVX512F)) != 0;
     const uint16_t general = (uint16_t)(1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RCX | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RSI |
                                         1u << X86_REGISTER_RDI | 1u << X86_REGISTER_R8 | 1u << X86_REGISTER_R9 | 1u << X86_REGISTER_R10);
@@ -14406,11 +14407,11 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             // GNU's function multiversioning: a version's symbol and the resolver's ifunc that calls reach.
             check_lower_unsupported(writer, "functions of several target versions (target_clones, or target attributes of other strings)");
         }
-        else if (check_program_interrupt(program, b))
+        else if (check_program_interrupt(program, b) && writer->variadic)
         {
-            // x86's interrupt service routine (#147, CheckProgram.object_interrupt): its frame, which saves every register
-            // it touches and returns with iretq past the CPU's frame and error code, isn't Tier 0's yet.
-            check_lower_unsupported(writer, "interrupt service routines");
+            // x86's interrupt service routine (#147, CheckProgram.object_interrupt) is Tier 0's frame (Tier0Function.interrupt),
+            // which takes no variadic arguments: the processor pushes none.
+            check_lower_unsupported(writer, "variadic interrupt service routines");
         }
         else if (convention != NULL)
         {
@@ -14880,20 +14881,27 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         function->returns_twice = writer->returns_twice;
         function->eh_return = writer->eh_return;
         // A preserving convention's registers (#147), which Tier 0's frame keeps but for a tail call's, __builtin_eh_return's
-        // or __builtin_setjmp's frame, whose teardowns and saves know nothing of them.
+        // or __builtin_setjmp's frame, whose teardowns and saves know nothing of them. An interrupt service routine's are every
+        // register, and its frame the processor's (Tier0Function.interrupt: its parameters, 1 or 2, which the checker made
+        // its frame's pointer and its error code), returned from with iretq.
+        const bool handler = !bare && check_program_interrupt(program, b);
         if (!bare)
         {
-            check_lower_preserve(types, type, writer->target.features, function);
+            check_lower_preserve(types, type, writer->target.features, handler, function);
         }
+        function->interrupt = handler ? (uint8_t)function->parameter_count : 0;
         if (tier0_preserving(function) && (writer->tails || writer->eh_return || writer->returns_twice))
         {
             const bool every = type_function_abi_kind(types, type) == TYPE_FUNCTION_ABI_NO_CALLER_SAVED;
-            check_lower_unsupported(writer, writer->eh_return ? (every ? "__builtin_eh_return in a function with no_caller_saved_registers" :
-                                                                         "__builtin_eh_return in a function of the preserve_most or preserve_all calling convention") :
-                                            writer->returns_twice ? (every ? "__builtin_setjmp in a function with no_caller_saved_registers" :
-                                                                             "__builtin_setjmp in a function of the preserve_most or preserve_all calling convention") :
-                                            every ? "musttail calls in a function with no_caller_saved_registers" :
-                                                    "musttail calls in a function of the preserve_most or preserve_all calling convention");
+            static const char* const reasons[3][3] = {
+                { "__builtin_eh_return in an interrupt service routine", "__builtin_eh_return in a function with no_caller_saved_registers",
+                  "__builtin_eh_return in a function of the preserve_most or preserve_all calling convention" },
+                { "__builtin_setjmp in an interrupt service routine", "__builtin_setjmp in a function with no_caller_saved_registers",
+                  "__builtin_setjmp in a function of the preserve_most or preserve_all calling convention" },
+                { "musttail calls in an interrupt service routine", "musttail calls in a function with no_caller_saved_registers",
+                  "musttail calls in a function of the preserve_most or preserve_all calling convention" },
+            };
+            check_lower_unsupported(writer, reasons[writer->eh_return ? 0 : writer->returns_twice ? 1 : 2][handler ? 0 : every ? 1 : 2]);
         }
         function->vectors = writer->vectors;
         function->masks = writer->masks;

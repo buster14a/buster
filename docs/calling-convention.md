@@ -1868,8 +1868,10 @@ A call in a `no_caller_saved_registers` function, or in an x86 `interrupt`
 service routine, of a callee without the attribute on its declaration is
 clang's `-Wexcessive-regsave` warning (#147, `docs/c-checker.md`): the
 callee may clobber the vector registers the caller keeps. An interrupt
-service routine's definition is refused by name ("unsupported: interrupt
-service routines") until Tier 0 has its frame (`check_program_interrupt`).
+service routine's definition keeps that same set of every register in Tier
+0's handler frame (`check_program_interrupt`, `Tier0Function.interrupt`,
+`docs/tier0.md`), which returns with `iretq`; a variadic one is refused by
+name ("unsupported: variadic interrupt service routines").
 
 Tier 0 leaves out the result's registers, which the caller reads (LLVM's
 return lowering takes them out of the set). A definition whose frame Tier 0's

@@ -6382,12 +6382,17 @@ arguments against the function. The checker now gives these as clang does.
   error, which clang doesn't build, has none. Builtins are calls but those
   clang parses as keywords' forms (`va_arg`, `convertvector`, `offsetof`,
   `types_compatible_p`, `choose_expr`). The calls are the graph's in its
-  postorder, clang's order: a call's callee's and arguments' calls first. The
-  lowering refuses an interrupt service routine's definition by name
-  ("unsupported: interrupt service routines") until Tier 0 has its frame:
-  `CheckProgram.object_interrupt` holds each function's first declaration
-  with the attribute, and `check_program_interrupt(program, b)` says whether
-  body `b` is a routine's (that declaration at or before its definition).
+  postorder, clang's order: a call's callee's and arguments' calls first. An
+  interrupt service routine's definition is Tier 0's handler frame
+  (`Tier0Function.interrupt`, `docs/tier0.md`): `CheckProgram.object_interrupt`
+  holds each function's first declaration with the attribute,
+  `check_program_interrupt(program, b)` says whether body `b` is a routine's
+  (that declaration at or before its definition), and the lowering gives it
+  `no_caller_saved_registers`' set of every register (`check_lower_preserve`,
+  LLVM's `CSR_64_AllRegs` of `x86_intrcc`) and its 1 or 2 parameters' kind.
+  A variadic routine, which clang compiles, is refused by name ("unsupported:
+  variadic interrupt service routines"), as are `__builtin_eh_return`,
+  `__builtin_setjmp` and musttail calls in one, as in any preserving frame.
 
   The rest stay refused by name: the attributes whose handlers clang has its
   own (`pass_object_size` and others). Recognizing their names does not
