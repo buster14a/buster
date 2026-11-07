@@ -1546,6 +1546,44 @@ keeps the receipts, each build's profile and the probe.
 paths take. `check_input_resolve_range` went from 5.58% to 4.60% of the cycles. The compile's cycles fell by about a
 fifth as much as its instructions: the tests a visit no longer makes were cheap and well predicted.
 
+## The declaration steps' frames without attributes (#1671)
+
+**Where the declaration steps' time goes.** Probes summed `__rdtsc` deltas by class over `-c sqlite3.c`'s declarators.
+They ran off the 9700X, so their shares are what count, not their values:
+
+| declarator | count | TSC cycles per call |
+| --- | ---: | ---: |
+| a name | 5,431 | about 200 |
+| pointers and a name | 3,834 | about 330 |
+| empty or pointers alone, mostly casts' type names | 9,342 | about 200 |
+| a function's, with its parameters | 5,914 | about 4,000 |
+
+The function declarators take about 80% of the declarators' time. Within them:
+- **Attribute lists.** 1,895 lists, mostly glibc's prototypes', are read at about 3,000 cycles each: about 20%.
+- **Parameters' specifiers.** The 14,783 parameters' specifiers take about 11%.
+- **Type warnings.** `check_input_attribute_type_warnings` takes about 10%.
+- **The rest.** About 60% goes to each parameter's bookkeeping and the function type.
+
+**The change.** 40,403 of the 42,404 frames, the declarations' and the parameters', have no attribute list. Two steps
+now return at once there:
+- **`check_input_attribute_type_warnings`** walked the type to its function before loops over no list. Without lists it
+  warns of nothing and marks nothing.
+- **`check_input_declarator_abi`**, called twice per frame, walked the type again. With no list,
+  `check_input_attribute_requested_abi` gives no ABI, so `check_input_attribute_abi_origin` keeps the origin and
+  `check_input_attribute_abi_with_override` keeps the type.
+
+**Measured on the 9700X.** Main `07b78e0f` against #1680's head, in 8 interleaved rounds, then `measure-compile` each
+way. Every run held the lock on its own. The objects are the same bytes.
+[The record](https://github.com/buster14a/buster-performance/tree/97d4731b20dc4a334c49381ed6dade2473f932dd/docs/measurements/check-input-1671-declarators-2026-11-07)
+keeps the probes and the receipts.
+
+| measure | main | head | difference |
+| --- | ---: | ---: | ---: |
+| wall time | 121.740 ms | 121.490 ms | −0.21% |
+| user cycles | 590.785 M | 589.415 M | −0.23% |
+| user instructions | 1,304.696 M | 1,299.420 M | −0.40% |
+| `check-input` | 46.614 ms | 46.388 ms | −0.23 ms |
+
 ## The passes after checking (#592)
 
 #641 removes more token-domain work from the same handoffs. Initializer plans keep only their ascending
