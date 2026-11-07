@@ -2786,27 +2786,35 @@ static void check_input_attribute_function_types(CheckInputReader* reader, const
 
 // Always inlined (#880), as profile-guided builds do; hot callers: check_input_declarator_step and
 // check_input_declaration.
+// Without attributes it gives back the type and the origin (#1671): no list requests an ABI
+// (check_input_attribute_requested_abi), so check_input_attribute_abi_origin keeps the origin and
+// check_input_attribute_abi_with_override the type, and the walk to the function finds nothing to do.
 static inline __attribute__((always_inline)) TypeId check_input_declarator_abi(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type, uint8_t* origin,
                                                                               bool replace_wrapped_abi)
 {
-    TypeId function = type;
-    uint8_t kind = type_kind(reader->types, function);
-    while (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED)
+    TypeId result = type;
+    if (attributes != NULL)
     {
-        function = reader->types->types.base[type_index(function)];
-        kind = type_kind(reader->types, function);
+        TypeId function = type;
+        uint8_t kind = type_kind(reader->types, function);
+        while (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED)
+        {
+            function = reader->types->types.base[type_index(function)];
+            kind = type_kind(reader->types, function);
+        }
+        // The declaration's conventions in source order first (#147): one the declarator applied already conflicts with an
+        // earlier specifier's at its own attribute, as clang's.
+        if (kind == BUSTER_TYPE_KIND_FUNCTION && attributes->count != 0 && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+        {
+            check_input_attribute_conventions(reader, attributes, type);
+        }
+        if (kind == BUSTER_TYPE_KIND_FUNCTION)
+        {
+            *origin = check_input_attribute_abi_origin(reader, attributes, *origin);
+        }
+        result = check_input_attribute_abi_with_override(reader, attributes, type, replace_wrapped_abi);
     }
-    // The declaration's conventions in source order first (#147): one the declarator applied already conflicts with an
-    // earlier specifier's at its own attribute, as clang's.
-    if (kind == BUSTER_TYPE_KIND_FUNCTION && attributes != 0 && attributes->count != 0 && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
-    {
-        check_input_attribute_conventions(reader, attributes, type);
-    }
-    if (kind == BUSTER_TYPE_KIND_FUNCTION)
-    {
-        *origin = check_input_attribute_abi_origin(reader, attributes, *origin);
-    }
-    return check_input_attribute_abi_with_override(reader, attributes, type, replace_wrapped_abi);
+    return result;
 }
 
 static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* cursor, uint32_t end, CheckInputAttributes** attributes);
@@ -5220,74 +5228,78 @@ static uint32_t check_input_attribute_group_close(const Parser* parser, uint32_t
 static void check_input_attribute_type_warnings(CheckInputReader* reader, CheckInputAttributes* common, CheckInputAttributes* own, TypeId type, uint32_t name,
                                                 uint32_t split, const CheckDeclaratorPart* parts, uint32_t order, TypeId base)
 {
-    TypeId function = type;
-    uint8_t kind = type_kind(reader->types, function);
-    while (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED)
+    // Without lists there is nothing to warn of or to mark, and the walk to the function finds nothing to do (#1671).
+    if (common != NULL || own != NULL)
     {
-        function = reader->types->types.base[type_index(function)];
-        kind = type_kind(reader->types, function);
-    }
-    const bool applies = kind == BUSTER_TYPE_KIND_FUNCTION;
-    // Retain the two list facts that the final kernel checks need. Type attributes moved to a function chunk leave a
-    // nonempty list there even though ProcessDeclAttributes ignores their type effects on that later visit.
-    for (uint32_t pass = 0; pass < 2; pass += 1)
-    {
-        CheckInputAttributes* list = pass == 0 ? common : own;
-        if (list != NULL)
+        TypeId function = type;
+        uint8_t kind = type_kind(reader->types, function);
+        while (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED)
         {
-            list->function_chunk = false;
-            for (uint32_t i = 0; i < list->count; i += 1)
+            function = reader->types->types.base[type_index(function)];
+            kind = type_kind(reader->types, function);
+        }
+        const bool applies = kind == BUSTER_TYPE_KIND_FUNCTION;
+        // Retain the two list facts that the final kernel checks need. Type attributes moved to a function chunk leave a
+        // nonempty list there even though ProcessDeclAttributes ignores their type effects on that later visit.
+        for (uint32_t pass = 0; pass < 2; pass += 1)
+        {
+            CheckInputAttributes* list = pass == 0 ? common : own;
+            if (list != NULL)
             {
-                CheckInputAttribute* attribute = list->records + i;
-                attribute->declaration_prefix = pass == 0;
-                list->function_chunk |= applies && !attribute->specifier_ignored && !attribute->specifier_applied &&
-                                        check_input_attribute_function_typed(reader, attribute);
+                list->function_chunk = false;
+                for (uint32_t i = 0; i < list->count; i += 1)
+                {
+                    CheckInputAttribute* attribute = list->records + i;
+                    attribute->declaration_prefix = pass == 0;
+                    list->function_chunk |= applies && !attribute->specifier_ignored && !attribute->specifier_applied &&
+                                            check_input_attribute_function_typed(reader, attribute);
+                }
             }
         }
-    }
-    // The declaration's type and then its subject checks complete after every parameter's checks.
-    const uint32_t completion = reader->attribute_completion;
-    // Three passes over the lists: where it applies, the specifiers', the trailing ones and the chunks'; where it doesn't,
-    // the chunks', the specifiers' and the trailing ones.
-    for (uint32_t pass = 0; pass < 3; pass += 1)
-    {
-        const bool specifiers = applies ? pass == 0 : pass == 1;
-        const bool chunks = applies ? pass == 2 : pass == 0;
-        const CheckInputAttributes* list = specifiers ? common : own;
-        for (uint32_t i = 0; list != NULL && i < list->count; i += 1)
+        // The declaration's type and then its subject checks complete after every parameter's checks.
+        const uint32_t completion = reader->attribute_completion;
+        // Three passes over the lists: where it applies, the specifiers', the trailing ones and the chunks'; where it doesn't,
+        // the chunks', the specifiers' and the trailing ones.
+        for (uint32_t pass = 0; pass < 3; pass += 1)
         {
-            const CheckInputAttribute* attribute = list->records + i;
-            const bool placed = !attribute->ignored && (specifiers || (chunks ? attribute->first < split : attribute->first >= split));
-            if (placed && attribute->specifier_ignored && check_input_attribute_function_typed(reader, attribute))
+            const bool specifiers = applies ? pass == 0 : pass == 1;
+            const bool chunks = applies ? pass == 2 : pass == 0;
+            const CheckInputAttributes* list = specifiers ? common : own;
+            for (uint32_t i = 0; list != NULL && i < list->count; i += 1)
             {
-                check_input_attribute_function_type_warning(reader, attribute, base, type, name, split, completion);
-            }
-            else if (placed && applies && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->value == CHECK_CALL_IGNORED_X86_32 &&
-                     attribute->convention_count == BUSTER_CHECK_COUNT_NONE && !check_input_attribute_kernel(reader, attribute) &&
-                     list->error == CHECK_ATTRIBUTE_ERROR_NONE && check_input_attribute_pcs_valid(reader, attribute))
-            {
-                check_input_attribute_unsupported_at(reader, attribute, completion);
-            }
-            else if (placed && !applies && check_input_attribute_function_typed(reader, attribute))
-            {
-                // A chunk's type so far: the pointers before it, and the suffixes after its group, which enclose it.
-                TypeId here = type;
-                if (chunks)
+                const CheckInputAttribute* attribute = list->records + i;
+                const bool placed = !attribute->ignored && (specifiers || (chunks ? attribute->first < split : attribute->first >= split));
+                if (placed && attribute->specifier_ignored && check_input_attribute_function_typed(reader, attribute))
                 {
-                    const uint32_t close = check_input_attribute_group_close(reader->parser, attribute->first);
-                    here = base;
-                    bool before = true;
-                    for (uint32_t p = order; before && p != BUSTER_CHECK_NONE; p = parts[p].next)
-                    {
-                        if (parts[p].kind == BUSTER_TYPE_KIND_NONE)
-                        {
-                            continue;
-                        }
-                        before = parts[p].kind == BUSTER_TYPE_KIND_POINTER ? parts[p].token < attribute->first : close != UINT32_MAX && parts[p].token > close;
-                        here = before ? parts[p].type : here;
-                    }
+                    check_input_attribute_function_type_warning(reader, attribute, base, type, name, split, completion);
                 }
-                check_input_attribute_function_type_warning(reader, attribute, here, type, name, split, completion);
+                else if (placed && applies && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->value == CHECK_CALL_IGNORED_X86_32 &&
+                         attribute->convention_count == BUSTER_CHECK_COUNT_NONE && !check_input_attribute_kernel(reader, attribute) &&
+                         list->error == CHECK_ATTRIBUTE_ERROR_NONE && check_input_attribute_pcs_valid(reader, attribute))
+                {
+                    check_input_attribute_unsupported_at(reader, attribute, completion);
+                }
+                else if (placed && !applies && check_input_attribute_function_typed(reader, attribute))
+                {
+                    // A chunk's type so far: the pointers before it, and the suffixes after its group, which enclose it.
+                    TypeId here = type;
+                    if (chunks)
+                    {
+                        const uint32_t close = check_input_attribute_group_close(reader->parser, attribute->first);
+                        here = base;
+                        bool before = true;
+                        for (uint32_t p = order; before && p != BUSTER_CHECK_NONE; p = parts[p].next)
+                        {
+                            if (parts[p].kind == BUSTER_TYPE_KIND_NONE)
+                            {
+                                continue;
+                            }
+                            before = parts[p].kind == BUSTER_TYPE_KIND_POINTER ? parts[p].token < attribute->first : close != UINT32_MAX && parts[p].token > close;
+                            here = before ? parts[p].type : here;
+                        }
+                    }
+                    check_input_attribute_function_type_warning(reader, attribute, here, type, name, split, completion);
+                }
             }
         }
     }
