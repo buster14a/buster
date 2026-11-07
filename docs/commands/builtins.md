@@ -24,7 +24,10 @@ requirements. [Command index](README.md).
   the carry chains: `c_check_builtin_bits.c`, `c_builtin_bits_lower.c`) are the
   graph's miscellaneous builtins; `test-check-builtins-bits` checks their folds
   against the host compiler's builtins, and `test-checker --program-bits` runs
-  them natively against clang -O0's build. So are the alignment builtins
+  them natively against clang -O0's build, and the classic ones (`ctz` to
+  `bswap64`, #1374: one instruction each by the target, the guide's "The bit
+  builtins' instructions") at `x86-64`, `x86-64-v2`, `x86-64-v3` and `znver5`,
+  checking that their rows are the target's forms. So are the alignment builtins
   (`align_up`, `align_down`, `is_aligned`, folded from a declaration's alignment
   as clang folds them) and `expect_with_probability`, whose recipes reuse the
   bit builtins' and `expect`'s; `test-checker --program-align` runs them, and

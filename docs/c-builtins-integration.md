@@ -176,9 +176,16 @@ build at the same `-march`, and checks that the rows' forms are the target's;
 `test-checker-driver`'s Tier 1 fixture of them does so for `--tier1` at the
 first three.
 
-On the issue's kernel (`__builtin_popcountl(x) + __builtin_ctzl(x | 1) +
-__builtin_clzl(x | 1)` for 20 M values, and the byte swaps of #1374's comment),
-the measurement is in the pull request's record.
+On the 9700X (CPU 2 under the lock, best of five repetitions per process, the
+median of three rounds), the issue's kernel (`__builtin_popcountl(x) +
+__builtin_ctzl(x | 1) + __builtin_clzl(x | 1)`, 20 M calls from a clang -O2
+loop of a xorshift generator, which alone takes 21.6 ms) went from 90.8 ms
+(Tier 0) and 84.3 ms (Tier 1) to 21.9 ms and 21.6 ms at `x86-64-v3` and
+`znver5`, clang -O0's 22.2 ms and -O2's 21.6 ms, and to 35.7 ms and 33.6 ms
+at `x86-64`, whose popcount stays the recipe (clang -O0: 29.7 ms). The byte swaps
+of #1374's comment went from 44.3 ms and 42.9 ms to 21.6 ms at every level,
+clang's time. The kernel is 16 instructions by Tier 0 and 11 by Tier 1 at
+`x86-64-v3`, where it was 188 and 120.
 
 Tier 0 can consume the complete ordinary-width recipes. The current separate
 Tier 1 pipeline only supports a subset: straight-line 32/64-bit integer and
