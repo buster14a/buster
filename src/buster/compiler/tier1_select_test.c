@@ -3362,7 +3362,7 @@ static void tier1_select_test_address_walk(Tier1SelectTest* test, uint32_t varia
 // A frame object's address in its users' memory operands: object 0 (8 bytes) and object 1 (200 bytes), each reached
 // directly (variant 0), through a 64-bit addition of 16 (1) or -8 after the typed stream's conversions (2), or of
 // 0x7fffffff (3, which folds) or 0x80000000 (4, past 32 bits, whose address keeps its lea). Variant 5 uses the address
-// twice, so both accesses share its lea, and variant 6 takes an over-aligned slot's address, which no pattern takes.
+// twice, so both accesses share its lea, and variant 6 takes a slot aligned past a page (#1450), which the frame realigns.
 // Variant 7 repeats variant 1 with the object in the entry block past the walk's block, as the producer's preheader
 // does. The
 // shape's access is a load returned (0), a store of the second parameter (1), or the pointer itself returned (2). A
@@ -3497,15 +3497,18 @@ static void tier1_select_test_stack_walk(Tier1SelectTest* test, uint32_t shape, 
     }
     if (created && variant == 6)
     {
+        // Past the frame planner's bound (1 << 30) a slot is no frame object, and its address selects nothing.
+        function.slots[2].alignment = UINT32_C(1) << 31;
         for (uint32_t path = 0; path < 2; path += 1)
         {
             uint32_t failed = BUSTER_IR_NONE;
             const Tier1SelectError error = tier1_select_plan(&function, 0, output, scratch, path == 0, &plans[path], &failed);
-            tier1_select_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED && failed == 2 && scratch->length == 0, "an over-aligned slot's address selects nothing");
+            tier1_select_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED && failed == 2 && scratch->length == 0, "a slot aligned past the frame's bound selects nothing");
         }
+        function.slots[2].alignment = 8192;
     }
     uint32_t planned = 0;
-    if (created && variant != 6)
+    if (created)
     {
         char where[128];
         snprintf(where, sizeof(where), "stack fixture selects (shape=%u variant=%u width=%u)", shape, variant, width);

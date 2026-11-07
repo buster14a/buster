@@ -204,8 +204,12 @@ static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified(const I
                 }
             }
         }
-        ir_optimize_dce(&work, options);
-        check.error = ir_optimize_rewrite(&work, output, scratch, options, &work.statistics.function);
+        check.error = work.simd_error;
+        if (check.error == IR_OK)
+        {
+            ir_optimize_dce(&work, options);
+            check.error = ir_optimize_rewrite(&work, output, scratch, options, &work.statistics.function);
+        }
     }
     // The rewrite copies every supported side table into output. None of the work's scratch is a dependency of the
     // rewritten function. Retire it before final verification rather than retaining two analyses' live storage.

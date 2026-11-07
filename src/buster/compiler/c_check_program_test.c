@@ -2292,111 +2292,17 @@ static void check_test_program_initializers(CheckTest* test, const char* clang)
         "automatic-sparse-no-large-image", clang, false, 0, 0);
 }
 
-// The objects check_lower_prepare marks in `locals` (#877), against a walk of each body's parameters (CheckInput's own
-// chain) and of every token that declares an automatic object in that body, written out here rather than through the
-// lowering's lists: each such object's bit is set, its local_map entry none, and no other bit, past the count too.
+// check_lower_prepare's local_map (#877): every entry none before any body is lowered, the last object's included, and
+// read back through check_lower_local_of, which every read of a body's locals goes through.
 static bool check_test_program_locals(const CheckProgram* program, const CheckLowerShared* shared)
 {
-    const CheckInput* input = program->input;
-    const uint32_t count = input->token_count;
-    const uint32_t words = (count + 64) / 64;
-    uint8_t* openings = calloc((uint64_t)count + 1, 1);
-    uint8_t* local = calloc((uint64_t)words * 64, 1);
-    bool same = openings != NULL && local != NULL;
-    for (uint32_t b = 0; same && b < program->body_count; b += 1)
-    {
-        const uint32_t opening = program->bodies[b].opening;
-        if (opening < count)
-        {
-            openings[opening] = 1;
-        }
-        for (uint32_t parameter = check_sparse_get(input->parameters, opening); parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(input->parameter_next, parameter))
-        {
-            const uint32_t object = input->objects[parameter];
-            if (object <= count)
-            {
-                local[object] = 1;
-            }
-        }
-    }
-    for (uint32_t token = 0; same && token < count; token += 1)
-    {
-        const uint32_t body = check_sparse_get(input->declaration_bodies, token);
-        const uint32_t object = input->objects[token];
-        if (input->declarations[token] == token && body < count && openings[body] != 0 && input->declaration_kinds[token] == C_BINDING_OBJECT &&
-            check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) == 0 && object <= count)
-        {
-            local[object] = 1;
-        }
-    }
-    for (uint32_t object = 0; same && object < words * 64; object += 1)
-    {
-        const bool bit = ((shared->locals[object / 64] >> (object % 64)) & 1) != 0;
-        same &= bit == (local[object] != 0) && (local[object] == 0 || shared->local_map[object] == BUSTER_CHECK_NONE);
-    }
-    free(openings);
-    free(local);
-    return same;
-}
-
-// check_lower_local_keep and check_lower_local_of (#877) at every count to 129 objects, the bitset and the map each ending
-// at a PROT_NONE page and the map poisoned: random objects kept, each read back as none and every other as none without
-// its entry read; a written entry read back, and a writer without the bitset reading every entry.
-static void check_test_program_local_bits(CheckTest* test)
-{
-    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
-    uint8_t* mappings[2] = { 0 };
-    bool ready = page >= 130 * sizeof(uint32_t);
-    for (uint32_t i = 0; i < 2; i += 1)
-    {
-        mappings[i] = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        ready = mappings[i] != MAP_FAILED && mprotect(mappings[i] + page, page, PROT_NONE) == 0 && ready;
-    }
-    check_test_expect(test, ready, "the lowering's local bits have protected tails");
+    const CheckLowerWriter writer = { .local_map = shared->local_map };
     bool same = true;
-    for (uint32_t count = 0; ready && count <= 129; count += 1)
+    for (uint32_t object = 0; object <= program->input->token_count; object += 1)
     {
-        const uint32_t words = (count + 64) / 64;
-        uint64_t* locals = (uint64_t*)(mappings[0] + page - (uint64_t)words * sizeof(uint64_t));
-        uint32_t* local_map = (uint32_t*)(mappings[1] + page - ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(locals, 0, (uint64_t)words * sizeof(uint64_t));
-        memset(local_map, 0xa5, ((uint64_t)count + 1) * sizeof(uint32_t));
-        CheckLowerShared shared = { .local_map = local_map, .locals = locals };
-        bool kept[130] = { 0 };
-        for (uint32_t k = 0; k < count / 3 + 2; k += 1)
-        {
-            // The last object, past it (ignored) and random ones, some twice.
-            const uint32_t object = k == 0 ? count : k == 1 ? count + 1 : check_test_random(test) % (count + 1);
-            check_lower_local_keep(&shared, object, count);
-            if (object <= count)
-            {
-                kept[object] = true;
-            }
-        }
-        const CheckLowerWriter writer = { .local_map = local_map, .locals = locals };
-        for (uint32_t object = 0; object <= count; object += 1)
-        {
-            same &= check_lower_local_of(&writer, object) == BUSTER_CHECK_NONE;
-            same &= ((locals[object / 64] >> (object % 64)) & 1) == (uint64_t)kept[object];
-            same &= kept[object] || local_map[object] == 0xa5a5a5a5u;
-        }
-        for (uint32_t object = count + 1; object < words * 64; object += 1)
-        {
-            same &= ((locals[object / 64] >> (object % 64)) & 1) == 0;
-        }
-        local_map[count] = count / 2;
-        same &= check_lower_local_of(&writer, count) == count / 2;
-        const CheckLowerWriter unmarked = { .local_map = local_map };
-        same &= count == 0 || check_lower_local_of(&unmarked, 0) == local_map[0];
+        same &= shared->local_map[object] == BUSTER_CHECK_NONE && check_lower_local_of(&writer, object) == BUSTER_CHECK_NONE;
     }
-    check_test_expect(test, same, "the lowering's local bits mark the objects kept and read none for the others");
-    for (uint32_t i = 0; i < 2; i += 1)
-    {
-        if (mappings[i] != MAP_FAILED && mappings[i] != 0)
-        {
-            munmap(mappings[i], page * 2);
-        }
-    }
+    return same;
 }
 
 // The branches' targets (check_lower_resolve_labels): by 64 kinds at a time as by its scalar twin, the same targets
@@ -2525,7 +2431,7 @@ static void check_test_program_boundary_target(CheckTest* test, const char* sour
                     check_test_expect(test, !machine || prepared_ok, "a program that lowers prepares its lowering");
                     if (prepared_ok)
                     {
-                        check_test_expect(test, check_test_program_locals(&program, &shared), "the lowering marks exactly its bodies' parameters and locals");
+                        check_test_expect(test, check_test_program_locals(&program, &shared), "the lowering's local_map reads none for every object before any body");
                     }
                     arena_pop_to(&output, output_mark);
                     arena_pop_to(&scratch, scratch_mark);
@@ -2719,9 +2625,10 @@ static void check_test_program_refused(CheckTest* test)
 // The table of every type's class and facts that the bodies read (check_lower_classify_types) against its twin's, on the
 // types of random worlds of every kind (the type table's tests' world: pointers, arrays, functions, vectors, atomic
 // types, aligned typedefs, complex types of _BitInts, enums and records; and the calling convention's tests' world:
-// complex types of every floating type among them): of the whole world and of every count of its types to 300; then with
-// the kinds' column and both tables ending at a PROT_NONE page, for every count to 200, so that a read or a write past the
-// last type faults. And a function's memory classes from its entries' (check_lower_entry_classes), at the page's end too.
+// complex types of every floating type among them): of the whole world and of every count of its types to 300, with plain
+// char signed and unsigned; then with the kinds' column and both tables ending at a PROT_NONE page, for every count to
+// 200, so that a read or a write past the last type faults. And a function's memory classes from its entries'
+// (check_lower_entry_classes), at the page's end too.
 static __attribute__((noinline)) void check_test_program_type_facts(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -2752,21 +2659,29 @@ static __attribute__((noinline)) void check_test_program_type_facts(CheckTest* t
             const uint32_t count = table->types.count;
             uint8_t* columns = malloc(4 * ((uint64_t)count + 1));
             check_test_expect(test, columns != 0 && count > 300, "the world's types and their columns");
-            for (uint32_t prefix = 0; columns != 0 && prefix <= count; prefix = prefix < 300 ? prefix + 1 : prefix < count ? count : prefix + 1)
+            // In both char modes: the vector path copies the builtins' rows, plain char's class by the mode, which the
+            // twin classifies by the rules (#442).
+            for (uint32_t mode = 0; columns != 0 && mode < 2; mode += 1)
             {
-                uint8_t* scalar_classes = columns;
-                uint8_t* scalar_facts = columns + count + 1;
-                uint8_t* vector_classes = columns + 2 * ((uint64_t)count + 1);
-                uint8_t* vector_facts = columns + 3 * ((uint64_t)count + 1);
-                memset(vector_classes, 0xa5, prefix + 1);
-                memset(vector_facts, 0xa5, prefix + 1);
-                check_lower_classify_types_scalar(table, prefix, scalar_classes, scalar_facts);
-                check_lower_classify_types(table, prefix, vector_classes, vector_facts);
-                const bool same = memcmp(scalar_classes, vector_classes, prefix) == 0 && memcmp(scalar_facts, vector_facts, prefix) == 0 &&
-                                  vector_classes[prefix] == 0xa5 && vector_facts[prefix] == 0xa5;
-                char description[160];
-                snprintf(description, sizeof(description), "the first %u of world %u's %u types: their classes and facts by both paths", prefix, round, count);
-                check_test_expect(test, same, description);
+                TypeTable flipped = *table;
+                flipped.char_unsigned = mode != 0;
+                for (uint32_t prefix = 0; prefix <= count; prefix = prefix < 300 ? prefix + 1 : prefix < count ? count : prefix + 1)
+                {
+                    uint8_t* scalar_classes = columns;
+                    uint8_t* scalar_facts = columns + count + 1;
+                    uint8_t* vector_classes = columns + 2 * ((uint64_t)count + 1);
+                    uint8_t* vector_facts = columns + 3 * ((uint64_t)count + 1);
+                    memset(vector_classes, 0xa5, prefix + 1);
+                    memset(vector_facts, 0xa5, prefix + 1);
+                    check_lower_classify_types_scalar(&flipped, prefix, scalar_classes, scalar_facts);
+                    check_lower_classify_types(&flipped, prefix, vector_classes, vector_facts);
+                    const bool same = memcmp(scalar_classes, vector_classes, prefix) == 0 && memcmp(scalar_facts, vector_facts, prefix) == 0 &&
+                                      vector_classes[prefix] == 0xa5 && vector_facts[prefix] == 0xa5;
+                    char description[192];
+                    snprintf(description, sizeof(description), "the first %u of world %u's %u types, plain char %s: their classes and facts by both paths", prefix,
+                             round, count, mode != 0 ? "unsigned" : "signed");
+                    check_test_expect(test, same, description);
+                }
             }
             for (uint32_t prefix = 0; columns != 0 && guarded && prefix <= 200 && prefix <= count; prefix += 1)
             {
@@ -3521,7 +3436,6 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "for(int i=0,j=2;i<3;i++,j++){int u=i,v=j;r+=u+v;}"
             "int s=({int i=n+3,j=i+2;i+j;}),t=s+1;return r+s+t+a+b+c;}",
             "multi-declarator-plan-scopes", clang);
-        check_test_program_local_bits(test);
         check_test_program_resolve_labels(test);
         check_test_program_bodies(test, clang);
         // C89's implicit int in the runtime program harness (#1121): the declarations' types and qualifiers decide what

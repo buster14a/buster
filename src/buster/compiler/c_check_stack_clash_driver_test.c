@@ -15,8 +15,8 @@
 // variable-length array, a frame realigned to 64 bytes and one realigned to two pages. Unprobed, the code steps over the
 // guard and prints "skipped"; probed, it faults on the guard page, whose handler (on a stack of its own) prints
 // "probed". Each build prints what clang -O0's does with the option and without it: by Tier 0 and by --tier1 (with and
-// without rematerialization), by each path, with a frame pointer and without, under --verify, every function Tier 1's but
-// the page-aligned one, which Tier 1's selection refuses with or without probes and Tier 0 compiles. The probes fixture
+// without rematerialization), by each path, with a frame pointer and without, under --verify, every function Tier 1's,
+// including the two-page-aligned frame (#1450). The probes fixture
 // computes through frames of pages, variable-length arrays and allocas in loops, an allocation of none, one of a page and
 // one of a constant, recursion through two-page frames, a realigned frame and 24 allocations in a straight line (Tier 1's
 // capacity for their probes, which its emission checks), printing clang -O0's line. A probed
@@ -276,7 +276,8 @@ static const char check_test_stack_clash_probes_source[] =
     "}\n"
     "\n"
     "// A call after an allocation, its argument an aggregate by value on the stack: a dynamic frame's call area, which\n"
-    "// Tier 1 takes from rsp at the call and touches.\n"
+    "// Tier 1 takes from rsp at the call and probes. The local's two-page alignment is the frame's, not rsp's, so the\n"
+    "// area stays the call's own 256 bytes (#1450).\n"
     "struct big\n"
     "{\n"
     "    unsigned char bytes[256];\n"
@@ -289,7 +290,7 @@ static const char check_test_stack_clash_probes_source[] =
     "\n"
     "static unsigned long call_area(int n)\n"
     "{\n"
-    "    struct big b;\n"
+    "    _Alignas(8192) struct big b;\n"
     "    memset(&b, 7, sizeof(b));\n"
     "    b.bytes[255] = (unsigned char)n;\n"
     "    volatile char* p = alloca((size_t)n);\n"
@@ -422,7 +423,7 @@ static const char check_test_stack_clash_tail_source[] =
 #define BUSTER_CHECK_TEST_STACK_CLASH_TAIL_CASES 6
 
 // A build of `source` into `object` by Tier 0 or by --tier1 (`tier1`, with or without rematerialization), by each path,
-// with `options` (up to two, NULL-ended) and --verify: whether it compiled, every function Tier 1's but `paged`.
+// with `options` (up to two, NULL-ended) and --verify: whether it compiled, every function Tier 1's.
 static bool check_test_stack_clash_build(const char* executable, const char* source, const char* object, bool tier1, bool rematerialize, bool scalar,
                                          const char* const* options)
 {
@@ -452,7 +453,7 @@ static bool check_test_stack_clash_build(const char* executable, const char* sou
     arguments[count] = NULL;
     char* text = NULL;
     const int status = check_test_driver_spawn(arguments, &text);
-    static const char* const names[] = { "frame", "allocation", "array", "aligned", "run", "handler", "main", "table_sum", "array_sum", "allocation_chain", "edges", "deep", "many", "take_big",
+    static const char* const names[] = { "frame", "allocation", "array", "aligned", "paged", "run", "handler", "main", "table_sum", "array_sum", "allocation_chain", "edges", "deep", "many", "take_big",
                                          "call_area", "tail_register", "tail_constant", "tail_constant_large", "tail_array" };
     const bool taken = !tier1 || check_test_tier1_taken(text, names, BUSTER_ARRAY_LENGTH(names));
     if ((status != 0 || !taken) && text != NULL)
@@ -463,9 +464,10 @@ static bool check_test_stack_clash_build(const char* executable, const char* sou
     return status == 0 && taken;
 }
 
-// Whether function `name` of `object` probes its frame: a record touching the byte at rsp (`or byte [rsp], 0`) and a jne
-// back to an earlier record of its, tier0_emit_probed_reservation's loop (Tier 1's PROBE_ALLOCATE has the same records).
-static bool check_test_stack_clash_probed(const char* object, const char* name, bool* found)
+// Whether function `name` of `object` touches the byte at rsp (`or byte [rsp], 0`, a probe's) anywhere, in `touch`, and
+// whether it also jumps back to an earlier record of its by jne: tier0_emit_probed_reservation's loop (Tier 1's
+// PROBE_ALLOCATE has the same records).
+static void check_test_stack_clash_scan(const char* object, const char* name, bool* found, bool* touch, bool* back)
 {
     enum
     {
@@ -478,18 +480,26 @@ static bool check_test_stack_clash_probed(const char* object, const char* name, 
     const uint32_t count = records != NULL && offsets != NULL && types != NULL ?
                                check_test_tier1_function(object, name, records, CHECK_TEST_STACK_CLASH_RECORDS, offsets, types, &relocations) : 0;
     *found = count != 0;
-    bool touch = false;
-    bool back = false;
+    *touch = false;
+    *back = false;
     for (uint32_t r = 0; r < count; r += 1)
     {
         const X86Instruction* record = &records[r].instruction;
         const uint32_t form = record->form & BUSTER_X86_FORM_NUMBER;
-        touch |= form == X86_FORM_OR_RM8_IMM8 && record->mode == BUSTER_X86_MEMORY_BASE && record->rm == X86_REGISTER_RSP && record->displacement == 0 && record->immediate == 0;
-        back |= (form == X86_FORM_JNE_REL8 || form == X86_FORM_JNE_REL32) && record->displacement < 0;
+        *touch |= form == X86_FORM_OR_RM8_IMM8 && record->mode == BUSTER_X86_MEMORY_BASE && record->rm == X86_REGISTER_RSP && record->displacement == 0 && record->immediate == 0;
+        *back |= (form == X86_FORM_JNE_REL8 || form == X86_FORM_JNE_REL32) && record->displacement < 0;
     }
     free(records);
     free(offsets);
     free(types);
+}
+
+// Whether function `name` of `object` probes its frame by the probes' loop (check_test_stack_clash_scan).
+static bool check_test_stack_clash_probed(const char* object, const char* name, bool* found)
+{
+    bool touch = false;
+    bool back = false;
+    check_test_stack_clash_scan(object, name, found, &touch, &back);
     return touch && back;
 }
 
@@ -533,7 +543,7 @@ static bool check_test_stack_clash_verdicts(const char* program, char* verdicts,
 // The tail fixture (#1434's review): a function entered 192 bytes above the guard page, whose fixed frame under a page
 // ends inside the guard, its local not touched before a dynamic allocation that takes rsp below the guard (of a
 // register's size or a constant's, under a page or past one, an alloca's or a variable-length array's). Without the
-// prologue's touch of a frame pointer's reservation, the allocation's own touches all fall below the guard, and the
+// prologue's touch of a reservation whose body moves rsp, the allocation's own touches all fall below the guard, and the
 // function steps over it. Every build with the option faults at the guard, as clang -O0's: by Tier 0 and by --tier1
 // (with and without rematerialization), by each path, with a frame pointer and without, under --verify. Without the
 // option clang's -O0 frame keeps slots at its bottom, inside the guard, so only the option's verdicts are compared.
@@ -641,10 +651,20 @@ static void check_test_driver_stack_clash(CheckTest* test, const char* clang, co
                 const char* const* options = pointer != 0 ? pointer_options : probe_options;
                 const bool compiled = check_test_stack_clash_build(executable, guard, object, build != 0, build == 1, path != 0, options);
                 check_test_expect(test, compiled, build == 0 ? "the guard fixture compiles by Tier 0 with -fstack-clash-protection" :
-                                                               "the guard fixture compiles by --tier1 with -fstack-clash-protection, every function Tier 1's but the page-aligned one");
+                                                               "the guard fixture compiles by --tier1 with -fstack-clash-protection, including its page-aligned frame");
                 bool found = false;
                 const bool probed = compiled && check_test_stack_clash_probed(object, "frame", &found);
                 check_test_expect(test, !compiled || (found && probed), "-fstack-clash-protection: a frame of pages starts with the probes' loop");
+                // The signal handler's frame is under a page, keeps a frame pointer with -fno-omit-frame-pointer and
+                // moves no rsp: its next call's return address is the next touch, so it touches nothing (#1450).
+                bool handler_found = false;
+                bool handler_touch = true;
+                bool handler_back = false;
+                if (compiled)
+                {
+                    check_test_stack_clash_scan(object, "handler", &handler_found, &handler_touch, &handler_back);
+                }
+                check_test_expect(test, !compiled || (handler_found && !handler_touch), "-fstack-clash-protection: a frame under a page that moves no rsp isn't touched, with a frame pointer too");
                 char* link_arguments[] = { (char*)clang, "-o", program, object, NULL };
                 char* link_text = NULL;
                 const bool linked = compiled && check_test_driver_spawn(link_arguments, &link_text) == 0;

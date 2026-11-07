@@ -110,6 +110,10 @@ static void ir_gvn_classify(IrGvnWork* work)
     const IrFunction* f = work->ir.function;
     static const uint8_t pure[64] = {
         [IR_CONST] = 1,
+        [IR_VCONST] = 1,
+        [IR_VCMP] = 2,
+        [IR_VSELECT] = 1,
+        [IR_INTRINSIC] = 3,
         [IR_PARAM] = 1,
         [IR_ADD] = 1,
         [IR_SUB] = 1,
@@ -169,7 +173,12 @@ static void ir_gvn_classify(IrGvnWork* work)
         const __m128i operations = _mm_maskz_loadu_epi8(valid, f->op + first);
         const __m128i kinds = _mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_zextsi128_si512(operations), _mm512_loadu_si512(pure)));
         const __m128i tainted = _mm_maskz_loadu_epi8(valid, work->tainted + first);
-        _mm_mask_storeu_epi8(work->pure + first, valid, _mm_andnot_si128(tainted, kinds));
+        const __m128i flags = _mm_maskz_loadu_epi8(valid, f->flags + first);
+        const __mmask16 integer_compare = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(2)) & _mm_cmplt_epu8_mask(flags, _mm_set1_epi8(IR_SIMD_LANE_F32));
+        const __m512i discriminators = _mm512_maskz_loadu_epi32(valid, f->c + first);
+        const __mmask16 splat = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(3)) & _mm512_cmpeq_epi32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_SPLAT));
+        const __mmask16 eligible = (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(1)) | integer_compare | splat) & _mm_cmpeq_epi8_mask(tainted, _mm_setzero_si128());
+        _mm_mask_storeu_epi8(work->pure + first, valid, _mm_maskz_set1_epi8(eligible, 1));
     }
     for (uint32_t i = 0; i < f->instruction_count; i += 1)
     {
@@ -211,11 +220,19 @@ static IrGvnPayload ir_gvn_payload(const IrGvnWork* work, uint32_t i)
         payload.low = f->constants[f->a[i]].low;
         payload.high = f->constants[f->a[i]].high;
     }
+    else if (op == IR_VCONST)
+    {
+        // The remaining six words take part in hashing and in collision equality, in the acyclic numbering
+        // (ir_gvn_number) and in the refinement (ir_gvn_hash_one, ir_gvn_compare): table indices alone would miss
+        // identical payloads at distinct indices, and two-word keys would merge different upper lanes.
+        payload.low = f->vector_constants[f->a[i]].words[0];
+        payload.high = f->vector_constants[f->a[i]].words[1];
+    }
     else if (op == IR_PARAM || op == IR_STACK_ADDR || op == IR_SYMBOL_ADDR)
     {
         payload.low = f->a[i];
     }
-    else if (op == IR_ICMP)
+    else if (op == IR_ICMP || op == IR_VCMP || op == IR_INTRINSIC)
     {
         payload.low = f->c[i];
     }
@@ -267,6 +284,14 @@ static uint64_t ir_gvn_hash_one(const IrGvnWork* work, uint32_t position, uint32
     {
         hash = ir_gvn_mix(hash, work->fields[(uint64_t)field * f->instruction_count + position]);
     }
+    if (f->op[i] == IR_VCONST)
+    {
+        const uint64_t* const words = f->vector_constants[f->a[i]].words;
+        for (uint32_t word = 2; word < 8; word += 1)
+        {
+            hash = (hash ^ words[word]) * BUSTER_IR_GVN_HASH_MULTIPLIER;
+        }
+    }
     if (!initial && f->op[i] == IR_PHI && work->pure[i] != 0)
     {
         const uint32_t block = work->ir.cfg.instruction_blocks[i];
@@ -310,7 +335,7 @@ static void ir_gvn_keys(IrGvnWork* work, uint32_t count, bool initial, bool scal
         {
             const uint32_t position = first + lane;
             const uint32_t i = work->members[position];
-            if (BUSTER_SCALAR_PATH(scalar) || (!initial && work->ir.function->op[i] == IR_PHI && work->pure[i] != 0))
+            if (BUSTER_SCALAR_PATH(scalar) || work->ir.function->op[i] == IR_VCONST || (!initial && work->ir.function->op[i] == IR_PHI && work->pure[i] != 0))
             {
                 work->hashes[position] = ir_gvn_hash_one(work, position, i, initial);
             }
@@ -328,6 +353,15 @@ static int ir_gvn_compare(const IrGvnWork* work, uint32_t a, uint32_t b, uint32_
         const uint64_t left = work->fields[(uint64_t)field * f->instruction_count + a];
         const uint64_t right = work->fields[(uint64_t)field * f->instruction_count + b];
         result = left < right ? -1 : left != right;
+    }
+    if (result == 0 && f->op[ia] == IR_VCONST)
+    {
+        const uint64_t* const left = f->vector_constants[f->a[ia]].words;
+        const uint64_t* const right = f->vector_constants[f->a[ib]].words;
+        for (uint32_t word = 2; result == 0 && word < 8; word += 1)
+        {
+            result = left[word] < right[word] ? -1 : left[word] != right[word];
+        }
     }
     if (result == 0 && !initial && f->op[ia] == IR_PHI && work->pure[ia] != 0)
     {
@@ -547,6 +581,14 @@ static bool ir_gvn_number(IrGvnWork* work, uint32_t i, uint32_t buckets, uint64_
         {
             hash = ir_gvn_mix(hash, key[word]);
         }
+        // A vector constant's key holds its first two words (ir_gvn_payload): its other six are hashed and compared
+        // here, as the refinement does, so that constants differing only in upper lanes stay apart (#1450).
+        const bool vector = f->op[i] == IR_VCONST;
+        const uint64_t* const words = vector ? f->vector_constants[f->a[i]].words : NULL;
+        for (uint32_t word = 2; vector && word < 8; word += 1)
+        {
+            hash = ir_gvn_mix(hash, words[word]);
+        }
         const bool phi = f->op[i] == IR_PHI;
         const uint32_t block = work->ir.cfg.instruction_blocks[i];
         const uint32_t first_edge = work->ir.cfg.predecessor_offsets[block];
@@ -563,6 +605,8 @@ static bool ir_gvn_number(IrGvnWork* work, uint32_t i, uint32_t buckets, uint64_
             work->statistics.partition_probes += 1;
             const uint64_t* entry = work->fields + (uint64_t)match * BUSTER_IR_GVN_ENTRY_WORDS;
             equal = work->hashes[match] == hash && entry[0] == key[0] && entry[1] == key[1] && entry[2] == key[2] && entry[3] == key[3];
+            // Equal keys make both vector constants: compare their whole payloads.
+            equal = equal && (!vector || memcmp(words, f->vector_constants[f->a[match]].words, sizeof(IrSimdValue)) == 0);
             // Equal keys put both phis in one block: compare their inputs in that block's predecessor order.
             for (uint32_t edge = first_edge; phi && equal && edge < end_edge; edge += 1)
             {
@@ -896,7 +940,7 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
     if (output != scratch)
     {
-        check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), false);
+        check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
     }
     if (check.error == IR_OK)
     {

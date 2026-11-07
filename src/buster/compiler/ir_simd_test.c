@@ -359,8 +359,69 @@ static void ir_test_simd_lane_execution(IrTestTally* test, Arena* output, Arena*
     }
 }
 
+static void ir_test_splats(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t scalar = IR_I1; scalar < IR_TYPE_COUNT; scalar += 1)
+        {
+            IrFunction function = {0};
+            const IrSizes sizes = {
+                .instruction_count = 3,
+                .block_count = 1,
+                .parameter_count = 1,
+            };
+            const bool created = ir_create(output, &sizes, &function) == IR_OK;
+            ir_test_expect(test, created, "splat verifier fixture allocation");
+            if (created)
+            {
+                const IrType type = (IrType)(IR_V4I32 + width);
+                const bool admitted = (scalar >= IR_I8 && scalar <= IR_I64) || scalar == IR_F32 || scalar == IR_F64;
+                function.result_type = IR_VOID;
+                function.parameter_types[0] = (uint8_t)scalar;
+                function.block_offsets[1] = 3;
+                ir_test_instruction(&function, 0, IR_PARAM, (IrType)scalar, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 1, IR_INTRINSIC, type, 0, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_SPLAT);
+                ir_test_instruction(&function, 2, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_pair(test, &function, scratch, NULL, admitted, "splat admission follows its scalar element type at every vector width");
+                if (admitted)
+                {
+                    ir_test_expect(test, ir_operand_count(&function, 1) == 1 && ir_value_mask(&function, 1) == 1, "splat has one SSA use and no phantom second input");
+                    IrSimdValue value;
+                    memset(&value, 0xa5, sizeof(value));
+                    const uint64_t bits = UINT64_C(0x7ff0000080000081);
+                    bool exact = ir_splat_value(type, scalar, bits, &value);
+                    const uint32_t bytes = ir_type_bits[scalar] / 8;
+                    for (uint32_t byte = 0; exact && byte < sizeof(value); byte += 1)
+                    {
+                        const uint8_t expected = byte < (16u << width) ? (uint8_t)(bits >> (8 * (byte % bytes))) : 0;
+                        exact = ((const uint8_t*)&value)[byte] == expected;
+                    }
+                    ir_test_expect(test, exact, "splat repeats raw bits at each element width and zeroes its sparse tail");
+                    function.b[1] = 0;
+                    ir_test_pair(test, &function, scratch, NULL, false, "splat refuses a second operand");
+                    function.b[1] = BUSTER_IR_NONE;
+                    function.flags[1] = 1;
+                    ir_test_pair(test, &function, scratch, NULL, false, "splat's scalar type fixes its element width; lane flags are refused");
+                    function.flags[1] = 0;
+                    function.c[1] = BUSTER_IR_INTRINSIC_PDEP;
+                    function.b[1] = 0;
+                    ir_test_pair(test, &function, scratch, NULL, false, "a scalar BMI intrinsic cannot acquire a vector result");
+                    function.c[1] = BUSTER_IR_INTRINSIC_SPLAT;
+                    function.type[1] = IR_I32;
+                    function.b[1] = BUSTER_IR_NONE;
+                    ir_test_pair(test, &function, scratch, NULL, false, "splat requires a vector result");
+                }
+            }
+            arena_pop_to(output, mark);
+        }
+    }
+}
+
 static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
 {
+    ir_test_splats(test, output, scratch);
     ir_test_simd_bitcasts(test, output, scratch);
     ir_test_simd_rows(test, output, scratch);
     ir_test_simd_lanes(test, output, scratch);

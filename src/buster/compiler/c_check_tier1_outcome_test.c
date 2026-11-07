@@ -182,8 +182,8 @@ static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
         // f(int, double, long double) -> double; (*p)(short, long..., __int128) of one argument past the boundary's
         // limit, the __int128, all named, -> __int128; g(long) whose ABI record's outgoing area is past any frame's;
         // h(long) of two parameters -> long double; k(a, b, c, d) of four 32-byte aggregates, each whole in a ymm
-        // register, whose parts take 16 staging slots; m(a, b) of two 64-byte ones, each whole in a zmm register, whose
-        // parts wait in zmm16 and on instead (#141); and a constant.
+        // register, whose parts take 16 staging slots in the frame (#1450); m(a, b) of two 64-byte ones, each whole in a
+        // zmm register, whose parts wait in zmm16 and on instead (#141); and a constant.
         function.call_types[0] = IR_I32;
         function.call_types[1] = IR_F64;
         function.call_types[2] = IR_F80;
@@ -225,15 +225,15 @@ static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
             function.c[node] = BUSTER_IR_NONE;
         }
         // A double and a long double, argument or result, are the boundary's since #141, and so is each of k's and m's
-        // records, and m's parts' zmm registers; the short isn't, nor the 17th argument, the __int128 result, the
-        // record's area, the missing argument or k's 16 slots past the 14. The 17th is still an __int128.
+        // records, m's parts' zmm registers and k's 16 staging slots (#1450); the short isn't, nor the 17th argument,
+        // the __int128 result, the record's area or the missing argument. The 17th is still an __int128.
         const uint32_t expected[7] = {
             0,
             1u << CHECK_TIER1_CALL_INDIRECT | 1u << CHECK_TIER1_CALL_VARIADIC | 1u << CHECK_TIER1_CALL_STACK_ARGUMENTS | 1u << CHECK_TIER1_CALL_NARROW_ARGUMENT |
                 1u << CHECK_TIER1_CALL_OTHER_ARGUMENT | 1u << CHECK_TIER1_CALL_OTHER_RESULT,
             1u << CHECK_TIER1_CALL_ABI_RECORD,
             1u << CHECK_TIER1_CALL_ARGUMENT_COUNT,
-            1u << CHECK_TIER1_CALL_ABI_RECORD,
+            0,
             0,
             0,
         };
@@ -244,6 +244,9 @@ static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
             check_lanes_test_expect(tally, node == 6 || tier1_select_call_supported(&function, node) == ((check_tier1_call_kinds(&function, node) & ~taken) == 0),
                                     "a call has a kind past indirect and variadic exactly where the selector refuses it", ir_op_names[ops[node]]);
         }
+        check_lanes_test_expect(tally, tier1_select_call_staging_slots(&function, &function.calls[4]) == 16 &&
+                                tier1_select_call_supported(&function, 4) && check_tier1_call_kinds(&function, 4) == 0,
+                                "four 32-byte register arguments exceed red-zone staging without an ABI refusal", NULL);
         CheckTier1Outcome outcome = check_tier1_failure(CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, TIER1_SELECT_ERROR_UNSUPPORTED, 1, 0);
         outcome.operation = IR_CALL_INDIRECT;
         outcome.call_kinds = expected[1];

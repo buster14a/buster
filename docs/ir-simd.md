@@ -100,13 +100,15 @@ native opmask registers. Step/value limits and scratch rollback remain active.
 First-class vector entry arguments/results and vector/mask call signatures still
 refuse before executing a frame: the 16-byte scalar argument/result API and native
 bridge have no such ABI contract. Existing aggregate-by-pointer machinery is not
-replaced. The SSA promoter and SCCP/DCE/CFG take a function with vectors (#141),
-as they take one whose only SIMD values are masks (#179): a slot of a vector type,
-read and written whole at its type, promotes as a scalar's does, the vector
-constants' payloads are copied as the scalar constants are, and SCCP takes no
-vector for a constant (a `v4i32` addition isn't an `i128` one, and `IR_CONST` has
-no vector type), so that it folds none; GVN, LICM, SROA and the
-inliner continue to reject every SIMD function. Native Tier 1 selection takes a
+replaced. A slot of a vector type, read and written whole at its type, promotes
+as a scalar's does. SCCP tracks sparse wide constants and folds supported vector
+operations without treating a vector as an `i128`. It folds floating lanes only
+where every floating environment gives the same bits, and keeps their original
+rows for their flags and traps ahead of the constant their users receive. GVN and LICM admit SIMD with lane
+metadata and full constant payloads in their keys, excluding floating effects;
+LICM also retains memory operations and undefined operands. SROA requires its
+`simd` option, and the inliner clones SIMD callees. See
+[IR optimization](commands/ir-optimization.md) for the exact boundaries. Native Tier 1 selection takes a
 function's vectors ([#141](https://github.com/buster14a/buster/issues/141), [the
 selection guide](tier1-selection.md)'s "Vectors"), and C's vectors passed by
 value, which are aggregates in a vector register whole, and takes masks:
@@ -119,9 +121,8 @@ operators, selection and comparisons with independent lane expectations, and
 memory effects with guarded bounded slices. `test-ir` exercises actual IR
 execution, malformed types/predicates/SSA/effects and sparse storage;
 `test-ir-parse` roundtrips the hand-written vector/mask fixture;
-`test-ir-simd` checks transactional unsupported-consumer refusals in both
-verification modes. These tests establish no native Tier 1 support or
-performance improvement.
+`test-ir-simd` checks typed admission and consumer behavior in both verification
+modes. These tests alone establish no code-quality or throughput improvement.
 
 ## Integration fixtures and consumer handoff
 
@@ -133,10 +134,20 @@ memory canaries; the same typed programs pass through both Tier 0 compilers and
 encoders, and run natively only when the machine has the required features.
 Unavailable native execution is reported, not counted as passed execution.
 
+The scalar-splat integration adds 21 producer cases: six scalar lane types at
+three widths and three word broadcasts with distinct high bits in a 32-bit
+carrier. Both adapters must emit the same single semantic splat, no machine row
+or row call, and an explicit truncation where the lane is narrower than its
+carrier. Shared interpretation and gated native Tier 0 execution compare exact
+bytes and surrounding canaries against an independent byte-repetition formula.
+
 `test-ir-interpreter` additionally checks simultaneous vector phi cycles, logical
 masks through 64 bits, unused high mask bits, undefined selection alternatives,
 128-bit bitcasts, unaligned volatile memory, short/read-only memory refusal and
-step/value budgets. The original straight-line executor remains an independent
+step/value budgets. Its splat fixtures cover all six scalar types at all three
+widths with integer boundaries, both zero signs, denormals and signaling/quiet
+NaN encodings; undefined scalar inputs must refuse before a following store.
+The original straight-line executor remains an independent
 consumer; the shared interpreter is not routed through it.
 
 `test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c tests/ir/vector-rows.c tests/ir/carrier-rows.c`
@@ -159,7 +170,8 @@ require promotion. Source preparation retains each function's selected
 output-target features rather than inferring them from the host.
 
 For #141, the handoff is verified shape-qualified IR with explicit `vcmp`/`vselect`
-and wide memory transports. The selector's refusal of vectors remains in place.
+and wide memory transports, which Tier 1 selects at the output target's encoding
+level.
 For #179, masks have explicit `m8`/`m16`/`m32`/`m64` types and exact-bit semantics,
 which Tier 1 keeps in the opmask registers (k1 to k7, k0 the class's scratch), moved
 and spilled at their widths; no ABI passes one. This change makes no native Tier 1
@@ -224,6 +236,76 @@ mask, index or control. Tier 1 selects each as its one VEX instruction
 (`TIER1_RULE_INTRINSIC`), whose three registers are its own; its emission's
 target allow-list refuses one for a target without the feature.
 
+## Scalar splats (#1450)
+
+The opcode table already fills its 64-entry byte-permute register. A scalar
+broadcast therefore uses a unary kind of `intrinsic`, retaining every opcode
+number and the existing instruction columns:
+
+```text
+%7 = intrinsic.v8i32 %3 splat
+```
+
+`c` is `BUSTER_IR_INTRINSIC_SPLAT`, `a` is a scalar of type `i8`, `i16`, `i32`,
+`i64`, `f32` or `f64`, and `b` is absent (`BUSTER_IR_NONE`). The result is a
+16-, 32- or 64-byte vector container. The scalar's type gives the lane width;
+the instruction's flags remain zero. Each lane receives exactly the scalar's
+bits. It performs no floating arithmetic, leaves NaN signaling bits and
+payloads untouched, preserves signed zero, and consumes an undefined source.
+Existing scalar intrinsic kinds keep their two operands and scalar result
+rules. The operand table makes `b` optional and the semantic verifier enforces
+which kind needs it; use enumeration, remapping and text round trips retain
+that distinction.
+
+`ir_simd_typed_splat` admits the producer's exact single-record EVEX broadcasts:
+`vpbroadcastb/w/d/q` from a general register, `vbroadcastss` from an XMM register,
+and a double's `vpbroadcastq` or `vbroadcastsd` from XMM. It checks the result
+width, scalar class, role registers and every record field. Decorations, memory
+forms, fixed registers and extra records do not silently become a pure splat.
+The target needs the form's features and the vector transport features; a
+missing feature refuses before publication. Byte and word inputs have already
+been extended to a 32-bit register by the producer, and half-precision bits use
+the same word form. Lowering explicitly truncates a wider integer carrier
+before the splat. Baseline SSE/VEX producer sequences remain machine rows in
+this bounded decoder.
+
+The shared interpreter repeats bits into its sparse vector payload. SCCP can
+fold constant splats, and GVN/LICM can reuse or move a pure splat where their
+ordinary dominance and definedness rules permit. Tier 1 selects a dynamic
+splat through its vector rule: EVEX broadcasts directly; SSE/VEX targets use
+bit moves, low unpacks and shuffles, with a 128-bit insert for a 32-byte result.
+No expansion uses a temporary stack object or floating arithmetic.
+
+`tests/ir/splats.ir` round-trips all 18 scalar-type/vector-width combinations.
+`test-ir` checks type admission, one-operand use enumeration and malformed
+neighbors in both verifier paths. `test-ir-simd` checks actual producer rows,
+exact feature requirements and mutations of their roles and effects.
+`test-ir-lowering` and `test-ir-interpreter` check execution as described above.
+The existing `tier1-lanes` source fixture now requires zero machine rows where
+its 14 remaining rows were scalar splats, and compares both Tier 1 paths with
+Clang. Measured by `--tier1 --tier1-report -march=x86-64-v4` on that unit, main
+`ec5f0f6b` has 14 rows by each path and this change none.
+
+The compiler's own units have no broadcast rows at `-march=znver5`, so the
+splats change none of their counts: `main_unit_frontend.c` keeps its 1,673 rows
+either way and `main_unit_backend.c` its 2,432. The frontend unit's rows are:
+
+| Rows | Kind |
+| ---: | --- |
+| 459 | a comparison into a mask alone (an intrinsic's `vpcmp`, without the expansion the decoder takes) |
+| 450 | masked or element-typed moves |
+| 404 | permutes and shuffles |
+| 87 | conversions and mask moves |
+| 65 | AES rounds |
+| 46 | other integer operations (minimum, maximum, saturation, products' high halves) |
+| 32 | shifts by a scalar, rotates |
+| 10 | ternary logic, tests, blends |
+| 114 | others |
+
+A comparison into a mask alone is the IR's own `vcmp`, so decoding it is the
+next measurable step. Shuffles and conversions need new operations, which the
+full opcode table can only take as `intrinsic` kinds, as the splat does.
+
 ## Lanes: the vectors' element types (#141)
 
 The IR's vector types are containers of 16, 32 and 64 bytes (`v4i32`, `v8i32`
@@ -240,7 +322,7 @@ new opcode or type:
 | --- | --- | --- |
 | `add`, `sub`, `mul` | integers | wrapping, each lane |
 | `shl`, `lshr`, `ashr` | integers | each lane by the other operand's same lane, unsigned: 0 past the lane's bits, an arithmetic shift every bit the sign (the `vpsllv` family's) |
-| `fadd`, `fsub`, `fmul`, `fdiv` | floats, doubles | IEEE at the default rounding, a NaN operand's quieted bits (the first's where both are NaNs, x86's rule), else the default NaN |
+| `fadd`, `fsub`, `fmul`, `fdiv` | floats, doubles | IEEE under the runtime MXCSR's rounding, FTZ and DAZ; a NaN operand's quieted bits (the first's where both are NaNs, x86's rule), else the default NaN of an invalid one. The interpreter models the default environment; SCCP folds a lane only where every environment agrees |
 | `vcmp` | any | a mask of a bit per lane (`m8` for 8 lanes or fewer, else `m16`, `m32`, `m64`); floating lanes' predicates are C's (`eq` to `ge`: ordered but `ne`, unordered or unequal) |
 | `vselect` | any | each lane by its own mask bit |
 
@@ -262,20 +344,36 @@ operations: `vpadd`, `vpsub` of bytes to quadwords, `vpmullw`, `vpmulld` and
 `vpmullq`, the `vpsllv`, `vpsrlv` and `vpsrav` of words to quadwords, `vaddps` to
 `vdivpd`, and every comparison and its expansion (`vpcmp[u]b` to `vpcmp[u]q`,
 `vcmpps` and `vcmppd` with `vpmovm2b` to `vpmovm2q`), each at its form's own
-features. Splats of a scalar, a floating negation (a sign bit's broadcast and
-`vpxorq`), half-precision elements and every other builtin stay machine rows. The
+features. The single-record scalar splats above are semantic intrinsics;
+multi-record splats, a floating negation (a sign bit's broadcast and `vpxorq`),
+half-precision arithmetic and other builtins stay machine rows. The
 interpreter models each lane (`ir_simd_evaluate`): `test-ir`'s model check
 compares every lane kind and width with C's scalar operators lane by lane, and
 `test-tier1-masks` runs three fixtures of every lane kind natively by Tier 1
 against the interpreter, random NaNs, infinities and denormals among the floats.
 The passes see a pure operation where they saw a call: SSA promotion, SCCP, dead
-code and CFG cleanup take them (SCCP folds no vector); GVN and LICM still refuse
-SIMD functions. Dead code keeps the floating operations as the scalar ones'
-effects on the floating environment: the arithmetic, and a comparison of
-floating lanes (`ir_optimize_roots`' kind 3, #1413's review: a NaN operand raises
-MXCSR's invalid flag, or traps where it is unmasked), whose mask may go unused;
-an integer comparison goes with its mask. `test-ir-optimize` checks both paths,
+code and CFG cleanup take them; SCCP folds supported constant vectors, and GVN
+and LICM take pure operations with their lane metadata. SCCP folds a floating
+lane only where its value is the same under every rounding, FTZ and DAZ: an exact
+result, no subnormal operand or result, or a NaN operand ([IR
+optimization](ir-optimization.md)'s "Constant SIMD lanes"). Dead code keeps every
+floating operation, folded or not, for its effects on the runtime floating
+environment: the arithmetic, and a comparison of floating lanes
+(`ir_optimize_roots`' kind 3, #1413's review: a NaN operand raises MXCSR's
+invalid flag, or traps where it is unmasked), whose mask may go unused; an
+integer comparison goes with its mask. `test-ir-optimize` checks both paths,
 and `test-checker-driver` an unused comparison of a NaN natively, by both tiers.
+
+The lanes cost compile time even without vectors. On the 9700X, `--tier1 -c
+sqlite3.c` (no vectors) ran 29.2M more user instructions (+0.44%) with #1413's
+lanes than at its base. Exact counts per pipeline stage (#1450's item 5) put
+19.7M in the IR verifier's checks of lane metadata (+2.21% of its work), 6.1M in
+the optimizer's own passes, 2.7M in Tier 1's emission and 1.4M in the typed
+lowering, with selection 0.7M cheaper; nothing outside Tier 1 changed. Cycles
+were flat, so the cost is accepted. [The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-remaining-1450-2026-11-06)
+(buster-performance#303) has the measurement patch, the counts and a sampled
+profile that inlining and throttling made unusable.
 
 ## Machine rows (#141)
 
@@ -298,14 +396,14 @@ decodes a saturating byte addition's, a masked store's of no result and a shift'
 of a count from a general register as machine rows, with their classes and exactly their
 features, each refused without each feature it needs.
 
-The consumers take a function without vectors (`ir_function_has_vectors`, 64
-instructions at a time on the vector path, with a scalar twin): a vector type
+Consumers classify vectors with `ir_function_has_vectors`, 64
+instructions at a time on the vector path, with a scalar twin: a vector type
 anywhere, a vector constant or a `vconst`, `vcmp` or `vselect`, in its
 instructions, parameters, calls and slots. `ssa_ir_promote` and its twin promote
 mask slots as any other (the SSA core compares types alone, `ssa.c`'s codes now
 past the IR's mask types), and `ir_optimize`'s SCCP, dead code and CFG cleanup
-take masks (`ir_optimize_prepare`'s `masks`); GVN and LICM don't model them and
-still refuse, and so does SROA without #1282's `simd` option. The inliner
+take masks (`ir_optimize_prepare`'s `masks`), as do GVN and LICM; SROA requires
+#1282's `simd` option. The inliner
 clones them with its callees (#1282, [the inlining guide](ir-inlining.md)'s
 "SIMD callees and by-value vectors"). Tier 1 selects the bitcasts as `kmov`s
 ([the selection guide](tier1-selection.md)'s "AVX-512's masks").
@@ -326,8 +424,8 @@ The tests:
   without each with the result untouched, and twelve mutations of each row
   (decorations, memory, a register by number, widths, classes, a test's condition, an unwritten
   register, a record too many, an immediate) refused; and a function of masks
-  alone through both SSA paths and SCCP/DCE/CFG, refused by GVN, LICM and SROA
-  (without `simd`), and taken by the inliner.
+  alone through both SSA paths, SCCP/DCE/CFG, GVN and LICM, refused by SROA
+  without `simd`, and taken by the inliner.
 - `test-ir` checks the bitcast rule's pairs both ways, accepted and refused, and
   `test-ir-interpreter` their values at each width.
 - `test-tier1-masks` takes Tier 0's random mask programs (`tier0_mask_test.c`'s
