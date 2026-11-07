@@ -1150,6 +1150,54 @@ static bool asm_test_gas_pads_like_2_47(AsmTest* test, const char* directory)
 
 // The driver reads regular files and streams beyond its old fixed buffer, with rollback on allocation or offset
 // limits. Large comments keep the token table small while exercising actual source bytes in both lexer paths.
+// Model the callback boundary with initialized bytes whose shadow was not written by libc. In MSan builds the
+// destination must become readable without clearing the original fwrite input's poison or the next arena byte.
+static void asm_test_print_callback(AsmTest* test)
+{
+    static const uint32_t counts[] = { 0, 1, 15, 16, 17, 31, 32, 33 };
+    Arena arena = arena_reserve(4096);
+    for (uint32_t c = 0; c < sizeof(counts) / sizeof(counts[0]); c += 1)
+    {
+        uint8_t input[64];
+        for (uint32_t i = 0; i < sizeof(input); i += 1)
+        {
+            input[i] = i % 5 == 0 ? 0 : (uint8_t)(i + 1);
+        }
+        arena_pop_to(&arena, 0);
+        uint8_t* storage = arena_push(&arena, 128, 1);
+        const bool ready = storage != NULL;
+        asm_test_check(test, ready, "cookie-write boundary fixture storage", 0);
+        if (ready)
+        {
+            memset(storage, 0xa5, 128);
+            // Commit the page before poisoning shadow, so the callback's small append maps no new page.
+            arena_pop_to(&arena, 1);
+            String8 printed = { .pointer = (char*)storage };
+            AsmPrintBuffer buffer = { .arena = &arena, .source = &printed };
+            const uint32_t count = counts[c];
+#if __has_feature(memory_sanitizer)
+            const uint32_t poisoned = count / 2;
+            __msan_poison(input + poisoned, 1);
+            __msan_poison(storage, count + 2);
+#endif
+            const ssize_t copied = asm_print_write(&buffer, (const char*)input, count);
+#if __has_feature(memory_sanitizer)
+            const bool shadow = __msan_test_shadow(storage, count + 1) == -1 &&
+                                __msan_test_shadow(input, sizeof(input)) == (intptr_t)poisoned &&
+                                __msan_test_shadow(storage + count + 1, 1) == 0;
+            asm_test_check(test, shadow, "cookie write defines only its appended output and preserves source/guard poison", 0);
+            // Restore the artificial poison only where the byte-value checks below read it.
+            __msan_unpoison(input + poisoned, 1);
+            __msan_unpoison(storage + count + 1, 1);
+#endif
+            const bool exact = copied == (ssize_t)count && !buffer.failed && printed.length == count && arena.length == count + 1 &&
+                               memcmp(storage, input, count) == 0 && storage[count] == 0 && storage[count + 1] == 0xa5;
+            asm_test_check(test, exact, "cookie write appends exact binary bytes, a terminator and no extra byte", 0);
+        }
+    }
+    arena_release(&arena);
+}
+
 static void asm_test_reader(AsmTest* test, const char* directory)
 {
     static const char text[] = "nop\nret\n";
@@ -1692,6 +1740,7 @@ static int run_assembler_tests(int count, char** arguments)
         char directory[] = "/tmp/buster-assembler-XXXXXX";
         if (mkdtemp(directory) != 0)
         {
+            asm_test_print_callback(&test);
             asm_test_reader(&test, directory);
             asm_test_preprocessed(&test, directory);
             asm_test_compatibility(&test, directory, cross_check);
