@@ -1730,18 +1730,19 @@ batch's nodes one at a time: about 0.8% of `-c sqlite3.c`'s cycles on the 9700X,
 - A probe that validates every graph found `sqlite3.c`'s 309,214 nodes' recorded purity and counters equal to the
   validation's.
 
-**Measured on the 9700X.** Main `73fcf006` against the head `c72eafc8`, in 8 interleaved rounds, then
-`measure-compile` each way. Every run held the lock on its own. The objects are the same bytes.
-[The record](https://github.com/buster14a/buster-performance/tree/bc06bdb55949dd46ca5b8d88d306eee7be20ba27/docs/measurements/check-input-1671-coded-record-2026-11-07)
-keeps the receipts, each build's profile and the probe.
+**Measured on the 9700X.** Main `219e7e9b`, with #1692, against the head `38152245` (this change merged with it), in 8
+interleaved rounds, then `measure-compile` each way. Every run held the lock on its own. The objects are the same bytes.
+Against main `73fcf006`, before #1692, it measured −0.56% wall and −0.67 ms of `check-input`.
+[The record](https://github.com/buster14a/buster-performance/tree/b3a5bd2bce97d070abf1c2ee520fca48ea0f3d35/docs/measurements/check-input-1671-coded-record-2026-11-07)
+keeps both A/Bs' receipts, each build's profile and the probe.
 
 | measure | main | head | difference |
 | --- | ---: | ---: | ---: |
-| wall time | 119.810 ms | 119.135 ms | −0.56% |
-| user cycles | 582.419 M | 578.394 M | −0.69% |
-| user instructions | 1,307.854 M | 1,298.923 M | −0.68% |
-| `check-input` | 44.619 ms | 43.946 ms | −0.67 ms |
-| `expressions.actions` | 10.269 ms | 9.546 ms | −0.72 ms |
+| wall time | 119.460 ms | 118.450 ms | −0.85% |
+| user cycles | 580.282 M | 575.560 M | −0.81% |
+| user instructions | 1,288.534 M | 1,279.602 M | −0.69% |
+| `check-input` | 43.966 ms | 43.183 ms | −0.78 ms |
+| `expressions.actions` | 9.660 ms | 8.868 ms | −0.79 ms |
 
 ## The passes after checking (#592)
 
