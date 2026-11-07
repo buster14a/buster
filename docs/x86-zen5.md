@@ -1,272 +1,344 @@
-# Zen 5 instruction observations
+# The Zen 5 processor model
 
-`x86_zen5.c` is the first measured slice of [#181](https://github.com/buster14a/buster/issues/181).
-It supplies an explicit unknown value, operand-sensitive IDs, bounded SIMD
-lookups and a reproducible instruction microbenchmark. It is a partial model.
-It does not yet satisfy #181's complete processor-model acceptance criteria.
+`x86_zen5.c` is [#181](https://github.com/buster14a/buster/issues/181)'s model of
+the Ryzen 7 9700X: for every case Tier 0 and Tier 1 emit, a row of the 9700X's
+own measurements, which the backend's decisions read through byte IDs and
+in-register lookups. Its purpose is relative choices (which of two sequences,
+which record first), not cycle-exact prediction: every decision that uses it is
+still confirmed by measuring generated programs.
 
-## Coverage and consumers
+## Cases and IDs
 
-There are 57 measured cases: selected 32- and 64-bit integer arithmetic,
-immediates, unary operations, shifts, multiplication, two LEA addressing cases,
-constant moves, zeroing XORs and an aligned L1 pointer load. A form with a
-register operand and the same form with a memory operand are different cases.
-Zeroing XOR and ordinary XOR are different too. The cases are intentionally
-explicit; no mnemonic or operand-width rule assigns costs to unmeasured forms.
+A **case** is a form (`X86Form`) and an operand kind (`X86CostOperands`):
 
-Tier 0 (#136) and Tier 1 (#141) have no emitted-form manifests on the starting
-revision, `5ca41258f9922739143318367ad815f71825d045`. Their selectors, scheduler
-(#172) and rematerializer (#178) do not exist there. The test's own fixtures
-therefore cannot establish emitter coverage or count as a compiler consumer.
+| Kind | Records |
+| --- | --- |
+| `REGISTER` | every operand a register, or none |
+| `ZERO` | an idiom of two equal sources (xor, sub, pxor, xorps, vpxord, vxorps of a register with itself; pcmpeqd's all ones), for the forms that have such a row |
+| `MEMORY` | a memory operand of a base and a displacement, of RIP, or of a displacement alone |
+| `MEMORY_INDEX` | a memory operand with an index (a gather's vector index too) |
+| `LEA_BASE` | LEA of one component and a displacement (`[base + disp]`, `[rip + disp]`) |
+| `LEA_INDEX` | LEA of `[base + index]` |
+| `LEA_SCALED` | LEA of `[base + index * 2, 4 or 8]` |
+| `LEA_THREE` | LEA of `[base + index * scale + disp]`; RBP or R13 as the base force a displacement and make `[base + index]` one |
+| `MASKED` | an EVEX record of registers merging into its destination under an opmask |
+| `MASKED_MEMORY` | an EVEX record of a memory operand (a base, no index) under an opmask: a masked store (merging) or a zeroing masked load |
 
-Remaining acceptance work:
+A record whose form has no row of its kind, an index without a base, or a
+32-bit address has no case (ID 0, every column unknown): a merging opmask on a
+form measured without one, and a load merging into its vector destination, are
+such records. Some things don't change a record's case: its immediate's value,
+an EVEX zeroing opmask on registers or rounding decoration, a segment override
+and a fixup mark. The immediates and decorations are measured (below, "What
+doesn't change a case"); a segment override (TLS) and a fixup mark are assumed
+alike, as the instruction's execution is the form's. A merging opmask, and any
+opmask on memory, do change a case, which the sweep found: they have their own
+kinds.
 
-- Attach each real emitter's independent manifest to `x86_zen5_missing`, and
-  measure every missing operand case. An empty manifest proves nothing.
-- Establish flag-result latency, executed micro-op counts, pipe constraints and memory-source
-  latency increments. These columns currently remain **unknown**. The load
-  observation is an address-to-data L1 dependency, not an additive surcharge
-  that applies to every instruction with a memory operand.
-- Add floating-point, vector, flag-result, branch, store and other cases that
-  the actual emitters use. Data-dependent operations need operand ranges and
-  multiple measurements, not one magic latency.
-- Integrate a real selection, scheduling or rematerialization decision and
-  compare generated-program performance with the decision disabled on the
-  9700X. Neither a fast lookup nor absent consumers establishes that scheduling
-  or a cost model pays, or that it does not pay.
+`x86_zen5_rows.c` has 1,349 rows: the cases Tier 0 and Tier 1 emitted in their
+tests (with CI's options: `test-tier0 --cross-check`, `test-ir-lowering`'s
+programs, `test-tier1-masks` for x86-64-v2, -v3 and -v4) and in compiling
+SQLite's amalgamation and speedtest1 and Lua 5.4.8 (both tiers, the default
+target and `-march=znver5`), and their families: every width and operand kind
+(registers, memory, memory with an index) of the integer ALU operations, the
+tests, the unary operations, the shifts, the moves and extensions and `imul`;
+all 16 conditions of jcc, setcc and cmovcc, which a program's conditions choose;
+every width and element of the broadcasts, `vpmovm2*`, `vpternlog` and `vpxor`
+Tier 0's vector code emits; and the 57 cases of the first model. A generated
+program can take any width of a family, which only some seeds show. `x86_zen5_initialize` gives the rows that agree in every column and
+mask one dense ID (fewer than 256: the initialization fails past them). A
+record resolves to its ID once (`x86_zen5_id`); consumers carry the byte as a
+column (`Tier1SelectCode.cost_ids`) and look up 32 at a time
+(`x86_zen5_lookup`): four banks of 64 16-bit entries, eight ZMM registers per
+column, a `vpermi2w` per bank and two blends by the ID's bits 6 and 7. Every
+byte indexes a slot, the slots past the rows unknown, so no ID wraps. The
+scalar twin (`x86_zen5_lookup_scalar`) is a load per ID.
 
-The unrelated semantics work in #221 / PR #239 owns instruction effects and
-legal substitutions. This model does not duplicate or change those rules.
+## Columns
 
-## API and representation
+Cycle quantities and op counts are fixed point, 256 a unit (`BUSTER_X86_COST_SCALE`).
 
-Call `x86_zen5_initialize` once before worker threads. It does not change the
-encoder or the generated-code ISA policy. Then:
+| Column | What it is |
+| --- | --- |
+| `LATENCY` | the longest latency from a source operand to the register result: a register source's, an address register's for a memory kind, a read-modify-write's through its memory |
+| `THROUGHPUT` | reciprocal throughput: cycles per instruction among independent instances |
+| `RETIRED_OPS` | AMD PMCx0C1, retired macro-ops per instruction |
+| `FLAGS_LATENCY` | the latency from a register source to the status flags |
+| `LOAD_EXTRA` | a memory kind's extra latency from the address to the result, over the register path (or the flags' path, for a compare) |
+| `FP_OPS` | AMD PMCx0AB (umask 4): macro-ops dispatched to the floating-point unit per instruction |
+| `PIPES` | `BUSTER_X86_PIPE_*` bits: the blockers of known pipes this case measurably contends with |
 
-- `x86_zen5_id(record)` accepts a validated 64-bit-mode instruction and resolves
-  its case to a byte ID. Carry that ID alongside selected instructions; this
-  scalar resolution is not part of the vector lookup timing.
-- `x86_zen5_lookup(ids, count, column, output)` looks up 32 IDs per iteration
-  with `vpermi2w` / `vpermt2w`. A column occupies two ZMM registers. The scalar
-  twin is `x86_zen5_lookup_scalar`. Input and output are disjoint bounded slices.
-  Any byte outside the known ID range returns unknown; it cannot wrap through
-  the permute. Both tails use masks, including reads of the byte IDs.
-- `x86_zen5_missing(records, count, required_columns)` counts records lacking
-  any requested field. A known form with unknown pipes fails a request for
-  pipes. Callers must not replace unknowns with zero or use them as numerical
-  costs. `required_columns` contains bits for `X86CostColumn` only.
+Each column of each row is one of three (`measured`, `derived`, `absent`
+masks), and `x86_zen5_accounts` asks whether a row accounts for a set:
 
-Row zero and every unmeasured field are `UINT16_MAX`. Cycle quantities and
-retired macro-ops use unsigned fixed point with 256 units per cycle or op.
-There is no silent saturation. The table's compile-time capacity check stops
-growth past 64 IDs; expanding coverage will require either more lookup banks
-or a measured, explicitly justified sharing of cost classes.
-`x86_zen5_measured_fields[id]` marks the columns supplied by the project's
-9700X observations; unmeasured fields have no bit set.
+- **measured**: this repository's harness observed it directly on the 9700X;
+- **derived**: computed from its observations with an assumption this document
+  states (a bridge's share of a round trip, a helper's one macro-op);
+- **absent**: the case has no such path (a constant's move has no source, a
+  store no register result, a form that doesn't write the flags no flag
+  latency, a register case no load), or the harness has no experiment that
+  separates it (listed below). Its value is unknown.
 
-The measured immediate cases currently accept the exact recorded immediate.
-In particular a shift by 0 or a multiple of the operand width never acquires
-the cost of a shift by 3. Unsupported addresses, segment overrides, fixup
-flags, decorations and unmeasured zeroing SUBs return unknown. The L1-load
-case assumes an aligned, ordinary, cacheable L1 hit; record inspection cannot
-prove that runtime condition. Tuning never grants permission to emit an ISA
-feature: that remains `x86_target.c`'s job.
+An absent or unknown value is `BUSTER_X86_COST_UNKNOWN`, never zero; consumers
+don't treat it as a cost. Latencies within a tenth of a cycle are stored as the
+whole cycle, others to an eighth; throughputs to a 64th; op counts to an
+eighth. The coarse steps let equal costs share an ID.
 
-The simple-LEA case excludes RBP/R13 bases: those force an encoded displacement
-even for displacement zero. An initial twelve-register sweep reported 1.1667
-retired macro-ops per simple LEA because two of its twelve bases had that
-encoding. The final throughput fixture keeps the base at R14 and varies the
-index; the base and index dependency chains remain separate. The excluded
-address cases return unknown rather than inheriting an average of two cases.
+## The harness
 
-## Measurement method
+`measure-x86-zen5` builds every fixture from the encoder's form table and the
+semantics module's effects (`x86_effects`, `x86_effects_role`), not from
+per-mnemonic code: a case's roles (ModRM.reg, ModRM.rm, VEX.vvvv, an is4
+register), each one's register file (general, vector, opmask, x87) and access
+(read, written, merged), its implicit registers, flags, and memory access give
+its experiments. A program is a loop of 240 units (a unit is a target
+instruction and the records around it), 64-byte aligned, wrapped in a function
+that saves the callee-saved registers, sets every register it reads from the
+data's constants, and returns with the x87 stack empty and the upper vector
+state clean. Both encoders must agree on every byte before the mapping becomes
+executable; every target record must resolve to the case it measures
+(`x86_zen5_program_targets`), so that no fixture measures a neighbouring case
+(an index shape, a forced displacement, an idiom) by accident.
 
-`measure-x86-zen5` runs original C-generated fixtures through the existing
-encoder. Each generated function preserves the SysV callee-saved registers,
-aligns its loop to 64 bytes, runs 240 target instructions per iteration, and
-returns. The code mapping is writable while being constructed and executable
-only after construction. Both encoders must produce identical code before it
-can run, and every record must pass `x86_validate`.
+**Registers and values.** Written general registers come from twelve (RAX, RDX,
+R8 to R11, RBX, RBP, RCX, RDI, R13, R15) less those the form names implicitly;
+R14 holds the constant 3, RSI the data, R12 the iteration count. Vector
+registers 0 to 11 are written and 13 to 15 are constants, opmasks 1 to 5 and 6
+and 7. A masked case's target runs under k7, every other element selected:
+merging, or zeroing for a load into a vector register. A floating-point case's registers start at 1.0 of its element and its
+constant sources are 1.0, or 0.0 for an addition, subtraction or fused
+multiply-add, so that every chain keeps the value 1.0 and never reaches a
+denormal, infinity or NaN; integers are 3. Divisions divide a 57-bit dividend
+(`0x0123456789abcdef`) by 3 with RDX zero: their latency is that operand
+range's, not a small quotient's.
 
-Seven experiments run in rotating order over an odd number of passes (the seventh for 35 of the cases):
+**Data.** The targets' memory operands are consecutive slots of the operand's
+size (at least 8 bytes) in the data's first 2 KiB, as a function's spills to
+adjacent stack slots are; the blockers' are 2,176 bytes on modulo 4 KiB, so that
+no access aliases another in the low 12 address bits, which the store queue
+compares first (in a first trial, loads 16 KiB from read-modify-writes took 12
+cycles a pair).
 
-1. Twelve independent register chains (an address-independent repeated L1
-   load for the load case).
-2. Six independent chains, matching the register budget used in the mixes.
-3. A chain through the written operand, or through the base for LEA.
-4. A ring of twelve registers carrying the other source's result into the
-   next instruction, or the index for LEA. Single-source forms repeat the
-   first chain. The block length is a multiple of twelve, preserving the
-   dependency across the back edge.
-5. Six target chains interleaved with six independent ADD chains.
-6. Six target chains interleaved with six independent IMUL chains.
-7. The twelve independent chains with a never-taken `jo` after each
-   instruction (`branch`): whether a flag-setting instruction and its
-   conditional branch retire as one macro-op, and the cycles per pair. Only
-   the cases whose OF the chains keep clear run it (`x86_zen5_branch_case`):
-   the logic operations, which clear it; an add or sub of 3, an inc and a
-   dec, which can't leave the chain's width from 3 in the most iterations a
-   call runs (`BUSTER_X86_COST_MAX_ITERATIONS`, a static assertion); neg; and
-   shr and sar by one. The multiplies overflow, shifts by 3 leave OF
-   undefined, shl by one shifts the chains' bits into the sign, an add of
-   4660 overflows at 32 bits, and not, lea and mov write no flags, so their
-   `jo` would read what came before them: the harness refuses the experiment
-   for those cases.
+**Experiments** (`X86CostExperiment`), each where the case allows it:
 
-The ring avoids accidentally turning an ordinary XOR or SUB into its zero
-idiom. IMUL with an immediate chains its source into the result. Loads use an
-aligned word pointing to itself: the chain measures an L1 address dependency,
-not a memory hierarchy or aliasing workload. Zeroing XOR and immediate moves
-have no GPR input dependency; their repeated-destination measurements are
-throughput observations, not evidence of a fractional dependency latency.
-`X86_COST_GPR_LATENCY` concerns the GPR result. `X86_COST_FLAGS_LATENCY`
-remains unknown so a flag dependency cannot accidentally acquire a GPR latency.
+- *independent*: twelve independent instances (fewer for a smaller pool), whose
+  cycles, retired ops and dispatched ops per unit are the throughput and op
+  counts; and *independent-six*, six, the mixes' reference;
+- *chain-destination*: one register (or a read-modify-write's memory) the form
+  reads and writes, through every instance;
+- *chain-reg*, *chain-rm*, *chain-vvvv*: a ring of twelve registers, each
+  instance reading in that role the previous instance's result; where the role's
+  file isn't the result's, a bridge record moves it (`movq` between general and
+  vector registers, `kmovq` between general registers and opmasks, both through a
+  general register between opmasks and vector registers);
+- *chain-index*: LEA's index (and a gather's), as *chain-rm* is its base;
+- *chain-address*: a memory kind's result (through a bridge, or a `cmov` for a
+  flags result) `and`ed with 0 and added to the base the next instance
+  addresses, so that each address waits for the previous result;
+- *chain-flags*: the flags a register source sets, read by a `cmov` (of a flag
+  the form defines) that writes the next instance's source (and a bridge into a
+  vector source);
+- *mix-…*: the six instances interleaved one to one with a blocker of known
+  pipes (`x86_zen5_blockers`): `mov r32, imm32` (the ALUs), `imul r64, r/m64,
+  imm8` (the multipliers), `rorx` (the shifters), a load, a store, `vaddps`,
+  `vmulps`, `vpaddd`, `vpshufb` and `vmovd r32, xmm` (the transfer from the
+  vector unit), each write-only, so that six of them saturate their pipes. A
+  form that reads the flags isn't mixed with `imul`, which writes them.
 
-Counters are one pinned perf group: core cycles, retired instructions and AMD
-PMCx0C1, **retired macro-ops**. The latter's meaning is exposed by the host's
-`perf list --details` (`ex_ret_ops`). It is not an executed-micro-op counter.
-The command refuses other processors, failed reads, unavailable counters,
-multiplexed groups and unexpected retired-instruction counts. It does not
-replace failures with zero. It checks the instruction count against the
-generated loop's exact body count, allowing a small fixed wrapper overhead.
+**Special families**, whose units the effects alone can't build:
 
-Cycles retain loop overhead, because subtracting empty-loop cycles from a
-throughput loop would remove work that overlapped the measured instructions.
-Retired macro-ops subtract a separately measured empty loop, including its
-loop branch and wrappers. Mixed cycles and counts are per **pair**, not per
-instruction; a mix reveals contention but cannot uniquely name physical
-pipes. Compare each mix with the **six-chain** measurements of both the target
-and blocker: six chains of a 3-cycle multiply alone cannot run faster than
-0.5 cycles per instruction, even when twelve independent chains reach 0.333.
-That dependency limit is not evidence of contention with an ADD. A mix can
-hide resource limits behind its dependency limits, so it is only a diagnostic.
-The command prints medians, min/max cycles and an FNV-1a hash of each
-generated code block. These hashes audit generated bytes; they are not
-cryptographic source identities.
+- *implicit registers* (mul and imul of one operand, div, idiv, cqo, cdq, an
+  accumulator's immediate, cmpxchg): the independent units first set RAX (a
+  move of 3, or a load of the dividend), the chain runs through RAX, a divide's
+  restoring the dividend's magnitude with an `or` (one ALU cycle, subtracted);
+  RDX's zero idiom precedes each divide;
+- *the stack*: 240 pushes and a LEA giving the stack back, or a LEA reserving it
+  and 240 pops;
+- *control*: a jmp to the next record (taken), a jcc to it with its condition
+  false (the body starts with `cmp r14d, imm32` chosen per condition), a call of
+  a stub whose ret returns, ret as that stub's, and an indirect jmp through a
+  register a LEA sets;
+- *the x87*: the stack holds five 1.0s and a constant; a form that pushes is
+  paired with `fstp st(0)`, one that pops with `fld`, one on st(0) alone with an
+  `fxch` that rotates the values;
+- *the gather*: `kxnorw` sets its mask before each, the chain through its index;
+- *traps* (`ud2`): never run, every column absent.
 
-Run every command separately under the shared host lock:
+**Counters.** One pinned perf group: core cycles, retired instructions, retired
+macro-ops (PMCx0C1), and macro-ops dispatched to the FP unit and to the integer
+unit (PMCx0AB, umasks 4 and 8; the host's `perf list --details` names them
+`ex_ret_ops` and `de_dis_ops_from_decoder.any_fp_dispatch` and
+`.any_integer_dispatch`). The command refuses other processors, failed reads,
+multiplexed groups and a retired-instruction count that isn't the loop's. Passes
+interleave every experiment of a case in a rotating order, each pass starting
+with the empty loop, whose counts (not cycles) every sample subtracts; each
+value is the passes' median.
 
-```sh
-EXCLUSIVE_OWNER=issue-181 ~/buster-fast-bench/exclusive.sh ./build.sh
-EXCLUSIVE_OWNER=issue-181 ~/buster-fast-bench/exclusive.sh ./build/compiler test-x86-zen5
-EXCLUSIVE_OWNER=issue-181 ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler measure-x86-zen5
-EXCLUSIVE_OWNER=issue-181 ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler measure-x86-zen5 --only IMUL_R64_RM64/REGISTER --passes 11 --iterations 20000
-EXCLUSIVE_OWNER=issue-181 ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler benchmark-x86-zen5
-EXCLUSIVE_OWNER=issue-181 ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler benchmark-x86-zen5 --only vector --after-scalar 200
-```
+**References**, measured first in every process: the bridges' round trips
+(`movq xmm, r64` then `movq r64, xmm`; `kmovq` both ways; `test` then `cmovne`)
+and each blocker alone.
 
-The lookup benchmark checks equality before timing, reports 21-pass median
-nanoseconds and core cycles per ID, and can run each implementation alone or after scalar
-conditioning. It measures a hot 65,536-ID synthetic column and its outputs.
-It is not a whole-compiler or generated-program speed measurement.
+### Reduction (`x86_zen5_reduce`)
 
-## Recorded observations
+- The throughput, retired ops and FP ops are the independent experiment's,
+  less its helpers' (a helper record is one macro-op: a move, a zero idiom, an
+  x87 push or pop, a mask's `kxnorw`; derived where there are any).
+- The latency is the longest register chain's cycles per unit, less its
+  bridge's share (derived), or the address chain's where longer: its cycles less
+  the `and` and the `add` (an ALU cycle each) and the result's bridge's share
+  (derived).
+- A bridge's share is half its measured round trip: **the two directions are
+  assumed to cost the same**. A chain can't separate them: every round trip
+  through a vector register or an opmask has both. The model's latencies across
+  register files and its memory kinds' vector and opmask latencies rest on it.
+- The load's extra latency is the address chain's latency over the register
+  paths' (the flags' for a flags result).
+- The flags' latency is the flags chain's cycles less half the `test`-`cmovne`
+  round trip (the `cmov`'s share) and the source's bridge's.
+- A pipe bit is set where the mix with a blocker took at least half the cycles
+  that full sharing would add over the mix's floor, and full sharing would add
+  at least a 20th of a cycle: the floor is the greatest of the target's six
+  instances alone, the blocker's alone, and both's macro-ops over 8 (the
+  dispatch width); full sharing is the sum of the first two. A bit says the case
+  contends with that blocker's pipes at one to one, not which physical pipe it
+  runs on; a mix can hide a resource limit behind a dependency limit.
 
-The [2026-10-22 evidence](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/x86-zen5-2026-10-22/README.md) retains
-three complete 9700X processes, their source/binary identities, generated-code
-hashes, reductions and lookup observations. All three agree on every code hash;
-their independent-throughput medians differ by at most 0.0535%.
+**Absent by method**: the flags' latency of an accumulator's or implicit
+register's form, of a read-modify-write and of the x87's; the latency of a load
+or store of the x87 and of push and pop (the stack engine's); a divide's load's
+extra latency; control transfers' latencies.
 
-| Observed case | GPR latency (cycles) | Block throughput (cycles/instruction) | Retired macro-ops |
+## What doesn't change a case
+
+`measure-x86-zen5 --immediate N` and `--decorations N` measure a case with a
+fixture's immediate or EVEX decorations in place of its own. In each of three
+processes on the 9700X (the record below), every value gave the same row:
+
+| Case | Immediates or decorations | Row |
+| --- | --- | --- |
+| `shl r64, imm8` | 0, 1, 3, 63, 127 | latency 1, throughput 0.328, 1 op |
+| `imul r64, r/m64, imm8` | 1, 3, 127, −128 | latency 3, throughput 0.328, 1 op |
+| `add r/m64, imm8` | 1, 3, 127, −128 | latency 1, throughput 0.188, 1 op |
+| `add r/m32, imm32` | 0, 4660, 2147483647 | latency 1, throughput 0.188, 1 op |
+| `vpaddd zmm` | none; zeroing under k4 | latency 2, throughput 0.25 |
+| `vaddps zmm` | none; zeroing under k4 | latency 2, throughput 0.5 |
+
+A shift by 0 doesn't write the flags, but costs a shift's cycles. Merging under
+an opmask is different: in all three processes a merging `vpaddd zmm {k4}`
+took 3 cycles from its sources where the unmasked one took 2, so a merging
+opmask has its own kind (`MASKED`), which a form has rows of where an emitter
+merges (Tier 0's masked `vpaddd`, Tier 1's `vpblendm*` selections and masked
+compares). Where the semantics' effects say merging makes the destination a
+source, the harness chains through it, which measures whether the processor
+waits for it: a merging `vpaddd` does (2 cycles), `vpblendm`'s selection
+doesn't (0.25 cycles, its throughput); a compare into an opmask has no vector
+destination. An opmask on memory is different too: a zeroing
+`vmovdqu8 zmm {k3}{z}, m512` took 6.5 cycles from its address (derived) where
+the unmasked load took 4.5, at the same throughput, so any opmask on a memory
+operand is the `MASKED_MEMORY` kind: Tier 0's masked stores (merging) and
+masked loads (zeroing, as the harness measures a load's row; a load merging
+into its destination would read it too, and has no row).
+
+## Coverage
+
+Every record Tier 0 and Tier 1 emit has a complete row, which the tests check
+on every program they compile, as #221's checks do for the semantics' covered
+forms:
+
+- `test-tier0` (`tier0_test_covered`): every program of its checks (the effects',
+  the deep values', the 128-bit integers', the masks', the vectors', the
+  x87's, and `--cross-check`'s), and the programs `test-ir-lowering` and
+  `test-interpreter` compile through it (`tier0_initialize` initializes the
+  model, so that a test of Tier 0 alone reads it);
+- `test-tier1-select`: every record of the selections' plans and expansions (not
+  the test's wrappers);
+- `test-tier1-emit` (and `test-x86-target-selection`, which runs it for each
+  target), `test-tier1-masks` and `test-tier1-pipeline`: every frame and body
+  record of the complete functions. `test-tier1-masks` exempts the forms Zen 5
+  doesn't run (AVX512-FP16's, which its fp16 fixtures emit): the 9700X can't
+  measure them, and code with them doesn't run on Zen 5.
+
+`test-x86-zen5` checks that every row accounts for every column, so a row can't
+be committed half measured. **Adding a case**: add its row with `U` values and
+zero masks to `x86_zen5_rows.c`, build, and on the 9700X run `measure-x86-zen5
+--missing --table`, which measures the rows without values and prints the whole
+file. CI reproduces three eighths of the rows on the 9700X (`--check --sample 8`
+with `--offset` 0, 1 and 2).
+
+## The 9700X record
+
+The record, with the scripts, every process's output, the receipt and the
+sweep: [buster-performance's `x86-zen5-181-2026-11-07`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/x86-zen5-181-2026-11-07).
+The rows come from four processes of the harness (CPU 2 under the host's lock,
+7 passes of 10,000 iterations, built `BUSTER_HOST_ARCH=znver5
+BUSTER_DEBUG_INFO=0` by clang 23.1.1): the first 849 rows' `--table`, and the
+masked rows', the families' and the masked load's `--missing --table`. On
+`30de081f`, the commit that completed them, two `--check` processes reproduced
+all 1,349 rows (49 and 58 differ in a pipe bit, which `--check` reports and
+doesn't require), and a fresh `--table` printed 1,270 of them exactly: the
+other 79 differ only in throughput, by the column's 1/64-cycle step (`ktest`'s
+and `kortest`'s by their 0.5 or 1 cycle passes), or in pipe bits. Their 1,349
+rows share 156 IDs.
+
+What the rows say, a few families (cycles; derived values in italics):
+
+| Family | Latency | Throughput | Macro-ops |
 | --- | ---: | ---: | ---: |
-| Regular integer ALU and simple LEA | 1 | about 0.18836 | 1 |
-| Zeroing XOR | unknown | 0.14172 | 1 |
-| Immediate shifts | 1 | 0.33475 | 1 |
-| Two-/three-operand IMUL | 3 | 0.33336 | 1 |
-| Scaled LEA plus displacement | 2 | about 0.45686 | 2 |
-| MOV r32, imm32 | unknown | 0.16741 | 1 |
-| MOV r64, imm64 | unknown | 0.33478 | 1 |
-| Aligned L1 MOV load | 4 (address to data) | 0.25003 | about 1 |
+| ALU on registers (`add`, `and`, `neg`, `inc`, `cmp`'s flags …) | 1 | 0.19 | 1 |
+| zero idioms (`xor r32, r32`; `pxor`, `vpxor` of a register with itself) | — | 0.14 (vector 0.17) | 1 |
+| `mov r32/r64, r` (eliminated: a chain runs at rename's rate) | 0.125 | 0.14 | 1 |
+| `mov r32, imm32`; `mov r64, imm64` | — | 0.17; 0.33 | 1 |
+| load `mov r, [m]`; with an index | 4; 5 | 0.25 | 1 |
+| `movsx` load; with an index | 5; 6 | 0.25 | 1 |
+| store (consecutive slots) | — | 0.5 | 1 |
+| read-modify-write `add [m], r` (through the memory) | 1 | 0.53 | 1 |
+| `lea` of one or two components, or scaled | 1 | 0.17 | 1 |
+| `lea [base + index * s + disp]` | 2 | 0.48 | 2 |
+| `imul r, r/m(, imm)`; `mul r64` | 3; 3 | 0.33; 0.67 | 1; 2 |
+| `div r64`; `div r32`, `idiv r32` (a 57-bit dividend by 3) | *16*; *13* | 9.3; 6 | 2 |
+| shifts (by 1, CL, imm8), `bsf`, `tzcnt`, `bextr`, `bzhi` | 1 | 0.33 | 1 |
+| `shld`, `shrd` | 2 | 1.0 | 4 to 5 |
+| `cmovcc` and `setcc` but `a`, `be` (`cmova`, `cmovbe`: 2 ops) | 1 | 0.19 | 1 |
+| `jcc` not taken; `jmp` to the next instruction | — | 0.34; 0.55 to 1.6 | 1 |
+| `call` and its `ret` | — | 4 a pair | 3 a pair |
+| `lock xadd`, `lock cmpxchg`, `xchg` with memory | 20 | 20 | 2 to 6 |
+| `mfence` | — | 82 | 6 |
+| SSE/AVX floating add, sub, compare; multiply | 2; 3 | 0.5 | 1 |
+| `divsd`; `divpd` | 13 | 4 | 1 |
+| vector integer `vpaddd` and logic; `vpmulld`; `vpermb` | 2; 3; 5 | 0.25; 0.5; 0.5 | 1 |
+| vector load (any width); `zmm` store | *4.5*; — | 0.5; 1 | 1; 2 |
+| `movq xmm, r64`; `movq r64, xmm` (half the 9-cycle round trip each) | *4.5* | 1; 0.5 | 2; 1 |
+| opmask logic (`kandw`, `kxorq` …) | 1 | 0.5 | 1 |
+| `kortest`, `ktest` (the passes are 0.5 or 1, either in one process) | — | 0.5 to 1 | 2 |
+| `vpgatherdd zmm` | 30 | 12.6 | 64 |
+| x87 `faddp`, `fmulp`; `fdivp`; `fld m80` | 6; 15; — | 1.2; 5; 4 | 1; 1; 10 |
 
-These are the explicit fixtures' measurements, including loop overhead. The
-table stores throughput and macro-ops rounded to 1/256, and dependent GPR
-latencies rounded to whole cycles. It does not extrapolate them to all operand
-values, addresses, flags or layouts. Of the 57 cases, all have measured
-throughput and retired macro-ops; 53 have measured GPR dependency latency.
-The other four columns remain unknown for every case.
+The vector loads' 4.5 cycles and every latency between register files rest on
+the even split of a round trip (above): a vector load's address chain is 11
+cycles with the `and`, the `add` and a `movq r64, xmm` in it, and an integer
+load's is 4 (measured, no bridge). Generated code doesn't change with these
+rows: the objects of `sqlite3.c`, speedtest1 and Lua's 34 files at Tier 0 and
+`--tier1`, at the default target and `-march=znver5`, are the same bytes from
+`main` and this change (Tier 0's `inc` and `dec` still cost no more than `add`
+and `sub`, and every rematerialized copy still costs no more than its reload).
 
-### inc and dec against add and sub (#181)
+## Consumers
 
-The form choice can take `inc` and `dec` for an add or sub of 1 or −1 where CF
-(and for −1 AF) is dead: they are a byte shorter than the imm8 forms. Whether
-they cost more is the target's to say (#221's `BUSTER_X86_CONTEXT_INC_DEC`).
-Tier 0 asks for them where this model's observations of `inc` and `dec` at 32
-and 64 bits, its widths, cost no more than `add` and `sub` with an imm8 of the
-same width in GPR latency, throughput and retired macro-ops, each of them
-known (`tier0_inc_dec`, decided once by `tier0_initialize`).
+- **Tier 0** asks the form choice for `inc` and `dec` where they cost no more
+  than `add` and `sub` with an imm8 (`tier0_inc_dec`): latency, throughput and
+  retired macro-ops, each known (below).
+- **Tier 1's selection** carries each record's ID (`Tier1SelectCode.cost_ids`)
+  and counts unknown cases.
+- **The postallocation scheduler** (#172, `tier1_schedule.c`) weighs each record
+  by its case's latency (docs/tier1-scheduling.md).
+- **Rematerialization** (#178, `tier1_rematerialization_model_costs`) compares a
+  copy's latency with an L1 load's (docs/tier1-allocation.md).
 
-The [2026-10-29 evidence](https://github.com/buster14a/buster-performance/blob/10c9d5fe412935d246163121b9c145308088c3dc/docs/measurements/x86-zen5-inc-dec-181-2026-10-29/README.md)
-retains three 9700X processes of the eight cases' seven experiments
-(`measure-x86-zen5 --only CASE --passes 11 --iterations 20000`, CPU 2), all
-eight cases the branch experiment's. Every case measured the same in every
-process, each experiment to within 0.06%; each case's median of the three:
+## Provenance
 
-| Case | Independent | Six chains | Chain | Mix with ADD | Mix with IMUL | Before `jo` (per pair) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `inc` r32 | 0.1884 | 0.2144 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
-| `dec` r32 | 0.1884 | 0.2144 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
-| `add` r32, imm8 | 0.1883 | 0.2144 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
-| `sub` r32, imm8 | 0.1884 | 0.2144 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
-| `inc` r64 | 0.1884 | 0.2144 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
-| `dec` r64 | 0.1884 | 0.2144 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
-| `add` r64, imm8 | 0.1884 | 0.2144 | 1.0000 | 0.3757 | 0.5003 | 0.3348 |
-| `sub` r64, imm8 | 0.1884 | 0.2144 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
-
-Cycles per instruction (per pair in the mixes and before `jo`); the chain is
-both chains, through the written operand and through the source, which for
-these one-register forms are the same loop. Each instruction retires as one
-macro-op, and each pair with its `jo` as one: all four fuse with the branch.
-So `inc` and `dec` cost no more on Zen 5, Tier 0 keeps asking for them, as it
-did, and its code doesn't change: `sqlite3.c`'s object (`-c`, the 9700X
-job's compile-time options) is the same bytes from the commit before and
-after the decision.
-
-## Validation and provenance
-
-`test-x86-zen5` compares every byte ID for every length from 0 through 256,
-every column, and tails ending at guard pages. It checks operand distinctions,
-unknown fields and unsupported cases, then validates, cross-encodes and runs
-every generated loop. Timing values are not hard correctness thresholds in CI.
-
-The local ASan/UBSan run also executes these tests. Only Clang's function-type
-metadata probe is disabled at the generated-code call boundary: the generated
-entry point has no Clang metadata before it. Address checks and the other
-undefined-behavior checks still cover the wrapper, fixture construction, model
-and lookups.
-
-The implementation, fixtures and measurement data are original project work.
-No uops.info XML, XED data, LLVM scheduling table, nanoBench implementation or
-other third-party timing dataset is incorporated. uops.info is background
-research, not a source of table values. The hardware counter identifier is an
-architectural interface; Linux perf and Clang are external tools. This follows
-#181's option to generate observations on the owner's hardware without
-choosing terms for a third-party timing-data import.
-
-## Boundary audit #298
-
-Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
-[scope and evidence](simd-boundary-audit.md). The
-[model](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/x86_zen5.c#L1)
-produces operand-sensitive case IDs and cost columns consumed by
-[tier1 scheduling](tier1-scheduling.md#boundary-audit-298), its verifier,
-measurement harness and tests. Form identity alone is insufficient when the
-operand/address case changes. Missing columns/cases retain the explicit unknown
-sentinel; they must not become a zero-latency readiness edge.
-
-`x86_zen5_id` classifies one validated physical record into a u8 case ID.
-`x86_zen5_lookup` consumes a counted u8 ID column and a valid `X86CostColumn`,
-writing disjoint u16 results: 32 lookups through two ZMM table registers, with
-masked tails and no caller padding requirement. Natural alignment suffices.
-Cycle costs use units of 1/256 cycle; `UINT16_MAX` means unknown, including
-unsupported IDs. Startup initializes the 64-entry columns before workers;
-they remain immutable while readers run. Caller ID/output storage must survive
-the lookup and subsequent cost consumers respectively.
-
-The scheduler retains case IDs and reports unknown/missing columns rather than
-repeatedly querying names or inventing a port model. Its physical-record
-producer is a fixture at this pin, not integrated source Tier 1 selection.
-Disposition: retain measured case identity and conservative unknown handling.
-`test-x86-zen5` checks every tail and guarded slices, and the generated harness
-executes its loops. [#181](https://github.com/buster14a/buster/issues/181)/[#172](https://github.com/buster14a/buster/issues/172) own broader observations and actual producer +
-lookup + scheduler + generated-program measurements; a lookup benchmark or
-microbenchmark latency is not proof of whole-block or compiler improvement.
+The implementation, fixtures and measurements are original project work. No
+uops.info data, XED data, LLVM scheduling table, nanoBench implementation or
+other third-party timing dataset is incorporated; this follows #181's option to
+measure every entry with the harness, so that no third-party data enters the
+repository. The hardware counters' identifiers are architectural interfaces;
+Linux perf and Clang are external tools.

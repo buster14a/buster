@@ -137,9 +137,16 @@ static void tier1_schedule_test_compare(Tier1ScheduleTest* test, Tier1ScheduleIn
         tier1_schedule_test_expect(test, memcmp(scalar->successors[i], vector->successors[i], sizeof(scalar->successors[i])) == 0, "identical successor bitsets");
         tier1_schedule_test_expect(test, memcmp(scalar->data_successors[i], vector->data_successors[i], sizeof(scalar->data_successors[i])) == 0, "identical GPR RAW priority edges");
     }
+    // The columns whose value each record's case lacks: unknown, an absent path's too (x86_zen5_missing counts the ones
+    // a row doesn't account for, which an absent path is).
     for (uint32_t column = 0; column < X86_COST_COLUMN_COUNT; column += 1)
     {
-        tier1_schedule_test_expect(test, scalar_stats.missing_columns[column] == x86_zen5_missing(input.instructions, input.count, 1u << column), "coverage counts the actual input records");
+        uint32_t unknown = 0;
+        for (uint32_t i = 0; i < input.count; i += 1)
+        {
+            unknown += x86_zen5_columns[column][x86_zen5_id(&input.instructions[i])] == BUSTER_X86_COST_UNKNOWN;
+        }
+        tier1_schedule_test_expect(test, scalar_stats.missing_columns[column] == unknown, "coverage counts the actual input records");
     }
 }
 
@@ -159,7 +166,7 @@ static void tier1_schedule_test_examples(Tier1ScheduleTest* test, Tier1ScheduleG
     const uint16_t expected[] = { 2, 0, 1, 3 };
     tier1_schedule_test_expect(test, memcmp(order, expected, sizeof(expected)) == 0 && stats.moved == 3, "measured IMUL chain starts first with stable ties");
     tier1_schedule_test_expect(test, vector->heights[2] == 4 * BUSTER_X86_COST_SCALE && vector->heights[0] == BUSTER_X86_COST_SCALE, "actual three-cycle IMUL weights its GPR dependency");
-    tier1_schedule_test_expect(test, stats.unknown_cases == 0 && stats.missing_columns[X86_COST_PIPES] == 4, "known GPR costs never imply known pipes");
+    tier1_schedule_test_expect(test, stats.unknown_cases == 0 && stats.missing_columns[X86_COST_PIPES] == 0, "the measured cases' pipes are known (#181)");
     uint16_t invalid[] = { 3, 0, 1, 2 };
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, invalid), "verifier rejects RAW reversal");
     invalid[0] = 0;
@@ -218,10 +225,11 @@ static void tier1_schedule_test_examples(Tier1ScheduleTest* test, Tier1ScheduleG
     records[1].mode = BUSTER_X86_MEMORY_BASE;
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "a store stays after its value's definition");
     tier1_schedule_test_compare(test, input, scalar, vector);
-    records[0] = tier1_schedule_test_instruction(X86_FORM_ADD_RM64_IMM8, 0, X86_REGISTER_R8);
+    // A rotate: a form the backends don't emit, which the model has no row of (#181).
+    records[0] = tier1_schedule_test_instruction(X86_FORM_ROL_RM64_IMM8, 0, X86_REGISTER_R8);
     records[0].immediate = 4;
     records[1] = tier1_schedule_test_instruction(X86_FORM_NOT_RM64, 0, X86_REGISTER_R10);
-    tier1_schedule_test_expect(test, x86_zen5_id(records) == 0 && tier1_schedule_verify(input, reversed), "an unmeasured immediate moves");
+    tier1_schedule_test_expect(test, x86_zen5_id(records) == 0 && tier1_schedule_verify(input, reversed), "an unmeasured form moves");
     tier1_schedule_test_compare(test, input, scalar, vector);
     tier1_schedule_test_expect(test, tier1_schedule_block(input, vector, order, 8, true, &stats) == TIER1_SCHEDULE_OK && stats.unknown_cases == 1 &&
                                          vector->latencies[0] == BUSTER_X86_COST_SCALE, "an unmeasured case is counted unknown and weighs its class");

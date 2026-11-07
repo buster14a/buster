@@ -1852,6 +1852,22 @@ type of an incomplete array is completed to the row count. A short row, an
 elided or excess one, a deeper array and a designator at either level all keep
 the ordinary path.
 
+Arrays of integer structs (#1383), such as `struct R { int a; char b; long c; }`,
+also use the rows grammar when each brace supplies exactly one literal per
+member in declaration order. Every member must be a non-bit-field, nonvolatile
+8-, 16-, 32- or 64-bit integer other than `_Bool`. The producer gathers literal
+tokens once, converts each member's column with the existing scalar/vector
+batches, and places the results at that member's byte offset in a zeroed record
+payload. Type-table member offsets are in bits and are converted to bytes
+before checking the store bounds. This preserves packed layouts, padding,
+record alignment and omitted outer-array tails. Incomplete outer bounds finish
+at the record count. The source-order reader also accepts block-scope static
+tables; deferred function bodies retain ordinary checking. Floating, atomic,
+aggregate and bit-field members, partial records, designators, nonliteral
+expressions and conversions needing warnings retain the ordinary path for the
+whole table. Tests require compact selection, compare its bytes and completed
+types with the full graph, and cover guarded stores, scratch refusal and replay.
+
 Automatic arrays, volatile and atomic elements, 128-bit elements, designators,
 short or elided rows, deeper nesting and nonliteral expressions retain ordinary
 checking and planning. `check_input_tables_reference` provides that exact
