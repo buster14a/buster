@@ -385,6 +385,19 @@ static bool cc_compat_language_output(const char* text, const char* expected)
     return result && *expected == 0;
 }
 
+static void cc_compat_language_expect(CCCompatibilityTest* test, const char* name, const char* variant, const CCCompatibilityRun* run, const char* expected)
+{
+    char label[256];
+    snprintf(label, sizeof(label), "%s (%s)", name, variant);
+    const bool good = run->status == 0 && cc_compat_language_output(run->output, expected);
+    cc_compat_expect(test, good, label);
+    if (!good)
+    {
+        fprintf(stderr, "  %s status %d\n  stdout: %s\n  stderr: %s\n", variant, run->status,
+                run->output != NULL ? run->output : "(missing)", run->errors != NULL ? run->errors : "(missing)");
+    }
+}
+
 static void cc_compat_preprocessor_languages(CCCompatibilityTest* test)
 {
     const char* source = "#define N 3\n#ifdef __ASSEMBLER__\nasm_mode\n#else\nc_mode\n#endif\n$N\n";
@@ -398,25 +411,38 @@ static void cc_compat_preprocessor_languages(CCCompatibilityTest* test)
         const char* name;
         const char* arguments[16];
         const char* expected;
+        const char* oracle_path;
     } cases[] =
     {
-        { "suffixes select C and preprocessed assembly independently", { "-E", "-P", "language.c", "language.S", NULL }, "c_mode$Nasm_mode$3" },
-        { "suffixes select assembly then C independently", { "-E", "-P", "language.S", "language.c", NULL }, "asm_mode$3c_mode$N" },
-        { "separate -x is positional", { "-E", "-P", "-x", "c", "language.S", "-x", "assembler-with-cpp", "language.c", NULL }, "c_mode$Nasm_mode$3" },
-        { "joined -x and separate none restore suffixes", { "-E", "-P", "-xc", "language.S", "-x", "none", "language.S", "language.c", NULL }, "c_mode$Nasm_mode$3c_mode$N" },
-        { "joined none restores raw and cpp suffixes", { "-E", "-P", "-xassembler-with-cpp", "language.c", "-xnone", "language.s", "language.S", NULL }, "asm_mode$3asm_mode$3" },
-        { "a later -x does not change an earlier input", { "-E", "-P", "language.c", "-xassembler-with-cpp", NULL }, "c_mode$N" },
-        { "raw assembly suffix has no preprocessing action", { "-E", "-P", "language.s", NULL }, "" },
-        { "separate assembler language has no preprocessing action", { "-E", "-P", "-x", "assembler", "language.c", NULL }, "" },
-        { "joined assembler language has no preprocessing action", { "-E", "-P", "-xassembler", "language.S", NULL }, "" },
-        { "an include operand is not a language option", { "-E", "-P", "-include", "-xassembler-with-cpp", "language.c", NULL }, "c_mode$N" },
-        { "a dependency target is not a language option", { "-E", "-P", "-MT", "-xassembler-with-cpp", "language.c", NULL }, "c_mode$N" },
-        { "a filename after -- is not a language option", { "-E", "-P", "--", "-xassembler-with-cpp.S", NULL }, "asm_mode$3" },
+        { "suffixes select C and preprocessed assembly independently", { "-E", "-P", "language.c", "language.S", NULL }, "c_mode$Nasm_mode$3", NULL },
+        { "suffixes select assembly then C independently", { "-E", "-P", "language.S", "language.c", NULL }, "asm_mode$3c_mode$N", NULL },
+        { "separate -x is positional", { "-E", "-P", "-x", "c", "language.S", "-x", "assembler-with-cpp", "language.c", NULL }, "c_mode$Nasm_mode$3", NULL },
+        { "joined -x and separate none restore suffixes", { "-E", "-P", "-xc", "language.S", "-x", "none", "language.S", "language.c", NULL }, "c_mode$Nasm_mode$3c_mode$N", NULL },
+        { "joined none restores raw and cpp suffixes", { "-E", "-P", "-xassembler-with-cpp", "language.c", "-xnone", "language.s", "language.S", NULL }, "asm_mode$3asm_mode$3", NULL },
+        { "a later -x does not change an earlier input", { "-E", "-P", "language.c", "-xassembler-with-cpp", NULL }, "c_mode$N", NULL },
+        { "raw assembly suffix has no preprocessing action", { "-E", "-P", "language.s", NULL }, "", NULL },
+        { "separate assembler language has no preprocessing action", { "-E", "-P", "-x", "assembler", "language.c", NULL }, "", NULL },
+        { "joined assembler language has no preprocessing action", { "-E", "-P", "-xassembler", "language.S", NULL }, "", NULL },
+        { "an include operand is not a language option", { "-E", "-P", "-include", "-xassembler-with-cpp", "language.c", NULL }, "c_mode$N", NULL },
+        { "a dependency target is not a language option", { "-E", "-P", "-MT", "-xassembler-with-cpp", "language.c", NULL }, "c_mode$N", NULL },
+        { "a filename after -- is not a language option", { "-E", "-P", "--", "-xassembler-with-cpp.S", NULL }, "asm_mode$3", "./-xassembler-with-cpp.S" },
     };
     for (uint32_t i = 0; files && i < sizeof(cases) / sizeof(cases[0]); i += 1)
     {
-        CCCompatibilityRun oracle = cc_compat_run(test, test->clang, NULL, cases[i].arguments);
-        cc_compat_expect(test, oracle.status == 0 && cc_compat_language_output(oracle.output, cases[i].expected), cases[i].name);
+        const char* oracle_arguments[16] = { 0 };
+        uint32_t oracle_count = 0;
+        for (uint32_t a = 0; cases[i].arguments[a] != NULL; a += 1)
+        {
+            oracle_arguments[oracle_count++] = cases[i].arguments[a];
+        }
+        if (cases[i].oracle_path != NULL)
+        {
+            // The oracle reads the same file through ./; Buster still receives the bare option-looking name after --.
+            // This keeps Clang's driver-to-cc1 argument rendering out of Buster's -- boundary regression.
+            oracle_arguments[oracle_count - 1] = cases[i].oracle_path;
+        }
+        CCCompatibilityRun oracle = cc_compat_run(test, test->clang, NULL, oracle_arguments);
+        cc_compat_language_expect(test, cases[i].name, "Clang oracle", &oracle, cases[i].expected);
         cc_compat_release(&oracle);
         for (uint32_t scalar = 0; scalar < 2; scalar += 1)
         {
@@ -431,11 +457,7 @@ static void cc_compat_preprocessor_languages(CCCompatibilityTest* test)
                 arguments[count++] = cases[i].arguments[a];
             }
             CCCompatibilityRun run = cc_compat_run(test, test->compiler, NULL, arguments);
-            cc_compat_expect(test, run.status == 0 && cc_compat_language_output(run.output, cases[i].expected), cases[i].name);
-            if (run.status != 0)
-            {
-                fprintf(stderr, "  language diagnostics: %s\n", run.errors != NULL ? run.errors : "(missing)");
-            }
+            cc_compat_language_expect(test, cases[i].name, scalar != 0 ? "Buster scalar kernel" : "Buster default kernel", &run, cases[i].expected);
             cc_compat_release(&run);
         }
     }
