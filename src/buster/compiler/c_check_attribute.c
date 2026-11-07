@@ -1260,6 +1260,62 @@ static bool check_input_attribute_string(CheckInputReader* reader, uint32_t firs
     return valid;
 }
 
+// clang's parser reads an attribute's string argument and a static assertion's message as an unevaluated string literal
+// (#147, ParseUnevaluatedStringLiteralExpression): of the string literals from `first` to `end` (an attribute's argument's
+// parentheses peeled, as ParseUnevaluatedStringInAttribute peels them, into `*end`), the first token that has an escape
+// sequence clang refuses there (check_literal_unevaluated_escapes), or BUSTER_CHECK_NONE. Tokens of another kind are left
+// to the callers' own errors.
+static uint32_t check_input_unevaluated_refused(CheckInputReader* reader, uint32_t first, uint32_t* end)
+{
+    const Parser* parser = reader->parser;
+    uint32_t last = *end;
+    while (first + 1 < last && parser->tokens.kinds[first] == PARSE_KIND_L_PAREN && parser->tree.parents[first] == last - 1)
+    {
+        first += 1;
+        last -= 1;
+    }
+    bool strings = first < last;
+    for (uint32_t token = first; strings && token < last; token += 1)
+    {
+        strings = parser->tokens.kinds[token] == PARSE_KIND_STRING;
+    }
+    uint32_t refused = BUSTER_CHECK_NONE;
+    for (uint32_t token = first; strings && refused == BUSTER_CHECK_NONE && token < last; token += 1)
+    {
+        const uint64_t mark = reader->scratch->length;
+        const uint8_t* bytes = NULL;
+        uint32_t length = 0;
+        const bool spelled = check_input_spelling(reader, token, &bytes, &length);
+        bool had_error = false;
+        refused = spelled && check_literal_unevaluated_escapes(bytes, length, NULL, &had_error) != 0 ? token : BUSTER_CHECK_NONE;
+        arena_pop_to(reader->scratch, mark);
+    }
+    *end = last;
+    return refused;
+}
+
+// check_input_unevaluated_refused's literal, whose error drops what it belonged to: whether it has one, and then
+// CHECK_INPUT_UNEVALUATED_ESCAPE at its first token that has one, once, though a list may be read again.
+static bool check_input_unevaluated_strings(CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const uint32_t refused = check_input_unevaluated_refused(reader, first, &end);
+    bool reported = false;
+    for (uint32_t r = 0; refused != BUSTER_CHECK_NONE && r < reader->output->report_count; r += 1)
+    {
+        reported |= reader->output->reports[r].message == CHECK_INPUT_UNEVALUATED_ESCAPE && reader->output->reports[r].token == refused;
+    }
+    if (refused != BUSTER_CHECK_NONE && !reported)
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_report(reader, refused, CHECK_INPUT_UNEVALUATED_ESCAPE);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].detail = end;
+        }
+    }
+    return refused != BUSTER_CHECK_NONE;
+}
+
 // clang's name of a calling convention (FunctionType::getNameForCallConv): on x86-64 Linux, sysv_abi's and those it
 // hasn't (which it takes for the default, CHECK_CALL_IGNORED_X86_32) are cdecl's.
 static const char* check_input_convention_name(uint32_t call)
@@ -2282,7 +2338,8 @@ static const CheckInputArgumentsRow* check_input_attribute_gnu_arguments(CheckIn
 // ParsedFreeStandingDeclSpec), and a bare tag declaration's after its name. Of each GNU list's items and each alignment
 // specifier's argument from `first` to `end` (a tag's tokens skipped, CheckInputReader.tag_ends), only what clang's parser
 // checks: an argument that must be a string literal (CheckInputArgumentsRow.strings), "expected string literal as argument
-// of 'X' attribute", and a name in an argument read as an expression that names nothing, "use of undeclared identifier"
+// of 'X' attribute", or the escape sequences it refuses in one (check_input_unevaluated_strings), and a name in an argument
+// read as an expression that names nothing, "use of undeclared identifier"
 // (an attribute clang doesn't know takes a lone identifier as its first argument), the first an error at it. Then, with
 // `warn`, each one's warning: a GNU item's "attribute 'X' is ignored, place it after "struct" to apply attribute to type
 // declaration" (`keyword` the tag's: 0 struct, 1 union, 2 enum), an alignment specifier's "'_Alignas' attribute ignored";
@@ -2351,7 +2408,12 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
                         const bool library = reader->library_declarations != NULL && reader->library_declarations[word] != 0;
                         undeclared = named && !library && c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, word) == 0 ? token : BUSTER_CHECK_NONE;
                     }
-                    if (string && !identifier && !literals)
+                    if (string && !identifier && check_input_unevaluated_strings(reader, argument, stop))
+                    {
+                        // An escape sequence clang refuses in it, its error: then clang drops the attribute.
+                        valid = false;
+                    }
+                    else if (string && !identifier && !literals)
                     {
                         CheckInputAttributes holder = { 0 };
                         const CheckInputAttribute item = { .first = name, .name_token = name, .name = parser->tokens.names[name], .end = items_end };
@@ -2964,6 +3026,67 @@ static bool check_input_attribute_in_type_name(const Parser* parser, uint32_t fi
     return check_input_attribute_type_name_end(parser, first) != BUSTER_CHECK_NONE;
 }
 
+// clang's parser after a C23 standard attribute's arguments failed (#147, ParseCXX11AttributeArgs, deprecated's or
+// nodiscard's escape sequence): it checks the last attribute its specifier sequence parsed before, by that one's
+// argument count, as if it had been given the failed one's empty list, "parentheses must be omitted if 'X' attribute's
+// argument list is empty" where it takes arguments and "attribute 'X' cannot have an argument list" where it takes none
+// (a C23 attribute clang doesn't know takes none), and makes that one invalid. The sequence is the item's list, from
+// `list_first` (its first item's token) to `item`, and the lists right before it; an attribute an escape sequence
+// dropped (its report) isn't parsed. Returns 0 where there is none, 1 where it takes no arguments, 2 where it takes some,
+// with its first token in `*previous`. Cold: only a dropped standard attribute asks.
+static uint32_t check_input_attribute_standard_previous(CheckInputReader* reader, uint32_t list_first, uint32_t item, uint32_t* previous)
+{
+    const Parser* parser = reader->parser;
+    const uint8_t* kinds = parser->tokens.kinds;
+    // The sequence's first list's first item: back over adjacent `[[ ... ]]`, their brackets balanced.
+    uint32_t first = list_first;
+    bool earlier = first >= 4;
+    while (earlier)
+    {
+        const uint32_t open = first - 2;
+        earlier = open >= 2 && kinds[open - 1] == PARSE_KIND_R_SQUARE && kinds[open - 2] == PARSE_KIND_R_SQUARE;
+        uint32_t depth = 0;
+        uint32_t t = open;
+        do
+        {
+            t -= 1;
+            depth += kinds[t] == PARSE_KIND_R_SQUARE;
+            depth -= depth != 0 && kinds[t] == PARSE_KIND_L_SQUARE;
+        } while (earlier && t > 0 && depth != 0);
+        earlier &= depth == 0 && kinds[t] == PARSE_KIND_L_SQUARE && t + 2 < open && kinds[t + 1] == PARSE_KIND_L_SQUARE;
+        first = earlier ? t + 2 : first;
+        earlier &= first >= 4;
+    }
+    uint32_t result = 0;
+    uint32_t t = first;
+    while (t < item)
+    {
+        const uint8_t kind = kinds[t];
+        const bool separator = kind == PARSE_KIND_COMMA || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_R_SQUARE || parser->tokens.names[t] == 0;
+        const bool scoped = !separator && t + 3 < item && kinds[t + 1] == PARSE_KIND_COLON && kinds[t + 2] == PARSE_KIND_COLON;
+        const uint32_t name = scoped ? t + 3 : t;
+        const bool argued = !separator && name + 1 < item && kinds[name + 1] == PARSE_KIND_L_PAREN;
+        const uint32_t close = argued ? parser->tree.parents[name + 1] : name;
+        bool dropped = false;
+        for (uint32_t r = 0; argued && r < reader->output->report_count; r += 1)
+        {
+            const CheckInputReport* report = reader->output->reports + r;
+            dropped |= report->message == CHECK_INPUT_UNEVALUATED_ESCAPE && report->token > name + 1 && report->token < close;
+        }
+        if (!separator && !dropped)
+        {
+            const String8 scope = scoped ? check_input_attribute_name(reader, parser->tokens.names[t]) : (String8){ 0 };
+            const String8 spelled = check_input_attribute_name(reader, parser->tokens.names[name]);
+            const bool known = check_input_attribute_clang_knows(scope, spelled, scoped, true);
+            const CheckInputFactRow* fact = known ? check_input_fact_row(scope, spelled, scoped, true) : NULL;
+            result = known && (fact == NULL || fact->maximum != 0) ? 2 : 1;
+            *previous = t;
+        }
+        t = separator ? t + 1 : close > name && close < item ? close + 1 : name + 1;
+    }
+    return result;
+}
+
 static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t* cursor, uint32_t end, bool standard,
                                             uint32_t place)
 {
@@ -2976,6 +3099,8 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
     bool scoped = false;
     bool clang_scope = false;
     bool unknown = false;
+    // Whether an argument's escape sequence dropped it (check_input_unevaluated_strings).
+    bool escaped = false;
     String8 scope = { 0 };
     uint32_t scope_name = 0;
     if (valid && standard)
@@ -3065,10 +3190,14 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         // validated by their own schema below, after peeling parentheses, rather than the eager literal pass.
         const bool condition = rule != NULL && rule->schema == CHECK_ATTRIBUTE_CONDITION_STRINGS;
         const CheckInputArgumentsRow* arguments = valid && known && !custom && !condition ? check_input_attribute_gnu_arguments(reader, attribute.name) : NULL;
+        // Its string literals' escape sequences are read in a GNU attribute clang doesn't know too (nodiscard's), by its
+        // name: clang's GNU parser reads every one's arguments so (ParseGNUAttributeArgs). A C23 one it doesn't know it
+        // skips. The compatibility conditions' messages are strings too, which check_input_unevaluated_strings peels.
+        const CheckInputArgumentsRow* read = valid && (known || !standard) && !custom ? check_input_attribute_gnu_arguments(reader, attribute.name) : NULL;
         const uint32_t identifiers = BUSTER_CHECK_ARGUMENTS_VARIADIC_IDENTIFIER | BUSTER_CHECK_ARGUMENTS_STRICT_IDENTIFIER;
         uint32_t literal = BUSTER_CHECK_NONE;
         uint32_t index = 0;
-        for (uint32_t argument = attribute.argument_first; arguments != NULL && literal == BUSTER_CHECK_NONE && argument < attribute.argument_end; index += 1)
+        for (uint32_t argument = attribute.argument_first; read != NULL && literal == BUSTER_CHECK_NONE && !escaped && argument < attribute.argument_end; index += 1)
         {
             uint32_t stop = argument;
             bool strings = true;
@@ -3078,15 +3207,60 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                 stop = check_input_attribute_after_group(parser, stop, attribute.argument_end);
             }
             const bool lone = stop == argument + 1 && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
-            const bool identifier = lone && ((index == 0 && (arguments->flags & BUSTER_CHECK_ARGUMENTS_IDENTIFIER) != 0) || (arguments->flags & identifiers) != 0);
-            const bool string = index < 32 && ((arguments->strings >> index) & 1u) != 0 && (arguments->flags & (identifiers | BUSTER_CHECK_ARGUMENTS_TYPE)) == 0;
-            literal = string && !identifier && (!strings || stop == argument) ? argument : BUSTER_CHECK_NONE;
+            const bool identifier = lone && ((index == 0 && (read->flags & BUSTER_CHECK_ARGUMENTS_IDENTIFIER) != 0) || (read->flags & identifiers) != 0);
+            const bool string = index < 32 && ((read->strings >> index) & 1u) != 0 && (read->flags & (identifiers | BUSTER_CHECK_ARGUMENTS_TYPE)) == 0;
+            escaped = string && !identifier && check_input_unevaluated_strings(reader, argument, stop);
+            literal = arguments != NULL && string && !identifier && !escaped && (!strings || stop == argument) ? argument : BUSTER_CHECK_NONE;
             argument = stop + 1;
         }
         if (literal != BUSTER_CHECK_NONE)
         {
             check_input_attribute_argument_error(reader, attributes, &attribute, literal, CHECK_ARGUMENT_STRING_LITERAL, 0);
             valid = false;
+        }
+        // An argument's escape sequence's error drops the attribute, as clang's parser drops it (its arguments' parse
+        // failed): nothing more of it is read or kept, and its list and declaration go on without it.
+        valid &= !escaped;
+        // A standard one's (deprecated's, any spelling; nodiscard's, as written): clang's parser then checks the attribute
+        // parsed before it (check_input_attribute_standard_previous), its error at this one's `(` after the escapes'.
+        const InternTable* table = reader->pp->table;
+        const bool nodiscard = escaped && table->spans[attribute.name].length == 9 && memcmp(table->records + table->spans[attribute.name].offset, "nodiscard", 9) == 0;
+        if (escaped && standard && !scoped && (check_input_attribute_equal(name, "deprecated") || nodiscard))
+        {
+            uint32_t list_first = attribute.first;
+            while (list_first > 0 && parser->tree.depths[list_first - 1] >= parser->tree.depths[attribute.first])
+            {
+                list_first -= 1;
+            }
+            uint32_t previous_first = BUSTER_CHECK_NONE;
+            const uint32_t previous = check_input_attribute_standard_previous(reader, list_first, attribute.first, &previous_first);
+            bool found = false;
+            for (uint32_t r = reader->output->report_count; previous != 0 && !found && r-- > 0;)
+            {
+                CheckInputReport* report = reader->output->reports + r;
+                found = report->message == CHECK_INPUT_UNEVALUATED_ESCAPE && report->token >= attribute.argument_first && report->token < attribute.argument_end;
+                report->attribute = found ? attribute.name_token : report->attribute;
+                report->value = found ? attribute.argument_first | (previous == 1 ? UINT64_C(1) << 32 : 0) : report->value;
+            }
+            // The invalid one is no more: the last record kept, or the last unknown one, where it is that one.
+            if (previous != 0 && attributes->count != 0 && attributes->records[attributes->count - 1].first == previous_first)
+            {
+                attributes->count -= 1;
+            }
+            else if (previous != 0 && attributes->unknown_end != NULL && attributes->unknown_end->first == previous_first)
+            {
+                CheckInputUnknownAttribute* before = NULL;
+                for (CheckInputUnknownAttribute* unknown = attributes->unknown_begin; unknown != attributes->unknown_end; unknown = unknown->next)
+                {
+                    before = unknown;
+                }
+                attributes->unknown_end = before;
+                attributes->unknown_begin = before != NULL ? attributes->unknown_begin : NULL;
+                if (before != NULL)
+                {
+                    before->next = NULL;
+                }
+            }
         }
         // A type argument's (ParseTypeName's): an identifier that names no type is "unknown type name"; any other start of
         // no type "expected a type" and, in a GNU list, "expected ')'" there; a type followed by a `,` is "expected ')'"
@@ -3405,12 +3579,12 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             }
         }
     }
-    if (!valid && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+    if (!valid && !escaped && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
     {
         check_input_attribute_error(reader, attributes, attribute.first, i > attribute.first ? i : attribute.first + 1, CHECK_ATTRIBUTE_ERROR_SYNTAX);
     }
     *cursor = i;
-    return valid;
+    return valid || escaped;
 }
 
 static bool check_input_attribute_starts(const Parser* parser, uint32_t token, uint32_t end)

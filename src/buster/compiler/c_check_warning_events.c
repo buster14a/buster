@@ -74,6 +74,8 @@ enum
     CHECK_WARNING_ID_REDEFINE_EXTNAME = 82,
     CHECK_WARNING_ID_THREAD_SAFETY_ATTRIBUTES = 83,
     CHECK_WARNING_ID_NODEREF = 84,
+    // An unknown escape sequence in an unevaluated string literal, before its error (#147): the driver's alone, no event's.
+    CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE = 85,
     CHECK_WARNING_ID_COUNT,
 };
 

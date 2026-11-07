@@ -1681,7 +1681,10 @@ pool, and corpus comparisons include the retained indices.
 
 Static-assert messages contribute no expression value. The reader's existing
 constant-context pass marks each message span once, after identifying its
-assertion's top-level comma. String operands in the condition remain checked.
+assertion's top-level comma; the walk's action at the assertion's `)` reads the
+message's escape sequences (clang's unevaluated string literal, "Unevaluated
+string literals (#147)"), and one it refuses drops the assertion.
+String operands in the condition remain checked.
 This removes a parser-ancestor walk per string, whose repeated traversal of a
 long initializer's separator chain was quadratic (#593). Both changes consume
 existing reader facts; they add no search pass or per-initializer allocation.
@@ -1716,6 +1719,66 @@ random groups of one to three parts both ways, each part ending at a
 (`check_test_string_literal_blocks`), and both must agree on every field and
 byte. On #1388's megabyte of `\xhh` escapes in 32-character pieces the
 checker's input stage went from 53.7 ms to 11.0 ms (Ice Lake server, 11 runs).
+
+### Unevaluated string literals (#147)
+
+clang's parser reads an attribute's string argument (the argument places
+clang-tblgen's string switches give, `c_check_attribute_arguments.inc`, also
+of a GNU attribute clang doesn't know, `__attribute__((nodiscard("…")))`, by
+its name; parentheses around it peeled), a static assertion's message and a
+`#line` directive's or line marker's file name as an *unevaluated* string
+literal. Only the simple escapes (`\\ \' \" \? \a \b \f \n \r \t \v`) and the
+universal character names are valid there; every other escape sequence (octal,
+including `\0`; hexadecimal; `\e` and `\E`; GNU's `\( \{ \[ \%`; C2y's
+delimited `\x{…}` and `\o{…}`; an unknown one, after its
+-Wunknown-escape-sequence warning) is "invalid escape sequence 'S' in an
+unevaluated string literal", S as written (`'\x64e'` is the whole hexadecimal
+run, `'\0123'` the octal escape's three digits). Its reading's errors come
+first: "hex escape sequence out of range" and "octal escape sequence out of
+range" (the characters are a byte wide whatever the prefix), a delimited
+escape's, "\x used with no following hex digits" (with no unevaluated error).
+Each is at its escape's backslash, in source order across the literal's
+concatenated tokens. clang's literal-wide error state is kept across them:
+after any earlier error of the literal, hexadecimal and delimited octal
+escapes have no range error (a plain octal one still does), and `\x` without
+digits sets none. `check_literal_unevaluated_escapes`
+(`c_check_literal_diagnostic.c`) is clang's `ProcessCharEscape` of such a
+literal: it finds the backslashes with `memchr` and reads only escape
+sequences byte by byte, a cold path of short, rare strings with no vector
+twin; both checker paths call it the same way.
+
+clang then drops what the literal belonged to, and its diagnostics stop there.
+The reader (`check_input_unevaluated_strings`) reports
+`CHECK_INPUT_UNEVALUATED_ESCAPE` once at the literal's first refused token
+and the driver words each escape's diagnostics, the warning by its options
+and pragmas (`-w`, `-Werror`, `-pedantic-errors`,
+`-Wno-unknown-escape-sequence`). An attribute (`check_input_attribute_read_item`)
+is dropped where its first argument that fails does, and its list and
+declaration go on without it; in a declaration of no declarator
+(`check_input_attribute_ignored_lists`) the error ends the reading, as
+"expected string literal" does. A dropped C23 `deprecated` or `nodiscard`
+gives clang's parser's error of the attribute its specifier sequence parsed
+before it, at its `(`: "parentheses must be omitted if 'X' attribute's argument
+list is empty", or "attribute 'X' cannot have an argument list" where that
+one takes none (`check_input_attribute_standard_previous`). A static assertion
+whose message is refused is checked no further: its condition, an expression
+in a constant context (`BUSTER_CHECK_CONTEXT_VALUE`, without the runtime
+behavior's warnings), is neither required to be an integer constant nor
+asserted. Where the parse failed, a repaired view keeps the report
+(`check_repair_input_report`), and the tokens before the first syntax error
+that no view checked are read as `check_driver_unparsed_literals` reads their
+numeric constants (`check_driver_unparsed_strings`: GNU attributes' string
+arguments and static assertions' messages). A `#line` directive's is dropped
+by the preprocessor (`pp_decode_file_name`), whose unknown-escape warning has
+no flag, as its other warnings haven't. Asm labels and statements, pragmas'
+strings and `_Pragma` read evaluated literals, as clang's do.
+
+Not clang's yet: the encoding prefix's -Winvalid-unevaluated-string warning
+(a prefixed argument stays "expected string literal"), -pedantic's warnings of
+the non-standard escapes, the "expanded from macro" note of a literal that is
+a macro's argument, and what follows `\x` without digits, which clang alone
+keeps (its attribute still applies). Like the checker's other errors, the
+first one ends the unit's semantic diagnostics after its declaration.
 
 ### Large integer literal tables (#658)
 
@@ -6408,7 +6471,9 @@ arguments against the function. The checker now gives these as clang does.
   - Strings and identifiers: clang's parser reads a string argument as an
     unevaluated string literal, so one that is none is "expected string
     literal as argument of 'X' attribute" at it, wherever the attribute is
-    (before a C23 one's place is decided); visibility's identifier is its
+    (before a C23 one's place is decided), and an escape sequence it refuses
+    in one is its error, which drops the attribute ("Unevaluated string
+    literals (#147)"); visibility's identifier is its
     handler's "'visibility' attribute requires a string"; "'mode' attribute
     requires an identifier" and format's "requires parameter 1 to be an
     identifier" at the attribute; tls_model's other string is its
@@ -6697,7 +6762,10 @@ arguments against the function. The checker now gives these as clang does.
   `c_check_attribute_arguments_driver_test.c` compares complete diagnostic
   streams for malformed expressions, custom empty lists, annotate constants,
   deferred format/allocation checks, secondary mode errors and escaped target
-  strings. `c_check_attribute_effects_driver_test.c` covers complete
+  strings, and the escape sequences of unevaluated string literals in every
+  context, mode and warning option ("Unevaluated string literals (#147)",
+  `check_test_driver_unevaluated_strings`).
+  `c_check_attribute_effects_driver_test.c` covers complete
   thread-safety expressions with their warning option, loader diagnostics and
   loader section bytes and flags, through the scalar and vector paths.
 

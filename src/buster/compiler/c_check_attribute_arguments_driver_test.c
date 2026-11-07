@@ -1492,3 +1492,196 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
     free(actual_lines);
     unlink(source);
 }
+
+// Escape sequences in unevaluated string literals (#147, check_literal_unevaluated_escapes): an attribute's string argument,
+// a static assertion's message and a #line directive's file name take only the simple escapes and universal character
+// names. Each unit's whole output must be clang's by both paths, in its language mode and with its warning option: the
+// contexts (GNU and C23 attributes in their places, the argument places clang reads as strings, a GNU attribute clang
+// doesn't know by its name, declarations of no declarator, statements, type names, static assertions at file and block
+// scope, line directives), the escapes (octal and hexadecimal ones, out of range too, as written in the message; \e,
+// GNU's \(, the delimited ones and their errors, an unknown one's warning; \x without digits), concatenated tokens and
+// several escapes, parentheses around an argument, the attribute dropped while its list and declaration go on, the first
+// refused argument alone, the C23 parser's error of the attribute before a dropped standard one, the warning options and
+// pragmas, and the controls clang takes: the simple escapes, UCNs, an argument read as an expression, asm labels and
+// statements, a C23 attribute clang doesn't know.
+static void check_test_driver_unevaluated_strings(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    typedef struct CheckUnevaluatedUnit CheckUnevaluatedUnit;
+    struct CheckUnevaluatedUnit
+    {
+        const char* source;
+        const char* standard;
+        const char* option;
+    };
+    static const CheckUnevaluatedUnit units[] = {
+        // The issue's probes.
+        { "__attribute__((deprecated(\"\\x61\"))) void f(void);\n", "-std=gnu17", NULL },
+        { "__attribute__((section(\"\\x61\"))) int v;\n", "-std=gnu17", NULL },
+        { "_Static_assert(1, \"\\x61\");\n", "-std=gnu17", NULL },
+        { "__attribute__((visibility(\"hid\\x64en\"))) void f(void);\n", "-std=gnu17", NULL },
+        { "__attribute__((alias(\"\\x66\"))) void g(void);\nvoid f(void) {}\n", "-std=gnu17", NULL },
+        { "__attribute__((target_clones(\"avx\\x32\", \"default\"))) void f(void) {}\n", "-std=gnu17", NULL },
+        { "__attribute__((unavailable(\"\\101\"))) void f(void);\n", "-std=gnu17", NULL },
+        { "__attribute__((target(\"arch=\\x7a\"))) void f(void) {}\n", "-std=gnu17", NULL },
+        { "__attribute__((target(\"arch=x86-64\\n\"))) void f(void) {}\n", "-std=gnu17", NULL },
+        // The escapes: each octal and hexadecimal one as written, out of range ones, GNU's and the delimited ones, an unknown
+        // one's warning, \x without digits (no unevaluated error), and several in a token and across concatenated tokens.
+        { "__attribute__((deprecated(\"\\0\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\0123\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\400\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\x100\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\x0000000000000041\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\x123456789\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\e\\E\\(\\{\\[\\%\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\q\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"a\\ b\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\x\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\xg\\x61\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\x{}\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\x{1g2h}\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\x{12\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\x{100}\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\o\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\o{}\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\o{18}\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\o{400}\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\o{12\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"a\\101b\\x41\\x61\\x62\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"a\" \"\\x61\" \"b\" \"\\102\"))) void f(void);\n", "-std=gnu23", NULL },
+        // The literal's error state, across its escapes and tokens: an earlier error silences the out of range errors that
+        // test it (hexadecimal and delimited octal), not a plain octal one's; \x without digits sets none.
+        { "__attribute__((deprecated(\"\\x61\\x100\\o{777}\\400\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\{\" \"\\x100\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\x\" \"\\x100\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((section(\"\\o\\x{}\" \"\\a\\'\\x100\"))) int v;\n", "-std=gnu23", NULL },
+        // Clang's controls: an escaped backslash, the simple escapes and UCNs.
+        { "__attribute__((deprecated(\"a\\\\x61\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\n\\t\\a\\b\\f\\r\\v\\\\\\?\\\"\\'\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((section(\"a\\\\b\\\"c\"))) int v;\n", "-std=gnu17", NULL },
+        { "__attribute__((deprecated(\"\\u00e9\\U0001F600\"))) void f(void);\n", "-std=gnu17", NULL },
+        // The arguments: clang's string places only (annotate's later ones are expressions), the first refused one alone,
+        // parentheses, a GNU attribute clang doesn't know by its name, several attributes and lists of one declaration
+        // and what the declaration has after the dropped one.
+        { "__attribute__((annotate(\"x\", \"\\x66\"))) int v;\n", "-std=gnu23", NULL },
+        { "__attribute__((annotate(\"\\x66\", 1))) int v;\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"ok\", \"\\x61\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\x61\", \"\\x62\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((target_clones(\"avx2\", \"def\\x61ult\"))) void f(void) {}\n", "-std=gnu23", NULL },
+        { "__attribute__((visibility((\"hid\\x64en\")))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((nodiscard(\"\\101\"))) int f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((section(\"\\x61\"), deprecated(\"\\x62\"))) int v;\n", "-std=gnu23", NULL },
+        { "__attribute__((used, section(\"\\x61\"), aligned(3))) int v;\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\x61\"))) void f(void) __attribute__((deprecated(\"\\x62\")));\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\x61\"))) void f(void); int x = 1 + ;\n", "-std=gnu23", NULL },
+        { "__attribute__((tls_model(\"\\x66\"))) __thread int v;\n", "-std=gnu23", NULL },
+        { "__attribute__((weakref(\"\\x66\"))) static void g(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((no_sanitize(\"\\101\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((error(\"\\101\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((zero_call_used_regs(\"\\101\"))) void f(void);\n", "-std=gnu23", NULL },
+        { "__attribute__((model(\"\\101\"))) int v;\n", "-std=gnu23", NULL },
+        { "__attribute__((btf_decl_tag(\"\\101\"))) void f(void);\n", "-std=gnu23", NULL },
+        // The places: a definition, a member, an enumerator, a parameter, a typedef, a declarator's own list, a block's
+        // static, a type name, a statement, a declaration of no declarator.
+        { "__attribute__((section(\"\\x61\"))) void f(void) {}\n", "-std=gnu23", NULL },
+        { "struct S { int a __attribute__((deprecated(\"\\x61\"))); };\n", "-std=gnu23", NULL },
+        { "enum E { A __attribute__((deprecated(\"\\x61\"))) };\n", "-std=gnu23", NULL },
+        { "void f(int a __attribute__((annotate(\"\\x61\"))));\n", "-std=gnu23", NULL },
+        { "typedef int T __attribute__((deprecated(\"\\x61\")));\n", "-std=gnu23", NULL },
+        { "int a, b __attribute__((deprecated(\"\\x61\")));\n", "-std=gnu23", NULL },
+        { "void f(void) { __attribute__((section(\"\\x61\"))) static int x; }\n", "-std=gnu23", NULL },
+        { "void f(void) { int x = sizeof(int __attribute__((annotate(\"\\x61\")))); }\n", "-std=gnu23", NULL },
+        { "void f(void) { [[clang::suppress(\"\\x61\")]] ; }\n", "-std=gnu23", NULL },
+        { "__attribute__((deprecated(\"\\x61\"))) struct S { int a; };\n", "-std=gnu23", NULL },
+        { "__attribute__((capability(\"\\101\"))) struct S { int a; };\n", "-std=gnu23", NULL },
+        // C23 lists: the standard attributes, gnu:: and clang:: ones, one clang doesn't know (whose arguments it skips), and
+        // the parser's error of the attribute before a dropped standard one, by that one's argument count.
+        { "[[deprecated(\"\\x61\")]] void f(void);\n", "-std=c23", NULL },
+        { "[[nodiscard(\"\\x61\")]] int f(void);\n", "-std=c23", NULL },
+        { "[[gnu::section(\"\\x61\")]] int v;\n", "-std=c23", NULL },
+        { "[[__gnu__::__section__(\"\\x61\")]] int v;\n", "-std=c23", NULL },
+        { "[[clang::annotate(\"\\x61\")]] int v;\n", "-std=c23", NULL },
+        { "int f(void) [[deprecated(\"\\x61\")]];\n", "-std=c23", NULL },
+        { "[[foo::deprecated(\"\\x61\")]] int f(void);\n", "-std=c23", NULL },
+        { "[[nodiscard, deprecated(\"\\x61\")]] int f(void);\n", "-std=c23", NULL },
+        { "[[maybe_unused, deprecated(\"\\x61\")]] int f(void);\n", "-std=c23", NULL },
+        { "[[nodiscard]] [[deprecated(\"\\x61\")]] int f(void);\n", "-std=c23", NULL },
+        { "[[foo, deprecated(\"\\x61\")]] int f(void);\n", "-std=c23", NULL },
+        { "[[deprecated, nodiscard(\"\\x61\")]] int f(void);\n", "-std=c23", NULL },
+        { "[[gnu::unused, nodiscard(\"\\x61\")]] int f(void);\n", "-std=c23", NULL },
+        { "[[gnu::section(\"x\"), nodiscard(\"\\x61\")]] int f(void);\n", "-std=c23", NULL },
+        { "[[gnu::section(\"\\x61\"), nodiscard(\"\\x62\")]] int f(void);\n", "-std=c23", NULL },
+        { "[[nodiscard, gnu::section(\"\\x61\")]] int f(void);\n", "-std=c23", NULL },
+        { "[[deprecated]] int x, y [[deprecated(\"\\x61\")]];\n", "-std=c23", NULL },
+        // Static assertions: a refused message drops the assertion (no failure, no constant required), at file and block
+        // scope, with C23's keyword, concatenated, before a later error and assertion; their controls.
+        { "_Static_assert(0, \"\\x61\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(0, \"a\" \"\\x61\" \"b\" \"\\102\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(1 / 0, \"\\x61\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(1 << 40, \"\\x61\");\n", "-std=gnu17", NULL },
+        { "void f(void) { _Static_assert(0, \"\\x61\"); }\n", "-std=gnu17", NULL },
+        { "static_assert(0, \"\\x61\");\n", "-std=c23", NULL },
+        { "_Static_assert(0, \"\\x61\"); _Static_assert(0, \"b\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(0, \"\\x61\"); int x = 1 + ;\n", "-std=gnu17", NULL },
+        { "_Static_assert(y, \"\\x61\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(0, \"\\q\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(0, \"\\o{}\\q\\o\" \"\\E\");\n", "-std=gnu17", NULL },
+        { "void f(void) { _Static_assert(1, \"\\{\\u00e9\\'\"); }\n", "-std=gnu17", NULL },
+        { "_Static_assert(2147483647 + 1, \"\\x61\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(-1 << 2, \"\\x61\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(1, \"\\t\\\\\\\"\\u00e9\");\n", "-std=gnu17", NULL },
+        // Line directives and markers (the preprocessor's), and the evaluated literals clang takes any escape in.
+        { "#line 3 \"\\x61\"\nint x = 1 + ;\n", "-std=gnu17", NULL },
+        { "# 3 \"a\\x61\\x62\"\nint x = 1 + ;\n", "-std=gnu17", NULL },
+        { "#line 3 \"\\400\"\n", "-std=gnu17", NULL },
+        { "#line 3 \"\\x100\"\n", "-std=gnu17", NULL },
+        { "#line 3 \"\\x\"\n", "-std=gnu17", NULL },
+        { "#line 3 \"\\e\"\n", "-std=gnu17", NULL },
+        { "int x asm(\"\\x61\");\n", "-std=gnu17", NULL },
+        { "void f(void) { __asm__(\"\\x61\"); }\n", "-std=gnu17", NULL },
+        // The unknown escape's warning by the warning options and pragmas; the errors whatever they are.
+        { "__attribute__((deprecated(\"\\q\"))) void f(void);\n", "-std=gnu17", "-w" },
+        { "__attribute__((deprecated(\"\\q\"))) void f(void);\n", "-std=gnu17", "-Werror" },
+        { "__attribute__((deprecated(\"\\q\"))) void f(void);\n", "-std=gnu17", "-pedantic-errors" },
+        { "__attribute__((deprecated(\"\\q\"))) void f(void);\n", "-std=gnu17", "-Wno-unknown-escape-sequence" },
+        { "__attribute__((deprecated(\"\\q\"))) void f(void);\n", "-std=gnu17", "-Werror=unknown-escape-sequence" },
+        { "__attribute__((deprecated(\"\\x61\"))) void f(void);\n", "-std=gnu17", "-w" },
+        { "#pragma clang diagnostic ignored \"-Wunknown-escape-sequence\"\n__attribute__((deprecated(\"\\q\"))) void f(void);\n", "-std=gnu17", NULL },
+        { "#pragma clang diagnostic error \"-Wunknown-escape-sequence\"\n_Static_assert(1, \"\\q\");\n", "-std=gnu17", NULL },
+    };
+    enum { LINES = 16384 };
+    char* expected_lines = malloc(LINES);
+    char* actual_lines = malloc(LINES);
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/unevaluated-strings.c", directory);
+    for (uint32_t unit = 0; expected_lines != NULL && actual_lines != NULL && unit < BUSTER_ARRAY_LENGTH(units); unit += 1)
+    {
+        const CheckUnevaluatedUnit* fixture = units + unit;
+        const bool made = parse_test_write(source, fixture->source, strlen(fixture->source));
+        // The option, where there is one, before the path's.
+        char* arguments[] = { (char*)clang, (char*)fixture->standard, "-fsyntax-only", "-fno-caret-diagnostics", source, (char*)fixture->option, NULL, NULL };
+        const uint32_t path = fixture->option != NULL ? 6 : 5;
+        char* expected = NULL;
+        const int oracle = made ? check_test_driver_spawn(arguments, &expected) : -1;
+        const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
+        char description[4096];
+        snprintf(description, sizeof(description), "unevaluated strings %u: clang's lines read", unit);
+        check_test_expect(test, made && lines, description);
+        for (uint32_t scalar = 0; lines && scalar < 2; scalar += 1)
+        {
+            arguments[0] = (char*)executable;
+            arguments[path] = scalar != 0 ? "--scalar" : NULL;
+            char* actual = NULL;
+            const int status = check_test_driver_spawn(arguments, &actual);
+            const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
+            snprintf(description, sizeof(description), "unevaluated strings %u (%s %s %s), %s: status %d (clang %d), lines\n%s(clang\n%s)", unit, fixture->source,
+                     fixture->standard, fixture->option != NULL ? fixture->option : "", scalar != 0 ? "scalar" : "vector", status, oracle, actual_lines,
+                     expected_lines);
+            check_test_expect(test, same && (status != 0) == (oracle != 0), description);
+            free(actual);
+        }
+        free(expected);
+    }
+    free(expected_lines);
+    free(actual_lines);
+    unlink(source);
+}

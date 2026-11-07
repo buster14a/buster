@@ -444,6 +444,8 @@ static bool check_repair_input_report(const CheckRepair* repair, const CheckInpu
                  (role == PARSE_ROLE_RETURN && ((report->message == CHECK_INPUT_BREAK && kind == PARSE_KIND_BREAK) ||
                                                (report->message == CHECK_INPUT_CONTINUE && kind == PARSE_KIND_CONTINUE))) ||
                  (report->message == CHECK_INPUT_DECLARATION && asm_name) ||
+                 // An unevaluated string literal's escape sequence (#147) is its own spelling's error, whatever follows.
+                 (report->message == CHECK_INPUT_UNEVALUATED_ESCAPE && kind == PARSE_KIND_STRING) ||
                  (report->message == CHECK_INPUT_RETURN && kind == PARSE_KIND_RETURN);
         // The asm's complete original operands fix a naked parameter reference. A synthetic body closer
         // cannot supply the non-asm body constraint, which remains outside this whitelist.

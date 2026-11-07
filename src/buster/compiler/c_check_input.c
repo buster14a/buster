@@ -243,6 +243,13 @@ typedef enum CheckInputMessage
     CHECK_INPUT_FP_EVAL_USE,
     // A typedef whose available_only_in_default_eval_method attribute forbids the active pragma's evaluation method.
     CHECK_INPUT_FP_EVAL_TYPE,
+    // An escape sequence clang refuses in an unevaluated string literal (#147, check_literal_unevaluated_escapes): an
+    // attribute's string argument's, which clang then drops, or a static assertion's message's, which drops the assertion.
+    // At the first string token that has one; `detail` the literal's end (its last token plus one). The driver words each
+    // of the literal's escapes' diagnostics, at its backslash. A dropped C23 standard attribute's report gives clang's
+    // parser's error of the attribute before it too: `value` its `(` plus one (bit 32 where that one takes no arguments),
+    // `attribute` its name (check_input_attribute_standard_previous).
+    CHECK_INPUT_UNEVALUATED_ESCAPE,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -371,6 +378,7 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_MS_STRUCT_ALIGNMENT] = "ms_struct bit-field storage with non-power-of-two size is not supported",
     [CHECK_INPUT_FP_EVAL_USE] = "'__FLT_EVAL_METHOD__' cannot be expanded inside a scope containing '#pragma clang fp eval_method'",
     [CHECK_INPUT_FP_EVAL_TYPE] = "type is set according to the default eval method for the translation unit",
+    [CHECK_INPUT_UNEVALUATED_ESCAPE] = "invalid escape sequence in an unevaluated string literal",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -4147,6 +4155,37 @@ static void check_input_pragma_report(CheckInputReader* reader)
     }
 }
 
+static uint32_t check_constant_punctuation(const Parser* parser, uint32_t first, uint32_t end, uint8_t punctuation);
+
+// Whether the string literal from `first` to `end`, which the decoder refused, is a static assertion's message whose
+// escape sequence clang refuses there (#147, check_input_unevaluated_refused): the resolution walk reaches it before
+// check_input_constant_context marks it ignored, and the expressions' walk gives its error at the assertion
+// (check_input_expression_act), which drops the assertion, in place of the decoder's. Cold: a refused literal's.
+static bool check_input_assertion_escaped(CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    const uint8_t* kinds = parser->tokens.kinds;
+    // (The walk reaches each of the message's tokens while none is decoded: from its first.)
+    while (first > 0 && kinds[first - 1] == PARSE_KIND_STRING)
+    {
+        first -= 1;
+    }
+    bool result = first >= 3 && end < parser->tokens.count && kinds[first - 1] == PARSE_KIND_COMMA && kinds[end] == PARSE_KIND_R_PAREN;
+    // The `(` the `)` closes, back over balanced brackets.
+    uint32_t open = first - 1;
+    uint32_t depth = 0;
+    while (result && open > 0 && !(depth == 0 && kinds[open] == PARSE_KIND_L_PAREN))
+    {
+        depth += kinds[open] == PARSE_KIND_R_PAREN || kinds[open] == PARSE_KIND_R_SQUARE || kinds[open] == PARSE_KIND_R_BRACE;
+        depth -= depth != 0 && (kinds[open] == PARSE_KIND_L_PAREN || kinds[open] == PARSE_KIND_L_SQUARE || kinds[open] == PARSE_KIND_L_BRACE);
+        open -= 1;
+    }
+    result = result && open > 0 && kinds[open] == PARSE_KIND_L_PAREN && kinds[open - 1] == PARSE_KIND_STATIC_ASSERT &&
+             check_constant_punctuation(parser, open + 1, end, PARSE_KIND_COMMA) == first - 1;
+    uint32_t message_end = end;
+    return result && check_input_unevaluated_refused(reader, first, &message_end) != BUSTER_CHECK_NONE;
+}
+
 static const CheckInitString* check_input_string(CheckInputReader* reader, uint32_t token)
 {
     const Parser* parser = reader->parser;
@@ -4224,7 +4263,7 @@ static const CheckInitString* check_input_string(CheckInputReader* reader, uint3
                 reader->output->resource |= !check_const_append(&reader->const_values, object, &part, 1, NULL, 0, true);
                 reader->output->const_values = check_const_view(&reader->const_values);
             }
-            else
+            else if (!check_input_assertion_escaped(reader, token, end))
             {
                 check_input_report(reader, token, CHECK_INPUT_LITERAL);
             }
@@ -10144,7 +10183,17 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
         op = builtin ? check_graph_builtin_op((CBuiltinId)reader->builtins[token]) : CHECK_OP_COUNT;
         supported = builtin ? op != CHECK_OP_COUNT :
                     keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_STATIC_ASSERT && count == 1;
-        if (supported && !builtin)
+        // A message's escape sequence clang refuses (#147): its error drops the static assertion, whose condition, already
+        // checked as an expression in a constant context, is no constant clang then requires nor asserts: a constant
+        // context's subtree that reports no constraint of its own (BUSTER_CHECK_CONTEXT_VALUE), whose runtime behavior's
+        // warnings check_input_constant_context suppressed.
+        const uint32_t separator = supported && !builtin ? check_constant_punctuation(parser, keyword + 2, token, PARSE_KIND_COMMA) : token;
+        const bool dropped = separator < token && check_input_unevaluated_strings(reader, separator + 1, token);
+        if (supported && !builtin && dropped)
+        {
+            graph->contexts[a] |= BUSTER_CHECK_CONTEXT_VALUE;
+        }
+        else if (supported && !builtin)
         {
             graph->contexts[a] |= BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT;
             graph->contexts[a] |= BUSTER_CHECK_CONTEXT_GNU_CONSTANT;
@@ -10807,6 +10856,14 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
                 // A message contributes no expression value. Mark its span once instead of walking the parser
                 // ancestors of every string, which is quadratic in a long initializer's separator chain (#593).
                 memset(reader->ignored + separator + 1, 1, close - separator - 1);
+                // A message clang refuses (#147) drops the assertion: its condition has no ICE context's suppression of the
+                // runtime behavior's warnings then, which clang's constant context gives none of either. Before the walk
+                // makes the condition's nodes, which take their tokens' suppressions.
+                uint32_t message_end = close;
+                if (check_input_unevaluated_refused(reader, separator + 1, &message_end) != BUSTER_CHECK_NONE)
+                {
+                    check_input_warning_suppress(reader, token + 2, separator, check_constant_unevaluated_warnings());
+                }
             }
         }
     }
