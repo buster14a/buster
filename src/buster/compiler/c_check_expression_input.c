@@ -827,7 +827,10 @@ static uint32_t check_input_expression_literals(const CheckInputReader* reader, 
 // without a declared type. In a unit with overload tables the leaf holds the use's overload head, which the reader's run
 // wrote at the token, and which the walk's action writes back there unchanged. A K&R unit's identifiers, whose types a
 // K&R function's designator interns, and a constexpr object's, which reads its value, are the walk's.
-static bool check_input_expression_identifier(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, const CheckInputIdentifiers* identifiers, uint32_t at)
+// Always inlined (#1671): left to clang, the coded walk's action, once inlined into its loop, called it at each of sqlite3.c's
+// 95,402 identifiers.
+static inline __attribute__((always_inline)) bool check_input_expression_identifier(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token,
+                                                                                  const CheckInputIdentifiers* identifiers, uint32_t at)
 {
     const uint32_t status = identifiers->status[at];
     if ((status & BUSTER_CHECK_IDENTIFIER_NODE) != 0)
@@ -859,7 +862,9 @@ static bool check_input_expression_identifier(CheckInputReader* reader, CheckInp
 // a unit with overload tables, its token's head is its leaf's, none. A plain decimal's value the chunk's literals hold
 // (CheckInputLiterals); every other literal is parsed here. A function's name is the walk's, as its tests take it after
 // the literals.
-static bool check_input_expression_literal(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, const CheckInputLiterals* literals, uint32_t at)
+// Always inlined (#1671), as the identifier's action is: called, at each of sqlite3.c's 44,184 literals.
+static inline __attribute__((always_inline)) bool check_input_expression_literal(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token,
+                                                                               const CheckInputLiterals* literals, uint32_t at)
 {
     const bool acted = !check_input_function_name_token(reader->parser, token);
     if (acted)
@@ -1068,7 +1073,9 @@ static bool check_input_expression_return(CheckInputReader* reader, CheckInputBa
 // region its one value as its result, and the discards are chained from the token for the region's walk
 // (CheckInputReader.region_roots): what the walk's action does, in the same order. A region's last statement without
 // exactly one value is the walk's, which refuses it.
-static bool check_input_expression_terminator(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
+// Always inlined (#1671), as the identifier's action is: called, at each of sqlite3.c's 54,508 terminators.
+static inline __attribute__((always_inline)) bool check_input_expression_terminator(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token,
+                                                                                  CheckInputValues values)
 {
     CheckInput* input = reader->output;
     const bool condition = reader->conditions[token] != 0;
