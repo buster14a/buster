@@ -2077,7 +2077,8 @@ static OraclePath oracle_process_link(const char* link, bool followed, OracleUse
 // its end if `followed` (all but lstat, readlink, readlinkat, and newfstatat and statx with AT_SYMLINK_NOFOLLOW):
 //   - a path in one of the run's roots is kept, wherever $TMPDIR is (/dev/shm, say);
 //   - the package manager's files (under /usr but /usr/local, and /bin, /sbin, /lib, /lib32, /lib64 and /libx32, which
-//     merged-usr systems link into /usr) are left out: the package database's identity in every key stands for them;
+//     merged-usr systems link into /usr) are left out for canonical spellings: the package database's identity in
+//     every key stands for them. Repeated separators and dot components are kept without rewriting the path;
 //   - the kernel's (/proc and /sys), which describe the processes and the machine and change with no file changing,
 //     are left out where a call checks for them (access, chdir) and refused where it stats, opens, reads or changes
 //     them; and a process's paths, which /dev/fd, /dev/stdin, /dev/stdout and /dev/stderr lead to, by
@@ -2099,7 +2100,10 @@ static OraclePath oracle_path_rule(const OracleRun* run, const char* path, bool 
     {
         package |= oracle_path_under(path, packaged[p], &rest);
     }
-    package &= !oracle_path_under(path, "/usr/local", &rest);
+    const size_t length = strlen(path);
+    const bool simple = strstr(path, "//") == 0 && strstr(path, "/./") == 0 &&
+                        !(length >= 2 && strcmp(path + length - 2, "/.") == 0);
+    package &= simple && !oracle_path_under(path, "/usr/local", &rest);
     // A process's paths: /proc/PID's (and its task's), and /dev/fd's and the standard streams', which lead to the
     // caller's /proc/self/fd's.
     char link[BUSTER_ORACLE_PATH_BYTES + 8];
@@ -2690,7 +2694,8 @@ static void oracle_run_reset(OracleRun* run)
 
 // --- Entries ---
 
-static const char oracle_magic[8] = { 'B', 'U', 'S', 'T', 'O', 'R', 'C', '3' };
+// Version 4 rejects entries whose package-path rules could omit noncanonical /usr/local dependencies.
+static const char oracle_magic[8] = { 'B', 'U', 'S', 'T', 'O', 'R', 'C', '4' };
 
 // An entry's flags: its files' modification times are part of what its run read (oracle_tool_epoch).
 #define BUSTER_ORACLE_TIMES 1u
