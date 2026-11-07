@@ -749,7 +749,8 @@ static __attribute__((no_sanitize("function"))) void tier0_test_int128_run_body(
 // another's: each kind of entry of the class (CONST, DUP, NEG, NOT, LOAD, STORE, SET, ADD to XOR but division, the
 // shifts, JUMP_VALUE, LOCAL, STORE_LOCAL and SET_LOCAL on frame objects, and each compare of two values of it), each
 // conversion to it by its source class and from it by its destination class, MUL's and the shifts' saves of rax, rdx and
-// rcx, and both arms of a ?: of the class.
+// rcx, the shifts by constant counts below 64 and from 64 on (#1397), MUL's of operands whose high halves extend their low
+// ones alike, by mul and by imul (#1397), and both arms of a ?: of the class.
 typedef struct Tier0TestInt128Reach Tier0TestInt128Reach;
 struct Tier0TestInt128Reach
 {
@@ -759,7 +760,8 @@ struct Tier0TestInt128Reach
     // destination).
     uint16_t to[2];
     uint16_t from[2];
-    // A bit per fixed register saved, BUSTER_TIER0_TEST_INT128_SAVE_*.
+    // A bit per fixed register saved and per form of a constant shift or of a product, BUSTER_TIER0_TEST_INT128_SAVE_* and
+    // BUSTER_TIER0_TEST_INT128_FORM_*.
     uint8_t saves[2];
     // A bit per arm of a ?: run, BUSTER_TIER0_TEST_INT128_ARM_*.
     uint8_t arms[2];
@@ -768,7 +770,38 @@ struct Tier0TestInt128Reach
 #define BUSTER_TIER0_TEST_INT128_SAVE_RAX 1
 #define BUSTER_TIER0_TEST_INT128_SAVE_RDX 2
 #define BUSTER_TIER0_TEST_INT128_SAVE_RCX 4
-#define BUSTER_TIER0_TEST_INT128_SAVES 7
+#define BUSTER_TIER0_TEST_INT128_FORM_NEAR 8
+#define BUSTER_TIER0_TEST_INT128_FORM_FAR 16
+#define BUSTER_TIER0_TEST_INT128_FORM_MUL 32
+#define BUSTER_TIER0_TEST_INT128_FORM_IMUL 64
+#define BUSTER_TIER0_TEST_INT128_SAVES 127
+
+// The entries a 128-bit MUL's operands' producers may be back from it for Tier 0 to see them (its
+// BUSTER_TIER0_INT128_REACH), and the depths the reach's model follows.
+#define BUSTER_TIER0_TEST_INT128_REACH 32
+#define BUSTER_TIER0_TEST_INT128_MODEL_DEPTHS 256
+
+// How the value entry i makes fills its high half, as the stream says it does (not as Tier 0 reads it): 1 where it is
+// zero, 2 where it is the low half's sign, for a CONST of a 128-bit class (its value 64 bits) and a conversion to one from
+// an integer class; 0 for any other entry.
+static uint32_t tier0_test_int128_extension(const Tier0TestInt128Program* program, uint32_t i)
+{
+    const uint32_t kind = program->kinds[i];
+    const uint32_t class = program->classes[i];
+    const uint32_t from = i > 0 ? program->classes[i - 1] : BUSTER_TYPED_CLASS_VOID;
+    uint32_t extension = 0;
+    if (kind == BUSTER_TYPED_CONST && tier0_class_int128(class))
+    {
+        const bool small = program->values[i] < (1ull << 63);
+        extension = (class == BUSTER_TYPED_CLASS_U128 || small ? 1u : 0u) | (class == BUSTER_TYPED_CLASS_I128 || small ? 2u : 0u);
+    }
+    else if (kind == BUSTER_TYPED_CONVERT && tier0_class_int128(class) && from >= BUSTER_TYPED_CLASS_I8 && from <= BUSTER_TYPED_CLASS_U64)
+    {
+        const bool is_signed = from == BUSTER_TYPED_CLASS_I8 || from == BUSTER_TYPED_CLASS_I16 || from == BUSTER_TYPED_CLASS_I32 || from == BUSTER_TYPED_CLASS_I64;
+        extension = (is_signed ? 0u : 1u) | (is_signed || from != BUSTER_TYPED_CLASS_U64 ? 2u : 0u);
+    }
+    return extension;
+}
 
 #define BUSTER_TIER0_TEST_INT128_ARM_FIRST 1
 #define BUSTER_TIER0_TEST_INT128_ARM_SECOND 2
@@ -785,9 +818,24 @@ static Tier0TestInt128Reach tier0_test_int128_reached(const Tier0TestInt128Progr
 {
     Tier0TestInt128Reach reached = { 0 };
     int32_t depth = 0;
+    // The branches' targets, and each depth's value's producer (UINT32_MAX for one a label may have brought: every value
+    // under a label).
+    uint8_t labels[BUSTER_TIER0_TEST_INT128_ENTRIES + 1];
+    uint32_t made[BUSTER_TIER0_TEST_INT128_MODEL_DEPTHS];
+    memset(labels, 0, sizeof(labels));
+    memset(made, 0xff, sizeof(made));
+    for (uint32_t i = 0; i < program->count; i += 1)
+    {
+        const bool control = program->kinds[i] == BUSTER_TYPED_BRANCH_FALSE || program->kinds[i] == BUSTER_TYPED_JUMP_VALUE;
+        labels[control && program->values[i] <= program->count ? program->values[i] : BUSTER_TIER0_TEST_INT128_ENTRIES] = 1;
+    }
     for (uint32_t i = 0; i < program->count; i += 1)
     {
         const bool ran = (visited[i] & BUSTER_TIER0_TEST_INT128_VISITED_RAN) != 0;
+        if (labels[i] != 0)
+        {
+            memset(made, 0xff, sizeof(made));
+        }
         const uint32_t kind = program->kinds[i];
         const uint32_t class = program->classes[i];
         const uint32_t operand = i > 0 ? program->classes[i - 1] : BUSTER_TYPED_CLASS_VOID;
@@ -808,15 +856,26 @@ static Tier0TestInt128Reach tier0_test_int128_reached(const Tier0TestInt128Progr
             reached.kinds[index] |= 1ull << kind;
         }
         // The integer stack's depth before the entry, by the stream's own effects (no fusion: the programs' 128-bit
-        // entries absorb nothing, nor does the integer that sits under them).
+        // entries absorb nothing but a shift's constant count, nor does the integer that sits under them).
         if (wide && kind == BUSTER_TYPED_MUL)
         {
             reached.saves[index] |= depth > 2 ? BUSTER_TIER0_TEST_INT128_SAVE_RAX : 0;
             reached.saves[index] |= depth > 4 ? BUSTER_TIER0_TEST_INT128_SAVE_RDX : 0;
+            // Its operands' producers, the last one the entry before it and the first within Tier 0's reach.
+            const uint32_t first = depth >= 2 && depth <= BUSTER_TIER0_TEST_INT128_MODEL_DEPTHS ? made[depth - 2] : UINT32_MAX;
+            const uint32_t last = depth >= 2 && depth <= BUSTER_TIER0_TEST_INT128_MODEL_DEPTHS ? made[depth - 1] : UINT32_MAX;
+            const bool seen = labels[i] == 0 && first != UINT32_MAX && last == i - 1 && i - first <= BUSTER_TIER0_TEST_INT128_REACH;
+            const uint32_t extension = seen ? tier0_test_int128_extension(program, first) & tier0_test_int128_extension(program, last) : 0;
+            reached.saves[index] |= (extension & 1) != 0 ? BUSTER_TIER0_TEST_INT128_FORM_MUL : extension != 0 ? BUSTER_TIER0_TEST_INT128_FORM_IMUL : 0;
         }
         if (wide && (kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR))
         {
-            reached.saves[index] |= depth > 3 ? BUSTER_TIER0_TEST_INT128_SAVE_RCX : 0;
+            // A constant count is the shift's immediate, but where a label is at the shift.
+            const bool constant = labels[i] == 0 && program->kinds[i - 1] == BUSTER_TYPED_CONST && program->values[i - 1] <= 255;
+            const uint64_t count = program->values[i - 1] & 127;
+            reached.saves[index] |= depth > 3 && !constant ? BUSTER_TIER0_TEST_INT128_SAVE_RCX : 0;
+            reached.saves[index] |= constant && count != 0 && count < 64 ? BUSTER_TIER0_TEST_INT128_FORM_NEAR : 0;
+            reached.saves[index] |= constant && count >= 64 ? BUSTER_TIER0_TEST_INT128_FORM_FAR : 0;
         }
         // A ?:'s branch: its first arm ends at the JUMP_VALUE before the second's start, the branch's target, whose class
         // is the ?:'s.
@@ -832,6 +891,11 @@ static Tier0TestInt128Reach tier0_test_int128_reached(const Tier0TestInt128Progr
         depth -= shape.first != BUSTER_TIER0_STACK_NONE ? 1 : 0;
         depth -= shape.last == BUSTER_TIER0_STACK_OPERAND && !returns_nothing ? 1 : 0;
         depth += shape.push != BUSTER_TIER0_STACK_NONE ? 1 : 0;
+        // What it pushes it makes; an entry that pushes nothing leaves the value under it unknown, as Tier 0 takes it.
+        if (depth > 0 && depth <= BUSTER_TIER0_TEST_INT128_MODEL_DEPTHS)
+        {
+            made[depth - 1] = shape.push != BUSTER_TIER0_STACK_NONE ? i : UINT32_MAX;
+        }
     }
     return reached;
 }
@@ -1098,8 +1162,8 @@ static void tier0_test_int128_programs(Tier0TestTally* tally, const Tier0TestInt
         const uint32_t missing_arms = wanted.arms[index] & ~reached.arms[index];
         const bool missing = missing_kinds != 0 || missing_to != 0 || missing_from != 0 || missing_saves != 0 || missing_arms != 0;
         tier0_test_expect(tally, count < BUSTER_TIER0_TEST_INT128_PROGRAMS || !missing, "int128",
-                          "the checked programs' runs don't reach every kind, conversion, save and arm of %s (missing kinds %#" PRIx64
-                          ", conversions to it from %#x and from it to %#x, saves %#x, arms %#x)",
+                          "the checked programs' runs don't reach every kind, conversion, save, form and arm of %s (missing kinds %#" PRIx64
+                          ", conversions to it from %#x and from it to %#x, saves and forms %#x, arms %#x)",
                           index == 0 ? "I128" : "U128", missing_kinds, missing_to, missing_from, missing_saves, missing_arms);
     }
     arena_release(&arena);

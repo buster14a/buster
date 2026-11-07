@@ -619,7 +619,7 @@ Mutations of the tables, each built and run once, are caught. Among them:
   (imm8 and imm16), call
   (rel32, r/m64), jmp (rel8, rel32, r/m64), ret (and imm16), jcc (rel8,
   rel32), setcc and cmovcc of all 16 conditions, leave, nop (and the
-  multi-byte ones), int3, ud2, endbr64, mfence.
+  multi-byte ones), cld (which writes DF alone), int3, ud2, endbr64, mfence.
 - **Bits:** bswap, bt (register and imm8), bsf, bsr, tzcnt, lzcnt and popcnt;
   shld and shrd at 32 and 64 bits, by CL and by an imm8 (at 16 bits a count past
   the width leaves the result undefined, which the record can't say).

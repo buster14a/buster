@@ -166,6 +166,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   and GNU range initialization, including preservation and removal of marks.
   Each body has at most one warned dereference because Clang's delayed warning
   order for multiple accesses is unstable across invocations.
+  `c_check_interrupt_driver_test.c` (#147) compares x86's `interrupt` attribute's handler errors (with those clang
+  places nowhere), its direct calls and `-Wexcessive-regsave` with pinned Clang through the vector, scalar and
+  two-lane deferred paths, and checks that `-c` of a definition is refused by name (`docs/c-checker.md`).
   Bitwise/comparison `-Wparentheses` diagnostics distinguish a single bare comparison from eager logical
   comparison pairs and unparenthesized bitwise chains (#1390). Parenthesized operands retain their explicit
   grouping. Original default-warning fixtures compare complete diagnostics and independent counts against

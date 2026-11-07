@@ -51,6 +51,24 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 3,
     },
     {
+        // A truth context converts a floating literal to _Bool (#147): conditions, `!`, `&&`, `||` and a conditional's first
+        // operand, in unreachable code and short-circuited operands too; never a conditional's arms, a comma's result or
+        // sizeof's operand.
+        .name = "floating literal truth contexts",
+        .source = "int f(int x){if(0.25)x=1;while(0.5)break;for(;0.75;)break;do{}while(1.5);return (2.5&&x)+(x||-3.5)+!4.5+(5.5?x:1)+(1.0&&x)+(0.0||x);}\n"
+                  "int g(int x){return (x?1.5:2.5)&&x;}int h(int x){return (x,1.5)&&x;}unsigned long k(int x){return sizeof(1.5&&x);}\n"
+                  "int u(int x){if(0)return 6.5&&x;return 0&&7.5;}\n_Bool b=1.5;_Bool c(void){return 2.5;}\n",
+        .warnings = 13,
+    },
+    {
+        // A static assertion's condition is a truth context too, warned where clang's parser reads it: between a declaration's
+        // initializer and a later statement's, at file scope, and in unreachable code.
+        .name = "floating literal static assertions",
+        .source = "int o(int x){int y=2.5;_Static_assert(1.5,\"\");_Static_assert(0.0==0,\"\");return y+(x&&3.5);}\n_Static_assert(-0.5,\"\");\n"
+                  "_Static_assert(1.5&&2.5,\"\");int z(int x){if(0){_Static_assert(0.5,\"\");}return x;}\n",
+        .warnings = 7,
+    },
+    {
         .name = "floating literal source formats",
         .source = "int a=1.1f;int b=1.1;int c=1.1L;\n",
         .warnings = 3,

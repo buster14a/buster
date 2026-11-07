@@ -125,6 +125,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wpragmas", NULL, "#pragma redefine_extname is applicable to external C declarations only" },
     { "-Wthread-safety-attributes", "-Wthread-safety", "invalid thread-safety attribute" },
     { "-Wnoderef", NULL, "dereferencing expression marked as 'noderef'" },
+    { "-Wexcessive-regsave", NULL, "interrupt service routine should only call a function with attribute 'no_caller_saved_registers'" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

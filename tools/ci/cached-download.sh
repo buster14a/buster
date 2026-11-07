@@ -13,7 +13,9 @@ output=${3:?usage: cached-download.sh URL SHA256 OUTPUT}
 verify() { printf '%s  %s\n' "$digest" "$1" | sha256sum --check --status; }
 download()
 {
-    curl --fail --location --retry 3 --silent --show-error "$url" --output "$1"
+    # Retry transport resets too (curl's default policy omits them); the
+    # SHA-256 check below rejects whatever a failed attempt left behind.
+    curl --fail --location --retry 8 --retry-all-errors --retry-max-time 240 --silent --show-error "$url" --output "$1"
     if ! verify "$1"; then
         printf 'cached-download.sh: %s does not match its SHA-256 %s\n' "$url" "$digest" >&2
         return 1

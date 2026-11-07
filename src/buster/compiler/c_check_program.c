@@ -303,6 +303,11 @@ struct CheckProgram
     // hold, and BUSTER_CHECK_NONE for the others; null in a unit without one, the usual one. A function is naked when that
     // declaration is at or before its definition, as clang takes it (check_program_asm_naked).
     uint32_t* object_naked;
+    // Per object, its first declaration with x86's interrupt attribute (#147, not ignored), and BUSTER_CHECK_NONE for the
+    // others; null in a unit without one, the usual one. A function's body is an interrupt service routine's when that
+    // declaration is at or before its definition, as clang takes it (check_program_interrupt): the lowering's writer reads
+    // it of the body it lowers.
+    uint32_t* object_interrupt;
     // Per object, whether a declaration of the function has GNU's always_inline attribute (BUSTER_CHECK_PROGRAM_INLINE_ALWAYS)
     // or noinline (BUSTER_CHECK_PROGRAM_INLINE_NEVER), not ignored; null in a unit without either. --tier1's inliner
     // (#1282, c_check_tier1_inline.c) expands the calls of a defined function of internal linkage with the first and not
@@ -529,6 +534,7 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS 8u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALWAYS_INLINE 16u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_NOINLINE 32u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_INTERRUPT 64u
 // CheckProgram.object_inline's bits.
 #define BUSTER_CHECK_PROGRAM_INLINE_ALWAYS 1u
 #define BUSTER_CHECK_PROGRAM_INLINE_NEVER 2u
@@ -536,7 +542,8 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 // Which of them a declaration's `attributes` hold, by one pass over its records that aren't ignored: GNU's naked
 // attribute (CheckProgram.object_naked), a target or target_clones attribute (CheckProgramTargetEvents), one of a
 // callee's that code generation's check of target features reads, always_inline, flatten or noreturn (#775,
-// CheckProgram.attribute_keys), and an alias, ifunc or weakref attribute (#147, CheckProgram.aliases).
+// CheckProgram.attribute_keys), an alias, ifunc or weakref attribute (#147, CheckProgram.aliases), and x86's interrupt
+// (#147, CheckProgram.object_interrupt).
 static uint32_t check_program_attribute_bits(const CheckInputAttributes* attributes)
 {
     uint32_t bits = 0;
@@ -552,7 +559,8 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
                              kind == CHECK_ATTRIBUTE_ALIAS || kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS :
                                  0;
         const uint32_t inlining = kind == CHECK_ATTRIBUTE_ALWAYS_INLINE ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALWAYS_INLINE : kind == CHECK_ATTRIBUTE_NOINLINE ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_NOINLINE : 0;
-        bits |= attribute->ignored ? 0 : bit | inlining;
+        const uint32_t interrupt = kind == CHECK_ATTRIBUTE_INTERRUPT && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_INTERRUPT : 0;
+        bits |= attribute->ignored ? 0 : bit | inlining | interrupt;
     }
     return bits;
 }
@@ -3174,8 +3182,34 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
                 program->object_naked[object] = token;
             }
         }
+        // x86's interrupt service routines (#147), a function's declarations', as object_naked's.
+        if ((function_attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_INTERRUPT) != 0)
+        {
+            if (program->object_interrupt == 0 && room)
+            {
+                program->object_interrupt = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1);
+                room = program->object_interrupt != 0;
+                if (room)
+                {
+                    memset(program->object_interrupt, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+                }
+            }
+            if (room && program->object_interrupt[object] == BUSTER_CHECK_NONE)
+            {
+                program->object_interrupt[object] = token;
+            }
+        }
     }
     return room;
+}
+
+// Whether body `b` is an interrupt service routine's (#147): some declaration of its function up to its definition has
+// x86's interrupt attribute (CheckProgram.object_interrupt), as clang takes it; clang ignores one after the definition,
+// with a warning.
+static bool check_program_interrupt(const CheckProgram* program, uint32_t b)
+{
+    const CheckProgramBody body = program->bodies[b];
+    return program->object_interrupt != 0 && body.object < program->object_count && program->object_interrupt[body.object] <= body.declaration;
 }
 
 // The static objects' declarations, needs, naked functions and target attributes, by object, in token order (#530):

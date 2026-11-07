@@ -126,7 +126,7 @@ static void emitted_test_wide_tracking(EmittedTest* test)
     emitted_test_expect(test, emitted_add(INT64_MAX, 1) == BUSTER_EMITTED_UNKNOWN && emitted_add(INT64_MIN + 1, -2) == BUSTER_EMITTED_UNKNOWN &&
                               emitted_add(INT64_MIN + 1, -1) == BUSTER_EMITTED_UNKNOWN && emitted_add(BUSTER_EMITTED_UNKNOWN, 8) == BUSTER_EMITTED_UNKNOWN,
                         "64-bit overflow and the reserved unknown value remain unknown", 0);
-    EmittedState state = emitted_entry_state();
+    EmittedState state = emitted_entry_state(false);
     EmittedRules rules = emitted_initial_rules();
     state.value[X86_REGISTER_RSP] = INT32_MIN;
     rules.cfa_offset = INT64_C(2147483648);
@@ -136,7 +136,7 @@ static void emitted_test_wide_tracking(EmittedTest* test)
     emitted_test_expect(test, emitted_holds(&rules, &state), "the largest positive CFA is checked without summing offsets", 0);
     state.value[X86_REGISTER_RSP] = INT64_MAX;
     emitted_test_expect(test, !emitted_holds(&rules, &state), "a mismatched extreme CFA cannot wrap into a proof", 0);
-    state = emitted_entry_state();
+    state = emitted_entry_state(false);
     rules = emitted_initial_rules();
     rules.kinds[3] = EMITTED_RULE_OFFSET;
     rules.values[3] = BUSTER_EMITTED_UNKNOWN;

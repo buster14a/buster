@@ -82,6 +82,9 @@ struct EmittedCode
     uint32_t node;
     // Tier 0's entries it deferred, for the emission's statistics.
     uint32_t deferred;
+    // An interrupt service routine with an error code (#147, Tier0Code.frame_interrupt): entered with rsp 16 below the
+    // CFA, the error code at rsp and the interrupted rip, its return address, at CFA - 8 (emitted_entry_state).
+    bool entry_error_code;
 };
 
 typedef enum EmittedVerifyError
@@ -159,7 +162,28 @@ static uint32_t emitted_tier0_preserved(const Tier0Code* code)
 static uint64_t emitted_tier0_frame_room(const Tier0Code* code)
 {
     return 31 + 18 * (uint64_t)code->tail_count + (code->frame_eh_return ? 4 + 2 * (uint64_t)code->tail_count : 0) + 2 +
-           3 * (uint64_t)emitted_tier0_preserved(code);
+           3 * (uint64_t)emitted_tier0_preserved(code) + (code->frame_interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE ? 2 : 0);
+}
+
+// An interrupt service routine's frame with an error code (#147, Tier0Code.frame_interrupt), its `count` rows (room for
+// two more): the processor pushed the interrupted code's rip, its return address, above the error code, so its CFA is 8
+// bytes further up than a call's frame's, where rsp + 16 is at its entry. Each rule of the CFA's offset gains 8 and each
+// register's slot from the CFA loses 8, the CFA rsp + 16 from the entry, and after the epilogue's add over the error code,
+// rsp + 8 again for its iretq, which pops the rip at the CFA less 8 as a ret does (LLVM's x86_intrcc frames leave the
+// return address the error code's slot instead). Returns the rows' count.
+static uint32_t emitted_insert_row(EmissionFrameRow* rows, uint32_t count, EmissionFrameRow row);
+
+static uint32_t emitted_tier0_interrupt_rows(const Tier0Code* code, EmissionFrameRow* rows, uint32_t count)
+{
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        const uint32_t kind = rows[r].kind;
+        rows[r].value += kind == EMISSION_FRAME_CFA || kind == EMISSION_FRAME_CFA_OFFSET ? 8 : kind == EMISSION_FRAME_OFFSET ? -8 : 0;
+    }
+    memmove(rows + 1, rows, count * sizeof(EmissionFrameRow));
+    rows[0] = (EmissionFrameRow){ .offset = 0, .value = 16, .kind = EMISSION_FRAME_CFA_OFFSET };
+    // After the add, the epilogue's last record but the iretq (emitted_from_tier0's rows are before branch sizing).
+    return emitted_insert_row(rows, count + 1, (EmissionFrameRow){ .offset = code->count - 1, .value = 8, .kind = EMISSION_FRAME_CFA_OFFSET });
 }
 
 // A row into rows sorted by their offsets, after those at its offset or before (room for it). Returns the count.
@@ -248,8 +272,9 @@ static uint32_t emitted_tier0_preserve_rows(const Tier0Code* code, EmissionFrame
     const uint32_t block = tier0_preserve_block_bytes(vectors, code->frame_preserve_vector_bytes, code->frame_preserve_mask_bytes);
     const uint32_t moves = block != 0 ? tier0_preserve_moves(vectors, code->frame_preserve_mask_bytes) : 0;
     // Record boundaries (emitted_from_tier0's rows are before branch sizing). The epilogue: the block's loads, the release,
-    // the kept registers' pops, the callee-saved ones', rbp's and the ret.
-    const uint32_t release = code->count - 3 - pushes - kept;
+    // the kept registers' pops, the callee-saved ones', rbp's and the ret (an interrupt service routine's iretq, after its
+    // add over the error code where it has one).
+    const uint32_t release = code->count - 3 - pushes - kept - (code->frame_interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE ? 1u : 0u);
     uint32_t pushed = 0;
     for (uint32_t r = 0; r < 16; r += 1)
     {
@@ -377,6 +402,11 @@ static EmittedCode emitted_from_tier0(const Tier0Code* code, bool frames, bool s
         const uint32_t kept = emitted_tier0_preserved(code);
         result.frame_status = kept == 0 || count + 3 * (uint64_t)kept <= room ? result.frame_status : EMITTED_FRAME_UNDESCRIBED;
         count = kept != 0 && result.frame_status == EMITTED_FRAME_DESCRIBED ? emitted_tier0_preserve_rows(code, rows, count) : count;
+        // An interrupt service routine's with an error code (#147), whose CFA is 8 bytes further up, last.
+        const bool error_code = code->frame_interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE;
+        result.frame_status = !error_code || count + 2 <= room ? result.frame_status : EMITTED_FRAME_UNDESCRIBED;
+        count = error_code && result.frame_status == EMITTED_FRAME_DESCRIBED ? emitted_tier0_interrupt_rows(code, rows, count) : count;
+        result.entry_error_code = error_code;
         for (uint32_t i = 0; result.frame_status == EMITTED_FRAME_DESCRIBED && i < count; i += 1)
         {
             events[i] = (EmissionFrameEvent){
@@ -540,7 +570,7 @@ static EmittedRules emitted_initial_rules(void)
     return rules;
 }
 
-static EmittedState emitted_entry_state(void)
+static EmittedState emitted_entry_state(bool error_code)
 {
     EmittedState state = { .reached = true };
     for (uint32_t g = 0; g < 16; g += 1)
@@ -552,7 +582,7 @@ static EmittedState emitted_entry_state(void)
     {
         state.slots[h] = BUSTER_EMITTED_UNKNOWN;
     }
-    state.value[X86_REGISTER_RSP] = -8;
+    state.value[X86_REGISTER_RSP] = error_code ? -16 : -8;
     state.slots[16] = -8;
     return state;
 }
@@ -634,12 +664,13 @@ static bool emitted_jump(uint32_t form)
     return form == X86_FORM_JMP_REL8 || form == X86_FORM_JMP_REL32;
 }
 
-// Whether a record ends its path: a ret, a trap, or a jump out of the function (a tail call: a direct jmp with a
-// reference, or Tier 0's and Tier 1's jmp through r11).
+// Whether a record ends its path: a ret (an interrupt service routine's iretq, #147), a trap, or a jump out of the
+// function (a tail call: a direct jmp with a reference, or Tier 0's and Tier 1's jmp through r11).
 static bool emitted_exit(const X86Instruction* record, bool branch)
 {
     const uint32_t form = record->form;
-    return form == X86_FORM_RET || form == X86_FORM_UD2 || form == X86_FORM_INT3 || (!branch && form == (X86_FORM_JMP_REL32 | BUSTER_X86_FORM_FIXUP)) ||
+    return form == X86_FORM_RET || form == X86_FORM_IRETQ || form == X86_FORM_UD2 || form == X86_FORM_INT3 ||
+           (!branch && form == (X86_FORM_JMP_REL32 | BUSTER_X86_FORM_FIXUP)) ||
            (form == X86_FORM_JMP_RM64 && emitted_direct(record) && record->rm == X86_REGISTER_R11);
 }
 
@@ -965,8 +996,9 @@ static uint32_t emitted_saved_vector_move(const X86Instruction* record, bool sto
 
 // A vector or mask register's rules (#147, a preserving frame's: emitted_tier0_preserve_rows), which the fixpoint below
 // doesn't follow, proved by the records at their boundaries: a slot's rule right after the whole store of that register
-// into that slot from rbp (emitted_saved_vector_move: a masked one is no save), the CFA rbp's plus 16 by then; and its
-// caller's value at the entry, or right after its whole load back from the slot its rule named. The frame keeps rbp and the slots past the body's places (tier0_layout_frame).
+// into that slot from rbp (emitted_saved_vector_move: a masked one is no save), the CFA rbp's by then (plus 16, or an
+// interrupt service routine's with an error code plus 24); and its caller's value at the entry, or right after its whole
+// load back from the slot its rule named. The frame keeps rbp and the slots past the body's places (tier0_layout_frame).
 static EmittedVerdict emitted_verify_saved_vectors(const EmittedCode* code)
 {
     EmittedVerdict verdict = { .error = EMITTED_VERIFY_OK, .event = code->frame_count };
@@ -975,26 +1007,32 @@ static EmittedVerdict emitted_verify_saved_vectors(const EmittedCode* code)
     {
         slots[r] = BUSTER_EMITTED_UNKNOWN;
     }
-    bool framed = false;
+    // The CFA's offset from rbp where the CFA is rbp's (16, an interrupt service routine's with an error code 24, #147),
+    // BUSTER_EMITTED_UNKNOWN where it isn't.
+    int64_t framed = BUSTER_EMITTED_UNKNOWN;
+    bool rbp = false;
     for (uint32_t e = 0; verdict.error == EMITTED_VERIFY_OK && e < code->frame_count; e += 1)
     {
         const EmissionFrameEvent* event = &code->frames[e];
         const uint32_t boundary = event->at.boundary;
         const uint32_t kind = event->kind;
-        framed = kind == EMISSION_FRAME_CFA ? event->reg == BUSTER_EMISSION_X86_RBP && event->value == 16 : kind == EMISSION_FRAME_CFA_OFFSET ? framed && event->value == 16 : framed;
+        rbp = kind == EMISSION_FRAME_CFA ? event->reg == BUSTER_EMISSION_X86_RBP : rbp;
+        framed = kind == EMISSION_FRAME_CFA || kind == EMISSION_FRAME_CFA_OFFSET ? (rbp ? event->value : BUSTER_EMITTED_UNKNOWN) : framed;
         if (emission_x86_saved_vector(event->reg) && kind != EMISSION_FRAME_CFA && kind != EMISSION_FRAME_CFA_OFFSET)
         {
             const X86Instruction* record = boundary != 0 && boundary <= code->count ? &code->records[boundary - 1] : NULL;
             bool proved = false;
             if (kind == EMISSION_FRAME_OFFSET)
             {
-                proved = framed && record != NULL && emitted_saved_vector_move(record, true) == event->reg && record->displacement == event->value + 16;
-                slots[event->reg] = event->value;
+                // The slot from rbp, where the load back must find it.
+                slots[event->reg] = framed != BUSTER_EMITTED_UNKNOWN ? event->value + framed : BUSTER_EMITTED_UNKNOWN;
+                proved = framed != BUSTER_EMITTED_UNKNOWN && record != NULL && emitted_saved_vector_move(record, true) == event->reg &&
+                         record->displacement == slots[event->reg];
             }
             else if (kind == EMISSION_FRAME_SAME_VALUE)
             {
                 proved = boundary == 0 || (record != NULL && emitted_saved_vector_move(record, false) == event->reg && slots[event->reg] != BUSTER_EMITTED_UNKNOWN &&
-                                           record->displacement == slots[event->reg] + 16);
+                                           record->displacement == slots[event->reg]);
             }
             verdict = proved ? verdict : (EmittedVerdict){ .error = EMITTED_VERIFY_REFUTED, .record = boundary, .event = e };
         }
@@ -1073,7 +1111,7 @@ static EmittedVerdict emitted_verify_frames(const EmittedCode* code, Arena* scra
                 queued[leaders[i]] = 0;
             }
         }
-        states[0] = emitted_entry_state();
+        states[0] = emitted_entry_state(code->entry_error_code);
         work[pending++] = 0;
         queued[0] = 1;
     }

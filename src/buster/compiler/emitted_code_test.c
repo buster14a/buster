@@ -463,7 +463,7 @@ static void emitted_test_preserve_moves(EmittedTest* test, const Tier0Code* code
     // The records: rbp's push and mov, the pushes, the block's sub and its stores; its loads right before the epilogue's
     // release, its pops, rbp's and the ret.
     const uint32_t stored = 2 + pushes + kept + 1;
-    const uint32_t loaded = code->count - 3 - pushes - kept - moves;
+    const uint32_t loaded = code->count - 3 - pushes - kept - moves - (code->frame_interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE ? 1u : 0u);
     const uint32_t positions[4] = { stored, stored + moves - 1, loaded, loaded + moves - 1 };
     Arena* arena = &test->arena;
     const uint64_t mark = arena->length;
@@ -596,6 +596,128 @@ static void emitted_test_tier0_preserving(EmittedTest* test)
     }
 }
 
+// Tier 0's interrupt service routines (#147, Tier0Function.interrupt), with an error code and without: a preserving frame
+// of every register (zmm0 to zmm31 and the masks, and whole YMMs), in a function of the handler's parameters and one
+// address-taken object of each size and alignment, probed and not. Both paths compile the same code, which clears the
+// direction flag, gives the frame's address in rdi (and the error code in rsi) and ends in iretq (after an add over the
+// error code); the fixed reader takes it; its events resolve, describe every kept register at every boundary and are its
+// records' (the error code's frame's CFA 8 bytes up, emitted_tier0_interrupt_rows); and their mutants aren't, nor is a
+// frame whose block moves are changed.
+static void emitted_test_tier0_interrupt(EmittedTest* test)
+{
+    static const uint32_t sizes[] = { 100, BUSTER_TIER0_PAGE_BYTES + 904 };
+    static const uint8_t alignments[] = { 4, 6 };
+    static const uint64_t values[3] = { 2, 0, 0 };
+    static const uint8_t kinds[3] = { BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_DISCARD, BUSTER_TYPED_RETURN };
+    static const uint8_t classes[3] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID };
+    static const uint8_t local_classes[3] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID };
+    static const uint8_t local_flags[3] = { 0, 0, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN };
+    const AbiLocation parameters[2] = {
+        { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { X86_REGISTER_RDI, BUSTER_ABI_REGISTER_NONE } },
+        { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { X86_REGISTER_RSI, BUSTER_ABI_REGISTER_NONE } },
+    };
+    const uint16_t every = (uint16_t)(1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RCX | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RSI | 1u << X86_REGISTER_RDI |
+                                      1u << X86_REGISTER_R8 | 1u << X86_REGISTER_R9 | 1u << X86_REGISTER_R10 | 1u << X86_REGISTER_R11);
+    const struct
+    {
+        uint8_t vectors;
+        uint8_t bytes;
+        uint8_t masks;
+    } sets[] = { { 32, 64, 8 }, { 16, 32, 0 } };
+    for (uint32_t kind = BUSTER_TIER0_INTERRUPT_HANDLER; kind <= BUSTER_TIER0_INTERRUPT_ERROR_CODE; kind += 1)
+    {
+        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(sets); c += 1)
+        {
+            for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sizes); s += 1)
+            {
+                for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(alignments); a += 1)
+                {
+                    for (uint32_t probe = 0; probe < 2; probe += 1)
+                    {
+                        const uint64_t id = 0x70000 + kind * 256 + c * 64 + s * 16 + a * 2 + probe;
+                        const uint32_t local_sizes[3] = { 0, 0, sizes[s] };
+                        const uint8_t local_alignments[3] = { 0, 0, alignments[a] };
+                        uint64_t handler_values[3];
+                        memcpy(handler_values, values, sizeof(values));
+                        handler_values[0] = kind;
+                        Tier0Function function;
+                        memset(&function, 0, sizeof(function));
+                        function.kinds = kinds;
+                        function.classes = classes;
+                        function.values = handler_values;
+                        function.count = 3;
+                        function.local_classes = local_classes + (kind == BUSTER_TIER0_INTERRUPT_HANDLER ? 1 : 0);
+                        function.local_flags = local_flags + (kind == BUSTER_TIER0_INTERRUPT_HANDLER ? 1 : 0);
+                        function.local_sizes = local_sizes + (kind == BUSTER_TIER0_INTERRUPT_HANDLER ? 1 : 0);
+                        function.local_alignments = local_alignments + (kind == BUSTER_TIER0_INTERRUPT_HANDLER ? 1 : 0);
+                        function.local_count = kind + 1;
+                        function.parameter_count = kind;
+                        function.parameters = parameters;
+                        function.probe_stack = probe != 0;
+                        function.preserve_general = every;
+                        function.preserve_vectors = sets[c].vectors;
+                        function.preserve_vector_bytes = sets[c].bytes;
+                        function.preserve_mask_bytes = sets[c].masks;
+                        function.interrupt = (uint8_t)kind;
+                        Arena* arena = &test->arena;
+                        const uint64_t mark = arena->length;
+                        const Tier0Check checked = tier0_validate(&function);
+                        const Tier0Code code = checked.error == TIER0_OK ? tier0_compile(&function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
+                        const Tier0Code twin = code.error == TIER0_OK ? tier0_compile_scalar(&function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
+                        bool valid = emitted_test_expect(test, code.error == TIER0_OK && twin.error == TIER0_OK && twin.count == code.count &&
+                                                                   memcmp(twin.records, code.records, code.count * sizeof(X86Instruction)) == 0,
+                                                         "Tier 0's paths compile the same interrupt service routine", id);
+                        // Its entry and exit: cld and the parameters from the processor's frame, and iretq after its add.
+                        bool shaped = false;
+                        for (uint32_t r = 0; valid && r + 1 < code.count; r += 1)
+                        {
+                            const X86Instruction* frame = &code.records[r + 1];
+                            shaped |= code.records[r].form == X86_FORM_CLD && frame->form == X86_FORM_LEA_R64_M && frame->reg == X86_REGISTER_RDI &&
+                                      frame->rm == X86_REGISTER_RBP && frame->displacement == (kind == BUSTER_TIER0_INTERRUPT_ERROR_CODE ? 16 : 8) &&
+                                      (kind == BUSTER_TIER0_INTERRUPT_HANDLER ||
+                                       (r + 2 < code.count && code.records[r + 2].form == X86_FORM_MOV_R64_RM64 && code.records[r + 2].reg == X86_REGISTER_RSI &&
+                                        code.records[r + 2].rm == X86_REGISTER_RBP && code.records[r + 2].displacement == 8));
+                        }
+                        const X86Instruction* last = valid ? &code.records[code.count - 1] : NULL;
+                        const X86Instruction* stepped = valid ? &code.records[code.count - 2] : NULL;
+                        valid = valid && emitted_test_expect(test, shaped && last->form == X86_FORM_IRETQ && code.frame_interrupt == kind &&
+                                                                       (kind == BUSTER_TIER0_INTERRUPT_HANDLER ?
+                                                                            stepped->form == X86_FORM_POP_R64 && stepped->rm == X86_REGISTER_RBP :
+                                                                            stepped->form == X86_FORM_ADD_RM64_IMM8 && stepped->rm == X86_REGISTER_RSP &&
+                                                                                stepped->immediate == 8),
+                                                             "an interrupt service routine clears DF, gives its parameters and ends in iretq", id);
+                        EmittedTestLayout layout;
+                        valid = valid && emitted_test_expect(test, emitted_test_layout(code.records, code.count, code.branches, code.targets, code.branch_count,
+                                                                                       code.reference_count, arena, &layout),
+                                                             "the interrupt service routine sizes and encodes", id);
+                        UnwindFunction fixed;
+                        valid = valid && emitted_test_expect(test, unwind_tier0_frame_tails(&code, layout.offsets, layout.length, &fixed, 0) == UNWIND_OK,
+                                                             "the fixed reader takes an interrupt service routine's frame", id);
+                        const EmittedCode emitted = valid ? emitted_from_tier0(&code, true, false, false, arena) : (EmittedCode){ 0 };
+                        valid = valid && emitted_test_expect(test, emitted.frame_status == EMITTED_FRAME_DESCRIBED,
+                                                             "Tier 0's adapter describes an interrupt service routine's frame", id);
+                        EmissionFrameRow* rows = valid && emitted.frame_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, EmissionFrameRow, emitted.frame_count) : 0;
+                        UnwindFunction resolved;
+                        valid = valid && emitted_test_expect(test, rows != 0 && emitted_unwind(&emitted, layout.offsets, layout.length, false, rows, &resolved) == UNWIND_OK,
+                                                             "an interrupt service routine's events resolve", id);
+                        valid = valid && emitted_test_expect(test, emitted_test_preserve_complete(&emitted, &code),
+                                                             "an interrupt service routine describes every kept register at every boundary", id);
+                        if (valid)
+                        {
+                            const EmittedVerdict verdict = emitted_verify_frames(&emitted, arena);
+                            emitted_test_expect(test, verdict.error == EMITTED_VERIFY_OK, "an interrupt service routine's events are its records'", id);
+                            emitted_test_mutants(test, &emitted, 6, id);
+                            emitted_test_preserve_moves(test, &code, &emitted, id);
+                            test->tier0_functions += 1;
+                        }
+                        arena_pop_to(arena, mark);
+                    }
+                }
+            }
+        }
+    }
+}
+
 static void emitted_test_tier0(EmittedTest* test, uint64_t seed, uint32_t rounds)
 {
     static const Tier0ProgramOptions options[] = {
@@ -635,6 +757,7 @@ static void emitted_test_tier0(EmittedTest* test, uint64_t seed, uint32_t rounds
     tier0_tables_close(&tables);
     emitted_test_tier0_probes(test);
     emitted_test_tier0_preserving(test);
+    emitted_test_tier0_interrupt(test);
 }
 
 // A Tier 1 frame's function: its prologue (with its events), a body that clobbers the saved registers, moves rsp with
