@@ -27,7 +27,9 @@ if [ ! -f "$destination/.correctness-complete" ] || [ ! -f "$destination/LICENSE
     ! bash "$manifest_tool" check "$destination"; then
     temporary=$(mktemp -d "$cache/.clang-${version}.XXXXXXXX")
     trap 'rm -rf "$temporary"' EXIT
-    curl --fail --location --retry 3 \
+    # Curl's default retry policy omits transport resets (e.g. exit 35/56). These
+    # immutable release downloads are SHA-256 checked, so retry all errors.
+    curl --fail --location --retry 8 --retry-all-errors --retry-max-time 240 \
         "https://github.com/llvm/llvm-project/releases/download/llvmorg-${version}/${archive}.tar.zst" \
         --output "$temporary/archive.tar.zst"
     printf '%s  %s\n' "$digest" "$temporary/archive.tar.zst" | sha256sum --check
@@ -43,7 +45,7 @@ if [ ! -f "$destination/.correctness-complete" ] || [ ! -f "$destination/LICENSE
         "$archive/include/*" "$archive/lib/clang/23/*" "$archive/lib/libclang-cpp.so*"
     # The binary release omits the project license. Retain the LLVM license
     # from the exact release commit alongside the staged executable.
-    curl --fail --location --retry 3 \
+    curl --fail --location --retry 8 --retry-all-errors --retry-max-time 240 \
         https://raw.githubusercontent.com/llvm/llvm-project/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/llvm/LICENSE.TXT \
         --output "$temporary/tree/LICENSE.TXT"
     printf '%s  %s\n' 8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee \
