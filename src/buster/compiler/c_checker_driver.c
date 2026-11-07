@@ -5324,6 +5324,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             libraries.linker.missing = true;
         }
     }
+    // A source link with named libraries needs the foreign resolver's archive selection and argv-ordered -l state,
+    // just as a positional archive does (#1470). Compile-only and no-library C commands keep their existing paths.
+    mixed_inputs |= link && libraries.count != 0;
     const bool linker_valid = linker_ready && linker_options_finish(&libraries.linker, &arena);
     const bool runtime_path_refused = link && linker_valid && libraries.linker.runpath.pointer != NULL && runtime_kind != RUNTIME_KIND_DYNAMIC;
     // Code generation's options, which the driver reports before a usage error: the first one it doesn't implement, else

@@ -187,9 +187,17 @@ suffix for following inputs only; `-x none` restores suffix inference. Joined
 A non-regular C or preprocessed-assembly source (`/dev/null`, a FIFO, `/dev/fd/N`)
 is read to EOF once, like stdin. Include probes still refuse those files.
 
-C-only commands retain the existing direct path. Mixed commands compile C and
-assembly on the unit scheduler's lanes, retain their ELF objects in memory,
-and use the built-in foreign resolver and writer with the discovered C runtime.
+C-only links without named libraries retain the existing direct path. Source
+links with `-lNAME` or `-l:FILE` use the mixed/foreign path even when every
+positional input is C (#1470), so named archives get the same lazy member
+selection and input ordering as positional archives. Both the shared-library
+search and static runtime's archive search retain their existing flags and
+`-L` directories; no new runtime or writer mode is introduced. `-c` and
+syntax checking do not resolve named libraries.
+
+Mixed commands compile C and assembly on the unit scheduler's lanes, retain
+their ELF objects in memory, and use the built-in foreign resolver and writer
+with the discovered C runtime.
 No host compiler/linker or temporary object files are used. Input order, `-l`
 state, archive extraction, named sections, C DWARF and unwind records survive
 this boundary. Each `.S` unit owns its preprocessing state on its lane, including

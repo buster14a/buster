@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Mixed-input commands (#1120): the unit scheduler keeps C and assembly objects in memory, then the ordinary foreign
-// resolver consumes them beside files and archives in argv order. Pure-C commands retain their direct link path.
+// resolver consumes them beside files and archives in argv order. C-only links without named libraries retain their direct link path.
 
 static int check_driver_assembly(const CheckDriverCommand* command, const PPOptions* preprocessing, CheckUnitsUnit* unit,
                                  CheckUnitsLane* lane, FILE* errors)

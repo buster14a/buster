@@ -47,6 +47,8 @@ static void cc_mixed_refusal(CCCompatibilityTest* test, const char* name, const 
     cc_compat_release(&run);
 }
 
+#include "c_driver_named_libraries_test.c"
+
 static void cc_mixed_unsupported_sources(CCCompatibilityTest* test)
 {
     static const char* const suffixes[] = {
@@ -253,6 +255,7 @@ static int driver_mixed_tests(const char* compiler, const char* clang)
         cc_mixed_refusal(&test, "-x none cancels stdin language", language_reset, "requires -x");
         cc_mixed_refusal(&test, "linker option cannot consume a source operand", missing_link_value, "missing");
         cc_mixed_refusal(&test, "mixed multiple -c -o rejected", multiple_output, "multiple output");
+        cc_mixed_named_libraries(&test);
         cc_mixed_unsupported_sources(&test);
         const char* const fatal_order[] = { "-c", "-Wfatal-errors", "fatal.S", "later.c", NULL };
         CCCompatibilityRun fatal = cc_compat_run(&test, test.compiler, NULL, fatal_order);
