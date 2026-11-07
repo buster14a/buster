@@ -969,6 +969,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                           check_warning_text(scratch, "%s%.*s%s is deprecated", quotes, (int)used.length, used.pointer, quotes);
             break;
         }
+        case CHECK_WARNING_EVENT_UNKNOWN_ESCAPE:
+            result = check_warning_text(scratch, "unknown escape sequence '\\%c'", (char)payload->name);
+            break;
         case CHECK_WARNING_EVENT_ALIGNOF_EXPRESSION:
         {
             result = check_warning_text(scratch, "'%.*s' applied to an expression is a GNU extension", (int)name.length, name.pointer);
@@ -1390,6 +1393,11 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                             pp_diagnose_output_phase(pp, disposition, source, semantic ? boundary : event->payload.token,
                                                      semantic ? PP_DIAGNOSTIC_SEMANTIC : PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
                         }
+                    }
+                    else if (event->kind == CHECK_WARNING_EVENT_UNKNOWN_ESCAPE)
+                    {
+                        // At its backslash inside the literal's token (#1447).
+                        pp_diagnose_output_offset_at(pp, disposition, source, event->payload.data, boundary, "%s%s", message, suffix);
                     }
                     else if ((event->flags & BUSTER_CHECK_WARNING_UNLOCATED) != 0)
                     {

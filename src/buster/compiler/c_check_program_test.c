@@ -1915,6 +1915,14 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         {
             snprintf(description, sizeof(description), "%s: %s static data and token bodies are what the dense passes made", name, path == 0 ? "scalar" : "vector");
             check_test_expect(test, check_test_program_sparse(&program, &data, &input, &stream, &initializers, &types.table, path == 0, &output, &scratch), description);
+            // The return facts' vector path visits only the nodes that can have facts (check_program_return_sparse): every
+            // node's must be what the scalar path, which visits each, gives it.
+            const uint64_t facts_mark = scratch.length;
+            const uint8_t* exact = check_program_return_facts(&program, &scratch, NULL, true);
+            const uint8_t* sparse = check_program_return_facts(&program, &scratch, NULL, false);
+            snprintf(description, sizeof(description), "%s: the return facts' vector path gives every node the scalar path's facts", name);
+            check_test_expect(test, input.graph.count == 0 || (exact != NULL && sparse != NULL && memcmp(exact, sparse, input.graph.count) == 0), description);
+            arena_pop_to(&scratch, facts_mark);
         }
         // A program that includes the system's headers lowers what its roots reach, as -c does: their other functions
         // (MMX's, whose builtins no row takes) are no part of it.
@@ -3022,10 +3030,13 @@ static void check_test_program_return_marks(CheckTest* test)
                                             .argument_offsets = offsets, .argument_counts = counts, .argument_nodes = arguments } };
         const CheckStream stream = { .misc = &misc, .misc_count = 1, .queries = &query, .query_count = 1 };
         CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input, .stream = &stream };
-        const uint8_t* query_facts = check_program_return_facts(&program, &scratch, NULL);
-        check_test_expect(test, query_facts != NULL && query_facts[0] == BUSTER_CHECK_RETURN_STOPS &&
-                               query_facts[1] == BUSTER_CHECK_RETURN_UNKNOWN,
-                          "an evaluated query operand never promotes its conservative warning contract to a guaranteed stop");
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            const uint8_t* query_facts = check_program_return_facts(&program, &scratch, NULL, path == 0);
+            check_test_expect(test, query_facts != NULL && query_facts[0] == BUSTER_CHECK_RETURN_STOPS &&
+                                   query_facts[1] == BUSTER_CHECK_RETURN_UNKNOWN,
+                              "an evaluated query operand never promotes its conservative warning contract to a guaranteed stop");
+        }
     }
     if (ready)
     {
@@ -3042,12 +3053,60 @@ static void check_test_program_return_marks(CheckTest* test)
         const CheckStream stream = { .dense_values = values };
         const CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input,
                                        .stream = &stream, .object_count = 2 };
-        check_test_expect(test, check_program_return_call(&program, 1, NULL) == BUSTER_CHECK_RETURN_UNKNOWN,
+        check_test_expect(test, check_program_return_call(&program, 1, NULL, NULL) == BUSTER_CHECK_RETURN_UNKNOWN,
                           "a call without optional source declaration bindings remains conservative");
     }
 
     arena_release(&scratch);
     check_test_types_close(&types);
+}
+
+// #1709: the return flow reads a byte per interned name instead of searching the catalogue for each call. Its table is
+// exactly the catalogue's entries with the 'r' attribute, and over every catalogue name, near misses and the
+// predefined names, the bytes equal the search's answers.
+static void check_test_program_return_library(CheckTest* test)
+{
+    uint32_t matched = 0;
+    bool ordered = true;
+    for (uint32_t i = 0; i < BUSTER_BUILTIN_INTRINSIC_COUNT; i += 1)
+    {
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_infos + i;
+        const bool listed = memchr(info->attributes, 'r', info->attributes_length) != NULL;
+        const BuiltinIntrinsicName* entry = listed && matched < BUSTER_ARRAY_LENGTH(check_program_return_library_entries) ?
+                                            check_program_return_library_entries + matched : NULL;
+        ordered = ordered && (!listed || (entry != NULL && entry->length == info->name_length && memcmp(entry->name, info->name, entry->length) == 0));
+        matched += listed ? 1 : 0;
+    }
+    check_test_expect(test, ordered && matched == BUSTER_ARRAY_LENGTH(check_program_return_library_entries),
+                      "the return flow's library names are exactly the catalogue's entries with the 'r' attribute");
+    InternTable identifiers = { 0 };
+    Arena scratch = arena_reserve(UINT64_C(1) << 20);
+    bool ready = scratch.base != NULL && intern_initialize(&identifiers);
+    static const char* const misses[] = { "exi", "exits", "abort_", "longjm", "_Exit_", "main", "" };
+    for (uint32_t i = 0; ready && i < BUSTER_BUILTIN_INTRINSIC_COUNT; i += 1)
+    {
+        ready = intern_find_or_add(&identifiers, (const uint8_t*)builtin_intrinsic_infos[i].name, builtin_intrinsic_infos[i].name_length) != 0;
+    }
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(misses) - 1; i += 1)
+    {
+        ready = intern_find_or_add(&identifiers, (const uint8_t*)misses[i], (uint32_t)strlen(misses[i])) != 0;
+    }
+    const uint8_t* names = ready ? check_program_return_library_names(&identifiers, &scratch) : NULL;
+    check_test_expect(test, names != NULL, "the return flow's library-name fixture interns the catalogue");
+    uint32_t equal = 0;
+    uint32_t unknown = 0;
+    for (uint32_t id = 1; names != NULL && id < identifiers.count; id += 1)
+    {
+        equal += names[id] == check_program_return_library_search(&identifiers, id) ? 1 : 0;
+        unknown += names[id] == BUSTER_CHECK_RETURN_UNKNOWN ? 1 : 0;
+    }
+    check_test_expect(test, names != NULL && equal == identifiers.count - 1 && unknown == BUSTER_ARRAY_LENGTH(check_program_return_library_entries) && names[0] == 0,
+                      "each interned name's return-flow byte equals the catalogue search's answer");
+    Arena empty = { 0 };
+    check_test_expect(test, check_program_return_library_names(NULL, &scratch) == NULL && check_program_return_library_names(&identifiers, &empty) == NULL,
+                      "without identifiers or room the return flow searches, as before");
+    intern_release(&identifiers);
+    arena_release(&scratch);
 }
 
 #include "c_check_program_batch_test.c"
@@ -3466,6 +3525,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     {
         check_test_program_array_alignment(test, clang);
         check_test_program_return_marks(test);
+        check_test_program_return_library(test);
         check_test_literal_tables(test, clang);
         check_test_program_builtin_scratch(test, clang);
         check_test_program_copies(test, clang);
@@ -4013,6 +4073,14 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "unsigned long mask=((unsigned long)&x&31)|((unsigned long)page&4095)|((unsigned long)&s&63)|((unsigned long)&d&15)|((unsigned long)&e&31);"
             "x+=7;d*=3;return x+page[0]+page[99]+s.a+(int)s.b+(int)d+(int)e+(int)mask*1000;}",
             "objects-aligned-past-16", clang);
+        // Escapes clang takes that the checker's fast decoding refuses (#1447, check_literal_strings_extended): delimited ones
+        // (\x{...}, \o{...}, \u{...}), unknown ones (their character) and GNU's \E, in strings of each width and in
+        // character constants, their values against clang's build.
+        check_test_program_source(test,
+            "int tested(int n){const char*s=\"\\x{41}\\o{102}\\u{e9}\\q\\E\\(\\%\";const unsigned short*u=u\"\\x{1234}\\u{1F600}\";const int*w=L\"\\o{7777777}\\Q\";"
+            "int c='\\x{43}'+'\\o{104}'*3+'\\E'*5+'\\z'*7;unsigned long h=0;for(int i=0;s[i];i++)h=h*31+(unsigned char)s[i];"
+            "for(int i=0;u[i];i++)h=h*37+u[i];for(int i=0;w[i];i++)h=h*41+(unsigned)w[i];return (int)(h%1000003)+c+n;}",
+            "extended-escapes", clang);
         // x86's force_align_arg_pointer (#1447, Tier0Function.realign_stack): a function entered with rsp 8 bytes off a call's
         // alignment (an inline asm call that aligns rsp below the red zone, then moves it by 8) realigns its frame, so that
         // an object aligned to 16 is; with a call of its own and with a variable-length array (a realigned frame with a
