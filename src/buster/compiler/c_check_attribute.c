@@ -698,6 +698,10 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_ANNOTATE_CONSTANT,
     CHECK_ARGUMENT_TARGET_CLONES_DEFAULT,
     CHECK_ARGUMENT_SELECTANY_LINKAGE,
+    // pcs's identifier argument aapcs, after its "requires a string" (#147): the convention's warning the driver gives, and
+    // on a tag then the warning that it takes functions alone.
+    CHECK_ARGUMENT_CONVENTION_UNSUPPORTED,
+    CHECK_ARGUMENT_FUNCTIONS_METHODS,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -1619,13 +1623,20 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             // clang's error of an argument that is no string literal, at it (#147): visibility's own wording, the others'
             // checkStringLiteralArgumentAttr's.
             // visibility's and pcs's arguments are enumerators', which clang's parser reads as identifiers: one is "requires a
-            // string" (pcs's then also "invalid PCS type", which the first error's stop leaves out).
+            // string". pcs's is its handler's, once a function or a tag takes it (check_input_attribute_pcs): on another type
+            // clang's type processing never reads the argument, and the attribute's warning is all.
             if (!decoded)
             {
                 const bool named = first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER;
-                const bool enumerated = attribute->kind == CHECK_ATTRIBUTE_VISIBILITY ||
-                                        (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "pcs"));
+                const bool pcs = attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION &&
+                                 check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "pcs");
+                const bool enumerated = attribute->kind == CHECK_ATTRIBUTE_VISIBILITY || pcs;
+                const CheckInputAttributeError saved = attributes->error;
+                const uint32_t saved_first = attributes->error_first;
+                const uint32_t saved_end = attributes->error_end;
+                const uint32_t before = reader->output->report_count;
                 check_input_attribute_argument_error(reader, attributes, attribute, first, enumerated && named ? CHECK_ARGUMENT_STRING : CHECK_ARGUMENT_STRING_LITERAL, 0);
+                valid = pcs && named && check_input_attribute_defer(reader, attributes, attribute, before, saved, saved_first, saved_end);
             }
         }
         else if (valid)
@@ -2788,12 +2799,29 @@ static bool check_input_attribute_pcs_valid(CheckInputReader* reader, const Chec
                     (check_input_attribute_equal(attribute->text, "aapcs") || check_input_attribute_equal(attribute->text, "aapcs-vfp")));
 }
 
-static bool check_input_attribute_pcs(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute)
+static bool check_input_attribute_pcs(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, bool tag)
 {
     const bool pcs = attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "pcs");
     const bool counted = !pcs || attribute->argument_count == 1;
     const bool known = !counted || check_input_attribute_pcs_valid(reader, attribute);
-    if (!counted && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+    const CheckInputReport* deferred = pcs ? attribute->deferred : NULL;
+    if (deferred != NULL)
+    {
+        // An identifier for its string (check_input_attribute_validate): "requires a string", given once. clang's
+        // checkStringLiteralArgumentAttr goes on with the identifier's text, which the driver words after the error: aapcs's
+        // convention x86-64 warns of and ignores, any other's "invalid PCS type".
+        CheckInput* output = reader->output;
+        if (output->report_count < output->report_capacity)
+        {
+            // (A tag's, whose aapcs clang then also finds no function's: `value` 1.)
+            output->reports[output->report_count] = *deferred;
+            output->reports[output->report_count++].value = tag ? 1u : 0u;
+        }
+        output->resource |= output->report_count >= output->report_capacity && output->reports[output->report_count - 1].token != deferred->token;
+        attributes->error = attributes->error == CHECK_ATTRIBUTE_ERROR_NONE ? CHECK_ATTRIBUTE_ERROR_ARGUMENTS : attributes->error;
+        attribute->deferred = NULL;
+    }
+    else if (!counted && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
     {
         attributes->error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
         attributes->error_first = attribute->first;
@@ -2804,7 +2832,7 @@ static bool check_input_attribute_pcs(CheckInputReader* reader, CheckInputAttrib
     {
         check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PCS_TYPE, 0);
     }
-    return counted && known;
+    return deferred == NULL && counted && known;
 }
 
 // The count of an attribute's arguments, its commas outside nested brackets (#147).
@@ -4069,10 +4097,10 @@ static void check_input_attribute_conventions(CheckInputReader* reader, CheckInp
     uint32_t current = CHECK_CALL_DEFAULT;
     for (uint32_t i = 0; is_function && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE && i < attributes->count; i += 1)
     {
-        const CheckInputAttribute* attribute = attributes->records + i;
+        CheckInputAttribute* attribute = attributes->records + i;
         const bool convention = attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !attribute->specifier_ignored && !attribute->specifier_applied;
         // One of a wrong count is its count's error alone, at its subject's check (CheckInputAttribute.convention_count).
-        if (convention && attribute->convention_count == BUSTER_CHECK_COUNT_NONE && check_input_attribute_pcs(reader, attributes, attribute))
+        if (convention && attribute->convention_count == BUSTER_CHECK_COUNT_NONE && check_input_attribute_pcs(reader, attributes, attribute, false))
         {
             const uint32_t call = attribute->value == CHECK_CALL_IGNORED_X86_32 ? CHECK_CALL_SYSV : (uint32_t)attribute->value;
             // (A GPU kernel's convention is a function's declaration's alone, not a pointer's to one.)
@@ -5953,7 +5981,7 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
                                     check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "cfi_unchecked_callee"));
         if (valid && tag && function_type && !attribute->ignored && !attribute->subject_ignored)
         {
-            valid = check_input_attribute_pcs(reader, attributes, attribute);
+            valid = check_input_attribute_pcs(reader, attributes, attribute, true);
             if (valid && convention && attribute->value == CHECK_CALL_IGNORED_X86_32)
             {
                 check_input_attribute_unsupported(reader, attribute);
@@ -6072,9 +6100,10 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_SELECTANY_LINKAGE, 0);
             valid = false;
         }
-        else if (kept && attribute->deferred != NULL)
+        else if (kept && attribute->deferred != NULL && attribute->kind != CHECK_ATTRIBUTE_CALLING_CONVENTION)
         {
-            // Its argument's error, its handler's once its subject takes it (check_input_attribute_defer).
+            // Its argument's error, its handler's once its subject takes it (check_input_attribute_defer); a convention's
+            // where it meets a function or a tag (check_input_attribute_pcs).
             CheckInput* output = reader->output;
             if (output->report_count < output->report_capacity)
             {
