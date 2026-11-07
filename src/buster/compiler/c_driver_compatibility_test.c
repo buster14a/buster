@@ -338,6 +338,8 @@ static bool cc_compat_elf(CCCompatibilityTest* test, const char* name, uint16_t 
     return result && found == interpreter;
 }
 
+#include "c_driver_response_test.c"
+
 static void cc_compat_cleanup(CCCompatibilityTest* test)
 {
     // The fixture owns only these flat subdirectories. No shell, recursive traversal or caller-provided path.
@@ -629,6 +631,7 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
             fprintf(stderr, "  ./- diagnostics: %s\n", dash_directory_run.errors != NULL ? dash_directory_run.errors : "(missing)");
         }
         cc_compat_release(&dash_directory_run);
+        cc_compat_response_files(&test);
         cc_compat_cleanup(&test);
     }
     printf("CC compatibility: %u checks, %u failures\n", test.checks, test.failures);
