@@ -17,7 +17,10 @@ requirements. [Command index](README.md).
   `test-tier1-pipeline` checks the kernel twins and complete plans on every
   function, and `benchmark-tier1-select-source` checks the kernels before timing.
   `test-checker-driver` requires byte-identical Tier 1 scalar/vector objects for
-  the #1395 regressions at the same target, with either rematerialization mode. Bounded
+  the #1395 regressions at the same target, with either rematerialization mode,
+  including a parameter-free leaf with volatile loads. Both production
+  allocators use the same regular-class level rule; the independent scan remains
+  a test reference, alongside the exact allocation-output comparisons. Bounded
   direct scalar calls preserve live caller registers and publish symbolic CALL
   references. Byte/word memory and integer conversions
   use canonical 32-bit storage; terminal chains retain explicit traps or empty

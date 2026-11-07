@@ -1371,7 +1371,10 @@ target, with and without rematerialization. Every fixture function must select
 through Tier 1, the complete object files must be byte-identical, and each
 linked object must print the independent Clang build's output. Baseline-host
 builds exercise the scalar production route; native builds exercise both kernel
-routes when their host supports the full vector path.
+routes when their host supports the full vector path. A parameter-free leaf
+with four volatile loads isolates unrestricted register allocation from phi
+ordering. Both production allocators now use the same level-rule policy; the
+independent scan remains a test reference ([allocation guide](tier1-allocation.md)).
 
 `test-tier1-select --manifest` writes CSV with separate origins for actual
 `plan` emission, direct `expansion` fixtures and test `wrapper` records. Every
