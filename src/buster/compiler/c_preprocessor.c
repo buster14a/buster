@@ -4708,7 +4708,7 @@ static PPPrepare pp_prepare_options(const PPOptions* options)
                         (options->language.standard < 2023 ? C_TOKENIZER_NO_DIGIT_SEPARATORS : 0),
         .split_kinds = pp_split_kinds(options->language),
         .dollar_punctuation = pp_dollar_punctuation(options),
-        .vectorized = !options->scalar,
+        .vectorized = BUSTER_VECTOR_PATH(!options->scalar),
         .window_bytes = options->window_bytes,
     };
 }

@@ -485,3 +485,18 @@ share. Run it under the 9700X's lock with `taskset -c 2`;
 after a warm-up: medians per input byte, and the text's throughput. The two
 texts must be the same. Run it pinned to one CPU; `docs/c-preprocessor.md` has
 the 9700X's numbers.
+
+## Scalar-host preparation (#1369)
+
+Production preparation chooses vector kernels only when the host build supports
+BUSTER_HOST_VECTOR and the caller has not requested scalar execution. This also
+selects whole-file scalar refinement instead of emulated 512-bit chunk/window
+refinement on baseline hosts. Shared file caches inherit the same preparation
+policy. Explicit low-level window tests still exercise both kernel protocols on
+baseline hosts; the scalar-reference and window-unit fixtures check the default
+host/option policy before those test-only overrides.
+
+This bounded change does not change parser dispatch or replace the scalar hash's
+software AES implementation. Existing token, macro, diagnostic and window twins
+remain the correctness checks. Baseline/AVX2-host end-to-end timing on the approved
+9700X remains pending; no measured speedup is claimed here.
