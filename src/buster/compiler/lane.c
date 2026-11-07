@@ -272,11 +272,12 @@ static __attribute__((unused)) bool arena_untouched(const Arena* arena);
 // sqlite3.c's and the backend after them to 24 MB). Borrowed storage, and an arena whose writable extent is unknown, keep
 // their pages. The peak stays where it was: past the length, the pages up to the boundary still hold what was written.
 static __attribute__((unused)) void arena_discard(Arena* arena);
-// arena_discard in whole huge pages (#777): through the huge page that holds the peak, whose bytes past the peak no
-// push wrote, as far as the arena committed. For an arena whose next user pushes as far again, a lane of the C driver's
-// units with another unit to compile: the kernel splits a huge page that a discard frees part of into base pages, which
-// hold the rest of it and which later pushes fault in one at a time, where a whole one comes back in one fault. Synth's
-// units by one lane took 130 thousand faults more for the split pages on the 9700X.
+// arena_discard in whole huge pages (#777): from the first huge page boundary past the length to the last one at or
+// below the peak, for an arena whose next user pushes as far again, a lane of the C driver's units with another unit to
+// compile. The huge page a discard frees part of is split by the kernel into base pages, which later pushes fault in
+// one at a time: by one lane, synth's units took 130 thousand faults more for them on the 9700X. That huge page is
+// kept, at most 2 MB: freeing it whole made each unit take a fresh one, cleared by the kernel, and synth's link by 8
+// lanes took 4.3% longer than with arena_discard, where keeping it took 2.2% less.
 static __attribute__((unused)) void arena_discard_huge(Arena* arena);
 // Keeps the executable's .bss in base pages (#652), for a compile's commands to call first: it is 220 MB of statics, the
 // tests' and benchmarks' arrays among them, of which a compile writes 11 pages whatever its size (an empty file's -c as
@@ -939,8 +940,7 @@ static bool arena_untouched(const Arena* arena)
 }
 
 // The pages arena_discard gives back, past the length from the first huge page boundary past it: to the peak's page, or
-// with `whole` to the first huge page boundary at or past the peak, within what the arena committed
-// (arena_discard_huge).
+// with `whole` to the last huge page boundary at or below the peak (arena_discard_huge).
 static void arena_discard_to(Arena* arena, bool whole)
 {
     if (arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted)
@@ -949,8 +949,7 @@ static void arena_discard_to(Arena* arena, bool whole)
         const uintptr_t begin = (base + arena->length + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
         const uint64_t written = arena->committed > arena->mapping_offset ? arena->committed - arena->mapping_offset : 0;
         const uintptr_t last = base + (arena->peak < written ? arena->peak : written);
-        const uintptr_t huge = (last + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
-        const uintptr_t end = whole ? (huge < base + written ? huge : base + written) :
+        const uintptr_t end = whole ? last & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1) :
                                       (last + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
         if (end > begin)
         {
