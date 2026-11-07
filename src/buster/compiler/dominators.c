@@ -533,6 +533,9 @@ static bool dominators_dominates(const Dominators* dominators, uint32_t dominato
     return result;
 }
 
+// Each predecessor's walk climbs the tree to the block's idom. One that reaches a runner whose frontier already holds
+// the block stops: an earlier predecessor's walk passed there and marked the same chain on up (#1352). That keeps the
+// walks to the frontiers' total size plus the edges, where a join of many predecessors under a deep chain was quadratic.
 static void dominators_frontiers(const DominatorCfg* cfg, Dominators* result)
 {
     memset(result->frontiers, 0, (uint64_t)cfg->block_count * result->row_words * sizeof(uint64_t));
@@ -546,7 +549,7 @@ static void dominators_frontiers(const DominatorCfg* cfg, Dominators* result)
             uint32_t runner = cfg->predecessors[edge];
             if (result->rpo_index[runner] != BUSTER_DOMINATOR_NONE)
             {
-                while (runner != stop)
+                while (runner != stop && !dominators_bit(result->frontiers + (uint64_t)runner * result->row_words, block))
                 {
                     dominators_set(result->frontiers + (uint64_t)runner * result->row_words, block);
                     runner = runner == cfg->entry ? BUSTER_DOMINATOR_NONE : result->idom[runner];

@@ -16,7 +16,7 @@
 #include <unistd.h>
 
 #define BUSTER_DOMINATOR_TEST_BYTES (256ull << 20)
-#define BUSTER_DOMINATOR_TEST_SHAPES 8
+#define BUSTER_DOMINATOR_TEST_SHAPES 9
 
 typedef struct DominatorTestEdge DominatorTestEdge;
 struct DominatorTestEdge
@@ -201,6 +201,16 @@ static bool dominator_test_generate(Arena* arena, uint32_t count, uint32_t shape
                 edges[edge_count] = (DominatorTestEdge){
                     .source = block,
                     .target = count - 1 - block,
+                };
+                edge_count += 1;
+            }
+            // A ?: chain's single join: every condition in the first half also reaches the last block, whose idom is
+            // entry. Each frontier walk climbs the whole chain above its predecessor unless it stops early.
+            if (shape == 8 && block < count / 2)
+            {
+                edges[edge_count] = (DominatorTestEdge){
+                    .source = block,
+                    .target = count - 1,
                 };
                 edge_count += 1;
             }

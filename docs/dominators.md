@@ -162,13 +162,15 @@ dominators enumerates every set bit, O(B × depth).
 its memory: on the 9700X (`znver5` build, CPU 2, `--outputs tree`, whole
 analysis per block) it beats the bit matrix on every input measured. On
 sqlite3.c's 7,806 exported source CFGs (`benchmark-dominators --cfg`), the
-matrix took 1.3× SEMI-NCA's time for 2–16 blocks, 1.4–1.7× for 16–128,
-2.0–2.7× for 128–1,024 and 3.3× above, as for `sqlite3VdbeExec`'s 1,759
-blocks; 1.5× over all of them (37.8 against 25.3 ns per block). On the
-synthetic shapes it took 1.5× (16-block diamonds), 2.8–6.7× (256 to 2,049
-blocks), and 30× and 54× on
-the 8,192-block `ladder` and `nested-ifs`, whose deep trees make its
-enumeration quadratic. Cooper–Harvey–Kennedy, which SEMI-NCA replaced, was
+matrix took 1.3–1.4× SEMI-NCA's time for 2–16 blocks, 1.4–1.8× for 16–128,
+2.1–2.8× for 128–1,024 and 3.2–3.3× above, as for `sqlite3VdbeExec`'s 1,759
+blocks; 1.5× over all of them (38.5 against 25.4 ns per block). On the
+synthetic shapes it took 1.6× (16-block diamonds), 2.7–6.9× (256 to 2,049
+blocks), and 31×, 56× and 87× on the 8,192-block `ladder`, `nested-ifs` and
+`fan-in`, whose deep trees make its enumeration quadratic. AUTO's vector loop
+path, which it still takes when the loop matrices fit, made the complete
+analysis (`--outputs all`) 6% slower than the scalar one on the same CFGs, up
+to 19% on the largest. Cooper–Harvey–Kennedy, which SEMI-NCA replaced, was
 also faster than the matrix everywhere on sqlite3.c but quadratic in tree
 depth (#1352). The matrix solver stays as the explicit `VECTOR` path, the
 scalar solver's twin and test oracle. Raw logs:
@@ -179,6 +181,11 @@ stack assigns intervals for constant-time dominance queries. Frontier
 construction walks each reachable edge's source up to the target's immediate
 dominator. For incoming edges to entry, it includes the root itself; this
 also handles a single self-loop without assuming a join has two predecessors.
+A walk stops at a block whose frontier already holds the target: an earlier
+predecessor's walk passed there and marked the rest of the same chain. The
+walks then cost the frontiers' total size plus the edges; without the stop, a
+join of many predecessors under a deep chain, as a `?:` chain's, made them
+O(E × depth). A goto ladder's frontiers are themselves quadratic in size.
 
 Backedges are edges whose target dominates their source. All latches at one
 header contribute to one natural loop. The scalar path walks predecessor CSR
@@ -212,8 +219,9 @@ the 9700X or that a synthetic crossover establishes a production threshold.
 
 `test-dominators [--seed N] [--count N]` compares complete scalar/vector
 results on original chains, diamonds, nested suffix loops, irreducible regions,
-random graphs, unreachable components, and #1352's goto ladder and nested-if
-joins, whose dominator trees are half the graph deep. Fixed sizes include
+random graphs, unreachable components, and #1352's goto ladder, nested-if
+joins and a `?:` chain's single join, whose dominator trees are half the graph
+deep. Fixed sizes include
 empty/singleton graphs and boundaries at 63/64/65, 511/512/513 and 1,025
 blocks. Random small
 graphs get full definition checks. A 100,000-block chain requests only the
@@ -234,8 +242,8 @@ rollback. These are module checks, not corpus or frontend coverage.
 
 `benchmark-dominators [--seed N] [--only scalar|vector]
 [--phase analysis|pipeline] [--after-scalar MS]` checks equality, then measures
-six fixed synthetic shapes, the last two the 8,192-block `ladder` and
-`nested-ifs`. It reports tree-only, tree-plus-loops and full
+seven fixed synthetic shapes, the last three the 8,192-block `ladder`,
+`nested-ifs` and `fan-in`. It reports tree-only, tree-plus-loops and full
 analysis. Analysis timing includes validation, all allocation, RPO, the chosen
 solver, requested derived data and ordinary dominance/loop/frontier consumers.
 Pipeline timing additionally creates the input edge stream and both CSR views;
