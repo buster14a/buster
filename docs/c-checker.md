@@ -1799,7 +1799,8 @@ keeps (its attribute still applies). A named universal character name's name:
 clang decodes `\N{…}` by Unicode's names, and checks a name against them
 ("'x' is not a valid Unicode character name" with its notes), while the
 compiler takes no named escape anywhere, so a well-formed one stays the
-decoders' refusal. Like the checker's other errors, the
+decoders' refusal; so does a valid delimited `\u{…}`, which the decoders
+don't read either. Like the checker's other errors, the
 first one ends the unit's semantic diagnostics after its declaration.
 
 ### Large integer literal tables (#658)

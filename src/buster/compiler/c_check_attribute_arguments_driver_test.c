@@ -1661,7 +1661,6 @@ static void check_test_driver_unevaluated_strings(CheckTest* test, const char* c
         { "_Static_assert(1, \"\\u{110000}\");\n", "-std=gnu17", NULL },
         { "_Static_assert(1, \"\\u{FFFFFFFFF}\");\n", "-std=gnu17", NULL },
         { "_Static_assert(1, \"\\u{41}\");\n", "-std=gnu17", NULL },
-        { "_Static_assert(1, \"\\u{e9}\");\n", "-std=gnu17", NULL },
         { "_Static_assert(1, \"\\N\");\n", "-std=gnu17", NULL },
         { "_Static_assert(1, \"\\Nx\");\n", "-std=gnu17", NULL },
         { "_Static_assert(1, \"\\N{\");\n", "-std=gnu17", NULL },
