@@ -123,6 +123,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_PRAGMA_SEMANTICS: result = "unsupported semantic pragma"; break;
         case CHECK_INPUT_FP_EVAL_USE: result = "'__FLT_EVAL_METHOD__' cannot be expanded inside a scope containing '#pragma clang fp eval_method'"; break;
         case CHECK_INPUT_FP_EVAL_TYPE: result = "type is set according to the default eval method for the translation unit"; break;
+        case CHECK_INPUT_UNEVALUATED_ESCAPE: result = "invalid escape sequence in an unevaluated string literal"; break;
         case CHECK_INPUT_MUSTTAIL_ARGUMENTS: result = "'musttail' attribute takes no arguments"; break;
         case CHECK_INPUT_MUSTTAIL_DECLARATION: result = "'musttail' attribute cannot be applied to a declaration"; break;
         case CHECK_INPUT_MUSTTAIL_STATEMENT: result = "'musttail' attribute only applies to return statements"; break;
@@ -670,6 +671,125 @@ static const char* check_driver_initializer_field_message(const Parser* parser, 
 
 static bool check_driver_literal(Preprocessor* pp, const Parser* parser, uint32_t token, uint32_t source, uint32_t publication, Arena* scratch);
 
+// The escape sequences' diagnostics of an unevaluated string literal's tokens from `first` to `end` (#147), each at its
+// escape's backslash, in clang's order, published where `publication` puts them: an unknown escape's
+// -Wunknown-escape-sequence warning as the warning options and `input`'s pragmas map it, then the errors
+// (check_literal_unevaluated_escapes). The tokens before `first` have no escape clang refuses: none set its error state.
+static void check_driver_escapes(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t first, uint32_t end, uint32_t publication, Arena* scratch)
+{
+    bool had_error = false;
+    for (uint32_t token = first; token < end && token < parser->tokens.count && !pp->fatal; token += 1)
+    {
+        const uint64_t mark = scratch->length;
+        const uint32_t source = parser->tokens.sources[token];
+        const String8 spelling = check_warning_string_spelling(parser, pp, token, scratch);
+        const uint32_t length = (uint32_t)spelling.length;
+        CheckEscapeDiagnostic* diagnostics = length != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length)) : NULL;
+        const uint32_t count = diagnostics != NULL ? check_literal_unevaluated_escapes((const uint8_t*)spelling.pointer, length, pp->options.language.standard >= 2023, diagnostics, &had_error) : 0;
+        for (uint32_t i = 0; i < count && !pp->fatal; i += 1)
+        {
+            const CheckEscapeDiagnostic* diagnostic = diagnostics + i;
+            const uint32_t offset = diagnostic->offset;
+            const char character = (char)diagnostic->character;
+            switch (diagnostic->kind)
+            {
+                case CHECK_ESCAPE_DIAGNOSTIC_UNKNOWN:
+                {
+                    const CheckWarningSeverity severity = check_common_severity(pp, parser, input, token, CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE, false);
+                    // "[-Werror,-Wflag]" while the promoted warning is an ordinary error, "[-Wflag]" once it is fatal.
+                    const bool error = severity == CHECK_WARNING_ERROR;
+                    const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL : error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+                    // clang prints a character that isn't printable as its value, sign-extended from char, in hexadecimal.
+                    const bool printable = diagnostic->character >= 0x20 && diagnostic->character < 0x7f;
+                    char escaped[16];
+                    if (printable)
+                    {
+                        snprintf(escaped, sizeof(escaped), "%c", character);
+                    }
+                    else
+                    {
+                        snprintf(escaped, sizeof(escaped), "x%X", (unsigned)(int32_t)(int8_t)diagnostic->character);
+                    }
+                    if (severity != CHECK_WARNING_IGNORE)
+                    {
+                        pp_diagnose_output_offset_at(pp, disposition, source, offset, publication, "unknown escape sequence '\\%s' [%s-Wunknown-escape-sequence]", escaped,
+                                                     error ? "-Werror," : "");
+                    }
+                    break;
+                }
+                case CHECK_ESCAPE_DIAGNOSTIC_HEX_DIGITS:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "\\x used with no following hex digits");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_HEX_RANGE:
+                case CHECK_ESCAPE_DIAGNOSTIC_OCTAL_RANGE:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "%s escape sequence out of range",
+                                                 diagnostic->kind == CHECK_ESCAPE_DIAGNOSTIC_HEX_RANGE ? "hex" : "octal");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_EMPTY:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "delimited escape sequence cannot be empty");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_DIGIT:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "invalid digit '%c' in escape sequence", character);
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_OPEN_BRACE:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "expected '{' after '\\%c' escape sequence", character);
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_CLOSE_BRACE:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "expected '}'");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_DIGITS:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "\\%c used with no following hex digits", character);
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_INCOMPLETE:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "incomplete universal character name");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_INVALID:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "invalid universal character");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_CONTROL:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "universal character name refers to a control character");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_BASIC:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "character '%c' cannot be specified by a universal character name",
+                                                 character);
+                    break;
+                default:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "invalid escape sequence '%.*s' in an unevaluated string literal",
+                                                 (int)diagnostic->length, spelling.pointer + offset);
+                    break;
+            }
+        }
+        arena_pop_to(scratch, mark);
+    }
+}
+
+// A CHECK_INPUT_UNEVALUATED_ESCAPE report's diagnostics (#147): its literal's escapes', from its token to its `detail`
+// (check_driver_escapes). Then, where its `value` gives a C23 standard attribute's `(` plus one, clang's parser's error
+// there of the attribute before it (check_input_attribute_standard_previous), naming the dropped one (the report's
+// `attribute`) as written: "attribute 'X' cannot have an argument list" with bit 32, else "parentheses must be omitted
+// if 'X' attribute's argument list is empty".
+static void check_driver_unevaluated_escapes(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckInputReport* report, uint32_t publication,
+                                             Arena* scratch)
+{
+    check_driver_escapes(parser, pp, input, report->token, report->detail, publication, scratch);
+    const uint32_t open = (uint32_t)report->value - 1;
+    if (report->value != 0 && open < parser->tokens.count && report->attribute < parser->tokens.count && !pp->fatal)
+    {
+        const uint32_t name = parser->tokens.names[report->attribute];
+        const int length = (int)intern_length(pp->table, name);
+        const char* written = (const char*)intern_bytes(pp->table, name);
+        if ((report->value >> 32) != 0)
+        {
+            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[open], publication, "attribute '%.*s' cannot have an argument list", length, written);
+        }
+        else
+        {
+            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[open], publication,
+                                  "parentheses must be omitted if '%.*s' attribute's argument list is empty", length, written);
+        }
+    }
+}
+
 // The numeric constants a failed parse left unchecked, from `begin` (where the checked prefix or repair ends) to its first
 // error: clang diagnoses each as it parses it, before that error, which is where buster's checker never reaches them
 // (#1127). Each one's publication is its own token, so it sorts before the parse's diagnostics. Numbers in a C23
@@ -704,6 +824,136 @@ static void check_driver_unparsed_literals(const Parser* parser, Preprocessor* p
             }
             t += 1;
         }
+    }
+}
+
+// Whether the tokens from `first` to `end`, any parentheses around them peeled, are string literals whose escape sequences
+// clang refuses in an unevaluated string literal (#147): then their diagnostics (check_driver_escapes), from the first
+// token that has one, published at it, the warning's severity the command line's (`input` holds no pragmas).
+static bool check_driver_unparsed_escapes(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t first, uint32_t end, Arena* scratch)
+{
+    const uint8_t* kinds = parser->tokens.kinds;
+    while (first + 2 < end && kinds[first] == PARSE_KIND_L_PAREN && kinds[end - 1] == PARSE_KIND_R_PAREN)
+    {
+        first += 1;
+        end -= 1;
+    }
+    bool strings = first < end;
+    for (uint32_t token = first; strings && token < end; token += 1)
+    {
+        strings = kinds[token] == PARSE_KIND_STRING;
+    }
+    uint32_t refused = end;
+    for (uint32_t token = first; strings && refused == end && token < end; token += 1)
+    {
+        const uint64_t mark = scratch->length;
+        const String8 spelling = check_warning_string_spelling(parser, pp, token, scratch);
+        bool had_error = false;
+        refused = spelling.length != 0 && check_literal_unevaluated_escapes((const uint8_t*)spelling.pointer, (uint32_t)spelling.length, pp->options.language.standard >= 2023, NULL, &had_error) != 0 ? token : end;
+        arena_pop_to(scratch, mark);
+    }
+    if (refused != end)
+    {
+        check_driver_escapes(parser, pp, input, refused, end, parser->tokens.sources[refused], scratch);
+    }
+    return refused != end;
+}
+
+// An attribute's arguments in parentheses, from the `(` at `k`, split at their top-level commas, as
+// check_driver_unparsed_strings reads them: the escapes of each argument its name's `row` reads as an unevaluated string
+// literal, to the first whose escape clang refuses (which drops the attribute, its later arguments unread). Returns the
+// token past the `)`.
+static uint32_t check_driver_unparsed_arguments(const Parser* parser, Preprocessor* pp, const CheckInputArgumentsRow* row, uint32_t k, uint32_t end, Arena* scratch)
+{
+    static const CheckInput none = { 0 };
+    const uint8_t* kinds = parser->tokens.kinds;
+    const uint32_t identifiers = BUSTER_CHECK_ARGUMENTS_VARIADIC_IDENTIFIER | BUSTER_CHECK_ARGUMENTS_STRICT_IDENTIFIER;
+    uint32_t argument = k + 1;
+    uint32_t index = 0;
+    uint32_t depth = 0;
+    bool refused = false;
+    k = argument;
+    while (k < end && !(depth == 0 && kinds[k] == PARSE_KIND_R_PAREN))
+    {
+        const uint8_t at = kinds[k];
+        depth += at == PARSE_KIND_L_PAREN || at == PARSE_KIND_L_SQUARE || at == PARSE_KIND_L_BRACE;
+        depth -= depth != 0 && (at == PARSE_KIND_R_PAREN || at == PARSE_KIND_R_SQUARE || at == PARSE_KIND_R_BRACE);
+        const bool last = k + 1 < end && depth == 0 && kinds[k + 1] == PARSE_KIND_R_PAREN;
+        if (depth == 0 && (at == PARSE_KIND_COMMA || last))
+        {
+            const uint32_t stop = at == PARSE_KIND_COMMA ? k : k + 1;
+            const bool lone = stop == argument + 1 && kinds[argument] == PARSE_KIND_IDENTIFIER;
+            const bool identifier = row != NULL && lone && ((index == 0 && (row->flags & BUSTER_CHECK_ARGUMENTS_IDENTIFIER) != 0) || (row->flags & identifiers) != 0);
+            const bool string = row != NULL && index < 32 && ((row->strings >> index) & 1u) != 0 && (row->flags & (identifiers | BUSTER_CHECK_ARGUMENTS_TYPE)) == 0;
+            refused = refused || (string && !identifier && check_driver_unparsed_escapes(parser, pp, &none, argument, stop, scratch));
+            index += 1;
+            argument = stop + 1;
+        }
+        k += 1;
+    }
+    return k + (k < end ? 1 : 0);
+}
+
+// The unevaluated string literals a failed parse left unchecked, from `begin` to its first error, as
+// check_driver_unparsed_literals reads its constants (#147): a GNU attribute's string arguments (its name's row; the
+// first whose escape sequence clang refuses drops the attribute, its later ones unread), a known C23 attribute's (a
+// standard one's, deprecated's and nodiscard's, or one of gnu::'s or clang::'s, the GNU name's row) and a static
+// assertion's message, each wholly before that error. clang diagnoses their escapes as it parses them. The unknown
+// escape's warning is the command line's: the pragmas are the checked view's.
+static void check_driver_unparsed_strings(const Parser* parser, Preprocessor* pp, uint32_t begin, Arena* scratch)
+{
+    static const CheckInput none = { 0 };
+    const uint8_t* kinds = parser->tokens.kinds;
+    uint32_t end = parser->tokens.count;
+    for (uint32_t d = 0; d < parser->diagnostic_count && end == parser->tokens.count; d += 1)
+    {
+        end = parser->diagnostics[d].error && parser->diagnostics[d].token < end ? parser->diagnostics[d].token : end;
+    }
+    uint32_t t = begin;
+    while (t < end && !pp->fatal)
+    {
+        const uint8_t kind = kinds[t];
+        const bool gnu = kind == PARSE_KIND_ATTRIBUTE && t + 2 < end && kinds[t + 1] == PARSE_KIND_L_PAREN && kinds[t + 2] == PARSE_KIND_L_PAREN;
+        const bool standard = kind == PARSE_KIND_L_SQUARE && t + 1 < end && kinds[t + 1] == PARSE_KIND_L_SQUARE;
+        const bool assertion = kind == PARSE_KIND_STATIC_ASSERT && t + 1 < end && kinds[t + 1] == PARSE_KIND_L_PAREN;
+        uint32_t k = gnu ? t + 3 : standard || assertion ? t + 2 : t + 1;
+        // A list's items, to its inner `)` or its `]`: a name (a C23 one's after its scope and `::`), and its arguments in
+        // parentheses, split at their commas.
+        while ((gnu || standard) && k < end && kinds[k] != (gnu ? PARSE_KIND_R_PAREN : PARSE_KIND_R_SQUARE))
+        {
+            const bool scoped = standard && k + 3 < end && kinds[k] == PARSE_KIND_IDENTIFIER && kinds[k + 1] == PARSE_KIND_COLON &&
+                                kinds[k + 2] == PARSE_KIND_COLON && (parser->tokens.flags[k + 2] & BUSTER_PARSE_COLONCOLON_SECOND) != 0;
+            const uint32_t name = scoped ? k + 3 : k;
+            const String8 scope = scoped ? check_input_attribute_spelling(pp->table, parser->tokens.names[k]) : (String8){ "", 0 };
+            const String8 spelled = kinds[name] != PARSE_KIND_COMMA && parser->tokens.names[name] != 0 ?
+                                    check_input_attribute_spelling(pp->table, parser->tokens.names[name]) : (String8){ "", 0 };
+            const bool known = gnu || (scoped ? check_input_attribute_equal(scope, "gnu") || check_input_attribute_equal(scope, "__gnu__") ||
+                                                check_input_attribute_equal(scope, "clang") || check_input_attribute_equal(scope, "_Clang") :
+                                                check_input_attribute_equal(spelled, "deprecated") || check_input_attribute_equal(spelled, "nodiscard") ||
+                                                check_input_attribute_equal(spelled, "__deprecated__") || check_input_attribute_equal(spelled, "__nodiscard__"));
+            const CheckInputArgumentsRow* row = known && spelled.length != 0 ? check_input_arguments_row(spelled) : NULL;
+            k = name + 1;
+            if (kinds[name] != PARSE_KIND_COMMA && k < end && kinds[k] == PARSE_KIND_L_PAREN)
+            {
+                k = check_driver_unparsed_arguments(parser, pp, row, k, end, scratch);
+            }
+        }
+        // A static assertion's message, after the condition's top-level comma, to its `)`.
+        uint32_t depth = 0;
+        uint32_t comma = end;
+        while (assertion && k < end && !(depth == 0 && kinds[k] == PARSE_KIND_R_PAREN))
+        {
+            const uint8_t at = kinds[k];
+            comma = depth == 0 && at == PARSE_KIND_COMMA && comma == end ? k : comma;
+            depth += at == PARSE_KIND_L_PAREN || at == PARSE_KIND_L_SQUARE || at == PARSE_KIND_L_BRACE;
+            depth -= depth != 0 && (at == PARSE_KIND_R_PAREN || at == PARSE_KIND_R_SQUARE || at == PARSE_KIND_R_BRACE);
+            k += 1;
+        }
+        if (assertion && k < end && comma < k)
+        {
+            check_driver_unparsed_escapes(parser, pp, &none, comma + 1, k, scratch);
+        }
+        t = gnu || standard || assertion ? k : t + 1;
     }
 }
 
@@ -2153,6 +2403,11 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                         label == CHECK_INPUT_LABEL_UNDECLARED ? "use of undeclared label '%.*s'" :
                                                         label == CHECK_INPUT_LABEL_REDEFINITION ? "redefinition of label '%.*s'" : "reference to '%.*s' is ambiguous",
                                                         (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_UNEVALUATED_ESCAPE && token < count)
+                        {
+                            // An unevaluated string literal's escape sequences (#147): each one's diagnostics, at its backslash.
+                            check_driver_unevaluated_escapes(parser, pp, input, input->reports + index, publication, scratch);
                         }
                         else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && input->reports[index].attribute < count)
                         {
@@ -4611,6 +4866,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 // The checked view's reports covered its tokens: the original ones of a repair, a prefix's whole.
                 const uint32_t checked_end = !ready || !prefix_only ? 0 : repairing ? repair.original_end : checking->tokens.count;
                 check_driver_unparsed_literals(recovered, pp, checked_end, scratch);
+                check_driver_unparsed_strings(recovered, pp, checked_end, scratch);
                 // The parse's errors as clang's recovery reads on past a missing `;` (check_prefix_resume): the original's
                 // places, with what its own recovery skipped.
                 Parser printed = *parser;

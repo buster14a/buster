@@ -75,6 +75,8 @@ enum
     CHECK_WARNING_ID_THREAD_SAFETY_ATTRIBUTES = 83,
     CHECK_WARNING_ID_NODEREF = 84,
     CHECK_WARNING_ID_EXCESSIVE_REGSAVE = 85,
+    // An unknown escape sequence in an unevaluated string literal, before its error (#147): the driver's alone, no event's.
+    CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE = 86,
     CHECK_WARNING_ID_COUNT,
 };
 
