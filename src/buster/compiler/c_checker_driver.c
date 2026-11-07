@@ -4056,6 +4056,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         check_clock_mark(stage_clock, CHECK_STAGE_PREPROCESS);
         // The phases of pp_run alone: a diagnostic's later replay of the unit (pp_history_ensure) adds to them.
         memcpy(pp_ticks, pp->ticks, sizeof(pp->ticks));
+        // The files' token columns have no reader past the run (pp_release_file_columns, #628); --poison-arenas makes
+        // them unreadable instead, for a test to find one.
+        pp_release_file_columns(pp, command->poison_arenas);
         // One of several units (#1109): the unit's estimated peak, from its tokens, out of the memory the units' lanes
         // share, before the parse and the checker take it; it may wait for another lane's units to give theirs back.
         if (lanes != NULL && lanes->units_lane != NULL)
