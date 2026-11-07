@@ -1200,9 +1200,11 @@ static bool check_input_expression_call(CheckInputReader* reader, CheckInputBatc
 // room for them first: a terminator's discards, one a value, and every other class's one node at most (a terminator of
 // more values than the batch holds is the walk's). In a coded unit, the visit's ticks are added to `*visited`
 // (BUSTER_CHECK_EXPRESSION_PART_VISITS) unless it is null; in another, the caller times its whole chunk as visits.
-static void check_input_expression_coded(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, uint8_t classes, bool coded,
-                                         const CheckInputIdentifiers* identifiers, uint32_t* identifier, const CheckInputLiterals* literals, uint32_t* literal,
-                                         uint64_t* visited)
+// Always inlined into the chunk's loop (#1671): called, each of sqlite3.c's 451,790 actions paid a call of four arguments
+// on the stack after a vzeroupper, its prologue and epilogue and its spills, about 2% of the compile's cycles on the 9700X.
+static inline __attribute__((always_inline)) void check_input_expression_coded(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, uint8_t classes,
+                                                                               bool coded, const CheckInputIdentifiers* identifiers, uint32_t* identifier,
+                                                                               const CheckInputLiterals* literals, uint32_t* literal, uint64_t* visited)
 {
     const uint32_t code = (classes & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
     bool acted = coded && code != CHECK_INPUT_CODE_SCALAR;
@@ -1308,6 +1310,15 @@ static void check_input_expression_coded(CheckInputReader* reader, CheckInputBat
             *visited += __rdtsc() - start;
         }
     }
+}
+
+// The action of check_input_expression_coded, called: the loop that times each action by its class
+// (PPOptions.expression_timing) takes it, so that the action's body is inlined once, into the untimed loop.
+static __attribute__((noinline)) void check_input_expression_coded_timed(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, uint8_t classes, bool coded,
+                                                                         const CheckInputIdentifiers* identifiers, uint32_t* identifier,
+                                                                         const CheckInputLiterals* literals, uint32_t* literal)
+{
+    check_input_expression_coded(reader, batch, token, classes, coded, identifiers, identifier, literals, literal, NULL);
 }
 
 // Whether `token` passes its children's values on to its parent in the graph by passes' numbering: a LIST, a GROUP, a
@@ -1533,7 +1544,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
             for (; i < acting && !reader->output->resource; i += 1)
             {
                 const uint64_t before = __rdtsc();
-                check_input_expression_coded(reader, batch, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &literals, &literal, NULL);
+                check_input_expression_coded_timed(reader, batch, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &literals, &literal);
                 const uint64_t after = __rdtsc();
                 reader->output->expression_class_ticks[(classes[i] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT] += after - before;
                 reader->output->expression_class_overhead += __rdtsc() - after;
