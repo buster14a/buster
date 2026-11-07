@@ -15,6 +15,8 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
     TypeId type = reader->declared_types[declaration];
     bool valid = begin < end && end <= parser->tokens.count;
     bool item = true;
+    // A string literal check_input_string refused, which reported its own error (#1447): no declaration's beside it.
+    bool string_refused = false;
     for (uint32_t token = begin; valid && token < end;)
     {
         const uint8_t kind = parser->tokens.kinds[token];
@@ -94,6 +96,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
             if (kind == PARSE_KIND_STRING)
             {
                 valid = check_input_string(reader, token) != 0;
+                string_refused = !valid;
             }
             if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
             {
@@ -119,7 +122,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
         check_input_visit(reader, end, BUSTER_CHECK_RESOLVE_FINISH);
         reader->inference_end = end > reader->inference_end ? end : reader->inference_end;
     }
-    if (!valid)
+    if (!valid && !string_refused)
     {
         check_input_report(reader, assignment, CHECK_INPUT_DECLARATION);
     }
