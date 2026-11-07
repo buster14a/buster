@@ -218,10 +218,12 @@ names once that pays:
   only `<stdio.h>` 14,000 instructions (0.18%) on the 9700X.
 - **Across units and the walk.** The listings live in the cache, so every unit
   of a run that shares it uses them. The walk (`files_advance`) moves past a
-  candidate a listing rules out without waiting for a wave's probes. It counts
-  a wave's failed probes as it adds them (`files_add_probes`, on one lane, in
-  the probes' order), so every lane count lists the same directories at the
-  same point. On this repository's Ubuntu image, `main.c`'s walk took 31 waves
+  candidate a listing rules out without waiting for a wave's probes. It still
+  lists the candidate with the wave's paths, so that `files_add_probes` gives
+  it the ENOENT entry a unit's lookup gives it, and the cache holds the same
+  paths as without listings. It counts a wave's failed probes as it adds them
+  (on one lane, in the probes' order), so every lane count lists the same
+  directories at the same point. On this repository's Ubuntu image, `main.c`'s walk took 31 waves
   instead of 46, and made 2,082 opens instead of 2,688.
 - **No vector path.** A listing is a few hundred names, read once, and a
   lookup hashes one component. The system calls are the cost; scalar code

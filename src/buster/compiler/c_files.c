@@ -218,6 +218,9 @@ struct FilesPath
     // The length of the directory the search looks in (file_cache_lookup_path's `directory_length`), or BUSTER_PP_NONE.
     uint32_t directory_length;
     uint64_t hash;
+    // A path its directory's listing rules out (file_cache_listed_absent): not probed, but added to the cache with the
+    // entry a failed probe gives it, as a unit's lookup adds it (file_cache_lookup_path).
+    bool listed;
 };
 
 // What a lane keeps through a run: its intern table, what it knows of each of its spellings and their shared ids (0
@@ -1247,6 +1250,17 @@ static void files_advance(FilesRun* run, FilesLane* mine)
             }
             else if (absent)
             {
+                // Listed for this wave's additions, as a unit's lookup would add its entry, without waiting for them.
+                char* copy = arena_push(&mine->names, (uint64_t)path_length + 1, 1);
+                FilesPath* listed_path = copy != 0 ? arena_push_array(&mine->path_list, 1, sizeof(FilesPath), _Alignof(FilesPath)) : 0;
+                files_fail(run, listed_path == 0);
+                if (listed_path != 0)
+                {
+                    memcpy(copy, path, path_length);
+                    copy[path_length] = 0;
+                    *listed_path = (FilesPath){ .path = copy, .length = path_length, .directory_length = directory_length, .hash = hash, .listed = true };
+                    mine->path_count += 1;
+                }
                 search->candidate += 1;
             }
             else if (candidate == PP_CANDIDATE_PATH && entry == 0)
@@ -1281,8 +1295,8 @@ static void files_advance(FilesRun* run, FilesLane* mine)
     }
 }
 
-// On one lane: the paths the lanes' searches wait for, each once, in order (lane by lane, each in its searches' order),
-// with room for what each probe finds.
+// On one lane: the paths the lanes' searches wait for, and those their directories' listings ruled out, each once, in
+// order (lane by lane, each in its searches' order), with room for what each probe finds.
 static void files_collect_probes(FilesRun* run)
 {
     uint64_t total = 0;
@@ -1327,16 +1341,17 @@ static void files_collect_probes(FilesRun* run)
     }
 }
 
-// On one lane: the wave's probed paths added to the cache, in order, each with its file's record (file_cache_identify).
-// A path without a file there counts towards its directory's listing (file_cache_count_miss), which the next waves'
-// searches read: added in the probes' order, the listings are those of any lane count.
+// On one lane: the wave's probed paths added to the cache, in order, each with its file's record (file_cache_identify),
+// and those a listing ruled out with ENOENT. A probe that found no file there counts towards its directory's listing
+// (file_cache_count_miss), which the next waves' searches read: added in the probes' order, the listings are those of
+// any lane count.
 static void files_add_probes(FilesRun* run, FileCacheCounts* counts)
 {
     FileCache* cache = run->cache;
     for (uint32_t p = 0; p < run->probe_count; p += 1)
     {
         const FilesPath* path = &run->probes[p];
-        const bool missed = run->found[p].error == ENOENT && file_cache_in_directory(path->path, path->length, path->directory_length);
+        const bool missed = !path->listed && run->found[p].error == ENOENT && file_cache_in_directory(path->path, path->length, path->directory_length);
         FileCacheDirectory* directory = missed ? file_cache_directory(cache, path->path, path->directory_length) : 0;
         file_cache_count_miss(cache, directory, &run->found[p], counts);
         FileCachePath* entry = file_cache_add_path(cache, path->path, path->length, path->hash, &run->found[p]);
@@ -1378,7 +1393,14 @@ static void files_search(FilesRun* run)
         const FileCacheBytes how = run->lane_count > 1 ? run->bytes : FILE_CACHE_MAP_POPULATED;
         for (uint64_t p = range.begin; p < range.end; p += 1)
         {
-            file_cache_probe(run->cache, run->probes[p].path, how, run->read_limit, &run->cache->lanes[lane].bytes, &run->found[p], &mine->counts);
+            if (run->probes[p].listed)
+            {
+                run->found[p] = (FileProbe){ .record = BUSTER_PP_NONE, .error = ENOENT };
+            }
+            else
+            {
+                file_cache_probe(run->cache, run->probes[p].path, how, run->read_limit, &run->cache->lanes[lane].bytes, &run->found[p], &mine->counts);
+            }
         }
         files_sync(mine, FILES_PHASE_SEARCH);
         if (lane == 0 && probes != 0)
