@@ -160,7 +160,10 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   succeed (no `-include` file made without one). `c_preprocessor_forced_include_test.c` checks raw entry's
   synthetic/real range failures, successful cleanup and fatal live-context depth ownership on both kernels;
   the CC compatibility fixtures repeat quote-named once/guarded/plain headers before an ordinary forced header,
-  against Clang and both kernels through preprocessing and syntax-only actions. The fuzz batch: its isolation rules checked on small sources (what a case
+  through preprocessing and syntax-only actions on both kernels. Clang cannot spell these quote-named
+  command-line includes, so its six oracle routes use safe hard links whose device and inode match the raw
+  headers, each included twice. The oracle checks the same header semantics and include levels; the Buster
+  routes retain the exact quote-containing operands. The fuzz batch: its isolation rules checked on small sources (what a case
   leaves open makes clang read it alone), its comparison on pairs of texts
   (whitespace between tokens doesn't count, a literal's contents and joined
   tokens do, and our tokens that don't lex back, as an unterminated literal,
