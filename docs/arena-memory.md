@@ -15,6 +15,41 @@ A reservation and a successful push are therefore distinct operations that can
 both fail. The driver reports the failed operation and requested byte count.
 The early C-driver checks from #852 remain in place.
 
+## Tables committed whole (#1521)
+
+An arena of tables (below) is pushed full as it is reserved, so its commit is
+its tables' whole size, while a unit writes a few pages of most of them: the
+preprocessor's tables are about 10 GB in their full shape, the output's token
+columns 2.5 GB, a history table that outgrows its slice up to 2 GB. Under the
+kernel's default heuristic overcommit (`vm.overcommit_memory` 0) a single
+commit larger than the host's RAM and swap is refused, whatever is touched, so
+on a host of 7 GB every unit's preprocessor started with a refused 10 GB
+`mprotect`. That refusal used to switch the thread to compact reservations,
+which capped every later arena at 64 MB: units of a few hundred thousand tokens
+then failed as `can't reserve type table` or `checker input capacity
+exhausted`, though they needed far less memory than the host had.
+
+So an arena of tables is mapped `MAP_NORESERVE`. Under heuristic or unlimited
+overcommit (modes 0 and 1) its commit is then charged nothing and never
+refused, and its pages are allocated as they are first written, as every
+arena's are. Where commit charge is bounded nothing changes: the kernel ignores
+`MAP_NORESERVE` under strict overcommit (mode 2), and a finite `RLIMIT_DATA`
+counts the writable mapping whatever its flags. The other fixed arrays the
+preprocessor pushed whole into arenas of their own are tables too: the
+arguments' links (256 MB), a history table's full reservation and a shared
+file cache's four arrays (568 MiB, one arena of four tables now, where they
+took four mappings and four commits).
+
+A refused commit no longer switches the thread to compact reservations: a
+smaller reservation charges nothing less, since an ordinary arena commits only
+what its pushes reach. It sets `arena_commit_refused` instead, the thread's
+from then on, after which `arena_capacity_shift` gives the compact shape to the
+tables committed whole (the preprocessor's and its file caches'), and the
+thread's other reservations keep their capacities. Compact reservations remain
+what a refused mapping (the address space) switches a thread to; a C-driver
+unit that fails on such a thread ends with a note that its arenas held 64 MiB
+each, since a capacity error before it may be that limit's.
+
 ## Page sizes
 
 An arena's first `small` bytes (`BUSTER_ARENA_SMALL_BYTES`, 64 KB, or
@@ -92,8 +127,11 @@ consumers allocate that same range, including when the table later grows. A
 cache's record ids retain their complete indexing range in each unit's
 `record_data`, independently of the unit's own file capacity.
 
-When a full preprocessor shape is refused by commit accounting, initialization
-releases it without pooling and retries the compact shape once. This preserves
+When a full preprocessor shape is refused, by commit accounting
+(`arena_commit_refused`) or by the address space (compact reservations),
+initialization releases it without pooling and retries the compact shape once;
+the thread's later units start in the compact shape. A successful retry leaves
+the caller's last recorded failure as it was. This preserves
 the intern producer's existing id range; it never narrows a live table behind
 another consumer. Consequently this is not a minimal-memory implementation of
 the preprocessor: an intern table initialized before fallback can still require
@@ -145,8 +183,9 @@ tables or more, which a finite `RLIMIT_AS` bounds: rounding each table's end to
 a boundary, as the first version did, outgrew a 512 MB limit on a small unit's
 replay for its expansion history (#1203's review). A mapping refused for its
 size past 64 MB switches the thread to compact reservations, as an arena's does,
-so that the preprocessor retries with smaller tables. The mapping is advised
-`MADV_NOHUGEPAGE` once, each table's huge pages `MADV_HUGEPAGE`, and one
+and a refused commit sets `arena_commit_refused`, so that the preprocessor
+retries with smaller tables. The mapping is `MAP_NORESERVE` (#1521, above),
+advised `MADV_NOHUGEPAGE` once, each table's huge pages `MADV_HUGEPAGE`, and one
 `mprotect` commits it whole.
 So a lane's first unit reserves the preprocessor's 27 tables of records, its
 stacks' 12 columns and its file cache, all of them base pages (#652), with one
@@ -167,8 +206,15 @@ faults, but no time measurable on the 9700X, and was not kept (#1203's review).
 advice against an arena of their own's, the pool's reuse for the same tables
 alone, not for another layout, the floor's or an ordinary reservation; for 4,096
 random sets of tables a layout in order, aligned and no larger than their own
-arenas; and, in a child under `RLIMIT_AS`, tables refused for their size, which
-past 64 MB switch the thread to compact reservations.
+arenas; in a child under `RLIMIT_AS`, tables refused for their size, which
+past 64 MB switch the thread to compact reservations; in a child, 2 TiB of
+tables, past any host's RAM and swap, committed and writable at both ends,
+`nr` in their `VmFlags`, where commit charge isn't bounded, or refused with
+`arena_commit_refused` where it is, neither switching the thread; and, in a
+child under an `RLIMIT_DATA` of 64 MB more than its data, 96 MB of tables and
+an ordinary arena's push of 96 MB refused without switching it, a reservation
+of 64 GiB after them keeping its capacity and its pushes within the limit, and
+`arena_capacity_shift` giving the compact shape.
 
 Tests that deliberately
 poison unused logical capacity explicitly commit that test memory first; a raw
@@ -186,7 +232,11 @@ without relying on Valgrind's current address layout.
 
 With a compiler path and output directory it runs `-E`, `parse`,
 `-fsyntax-only`, object compilation and executable linking, then executes the
-result. Each command is also refused by child-only seccomp rules for inaccessible
+result. It also compiles a unit of about 540,000 tokens (100,000 declarations
+and a function of 30,000 statements) to an object under a 4 GiB `RLIMIT_DATA`,
+or with `--strict` under strict overcommit's headroom (#1521): commit charge
+below the preprocessor's full tables, which it must take in with their compact
+shape while the unit's other arenas keep their capacities. Each command is also refused by child-only seccomp rules for inaccessible
 reservations and writable commits, with a fatal byte-count diagnostic and without
 usage text. The loader is allowed to map its ELF segments and make RELRO read-only;
 the test does not assume that a small fixed address-space limit must always fail.

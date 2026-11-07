@@ -183,7 +183,9 @@ struct ArenaTable
 // released together, as a unit's preprocessor's are, so takes one mapping, one commit and one discard rather than one of
 // each per table, every one of which takes the address space's lock or sends the other lanes a TLB flush. The arena is
 // pushed full and released as one (arena_release); the thread's pool gives it again only to a reservation of the same
-// tables. Returns an arena without capacity, and the bases null, if the address space can't be reserved.
+// tables. Its commit is charged only where commit charge is bounded (#1521: strict overcommit or a finite RLIMIT_DATA),
+// as the kernel ignores the mapping's MAP_NORESERVE there. Returns an arena without capacity, and the bases null, if the
+// address space can't be reserved or the commit is refused (which sets arena_commit_refused).
 static __attribute__((unused)) Arena arena_reserve_tables(ArenaTable* tables, uint32_t count);
 
 // The base pages every arena the thread reserves starts with, at least (0 for BUSTER_ARENA_SMALL_BYTES alone; a
@@ -324,14 +326,23 @@ struct ArenaFailure
     bool commit;
 };
 
+// arena_commit_refused: a commit of this thread's was refused (#1521: strict overcommit, a finite RLIMIT_DATA, or a
+// single commit larger than heuristic overcommit admits). From then on the tables that are committed whole as they are
+// reserved, whose sizes arena_capacity_shift decides (the preprocessor's and its file caches'), take the compact shape,
+// so that they charge less. The thread's other reservations keep their capacities: an arena commits only what its pushes
+// reach, so capping its reservation at BUSTER_ARENA_COMPACT_BYTES, as arena_compact does for a constrained address
+// space, would charge nothing less and only refuse a large unit's pushes as capacity errors.
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
 extern _Thread_local bool arena_compact;
+extern _Thread_local bool arena_commit_refused;
 extern _Thread_local ArenaFailure arena_failure;
 #elif defined(BUSTER_UNIT)
 _Thread_local bool arena_compact;
+_Thread_local bool arena_commit_refused;
 _Thread_local ArenaFailure arena_failure;
 #else
 static _Thread_local bool arena_compact;
+static _Thread_local bool arena_commit_refused;
 static _Thread_local ArenaFailure arena_failure;
 #endif
 
@@ -608,8 +619,16 @@ static uint64_t arena_tables_mapping_bytes(uint64_t bytes, bool huge)
 // advice where the layout doesn't decide): one MADV_NOHUGEPAGE for the mapping and one MADV_HUGEPAGE for each table with
 // huge pages, which stay advised while the pool keeps the mapping. Pushing the arena full commits it in one mprotect. A
 // mapping refused for its size (ENOMEM, or Valgrind's EINVAL) past BUSTER_ARENA_COMPACT_BYTES switches the thread to
-// compact reservations as arena_reserve_policy's does, so that a caller that sizes its tables by arena_capacity_shift
-// (pp_initialize) can try smaller ones.
+// compact reservations as arena_reserve_policy's does, and a refused commit sets arena_commit_refused (arena_commit), so
+// that a caller that sizes its tables by arena_capacity_shift (pp_initialize) can try smaller ones.
+//
+// The mapping is MAP_NORESERVE (#1521). Its commit makes the tables writable whole, but they are written sparsely, where
+// their units reach: the preprocessor's, about 10 GB in their full shape, take a few pages of each for a small unit. The
+// kernel's heuristic overcommit (vm.overcommit_memory 0, the default) refuses a single commit larger than its RAM and
+// swap, whatever is touched, so a host of 8 GB refused the preprocessor's at every unit's start. Uncharged, their commit
+// isn't refused there, and their pages are allocated as they are first written, as every arena's are. Where commit
+// charge is bounded the kernel ignores MAP_NORESERVE (strict overcommit) or RLIMIT_DATA still counts the writable
+// mapping, so the commit is charged and may be refused, as before.
 static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
 {
     Arena result = { 0 };
@@ -640,7 +659,7 @@ static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
         allowed = arena_test_reservation_allowed(mapping_bytes);
 #endif
         errno = ENOMEM;
-        uint8_t* mapping = allowed ? mmap(0, mapping_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+        uint8_t* mapping = allowed ? mmap(0, mapping_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0) : MAP_FAILED;
         if (mapping != MAP_FAILED)
         {
             // The base, `phase` past a huge-page boundary, a page or more past the mapping's start (and so at most a huge
@@ -689,10 +708,13 @@ static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
 }
 
 // Powers-of-two table capacities keep their hashing invariants. Ten reductions still leave 1024 file records and
-// contexts, more than the fixed include-depth limit. If even that shape cannot be admitted, initialization fails.
+// contexts, more than the fixed include-depth limit. If even that shape cannot be admitted, initialization fails. Once
+// a commit of the thread's has been refused (arena_commit_refused), the shape is the compact one, as with compact
+// reservations: these tables are committed whole.
 static __attribute__((unused)) uint32_t arena_capacity_shift(uint64_t largest)
 {
-    const uint64_t limit = arena_reservation_limit();
+    const uint64_t reservation = arena_reservation_limit();
+    const uint64_t limit = arena_commit_refused && reservation > BUSTER_ARENA_COMPACT_BYTES ? BUSTER_ARENA_COMPACT_BYTES : reservation;
     uint32_t shift = 0;
     while (shift < 10 && (largest >> shift) + 64 > limit)
     {
@@ -955,8 +977,10 @@ static bool arena_commit(Arena* arena, uint64_t end)
             {
                 arena_unaccounted(arena, at);
             }
+            // A refused commit charges nothing less in a smaller reservation, so it leaves the thread's reservations as
+            // they were (#1521) and only its tables that are committed whole shrink (arena_commit_refused).
             arena_failure = (ArenaFailure){ .bytes = target - committed, .error = error, .commit = true };
-            arena_compact = true;
+            arena_commit_refused = true;
         }
     }
     return result;

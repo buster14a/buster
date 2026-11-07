@@ -776,7 +776,9 @@ struct FileCache
     uint32_t listing_misses;
     // The directories with a listing: until there is one, a lookup that finds a file looks no directory up.
     uint32_t listed_directories;
-    Arena arrays[4];
+    // The four arrays' arena of tables, file_cache_initialize's (#1521), or empty where they are tables of a unit's
+    // (pp_initialize_once).
+    Arena arrays;
     // Each lane's arenas, reserved when the lane first prepares a record.
     FileCacheArenas lanes[BUSTER_LANE_MAX_COUNT];
     // The records prepared, and their tokens (for the tests and the benchmark).
@@ -4006,7 +4008,7 @@ static uint32_t file_cache_shift(void)
     return arena_capacity_shift(records > paths ? records : paths);
 }
 
-// The entries and entry bytes of a cache's four arrays at capacity shift `shift`, in FileCache.arrays' order: the
+// The entries and entry bytes of a cache's four arrays at capacity shift `shift`, in file_cache_start's order: the
 // records, their identity slots, the paths and their slots.
 static void file_cache_array_shape(uint32_t shift, uint64_t counts[4], uint64_t sizes[4])
 {
@@ -4022,8 +4024,8 @@ static void file_cache_array_shape(uint32_t shift, uint64_t counts[4], uint64_t 
 
 // Starts a cache whose bytes are all zero, with its four arrays at `arrays` (file_cache_array_shape's, at `shift`, zero
 // too, or a null among them if they couldn't be reserved), and reserves its paths' bytes. The arrays are the caller's to
-// release: file_cache_initialize's own arenas, or a unit's tables (pp_initialize_once, #652), which hold the cache itself
-// too and so need neither its 120 KB written zero nor four arenas of their own.
+// release: file_cache_initialize's arena of tables, or a unit's tables (pp_initialize_once, #652), which hold the cache
+// itself too and so need neither its 120 KB written zero nor an arena of their own.
 static bool file_cache_start(FileCache* cache, InternTable* table, PPPrepare prepare, uint32_t shift, void* const arrays[4])
 {
     cache->prepare = prepare;
@@ -4051,14 +4053,21 @@ static __attribute__((unused)) bool file_cache_initialize(FileCache* cache, Inte
     uint64_t counts[4];
     uint64_t sizes[4];
     file_cache_array_shape(shift, counts, sizes);
-    // Reserved in turn until one can't be (file_cache_release releases those that were).
-    void* arrays[4] = { 0 };
-    bool reserved = true;
-    for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(cache->arrays); i += 1)
+    // One arena of tables (#1521), each in the pages an arena of its own would have: it commits them whole without
+    // charging their 568 MiB, of which a unit's files touch a few pages, and takes one mapping and one commit for four.
+    ArenaTable tables[4];
+    void* arrays[4];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(tables); i += 1)
     {
-        cache->arrays[i] = arena_reserve(counts[i] * sizes[i] + 64);
-        arrays[i] = cache->arrays[i].base != 0 ? arena_push_array(&cache->arrays[i], counts[i], sizes[i], 64) : 0;
-        reserved = arrays[i] != 0;
+        tables[i] = (ArenaTable){
+            .bytes = counts[i] * sizes[i] + 64,
+            .small = BUSTER_ARENA_SMALL_BYTES,
+        };
+    }
+    cache->arrays = arena_reserve_tables(tables, BUSTER_ARRAY_LENGTH(tables));
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(tables); i += 1)
+    {
+        arrays[i] = tables[i].base;
     }
     return file_cache_start(cache, table, prepare, shift, arrays);
 }
@@ -4091,10 +4100,7 @@ static __attribute__((unused)) void file_cache_release(FileCache* cache)
         arena_release(&arenas->arena);
         arena_release(&arenas->bytes);
     }
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cache->arrays); i += 1)
-    {
-        arena_release(&cache->arrays[i]);
-    }
+    arena_release(&cache->arrays);
     arena_release(&cache->path_arena);
     *cache = (FileCache){ 0 };
 }
@@ -8572,9 +8578,13 @@ static bool pp_index_arguments(Preprocessor* pp)
 {
     if (pp->argument_links == 0)
     {
-        const uint64_t bytes = (uint64_t)(BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift) * sizeof(uint32_t);
-        pp->argument_link_arena = arena_reserve_small(bytes, BUSTER_PP_TABLE_SMALL_BYTES);
-        pp->argument_links = arena_push_array(&pp->argument_link_arena, (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift), sizeof(uint32_t), 64);
+        // A table committed whole (arena_reserve_tables), uncharged where commit charge isn't bounded (#1521).
+        ArenaTable links = {
+            .bytes = (uint64_t)(BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift) * sizeof(uint32_t),
+            .small = BUSTER_PP_TABLE_SMALL_BYTES,
+        };
+        pp->argument_link_arena = arena_reserve_tables(&links, 1);
+        pp->argument_links = links.base;
         if (pp->argument_links == 0)
         {
             pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory indexing macro arguments");
@@ -18479,16 +18489,20 @@ static void pp_dedupe_directories(Preprocessor* pp)
 }
 
 // An array of `count` records of `size` bytes in an arena of its own (address space, touched as it is used), whose first
-// `small` bytes are base pages (arena_reserve_small), while `*reserved` (which becomes false if it can't be): where a
-// history table moves when it outgrows its slice (pp_history_grow).
+// `small` bytes are base pages, while `*reserved` (which becomes false if it can't be): where a history table moves when
+// it outgrows its slice (pp_history_grow). It is committed whole, up to 2 GB, as a table (arena_reserve_tables), which
+// charges no commit for it where commit charge isn't bounded (#1521).
 static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small)
 {
     void* result = 0;
     if (*reserved && pp->array_count < BUSTER_PP_ARRAYS)
     {
-        Arena* arena = &pp->arrays[pp->array_count];
-        *arena = arena_reserve_small(count * size + 64, small);
-        result = arena_push_array(arena, count, size, 64);
+        ArenaTable array = {
+            .bytes = count * size + 64,
+            .small = small,
+        };
+        pp->arrays[pp->array_count] = arena_reserve_tables(&array, 1);
+        result = array.base;
         pp->array_count += 1;
     }
     *reserved = result != 0;
@@ -18874,17 +18888,24 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     return result;
 }
 
+// The full shape, and once more in the compact one (arena_capacity_shift) if the first was refused: by the address
+// space, which switches the thread to compact reservations (arena_compact), or by commit charge, which sets
+// arena_commit_refused and leaves the thread's other reservations as they were (#1521). Either stays the thread's, so
+// that its later units start in the compact shape. A retry that succeeds leaves the caller's last failure as it was, so
+// that no later report reads the first shape's.
 BUSTER_PREPROCESSOR_ENTRY bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTable* table)
 {
-    const bool compact = arena_compact;
+    const bool compact = arena_compact || arena_commit_refused;
+    const ArenaFailure failure = arena_failure;
     bool result = pp_initialize_once(pp, options, table);
-    if (!result && !pp->fatal && !compact && arena_compact)
+    if (!result && !pp->fatal && !compact && (arena_compact || arena_commit_refused))
     {
         ArenaPool* pool = arena_pool;
         arena_pool = 0;
         pp_release(pp);
         arena_pool = pool;
         result = pp_initialize_once(pp, options, table);
+        arena_failure = result ? failure : arena_failure;
     }
     return result;
 }

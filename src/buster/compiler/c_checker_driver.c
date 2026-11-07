@@ -4724,6 +4724,13 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     pp_diagnostic_publish(pp);
     pp_diagnostic_summary(pp);
     result = pp->errors != 0 || driver_fatal ? 1 : result;
+    // A failure on a thread switched to compact reservations (#1521): each arena it reserved since then holds at most
+    // BUSTER_ARENA_COMPACT_BYTES, which a capacity error above may be rather than the unit.
+    if (result != 0 && arena_compact)
+    {
+        fprintf(errors, "note: memory reservations were limited to %llu MiB each after the address space refused a larger one; a capacity error above may be that limit\n",
+                (unsigned long long)(BUSTER_ARENA_COMPACT_BYTES >> 20));
+    }
     if (fatal != NULL)
     {
         *fatal = pp->fatal || driver_fatal;
