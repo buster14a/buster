@@ -2670,7 +2670,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         };
         for (uint32_t child = reader->first_child[token]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
         {
-            if (input->cached && reader->specifier_finishes[token] != 0 && child < token)
+            if (input->cached && BUSTER_CHECK_RARE(reader, specifier_finishes, token) != 0 && child < token)
             {
                 continue;
             }
@@ -2796,7 +2796,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
                 // A constexpr object's value is the constant its initializer's finish read (#793): an integer or a
                 // floating constant, or a null pointer, as an lvalue whose object is still the declaration's.
-                const CheckConstexprValue* constant = (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0 ?
+                const CheckConstexprValue* constant = (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0 ?
                     check_input_constexpr_find(reader, declaration) : 0;
                 input->values[index] = constant != 0 ? constant->value : (CheckValue)
                 {
@@ -3052,7 +3052,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         }
         else if (role == PARSE_ROLE_CLOSE_KEYWORD)
         {
-            if (reader->builtins[token] == CBUILTIN_CONVERTVECTOR || reader->builtins[token] == CBUILTIN_BIT_CAST)
+            if (BUSTER_CHECK_RARE(reader, builtins, token) == CBUILTIN_CONVERTVECTOR || BUSTER_CHECK_RARE(reader, builtins, token) == CBUILTIN_BIT_CAST)
             {
                 const uint16_t builtin = reader->builtins[token];
                 const uint32_t type_first = input->type_begin[index];
@@ -3071,7 +3071,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 valid = check_constant_source_builtin(input, token, count, action.operands, &input->values[index]);
                 proof = input->values[index];
             }
-            else if (reader->builtins[token] == CBUILTIN_AVAILABLE)
+            else if (BUSTER_CHECK_RARE(reader, builtins, token) == CBUILTIN_AVAILABLE)
             {
                 valid = count == 0 && check_constant_call(input, reader->first_child[token], token, CBUILTIN_AVAILABLE, 0, action.operands, 0, &input->values[index]);
                 proof = input->values[index];

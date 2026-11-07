@@ -5297,6 +5297,9 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     const char* fail_at = getenv("BUSTER_TEST_COMMON_WARNING_FAIL_AT");
     check_common_resources.fail_at = fail_at != NULL ? (uint32_t)strtoul(fail_at, NULL, 10) : UINT32_MAX;
     check_common_resources.pushes = 0;
+    // What the passes push is theirs alone, and the scratch goes back to where it was after them, so that the backend's
+    // pushes reuse its pages rather than take others past them (#628: 21.7 MB of sqlite3.c's, through the backend's peak).
+    const uint64_t mark = scratch->length;
     CheckWarningSpelling spell = { 0 };
     const CheckCommonEnabled enabled =
     {
@@ -5321,4 +5324,5 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
         check_common_uninitialized(parser, pp, input, stream, types, &facts, scratch);
     }
     check_common_format(parser, pp, input, stream, types, &spell, program, scratch);
+    arena_pop_to(scratch, mark);
 }

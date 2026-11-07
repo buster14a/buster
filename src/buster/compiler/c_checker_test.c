@@ -6287,8 +6287,8 @@ static __attribute__((noinline)) void check_test_builtin_capacity(CheckTest* tes
             builtins[i] = draw < 2 ? recorded[pick % BUSTER_ARRAY_LENGTH(recorded)] : draw < 4 ? unrecorded[pick % BUSTER_ARRAY_LENGTH(unrecorded)] : 0;
             expected += draw < 2;
         }
-        const uint32_t vector = check_input_builtin_capacity(builtins, count, false);
-        const uint32_t scalar = check_input_builtin_capacity(builtins, count, true);
+        const uint32_t vector = check_input_builtin_capacity(NULL, builtins, count, false);
+        const uint32_t scalar = check_input_builtin_capacity(NULL, builtins, count, true);
         char description[160];
         snprintf(description, sizeof(description), "builtin call records of %u tokens: %u by the vector path and %u by the scalar one, for %u", count,
                  vector, scalar, expected);
