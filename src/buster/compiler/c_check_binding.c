@@ -172,10 +172,10 @@ static uint32_t check_input_operation_events(const CBindings* events, uint8_t op
         const uint32_t length = events->count - first < 64 ? events->count - first : 64;
         const __mmask64 lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
         const __m512i operations = _mm512_maskz_loadu_epi8(lanes, events->operation + first);
-        const uint64_t declares = _mm512_mask_cmpeq_epi8_mask(lanes, operations, _mm512_set1_epi8((char)operation));
+        const uint64_t matches = _mm512_mask_cmpeq_epi8_mask(lanes, operations, _mm512_set1_epi8((char)operation));
         for (uint32_t part = 0; part < length; part += 16)
         {
-            const __mmask16 selected = (__mmask16)(declares >> part);
+            const __mmask16 selected = (__mmask16)(matches >> part);
             _mm512_mask_compressstoreu_epi32(list + found, selected, _mm512_add_epi32(_mm512_set1_epi32((int32_t)(first + part)), lanes16));
             found += (uint32_t)__builtin_popcount(selected);
         }
