@@ -399,10 +399,10 @@ musl="$corpus/libc/musl"
 "$BUSTER_COMPILER" test-ir-lowering
 "$BUSTER_COMPILER" test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c tests/ir/vector-rows.c tests/ir/carrier-rows.c
 "$BUSTER_COMPILER" test-ir-source --dataflow-self-test
-# #1374: qualify the benchmark's corpus preparation and both timed lowerings at each function's own target.
+# #1374: qualify the benchmark's corpus preparation and both measured lowerings at each function's own target.
 # The fixture adds features on the baseline and removes them at znver5; it never executes generated instructions.
-"$BUSTER_COMPILER" benchmark-ir-source --only lower -march=x86-64 tests/ir-source/bit-builtins.c
-"$BUSTER_COMPILER" benchmark-ir-source --only lower-scalar -march=znver5 tests/ir-source/bit-builtins.c
+"$BUSTER_COMPILER" test-ir-source --benchmark-self-test -march=x86-64 tests/ir-source/bit-builtins.c
+"$BUSTER_COMPILER" test-ir-source --benchmark-self-test -march=znver5 tests/ir-source/bit-builtins.c
 "$BUSTER_COMPILER" test-ir-parse
 "$BUSTER_COMPILER" test-ir-reduce
 "$BUSTER_COMPILER" test-ir-metamorphic --seed 731 --count 6

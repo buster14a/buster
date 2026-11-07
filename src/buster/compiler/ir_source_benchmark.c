@@ -469,7 +469,9 @@ static bool ir_source_functions(const IrSourceCorpus* corpus, Arena* output, Are
     return !failed;
 }
 
-static int run_ir_source_benchmark(int count, char** arguments)
+// The correctness command shares corpus preparation and the measured paths, but opens no counters and reports no
+// timings. It is available on scalar host builds too: target-feature handoffs must be checked on every CI host.
+static int ir_source_benchmark_command(int count, char** arguments, bool testing)
 {
     uint32_t only = BUSTER_IR_SOURCE_VARIANTS;
     uint64_t after_scalar = 0;
@@ -515,7 +517,7 @@ static int run_ir_source_benchmark(int count, char** arguments)
             }
         }
     }
-    valid = valid && file_count != 0;
+    valid = valid && file_count != 0 && (!testing || (only == BUSTER_IR_SOURCE_VARIANTS && after_scalar == 0 && !functions));
     Arena lowered = arena_reserve(UINT64_C(1) << 36);
     Arena table = arena_reserve(UINT64_C(1) << 32);
     Arena kept = arena_reserve(UINT64_C(1) << 36);
@@ -533,8 +535,22 @@ static int run_ir_source_benchmark(int count, char** arguments)
     bool reported = false;
     if (valid && corpus.failures == 0 && corpus.count != 0 && corpus.entries != 0 && corpus.tokens != 0)
     {
-        ir_source_bytes(&corpus);
-        reported = functions ? ir_source_functions(&corpus, &output, &scratch) : ir_source_measure(&corpus, &output, &scratch, only, after_scalar);
+        if (testing)
+        {
+            const Tier0BenchmarkCounters counters = { .cycles = -1, .instructions = -1, .throttle = -1 };
+            uint64_t failures = 0;
+            for (uint32_t v = BUSTER_IR_SOURCE_LOWER; v <= BUSTER_IR_SOURCE_LOWER_SCALAR; v += 1)
+            {
+                failures += ir_source_run(v, &corpus, &output, &scratch, counters).failures;
+            }
+            reported = failures == 0;
+            printf("ir-source-benchmark-test: files=%" PRIu64 " functions=%u lowerings=2 failures=%" PRIu64 "\n", corpus.files, corpus.count, failures);
+        }
+        else
+        {
+            ir_source_bytes(&corpus);
+            reported = functions ? ir_source_functions(&corpus, &output, &scratch) : ir_source_measure(&corpus, &output, &scratch, only, after_scalar);
+        }
     }
     else if (valid)
     {
@@ -542,8 +558,15 @@ static int run_ir_source_benchmark(int count, char** arguments)
     }
     if (!valid)
     {
-        fprintf(stderr, "usage: compiler benchmark-ir-source [--only lower|lower-scalar|verify|verify-scalar|promote|promote-scalar|gvn|gvn-scalar|optimize|optimize-scalar|optimize-vector] [--after-scalar MS] [--functions] "
-                        "[preprocessor options] file...\n");
+        if (testing)
+        {
+            fprintf(stderr, "usage: compiler test-ir-source --benchmark-self-test [preprocessor options] file...\n");
+        }
+        else
+        {
+            fprintf(stderr, "usage: compiler benchmark-ir-source [--only lower|lower-scalar|verify|verify-scalar|promote|promote-scalar|gvn|gvn-scalar|optimize|optimize-scalar|optimize-vector] [--after-scalar MS] [--functions] "
+                            "[preprocessor options] file...\n");
+        }
     }
     fflush(stdout);
     arena_release(&scratch);
@@ -554,4 +577,14 @@ static int run_ir_source_benchmark(int count, char** arguments)
     free(files);
     free(options);
     return reported ? 0 : 1;
+}
+
+static int run_ir_source_benchmark(int count, char** arguments)
+{
+    return ir_source_benchmark_command(count, arguments, false);
+}
+
+static int run_ir_source_benchmark_tests(int count, char** arguments)
+{
+    return ir_source_benchmark_command(count, arguments, true);
 }
