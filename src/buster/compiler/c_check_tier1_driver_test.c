@@ -1361,6 +1361,105 @@ static const char check_test_tier1_reproducible_source[] =
     "    return 0;\n"
     "}\n";
 
+// A failed whole-object comparison must locate a code difference without a local rerun: report its first byte and
+// each fixture function's first different decoded record, with a short window on either side and its relocations.
+static void check_test_tier1_reproducible_difference(const char* first, const char* second, uint32_t remat)
+{
+    const char* paths[2] = { first, second };
+    uint64_t lengths[2] = { 0 };
+    uint8_t* bytes[2] = { check_test_driver_read_aligned(first, &lengths[0]), check_test_driver_read_aligned(second, &lengths[1]) };
+    if (bytes[0] != NULL && bytes[1] != NULL)
+    {
+        uint64_t at = 0;
+        while (at < lengths[0] && at < lengths[1] && bytes[0][at] == bytes[1][at])
+        {
+            at += 1;
+        }
+        char values[2][8];
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            if (at < lengths[path])
+            {
+                snprintf(values[path], sizeof(values[path]), "%02x", bytes[path][at]);
+            }
+            else
+            {
+                snprintf(values[path], sizeof(values[path]), "EOF");
+            }
+        }
+        fprintf(stderr, "test-checker: Tier 1 object difference remat=%u offset=%" PRIu64 " vector=%s scalar=%s sizes=%" PRIu64 "/%" PRIu64 "\n",
+                remat, at, values[0], values[1], lengths[0], lengths[1]);
+    }
+    else
+    {
+        fprintf(stderr, "test-checker: Tier 1 object comparison remat=%u cannot read vector=%s or scalar=%s\n", remat, first, second);
+    }
+    free(bytes[0]);
+    free(bytes[1]);
+    enum
+    {
+        CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS = 4096,
+    };
+    X86Decoded* records[2] = { calloc(CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS, sizeof(X86Decoded)), calloc(CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS, sizeof(X86Decoded)) };
+    uint32_t* offsets = calloc(2 * CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS, sizeof(uint32_t));
+    uint32_t* types = calloc(2 * CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS, sizeof(uint32_t));
+    const bool ready = records[0] != NULL && records[1] != NULL && offsets != NULL && types != NULL && x86_disassembler_initialize();
+    static const char* const names[] = { "m3", "m5", "m9", "m4", "m3i", "address_sum", "chain", "load_add", "two_loads", "loop", "main" };
+    for (uint32_t f = 0; ready && f < sizeof(names) / sizeof(names[0]); f += 1)
+    {
+        uint32_t counts[2];
+        uint32_t relocations[2];
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            counts[path] = check_test_tier1_function(paths[path], names[f], records[path], CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS,
+                                                   offsets + path * CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS, types + path * CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS, &relocations[path]);
+        }
+        uint32_t at = 0;
+        while (at < counts[0] && at < counts[1] && records[0][at].offset == records[1][at].offset && records[0][at].length == records[1][at].length &&
+               records[0][at].address32 == records[1][at].address32 && memcmp(&records[0][at].instruction, &records[1][at].instruction, sizeof(X86Instruction)) == 0)
+        {
+            at += 1;
+        }
+        const bool same = counts[0] != 0 && counts[0] == counts[1] && at == counts[0];
+        fprintf(stderr, "test-checker: Tier 1 object function=%s remat=%u records=%u/%u relocations=%u/%u code=%s\n",
+                names[f], remat, counts[0], counts[1], relocations[0], relocations[1], same ? "same" : "different or undecodable");
+        for (uint32_t r = at != 0 ? at - 1 : 0; !same && r < at + 4; r += 1)
+        {
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                if (r < counts[path])
+                {
+                    const X86Decoded* decoded = &records[path][r];
+                    const X86Instruction* instruction = &decoded->instruction;
+                    fprintf(stderr, "  function=%s remat=%u path=%s record=%u offset=%u length=%u form=%u reg=%u rm=%u index=%u mode=%u vvvv=%u decorations=%u address32=%u disp=%" PRId32 " imm=%" PRId32 "\n",
+                            names[f], remat, path == 0 ? "vector" : "scalar", r, decoded->offset, decoded->length, instruction->form, instruction->reg, instruction->rm, instruction->index,
+                            instruction->mode, instruction->vvvv, instruction->decorations, decoded->address32, instruction->displacement, instruction->immediate);
+                }
+            }
+        }
+        uint32_t reported = 0;
+        for (uint32_t r = 0; reported < 4 && (r < relocations[0] || r < relocations[1]); r += 1)
+        {
+            const uint32_t s = r + CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS;
+            if (r >= relocations[0] || r >= relocations[1] || offsets[r] != offsets[s] || types[r] != types[s])
+            {
+                fprintf(stderr, "  function=%s remat=%u relocation=%u vector-offset/type=%u/%u scalar-offset/type=%u/%u (UINT32_MAX absent)\n", names[f], remat, r,
+                        r < relocations[0] ? offsets[r] : UINT32_MAX, r < relocations[0] ? types[r] : UINT32_MAX,
+                        r < relocations[1] ? offsets[s] : UINT32_MAX, r < relocations[1] ? types[s] : UINT32_MAX);
+                reported += 1;
+            }
+        }
+    }
+    if (!ready)
+    {
+        fprintf(stderr, "test-checker: Tier 1 object comparison remat=%u cannot allocate or initialize decoded diagnostics\n", remat);
+    }
+    free(records[0]);
+    free(records[1]);
+    free(offsets);
+    free(types);
+}
+
 static void check_test_driver_tier1_reproducible(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     char source[512];
@@ -1396,7 +1495,12 @@ static void check_test_driver_tier1_reproducible(CheckTest* test, const char* cl
                               "each reproducibility object executes like the independent C oracle");
             unlink(linked);
         }
-        check_test_expect(test, compiled[0] && compiled[1] && check_test_driver_same_files(objects[0], objects[1]),
+        const bool same = compiled[0] && compiled[1] && check_test_driver_same_files(objects[0], objects[1]);
+        if (compiled[0] && compiled[1] && !same)
+        {
+            check_test_tier1_reproducible_difference(objects[0], objects[1], remat);
+        }
+        check_test_expect(test, same,
                           "Tier 1 emits byte-identical scalar/vector objects for the same baseline target, with either rematerialization mode");
         unlink(objects[0]);
         unlink(objects[1]);
