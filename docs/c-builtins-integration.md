@@ -241,6 +241,20 @@ checks that the signed longs' rows are `add`, `imul` and `cmp` with `seto`;
 and `tests/ir-source/overflow-builtins.c` through the IR's lowerings, both
 interpreters and Tier 1 (`test-ssa-source --typed --tier1`).
 
+On the 9700X (CPU 2 under the lock, best of three repetitions per process, the
+median of three rounds), loops of 4,096 elements, each called 20,000 times from a
+clang -O2 driver: the issue's signed longs' running sum went from 119.8 ms (Tier 0)
+and 68.9 ms (Tier 1) to 59.2 ms and 30.9 ms (clang -O0 48.4 ms, -O2 15.0 ms), and
+their products from 241.9 ms and 169.7 ms to 103.6 ms and 48.1 ms (clang -O0
+75.3 ms, -O2 30.4 ms). Over those and ints' sums and products and unsigned longs'
+products, Tier 1 now takes 0.64 to 0.80 times clang -O0's time (it took 1.4 to 2.5
+times) and Tier 0 1.2 to 1.6 times (2.5 to 3.4), the rest Tier 0's loops' own code.
+`mul_overflow(long, long, long*)` is 15 instructions by Tier 0 and 9 by Tier 1,
+where it was 102 and 54 (clang -O0 15). sqlite3.c's `-c`, which has no overflow
+builtin, writes the same object in the same time. [The
+record](https://github.com/buster14a/buster-performance/tree/9615dfdc39342638c4269e1930a29fb7553d1c88/docs/measurements/overflow-builtins-1385-2026-11-07)
+has the commands, receipts and limitations.
+
 Tier 0 can consume the complete ordinary-width recipes. The current separate
 Tier 1 pipeline only supports a subset: straight-line 32/64-bit integer and
 pointer operations, fixed shifts and 32/64-bit memory accesses. Narrow stores,
