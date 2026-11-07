@@ -9,7 +9,10 @@
 // branches: each can grow once, alignment is recomputed every round, and a final fixed-layout check covers rel8-only
 // instructions. This terminates after at most branch_count + 1 rounds even when alignment absorbs earlier growth.
 
-#define BUSTER_ASM_MAX_SOURCE (64u << 20)
+// Source offsets and token counts are 32-bit, with four lookahead records. The symbol table's power-of-two slot
+// count is also 32-bit and at least twice the parser's token capacity.
+#define BUSTER_ASM_MAX_SOURCE (UINT32_MAX - 4u)
+#define BUSTER_ASM_MAX_TOKENS ((1u << 30) - 4u)
 #define BUSTER_ASM_MAX_SECTION (256u << 20)
 #define BUSTER_ASM_EXPR_DEPTH 128
 #define BUSTER_ASM_WORD 256
@@ -5287,7 +5290,7 @@ static void asm_lex_source(AsmParser* parser)
     Arena* arena = parser->arena;
     if (source.length > BUSTER_ASM_MAX_SOURCE || (source.length != 0 && source.pointer == 0))
     {
-        asm_fail(parser, 0, "invalid source or source exceeds the 64 MiB limit");
+        asm_fail(parser, 0, "invalid source or source exceeds the 32-bit offset implementation limit");
     }
     else
     {
@@ -5313,6 +5316,10 @@ static void asm_lex_source(AsmParser* parser)
 static void asm_parse_source(AsmParser* parser)
 {
     Arena* arena = parser->arena;
+    if (parser->token_count > BUSTER_ASM_MAX_TOKENS)
+    {
+        asm_fail(parser, 0, "assembly token count exceeds the 32-bit symbol-table implementation limit");
+    }
     if (parser->result.error == 0)
     {
         parser->capacity = parser->token_count + 4;

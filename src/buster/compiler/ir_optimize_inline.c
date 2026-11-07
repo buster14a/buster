@@ -783,13 +783,14 @@ struct IrInlineCursor
 static void ir_inline_node(const IrFunction* source, uint32_t old, IrFunction* destination, uint32_t node, const uint32_t* values, IrInlineBases bases)
 {
     const uint32_t op = source->op[old];
+    const uint32_t mask = ir_value_mask(source, old);
     destination->op[node] = (uint8_t)op;
     destination->type[node] = source->type[old];
     destination->flags[node] = source->flags[old];
     destination->alignment_log2[node] = source->alignment_log2[old];
-    destination->a[node] = (ir_operand_table[op] & 1) != 0 ? values[source->a[old]] : source->a[old];
-    destination->b[node] = (ir_operand_table[op] & 2) != 0 ? values[source->b[old]] : source->b[old];
-    destination->c[node] = (ir_operand_table[op] & 4) != 0 ? values[source->c[old]] : source->c[old];
+    destination->a[node] = (mask & 1) != 0 ? values[source->a[old]] : source->a[old];
+    destination->b[node] = (mask & 2) != 0 ? values[source->b[old]] : source->b[old];
+    destination->c[node] = (mask & 4) != 0 ? values[source->c[old]] : source->c[old];
     if (op == IR_CONST)
     {
         destination->a[node] += bases.constants;

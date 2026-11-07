@@ -84,7 +84,13 @@ static bool driver_information_files(const char* name, int count, char** argumen
             }
             result = putchar('\n') != EOF && result;
         }
-        else
+        // An empty -print-file-name= is the empty spelling. Probing "directory/" would be a directory, and a
+        // directory is never a file this lookup may print.
+        if (result && name != NULL && name[0] == 0)
+        {
+            result = printf("\n") >= 0;
+        }
+        else if (result && name != NULL)
         {
             String8 file = { 0 };
             struct stat status;
@@ -121,6 +127,12 @@ static bool driver_information_files(const char* name, int count, char** argumen
             if (file.length == 0)
             {
                 file = runtime_find_file(&runtime, name, false);
+            }
+            if (file.length != 0)
+            {
+                struct stat found_status;
+                const bool regular = file.pointer != NULL && stat(file.pointer, &found_status) == 0 && S_ISREG(found_status.st_mode);
+                file = regular ? file : (String8){ 0 };
             }
             result = printf("%.*s\n", (int)(file.length != 0 ? file.length : strlen(name)), file.length != 0 ? file.pointer : name) >= 0;
         }

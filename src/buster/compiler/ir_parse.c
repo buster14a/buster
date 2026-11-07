@@ -952,6 +952,10 @@ static void ir_parse_instruction(IrParseState* state)
                 // An intrinsic's operation (#141), after its operands as a comparison's predicate is.
                 if (row.op == IR_INTRINSIC)
                 {
+                    if (ir_parse_take(state, ','))
+                    {
+                        row.b = ir_parse_id(state, '%');
+                    }
                     row.c = ir_parse_named(state, ir_intrinsic_names, BUSTER_IR_INTRINSIC_COUNT);
                 }
                 if (row.op == IR_LOAD || row.op == IR_STORE || row.op == IR_ATOMIC_RMW)

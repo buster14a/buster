@@ -1864,7 +1864,8 @@ static bool check_graph_system_token(const CheckGraph* graph, uint32_t token)
 }
 
 // Construct one semantic view at the graph boundary. Diagnostic node ids and source ends are independent.
-// The stream authorizes receipt reads; branch selection and runtime effects stay in their own graph columns.
+// The stream marks required constant evaluation for receipt reads and half arithmetic; branch selection and runtime
+// effects stay in their own graph columns.
 static CheckContext check_graph_context(const CheckGraph* graph, uint32_t node, bool constant_evaluated)
 {
     const uint32_t token = graph->tokens != NULL ? graph->tokens[node] : BUSTER_CHECK_NONE;
@@ -3917,7 +3918,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
     CheckValue* arguments = result && maximum_arguments != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckValue, maximum_arguments) : 0;
     bool constant_contexts = false;
     bool zero_output = false;
-    for (uint32_t node = 0; result && graph->const_values != NULL && graph->contexts != NULL && !constant_contexts && node < count; node += 1)
+    for (uint32_t node = 0; result && graph->contexts != NULL && !constant_contexts && node < count; node += 1)
     {
         constant_contexts = (graph->contexts[node] & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_VALUE)) != 0;
     }

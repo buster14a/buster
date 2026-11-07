@@ -715,13 +715,14 @@ static void tier1_frame_steps(const Tier1FrameRequest* request, const Tier1Frame
         }
     }
     // Under PROBE_STACK a realigned frame probes its subtraction whatever its size, so that the alignment gap's probe
-    // starts from a touched address: the two together could otherwise cross an unprobed page. So does a frame with a
-    // frame pointer (#177), every one whose body moves rsp: its dynamic allocations and call areas start from rsp, which
-    // an unprobed subtraction under a page would leave up to a page below the last touch, and an allocation after it
-    // could then take rsp past a guard page before its first touch (LLVM's constraint).
+    // starts from a touched address: the two together could otherwise cross an unprobed page. So does a frame whose body
+    // moves rsp (#177, the dynamic stack's): its dynamic allocations and call areas start from rsp, which an unprobed
+    // subtraction under a page would leave up to a page below the last touch, and an allocation after it could then take
+    // rsp past a guard page before its first touch (LLVM's constraint). A frame pointer the options keep doesn't (#1450):
+    // without a dynamic stack less than a page stays untouched until the next call's return address.
     if (frame->stack_adjust_bytes != 0)
     {
-        const bool probed = probe && (frame->stack_adjust_bytes >= BUSTER_TIER1_FRAME_PAGE_BYTES || frame->realigned || frame->frame_pointer);
+        const bool probed = probe && (frame->stack_adjust_bytes >= BUSTER_TIER1_FRAME_PAGE_BYTES || frame->realigned || requirements->dynamic_stack);
         tier1_frame_step(frame->prologue, &frame->prologue_count, probed ? TIER1_FRAME_PROBE_ALLOCATE : TIER1_FRAME_ALLOCATE,
             BUSTER_ABI_RSP, BUSTER_ABI_RSP, 0, frame->stack_adjust_bytes);
     }

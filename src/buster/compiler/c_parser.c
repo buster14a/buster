@@ -13045,12 +13045,13 @@ static bool parse_tree_columns_reserve(Parser* parser, ParseTree* tree)
 // Whether token `t` is a number where a C23 attribute's identifier goes: before `::` (the two colons of one `::` token, a
 // scope's), right after `[[`, or after a comma. The last is only a candidate: the sparse history/context walk below
 // proves that it is an attribute's name, rather than an expression or an attribute argument.
-BUSTER_INLINE bool parse_clang_scope_place(const ParseTokens* tokens, uint32_t t)
+// `attributes`: whether a `[[` comes before `t` in the unit, without which a comma at `t` is no attribute list's.
+BUSTER_INLINE bool parse_clang_scope_place(const ParseTokens* tokens, uint32_t t, bool attributes)
 {
     const bool scope = tokens->kinds[t + 1] == PARSE_KIND_COLON && tokens->kinds[t + 2] == PARSE_KIND_COLON &&
                        (tokens->flags[t + 2] & BUSTER_PARSE_COLONCOLON_SECOND) != 0;
     const bool name = tokens->kinds[(int64_t)t - 1] == PARSE_KIND_L_SQUARE && tokens->kinds[(int64_t)t - 2] == PARSE_KIND_L_SQUARE;
-    const bool comma = tokens->kinds[(int64_t)t - 1] == PARSE_KIND_COMMA;
+    const bool comma = attributes && tokens->kinds[(int64_t)t - 1] == PARSE_KIND_COMMA;
     return tokens->kinds[t] == PARSE_KIND_NUMBER && (tokens->flags[t] & BUSTER_PP_FROM_MACRO) != 0 && (scope || name || comma);
 }
 
@@ -13072,9 +13073,12 @@ static bool parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
     bool result = true;
     const IdentId clang = intern_find(pp->table, (const uint8_t*)"__clang__", 9);
     IdentId spelling = 0;
-    // The history, which a deferred one replays the unit for (pp_history_ensure), is read only where a place is found.
+    // The history, which a deferred one replays the unit for (pp_history_ensure), is read only where a place is found. A
+    // macro's number after a comma, in any call's arguments, is one only past the unit's first `[[` (#628): before it,
+    // the first such number made every unit with macros replay its preprocessing for its history, and keep the replay.
     bool history = false;
     bool asked = false;
+    bool attributes = false;
     for (uint32_t first = 0; result && clang != 0 && first < count; first += 64)
     {
         uint64_t places = 0;
@@ -13098,14 +13102,20 @@ static bool parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
             const __mmask64 name = _mm512_cmpeq_epi8_mask(before, _mm512_set1_epi8(PARSE_KIND_L_SQUARE)) &
                                    _mm512_cmpeq_epi8_mask(earlier, _mm512_set1_epi8(PARSE_KIND_L_SQUARE));
             const __mmask64 comma = _mm512_cmpeq_epi8_mask(before, _mm512_set1_epi8(PARSE_KIND_COMMA));
-            places = live & number & (scope | name | comma);
+            // The tokens right after a `[[`: a comma candidate counts from the unit's first.
+            const __mmask64 opened = live & name;
+            const uint64_t past = attributes ? ~UINT64_C(0) : opened != 0 ? ~((UINT64_C(1) << _tzcnt_u64(opened)) - 1) : 0;
+            attributes |= opened != 0;
+            places = live & number & (scope | name | (comma & past));
         }
         else
 #endif
         {
             for (uint32_t i = 0; i < length; i += 1)
             {
-                places |= parse_clang_scope_place(tokens, first + i) ? UINT64_C(1) << i : 0;
+                const uint32_t t = first + i;
+                attributes |= tokens->kinds[(int64_t)t - 1] == PARSE_KIND_L_SQUARE && tokens->kinds[(int64_t)t - 2] == PARSE_KIND_L_SQUARE;
+                places |= parse_clang_scope_place(tokens, t, attributes) ? UINT64_C(1) << i : 0;
             }
         }
         for (; result && places != 0; places &= places - 1)

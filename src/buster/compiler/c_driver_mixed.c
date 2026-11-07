@@ -33,7 +33,7 @@ static int check_driver_assembly(const CheckDriverCommand* command, const PPOpti
     int result = 1;
     if (!ready || index == NULL)
     {
-        fprintf(errors, "%s: unable to initialize or read assembly input (maximum 64 MiB)\n", unit->path);
+        fprintf(errors, "%s: unable to initialize or read assembly input (I/O, memory, or 32-bit source-offset implementation limit)\n", unit->path);
     }
     else
     {

@@ -48,6 +48,13 @@ static void ir_licm_classify(IrLicmWork* work)
 {
     const IrFunction* f = work->ir.function;
     static const uint8_t safe[64] = {
+        [IR_VCONST] = 1,
+        [IR_VCMP] = 2,
+        [IR_VSELECT] = 1,
+        [IR_SHL] = 3,
+        [IR_LSHR] = 3,
+        [IR_ASHR] = 3,
+        [IR_INTRINSIC] = 4,
         [IR_CONST] = 1, [IR_PARAM] = 1, [IR_COPY] = 1,
         [IR_ADD] = 1, [IR_SUB] = 1, [IR_MUL] = 1,
         [IR_AND] = 1, [IR_OR] = 1, [IR_XOR] = 1, [IR_NEG] = 1, [IR_NOT] = 1,
@@ -85,7 +92,15 @@ static void ir_licm_classify(IrLicmWork* work)
         const __m128i operations = _mm_maskz_loadu_epi8(valid, f->op + first);
         const __m128i kinds = _mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_zextsi128_si512(operations), _mm512_loadu_si512(safe)));
         const __m128i tainted = _mm_maskz_loadu_epi8(valid, work->tainted + first);
-        _mm_mask_storeu_epi8(work->safe + first, valid, _mm_andnot_si128(tainted, kinds));
+        const __m128i flags = _mm_maskz_loadu_epi8(valid, f->flags + first);
+        const __m128i types = _mm_maskz_loadu_epi8(valid, f->type + first);
+        const __mmask16 integer_compare = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(2)) & _mm_cmplt_epu8_mask(flags, _mm_set1_epi8(IR_SIMD_LANE_F32));
+        // Packed variable shifts are total even for oversized counts. Scalar shifts keep their fault exclusion.
+        const __mmask16 vector_shift = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(3)) & _mm_cmpge_epu8_mask(types, _mm_set1_epi8(IR_V4I32)) & _mm_cmple_epu8_mask(types, _mm_set1_epi8(IR_V16I32));
+        const __m512i discriminators = _mm512_maskz_loadu_epi32(valid, f->c + first);
+        const __mmask16 splat = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(4)) & _mm512_cmpeq_epi32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_SPLAT));
+        const __mmask16 eligible = (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(1)) | integer_compare | vector_shift | splat) & _mm_cmpeq_epi8_mask(tainted, _mm_setzero_si128());
+        _mm_mask_storeu_epi8(work->safe + first, valid, _mm_maskz_set1_epi8(eligible, 1));
     }
 }
 
@@ -419,7 +434,7 @@ static __attribute__((unused)) IrCheck ir_optimize_licm(const IrFunction* functi
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
     if (output != scratch)
     {
-        check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), false);
+        check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
     }
     if (check.error == IR_OK)
     {

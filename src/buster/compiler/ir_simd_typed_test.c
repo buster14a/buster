@@ -442,8 +442,90 @@ static void ir_simd_typed_test_machine(IrTestTally* tally)
     ir_test_expect(tally, ir_simd_typed_row(&wide, avx512, &decoded) == IR_SIMD_TYPED_UNSUPPORTED, "a row of a long double is no row call's");
 }
 
+static void ir_simd_typed_test_splats(IrTestTally* tally)
+{
+    static const TypeId elements[] = {
+        BUSTER_TYPE_SCHAR,
+        BUSTER_TYPE_UCHAR,
+        BUSTER_TYPE_SHORT,
+        BUSTER_TYPE_USHORT,
+        BUSTER_TYPE_INT,
+        BUSTER_TYPE_UINT,
+        BUSTER_TYPE_LLONG,
+        BUSTER_TYPE_ULLONG,
+        BUSTER_TYPE_FLOAT,
+        BUSTER_TYPE_DOUBLE,
+    };
+    static const uint8_t classes[] = {
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U32,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_F32,
+        BUSTER_TYPED_CLASS_F64,
+    };
+    const X86Target target = { .features = UINT64_MAX, .extensions = UINT64_MAX };
+    TypeTestTable table = {0};
+    const bool ready = type_test_table_open(&table, 256);
+    ir_test_expect(tally, ready, "splat decoder producer type table");
+    for (uint32_t width = 0; ready && width < 3; width += 1)
+    {
+        for (uint32_t element = 0; element < BUSTER_ARRAY_LENGTH(elements); element += 1)
+        {
+            const uint32_t bytes = (uint32_t)type_size(&table.table, elements[element]);
+            const TypeId type = type_vector(&table.table, elements[element], (16u << width) / bytes, false);
+            Tier0Operation row = {0};
+            const char* reason = check_vector_lower_row(&table.table, &target, false, BUSTER_CHECK_VECTOR_SPLAT, type, classes[element], &row);
+            IrSimdTypedOperation decoded = {0};
+            const IrSimdTypedStatus status = ir_simd_typed_row(&row, target.features, &decoded);
+            const uint64_t required = BUSTER_X86_FEATURE(AVX512F) | (width < 2 ? BUSTER_X86_FEATURE(AVX512VL) : 0) | (bytes < 4 ? BUSTER_X86_FEATURE(AVX512BW) : 0);
+            ir_test_expect(tally, reason == NULL && status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.splat_bytes == bytes &&
+                                  decoded.operand_count == 1 && decoded.operand_classes[0] == classes[element] && decoded.required_features == required,
+                           "every scalar splat producer becomes semantic IR at each width with its exact features");
+            if (reason == NULL && status == IR_SIMD_TYPED_OK)
+            {
+                const IrSimdTypedOperation before = decoded;
+                for (uint64_t features = required; features != 0; features &= features - 1)
+                {
+                    const uint64_t missing = features & (UINT64_C(0) - features);
+                    const IrSimdTypedStatus refused = ir_simd_typed_row(&row, target.features & ~missing, &decoded);
+                    ir_test_expect(tally, refused == IR_SIMD_TYPED_TARGET && memcmp(&decoded, &before, sizeof(decoded)) == 0,
+                                   "a splat missing any required target feature refuses before publication");
+                }
+                for (uint32_t mutation = 0; mutation < 11; mutation += 1)
+                {
+                    Tier0Operation changed = row;
+                    switch (mutation)
+                    {
+                        case 0: changed.records[0].decorations = 1; break;
+                        case 1: changed.records[0].displacement = 8; break;
+                        case 2: changed.records[0].mode = BUSTER_X86_MEMORY_BASE; break;
+                        case 3: changed.records[0].reg ^= 1; break;
+                        case 4: changed.records[0].rm ^= 1; break;
+                        case 5: changed.records[0].vvvv = 1; break;
+                        case 6: changed.records[0].immediate = 1; break;
+                        case 7: changed.operand_count = 2; break;
+                        case 8: changed.operand_classes[0] = BUSTER_TYPED_CLASS_VOID; break;
+                        case 9: changed.result_bytes = row.result_bytes == 16 ? 32 : 16; break;
+                        case 10: changed.operand_classes[0] = BUSTER_TYPED_CLASS_U8; break;
+                    }
+                    const IrSimdTypedStatus refused = ir_simd_typed_splat(&changed, target.features, &decoded);
+                    ir_test_expect(tally, refused == IR_SIMD_TYPED_UNSUPPORTED && memcmp(&decoded, &before, sizeof(decoded)) == 0,
+                                   "changed splat roles, widths, decorations and effects are not silently discarded");
+                }
+            }
+        }
+    }
+    type_test_table_close(&table);
+}
+
 static void ir_simd_typed_test(IrTestTally* tally)
 {
+    ir_simd_typed_test_splats(tally);
     ir_simd_typed_test_machine(tally);
     TypeTestTable table = { 0 };
     const bool ready = type_test_table_open(&table, 256);

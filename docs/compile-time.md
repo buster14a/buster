@@ -958,6 +958,44 @@ What the peaks still hold for little, after this:
 - **The stream's conversions**, 32 bytes a node, 10 MB from `check-expressions`
   through the backend, where a leaf's is its type.
 
+### The expansion history's replay (#628)
+
+A unit whose diagnostics need the macro expansions' history records none while
+it is preprocessed (`PPOptions.defer_history`) and, when a reader first asks for
+it (`pp_history_ensure`), preprocesses itself again with the history on: a
+replay, which must give the same output, token for token.
+- **Every unit replayed.** #1455 (`f4272a46`) made a macro's number after a
+  comma a candidate for `__clang__`'s `_Clang` reading
+  (`parse_clang_scope_numbers`), which only a C23 attribute list's comma can
+  be. The first candidate asks for the history, so every unit with a macro's
+  number in a call's arguments replayed its preprocessing at the parse: on the
+  VM, `sqlite3.c`'s `-c` parse added 12.5 MB, and the compiler's own `main.c`'s
+  `-fsyntax-only` parse took about 250 ms and 140 MB more. A comma's candidate
+  now counts only past the unit's first `[[`, which an attribute list's comma
+  follows; both paths track it, the vector path as the bits from the first token
+  right after a `[[`. `test-parser` checks that a unit without one keeps its
+  history deferred by both paths, and that one with a `[[` before such a comma
+  asks for it.
+- **The replay's output.** A replay kept its output token columns to the unit's
+  end, though nothing reads them after its comparison with the unit's output:
+  12 MB of `sqlite3.c`'s, in the backend's peak, for a unit with any diagnostic.
+  They are released once the replay is taken; its origins, which a collected
+  diagnostic's group may own, stay.
+- **The diagnostics.** With the history recorded at the parse, main's vector
+  path doesn't give #1339's false `-Wempty-body` at `sqlite3.c:74649`, since
+  the warning reads the history when it's there. With the change, it gives it
+  again, as before #1455, until #1547 fixes the warning: its objects are the
+  same bytes, and the `--scalar` path's diagnostics too.
+
+On the VM, main `67cd05ca` against the change, `-c sqlite3.c` with huge pages
+(`BUSTER_HUGE_PAGES=1`), three runs each, which agree within 12 KiB:
+
+| measure | main | the change |
+| --- | ---: | ---: |
+| `parse`'s peak added | 97,716 KiB | 79,600 KiB |
+| peak RSS, with `-w` | 297,664 KiB | 279,552 KiB |
+| peak RSS, with the warning | 297,732 KiB | 279,620 KiB |
+
 ### Huge pages held for under a megabyte (#672)
 
 Each mapping's resident memory at the compile's peak, on this repository's VM
@@ -2245,13 +2283,35 @@ the kernel's setting in force:
 | c-testsuite's 220, mean | `always` | | | 3.20 ms | 5.63 ms | 1.71 ms |
 
 - **Empty file.** `backend-setup` is the stage clock's boundary alone, under
-  every page policy: 0.004 ms on the 9700X and 0.008 to 0.010 ms on the VM. A
-  unit without a selected body initializes nothing (#689), and the baked
-  executable has nothing to initialize.
+  every page policy: 0.004 ms on the 9700X, and 0.007 to 0.010 ms on the VM
+  (with its own default, huge pages off, too). A unit without a selected body
+  initializes none of the backend's tables (#689), and the baked executable
+  has none to initialize.
 - **With a function.** The baked executable's `backend-setup` is 0.003 ms on
-  the 9700X and 0.008 to 0.009 ms on the VM, with one or two faults. Building the tables
-  when the process runs costs about 1,135 faults on both machines: 0.75 to
-  0.86 ms on the 9700X, and 2.2 ms on the VM under `madvise` and `always` alike.
+  the 9700X and 0.008 to 0.009 ms on the VM, with one or two faults. Building
+  the tables when the process runs costs about 1,135 faults on both machines:
+  0.75 to 0.86 ms on the 9700X, and 2.2 ms on the VM under `madvise` and
+  `always` alike.
+- **Assembly inputs (#1571).** Two routes still rebuilt the x86 semantics'
+  tables in a baked executable, writing their baked pages:
+  - a compile with an assembly or other non-C input (`-c foo.s`, or C files
+    with one), which sets the driver's `mixed_inputs`;
+  - `compiler assemble`.
+
+  They now test `x86_semantics_initialized` first, as the other routes do.
+  Their objects are unchanged, and an executable that isn't baked builds the
+  tables once, as before. Two rounds of `measure-compile --runs 41`, CPU 2,
+  against the build before:
+  - on the 9700X, at `ec5f0f6b`, where the two files are `main`'s:
+    - `-c foo.s` takes 0.479 and 0.476 ms with 230 faults, against 0.546 ms
+      with 269, 13% less;
+    - a link of a C file and `foo.s` takes 1.181 and 1.193 ms with 529
+      faults, against 1.268 and 1.283 ms with 568;
+  - on the VM:
+    - `-c foo.s` takes 2.40 and 2.57 ms with 675 faults, against 2.64 and
+      2.89 ms with 716;
+    - the link takes 4.18 and 4.39 ms with 1,202 faults, against 4.49 and
+      4.63 ms with 1,243.
 - **Under the VM's own default** (huge pages off), the baked executable's
   `backend-setup` is the same, 0.007 to 0.009 ms. c-testsuite's programs take
   3.21 and 3.34 ms there, against 5.55 and 5.74 ms built.
@@ -2272,8 +2332,9 @@ the kernel's setting in force:
   - the checker's reader (`check-input`), 1.0 to 1.2 ms;
   - `setup`, 0.45 to 0.55 ms.
 
-  The process outside the span (exec, `main`'s dispatch and exit) takes 1.2 to
-  1.6 ms for any input. tcc's whole compile of `empty.c` takes 1.65 to 1.79 ms.
+  On the VM, the process outside the span (exec, `main`'s dispatch and exit)
+  takes 1.2 to 1.6 ms for any input, and tcc's whole compile of `empty.c`
+  takes 1.65 to 1.79 ms. On the 9700X they take 0.24 to 0.39 ms and 0.36 ms.
   - `setup`'s faults come from first touching the executable's pages. From
     `check_driver_command`'s entry to `check_driver_flow`'s (`setup` and
     `lanes-start`), gdb and `/proc/PID/smaps` show about 1.4 MB of code,

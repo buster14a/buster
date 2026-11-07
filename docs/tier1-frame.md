@@ -243,9 +243,33 @@ a page at a time rather than touch below it, since kernels before Linux 4.20
 refuse an access more than 64 KiB below rsp where the main thread's stack must
 grow.
 
+A reservation under a page is touched only where the frame is realigned or the
+body moves rsp (an allocation, a stack restore): a dynamic allocation must
+start from a touched rsp, or its first touch could land a page below an
+untouched reservation, past a guard page (LLVM's constraint). Other frames
+under a page, with a frame pointer or not, leave less than a page untouched,
+and the next call's return address is the next touch. Until #1450 a frame
+pointer alone made both tiers touch, so with `-fno-omit-frame-pointer` every
+call did a read-modify-write of `[rsp]`. That isn't the default.
+
+The option's run-time cost is placement. #177 timed Tier 0's `closures.lua`
+4.59% slower with it, in one layout per build. Tier 0's Lua probes in two
+functions only: `luaV_execute`, whose 5,064-byte frame takes a page's loop and
+a remainder's touch on every call, and `luaL_loadfilex`. A cycles profile
+doesn't place the difference at the probe: `luaV_execute`'s share falls. Over
+16 recorded link orders of fixed objects (the [profiling
+guide](commands/profiling.md)'s protocol), the option's paired effect on
+`closures.lua` is -1.02% at Tier 0 (95% interval -2.37% to +0.35%) and -1.37% at
+Tier 1 (-3.75% to +1.07%). Layout alone spreads Tier 0's time over 14%, and in
+the normal order the option is 6.2% faster (#1450's item 6, [the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-remaining-1450-2026-11-06),
+buster-performance#303).
+
 - **Tier 1's prologue** takes `PROBE_STACK` (`Tier1EmitOptions.frame_flags`):
   the planner's `PROBE_ALLOCATE` and `PROBE_ALIGN` above, with their frame
-  events. `Tier1Frame.probe_stack` records it.
+  events. `Tier1Frame.probe_stack` records it. Selection accepts object
+  alignments through the planner's `1 << 30` bound, including those larger
+  than a page (#1450).
 - **Tier 1's dynamic allocations** (`TIER1_RULE_ALLOCA` and its immediate
   form) are the CFG consumer's `tier1_emit_cfg_probed_allocation`: the rule's
   records, but its subtraction from rsp, whose bytes a loop takes instead, in
@@ -255,8 +279,20 @@ grow.
   its own records. No byte at or above the old rsp, the frame's own, is
   touched, so the frame events' proof (`emitted_verify_frames`) keeps the
   saved registers' slots.
+- **Tier 1's dynamic outgoing call areas** (`tier1_emit_cfg_adjust`) touch
+  their lowest byte for a sub-page area and use the frame emitter's page loop
+  and final partial touch for a larger one (#1450), which selection doesn't
+  make today: an area is the call's stack bytes, at most 2,560, rounded to the
+  calls' alignment. `test-tier1-emit`'s native call-probe fixture runs the loop.
+  Reserved r11 holds the
+  bound, leaving all argument registers and an indirect callee intact; the
+  dynamic frame's CFA stays in rbp. Records and branch columns reserve the
+  loop's full capacity before emission, and release adds the area back without
+  a probe.
 - **Tier 0's prologue** probes a reservation of a page or more, and a realigned
-  frame's whatever its size (`tier0_probes_reservation`), with Tier 1's records:
+  frame's or one whose body moves rsp (`Tier0Frame.moves`, published as
+  `Tier0Code.frame_moves` for the unwind reader) whatever its size
+  (`tier0_probes_reservation`), with Tier 1's records:
   `tier0_emit_probed_reservation`, r11 set to rsp less the pages, rsp moved a
   page and touched until it reaches r11, then the remainder's subtraction and
   touch; a realigned frame touches after its `and`, or past a page's alignment
@@ -289,11 +325,19 @@ frame and two-page-aligned frame. Each build prints what clang -O0's does:
 "skipped" past the guard without the option, "probed" at the guard with it.
 That holds by Tier 0 and by `--tier1` with and without rematerialization, by
 each path, with a frame pointer and without, under `--verify`, every function
-Tier 1's but the page-aligned one, which Tier 1's selection refuses with or
-without probes. Its probes fixture prints clang -O0's line through frames of
+required to use Tier 1, including the two-page-aligned frame. Its probes fixture prints clang -O0's line through frames of
 pages, variable-length arrays and allocas in loops, an allocation of none, of
 a page and of a constant, recursion through two-page frames and a realigned
-frame. Each probed frame's function starts with the probes' loop; and the last
+frame, plus a dynamic call after an allocation in a frame realigned to two
+pages, whose outgoing area stays the call's own 256 bytes: rsp keeps the
+calls' alignment, not the frame's (#1450), and selection's 2,560 stack bytes
+make no area of a page. `test-tier1-emit`'s native call-probe fixture checks six integer and
+eight vector argument registers, AL, an indirect-callee register, callee-save
+registers and exact rsp restoration for zero, sub-page, page and multi-page
+areas. Protected intermediate and final partial pages fault only with probes;
+unprotected runs and the no-probe controls return normally. Exact-capacity and
+short-column cases check the transactional emission boundary.
+Each probed frame's function starts with the probes' loop; and the last
 of the pair wins, byte for byte. `test-emitted-code` proves probed Tier 0
 frames' events (every other round's programs, and frames of each size and
 alignment with a frame pointer and without, the loop's without one a row

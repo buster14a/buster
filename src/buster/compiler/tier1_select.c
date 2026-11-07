@@ -226,7 +226,9 @@ typedef enum Tier1SelectRule
 // - NOT of values[0]: vpternlogd with 0x55, the complement of its third operand;
 // - COMPARE of values[0] and values[1] into a mask, `condition` its IR predicate: vpcmpd, or vpcmpud for an unsigned
 //   one, into the mask's opmask register (the destination's low three bits, class 2's);
-// - SELECT of values[1] where the mask values[0] is set and of values[2] where it isn't: vpblendmd under the mask.
+// - SELECT of values[1] where the mask values[0] is set and of values[2] where it isn't: vpblendmd under the mask;
+// - SCALAR_SPLAT of values[0], whose scalar IR type is in `source_width`: repeat its raw bits without floating
+//   arithmetic, by a broadcast or the baseline move/unpack/shuffle sequence.
 // A vector's encoding level (#141): EVEX's at a target with AVX512VL, VEX's at one with AVX but without it (#1281), and
 // legacy SSE's at one without AVX (the x86-64 baseline and x86-64-v2), whose vectors are 16 bytes alone. The helpers
 // take it where they took `vex` (BUSTER_TIER1_ENCODING_VEX is `vex`'s true), from Tier1EmitPrepared's vex and sse.
@@ -260,6 +262,7 @@ typedef enum Tier1SelectRule
 #define BUSTER_TIER1_VECTOR_NOT 6
 #define BUSTER_TIER1_VECTOR_COMPARE 7
 #define BUSTER_TIER1_VECTOR_SELECT 8
+#define BUSTER_TIER1_VECTOR_SCALAR_SPLAT 9
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -1095,6 +1098,69 @@ static X86Instruction tier1_select_intrinsic(const Tier1SelectHoles* holes)
     };
 }
 
+// A scalar splat (#1450): EVEX broadcasts directly from a general register or a floating scalar's xmm register.
+// The baseline sequence copies bits through xmm registers only: movd/movq, low unpacks for bytes/words, pshufd and,
+// for AVX's 32-byte result, vinsertf128. It never interprets a NaN or a signed zero as arithmetic.
+static void tier1_select_scalar_splat(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
+{
+    const uint32_t type = holes->source_width;
+    const uint32_t bytes = ir_splat_scalar_type(type) ? ir_type_bits[type] / 8 : 0;
+    const uint8_t destination = holes->destination & 15;
+    const bool floating = type == IR_F32 || type == IR_F64;
+    const uint8_t source = floating ? holes->left & 15 : holes->left;
+    if (holes->width < 64 && (holes->sse || holes->vex))
+    {
+        const bool vex = !holes->sse;
+        uint8_t from = source;
+        if (!floating)
+        {
+            const uint16_t move = bytes == 8 ? (vex ? X86_FORM_VMOVQ_X_RM64 : X86_FORM_MOVQ_X_RM64) :
+                                              (vex ? X86_FORM_VMOVD_X_RM32 : X86_FORM_MOVD_X_RM32);
+            tier1_select_append(result, tier1_select_register_record(move, destination, source));
+            from = destination;
+            for (uint32_t element = bytes; element < 4 && element != 0; element *= 2)
+            {
+                const uint16_t form = element == 1 ? (vex ? X86_FORM_VPUNPCKLBW_X_X_XM128 : X86_FORM_PUNPCKLBW_X_XM128) :
+                                                     (vex ? X86_FORM_VPUNPCKLWD_X_X_XM128 : X86_FORM_PUNPCKLWD_X_XM128);
+                tier1_select_append(result, (X86Instruction){
+                    .form = form,
+                    .reg = destination,
+                    .vvvv = vex ? destination : 0,
+                    .rm = destination,
+                    .mode = BUSTER_X86_REGISTER_DIRECT,
+                });
+            }
+        }
+        X86Instruction shuffle = tier1_select_register_record(vex ? X86_FORM_VPSHUFD_X_XM128_IMM8 : X86_FORM_PSHUFD_X_XM128_IMM8, destination, from);
+        shuffle.immediate = bytes == 8 ? 0x44 : 0;
+        tier1_select_append(result, shuffle);
+        if (holes->width == 32)
+        {
+            tier1_select_append(result, (X86Instruction){
+                .form = X86_FORM_VINSERTF128_Y_Y_XM128_IMM8,
+                .reg = destination,
+                .vvvv = destination,
+                .rm = destination,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .immediate = 1,
+            });
+        }
+    }
+    else
+    {
+        static const uint16_t forms[IR_TYPE_COUNT][3] = {
+            [IR_I8] = { X86_FORM_VPBROADCASTB_X_R32, X86_FORM_VPBROADCASTB_Y_R32, X86_FORM_VPBROADCASTB_Z_R32 },
+            [IR_I16] = { X86_FORM_VPBROADCASTW_X_R32, X86_FORM_VPBROADCASTW_Y_R32, X86_FORM_VPBROADCASTW_Z_R32 },
+            [IR_I32] = { X86_FORM_VPBROADCASTD_X_R32, X86_FORM_VPBROADCASTD_Y_R32, X86_FORM_VPBROADCASTD_Z_R32 },
+            [IR_I64] = { X86_FORM_VPBROADCASTQ_X_R64, X86_FORM_VPBROADCASTQ_Y_R64, X86_FORM_VPBROADCASTQ_Z_R64 },
+            [IR_F32] = { X86_FORM_VBROADCASTSS_X_XM32_EVEX, X86_FORM_VBROADCASTSS_Y_XM32_EVEX, X86_FORM_VBROADCASTSS_Z_XM32 },
+            [IR_F64] = { X86_FORM_VPBROADCASTQ_X_XM64_EVEX, X86_FORM_VBROADCASTSD_Y_XM64_EVEX, X86_FORM_VBROADCASTSD_Z_XM64 },
+        };
+        const uint32_t width = holes->width == 16 ? 0 : holes->width == 32 ? 1 : 2;
+        tier1_select_append(result, tier1_select_register_record(bytes != 0 ? forms[type][width] : X86_FORM_NONE, destination, source));
+    }
+}
+
 // A 16-byte vector's records at a target without AVX (#141's SSE targets, Tier1SelectHoles.sse): legacy SSE2's
 // two-operand forms, the destination's the first operand. Zeros by pxor and every bit by pcmpeqd of the destination with
 // itself, a splat's lane by mov into the scratch general register, movd and pshufd, a copy by movaps, and a BINARY by its
@@ -1562,7 +1628,11 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         const uint8_t left = holes->left & 15;
         const uint8_t right = holes->right & 15;
         const uint32_t kind = holes->scale;
-        if (holes->sse && width == 16 && kind != BUSTER_TIER1_VECTOR_COMPARE && kind != BUSTER_TIER1_VECTOR_SELECT)
+        if (kind == BUSTER_TIER1_VECTOR_SCALAR_SPLAT)
+        {
+            tier1_select_scalar_splat(&result, holes);
+        }
+        else if (holes->sse && width == 16 && kind != BUSTER_TIER1_VECTOR_COMPARE && kind != BUSTER_TIER1_VECTOR_SELECT)
         {
             tier1_select_sse_vector(&result, holes, destination);
         }
@@ -2069,7 +2139,8 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
 #define BUSTER_TIER1_SELECT_MAX_INSTRUCTIONS (1u << 20)
 // The largest frame object, and the most aligned, the selector takes: the frame's offsets are 32-bit.
 #define BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES (UINT64_C(1) << 28)
-#define BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT 4096u
+// Match the frame planner's bound without requiring its declarations before this standalone selector.
+#define BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT (1u << 30)
 #define BUSTER_TIER1_SELECT_MAX_CANDIDATES 8
 // The most links a pattern's walk follows through a truth value's chain or an address's (tier1_select_truth,
 // tier1_select_address): a bound on each node's walk, which every node of a chain takes again as its own pattern's.
@@ -3047,8 +3118,8 @@ static bool tier1_select_call_abi(const IrFunction* function, uint32_t node, con
                         abi->call.stack_bytes <= BUSTER_TIER1_SELECT_MAX_STACK_OFFSET + BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE);
 }
 
-// The red zone's staging slots a call's arguments' parts in registers wait in (#789, tier1_emit_staging): 14, the
-// argument registers'.
+// The red zone's staging slots a call's arguments' parts in registers may wait in (#789, tier1_emit_staging): 14, the
+// argument registers'. A function whose calls need more reserves a frame object for their maximum instead (#1450).
 #define BUSTER_TIER1_SELECT_STAGING_SLOTS (BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS)
 
 // The staging slots an argument's parts in registers take, by an ABI record Tier 1 takes (or none): an eightbyte's one, a
@@ -3062,6 +3133,17 @@ static uint32_t tier1_select_argument_slots(const IrPassed* record)
     for (uint32_t k = 0; k < count; k += 1)
     {
         slots += parts[k].reg != BUSTER_ABI_REGISTER_NONE ? tier1_select_argument_part_slots(parts[k].bytes) : 0;
+    }
+    return slots;
+}
+
+static uint32_t tier1_select_call_staging_slots(const IrFunction* function, const IrCall* call)
+{
+    const uint32_t count = call->abi != 0 ? call->argument_count : 0;
+    uint32_t slots = 0;
+    for (uint32_t argument = 0; argument < count; argument += 1)
+    {
+        slots += tier1_select_argument_slots(tier1_select_argument_record(function, call, argument));
     }
     return slots;
 }
@@ -3318,17 +3400,14 @@ static bool tier1_select_call_supported(const IrFunction* function, uint32_t nod
         const bool clobbered = function->op[node] == IR_CALL_INDIRECT && call.variadic && tier1_select_call_chained(function, &call);
         supported = call.argument_count <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS && tier1_select_call_arity(&call) && tier1_select_call_result(function->type[node]) &&
                     tier1_select_call_abi(function, node, &call) && !clobbered;
-        // The aggregates' parts in registers wait in the red zone's staging slots, a 64-byte one in zmm16 and on instead
-        // (tier1_select_argument_slots).
-        uint32_t staged = 0;
+        // Argument staging is the frame planner's: calls past the red zone's capacity reserve a frame object. Selection
+        // need not assume that the target has extra vector registers for their parts (#1450).
         for (uint32_t argument = 0; supported && argument < call.argument_count; argument += 1)
         {
             const uint32_t argument_type = tier1_select_argument_type(function, &call, argument);
             const IrPassed* record = tier1_select_argument_record(function, &call, argument);
             supported = record != 0 ? tier1_select_record_supported(record, argument_type) : tier1_select_call_argument(argument_type);
-            staged += supported ? tier1_select_argument_slots(record) : 0;
         }
-        supported &= staged <= BUSTER_TIER1_SELECT_STAGING_SLOTS;
     }
     return supported;
 }
@@ -3731,7 +3810,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     // A vector's operations (#141), behind one test: a function without vectors pays no other here.
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
-                                                   op == IR_VSELECT)) ||
+                                                   op == IR_VSELECT || (op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_SPLAT))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -3756,6 +3835,16 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.scale = (uint8_t)(zero ? BUSTER_TIER1_VECTOR_ZERO : ones ? BUSTER_TIER1_VECTOR_ONES : splat ? BUSTER_TIER1_VECTOR_SPLAT : BUSTER_TIER1_VECTOR_CONSTANT);
             base.immediate = zero || ones ? 0 : splat ? first : a;
             base.intrinsic_cost = zero || ones ? 1 : 2;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_SPLAT)
+        {
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_SCALAR_SPLAT;
+            base.source_width = function->type[a];
+            base.values[0] = a;
+            base.intrinsic_cost = 1;
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
         else if (vector_width != 0 && (op == IR_COPY || op == IR_NOT))

@@ -180,6 +180,8 @@ static bool dependency_check_destinations(const DependencyOptions* options, char
 // atomic and leaves an old depfile intact on failure. Stdout is deliberately not transactional, but its failures are
 // reported. The caller, not a unit lane, owns publication. A new depfile gets the mode fopen would give it (0666 and
 // the umask); one replacing a regular file keeps that file's permission bits, as clang's truncation does.
+// A symlink is not replaced: clang truncates through it, so the target is rewritten in place and the link stays.
+// rename would swap the link for a regular file and leave the target stale.
 // The selected template must not produce the destination itself: creating that file would expose partial output
 // before rename. The two templates have equal lengths and disjoint five-byte prefixes for every random suffix.
 static const char* dependency_temporary_template(const char* basename)
@@ -194,12 +196,25 @@ static bool dependency_publish(const DependencyOutput* output, FILE* errors)
     {
         const char* path = output->path;
         const String8 bytes = output->bytes;
-        struct stat existing;
+        struct stat linked;
+        struct stat existing = { 0 };
+        const bool link = lstat(path, &linked) == 0 && S_ISLNK(linked.st_mode);
         const bool found = stat(path, &existing) == 0;
         const bool special = found && !S_ISREG(existing.st_mode);
         if (strcmp(path, "-") == 0)
         {
             result = fwrite(bytes.pointer, 1, (size_t)bytes.length, stdout) == bytes.length && fflush(stdout) == 0;
+        }
+        else if (link && !special)
+        {
+            // The target may be absent. fopen follows the link and creates it, which leaves a dangling symlink usable.
+            FILE* stream = fopen(path, "wb");
+            result = stream != NULL;
+            if (stream != NULL)
+            {
+                const bool written = fwrite(bytes.pointer, 1, (size_t)bytes.length, stream) == bytes.length;
+                result = fclose(stream) == 0 && written;
+            }
         }
         else if (special)
         {
@@ -274,9 +289,9 @@ static bool dependency_publish(const DependencyOutput* output, FILE* errors)
     return result;
 }
 
-// Pipes cannot be mmap'ed and diagnostic replay must not consume stdin twice. Keep a bounded, stable arena copy;
-// the preprocessor copies it into its ordinary virtual-file representation, with the name <stdin>.
-static bool driver_read_stdin(Arena* arena, String8* source)
+// Pipes cannot be mmap'ed. Read until EOF, at most UINT32_MAX bytes, and keep the bytes in `arena`. `quoted` puts
+// quotes around `label` in the diagnostic. An empty stream still has a non-null pointer.
+static bool driver_read_fd(Arena* arena, int fd, String8* source, const char* label, bool quoted)
 {
     const uint64_t mark = arena->length;
     uint64_t length = 0;
@@ -285,12 +300,18 @@ static bool driver_read_stdin(Arena* arena, String8* source)
     bool end = false;
     while (result && !end)
     {
-        const uint64_t remaining = UINT32_MAX - length;
+        const uint64_t remaining = (uint64_t)UINT32_MAX - length;
         const uint64_t chunk = remaining < 65536 ? remaining : 65536;
         if (chunk == 0)
         {
-            const int extra = fgetc(stdin);
-            result = extra == EOF && !ferror(stdin);
+            char extra = 0;
+            ssize_t got = 0;
+            do
+            {
+                got = read(fd, &extra, 1);
+            }
+            while (got < 0 && errno == EINTR);
+            result = got == 0;
             end = true;
         }
         else
@@ -300,23 +321,74 @@ static bool driver_read_stdin(Arena* arena, String8* source)
             if (result)
             {
                 first = first != NULL ? first : bytes;
-                const size_t read = fread(bytes, 1, (size_t)chunk, stdin);
-                length += read;
-                end = read != chunk;
-                result = !ferror(stdin);
+                uint64_t filled = 0;
+                while (result && filled < chunk && !end)
+                {
+                    const ssize_t got = read(fd, bytes + filled, (size_t)(chunk - filled));
+                    if (got > 0)
+                    {
+                        filled += (uint64_t)got;
+                    }
+                    else if (got == 0)
+                    {
+                        end = true;
+                    }
+                    else
+                    {
+                        result = errno == EINTR;
+                    }
+                }
+                length += filled;
+                end = end || filled != chunk;
             }
         }
     }
     if (result)
     {
         arena_pop_to(arena, mark + length);
+        first = length == 0 ? "" : first;
         *source = (String8){ .pointer = first, .length = length };
     }
     else
     {
         arena_pop_to(arena, mark);
         *source = (String8){ 0 };
-        fprintf(stderr, "error: can't read standard input: I/O error, source too large, or exhausted capacity\n");
+        fprintf(stderr, quoted ? "error: can't read '%s': I/O error, source too large, or exhausted capacity\n" :
+                                 "error: can't read %s: I/O error, source too large, or exhausted capacity\n", label);
+    }
+    return result;
+}
+
+// Diagnostic replay must not consume stdin twice. Keep a bounded, stable arena copy; the preprocessor copies it
+// into its ordinary virtual-file representation, with the name <stdin>.
+static bool driver_read_stdin(Arena* arena, String8* source)
+{
+    return driver_read_fd(arena, STDIN_FILENO, source, "standard input", false);
+}
+
+// 1 when `path` is neither a regular file nor a directory and its bytes are in `*source` (a character device, FIFO,
+// socket, or /dev/fd pipe). 0 when it is absent, a directory, or a regular file, which the file cache reads.
+// -1 when it is a stream and the read fails. Include search does not use this: those probes stay non-blocking.
+static int driver_read_nonregular(Arena* arena, const char* path, String8* source)
+{
+    struct stat status;
+    const bool exists = stat(path, &status) == 0;
+    const bool stream = exists && !S_ISREG(status.st_mode) && !S_ISDIR(status.st_mode) && !S_ISBLK(status.st_mode);
+    int result = 0;
+    *source = (String8){ 0 };
+    if (stream)
+    {
+        const int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOCTTY);
+        const bool read = fd >= 0 && driver_read_fd(arena, fd, source, path, true);
+        if (fd >= 0)
+        {
+            close(fd);
+        }
+        else
+        {
+            fprintf(stderr, "error: can't read '%s': %s\n", path, strerror(errno));
+        }
+        result = read ? 1 : -1;
     }
     return result;
 }

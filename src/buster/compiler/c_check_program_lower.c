@@ -602,11 +602,9 @@ struct CheckLowerWriter
     // A tracked vector's or mask's bytes (check_lower_track_bytes), whose dead stand-ins need them
     // (check_lower_dead_value); 0 for any other class.
     uint8_t* stack_bytes;
-    // Each object's local in the body being lowered, read through check_lower_local_of: where `locals` has the object's
-    // bit, its entry, and for every other object none, since nothing writes its entry (#877). Without `locals` (a test's
-    // writer) every entry is read.
+    // Each object's local in the body being lowered, read through check_lower_local_of: none for every object but the
+    // body's own parameters and locals, which the body writes as it starts and puts back to none as it ends.
     uint32_t* local_map;
-    const uint64_t* locals;
     uint32_t* switch_locals;
     // The switch whose CASE controls come next (the last SWITCH control's token), its jump table or BUSTER_CHECK_NONE
     // where its cases' compares dispatch it (check_lower_table_of, by its control), and whether its first CASE control is
@@ -849,10 +847,10 @@ struct CheckLowerWriter
     uint64_t template_mismatches;
 };
 
-// The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.locals).
+// The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.local_map).
 static uint32_t check_lower_local_of(const CheckLowerWriter* writer, uint32_t object)
 {
-    return writer->locals == NULL || check_program_bit(writer->locals, object) ? writer->local_map[object] : BUSTER_CHECK_NONE;
+    return writer->local_map[object];
 }
 
 // The declaration whose initializer `node` is, or none (CheckLowerWriter.initializer_declarations). The preparation writes
@@ -13245,9 +13243,7 @@ struct CheckLowerShared
     // from), or whose stream records an overload's address or holds its values whole (a hand-built one).
     bool overloads;
     uint32_t* initializer_declarations;
-    // local_map's entries and the objects whose entries are kept, the bodies' parameters' and locals' (CheckLowerWriter).
     uint32_t* local_map;
-    uint64_t* locals;
     uint32_t* switch_locals;
     uint32_t* vla_identities;
     uint32_t* save_locals;
@@ -13576,16 +13572,6 @@ static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
     return counts;
 }
 
-// Keeps `object`'s local_map entry (CheckLowerShared.locals): marked, and none until a body writes it.
-static void check_lower_local_keep(CheckLowerShared* shared, uint32_t object, uint32_t count)
-{
-    if (object <= count && !check_program_bit(shared->locals, object))
-    {
-        check_program_bit_set(shared->locals, object);
-        shared->local_map[object] = BUSTER_CHECK_NONE;
-    }
-}
-
 // What the lowering of every body shares (CheckLowerShared), its tables from `scratch`, and the program's lowering's
 // columns from `output`: its helpers, its label symbols' room, its functions and, with `sources`, their entries' tokens.
 // Returns false with `lowered`'s failure (its status, or OK for a resource's), and leaves the arenas' pushes to the
@@ -13746,7 +13732,6 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     shared->provisional_tables = valid ? (SymbolId)(provisional64 + CHECK_LOWER_RUNTIMES) : 0;
 #define BUSTER_CHECK_LOWER_TABLE(field, type, length) shared->field = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, type, length) : 0; valid &= shared->field != 0
     BUSTER_CHECK_LOWER_TABLE(local_map, uint32_t, (uint64_t)count + 1);
-    BUSTER_CHECK_LOWER_TABLE(locals, uint64_t, ((uint64_t)count + 64) / 64);
     BUSTER_CHECK_LOWER_TABLE(switch_locals, uint32_t, (uint64_t)count + 1);
     BUSTER_CHECK_LOWER_TABLE(vla_identities, uint32_t, input->vla_count != 0 ? (uint64_t)count + 1 : 1);
     BUSTER_CHECK_LOWER_TABLE(save_locals, uint32_t, input->vla_count != 0 ? (uint64_t)count + 1 : 1);
@@ -13819,7 +13804,11 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     }
     if (valid)
     {
-        memset(shared->locals, 0, ((uint64_t)count + 64) / 64 * sizeof(uint64_t));
+        // Every object's local_map entry is none until a body writes it. An expression may name any object, a global's
+        // included, so every entry is read. #1067 cleared only the bodies' parameters' and locals' entries and marked them
+        // in a bitset that each read tested first; on the 9700X that test cost the lowering more than this fill does
+        // (#877: the lower stage +1.2% at #1067's merge, 3.0 M instructions more for sqlite3.c's -c).
+        memset(shared->local_map, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         // A switch's local is read only at its cases' owner (check_lower_case and the dispatch), after the switch wrote it;
         // a case of an invalid program may read it first, and must find none. So only the owners are cleared, rather
         // than every token (#877).
@@ -13904,10 +13893,6 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             const uint32_t candidate = opening != BUSTER_CHECK_NONE ? shared->opening_bodies[opening] : BUSTER_CHECK_NONE;
             const uint32_t b = candidate < program->body_count && program->bodies[candidate].opening == opening ? candidate : BUSTER_CHECK_NONE;
             shared->local_bodies[token] = b;
-            if (opening != BUSTER_CHECK_NONE)
-            {
-                check_lower_local_keep(shared, input->objects[token], count);
-            }
             if (b != BUSTER_CHECK_NONE)
             {
                 shared->local_start[b + 1] += 1;
@@ -13940,14 +13925,6 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                 const uint32_t k = --shared->local_start[b + 1];
                 shared->local_tokens[k] = token;
                 shared->local_objects[k] = input->objects[token];
-            }
-        }
-        for (uint32_t b = 0; b < program->body_count; b += 1)
-        {
-            const uint32_t opening = program->bodies[b].opening;
-            for (uint32_t parameter = check_sparse_get(input->parameters, opening); parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(input->parameter_next, parameter))
-            {
-                check_lower_local_keep(shared, input->objects[parameter], count);
             }
         }
         // The runtime functions the unit declares, for every writer: each one's symbol is the first declaration's of its
@@ -14023,7 +14000,6 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .type_templates = shared->type_templates,
         .type_count = shared->type_count,
         .local_map = shared->local_map,
-        .locals = shared->locals,
         .switch_locals = shared->switch_locals,
         .vla_identities = shared->vla_identities,
         .save_locals = shared->save_locals,
