@@ -190,6 +190,36 @@ including ordinary function addresses and scalar/vector, eager/lazy headers.
 The object-size attributes currently use conservative unknown bounds, without
 Clang's hidden-parameter ABI ([fortify compatibility](../c-builtins-fortify.md#current-glibcs-clang-wrappers-1361)).
 
+## System-header token bitmap and MSan (#1610)
+
+The source reader maps parser tokens' source indices to system-header bits in
+`check_input_system_token_map`. It clamps indices at or beyond the preprocessor
+output count to the user-file sentinel, gathers the low level byte in groups of
+16 and finishes the tail with the scalar twin. History/run selection, arena
+ownership and the graph's final sentinel remain in `check_input_system_tokens`.
+
+The mapping kernel is deliberately `noinline`. In the pinned LLVM 23.1.4
+([revision 7a941dfb](https://github.com/llvm/llvm-project/blob/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/llvm/lib/Transforms/Instrumentation/MemorySanitizer.cpp#L1480-L1508)),
+MSan switches large functions to callback checks; wide shadows take a temporary
+`alloca` at the check site. Inlining the bitmap loop into the large reader can
+therefore make that temporary consume stack on each iteration. The small
+separate function retains the vector path and every sanitizer check, and
+avoids inheriting the reader's callback threshold. This is a source diagnosis
+consistent with the actual native MSan O3 stack-overflow reports; generated
+instrumented IR/assembly and post-fix sanitizer execution must be checked
+separately. No stack limit or sanitizer suppression changes are involved, and
+no performance improvement is claimed.
+
+`test-checker`'s input-scan section runs `c_check_system_tokens_test.c`: 228
+scalar/vector pairs at lengths 0 through 65, vector boundaries and 2,097,167
+tokens, with output limits 0, 1 and 67. Every byte is compared with independent
+level classes, including both system levels and other byte values. Source
+columns end at protected pages; level padding ends at a protected page; output
+prefixes and sentinels must stay unchanged. This is semantic and memory-boundary
+coverage. A small direct caller alone need not reproduce LLVM's large-function
+threshold. The existing repository-translation-unit checking command is the
+previously failing MSan regression and remains required for crash validation.
+
 ## Object and linkage options (#1124)
 
 The C driver refuses an effective `-ffunction-sections`,

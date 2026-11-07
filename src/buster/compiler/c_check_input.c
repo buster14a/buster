@@ -10650,6 +10650,33 @@ static void check_input_complete_uses(CheckInputReader* reader)
 #include "c_check_x86_input.c"
 #include "c_check_naked_input.c"
 
+// Map the parser's sources to the byte bitmap, with levels[limit] a user-file sentinel and three readable bytes
+// after it. Keep this small function out of check_input_run: LLVM 23.1.4's MSan switches a large function's wide
+// checks to callbacks whose temporary shadows are allocated at the check, which in this loop can grow the stack
+// with the token count. The separate frame retains every check and the vector path (#1610).
+static __attribute__((noinline)) void check_input_system_token_map(uint8_t* tokens, const uint32_t* sources, uint32_t count, const uint8_t* levels, uint32_t limit, bool scalar)
+{
+    (void)scalar;
+
+    uint32_t token = 0;
+    // The vector path, 16 tokens at a time (#529): their sources, clamped, gather four bytes each at their levels,
+    // of which the low one is the level. The loop after it, the scalar path, is its twin, and takes the last tokens.
+    for (; !BUSTER_SCALAR_PATH(scalar) && count - token >= 16; token += 16)
+    {
+        const __m512i source = _mm512_min_epu32(_mm512_loadu_si512(sources + token), _mm512_set1_epi32((int32_t)limit));
+        const __m512i level = _mm512_and_si512(_mm512_i32gather_epi32(source, levels, 1), _mm512_set1_epi32(0xff));
+        const __mmask16 marked = _mm512_cmpeq_epi32_mask(level, _mm512_set1_epi32(BUSTER_PP_SYSTEM_FILE)) |
+                                 _mm512_cmpeq_epi32_mask(level, _mm512_set1_epi32(BUSTER_PP_EXTERN_C_FILE));
+        _mm_storeu_si128((__m128i*)(tokens + token), _mm_maskz_set1_epi8(marked, 1));
+    }
+    for (; token < count; token += 1)
+    {
+        const uint32_t source = sources[token];
+        const uint8_t level = levels[source < limit ? source : limit];
+        tokens[token] = level == BUSTER_PP_SYSTEM_FILE || level == BUSTER_PP_EXTERN_C_FILE;
+    }
+}
+
 // Which tokens are written in a system header, where clang suppresses its warnings that default to errors
 // (BUSTER_CHECK_EXTENSION_SYSTEM_HEADER): the system level of each output token's expansion location, its file and the
 // line notes before it. The preprocessor gives every output token's level from the runs its main loop kept
@@ -10691,23 +10718,7 @@ static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp
         const uint32_t limit = pp->output.count;
         levels[limit] = BUSTER_PP_USER_FILE;
         memset(levels + limit + 1, 0, 3);
-        uint32_t token = 0;
-        // The vector path, 16 tokens at a time (#529): their sources, clamped, gather four bytes each at their levels,
-        // of which the low one is the level. The loop after it, the scalar path, is its twin, and takes the last tokens.
-        for (; !BUSTER_SCALAR_PATH(parser->options.scalar) && count - token >= 16; token += 16)
-        {
-            const __m512i source = _mm512_min_epu32(_mm512_loadu_si512(sources + token), _mm512_set1_epi32((int32_t)limit));
-            const __m512i level = _mm512_and_si512(_mm512_i32gather_epi32(source, levels, 1), _mm512_set1_epi32(0xff));
-            const __mmask16 marked = _mm512_cmpeq_epi32_mask(level, _mm512_set1_epi32(BUSTER_PP_SYSTEM_FILE)) |
-                                     _mm512_cmpeq_epi32_mask(level, _mm512_set1_epi32(BUSTER_PP_EXTERN_C_FILE));
-            _mm_storeu_si128((__m128i*)(tokens + token), _mm_maskz_set1_epi8(marked, 1));
-        }
-        for (; token < count; token += 1)
-        {
-            const uint32_t source = sources[token];
-            const uint8_t level = levels[source < limit ? source : limit];
-            tokens[token] = level == BUSTER_PP_SYSTEM_FILE || level == BUSTER_PP_EXTERN_C_FILE;
-        }
+        check_input_system_token_map(tokens, sources, count, levels, limit, parser->options.scalar);
         tokens[count] = 0;
         graph->system_tokens = tokens;
         graph->system_token_count = count;
