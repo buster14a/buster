@@ -45,6 +45,12 @@ distinct. A compiler run with `GCC_DIAGNOSTICS_LOG` set (even to an empty
 value) executes without cache admission, as its log may be outside the
 caller-declared replay artifacts.
 
+The diagnostic-environment test reads these variables through the test's compiled
+C helper. It checks unset, empty, `dumb` and two distinct nonempty values across
+cache misses, hits and check mode, without a shell supplying its own defaults
+(bash sets an unset `TERM` to `dumb`). The test therefore observes the exact
+environment passed to the tool on hosts whose `sh` is either bash or dash.
+
 A compiler's run (`OracleRun.dependencies`) is traced: it runs under a seccomp
 filter that stops each call of its processes that looks at a path (`open`,
 `stat`, `access`, `readlink`, `execve` and their kin), lists a directory, or

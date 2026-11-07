@@ -1658,6 +1658,7 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
                 .literal_bytes = string->bytes,
                 .literal_size = string->byte_count,
                 .string_pool = true,
+                .mergeable_string = !string->predefined,
             };
             result->reference_offsets[at] = result->reference_count;
             result->reference_counts[at] = 0;
@@ -1725,7 +1726,7 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
             const CheckDataObject* b = dense.objects + i;
             same = a->type == b->type && a->object == b->object && a->initializer == b->initializer && a->token == b->token &&
                    a->initializer_plan == b->initializer_plan && a->literal_bytes == b->literal_bytes && a->literal_size == b->literal_size &&
-                   a->string_pool == b->string_pool && a->alignment_log2 == b->alignment_log2;
+                   a->string_pool == b->string_pool && a->mergeable_string == b->mergeable_string && a->alignment_log2 == b->alignment_log2;
         }
         for (uint32_t object = 0; same && object <= count + 1; object += 1)
         {
@@ -1995,9 +1996,9 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                     check_test_expect(test, calls == expected, "ordinary library folds leave only the true overload's call on both paths");
                 }
             }
-            if (strcmp(name, "bits-classic-boundary-values") == 0)
+            if (strcmp(name, "bits-classic-boundary-values") == 0 || strcmp(name, "bits-generic-boundary-values") == 0)
             {
-                // The classic bit builtins' rows (#1374, check_lower_bits_row): each count's form the target's, on both paths.
+                // The classic and generic/C23 bit builtins' rows (#1374/#1652): each count's form the target's, on both paths.
                 const uint64_t features = target != NULL ? target->features : 0;
                 static const uint16_t forms[][2] = {
                     { X86_FORM_TZCNT_R32_RM32, X86_FORM_TZCNT_R64_RM64 }, { X86_FORM_BSF_R32_RM32, X86_FORM_BSF_R64_RM64 },
@@ -2031,7 +2032,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                     {
                         exact &= expected[f] ? found[f][0] != 0 && found[f][1] != 0 : found[f][0] == 0 && found[f][1] == 0;
                     }
-                    check_test_expect(test, exact, "the classic bit builtins' rows are the target's forms, of both widths, on both paths");
+                    check_test_expect(test, exact, "the bit builtins' rows are the target's forms, of both widths, on both paths");
                 }
             }
             if (strcmp(name, "overflow-instruction-rows") == 0)
@@ -3059,12 +3060,60 @@ static void check_test_program_return_marks(CheckTest* test)
         const CheckStream stream = { .dense_values = values };
         const CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input,
                                        .stream = &stream, .object_count = 2 };
-        check_test_expect(test, check_program_return_call(&program, 1, NULL) == BUSTER_CHECK_RETURN_UNKNOWN,
+        check_test_expect(test, check_program_return_call(&program, 1, NULL, NULL) == BUSTER_CHECK_RETURN_UNKNOWN,
                           "a call without optional source declaration bindings remains conservative");
     }
 
     arena_release(&scratch);
     check_test_types_close(&types);
+}
+
+// #1709: the return flow reads a byte per interned name instead of searching the catalogue for each call. Its table is
+// exactly the catalogue's entries with the 'r' attribute, and over every catalogue name, near misses and the
+// predefined names, the bytes equal the search's answers.
+static void check_test_program_return_library(CheckTest* test)
+{
+    uint32_t matched = 0;
+    bool ordered = true;
+    for (uint32_t i = 0; i < BUSTER_BUILTIN_INTRINSIC_COUNT; i += 1)
+    {
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_infos + i;
+        const bool listed = memchr(info->attributes, 'r', info->attributes_length) != NULL;
+        const BuiltinIntrinsicName* entry = listed && matched < BUSTER_ARRAY_LENGTH(check_program_return_library_entries) ?
+                                            check_program_return_library_entries + matched : NULL;
+        ordered = ordered && (!listed || (entry != NULL && entry->length == info->name_length && memcmp(entry->name, info->name, entry->length) == 0));
+        matched += listed ? 1 : 0;
+    }
+    check_test_expect(test, ordered && matched == BUSTER_ARRAY_LENGTH(check_program_return_library_entries),
+                      "the return flow's library names are exactly the catalogue's entries with the 'r' attribute");
+    InternTable identifiers = { 0 };
+    Arena scratch = arena_reserve(UINT64_C(1) << 20);
+    bool ready = scratch.base != NULL && intern_initialize(&identifiers);
+    static const char* const misses[] = { "exi", "exits", "abort_", "longjm", "_Exit_", "main", "" };
+    for (uint32_t i = 0; ready && i < BUSTER_BUILTIN_INTRINSIC_COUNT; i += 1)
+    {
+        ready = intern_find_or_add(&identifiers, (const uint8_t*)builtin_intrinsic_infos[i].name, builtin_intrinsic_infos[i].name_length) != 0;
+    }
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(misses) - 1; i += 1)
+    {
+        ready = intern_find_or_add(&identifiers, (const uint8_t*)misses[i], (uint32_t)strlen(misses[i])) != 0;
+    }
+    const uint8_t* names = ready ? check_program_return_library_names(&identifiers, &scratch) : NULL;
+    check_test_expect(test, names != NULL, "the return flow's library-name fixture interns the catalogue");
+    uint32_t equal = 0;
+    uint32_t unknown = 0;
+    for (uint32_t id = 1; names != NULL && id < identifiers.count; id += 1)
+    {
+        equal += names[id] == check_program_return_library_search(&identifiers, id) ? 1 : 0;
+        unknown += names[id] == BUSTER_CHECK_RETURN_UNKNOWN ? 1 : 0;
+    }
+    check_test_expect(test, names != NULL && equal == identifiers.count - 1 && unknown == BUSTER_ARRAY_LENGTH(check_program_return_library_entries) && names[0] == 0,
+                      "each interned name's return-flow byte equals the catalogue search's answer");
+    Arena empty = { 0 };
+    check_test_expect(test, check_program_return_library_names(NULL, &scratch) == NULL && check_program_return_library_names(&identifiers, &empty) == NULL,
+                      "without identifiers or room the return flow searches, as before");
+    intern_release(&identifiers);
+    arena_release(&scratch);
 }
 
 #include "c_check_program_batch_test.c"
@@ -3483,6 +3532,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     {
         check_test_program_array_alignment(test, clang);
         check_test_program_return_marks(test);
+        check_test_program_return_library(test);
         check_test_literal_tables(test, clang);
         check_test_program_builtin_scratch(test, clang);
         check_test_program_copies(test, clang);
@@ -4030,6 +4080,22 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "unsigned long mask=((unsigned long)&x&31)|((unsigned long)page&4095)|((unsigned long)&s&63)|((unsigned long)&d&15)|((unsigned long)&e&31);"
             "x+=7;d*=3;return x+page[0]+page[99]+s.a+(int)s.b+(int)d+(int)e+(int)mask*1000;}",
             "objects-aligned-past-16", clang);
+        // x86's force_align_arg_pointer (#1447, Tier0Function.realign_stack): a function entered with rsp 8 bytes off a call's
+        // alignment (an inline asm call that aligns rsp below the red zone, then moves it by 8) realigns its frame, so that
+        // an object aligned to 16 is; with a call of its own and with a variable-length array (a realigned frame with a
+        // base, r15). Without the attribute, such an object's address is 8 bytes off.
+        check_test_program_source(test,
+            "__attribute__((force_align_arg_pointer)) static unsigned long leaf(void){_Alignas(16) char b[16];b[0]=1;"
+            "__asm__ volatile(\"\"::\"r\"(b):\"memory\");return ((unsigned long)b&15)+b[0];}"
+            "__attribute__((force_align_arg_pointer)) static unsigned long calls(void){_Alignas(16) char b[16];b[0]=2;"
+            "__asm__ volatile(\"\"::\"r\"(b):\"memory\");return leaf()*100+((unsigned long)b&15)+b[0];}"
+            "__attribute__((force_align_arg_pointer)) static unsigned long vla(void){volatile int k=5;char v[k];_Alignas(16) char b[16];v[0]=3;b[0]=4;"
+            "__asm__ volatile(\"\"::\"r\"(b),\"r\"(v):\"memory\");return ((unsigned long)b&15)+v[0]+b[0];}"
+            "static unsigned long misaligned(unsigned long (*f)(void)){unsigned long r;"
+            "__asm__ volatile(\"movq %%rsp, %%rbx\\n\\tsubq $128, %%rsp\\n\\tandq $-16, %%rsp\\n\\tsubq $8, %%rsp\\n\\tcallq *%1\\n\\tmovq %%rbx, %%rsp\""
+            ":\"=a\"(r):\"r\"(f):\"rbx\",\"rcx\",\"rdx\",\"rsi\",\"rdi\",\"r8\",\"r9\",\"r10\",\"r11\",\"memory\",\"cc\");return r;}"
+            "int tested(int n){return (int)(misaligned(leaf)+misaligned(calls)*1000+misaligned(vla)*100000+leaf()+calls()+vla())+n;}",
+            "force-align-arg-pointer", clang);
         // Variable-length arrays aligned past 16 bytes (their storage rounded up within a larger allocation), beside a fixed
         // object aligned to 128 (a realigned frame with a base, r15, since the arrays move rsp), across calls with stack
         // arguments whose outgoing area the allocations keep aligned.

@@ -674,6 +674,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
                 .literal_bytes = string->bytes,
                 .literal_size = string->byte_count,
                 .string_pool = true,
+                .mergeable_string = !string->predefined,
             };
             result->reference_offsets[at] = result->reference_count;
             result->reference_counts[at] = 0;

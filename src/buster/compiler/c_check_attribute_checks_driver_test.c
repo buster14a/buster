@@ -2,7 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // clang's checks-only attributes (#1447): availability, external_source_symbol, enforce_tcb, enforce_tcb_leaf, callback,
-// swift_async, ns_error_domain, objc_ownership, objc_gc and modular_format, by the driver against clang, on original
+// swift_async, ns_error_domain, objc_ownership, objc_gc and modular_format, and force_align_arg_pointer's subjects (whose
+// code c_check_program_test.c's run tests), by the driver against clang, on original
 // fixtures: each unit's whole output (diagnostics, their places, their order and the attribute as each message names it)
 // must be clang's by both paths, in GNU C23. Valid uses, wrong subjects and wrong arguments for each, their handlers'
 // checks, availability's merges across redeclarations, -Wtcb-enforcement's calls, and objc_gc's and objc_ownership's types
@@ -644,6 +645,23 @@ static void check_test_driver_checks_attributes(CheckTest* test, const char* cla
         "#define __weak __attribute__((objc_gc(weak)))\n#define B __weak\nB int x;\n",
         "#define O __attribute__((objc_gc(foo)))\nO int *p;\n",
         "#define O __attribute__((objc_gc(none)))\nO int *p;\n",
+        // x86's force_align_arg_pointer (#1447): a function's, before its definition and after it (clang's warning that
+        // ignores it, with its note); silent on a function pointer (a variable's, a parameter's, a member's) and a typedef
+        // of a function's type or of a pointer to one; a variable's, a tag's, a member's, a parameter's and a local's
+        // subject warning; its argument's error; and gnu::'s spelling.
+        "__attribute__((force_align_arg_pointer)) void f(void);\nvoid f(void) {}\n",
+        "void f(void) __attribute__((force_align_arg_pointer));\nvoid f(void) {}\n",
+        "void m(void) {}\nvoid m(void) __attribute__((force_align_arg_pointer));\n",
+        "__attribute__((force_align_arg_pointer)) int v;\n",
+        "__attribute__((force_align_arg_pointer)) void (*fp)(void);\n",
+        "typedef void (*FP)(void) __attribute__((force_align_arg_pointer));\n",
+        "typedef void F(void) __attribute__((force_align_arg_pointer));\n",
+        "struct __attribute__((force_align_arg_pointer)) S { int a; };\n",
+        "struct S { void (*m)(void) __attribute__((force_align_arg_pointer)); int x __attribute__((force_align_arg_pointer)); };\n",
+        "void g(int p __attribute__((force_align_arg_pointer)), void (*q)(void) __attribute__((force_align_arg_pointer)));\n",
+        "void k(void) { __attribute__((force_align_arg_pointer)) int local; (void)local; }\n",
+        "void f(void) __attribute__((force_align_arg_pointer(1)));\n",
+        "[[gnu::force_align_arg_pointer]] void h(void);\n",
     };
     // Units whose warnings each option set below changes.
     static const char* const flagged[] = {
@@ -654,6 +672,7 @@ static void check_test_driver_checks_attributes(CheckTest* test, const char* cla
         "__attribute__((objc_ownership(none))) int *p;\n",
         "__attribute__((objc_gc(foo))) int *p;\n",
         "__attribute__((objc_gc(weak))) int x;\n",
+        "__attribute__((force_align_arg_pointer)) int v;\n",
         "void g(void);\n__attribute__((enforce_tcb(\"x\"))) void f(void) { g(); }\n__attribute__((availability(macos, introduced=17))) void h(void);\n",
     };
     static const char* const options[] = {

@@ -10,8 +10,9 @@
 // its width, and read back as one I128 or U128 value.
 //
 // The recipes compute on U64 temporaries, a value zero-extended from its width, as clang's code computes on its iN:
-// popcounts and bit counts by SWAR (cbuiltin_lower_popcount, a smear for the leading zeros), reversals by masked swaps
-// of halves, and selections by multiplying with a compare's 0 or 1, without branches. A wide value counts limb by limb
+// popcounts and bit counts by the producer's target-specific rows (CBuiltinBitsRows), or by SWAR without rows,
+// reversals by masked swaps of halves, and selections by multiplying with a compare's 0 or 1, without branches.
+// A wide value counts limb by limb
 // (the second limb's count added where the first limb is zero), reverses and swaps its bytes limb by limb, the limbs then
 // exchanged and shifted down past its width, and rotates by 128-bit shifts of variable counts: each limb shifted by the
 // count's part below 64, the bits that cross between them carried (shifted by one, then by 63 less the part, so that a
@@ -23,6 +24,49 @@
 // leave the width for zero, which clang's code leaves undefined.
 #ifndef BUSTER_C_BUILTIN_BITS_LOWER_INCLUDED
 #define BUSTER_C_BUILTIN_BITS_LOWER_INCLUDED
+
+// Optional primitive rows published by the source producer: the selected operation's 32- and 64-bit forms,
+// respectively, each a function-local operation index plus one (0 retains the baseline recipe). Both operand and
+// result have that width's unsigned class. Counts are popcnt, bsf/tzcnt or bsr/lzcnt; byte swaps are mov and bswap.
+// zero_counts distinguishes tzcnt/lzcnt, whose zero result is the machine width, from bsf/bsr, whose zero is undefined.
+// The rows outlive the append; publication copies only their indices, in the same scalar/vector transaction as any recipe.
+typedef struct CBuiltinBitsRows CBuiltinBitsRows;
+struct CBuiltinBitsRows
+{
+    uint32_t indices[2];
+    bool zero_counts;
+};
+
+// Apply the chosen row to the U64 value on the stack, leaving a U64 value. A narrow row reads its low 32 bits only.
+static void cbuiltin_bits_row(CBuiltinLowerRecipe* recipe, uint32_t width, const CBuiltinBitsRows* rows)
+{
+    const bool wide = width > 32;
+    const uint32_t class = wide ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_U32;
+    const uint32_t index = rows->indices[wide] - 1;
+    if (!wide)
+    {
+        cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, class, 0);
+    }
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_X86, class, index);
+    if (!wide)
+    {
+        cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+    }
+}
+
+static void cbuiltin_bits_popcount(CBuiltinLowerRecipe* recipe, uint32_t x, uint32_t temporary, uint32_t width, const CBuiltinBitsRows* rows)
+{
+    if (rows->indices[width > 32] != 0)
+    {
+        cbuiltin_lower_local(recipe, x);
+        cbuiltin_bits_row(recipe, width, rows);
+        cbuiltin_lower_set(recipe, x);
+    }
+    else
+    {
+        cbuiltin_lower_popcount(recipe, x, temporary);
+    }
+}
 
 // A descriptor's width: BUSTER_CBUILTIN_LOWER_WIDE's 128.
 static uint32_t cbuiltin_bits_width(uint32_t type)
@@ -125,45 +169,105 @@ static void cbuiltin_bits_smear(CBuiltinLowerRecipe* recipe, uint32_t x, uint32_
 }
 
 // x's leading zeros in `width` bits, the width for 0.
-static void cbuiltin_bits_leading(CBuiltinLowerRecipe* recipe, uint32_t x, uint32_t temporary, uint32_t width)
+static void cbuiltin_bits_leading(CBuiltinLowerRecipe* recipe, uint32_t x, uint32_t temporary, uint32_t width, const CBuiltinBitsRows* rows)
 {
-    cbuiltin_bits_smear(recipe, x, temporary, width);
-    cbuiltin_lower_popcount(recipe, x, temporary);
-    cbuiltin_lower_constant(recipe, width);
-    cbuiltin_lower_local(recipe, x);
-    cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
+    if (rows->indices[width > 32] != 0)
+    {
+        const uint32_t machine_width = width > 32 ? 64 : 32;
+        if (rows->zero_counts)
+        {
+            cbuiltin_lower_local(recipe, x);
+            cbuiltin_bits_row(recipe, width, rows);
+            if (width != machine_width)
+            {
+                cbuiltin_lower_constant(recipe, machine_width - width);
+                cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
+            }
+        }
+        else
+        {
+            // bsr must never read zero, including in the IR interpreter. Setting bit 0 preserves every nonzero
+            // operand's highest bit; for zero it gives index 0, whose width - 1 needs one more.
+            cbuiltin_lower_constant(recipe, width - 1);
+            cbuiltin_lower_local(recipe, x);
+            cbuiltin_lower_constant(recipe, 1);
+            cbuiltin_lower_operation(recipe, BUSTER_TYPED_OR);
+            cbuiltin_bits_row(recipe, width, rows);
+            cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
+            cbuiltin_lower_local(recipe, x);
+            cbuiltin_lower_constant(recipe, 0);
+            cbuiltin_lower_operation(recipe, BUSTER_TYPED_EQ);
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+            cbuiltin_lower_operation(recipe, BUSTER_TYPED_ADD);
+        }
+    }
+    else
+    {
+        cbuiltin_bits_smear(recipe, x, temporary, width);
+        cbuiltin_lower_popcount(recipe, x, temporary);
+        cbuiltin_lower_constant(recipe, width);
+        cbuiltin_lower_local(recipe, x);
+        cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
+    }
     cbuiltin_lower_set(recipe, x);
 }
 
 // x's trailing zeros in `width` bits, the width for 0: the ones below its lowest set bit, counted.
-static void cbuiltin_bits_trailing(CBuiltinLowerRecipe* recipe, uint32_t x, uint32_t temporary, uint32_t width)
+static void cbuiltin_bits_trailing(CBuiltinLowerRecipe* recipe, uint32_t x, uint32_t temporary, uint32_t width, const CBuiltinBitsRows* rows)
 {
-    cbuiltin_lower_immediate(recipe, temporary, BUSTER_TYPED_SUB, x, 1);
-    cbuiltin_lower_local(recipe, x);
-    cbuiltin_lower_operation(recipe, BUSTER_TYPED_NOT);
-    cbuiltin_lower_local(recipe, temporary);
-    cbuiltin_lower_operation(recipe, BUSTER_TYPED_AND);
-    cbuiltin_bits_mask(recipe, width);
-    cbuiltin_lower_set(recipe, x);
-    cbuiltin_lower_popcount(recipe, x, temporary);
+    if (rows->indices[width > 32] != 0)
+    {
+        const uint32_t machine_width = width > 32 ? 64 : 32;
+        const bool zero_counts = rows->zero_counts;
+        cbuiltin_lower_local(recipe, x);
+        if (width < machine_width || !zero_counts)
+        {
+            // A sentinel just above a narrow value gives its width for zero. A full-width bsf uses the top bit
+            // instead and adds one only for zero, so the intrinsic always has a defined nonzero operand.
+            const uint32_t bit = width < machine_width ? width : width - 1;
+            cbuiltin_lower_constant(recipe, UINT64_C(1) << bit);
+            cbuiltin_lower_operation(recipe, BUSTER_TYPED_OR);
+        }
+        cbuiltin_bits_row(recipe, width, rows);
+        if (width == machine_width && !zero_counts)
+        {
+            cbuiltin_lower_local(recipe, x);
+            cbuiltin_lower_constant(recipe, 0);
+            cbuiltin_lower_operation(recipe, BUSTER_TYPED_EQ);
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+            cbuiltin_lower_operation(recipe, BUSTER_TYPED_ADD);
+        }
+        cbuiltin_lower_set(recipe, x);
+    }
+    else
+    {
+        cbuiltin_lower_immediate(recipe, temporary, BUSTER_TYPED_SUB, x, 1);
+        cbuiltin_lower_local(recipe, x);
+        cbuiltin_lower_operation(recipe, BUSTER_TYPED_NOT);
+        cbuiltin_lower_local(recipe, temporary);
+        cbuiltin_lower_operation(recipe, BUSTER_TYPED_AND);
+        cbuiltin_bits_mask(recipe, width);
+        cbuiltin_lower_set(recipe, x);
+        cbuiltin_lower_popcount(recipe, x, temporary);
+    }
 }
 
 // A wide value's leading (or trailing) zeros in `width` bits, in a new temporary: the first limb's (the high one's of
 // width - 64 bits, or the low one's), plus the second's where the first is zero, the width for 0.
-static uint32_t cbuiltin_bits_count_wide(CBuiltinLowerRecipe* recipe, uint32_t low, uint32_t high, uint32_t width, bool trailing)
+static uint32_t cbuiltin_bits_count_wide(CBuiltinLowerRecipe* recipe, uint32_t low, uint32_t high, uint32_t width, bool trailing, const CBuiltinBitsRows* rows)
 {
     const uint32_t first = cbuiltin_bits_copy(recipe, trailing ? low : high);
     const uint32_t second = cbuiltin_bits_copy(recipe, trailing ? high : low);
     const uint32_t temporary = cbuiltin_lower_temporary(recipe);
     if (trailing)
     {
-        cbuiltin_bits_trailing(recipe, first, temporary, 64);
-        cbuiltin_bits_trailing(recipe, second, temporary, width - 64);
+        cbuiltin_bits_trailing(recipe, first, temporary, 64, rows);
+        cbuiltin_bits_trailing(recipe, second, temporary, width - 64, rows);
     }
     else
     {
-        cbuiltin_bits_leading(recipe, first, temporary, width - 64);
-        cbuiltin_bits_leading(recipe, second, temporary, 64);
+        cbuiltin_bits_leading(recipe, first, temporary, width - 64, rows);
+        cbuiltin_bits_leading(recipe, second, temporary, 64, rows);
     }
     cbuiltin_lower_local(recipe, first);
     cbuiltin_lower_local(recipe, second);
@@ -210,7 +314,7 @@ static void cbuiltin_bits_fallback(CBuiltinLowerRecipe* recipe, uint32_t x, uint
 
 // x's halves of `first` bits and up swapped within each lane of `width` bits: a power of two's swaps of halves smaller
 // than it leave its lanes reversed in place; another width's are those of 64 bits, then shifted down.
-static void cbuiltin_bits_swaps(CBuiltinLowerRecipe* recipe, uint32_t x, uint32_t temporary, uint32_t width, uint32_t first)
+static void cbuiltin_bits_swaps(CBuiltinLowerRecipe* recipe, uint32_t x, uint32_t temporary, uint32_t width, uint32_t first, const CBuiltinBitsRows* rows)
 {
     static const uint64_t masks[6] = {
         UINT64_C(0x5555555555555555),
@@ -220,32 +324,47 @@ static void cbuiltin_bits_swaps(CBuiltinLowerRecipe* recipe, uint32_t x, uint32_
         UINT64_C(0x0000ffff0000ffff),
         UINT64_C(0x00000000ffffffff),
     };
-    const bool power = (width & (width - 1)) == 0;
-    for (uint32_t stage = first; stage < 6 && (!power || (1u << stage) < width); stage += 1)
+    if (first == 3 && rows->indices[width > 32] != 0)
     {
-        const uint32_t shift = 1u << stage;
-        cbuiltin_lower_immediate(recipe, temporary, BUSTER_TYPED_SHR, x, shift);
-        cbuiltin_lower_immediate(recipe, temporary, BUSTER_TYPED_AND, temporary, masks[stage]);
-        cbuiltin_lower_immediate(recipe, x, BUSTER_TYPED_AND, x, masks[stage]);
-        cbuiltin_lower_immediate(recipe, x, BUSTER_TYPED_SHL, x, shift);
-        cbuiltin_lower_binary(recipe, x, BUSTER_TYPED_OR, x, temporary);
+        const uint32_t machine_width = width > 32 ? 64 : 32;
+        cbuiltin_lower_local(recipe, x);
+        cbuiltin_bits_row(recipe, width, rows);
+        if (width != machine_width)
+        {
+            cbuiltin_lower_constant(recipe, machine_width - width);
+            cbuiltin_lower_operation(recipe, BUSTER_TYPED_SHR);
+        }
+        cbuiltin_lower_set(recipe, x);
     }
-    if (!power)
+    else
     {
-        cbuiltin_lower_immediate(recipe, x, BUSTER_TYPED_SHR, x, 64 - width);
+        const bool power = (width & (width - 1)) == 0;
+        for (uint32_t stage = first; stage < 6 && (!power || (1u << stage) < width); stage += 1)
+        {
+            const uint32_t shift = 1u << stage;
+            cbuiltin_lower_immediate(recipe, temporary, BUSTER_TYPED_SHR, x, shift);
+            cbuiltin_lower_immediate(recipe, temporary, BUSTER_TYPED_AND, temporary, masks[stage]);
+            cbuiltin_lower_immediate(recipe, x, BUSTER_TYPED_AND, x, masks[stage]);
+            cbuiltin_lower_immediate(recipe, x, BUSTER_TYPED_SHL, x, shift);
+            cbuiltin_lower_binary(recipe, x, BUSTER_TYPED_OR, x, temporary);
+        }
+        if (!power)
+        {
+            cbuiltin_lower_immediate(recipe, x, BUSTER_TYPED_SHR, x, 64 - width);
+        }
     }
 }
 
 // A wide value's limbs, reversed (or byte swapped) whole: each limb's swaps (cbuiltin_bits_swaps of 64 bits from stage
 // `first`), the limbs exchanged, then the 128 bits shifted down past the value's width.
-static void cbuiltin_bits_reverse_wide(CBuiltinLowerRecipe* recipe, uint32_t* low, uint32_t* high, uint32_t width, uint32_t first)
+static void cbuiltin_bits_reverse_wide(CBuiltinLowerRecipe* recipe, uint32_t* low, uint32_t* high, uint32_t width, uint32_t first, const CBuiltinBitsRows* rows)
 {
     const uint32_t temporary = cbuiltin_lower_temporary(recipe);
     const uint32_t reversed_low = *high;
     const uint32_t reversed_high = *low;
     const uint32_t shift = 128 - width;
-    cbuiltin_bits_swaps(recipe, reversed_low, temporary, 64, first);
-    cbuiltin_bits_swaps(recipe, reversed_high, temporary, 64, first);
+    cbuiltin_bits_swaps(recipe, reversed_low, temporary, 64, first, rows);
+    cbuiltin_bits_swaps(recipe, reversed_high, temporary, 64, first, rows);
     if (shift != 0)
     {
         cbuiltin_lower_local(recipe, reversed_low);
@@ -511,7 +630,7 @@ static bool cbuiltin_bits_inverted(CBuiltinId id)
 // A builtin of a wide first operand (65 to 128 bits), limb by limb: a count leaves its result's class, a value (a
 // reversal, a byte swap, bit_floor, bit_ceil, a rotation) is written to `object` and read back.
 static void cbuiltin_bits_wide(CBuiltinLowerRecipe* recipe, CBuiltinId id, const uint32_t* arguments, const uint32_t* types, uint32_t count, uint32_t result,
-                               uint32_t object)
+                               uint32_t object, const CBuiltinBitsRows* rows)
 {
     const uint32_t width = cbuiltin_bits_width(types[0]);
     const bool leading = id == CBUILTIN_CLZG || id == CBUILTIN_STDC_LEADING_ZEROS || id == CBUILTIN_STDC_LEADING_ONES ||
@@ -530,7 +649,7 @@ static void cbuiltin_bits_wide(CBuiltinLowerRecipe* recipe, CBuiltinId id, const
     if (leading || trailing)
     {
         const uint32_t either = first || count == 2 ? cbuiltin_bits_either(recipe, low, high) : UINT32_MAX;
-        const uint32_t x = cbuiltin_bits_count_wide(recipe, low, high, width, trailing);
+        const uint32_t x = cbuiltin_bits_count_wide(recipe, low, high, width, trailing, rows);
         if (id == CBUILTIN_STDC_BIT_WIDTH)
         {
             cbuiltin_lower_constant(recipe, width);
@@ -551,8 +670,8 @@ static void cbuiltin_bits_wide(CBuiltinLowerRecipe* recipe, CBuiltinId id, const
     else if (id == CBUILTIN_POPCOUNTG || id == CBUILTIN_STDC_COUNT_ONES || id == CBUILTIN_STDC_COUNT_ZEROS || id == CBUILTIN_STDC_HAS_SINGLE_BIT)
     {
         const uint32_t temporary = cbuiltin_lower_temporary(recipe);
-        cbuiltin_lower_popcount(recipe, low, temporary);
-        cbuiltin_lower_popcount(recipe, high, temporary);
+        cbuiltin_bits_popcount(recipe, low, temporary, 64, rows);
+        cbuiltin_bits_popcount(recipe, high, temporary, width - 64, rows);
         cbuiltin_lower_binary(recipe, low, BUSTER_TYPED_ADD, low, high);
         if (id == CBUILTIN_STDC_COUNT_ZEROS)
         {
@@ -577,7 +696,7 @@ static void cbuiltin_bits_wide(CBuiltinLowerRecipe* recipe, CBuiltinId id, const
         uint32_t result_high = high;
         if (id == CBUILTIN_BITREVERSEG || id == CBUILTIN_BSWAPG)
         {
-            cbuiltin_bits_reverse_wide(recipe, &result_low, &result_high, width, id == CBUILTIN_BSWAPG ? 3 : 0);
+            cbuiltin_bits_reverse_wide(recipe, &result_low, &result_high, width, id == CBUILTIN_BSWAPG ? 3 : 0, rows);
         }
         else if (id == CBUILTIN_STDC_BIT_FLOOR || id == CBUILTIN_STDC_BIT_CEIL)
         {
@@ -596,7 +715,7 @@ static void cbuiltin_bits_wide(CBuiltinLowerRecipe* recipe, CBuiltinId id, const
                 cbuiltin_lower_binary(recipe, low, BUSTER_TYPED_SUB, low, nonzero);
                 cbuiltin_lower_binary(recipe, high, BUSTER_TYPED_SUB, high, borrow);
             }
-            const uint32_t k = cbuiltin_bits_count_wide(recipe, low, high, width, false);
+            const uint32_t k = cbuiltin_bits_count_wide(recipe, low, high, width, false, rows);
             cbuiltin_lower_constant(recipe, id == CBUILTIN_STDC_BIT_CEIL ? width : width - 1);
             cbuiltin_lower_local(recipe, k);
             cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
@@ -634,10 +753,27 @@ static void cbuiltin_bits_wide(CBuiltinLowerRecipe* recipe, CBuiltinId id, const
     }
 }
 
+// The bit at x in a value of `width` bits, or 0 when x is outside it. The shift count stays below 64 even for a zero
+// bit_floor's wrapped index or a full-width bit_ceil's overflow; neither the typed nor the IR interpreter sees an undefined shift.
+static void cbuiltin_bits_one(CBuiltinLowerRecipe* recipe, uint32_t x, uint32_t width)
+{
+    cbuiltin_lower_constant(recipe, 1);
+    cbuiltin_lower_local(recipe, x);
+    cbuiltin_lower_constant(recipe, 63);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_AND);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_SHL);
+    cbuiltin_lower_local(recipe, x);
+    cbuiltin_lower_constant(recipe, width);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_LT);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_MUL);
+    cbuiltin_lower_set(recipe, x);
+}
+
 // A bit builtin's recipe, from `count` arguments' locals and descriptors, of the result's descriptor `result` (a wide
 // one's value through `object`).
 static void cbuiltin_bits_recipe(CBuiltinLowerRecipe* recipe, CBuiltinId builtin, const uint32_t* arguments, const uint32_t* types, uint32_t count, uint32_t result,
-                                 uint32_t object)
+                                 uint32_t object, const CBuiltinBitsRows* rows)
 {
     // A stdc library builtin (stdc_leading_zeros_ui) is its generic builtin's of the argument its check converted to its
     // parameter's type.
@@ -649,7 +785,7 @@ static void cbuiltin_bits_recipe(CBuiltinLowerRecipe* recipe, CBuiltinId builtin
     }
     else if (width > 64)
     {
-        cbuiltin_bits_wide(recipe, id, arguments, types, count, result, object);
+        cbuiltin_bits_wide(recipe, id, arguments, types, count, result, object, rows);
     }
     else
     {
@@ -665,11 +801,11 @@ static void cbuiltin_bits_recipe(CBuiltinLowerRecipe* recipe, CBuiltinId builtin
             case CBUILTIN_BITREVERSE16:
             case CBUILTIN_BITREVERSE32:
             case CBUILTIN_BITREVERSE64:
-            case CBUILTIN_BITREVERSEG: cbuiltin_bits_swaps(recipe, x, temporary, width, 0); break;
+            case CBUILTIN_BITREVERSEG: cbuiltin_bits_swaps(recipe, x, temporary, width, 0, rows); break;
             case CBUILTIN_BSWAPG:
                 if (width % 16 == 0)
                 {
-                    cbuiltin_bits_swaps(recipe, x, temporary, width, 3);
+                    cbuiltin_bits_swaps(recipe, x, temporary, width, 3, rows);
                 }
                 break;
             case CBUILTIN_CLRSB:
@@ -684,7 +820,7 @@ static void cbuiltin_bits_recipe(CBuiltinLowerRecipe* recipe, CBuiltinId builtin
                 cbuiltin_bits_mask(recipe, width);
                 cbuiltin_lower_set(recipe, temporary);
                 cbuiltin_lower_binary(recipe, x, BUSTER_TYPED_XOR, x, temporary);
-                cbuiltin_bits_leading(recipe, x, temporary, width);
+                cbuiltin_bits_leading(recipe, x, temporary, width, rows);
                 cbuiltin_lower_immediate(recipe, x, BUSTER_TYPED_SUB, x, 1);
                 break;
             case CBUILTIN_CLZS:
@@ -695,11 +831,11 @@ static void cbuiltin_bits_recipe(CBuiltinLowerRecipe* recipe, CBuiltinId builtin
                 const uint32_t copy = count == 2 ? cbuiltin_bits_copy(recipe, x) : 0;
                 if (id == CBUILTIN_CLZS || id == CBUILTIN_CLZG)
                 {
-                    cbuiltin_bits_leading(recipe, x, temporary, width);
+                    cbuiltin_bits_leading(recipe, x, temporary, width, rows);
                 }
                 else
                 {
-                    cbuiltin_bits_trailing(recipe, x, temporary, width);
+                    cbuiltin_bits_trailing(recipe, x, temporary, width, rows);
                 }
                 if (count == 2)
                 {
@@ -708,18 +844,18 @@ static void cbuiltin_bits_recipe(CBuiltinLowerRecipe* recipe, CBuiltinId builtin
                 break;
             }
             case CBUILTIN_POPCOUNTG:
-            case CBUILTIN_STDC_COUNT_ONES: cbuiltin_lower_popcount(recipe, x, temporary); break;
+            case CBUILTIN_STDC_COUNT_ONES: cbuiltin_bits_popcount(recipe, x, temporary, width, rows); break;
             case CBUILTIN_STDC_COUNT_ZEROS:
-                cbuiltin_lower_popcount(recipe, x, temporary);
+                cbuiltin_bits_popcount(recipe, x, temporary, width, rows);
                 cbuiltin_lower_constant(recipe, width);
                 cbuiltin_lower_local(recipe, x);
                 cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
                 cbuiltin_lower_set(recipe, x);
                 break;
             case CBUILTIN_STDC_LEADING_ZEROS:
-            case CBUILTIN_STDC_LEADING_ONES: cbuiltin_bits_leading(recipe, x, temporary, width); break;
+            case CBUILTIN_STDC_LEADING_ONES: cbuiltin_bits_leading(recipe, x, temporary, width, rows); break;
             case CBUILTIN_STDC_TRAILING_ZEROS:
-            case CBUILTIN_STDC_TRAILING_ONES: cbuiltin_bits_trailing(recipe, x, temporary, width); break;
+            case CBUILTIN_STDC_TRAILING_ONES: cbuiltin_bits_trailing(recipe, x, temporary, width, rows); break;
             case CBUILTIN_STDC_FIRST_LEADING_ZERO:
             case CBUILTIN_STDC_FIRST_LEADING_ONE:
             case CBUILTIN_STDC_FIRST_TRAILING_ZERO:
@@ -728,17 +864,17 @@ static void cbuiltin_bits_recipe(CBuiltinLowerRecipe* recipe, CBuiltinId builtin
                 const uint32_t copy = cbuiltin_bits_copy(recipe, x);
                 if (id == CBUILTIN_STDC_FIRST_LEADING_ZERO || id == CBUILTIN_STDC_FIRST_LEADING_ONE)
                 {
-                    cbuiltin_bits_leading(recipe, x, temporary, width);
+                    cbuiltin_bits_leading(recipe, x, temporary, width, rows);
                 }
                 else
                 {
-                    cbuiltin_bits_trailing(recipe, x, temporary, width);
+                    cbuiltin_bits_trailing(recipe, x, temporary, width, rows);
                 }
                 cbuiltin_bits_position(recipe, x, copy);
                 break;
             }
             case CBUILTIN_STDC_HAS_SINGLE_BIT:
-                cbuiltin_lower_popcount(recipe, x, temporary);
+                cbuiltin_bits_popcount(recipe, x, temporary, width, rows);
                 cbuiltin_lower_local(recipe, x);
                 cbuiltin_lower_constant(recipe, 1);
                 cbuiltin_lower_operation(recipe, BUSTER_TYPED_EQ);
@@ -746,17 +882,40 @@ static void cbuiltin_bits_recipe(CBuiltinLowerRecipe* recipe, CBuiltinId builtin
                 cbuiltin_lower_set(recipe, x);
                 break;
             case CBUILTIN_STDC_BIT_WIDTH:
-                cbuiltin_bits_smear(recipe, x, temporary, width);
-                cbuiltin_lower_popcount(recipe, x, temporary);
+                if (rows->indices[width > 32] != 0)
+                {
+                    cbuiltin_bits_leading(recipe, x, temporary, width, rows);
+                    cbuiltin_lower_constant(recipe, width);
+                    cbuiltin_lower_local(recipe, x);
+                    cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
+                    cbuiltin_lower_set(recipe, x);
+                }
+                else
+                {
+                    cbuiltin_bits_smear(recipe, x, temporary, width);
+                    cbuiltin_lower_popcount(recipe, x, temporary);
+                }
                 break;
             case CBUILTIN_STDC_BIT_FLOOR:
-                // The highest set bit alone: the smeared ones less their half.
-                cbuiltin_bits_smear(recipe, x, temporary, width);
-                cbuiltin_lower_immediate(recipe, temporary, BUSTER_TYPED_SHR, x, 1);
-                cbuiltin_lower_binary(recipe, x, BUSTER_TYPED_SUB, x, temporary);
+                if (rows->indices[width > 32] != 0)
+                {
+                    cbuiltin_bits_leading(recipe, x, temporary, width, rows);
+                    cbuiltin_lower_constant(recipe, width - 1);
+                    cbuiltin_lower_local(recipe, x);
+                    cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
+                    cbuiltin_lower_set(recipe, x);
+                    cbuiltin_bits_one(recipe, x, width);
+                }
+                else
+                {
+                    // The highest set bit alone: the smeared ones less their half.
+                    cbuiltin_bits_smear(recipe, x, temporary, width);
+                    cbuiltin_lower_immediate(recipe, temporary, BUSTER_TYPED_SHR, x, 1);
+                    cbuiltin_lower_binary(recipe, x, BUSTER_TYPED_SUB, x, temporary);
+                }
                 break;
             case CBUILTIN_STDC_BIT_CEIL:
-                // One past the smeared ones of x - 1 (of 0 for 0 and 1), 0 where that leaves the width.
+                // The bit after x - 1's highest (x - 1 is 0 for 0 and 1), 0 where that leaves the width.
                 cbuiltin_lower_local(recipe, x);
                 cbuiltin_lower_local(recipe, x);
                 cbuiltin_lower_constant(recipe, 0);
@@ -764,12 +923,24 @@ static void cbuiltin_bits_recipe(CBuiltinLowerRecipe* recipe, CBuiltinId builtin
                 cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
                 cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
                 cbuiltin_lower_set(recipe, x);
-                cbuiltin_bits_smear(recipe, x, temporary, width);
-                cbuiltin_lower_local(recipe, x);
-                cbuiltin_lower_constant(recipe, 1);
-                cbuiltin_lower_operation(recipe, BUSTER_TYPED_ADD);
-                cbuiltin_bits_mask(recipe, width);
-                cbuiltin_lower_set(recipe, x);
+                if (rows->indices[width > 32] != 0)
+                {
+                    cbuiltin_bits_leading(recipe, x, temporary, width, rows);
+                    cbuiltin_lower_constant(recipe, width);
+                    cbuiltin_lower_local(recipe, x);
+                    cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
+                    cbuiltin_lower_set(recipe, x);
+                    cbuiltin_bits_one(recipe, x, width);
+                }
+                else
+                {
+                    cbuiltin_bits_smear(recipe, x, temporary, width);
+                    cbuiltin_lower_local(recipe, x);
+                    cbuiltin_lower_constant(recipe, 1);
+                    cbuiltin_lower_operation(recipe, BUSTER_TYPED_ADD);
+                    cbuiltin_bits_mask(recipe, width);
+                    cbuiltin_lower_set(recipe, x);
+                }
                 break;
             case CBUILTIN_STDC_ROTATE_LEFT:
             case CBUILTIN_STDC_ROTATE_RIGHT:
