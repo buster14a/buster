@@ -269,9 +269,16 @@ with `--offset` 0, 1 and 2).
 
 The record, with the scripts, every process's output, the receipt and the
 sweep: [buster-performance's `x86-zen5-181-2026-11-07`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/x86-zen5-181-2026-11-07).
-The rows are one `--table` process's (CPU 2 under the host's lock, 7 passes of
-10,000 iterations, built `BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0` by clang
-23.1.1); RECORD_REPRODUCTION. Their 1,349 rows share 156 IDs.
+The rows come from four processes of the harness (CPU 2 under the host's lock,
+7 passes of 10,000 iterations, built `BUSTER_HOST_ARCH=znver5
+BUSTER_DEBUG_INFO=0` by clang 23.1.1): the first 849 rows' `--table`, and the
+masked rows', the families' and the masked load's `--missing --table`. On
+`30de081f`, the commit that completed them, two `--check` processes reproduced
+all 1,349 rows (49 and 58 differ in a pipe bit, which `--check` reports and
+doesn't require), and a fresh `--table` printed 1,270 of them exactly: the
+other 79 differ only in throughput, by the column's 1/64-cycle step (`ktest`'s
+and `kortest`'s by their 0.5 or 1 cycle passes), or in pipe bits. Their 1,349
+rows share 156 IDs.
 
 What the rows say, a few families (cycles; derived values in italics):
 
