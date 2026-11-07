@@ -826,6 +826,7 @@ static bool check_literal_table_records_fill(CheckInputReader* reader, uint32_t 
     const Parser* parser = reader->parser;
     const uint64_t mark = reader->scratch->length;
     uint32_t* numbers = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, count);
+    reader->output->resource |= numbers == NULL;
     bool valid = numbers != NULL;
     uint32_t found = 0;
     for (uint32_t token = begin; valid && token < end; token += 1)
@@ -842,10 +843,12 @@ static bool check_literal_table_records_fill(CheckInputReader* reader, uint32_t 
     for (uint32_t m = 0; valid && m < members; m += 1)
     {
         const TypeId type = reader->types->members.type[first + m];
-        const uint64_t offset = reader->types->members.offset[first + m];
+        // The type table retains layout offsets in bits; the immutable payload is addressed in bytes.
+        const uint64_t bits = reader->types->members.offset[first + m];
+        const uint64_t offset = bits / 8;
         uint32_t width = 0;
         bool is_signed = false;
-        valid = check_action_integer_type(reader->types, type, &width, &is_signed) && offset + width / 8 <= size;
+        valid = bits % 8 == 0 && check_action_integer_type(reader->types, type, &width, &is_signed) && offset <= size && width / 8 <= size - offset;
         uint32_t tokens[BUSTER_CHECK_LITERAL_TABLE_BATCH];
         uint8_t values[BUSTER_CHECK_LITERAL_TABLE_BATCH * 8];
         for (uint32_t element = 0; valid && element < elements; element += BUSTER_CHECK_LITERAL_TABLE_BATCH)
@@ -917,6 +920,7 @@ static bool check_input_literal_table_prepare(CheckInputReader* reader, uint32_t
                (kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || count / columns <= reader->types->types.extent[type_index(type)]);
     const uint64_t mark = reader->arena->length;
     const uint64_t record_size = records ? type_size(reader->types, row) : 0;
+    eligible = eligible && (!records || count / columns <= UINT64_MAX / record_size);
     const uint64_t bytes = records ? (uint64_t)(count / columns) * record_size : (uint64_t)count * (width / 8);
     uint8_t* payload = eligible ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint8_t, bytes) : NULL;
     input->resource |= eligible && payload == NULL;
