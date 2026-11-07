@@ -981,9 +981,56 @@ static void check_init_repeat(CheckInitWalker* walker, uint32_t* position, bool*
     }
 }
 
+// The initializer cursor needs the record's own member, not the final named leaf: entering each anonymous member
+// preserves brace elision, union selection and the next positional initializer. The type index already stores that
+// first step. Its construction belongs to type_record_define; this read-only lookup allocates no new index or path.
+// The source reader rejects conflicting direct/promoted names before it completes a record (check_input_record_names).
+static uint32_t check_init_member(const TypeTable* types, uint32_t tag, uint32_t name, bool scalar)
+{
+    const uint32_t begin = types->tags.member_begin[tag];
+    const uint32_t count = types->tags.member_count[tag];
+    const uint32_t lookup = types->tags.lookup[tag];
+    const uint32_t* const names = types->members.name;
+    uint32_t member = 0;
+    if (lookup == 0)
+    {
+        member = scalar ? type_lookup_scan_scalar(names, begin, count, name) : type_lookup_scan(names, begin, count, name);
+    }
+    else if (lookup != BUSTER_TYPE_LOOKUP_WALK)
+    {
+        const uint32_t log2 = types->tags.lookup_log2[tag];
+        member = scalar ? type_lookup_probe_scalar(types->lookup.buckets, lookup, log2, name) :
+                          type_lookup_probe(types->lookup.buckets, lookup, log2, name);
+    }
+    else
+    {
+        // Preserve the existing capacity fallback, including direct members before anonymous members. The type
+        // table and its columns stay unchanged while the inner lookup uses its separate scratch arena.
+        member = type_lookup_scan_scalar(names, begin, count, name);
+        const uint8_t* const flags = types->members.flags;
+        const TypeId* const member_types = types->members.type;
+        for (uint32_t i = 0; i < count && member == 0; i += 1)
+        {
+            if (names[begin + i] == 0 && (flags[begin + i] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0)
+            {
+                uint64_t offset = 0;
+                uint32_t qualifiers = 0;
+                const uint32_t inner = scalar ? type_lookup_member_scalar(types, member_types[begin + i], name, &offset, &qualifiers) :
+                                               type_lookup_member(types, member_types[begin + i], name, &offset, &qualifiers);
+                if (inner != 0 && inner != BUSTER_TYPE_MEMBER_UNKNOWN)
+                {
+                    member = begin + i;
+                }
+            }
+        }
+    }
+    return member;
+}
+
 static void check_init_designate(CheckInitWalker* walker, uint32_t* position, uint32_t end)
 {
     const Parser* parser = walker->parser;
+    const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
     uint32_t token = *position;
     const bool old_style = check_init_old_style_designator(parser, token, end);
     while (walker->depth > 1 && !walker->frames[walker->depth - 1].braced)
@@ -1120,29 +1167,11 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
                     const TypeId record = type_strip_aligned(walker->types, frame->type);
                     const uint32_t tag = walker->types->types.index[type_index(record)];
                     const uint32_t begin = walker->types->tags.member_begin[tag];
-                    const uint32_t count = walker->types->tags.member_count[tag];
-                    uint32_t member = 0;
-                    for (uint32_t i = 0; i < count && member == 0; i += 1)
-                    {
-                        if (walker->types->members.name[begin + i] == name)
-                        {
-                            member = begin + i;
-                            found = true;
-                        }
-                    }
+                    const uint32_t member = check_init_member(walker->types, tag, name, scalar);
+                    found = member != 0 && walker->types->members.name[member] == name;
                     if (found)
                     {
                         check_init_member_use(walker, member, token + 1);
-                    }
-                    for (uint32_t i = 0; i < count && member == 0; i += 1)
-                    {
-                        uint64_t ignored = 0;
-                        if (walker->types->members.name[begin + i] == 0 &&
-                            (walker->types->members.flags[begin + i] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0 &&
-                            type_find_member(walker->types, walker->types->members.type[begin + i], name, &ignored) != 0)
-                        {
-                            member = begin + i;
-                        }
                     }
                     if (member == 0)
                     {
@@ -3131,3 +3160,4 @@ static __attribute__((unused)) CheckInitStatus check_initializer_references(cons
     return status;
 }
 #endif
+
