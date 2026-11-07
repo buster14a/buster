@@ -2172,7 +2172,6 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                 check_sparse_get(left->body_declarations, token) == check_sparse_get(right->body_declarations, token) &&
                 check_sparse_get(left->declaration_bodies, token) == check_sparse_get(right->declaration_bodies, token) && check_sparse_get(left->parameters, token) == check_sparse_get(right->parameters, token) &&
                 check_sparse_get(left->parameter_next, token) == check_sparse_get(right->parameter_next, token) &&
-                check_sparse_get(left->parameter_sources, token) == check_sparse_get(right->parameter_sources, token) &&
                 check_sparse_get(left->control_owners, token) == check_sparse_get(right->control_owners, token) &&
                 check_sparse_get(left->label_targets, token) == check_sparse_get(right->label_targets, token) && check_sparse_get(left->case_ranges, token) == check_sparse_get(right->case_ranges, token) &&
                 left->expression_regions[token] == right->expression_regions[token] && check_input_asm_id(left, token) == check_input_asm_id(right, token) &&
@@ -2425,7 +2424,6 @@ static bool check_corpus_deferred_columns(const CheckInput* x, const CheckInput*
                  check_sparse_get(x->initializer_begins, token) != check_sparse_get(y->initializer_begins, token) ? "initializer_begins" : check_sparse_get(x->initializer_ends, token) != check_sparse_get(y->initializer_ends, token) ? "initializer_ends" :
                  check_sparse_get(x->body_declarations, token) != check_sparse_get(y->body_declarations, token) ? "body_declarations" : check_sparse_get(x->parameters, token) != check_sparse_get(y->parameters, token) ? "parameters" :
                  check_sparse_get(x->parameter_next, token) != check_sparse_get(y->parameter_next, token) ? "parameter_next" :
-                 check_sparse_get(x->parameter_sources, token) != check_sparse_get(y->parameter_sources, token) ? "parameter_sources" :
                  check_sparse_get(x->control_owners, token) != check_sparse_get(y->control_owners, token) ? "control_owners" :
                  check_sparse_get(x->label_targets, token) != check_sparse_get(y->label_targets, token) ? "label_targets" : check_sparse_get(x->case_ranges, token) != check_sparse_get(y->case_ranges, token) ? "case_ranges" :
                  x->expression_regions[token] != y->expression_regions[token] ? "expression_regions" : check_input_asm_id(x, token) != check_input_asm_id(y, token) ? "asm_ids" :

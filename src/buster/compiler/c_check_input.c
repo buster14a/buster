@@ -775,7 +775,7 @@ struct CheckInput
     uint32_t ignored_asm_count;
     bool asm_warnings_prepared;
     // The pool of the sparse columns below (c_check_sparse.c, #628): initializer_nodes, initializer_begins,
-    // initializer_ends, evaluation_nodes, body_declarations, declaration_bodies, parameters, parameter_next, parameter_sources,
+    // initializer_ends, evaluation_nodes, body_declarations, declaration_bodies, parameters, parameter_next,
     // control_owners, label_targets, case_ranges and string_ids, which few tokens have an entry in, and of the wide
     // `attributes` above. In the arena, so that a lane's copy of the CheckInput writes the same pool (c_check_deferred.c).
     CheckSparsePool* sparse_pool;
@@ -817,14 +817,10 @@ struct CheckInput
     uint8_t* constant_warning_ignored;
     CheckSparseColumn body_declarations;
     CheckSparseColumn declaration_bodies;
-    // At a body opening: its first named parameter token. At a parameter name or retained unnamed parameter's
-    // insertion token: its zero-based ordinal in the full list. These roles are disjoint.
+    // At a body opening: its first named parameter token. At a parameter name: its zero-based ordinal in the full
+    // parameter list, including unnamed parameters. These token roles are disjoint; no additional column is needed.
     CheckSparseColumn parameters;
     CheckSparseColumn parameter_next;
-    // A function declaration's first pointer parameter source, then the next source at each link. Named parameters
-    // use their names; unnamed ones use their declarators' insertion tokens. Notes follow this sparse list in argument
-    // order. Only the completed declared function owns a root, never its nested callback declarators.
-    CheckSparseColumn parameter_sources;
     CheckSparseColumn control_owners;
     CheckSparseColumn label_targets;
     // Resolved &&label expressions, counted by check_input_controls; zero lets check_program omit its address table.
@@ -6427,30 +6423,6 @@ static inline __attribute__((always_inline)) TypeId check_input_declarator_end(C
         }
     }
     const TypeId result = complete && captured && object_sizes ? run->result : 0;
-    if (result != 0 && own != NULL && !own->identifier_list && run->name != BUSTER_CHECK_NONE &&
-        type_kind(reader->types, result) == BUSTER_TYPE_KIND_FUNCTION)
-    {
-        uint32_t named = own->names;
-        uint32_t previous = run->name;
-        uint32_t ordinal = 0;
-        for (uint32_t parameter = own->parameter_first; parameter != BUSTER_CHECK_NONE; parameter = run->parameters[parameter].next)
-        {
-            const CheckDeclaratorParameter* item = run->parameters + parameter;
-            const uint32_t source = item->missing_name != BUSTER_CHECK_NONE ? item->missing_name : named;
-            if (item->missing_name == BUSTER_CHECK_NONE && named != BUSTER_CHECK_NONE)
-            {
-                named = check_sparse_get(reader->parameter_next, named);
-            }
-            if (source < reader->parser->tokens.count && check_action_kind(reader->types, item->type) == BUSTER_TYPE_KIND_POINTER)
-            {
-                check_sparse_set(reader->output->sparse_pool, reader->output->parameter_sources, previous, source);
-                check_sparse_set(reader->output->sparse_pool, reader->parameters, source, ordinal);
-                previous = source;
-            }
-            ordinal += 1;
-        }
-        check_sparse_set(reader->output->sparse_pool, reader->output->parameter_sources, previous, BUSTER_CHECK_NONE);
-    }
     if (complete && run->function_part != BUSTER_CHECK_NONE && reader->pp->options.language.standard < 2023 &&
         run->cursor < reader->parser->tokens.count && reader->parser->tokens.kinds[run->cursor] == PARSE_KIND_L_BRACE)
     {
@@ -12157,7 +12129,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     // The columns few tokens have an entry in, sparse (c_check_sparse.c, #628): their directories, which a fresh arena
     // holds zero, and their blocks' pool, of which they take as many pages as their entries' blocks. The deferred reader's
     // lanes write them at once.
-    CheckSparseColumn sparse_columns[13] = { 0 };
+    CheckSparseColumn sparse_columns[12] = { 0 };
     CheckSparseWide wide_columns[2] = { 0 };
     const bool noderef = intern_find(pp->table, (const uint8_t*)"noderef", 7) != 0 || intern_find(pp->table, (const uint8_t*)"__noderef__", 11) != 0;
     valid = valid && check_sparse_reserve_wide(arena, &input->sparse_pool, sparse_columns, BUSTER_ARRAY_LENGTH(sparse_columns), wide_columns, noderef ? 2 : 1, count, output_zero, deferred != 0);
@@ -12175,7 +12147,6 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     input->label_targets = sparse_columns[9];
     input->case_ranges = sparse_columns[10];
     input->string_ids = sparse_columns[11];
-    input->parameter_sources = sparse_columns[12];
     if (valid && deferred_tokens != 0)
     {
         uint8_t* retained = arena_push_array(arena, (uint64_t)count + 1, sizeof(uint8_t), 1);

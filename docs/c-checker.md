@@ -7112,9 +7112,11 @@ arguments against the function. The checker now gives these as clang does.
     with result type T" at the returned expression (T spelled with the
     function's result typedef), "passing S to parameter of type T" at the
     argument with "passing argument to parameter 'x' here" (or "… parameter
-    here") at the parameter's name, or where it has none the end of its
-    declarator (`check_driver_parameter_place`, as the sparse sources keep
-    pointer parameters' alone);
+    here") at the parameter's name, or where it has none where the
+    declarator reader puts its missing name, for a pointer parameter
+    (`check_driver_parameter_source`), and the end of its declarator for
+    another (`check_driver_parameter_place`). Both read the declaration's
+    tokens when a note is given; no prototype keeps them;
   - the types as written: an array's and a function's unconverted, a qualified
     lvalue's qualified, with their typedefs;
   - clang's fix-it words (`check_driver_conversion_hint`,

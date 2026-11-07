@@ -1691,10 +1691,105 @@ static uint32_t check_driver_parameter_spelling(const Parser* parser, const Chec
     return result;
 }
 
-// A call's warning bits summarize its arguments. Expand those two pointer bits together, walking arguments and the
-// declared function's sparse source list once so mixed warning groups retain argument order. Function-pointer calls,
-// including an explicit (*f), have no named declaration for parameter notes. A direct use resolves to the visible
-// declaration, whose compatible empty-list redeclarations retain their inherited prototype's sources.
+// Whether `token`, below `end`, starts a parameter's declarator rather than continuing its declaration's specifiers: a
+// `*`, its name, an abstract group, a function's parameter list or an array's bound.
+static bool check_driver_declarator_start(const Parser* parser, uint32_t token)
+{
+    const uint8_t kind = parser->tokens.kinds[token];
+    const uint8_t role = parser->tree.roles[token];
+    return kind == PARSE_KIND_STAR || (kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND) || role == PARSE_ROLE_OPEN_GROUP ||
+           (kind == PARSE_KIND_L_PAREN && (role == PARSE_ROLE_OPEN_CALL || role == PARSE_ROLE_OPEN_FUNCTION)) ||
+           (kind == PARSE_KIND_L_SQUARE && role == PARSE_ROLE_OPEN_SUBSCRIPT);
+}
+
+// The token a parameter's note names (#147), of the parameter from `begin` to `end` (its `,` or `)`): as the declarator
+// reader finds it (check_input_declarator_step's frames), past the declaration's specifiers, then each frame's pointer
+// prefix (`*` and the qualifiers, _Atomic and attributes after it) and the abstract group it opens: there the name, or,
+// unnamed, the token where the name would be (the reader's missing_name). BUSTER_CHECK_NONE for an empty parameter and for
+// an identifier list's (a K&R declaration's, whose names have no notes).
+static uint32_t check_driver_parameter_declarator(const Parser* parser, uint32_t begin, uint32_t end)
+{
+    uint32_t result = BUSTER_CHECK_NONE;
+    const bool listed = begin < end && !(parser->tokens.kinds[begin] == PARSE_KIND_IDENTIFIER && parser->tree.roles[begin] == PARSE_ROLE_OPERAND);
+    uint32_t i = begin;
+    while (listed && i < end && !check_driver_declarator_start(parser, i))
+    {
+        const uint8_t role = parser->tree.roles[i];
+        const uint32_t close = parser->tree.parents[i];
+        const bool group = role < PARSE_ROLE_COUNT && parse_closer_roles[role] != PARSE_ROLE_NONE && close > i && close < end;
+        i = check_input_attribute_starts(parser, i, end) ? check_input_skip_attributes(parser, i, end) : group ? close + 1 : i + 1;
+    }
+    uint32_t frame_end = end;
+    bool descending = listed;
+    for (uint32_t steps = 0; descending && steps < end - begin; steps += 1)
+    {
+        i = check_input_skip_attributes(parser, i, frame_end);
+        while (i < frame_end && parser->tokens.kinds[i] == PARSE_KIND_STAR)
+        {
+            i += 1;
+            uint32_t qualifiers = 0;
+            bool prefix = true;
+            while (prefix && i < frame_end)
+            {
+                const bool atomic = parser->tokens.kinds[i] == PARSE_KIND_ATOMIC && (i + 1 == frame_end || parser->tokens.kinds[i + 1] != PARSE_KIND_L_PAREN);
+                const bool attribute = !atomic && check_input_attribute_starts(parser, i, frame_end);
+                prefix = atomic || attribute || check_input_qualifier(parser, i, &qualifiers);
+                i = attribute ? check_input_skip_attributes(parser, i, frame_end) : prefix ? i + 1 : i;
+            }
+        }
+        const uint32_t close = i < frame_end ? parser->tree.parents[i] : BUSTER_CHECK_NONE;
+        const uint32_t inner = close < frame_end && close > i ? check_input_skip_attributes(parser, i + 1, close) : BUSTER_CHECK_NONE;
+        const bool group = close < frame_end && close > i &&
+                           (parser->tree.roles[i] == PARSE_ROLE_OPEN_GROUP ||
+                            (parser->tokens.kinds[i] == PARSE_KIND_L_PAREN && inner < close && parser->tokens.kinds[inner] == PARSE_KIND_STAR));
+        descending = group;
+        result = group ? result : i;
+        frame_end = group ? close : frame_end;
+        i = group ? i + 1 : i;
+    }
+    return result;
+}
+
+// The note token of parameter `index` of the function declared at `declaration` (its name), as the declarator reader
+// placed it (check_driver_parameter_declarator), found where a warning or an error gives the note rather than kept for
+// every prototype. BUSTER_CHECK_NONE where the declaration's own list, right after its name, has no such parameter: an
+// empty-list redeclaration's notes are none even where the prototype it inherits has them.
+static uint32_t check_driver_parameter_source(const Parser* parser, const CheckInput* input, uint32_t declaration, uint32_t index)
+{
+    const uint32_t count = parser->tokens.count < input->token_count ? parser->tokens.count : input->token_count;
+    uint32_t open = declaration + 1;
+    while (open < count && parser->tokens.kinds[open] == PARSE_KIND_R_PAREN)
+    {
+        open += 1;
+    }
+    open = check_input_skip_attributes(parser, open, count);
+    const bool listed = open < count && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN;
+    const uint32_t close = listed ? parser->tree.parents[open] : 0;
+    uint32_t result = BUSTER_CHECK_NONE;
+    uint32_t begin = open + 1;
+    uint32_t ordinal = 0;
+    bool done = !listed || close >= count || close <= open;
+    while (!done)
+    {
+        uint32_t end = begin;
+        while (end < close && parser->tokens.kinds[end] != PARSE_KIND_COMMA)
+        {
+            const uint8_t role = parser->tree.roles[end];
+            const uint32_t closer = parser->tree.parents[end];
+            end = role < PARSE_ROLE_COUNT && parse_closer_roles[role] != PARSE_ROLE_NONE && closer > end && closer < close ? closer + 1 : end + 1;
+        }
+        result = ordinal == index ? check_driver_parameter_declarator(parser, begin, end) : BUSTER_CHECK_NONE;
+        done = ordinal == index || end >= close;
+        ordinal += 1;
+        begin = end + 1;
+    }
+    return result;
+}
+
+// A call's warning bits summarize its arguments. Expand those two pointer bits together, walking arguments once so mixed
+// warning groups retain argument order. Function-pointer calls, including an explicit (*f), have no named declaration for
+// parameter notes. A direct use resolves to the visible declaration, whose own parameter list gives the note
+// (check_driver_parameter_source).
 static bool check_driver_pointer_arguments(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             const TypeTable* types, CheckWarningSpelling* spell, uint32_t token, uint32_t flags, uint32_t enabled,
                                             uint32_t publication, PPDiagnosticPhase phase, Arena* scratch)
@@ -1712,15 +1807,9 @@ static bool check_driver_pointer_arguments(const Parser* parser, Preprocessor* p
                             check_action_kind(types, check_stream_type(stream, callee)) == BUSTER_TYPE_KIND_FUNCTION &&
                             declaration < input->token_count && input->declaration_kinds != NULL &&
                             input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
-        uint32_t parameter = direct && check_sparse_present(input->parameter_sources) ? check_sparse_get(input->parameter_sources, declaration) : BUSTER_CHECK_NONE;
         const uint32_t offset = graph->argument_offsets[node];
         for (uint32_t i = 0; !pp->fatal && i < graph->argument_counts[node]; i += 1)
         {
-            while (parameter < input->token_count && check_sparse_get(input->parameters, parameter) < i)
-            {
-                parameter = check_sparse_get(input->parameter_sources, parameter);
-            }
-            const uint32_t note_token = parameter < input->token_count && check_sparse_get(input->parameters, parameter) == i ? parameter : BUSTER_CHECK_NONE;
             const uint32_t argument = graph->argument_nodes[offset + i];
             const CheckConversion conversion = stream->argument_conversions[offset + i];
             if (argument < stream->count && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0)
@@ -1741,6 +1830,8 @@ static bool check_driver_pointer_arguments(const Parser* parser, Preprocessor* p
                     {
                         const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                                        severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+                        // (A pointer parameter's, as a pointer conversion's warning is.)
+                        const uint32_t note_token = direct ? check_driver_parameter_source(parser, input, declaration, i) : BUSTER_CHECK_NONE;
                         const uint32_t spelling = check_driver_pointer_spelling(parser, input, stream, types, argument);
                         const uint32_t target_spelling = note_token < input->token_count ? check_driver_parameter_spelling(parser, input, note_token) : 0;
                         const String8 source = check_driver_warning_type(parser, pp, input, types, spell, scratch, value.type, spelling);
@@ -1869,10 +1960,10 @@ static const char* check_driver_conversion_hint(const TypeTable* types, const Ch
     return result;
 }
 
-// The place of parameter `index` of the function declared at `declaration` (its name), for a note, where the sparse source
-// list keeps none (it keeps pointer parameters' alone): the parameter's own name, or, unnamed, the token that ends its
-// declarator (the `,` or `)` after it), where clang's unnamed parameter is. BUSTER_CHECK_NONE where its declarator has no
-// parameter list right after the name. A diagnosis's cold path.
+// The place of parameter `index` of the function declared at `declaration` (its name), for a note of a parameter that isn't
+// a pointer, or a pointer's that check_driver_parameter_source finds none of: the parameter's own name, or, unnamed, the
+// token that ends its declarator (the `,` or `)` after it), where clang's unnamed parameter is. BUSTER_CHECK_NONE where its
+// declarator has no parameter list right after the name. A diagnosis's cold path.
 static uint32_t check_driver_parameter_place(const Parser* parser, const CheckInput* input, uint32_t declaration, uint32_t index)
 {
     const uint32_t count = parser->tokens.count < input->token_count ? parser->tokens.count : input->token_count;
@@ -2055,7 +2146,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     else if (applies)
     {
         // The callee's type's parameter, and its declaration's source where the callee is a function's own name
-        // (check_driver_pointer_arguments' sparse list).
+        // (check_driver_parameter_source).
         const uint32_t index = argument_index - 1;
         source = graph->argument_nodes[graph->argument_offsets[node] + index];
         const uint32_t callee = graph->operand0[node];
@@ -2068,13 +2159,11 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         const uint32_t declaration = name < input->token_count && input->declarations != NULL ? input->declarations[name] : BUSTER_CHECK_NONE;
         const bool direct = callee < stream->count && graph->ops[callee] == CHECK_OP_VALUE && declaration < input->token_count &&
                             input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
-        uint32_t parameter = direct && check_sparse_present(input->parameter_sources) ? check_sparse_get(input->parameter_sources, declaration) : BUSTER_CHECK_NONE;
-        while (parameter < input->token_count && check_sparse_get(input->parameters, parameter) < index)
-        {
-            parameter = check_sparse_get(input->parameter_sources, parameter);
-        }
-        parameter = parameter < input->token_count && check_sparse_get(input->parameters, parameter) == index ? parameter :
-                    direct ? check_driver_parameter_place(parser, input, declaration, index) : BUSTER_CHECK_NONE;
+        // A pointer parameter's note is where the declarator reader puts it (check_driver_parameter_source), any other's at
+        // its name or its declarator's end (check_driver_parameter_place), as is a pointer parameter's that has none.
+        uint32_t parameter = direct && target != 0 && check_action_kind(types, target) == BUSTER_TYPE_KIND_POINTER ?
+                             check_driver_parameter_source(parser, input, declaration, index) : BUSTER_CHECK_NONE;
+        parameter = parameter < input->token_count ? parameter : direct ? check_driver_parameter_place(parser, input, declaration, index) : BUSTER_CHECK_NONE;
         if (parameter < input->token_count)
         {
             const bool named = parser->tokens.kinds[parameter] == PARSE_KIND_IDENTIFIER && input->declarations[parameter] == parameter &&
