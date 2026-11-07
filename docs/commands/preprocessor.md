@@ -33,6 +33,8 @@ requirements. [Command index](README.md).
   `-I-` is rejected (`please use -iquote instead`); a directory named `-` is `-I./-`.
   A newline in `-D` is kept out of the directive and warned about. An `-include`
   path containing `"` or a newline is not pasted into `#include "..."`.
+  A raw forced include skipped by `#pragma once` or an include guard leaves the synthetic include depth balanced;
+  the following ordinary forced header still observes level 1, its child level 2, and the main file level 0 (#1616).
   `-E -fpreprocessed` is rejected; a `.i` input is already preprocessed.
   `docs/c-preprocessor.md` explains the design, the `clang -E`
   oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
@@ -155,7 +157,13 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   the prelude's failures (#361): the command line's arena push and its `-D`/`-U` and
   `-include` files each failed in turn (the arena cut short, the data table full), each
   a fatal error that stops the prelude and fails the run, beside controls that
-  succeed (no `-include` file made without one); and the fuzz batch: its isolation rules checked on small sources (what a case
+  succeed (no `-include` file made without one). `c_preprocessor_forced_include_test.c` checks raw entry's
+  synthetic/real range failures, successful cleanup and fatal live-context depth ownership on both kernels;
+  the CC compatibility fixtures repeat quote-named once/guarded/plain headers before an ordinary forced header,
+  through preprocessing and syntax-only actions on both kernels. Clang cannot spell these quote-named
+  command-line includes, so its six oracle routes use safe hard links whose device and inode match the raw
+  headers, each included twice. The oracle checks the same header semantics and include levels; the Buster
+  routes retain the exact quote-containing operands. The fuzz batch: its isolation rules checked on small sources (what a case
   leaves open makes clang read it alone), its comparison on pairs of texts
   (whitespace between tokens doesn't count, a literal's contents and joined
   tokens do, and our tokens that don't lex back, as an unterminated literal,
