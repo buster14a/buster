@@ -1868,3 +1868,35 @@ branch, meant to overlap the names' loads, cost +141 ns a file under 300 tokens:
 which places each result, then waited on every load, where the branchy lookup's predicted absence starts the next
 lookups' loads at once. Prefetching the names' home buckets before the lookups, and making the helpers' key table only
 for a unit with builtins, showed no gain.
+
+### The publication's and the object's rest (#1629)
+
+What #1658 left of #1629 was the publication's and the object's excess over main before #418
+([the record](https://github.com/buster14a/buster-performance/tree/fbb71141383b4c65f471b403bcd3de40f7b2d852/docs/measurements/lowering-object-1629-2026-11-07)).
+The harness timed the object stage a second time, warm, with the clock stopped after each of its calls, on the 9700X.
+Under 300 tokens (ns a file):
+
+| | Main before #418 | Main after #1658 | Constant names |
+| --- | ---: | ---: | ---: |
+| Publication | 37.3 | 48.5 | 48.2 |
+| Object, as run | 184.8 | 257.9 | 245.8 |
+| Warm: `link_check` / `object_prepare` / `object_build` | 6.5 / 38.9 / 68.3 | 10.4 / 54.2 / 100.1 | 10.7 / 54.1 / 104.9 |
+
+- **The removed part:** every object took `strlen` of each class section's name twice (`object_section_name_bytes`,
+  `object_fill_headers`). `ObjectSectionFormat.name_length` now holds it, from the literal. The object stage is −12 ns a
+  file against main (every round), and the path's total under 300 tokens 1.8% below main before #418's.
+- **What stays is work main has added since #418,** each piece a few ns a unit or about one a symbol (the 2,000-definition
+  units: each call about 1 ns more a symbol, the publication 8 to 9 ns more a static object):
+  - COMDAT groups (#1268): `link_groups_valid`, in `link_check` and `object_prepare`, and `object_build`'s groups
+    passes;
+  - named sections (#619), and the debug sections' passes;
+  - the publication's plan of each object before its bytes (`check_data_plan_object`), and its proof that an initialized
+    object is nonzero, for clang's `.bss` placement (`check_data_initializer_witness`).
+- **No single hotspot:** profiled alone, no line of the object stage holds more than about 5% of it (the largest is
+  `object_count_sections`' loop over its 14 classes).
+
+One opportunity remains outside the path: `link_check` checks every atom's fixups again, as before #418, which `-c`'s
+one-lane adds have already checked. Skipping it needs `Link` to record which columns lanes filled unchecked.
+
+`-c --lanes 1` of all 220 programs: −0.84% against main (7 of 8 paired runs faster). Every object of c-testsuite's
+programs and the synthetic units, by `-c`, `-c -g`, `--scalar` and `-funsigned-char`, is byte for byte main's.
