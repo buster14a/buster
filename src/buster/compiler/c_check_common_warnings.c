@@ -712,6 +712,7 @@ static void check_common_conversion_warning(const Parser* parser, Preprocessor* 
 // the order this traversal emits them. Clang emits a discarded expression's warnings in a value
 // post-order: division by zero first, nested subexpressions next, the discard marker after them, each
 // operand root's own warning after the marker, and sign comparisons last.
+typedef struct CheckCommonIgnored CheckCommonIgnored;
 typedef struct CheckCommonEmission
 {
     const Parser* parser;
@@ -743,6 +744,8 @@ typedef struct CheckCommonEmission
     // check_common_subtree_start.
     uint32_t* subtree_starts;
     bool subtree_starts_failed;
+    // The unit's marks of discarded calls' results (c_check_ignored_result.c), or null.
+    CheckCommonIgnored* ignored;
 } CheckCommonEmission;
 
 // check_common_subtree_start for the emission's queries, from a column of every token's subtree start built once
@@ -1253,6 +1256,8 @@ static void check_common_own(CheckCommonEmission* emission, uint32_t node)
 // statement or for clause leaves its result unused.
 // The discarded-left-operand analysis a comma node's frame runs once both operands' deep warnings are
 // out: the marker between the children's warnings and the operand roots' own.
+#include "c_check_ignored_result.c"
+
 static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t node)
 {
     const CheckGraph* graph = &emission->input->graph;
@@ -1338,6 +1343,11 @@ static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t no
                                        "left operand of comma operator has no effect", NULL, 0, scratch);
         }
     }
+    else if (left_effect && left_node < graph->count && graph->ops[left_node] != CHECK_OP_CONDITIONAL)
+    {
+        // A call's result the left operand drops (#1447): clang's CheckCommaOperands asks DiagnoseUnusedExprResult.
+        check_common_ignored_call(emission, left_result);
+    }
 }
 
 // The comma node's last stage: its operand roots marked emitted and, in a discarded position, the
@@ -1408,6 +1418,11 @@ static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node)
                                            "expression result unused", NULL, 0, scratch);
             }
         }
+        else if (right_start < parent && right_effect && !right_zero && right_node < graph->count && graph->ops[right_node] != CHECK_OP_CONDITIONAL)
+        {
+            // A discarded comma's result is its right operand's (#1447): a call's whose result warns.
+            check_common_ignored_call(emission, right_result);
+        }
     }
 }
 
@@ -1439,12 +1454,52 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
     }
     else if (discarded && op == CHECK_OP_CONDITIONAL)
     {
-        if (!check_common_arm_at(emission, graph->operand1[node]) && !check_common_arm_at(emission, graph->operand2[node]))
+        // An arm warns where it has no effect, or where it is a call whose result warns (#1447, clang's
+        // isUnusedResultAWarning): both must, and the else arm's result is the one reported.
+        CheckCommonIgnoredResult arm;
+        const uint32_t first = graph->operand1[node];
+        const uint32_t second = graph->operand2[node];
+        if ((!check_common_arm_at(emission, first) || (emission->ignored != NULL && check_common_ignored_of(emission, first, &arm))) &&
+            (!check_common_arm_at(emission, second) || (emission->ignored != NULL && check_common_ignored_of(emission, second, &arm))))
         {
             const uint32_t root = check_common_result_root(graph, node);
             const uint32_t report = root < graph->count && graph->tokens[root] < count ? graph->tokens[root] : token;
-            check_common_report_unused(parser, emission->pp, emission->input, report, CHECK_WARNING_ID_UNUSED_VALUE,
-                                       "expression result unused", NULL, 0, emission->scratch);
+            if (!check_common_ignored_call(emission, root))
+            {
+                check_common_report_unused(parser, emission->pp, emission->input, report, CHECK_WARNING_ID_UNUSED_VALUE,
+                                           "expression result unused", NULL, 0, emission->scratch);
+            }
+        }
+    }
+    else if (discarded && op == CHECK_OP_SELECT)
+    {
+        // A _Generic's or a __builtin_choose_expr's result is its chosen operand's (#1447): a call's whose result warns,
+        // or one without an effect's, at it.
+        uint32_t chosen = graph->operand0[node];
+        for (uint32_t steps = 0; chosen < graph->count && graph->ops[chosen] == CHECK_OP_SELECT && steps < graph->count; steps += 1)
+        {
+            chosen = graph->operand0[chosen];
+        }
+        const uint32_t at = chosen < graph->count ? graph->tokens[chosen] : count;
+        const uint8_t chosen_role = at < count ? parser->tree.roles[at] : PARSE_ROLE_NONE;
+        if (at < count && !check_common_ignored_call(emission, chosen) && !check_common_node_effect(graph, chosen) && graph->ops[chosen] != CHECK_OP_CONDITIONAL &&
+            graph->ops[chosen] != CHECK_OP_COMMA && check_common_effect_role(chosen_role) && chosen_role != PARSE_ROLE_ASSIGN &&
+            !(chosen_role == PARSE_ROLE_CLOSE_CAST && check_common_void_cast(parser, emission->pp, emission->input, emission->stream, emission->types, at)))
+        {
+            check_common_report_unused(parser, emission->pp, emission->input, chosen_role == PARSE_ROLE_MEMBER_OPERATOR && at + 1 < count ? at + 1 : at,
+                                       CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused", NULL, 0, emission->scratch);
+        }
+    }
+    else if (discarded && op == CHECK_OP_VALUE && role == PARSE_ROLE_CLOSE_KEYWORD)
+    {
+        // A __builtin_offsetof's or a __builtin_types_compatible_p's constant, at its keyword (#1447).
+        const uint32_t open = check_common_ignored_opener(parser, token);
+        const uint32_t keyword = open != BUSTER_CHECK_NONE && open > 0 ? open - 1 : count;
+        const uint32_t name = keyword < count ? parser->tokens.names[keyword] : 0;
+        if (name == C_NAME_BUILTIN_OFFSETOF || name == C_NAME_BUILTIN_TYPES_COMPATIBLE_P)
+        {
+            check_common_report_unused(parser, emission->pp, emission->input, keyword, CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused", NULL, 0,
+                                       emission->scratch);
         }
     }
     else if (discarded && op != CHECK_OP_INITIALIZE && op != CHECK_OP_CONVERT && op != CHECK_OP_CONDITION &&
@@ -2380,6 +2435,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
     if (ready && work_nodes != NULL && work_kinds != NULL)
     {
         memset(emitted, 0, graph->count);
+        CheckCommonIgnored ignored = { 0 };
         CheckCommonEmission emission =
         {
             .parser = parser,
@@ -2398,16 +2454,27 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             .work_capacity = work_capacity,
             .work_count = 0,
             .scratch = scratch,
+            .ignored = &ignored,
         };
+        if (!check_common_ignored_prepare(&ignored, parser, pp, input, types, scratch))
+        {
+            check_common_exhausted(pp);
+        }
         const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
         // Expression roots in graph order: each evaluated expression emits its subtree's deferred warnings
         // where clang's traversal puts them — the diagnostics' shared publication slot keeps this order. A root
         // whose subtree holds no reach and whose discarded expression is no comma and can't have a marker can't warn.
+        // An expression statement's call warns of its discarded result at once (#1447), in unreachable code too.
         CheckCommonScan roots = { 0 };
         for (uint32_t node = check_common_next_root(facts->parents, graph->count, &roots, vector); node < graph->count && !pp->fatal;
              node = check_common_next_root(facts->parents, graph->count, &roots, vector))
         {
             const uint32_t expr = check_common_discarded(parser, graph, node);
+            if (expr != node && expr < graph->count && check_common_ignored_op(graph->ops[expr]) && facts->parents[node] == BUSTER_CHECK_NONE &&
+                stream->diagnostics[node] == CHECK_DIAG_NONE)
+            {
+                check_common_ignored_call(&emission, expr);
+            }
             if (facts->parents[node] == BUSTER_CHECK_NONE && facts->evaluated[node] != 0 && stream->diagnostics[node] == CHECK_DIAG_NONE &&
                 emitted[node] == 0 &&
                 (reach[node] != 0 || (expr < graph->count && graph->ops[expr] == CHECK_OP_COMMA) || check_common_marker_candidate(graph, expr)))

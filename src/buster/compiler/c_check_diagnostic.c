@@ -126,6 +126,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Winvalid-version-availability", NULL, "invalid version in availability attribute" },
     { "-Wunknown-escape-sequence", NULL, "unknown escape sequence" },
     { "-Wvoid-ptr-dereference", NULL, "ISO C does not allow indirection on operand of type 'void *'" },
+    { "-Wunused-result", "-Wunused-value", "ignoring return value of function declared with 'warn_unused_result' attribute" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

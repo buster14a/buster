@@ -80,6 +80,7 @@ enum
     // An unknown escape sequence in an unevaluated string literal, before its error (#147): the driver's alone, no event's.
     CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE = 88,
     CHECK_WARNING_ID_VOID_PTR_DEREFERENCE = 89,
+    CHECK_WARNING_ID_UNUSED_RESULT = 90,
     CHECK_WARNING_ID_COUNT,
 };
 

@@ -4074,7 +4074,37 @@ comparison, a cast (including a typedef of `void`), a conditional, and a comma
 expression, parenthesized or not; a comma operand with a call, assignment or
 increment has an effect and does not get the left-operand warning. Its reports
 complete with the function's closing brace, as Clang's do, after the body's
-own warnings and before an unused declaration's.
+own warnings and before an unused declaration's. A discarded `__builtin_offsetof`,
+`__builtin_types_compatible_p`, and a `_Generic`'s or `__builtin_choose_expr`'s
+chosen operand without an effect report there too. `-Wunused-value` is in
+`-Wunused`, `-Wmost` and `-Wall`, with `-Wunused-comparison` and
+`-Wunused-result` under it.
+A discarded call's result (#1447, `c_check_ignored_result.c`, clang's
+`DiagnoseUnusedExprResult`): a call whose callee is declared
+`warn_unused_result` or `nodiscard` is "ignoring return value of function
+declared with 'warn_unused_result' attribute" (`-Wunused-result`), named as
+written (a scoped one with its scope, `'gnu::warn_unused_result'`) and with a
+standard unscoped `nodiscard`'s message after a colon; one whose return type's
+struct, union, enum or typedef (through further typedefs, the tag first) is
+declared so is "ignoring return value of type 'S' declared with 'nodiscard'
+attribute" (`-Wunused-value`); and one declared pure or const is "ignoring
+return value of function declared with pure attribute" (`-Wunused-value`),
+unless the call is written in a macro's body or a system header's macro (a
+macro's argument warns). Clang's builtin table gives a builtin's const and pure
+(its c, U and g rows; an e row's const needs -fno-math-errno, which clang's
+default isn't), a plain library function's only where the unit keeps the name a
+builtin and declares it with external linkage. These report at once at the
+callee's first token, in unreachable code too: a statement's, a for clause's,
+a comma's left operand's and, discarded, right operand's, and a discarded
+conditional's else arm where both arms warn (an arm of no effect, or such a
+call). The marks are found once a unit, from the tokens that have attributes:
+a function's by its first declaration, each redeclaration's in source order,
+so that a call reads those up to the declaration its lookup finds; a call then
+tests one bit of its callee's first declaration and one byte of its name.
+Left: a discarded call in an unreachable comma or conditional, one in a
+statement expression in sizeof's operand, which clang's unevaluated context
+quiets, and the "expanded from macro" note clang gives a call a macro's argument
+writes (as for every warning at a macro argument here).
 `-Warray-bounds` reports a direct array object, including a nested subscript
 such as `b[1][5]` at `b`, treats a zero extent as unknown, and leaves
 struct-member arrays to a full bounds analysis. `-Wunused-function` reports a
