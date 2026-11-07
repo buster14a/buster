@@ -625,6 +625,38 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .notes = 1,
     },
     {
+        // An indirection through a pointer to void (#147, -Wvoid-ptr-dereference): its operand's type as written (a typedef
+        // kept, top-level qualifiers dropped), in dead code too; not right after a unary `&` nor in sizeof's or alignof's
+        // operand.
+        .name = "void pointer dereferences",
+        .source = "typedef void *VP;\nvoid f(void *p, VP v, const void *c, void *const k) {\n"
+                  "  (void)*p; (void)*v; (void)*c; (void)*k; void *q = &*p; q = &(*p); q = & *p;\n"
+                  "  (void)sizeof(*p); (void)_Alignof(*p); (void)__alignof__ *p; (void)(1 ? *p : *p);\n"
+                  "  if (0) (void)*p; (void)**(void **)p; (void)q;\n}\n",
+        .warnings = 10,
+    },
+    {
+        // An assignment to a const variable, through an array's subscripts or a record's members to it, or through a
+        // pointer to a const record (#147): the variable named with its declared type and the "declared const here" note at
+        // its name; a pointer's target is the generic error.
+        .name = "const variable assignments",
+        .source = "typedef const int CI;\nstruct s { int a; };\nvoid f(const int p, const struct s *q) {\n  const int x = 1; x = 2; x++; p = 3;\n"
+                  "  const int a[2] = {0}; a[0] = 1; const int m[2][2] = {0}; m[0][1] = 1;\n"
+                  "  CI y = 1; y = 2; const struct s v = {0}; v.a = 1; q->a = 2;\n}\nvoid g(const int *r) { r[0] = 1; *r = 2; }\n",
+        .errors = 10,
+        .notes = 8,
+    },
+    {
+        // Arithmetic on a pointer to an incomplete type (#147): clang's message of the pointee as written, a subscript's at
+        // its `[`, and the "forward declaration" note at the tag's declaring name.
+        .name = "incomplete pointer arithmetic",
+        .source = "struct s; union u; enum e; typedef struct s S;\nvoid f(struct s *p, struct s *q, union u *w, enum e *n, S *t) {\n"
+                  "  (void)(p + 1); (void)(1 + p); (void)(p - q); p++; --p; p += 2; (void)p[1]; (void)1[p];\n"
+                  "  (void)(w + 1); (void)(n - 1); (void)(t + 1);\n}\n",
+        .errors = 11,
+        .notes = 11,
+    },
+    {
         .name = "independent bodies retain source order at requested lanes",
         .source = "int*f0(void){return 1-1;}\nint*f1(void){return 2-2;}\nint*f2(void){return 3-3;}\n",
         .warnings = 3,

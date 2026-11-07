@@ -79,6 +79,7 @@ enum
     CHECK_WARNING_ID_INVALID_VERSION_AVAILABILITY = 87,
     // An unknown escape sequence in an unevaluated string literal, before its error (#147): the driver's alone, no event's.
     CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE = 88,
+    CHECK_WARNING_ID_VOID_PTR_DEREFERENCE = 89,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -287,6 +288,9 @@ typedef enum CheckWarningEventKind
     // without no_caller_saved_registers (#147, check_input_interrupt_calls: -Wexcessive-regsave), at the callee, with a
     // CHECK_WARNING_NOTE_DECLARED_HERE at a named callee's declaration.
     CHECK_WARNING_EVENT_EXCESSIVE_REGSAVE,
+    // An indirection through a pointer to void (#147, clang's CheckIndirectionOperand: -Wvoid-ptr-dereference), at its `*`:
+    // payload.first_type the operand's type, payload.data its typedef's spelling.
+    CHECK_WARNING_EVENT_VOID_PTR_DEREFERENCE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
