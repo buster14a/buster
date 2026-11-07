@@ -613,10 +613,24 @@ static bool pp_test_deferred_history(const PPOptions* options, const char* path,
         result = false;
     }
     // A compile gives its files' token columns back after the run (pp_release_file_columns): the replay that records the
-    // deferred history then prepares the files again, and must give the same history.
+    // deferred history then prepares the files again, and must give the same history. Its backend gives the output back
+    // too (pp_release_output): the probe's diagnostic below asks for it, and the replay gives it back, which the streams'
+    // comparison then checks token for token.
     if (ready[1])
     {
         pp_release_file_columns(&runs[1], false);
+        // A reader that doesn't record the history has the output back from a replay without one, token for token, and the
+        // history stays deferred; then the backend's release again, for the probe.
+        pp_release_output(&runs[1], false);
+        const bool deferred = runs[1].history_deferred;
+        const bool kept = runs[1].output_released && (runs[1].output.kinds != NULL || runs[1].output.count != runs[0].output.count);
+        const bool back = pp_output_ensure(&runs[1]) && pp_tokens_same(&runs[0].output, &runs[1].output) && runs[1].history_deferred == deferred;
+        if (result && (kept || !back))
+        {
+            printf("%s: a released output %s\n", label, kept ? "keeps its columns or loses its count" : "comes back otherwise, or records the history");
+            result = false;
+        }
+        pp_release_output(&runs[1], false);
     }
     const uint32_t count = runs[0].output.count;
     uint32_t probe = count;
@@ -632,7 +646,7 @@ static bool pp_test_deferred_history(const PPOptions* options, const char* path,
     }
     const bool probed = result && lengths[0] == lengths[1] && (lengths[0] == 0 || memcmp(texts[0], texts[1], lengths[0]) == 0);
     const size_t printed = lengths[1];
-    const bool recorded = probed && pp_history_ensure(&runs[1]);
+    const bool recorded = probed && pp_history_ensure(&runs[1]) && pp_output_ensure(&runs[1]);
     if (streams[1] != 0)
     {
         fflush(streams[1]);

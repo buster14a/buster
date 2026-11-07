@@ -363,7 +363,7 @@ static void ir_test_simd_lane_execution(IrTestTally* test, Arena* output, Arena*
 static void ir_test_bit_intrinsics(IrTestTally* test, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
-    for (uint32_t operation = BUSTER_IR_INTRINSIC_TZCNT; operation < BUSTER_IR_INTRINSIC_COUNT; operation += 1)
+    for (uint32_t operation = BUSTER_IR_INTRINSIC_TZCNT; operation <= BUSTER_IR_INTRINSIC_BSWAP; operation += 1)
     {
         for (uint32_t type = IR_I1; type < IR_TYPE_COUNT; type += 1)
         {
@@ -396,6 +396,54 @@ static void ir_test_bit_intrinsics(IrTestTally* test, Arena* output, Arena* scra
                     function.type[1] = (uint8_t)type;
                     function.c[1] = BUSTER_IR_INTRINSIC_COUNT;
                     ir_test_pair(test, &function, scratch, NULL, false, "an intrinsic past the operations is refused");
+                }
+            }
+            arena_pop_to(output, mark);
+        }
+    }
+}
+
+// The signed overflows' intrinsics (#1385): two operands, I32s or I64s of the result's type, both present.
+static void ir_test_overflow_intrinsics(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    for (uint32_t operation = BUSTER_IR_INTRINSIC_SADDO; operation <= BUSTER_IR_INTRINSIC_SMULO; operation += 1)
+    {
+        for (uint32_t type = IR_I1; type < IR_TYPE_COUNT; type += 1)
+        {
+            IrFunction function = {0};
+            const IrSizes sizes = {
+                .instruction_count = 4,
+                .block_count = 1,
+                .parameter_count = 2,
+            };
+            const bool created = ir_create(output, &sizes, &function) == IR_OK;
+            ir_test_expect(test, created, "overflow intrinsic verifier fixture allocation");
+            if (created)
+            {
+                const bool admitted = type == IR_I32 || type == IR_I64;
+                function.result_type = IR_VOID;
+                function.parameter_types[0] = (uint8_t)type;
+                function.parameter_types[1] = (uint8_t)type;
+                function.block_offsets[1] = 4;
+                ir_test_instruction(&function, 0, IR_PARAM, (IrType)type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 1, IR_PARAM, (IrType)type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 2, IR_INTRINSIC, (IrType)type, 0, 1, operation);
+                ir_test_instruction(&function, 3, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_pair(test, &function, scratch, NULL, admitted, "an overflow intrinsic takes two I32 or I64 operands of its result's type");
+                if (admitted)
+                {
+                    ir_test_expect(test, ir_operand_count(&function, 2) == 2 && ir_value_mask(&function, 2) == 3, "an overflow intrinsic has two SSA uses");
+                    function.b[2] = BUSTER_IR_NONE;
+                    ir_test_pair(test, &function, scratch, NULL, false, "an overflow intrinsic refuses a missing second operand");
+                    function.b[2] = 1;
+                    function.type[1] = type == IR_I32 ? IR_I64 : IR_I32;
+                    function.parameter_types[1] = function.type[1];
+                    ir_test_pair(test, &function, scratch, NULL, false, "an overflow intrinsic's operands have one type");
+                    function.type[1] = (uint8_t)type;
+                    function.parameter_types[1] = (uint8_t)type;
+                    function.type[2] = type == IR_I32 ? IR_I64 : IR_I32;
+                    ir_test_pair(test, &function, scratch, NULL, false, "an overflow intrinsic's result has its operands' type");
                 }
             }
             arena_pop_to(output, mark);
@@ -466,6 +514,7 @@ static void ir_test_splats(IrTestTally* test, Arena* output, Arena* scratch)
 static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
 {
     ir_test_bit_intrinsics(test, output, scratch);
+    ir_test_overflow_intrinsics(test, output, scratch);
     ir_test_splats(test, output, scratch);
     ir_test_simd_bitcasts(test, output, scratch);
     ir_test_simd_rows(test, output, scratch);

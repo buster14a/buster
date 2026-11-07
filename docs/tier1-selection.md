@@ -123,8 +123,12 @@ patterns are:
   twin `tier1_select_barriers_scalar`), so the check is a comparison. Inside the
   plan's pass, its store made the operands' walk reload the function's columns
   (the build's `-fno-strict-aliasing`): 40 instructions more per node. C's aligned atomic loads and stores of a constant
-  order reach it as atomic accesses (#1059), selected as ordinary ones (`mov`, `movzx`) since x86-64's total store order
-  gives their orders, with a seq_cst store's `fence` after it. An exchange, an addition or a subtraction of a constant
+  order reach it as atomic accesses (#1059). Loads and relaxed/release stores select ordinary accesses (`mov`, `movzx`),
+  since x86-64's total store order gives their orders. A seq_cst `store` keeps its semantic IR operation and selects a
+  copy of its desired value into reserved `r11`, then a width-matched memory `xchg`, without `mfence` (#1396). The copy
+  preserves the desired SSA value if it remains live, and the final memory record retains folded and frame addresses.
+  Both selection paths and the emitted-code certificate use this kernel; tests reject replacing the exchange by `mov`
+  or dropping the preserving copy. An exchange, an addition or a subtraction of a constant
   order reaches it as the IR's `rmw` (`TIER1_RULE_ATOMIC_RMW`): the operand copied to the scratch register, `xchg` or
   `lock xadd` of the object's width (a byte's and a short's at their own, never their 32-bit register's, which
   `test-tier1-select` runs on guard bytes), and the old value zero-extended into its register as a load's is, a barrier
@@ -143,7 +147,13 @@ patterns are:
   instruction of the width, the operand in `rm` and the destination in `reg`, any register, the operand's too; and
   `bswap`, the operand moved into the destination where it isn't there, then swapped in place. The allow-list refuses
   `tzcnt` without BMI, `lzcnt` without LZCNT and `popcnt` without POPCNT; `test-tier1-select` runs each of both widths
-  into its operand's register and into two others, natively on both paths.
+  into its operand's register and into two others, natively on both paths. The signed overflows (#1385), `saddo`, `ssubo` and
+  `smulo`, are `TIER1_RULE_INTRINSIC` too (`tier1_select_overflow`): `add` or `imul` into the destination, which takes
+  the left operand first unless it holds an operand already (both operations and their flags commute), or `cmp` of
+  the two, which writes no register; then `mov` of 0 into the destination, which keeps the flags, and `seto` into its
+  low byte, the destination any register. `test-tier1-select` runs each of both widths from both operand orders, of a
+  masked operand and of one value twice, into a register apart and into each operand's, natively on both paths
+  against the host compiler's builtins.
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
   flags-aware form chooser, comparison/branch fusion, simple selects using
   `cmov`, unconditional branches, returns and `IR_UNREACHABLE` as `ud2`.

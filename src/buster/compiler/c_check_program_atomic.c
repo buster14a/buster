@@ -92,9 +92,9 @@ static bool check_lower_atomic_direct_plan(bool builtin, bool native, uint8_t op
 
 // Emits the load/store/exchange/CAS, from already materialized addresses and value bytes. A native leaf returns raw
 // unsigned long bits, while generic CAS returns C's bool; normalize the latter result to I32 for its branch consumer. A
-// direct access (check_lower_atomic_direct_plan) is the typed stream's LOAD or SET of its bits' class with the atomic
-// marker of seq_cst, as a direct builtin's (check_lower_atomic_direct), its load's bits zero-extended into the result
-// buffer as a leaf's are, and its store followed by the FENCE of seq_cst; a direct compare-exchange is ATOMIC_CAS of its
+// direct load (check_lower_atomic_direct_plan) has the atomic marker of seq_cst, its bits zero-extended into the result
+// buffer as a leaf's are. A direct store is SET of seq_cst, which the backend emits as memory xchg without a separate
+// fence; its assignment result still comes from the unchanged desired buffer. A direct compare-exchange is ATOMIC_CAS of its
 // bits' class on the expected buffer's bits and the desired one's, the old bits stored into the expected buffer as the
 // leaf stores them (on success they are the expected ones), and its result whether they are the expected ones (I32, the
 // last entry, as its consumer reads it; narrow bits compared as I32, the class Tier 0 compares).
@@ -149,7 +149,6 @@ static void check_lower_atomic_call(CheckLowerWriter* writer, const CheckLowerAt
         {
             check_lower_emit(writer, BUSTER_TYPED_LOCAL, bits, plan->desired);
             check_lower_emit(writer, BUSTER_TYPED_SET, bits, marker);
-            check_lower_emit(writer, BUSTER_TYPED_FENCE, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_FENCE_SEQ_CST);
         }
     }
     else if (plan->native && helper == NULL)

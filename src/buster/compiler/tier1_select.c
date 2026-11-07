@@ -173,7 +173,8 @@ typedef enum Tier1SelectRule
     TIER1_RULE_MULTIPLY_HIGH,
     // An x86 builtin's bit manipulation of values[0] by values[1] (IR_INTRINSIC's pdep, pext, bzhi and bextr, #141), the
     // intrinsic `immediate` (BUSTER_IR_INTRINSIC_*): its one VEX instruction of `width` 4 or 8, whose three registers
-    // are its own, the destination's any of them (tier1_select_intrinsic).
+    // are its own, the destination's any of them (tier1_select_intrinsic); the bit operations' one instruction (#1374);
+    // and the signed overflows' operation and seto (#1385, tier1_select_overflow), the destination any register.
     TIER1_RULE_INTRINSIC,
     // Long double (F80, #141), whose values the CFG consumer keeps in frame objects of their own, one per value, 16 bytes
     // each, and computes on the x87 stack between them, leaving it empty after each node (tier1_emit_cfg_x87): its kind
@@ -1097,7 +1098,7 @@ static X86Instruction tier1_select_intrinsic(const Tier1SelectHoles* holes)
     };
     const uint32_t operation = holes->immediate < BUSTER_IR_INTRINSIC_COUNT ? (uint32_t)holes->immediate : BUSTER_IR_INTRINSIC_MULHU;
     const bool deposit = operation == BUSTER_IR_INTRINSIC_PDEP || operation == BUSTER_IR_INTRINSIC_PEXT;
-    const bool unary = operation >= BUSTER_IR_INTRINSIC_TZCNT;
+    const bool unary = operation >= BUSTER_IR_INTRINSIC_TZCNT && operation <= BUSTER_IR_INTRINSIC_BSWAP;
     const bool swap = operation == BUSTER_IR_INTRINSIC_BSWAP;
     return (X86Instruction){
         .form = forms[operation][holes->width == 8],
@@ -1106,6 +1107,32 @@ static X86Instruction tier1_select_intrinsic(const Tier1SelectHoles* holes)
         .rm = swap ? holes->destination : deposit ? holes->right : holes->left,
         .mode = BUSTER_X86_REGISTER_DIRECT,
     };
+}
+
+// TIER1_RULE_INTRINSIC's signed overflows (#1385): saddo's add and smulo's imul into the destination, which takes the left
+// operand first unless it holds one of them already (both operations commute, and so do their flags), or ssubo's cmp,
+// which writes no register; then the destination zeroed by a move, which keeps the flags, and seto into its low byte.
+static void tier1_select_overflow(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
+{
+    const bool wide = holes->width == 8;
+    const uint8_t destination = holes->destination;
+    if (holes->immediate == BUSTER_IR_INTRINSIC_SSUBO)
+    {
+        tier1_select_append(result, tier1_select_register_record(wide ? X86_FORM_CMP_R64_RM64 : X86_FORM_CMP_R32_RM32, holes->left, holes->right));
+    }
+    else
+    {
+        const bool multiply = holes->immediate == BUSTER_IR_INTRINSIC_SMULO;
+        const uint8_t other = destination == holes->right ? holes->left : holes->right;
+        if (destination != holes->left && destination != holes->right)
+        {
+            tier1_select_append(result, tier1_select_move(holes->width, destination, holes->left));
+        }
+        const uint16_t form = multiply ? (wide ? X86_FORM_IMUL_R64_RM64 : X86_FORM_IMUL_R32_RM32) : (wide ? X86_FORM_ADD_R64_RM64 : X86_FORM_ADD_R32_RM32);
+        tier1_select_append(result, tier1_select_register_record(form, destination, other));
+    }
+    tier1_select_append(result, tier1_select_constant_move(4, destination, 0));
+    tier1_select_append(result, (X86Instruction){ .rm = destination, .form = X86_FORM_SETO_RM8 });
 }
 
 // A scalar splat (#1450): EVEX broadcasts directly from a general register or a floating scalar's xmm register.
@@ -1393,6 +1420,14 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         X86Instruction record = holes->memory;
         record.reg = holes->right;
         record.form = width == 1 ? X86_FORM_MOV_RM8_R8 : width == 2 ? X86_FORM_MOV_RM16_R16 : width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32;
+        if (holes->operation == X86_OPERATION_XCHG)
+        {
+            // The desired SSA value can remain live after this store. Xchg returns the discarded old value in the
+            // reserved scratch instead; keep the memory record last for a frame address's displacement patch.
+            tier1_select_append(&result, tier1_select_move(8, BUSTER_TIER1_SELECT_SCRATCH, holes->right));
+            record.reg = BUSTER_TIER1_SELECT_SCRATCH;
+            record.form = width == 1 ? X86_FORM_XCHG_RM8_R8 : width == 2 ? X86_FORM_XCHG_RM16_R16 : width == 8 ? X86_FORM_XCHG_RM64_R64 : X86_FORM_XCHG_RM32_R32;
+        }
         tier1_select_append(&result, record);
         break;
     }
@@ -1456,11 +1491,18 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_UD2 });
         break;
     case TIER1_RULE_INTRINSIC:
-        if (holes->immediate == BUSTER_IR_INTRINSIC_BSWAP && destination != holes->left)
+        if (holes->immediate >= BUSTER_IR_INTRINSIC_SADDO && holes->immediate < BUSTER_IR_INTRINSIC_COUNT)
         {
-            tier1_select_append(&result, tier1_select_move(width, destination, holes->left));
+            tier1_select_overflow(&result, holes);
         }
-        tier1_select_append(&result, tier1_select_intrinsic(holes));
+        else
+        {
+            if (holes->immediate == BUSTER_IR_INTRINSIC_BSWAP && destination != holes->left)
+            {
+                tier1_select_append(&result, tier1_select_move(width, destination, holes->left));
+            }
+            tier1_select_append(&result, tier1_select_intrinsic(holes));
+        }
         break;
     case TIER1_RULE_FENCE:
         if (holes->immediate == BUSTER_IR_FENCE_SEQ_CST)
@@ -4829,6 +4871,11 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[2] = function->a[b];
             tier1_select_fold(forest, node, b, &base);
         }
+        if (store && (function->flags[node] & (BUSTER_IR_ATOMIC | BUSTER_IR_ORDER)) == (BUSTER_IR_ATOMIC | (BUSTER_IR_FENCE_SEQ_CST << BUSTER_IR_ORDER_SHIFT)))
+        {
+            base.operation = X86_OPERATION_XCHG;
+            base.intrinsic_cost = 2;
+        }
         Tier1SelectPattern folded = base;
         const bool walked = tier1_select_memory(forest, node, a, &folded, 0);
         // Through a frame object the folded address stands alone, as above.
@@ -5000,13 +5047,14 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     }
     else if (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_MULHU ? type == IR_I64 : c < BUSTER_IR_INTRINSIC_COUNT && integer))
     {
-        // One test in the chain for both rules, as mulhu's alone was: its mul, or the others' VEX instruction.
+        // One test in the chain for both rules, as mulhu's alone was: its mul, or the others' VEX instruction (or a signed
+        // overflow's sequence, tier1_select_overflow).
         const bool high = c == BUSTER_IR_INTRINSIC_MULHU;
         base.rule = high ? TIER1_RULE_MULTIPLY_HIGH : TIER1_RULE_INTRINSIC;
         base.values[0] = a;
         base.values[1] = b;
         base.immediate = high ? 0 : c;
-        base.intrinsic_cost = high ? 4 : 1;
+        base.intrinsic_cost = high ? 4 : c >= BUSTER_IR_INTRINSIC_SADDO ? 3 : 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     else if (op == IR_LIFETIME)

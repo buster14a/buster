@@ -4,9 +4,9 @@
 // Runtime builtin recipes against Clang's actual builtin operations, independently of c_builtin.c's fold kernels.
 // Every recipe is appended by both paths, validated, compiled by both Tier 0 paths and executed in a child. Overflow
 // tests cover every ordinary 8/16/32/64 signed/unsigned and _Bool input/destination combination, wrapped bytes and
-// untouched surrounding bytes, _BitInt destinations narrower than their class, and 128-bit operands and destinations
-// (__int128's) mixed with 64-bit operands and narrower destinations. Guard-page tests exercise exact output tails and
-// transactional capacity failures.
+// untouched surrounding bytes, _BitInt operands and destinations narrower than their class, and 128-bit operands and
+// destinations (__int128's) mixed with 64-bit operands and narrower destinations. Guard-page tests exercise exact output
+// tails and transactional capacity failures.
 // This tests a typed-stream consumer; it does not claim source checking or C-to-Tier-1 integration.
 
 #include <stdio.h>
@@ -183,6 +183,17 @@ static uint64_t cbuiltin_lower_test_input(uint32_t index, uint32_t type, uint64_
     return result;
 }
 
+// An operand's slot value as the producer keeps it: a _BitInt's low bits extended from its width by its signedness (#1385:
+// its recipes read the slot whole), and a whole class's bits as they come, past the class unspecified.
+static uint64_t cbuiltin_lower_test_slot(uint64_t bits, uint32_t type)
+{
+    const uint32_t width = type & ~BUSTER_CBUILTIN_SIGNED;
+    const uint32_t shift = 64 - width;
+    const bool extend = !cbuiltin_lower_type_whole(type);
+    const uint64_t result = !extend ? bits : (type & BUSTER_CBUILTIN_SIGNED) != 0 ? (uint64_t)((int64_t)(bits << shift) >> shift) : (bits << shift) >> shift;
+    return result;
+}
+
 static bool cbuiltin_lower_test_same_code(const Tier0Code* a, const Tier0Code* b)
 {
     bool result = a->error == TIER0_OK && b->error == TIER0_OK && a->count == b->count && a->branch_count == b->branch_count &&
@@ -306,8 +317,14 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_lower_test_case(CB
                                     memcmp(scalar_stream.local_flags, vector_stream.local_flags, scalar_stream.buffer.local_count) == 0,
                                     "lower twins", call.id, call.result_type) && ok;
     CBuiltinLowerBuffer* buffer = &scalar_stream.buffer;
+    // A product with a 64-bit operand takes a U128 multiplication (#1385).
+    bool int128 = false;
     if (ok)
     {
+        for (uint32_t i = 0; i < buffer->count; i += 1)
+        {
+            int128 |= buffer->classes[i] == BUSTER_TYPED_CLASS_I128 || buffer->classes[i] == BUSTER_TYPED_CLASS_U128;
+        }
         scalar_stream.kinds[buffer->count] = BUSTER_TYPED_CONVERT;
         scalar_stream.classes[buffer->count] = BUSTER_TYPED_CLASS_U64;
         scalar_stream.values[buffer->count] = 0;
@@ -334,6 +351,7 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_lower_test_case(CB
         .local_count = buffer->local_count,
         .parameter_count = call.id >= CBUILTIN_ADD_OVERFLOW ? 3 : 1,
         .parameters = parameters,
+        .int128 = int128,
         .result =
         {
             .kind = BUSTER_ABI_RESULT_REGISTERS,
@@ -358,6 +376,11 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_lower_test_case(CB
         const uint32_t at = overflow ? call.a_type : tier0_class_bytes(cbuiltin_lower_parameter_class(call.id)) * 8;
         a[i] = cbuiltin_lower_test_input(overflow && i < 144 ? i / 12 : i, at, state);
         b[i] = cbuiltin_lower_test_input(overflow && i < 144 ? i % 12 : i, overflow ? call.b_type : 64, state);
+        if (overflow)
+        {
+            a[i] = cbuiltin_lower_test_slot(a[i], call.a_type);
+            b[i] = cbuiltin_lower_test_slot(b[i], call.b_type);
+        }
         if (!overflow && call.id >= CBUILTIN_CLZ && call.id <= CBUILTIN_CTZLL && (a[i] & cbuiltin_mask(at)) == 0)
         {
             a[i] = 1;
@@ -917,8 +940,9 @@ static void cbuiltin_lower_test_scratch(CBuiltinLowerTestTally* tally)
                 }
             }
         }
-        cbuiltin_lower_test_expect(tally, scratch.count == 16 && pooled.buffer.local_count == 20,
-                                   "all recipe families reuse at most sixteen U64 slots around a user local", 0, path);
+        // The widest recipe, a 128-bit product's, takes 14 (#1385: a 64-bit one's no longer takes four 32-bit products).
+        cbuiltin_lower_test_expect(tally, scratch.count == 14 && pooled.buffer.local_count == 18,
+                                   "all recipe families reuse at most fourteen U64 slots around a user local", 0, path);
         const CBuiltinLowerCall call = {
             .id = CBUILTIN_MUL_OVERFLOW,
             .a = 0,
@@ -928,16 +952,28 @@ static void cbuiltin_lower_test_scratch(CBuiltinLowerTestTally* tally)
             .b_type = 64,
             .result_type = 64,
         };
+        const CBuiltinLowerCall widest = {
+            .id = CBUILTIN_MUL_OVERFLOW,
+            .a = 0,
+            .b = 1,
+            .destination = 2,
+            .a_type = BUSTER_CBUILTIN_LOWER_WIDE | BUSTER_CBUILTIN_SIGNED,
+            .b_type = BUSTER_CBUILTIN_LOWER_WIDE,
+            .result_type = BUSTER_CBUILTIN_LOWER_WIDE,
+        };
         CBuiltinLowerTestStream partial;
-        cbuiltin_lower_test_stream(&partial, &call);
+        cbuiltin_lower_test_stream(&partial, &widest);
+        partial.local_flags[0] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+        partial.local_flags[1] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
         CBuiltinLowerScratch small = { .locals = { 3, 4, 5 }, .count = 3 };
         partial.buffer.scratch = &small;
         partial.buffer.local_count = 6;
-        partial.buffer.local_capacity = 18;
+        // Its 14 temporaries: the pool's 3, and room for 10 more of the 11.
+        partial.buffer.local_capacity = 16;
         memset(partial.local_classes + 3, BUSTER_TYPED_CLASS_U64, 3);
         const CBuiltinLowerTestStream partial_before = partial;
         const CBuiltinLowerScratch small_before = small;
-        const CBuiltinLowerResult refused = path == 0 ? cbuiltin_lower_scalar(&partial.buffer, &call) : cbuiltin_lower(&partial.buffer, &call);
+        const CBuiltinLowerResult refused = path == 0 ? cbuiltin_lower_scalar(&partial.buffer, &widest) : cbuiltin_lower(&partial.buffer, &widest);
         cbuiltin_lower_test_expect(tally, refused.error == CBUILTIN_LOWER_CAPACITY && refused.limit == CBUILTIN_LOWER_LIMIT_LOCALS &&
                                          memcmp(&partial, &partial_before, sizeof(partial)) == 0 && memcmp(&small, &small_before, sizeof(small)) == 0,
                                    "partially populated pool grows transactionally with one local missing", call.id, path);
@@ -1043,8 +1079,9 @@ static int run_builtin_lower_tests(int argc, char** argv)
                 }
             }
         }
-        // _BitInt destinations narrower than their slot class, from 64- and 32-bit operands.
-        const uint32_t bit_operands[3] = { 64, 64 | BUSTER_CBUILTIN_SIGNED, 32 | BUSTER_CBUILTIN_SIGNED };
+        // _BitInt destinations narrower than their slot class, from 64- and 32-bit operands (an unsigned 32-bit product,
+        // past 2^63, among them).
+        const uint32_t bit_operands[4] = { 64, 64 | BUSTER_CBUILTIN_SIGNED, 32, 32 | BUSTER_CBUILTIN_SIGNED };
         const uint32_t bit_results[13] =
         {
             2,
@@ -1080,6 +1117,46 @@ static int run_builtin_lower_tests(int argc, char** argv)
                             .result_type = bit_results[rt],
                         };
                         cbuiltin_lower_test_case(&tally, &arena, call, &state);
+                    }
+                }
+            }
+        }
+        // _BitInt operands narrower than their slot class (#1385), each recipe's: of at most 32 bits, past them within 64 and
+        // beside whole ones, into whole, _BitInt and bool destinations.
+        const uint32_t odd_operands[8] =
+        {
+            20,
+            31 | BUSTER_CBUILTIN_SIGNED,
+            32,
+            33 | BUSTER_CBUILTIN_SIGNED,
+            40,
+            63 | BUSTER_CBUILTIN_SIGNED,
+            64,
+            64 | BUSTER_CBUILTIN_SIGNED,
+        };
+        const uint32_t odd_results[6] = { 1, 31 | BUSTER_CBUILTIN_SIGNED, 32, 63 | BUSTER_CBUILTIN_SIGNED, 64, 64 | BUSTER_CBUILTIN_SIGNED };
+        for (uint32_t id = CBUILTIN_ADD_OVERFLOW; id <= CBUILTIN_MUL_OVERFLOW; id += 1)
+        {
+            for (uint32_t at = 0; at < BUSTER_ARRAY_LENGTH(odd_operands); at += 1)
+            {
+                for (uint32_t bt = 0; bt < BUSTER_ARRAY_LENGTH(odd_operands); bt += 1)
+                {
+                    for (uint32_t rt = 0; rt < BUSTER_ARRAY_LENGTH(odd_results); rt += 1)
+                    {
+                        const CBuiltinLowerCall call =
+                        {
+                            .id = (CBuiltinId)id,
+                            .a = 0,
+                            .b = 1,
+                            .destination = 2,
+                            .a_type = odd_operands[at],
+                            .b_type = odd_operands[bt],
+                            .result_type = odd_results[rt],
+                        };
+                        if (!cbuiltin_lower_type_whole(call.a_type) || !cbuiltin_lower_type_whole(call.b_type))
+                        {
+                            cbuiltin_lower_test_case(&tally, &arena, call, &state);
+                        }
                     }
                 }
             }

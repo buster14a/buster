@@ -113,6 +113,8 @@ static String8 check_semantic_token(const Parser* parser, Preprocessor* pp, uint
 {
     String8 result = { 0 };
     const uint32_t source = token < parser->tokens.count ? parser->tokens.sources[token] : BUSTER_CHECK_NONE;
+    // The output's columns, which the backend may have given back (pp_release_output).
+    pp_output_ensure(pp);
     if (source < pp->output.count && pp->output.kinds[source] != BUSTER_PP_KIND_EMBED)
     {
         const uint8_t kind = pp->output.kinds[source];

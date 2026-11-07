@@ -4611,6 +4611,12 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             if (!valid && !again)
             {
                 check_driver_link_name(&code.link, bind.name, name, sizeof(name));
+                // A unit's declaration has its place in the output, which the backend gave back (pp_release_output); a link
+                // of several units asks their kept parts, and has no preprocessor here.
+                if (units == NULL)
+                {
+                    pp_output_ensure(pp);
+                }
                 const bool system = bind.error == BIND_ERROR_UNDEFINED && (units != NULL ? check_units_system_declared(units, unit_count, &code.link, bind.name) :
                                                                                            check_driver_system_declared(program, parser, pp, &code.link, bind.name));
                 if (system)
@@ -5615,6 +5621,16 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     }
                     result = pp->errors != 0 ? 1 : result;
                     check_clock_mark(stage_clock, CHECK_STAGE_CHECK_PROGRAM);
+                    // The backend reads the program, not the preprocessor's output: only its diagnostics do, which ask for it
+                    // first (pp_output_ensure), and -g's line table, whose units keep their history and so their output. So a
+                    // unit without errors that goes on to its object or executable gives the output back; one that links with
+                    // others keeps it for the link, and one with errors for the diagnostics after these, which read it as they
+                    // are. --poison-arenas makes it unreadable instead, for a test to find a reader that doesn't ask
+                    // (pp_release_output, #628).
+                    if (result == 0 && (emit_object || link) && kept == NULL && !prefix_only && !dump_static && !parse_failed && !repairing)
+                    {
+                        pp_release_output(pp, command->poison_arenas);
+                    }
                     // -c's object, or a kept link (one of several units that link), are written alike: the unit's code and
                     // data.
                     if (result == 0 && (emit_object || kept != NULL) && !prefix_only)

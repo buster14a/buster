@@ -255,7 +255,7 @@ clang -std=c17 -O2 -Wall -Wextra -Werror "${sanitizer_flags[@]}" tests/different
 # #113's fixtures, each through the deferred reader on 1, 2, 3 and 8 lanes with every binding resolution, and
 # on 8 with the identifiers' ids in another order (#153's --id-order, 153 by default).
 "$BUSTER_COMPILER" test-checker-deferred
-== Test integer builtin actions against Clang
+== Test integer builtin actions against Clang (part 1 of 4)
 "$BUSTER_COMPILER" test-builtins
 "$BUSTER_COMPILER" test-builtin-intrinsic-types
 "$BUSTER_COMPILER" test-builtin-intrinsic-features
@@ -263,6 +263,7 @@ clang -std=c17 -O2 -Wall -Wextra -Werror "${sanitizer_flags[@]}" tests/different
 "$BUSTER_COMPILER" test-check-builtins-vector
 "$BUSTER_COMPILER" test-builtin-intrinsic-catalog
 "$BUSTER_COMPILER" test-builtin-intrinsic-inventory
+== Test integer builtin actions against Clang (part 2 of 4)
 "$BUSTER_COMPILER" test-check-builtins
 "$BUSTER_COMPILER" test-check-varargs
 "$BUSTER_COMPILER" test-tier0-variadic-frame
@@ -271,12 +272,14 @@ clang -std=c17 -O2 -Wall -Wextra -Werror "${sanitizer_flags[@]}" tests/different
 "$BUSTER_COMPILER" test-check-builtins-bit-cast
 "$BUSTER_COMPILER" test-check-builtins-float
 "$BUSTER_COMPILER" test-check-builtins-math
+== Test integer builtin actions against Clang (part 3 of 4)
 "$BUSTER_COMPILER" test-check-builtins-atomic
 "$BUSTER_COMPILER" test-check-builtins-atomic-rmw
 "$BUSTER_COMPILER" test-check-builtins-typed-overflow
 "$BUSTER_COMPILER" test-check-builtins-bits
 "$BUSTER_COMPILER" test-check-builtins-rounds
 "$BUSTER_COMPILER" test-builtin-lower
+== Test integer builtin actions against Clang (part 4 of 4)
 "$BUSTER_COMPILER" test-builtin-varargs-lower
 "$BUSTER_COMPILER" test-builtin-misc-lower
 "$BUSTER_COMPILER" test-builtin-float-lower
@@ -285,11 +288,11 @@ clang -std=c17 -O2 -Wall -Wextra -Werror "${sanitizer_flags[@]}" tests/different
 "$BUSTER_COMPILER" test-builtin-atomic-rmw-helpers
 "$BUSTER_COMPILER" test-builtin-rounds-helper
 "$BUSTER_COMPILER" test-builtin-math-helpers
-== Test typed postorder checking and source fixtures (part 1 of 4)
-# --part deals the checks (sections, and check_test_programs' programs) in turn to 4 parts of one CPU each; part 1
+== Test typed postorder checking and source fixtures (part 1 of 8)
+# --part deals the checks (sections, and check_test_programs' programs) in turn to 8 parts of one CPU each; part 1
 # also runs the sections that share the type table. Whole, the command took 141 s on a hosted runner with 2 CPUs,
 # of which it kept 1.03 busy.
-"$BUSTER_COMPILER" test-checker --seed 133 --part 1/4
+"$BUSTER_COMPILER" test-checker --seed 133 --part 1/8
 == Lower c-testsuite's programs and the frozen SQLite source with node templates as the tasks do
 # #1048: each file's selected program lowered by the task loop and with c_check_program_templates.c's templates forced,
 # on any host, every function's entries, locals, calls and arguments the same. sqlite3.c with test-ir-source's options.
@@ -367,12 +370,20 @@ else
 printf 'SKIP: main.c -c compiles (the TSan/MSan rows run them alone after the suite; docs/ci.md)\n'
 exit 77
 fi
-== Test typed postorder checking and source fixtures (part 2 of 4)
-"$BUSTER_COMPILER" test-checker --seed 133 --part 2/4
-== Test typed postorder checking and source fixtures (part 3 of 4)
-"$BUSTER_COMPILER" test-checker --seed 133 --part 3/4
-== Test typed postorder checking and source fixtures (part 4 of 4)
-"$BUSTER_COMPILER" test-checker --seed 133 --part 4/4
+== Test typed postorder checking and source fixtures (part 2 of 8)
+"$BUSTER_COMPILER" test-checker --seed 133 --part 2/8
+== Test typed postorder checking and source fixtures (part 3 of 8)
+"$BUSTER_COMPILER" test-checker --seed 133 --part 3/8
+== Test typed postorder checking and source fixtures (part 4 of 8)
+"$BUSTER_COMPILER" test-checker --seed 133 --part 4/8
+== Test typed postorder checking and source fixtures (part 5 of 8)
+"$BUSTER_COMPILER" test-checker --seed 133 --part 5/8
+== Test typed postorder checking and source fixtures (part 6 of 8)
+"$BUSTER_COMPILER" test-checker --seed 133 --part 6/8
+== Test typed postorder checking and source fixtures (part 7 of 8)
+"$BUSTER_COMPILER" test-checker --seed 133 --part 7/8
+== Test typed postorder checking and source fixtures (part 8 of 8)
+"$BUSTER_COMPILER" test-checker --seed 133 --part 8/8
 == Test the semantic driver's diagnostics and emission against clang, with lazy system headers
 # Only the checks that run the driver with -flazy-system-headers; the parts above run the others, which are the
 # same either way.
@@ -733,10 +744,14 @@ rm -rf "$errors" "$directory"
 # promotions and the text's round trip keep, and which the program's run in the IR's three forms passes through.
 "$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/fences.c
 "$BUSTER_COMPILER" test-ssa-source --clang clang tests/ir-source/fences.c
-# Each aligned atomic load and store of a constant order is the typed stream's marked LOAD or SET (and a seq_cst
-# store's FENCE) and the IR's atomic access, which promotion leaves in memory and the run passes through alike.
+# Each aligned atomic load and store of a constant order is the typed stream's marked LOAD or SET and the IR's atomic
+# access, which promotion leaves in memory and the run passes through alike. Seq_cst stores become xchg at emission.
 "$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/atomics.c
 "$BUSTER_COMPILER" test-ssa-source --clang clang tests/ir-source/atomics.c
+# #1396: initializing stores and assignment results, with the desired value live past xchg, through both interpreters
+# and both native Tier 1 paths. Unit tests also keep undefined-byte checking enabled for the initializing stores.
+"$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/atomic-stores.c
+"$BUSTER_COMPILER" test-ssa-source --typed --tier1 --clang clang tests/ir-source/atomic-stores.c
 # The verifier refuses an atomic access aligned below its size; the long's store and load, lowered and promoted,
 # print their natural alignment.
 test "$("$BUSTER_COMPILER" test-ir-source --print published tests/ir-source/atomics.c | grep -c 'align=8 atomic')" -eq 4
@@ -746,6 +761,11 @@ test "$("$BUSTER_COMPILER" test-ir-source --print exchanged tests/ir-source/atom
 # Each bitwise, minimum and maximum read/modify/write of the fixture's (twelve, GNU's, __sync's and C11's) is a loop of
 # compare-exchanges, the IR's `rmw ... cas`, none a helper's call, in both forms.
 test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomics.c | grep -c ' cas ')" -eq 24
+== Test the overflow builtins through the IR's lowerings, promotion, text, interpreters and Tier 1 against clang
+# #1385: signed longs' rows of the operation and seto are the IR's saddo, ssubo and smulo, the other classes' recipes
+# 64-bit operations and 128-bit products; the program runs in the IR's forms, the typed stream's interpreter and Tier 1.
+"$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/overflow-builtins.c
+"$BUSTER_COMPILER" test-ssa-source --typed --tier1 --clang clang tests/ir-source/overflow-builtins.c
 == Test deferred-body source-position environments
 "$BUSTER_COMPILER" test-environments
 == Test experimental Tier 1 scheduling, model coverage and native execution
