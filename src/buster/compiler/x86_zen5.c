@@ -16,8 +16,9 @@
 // - Cases whose rows agree in every column and mask share one dense ID (x86_zen5_initialize). A record resolves to its
 //   ID once (x86_zen5_id); consumers carry the byte ID as a column and look up 32 at a time through eight ZMM
 //   registers (x86_zen5_lookup: four banks of 64 IDs, vpermi2w), with x86_zen5_lookup_scalar as the exact twin.
-// - An immediate's value, an EVEX zeroing opmask or rounding decoration, a segment override and a fixup mark don't change
-//   a record's case (docs/x86-zen5.md has the measurements that support it); a merging opmask does (X86_COST_MASKED).
+// - An immediate's value, an EVEX zeroing opmask on registers or rounding decoration, a segment override and a fixup mark
+//   don't change a record's case (docs/x86-zen5.md has the measurements that support it); a merging opmask
+//   (X86_COST_MASKED) and any opmask on memory (X86_COST_MASKED_MEMORY) do.
 //   Tuning never grants permission to emit an ISA feature: that remains x86_target.c's job.
 
 #ifndef BUSTER_X86_ZEN5_C
@@ -55,9 +56,10 @@ typedef enum X86CostOperands
     // LEA of [base + index * scale + disp].
     X86_COST_LEA_THREE,
     // An EVEX record of registers merging into its destination under an opmask: the destination is a source too (a
-    // masked vpaddd's latency is a cycle more than an unmasked one's). Zeroing under an opmask is the unmasked kind's.
+    // masked vpaddd's latency is a cycle more than an unmasked one's). Zeroing on registers is the unmasked kind's.
     X86_COST_MASKED,
-    // An EVEX record of a memory operand (a base, no index) under an opmask, merging: a masked store, a masked load.
+    // An EVEX record of a memory operand (a base, no index) under an opmask: a masked store (merging) or a zeroing
+    // masked load (a zeroing vmovdqu8 load takes two cycles more from its address than an unmasked one).
     X86_COST_MASKED_MEMORY,
     X86_COST_OPERANDS_COUNT,
 } X86CostOperands;
@@ -225,13 +227,25 @@ static uint32_t x86_zen5_operands(const X86Instruction* instruction, uint32_t fo
     const uint32_t mode = instruction->mode;
     const X86FormDescription* description = &x86_form_descriptions[form];
     uint32_t operands = X86_COST_OPERANDS_COUNT;
-    // An opmask merging into the destination: its own kinds, which only the forms measured with one have.
-    const bool merging = (instruction->decorations & BUSTER_X86_DECORATION_MASK) != 0 && (instruction->decorations & BUSTER_X86_DECORATION_ZEROING) == 0 &&
-                         description->family == BUSTER_X86_FAMILY_EVEX && (description->rm & BUSTER_X86_OPERAND_VSIB) == 0;
-    if (merging)
+    // An opmask on a memory record, or merging into a register destination: its own kinds, which only the forms
+    // measured with one have. A masked load's row is a zeroing one: merging into a vector destination reads it too,
+    // which no row describes. Zeroing on registers is the unmasked kind's.
+    const bool masked = (instruction->decorations & BUSTER_X86_DECORATION_MASK) != 0 && description->family == BUSTER_X86_FAMILY_EVEX &&
+                        (description->rm & BUSTER_X86_OPERAND_VSIB) == 0;
+    const bool zeroing = (instruction->decorations & BUSTER_X86_DECORATION_ZEROING) != 0;
+    if (masked && mode != BUSTER_X86_REGISTER_DIRECT)
     {
-        const bool simple = mode == BUSTER_X86_REGISTER_DIRECT || ((mode & BUSTER_X86_MODE_INDEX) == 0 && (mode & BUSTER_X86_MODE_ADDRESS_SIZE) == 0);
-        operands = !simple ? X86_COST_OPERANDS_COUNT : mode == BUSTER_X86_REGISTER_DIRECT ? X86_COST_MASKED : X86_COST_MASKED_MEMORY;
+        const uint32_t klass = description->reg & BUSTER_X86_OPERAND_CLASS;
+        const uint32_t syntax = description->syntax;
+        const bool into = klass >= BUSTER_X86_CLASS_XMM && klass <= BUSTER_X86_CLASS_ZMM &&
+                          (syntax == X86_SYNTAX_REG_RM || syntax == X86_SYNTAX_REG_RM_IMM || syntax == X86_SYNTAX_REG_VVVV_RM ||
+                           syntax == X86_SYNTAX_REG_VVVV_RM_IMM || syntax == X86_SYNTAX_REG_RM_VVVV);
+        const bool simple = (mode & BUSTER_X86_MODE_INDEX) == 0 && (mode & BUSTER_X86_MODE_ADDRESS_SIZE) == 0;
+        operands = simple && (zeroing || !into) ? X86_COST_MASKED_MEMORY : X86_COST_OPERANDS_COUNT;
+    }
+    else if (masked && !zeroing)
+    {
+        operands = X86_COST_MASKED;
     }
     else if (mode == BUSTER_X86_REGISTER_DIRECT)
     {

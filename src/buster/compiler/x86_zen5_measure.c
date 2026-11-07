@@ -122,7 +122,8 @@ typedef enum X86CostSpecial
 #define BUSTER_X86_COST_OPMASKS 5
 #define BUSTER_X86_COST_OPMASK_VVVV 6
 #define BUSTER_X86_COST_OPMASK_RM 7
-// The opmask a masked case's target merges under: alternate elements (0x5555...), as its initial pattern.
+// The opmask a masked case's target runs under (merging, or zeroing for a masked load): alternate elements (0x5555...),
+// as its initial pattern.
 #define BUSTER_X86_COST_OPMASK_MERGE 7
 
 static const uint8_t x86_zen5_gpr_order[BUSTER_X86_COST_POOL] = {
@@ -168,8 +169,10 @@ struct X86CostShape
     bool stores;
     bool lea;
     bool is4;
-    // A merging opmask (BUSTER_X86_COST_OPMASK_MERGE) on the target: its destination is a source too.
+    // An opmask (BUSTER_X86_COST_OPMASK_MERGE) on the target, and its decorations: merging on registers and stores,
+    // zeroing on a load into a vector register (the model's masked load row).
     bool masked;
+    uint8_t decorations;
     uint8_t special;
     uint8_t fill;
     // Additive identity as the constant sources.
@@ -462,15 +465,20 @@ static void x86_zen5_shape(uint32_t form, uint32_t operands, X86CostShape* shape
     const uint16_t operand[BUSTER_X86_COST_ROLES] = { description->reg, description->rm, description->vvvv };
     shape->memory = operands != X86_COST_REGISTER && operands != X86_COST_ZERO && operands != X86_COST_MASKED;
     shape->masked = operands == X86_COST_MASKED || operands == X86_COST_MASKED_MEMORY;
-    // Whether the merging opmask makes the destination a source: the effects of a masked record of distinct registers
-    // say (a vpaddd's does; a compare into an opmask and vpblendm's selection don't).
+    const bool into = operands == X86_COST_MASKED_MEMORY && description->reg != BUSTER_X86_OPERAND_NONE &&
+                      x86_zen5_file(description->reg) == X86_COST_FILE_VECTOR && (x86_effects_role(effects, BUSTER_X86_ROLE_REG) & BUSTER_X86_ROLE_WRITE) != 0;
+    shape->decorations = (uint8_t)(shape->masked ? BUSTER_X86_COST_OPMASK_MERGE | (into ? BUSTER_X86_DECORATION_ZEROING : 0) : 0);
+    // Whether the opmask makes the destination a source: the effects of a masked record of distinct registers, with
+    // its opmasks (without them a masked record reads everything), say: merging does, zeroing doesn't. The destination's
+    // chain then measures whether the processor waits for it (a merging vpaddd does; vpblendm's selection doesn't).
     bool merged = false;
     if (shape->masked && description->reg != BUSTER_X86_OPERAND_NONE && x86_zen5_file(description->reg) == X86_COST_FILE_VECTOR)
     {
-        const X86Instruction sample = { .form = (uint16_t)form, .reg = 1, .vvvv = 2, .rm = 3, .decorations = BUSTER_X86_COST_OPMASK_MERGE };
+        const X86Instruction sample = { .form = (uint16_t)form, .reg = 1, .vvvv = 2, .rm = 3, .decorations = shape->decorations };
         uint64_t reads = 0;
         uint64_t writes = 0;
-        x86_instructions_effects_scalar(&sample, 1, &reads, &writes);
+        uint16_t opmasks = 0;
+        x86_instructions_effects_opmasks_scalar(&sample, 1, &reads, &writes, &opmasks);
         merged = (reads & BUSTER_X86_RESOURCE_VECTOR(1)) != 0;
     }
     shape->lea = effects->operation == X86_OPERATION_LEA;
@@ -724,7 +732,7 @@ static X86Instruction x86_zen5_record(const X86CostShape* shape, uint32_t destin
     {
         record.immediate = BUSTER_X86_COST_VECTOR_IS4 << 4;
     }
-    record.decorations = x86_zen5_override_decorations >= 0 ? (uint8_t)x86_zen5_override_decorations : shape->masked ? BUSTER_X86_COST_OPMASK_MERGE : 0;
+    record.decorations = x86_zen5_override_decorations >= 0 ? (uint8_t)x86_zen5_override_decorations : shape->decorations;
     return record;
 }
 
@@ -2164,13 +2172,14 @@ static void x86_zen5_release(X86CostProgram* programs, uint32_t count)
     }
 }
 
-// measure-x86-zen5 [--iterations N] [--passes N] [--only FORM/KIND | --sample N | --missing] [--table] [--check]
-// [--immediate N] [--decorations N]
+// measure-x86-zen5 [--iterations N] [--passes N] [--only FORM/KIND | --sample N [--offset N] | --missing] [--table]
+// [--check] [--immediate N] [--decorations N]
 static int run_x86_zen5_measure(int argc, char** argv)
 {
     uint64_t iterations = 10000;
     uint64_t passes = 7;
     uint64_t sample = 1;
+    uint64_t offset = 0;
     const char* only = 0;
     bool table = false;
     bool check = false;
@@ -2189,6 +2198,10 @@ static int run_x86_zen5_measure(int argc, char** argv)
         else if (strcmp(argv[i], "--sample") == 0 && i + 1 < argc)
         {
             valid = x86_zen5_number(argv[++i], 1, X86_COST_CASE_COUNT, &sample);
+        }
+        else if (strcmp(argv[i], "--offset") == 0 && i + 1 < argc)
+        {
+            valid = x86_zen5_number(argv[++i], 0, X86_COST_CASE_COUNT, &offset);
         }
         else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
         {
@@ -2264,7 +2277,7 @@ static int run_x86_zen5_measure(int argc, char** argv)
         const X86CostCase* entry = &x86_zen5_cases[c];
         // --missing: the rows that account for no column yet, the ones added with U values and zero masks.
         const bool unmeasured = (entry->measured | entry->derived | entry->absent) == 0;
-        const bool selected = only != 0 ? strcmp(only, entry->name) == 0 : missing ? unmeasured : (c - 1) % sample == 0;
+        const bool selected = only != 0 ? strcmp(only, entry->name) == 0 : missing ? unmeasured : (c - 1) % sample == offset % sample;
         if (selected)
         {
             matched += 1;

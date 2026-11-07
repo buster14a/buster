@@ -197,7 +197,7 @@ static void tier1_model_test_regressions(Tier1ModelTest* test)
         const Tier1ModelManifest* manifest = test->manifest;
         if (variant == 7)
         {
-            const bool separate = valid && manifest->count == 2 && manifest->unknown == 2 && manifest->cases[0].refusal != 0 && manifest->cases[1].refusal != 0 && strcmp(manifest->cases[0].refusal, "high-byte-register") == 0 && strcmp(manifest->cases[1].refusal, "operand-width") == 0 && manifest->cases[0].occurrences == 1 && manifest->cases[1].occurrences == 1;
+            const bool separate = valid && manifest->count == 2 && manifest->cases[0].cost_id == manifest->cases[1].cost_id && manifest->cases[0].refusal != 0 && manifest->cases[1].refusal != 0 && strcmp(manifest->cases[0].refusal, "high-byte-register") == 0 && strcmp(manifest->cases[1].refusal, "operand-width") == 0 && manifest->cases[0].occurrences == 1 && manifest->cases[1].occurrences == 1;
             tier1_model_test_expect(test, separate, "high-byte alias and unsupported width remain distinct refused cases");
         }
         if (variant == 8)

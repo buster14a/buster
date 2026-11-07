@@ -3463,8 +3463,9 @@ static void tier0_prepare_tables(void)
 
 static bool tier0_initialize(void)
 {
-    // Tier 0 reads the effects tables: its immediates' forms (x86_choose_forms) and its rows' (tier0_operation_form_valid).
-    if (!tier0_initialized && (x86_semantics_initialized || x86_semantics_initialize()))
+    // Tier 0 reads the effects tables: its immediates' forms (x86_choose_forms) and its rows' (tier0_operation_form_valid);
+    // and the Zen 5 model (#181), which its records' rows come from and whose tests check them.
+    if (!tier0_initialized && (x86_semantics_initialized || x86_semantics_initialize()) && (x86_zen5_initialized || x86_zen5_initialize()))
     {
         tier0_prepare_tables();
         tier0_inc_dec = tier0_inc_dec_costs_no_more() ? BUSTER_X86_CONTEXT_INC_DEC : 0;

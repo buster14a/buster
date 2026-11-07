@@ -22,24 +22,30 @@ A **case** is a form (`X86Form`) and an operand kind (`X86CostOperands`):
 | `LEA_SCALED` | LEA of `[base + index * 2, 4 or 8]` |
 | `LEA_THREE` | LEA of `[base + index * scale + disp]`; RBP or R13 as the base force a displacement and make `[base + index]` one |
 | `MASKED` | an EVEX record of registers merging into its destination under an opmask |
-| `MASKED_MEMORY` | an EVEX record of a memory operand (a base, no index) under a merging opmask: a masked store or load |
+| `MASKED_MEMORY` | an EVEX record of a memory operand (a base, no index) under an opmask: a masked store (merging) or a zeroing masked load |
 
 A record whose form has no row of its kind, an index without a base, or a
 32-bit address has no case (ID 0, every column unknown): a merging opmask on a
-form measured without one is such a record. Some things don't change a record's
-case: its immediate's value, an EVEX zeroing opmask or rounding decoration, a
-segment override and a fixup mark. The immediates and decorations are measured
-(below, "What doesn't change a case"); a segment override (TLS) and a fixup
-mark are assumed alike, as the instruction's execution is the form's. A merging
-opmask does change a case, which the sweep found: it has its own kinds.
+form measured without one, and a load merging into its vector destination, are
+such records. Some things don't change a record's case: its immediate's value,
+an EVEX zeroing opmask on registers or rounding decoration, a segment override
+and a fixup mark. The immediates and decorations are measured (below, "What
+doesn't change a case"); a segment override (TLS) and a fixup mark are assumed
+alike, as the instruction's execution is the form's. A merging opmask, and any
+opmask on memory, do change a case, which the sweep found: they have their own
+kinds.
 
-`x86_zen5_rows.c` has 893 rows: the cases of 390 forms Tier 0 and Tier 1
-emitted in their tests and in compiling SQLite's amalgamation and speedtest1 and
-Lua 5.4.8 (both tiers, the default target and `-march=znver5`), the rest of the
-conditional families (all 16 conditions of jcc, setcc and cmovcc, which a
-program's conditions choose), the vector, mask and masked forms Tier 1's
-selection emits for x86-64-v2, -v3 and -v4 (`test-tier1-masks`), and the 57
-cases of the first model. `x86_zen5_initialize` gives the rows that agree in every column and
+`x86_zen5_rows.c` has 1,349 rows: the cases Tier 0 and Tier 1 emitted in their
+tests (with CI's options: `test-tier0 --cross-check`, `test-ir-lowering`'s
+programs, `test-tier1-masks` for x86-64-v2, -v3 and -v4) and in compiling
+SQLite's amalgamation and speedtest1 and Lua 5.4.8 (both tiers, the default
+target and `-march=znver5`), and their families: every width and operand kind
+(registers, memory, memory with an index) of the integer ALU operations, the
+tests, the unary operations, the shifts, the moves and extensions and `imul`;
+all 16 conditions of jcc, setcc and cmovcc, which a program's conditions choose;
+every width and element of the broadcasts, `vpmovm2*`, `vpternlog` and `vpxor`
+Tier 0's vector code emits; and the 57 cases of the first model. A generated
+program can take any width of a family, which only some seeds show. `x86_zen5_initialize` gives the rows that agree in every column and
 mask one dense ID (fewer than 256: the initialization fails past them). A
 record resolves to its ID once (`x86_zen5_id`); consumers carry the byte as a
 column (`Tier1SelectCode.cost_ids`) and look up 32 at a time
@@ -98,7 +104,8 @@ executable; every target record must resolve to the case it measures
 R8 to R11, RBX, RBP, RCX, RDI, R13, R15) less those the form names implicitly;
 R14 holds the constant 3, RSI the data, R12 the iteration count. Vector
 registers 0 to 11 are written and 13 to 15 are constants, opmasks 1 to 5 and 6
-and 7. A floating-point case's registers start at 1.0 of its element and its
+and 7. A masked case's target runs under k7, every other element selected:
+merging, or zeroing for a load into a vector register. A floating-point case's registers start at 1.0 of its element and its
 constant sources are 1.0, or 0.0 for an addition, subtraction or fused
 multiply-add, so that every chain keeps the value 1.0 and never reaches a
 denormal, infinity or NaN; integers are 3. Divisions divide a 57-bit dividend
@@ -215,16 +222,22 @@ processes on the 9700X (the record below), every value gave the same row:
 | `add r/m32, imm32` | 0, 4660, 2147483647 | latency 1, throughput 0.188, 1 op |
 | `vpaddd zmm` | none; zeroing under k4 | latency 2, throughput 0.25 |
 | `vaddps zmm` | none; zeroing under k4 | latency 2, throughput 0.5 |
-| `vmovdqu8 zmm, m512` | none; zeroing under k3 | latency 4.5 (derived), throughput 0.5 |
 
 A shift by 0 doesn't write the flags, but costs a shift's cycles. Merging under
 an opmask is different: in all three processes a merging `vpaddd zmm {k4}`
 took 3 cycles from its sources where the unmasked one took 2, so a merging
-opmask has its own kinds (`MASKED`, `MASKED_MEMORY`), which a form has rows of
-where an emitter merges (Tier 0's masked `vpaddd` and stores, Tier 1's
-`vpblendm*` selections and masked compares). In those, the destination is a
-source where the semantics' effects say so (a merging `vpaddd`); a compare into
-an opmask and `vpblendm`'s selection don't read it.
+opmask has its own kind (`MASKED`), which a form has rows of where an emitter
+merges (Tier 0's masked `vpaddd`, Tier 1's `vpblendm*` selections and masked
+compares). Where the semantics' effects say merging makes the destination a
+source, the harness chains through it, which measures whether the processor
+waits for it: a merging `vpaddd` does (2 cycles), `vpblendm`'s selection
+doesn't (0.25 cycles, its throughput); a compare into an opmask has no vector
+destination. An opmask on memory is different too: a zeroing
+`vmovdqu8 zmm {k3}{z}, m512` took 6.5 cycles from its address (derived) where
+the unmasked load took 4.5, at the same throughput, so any opmask on a memory
+operand is the `MASKED_MEMORY` kind: Tier 0's masked stores (merging) and
+masked loads (zeroing, as the harness measures a load's row; a load merging
+into its destination would read it too, and has no row).
 
 ## Coverage
 
@@ -234,7 +247,9 @@ forms:
 
 - `test-tier0` (`tier0_test_covered`): every program of its checks (the effects',
   the deep values', the 128-bit integers', the masks', the vectors', the
-  x87's);
+  x87's, and `--cross-check`'s), and the programs `test-ir-lowering` and
+  `test-interpreter` compile through it (`tier0_initialize` initializes the
+  model, so that a test of Tier 0 alone reads it);
 - `test-tier1-select`: every record of the selections' plans and expansions (not
   the test's wrappers);
 - `test-tier1-emit` (and `test-x86-target-selection`, which runs it for each
@@ -246,7 +261,9 @@ forms:
 `test-x86-zen5` checks that every row accounts for every column, so a row can't
 be committed half measured. **Adding a case**: add its row with `U` values and
 zero masks to `x86_zen5_rows.c`, build, and on the 9700X run `measure-x86-zen5
---only FORM/KIND` (or `--table` for all), and copy the printed row.
+--missing --table`, which measures the rows without values and prints the whole
+file. CI reproduces three eighths of the rows on the 9700X (`--check --sample 8`
+with `--offset` 0, 1 and 2).
 
 ## The 9700X record
 
@@ -254,7 +271,7 @@ The record, with the scripts, every process's output, the receipt and the
 sweep: [buster-performance's `x86-zen5-181-2026-11-07`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/x86-zen5-181-2026-11-07).
 The rows are one `--table` process's (CPU 2 under the host's lock, 7 passes of
 10,000 iterations, built `BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0` by clang
-23.1.1); RECORD_REPRODUCTION. Their 893 rows share 141 IDs.
+23.1.1); RECORD_REPRODUCTION. Their 1,349 rows share 156 IDs.
 
 What the rows say, a few families (cycles; derived values in italics):
 

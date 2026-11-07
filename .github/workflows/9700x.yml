@@ -932,21 +932,22 @@ jobs:
 
       - name: Reproduce a sample of the Zen 5 model's rows
         # #181: every eighth row of x86_zen5_rows.c measured again (--check), which fails where a row's columns don't
-        # reproduce within the tolerances docs/x86-zen5.md gives; three separate processes where `changes` doesn't rule
-        # out the next step. The job hook holds the shared lock. Counter/protocol failures fail the step too.
+        # reproduce within the tolerances docs/x86-zen5.md gives; three separate processes, each a different eighth
+        # (--offset), where `changes` doesn't rule out the next step. The job hook holds the shared lock.
+        # Counter/protocol failures fail the step too.
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',x86-zen5,')
         run: |
           sha256sum build/compiler src/buster/compiler/x86_zen5.c src/buster/compiler/x86_zen5_rows.c src/buster/compiler/x86_zen5_measure.c
           echo "Zen 5 observation process 1"
-          taskset -c 2 ./build/compiler measure-x86-zen5 --check --sample 8
+          taskset -c 2 ./build/compiler measure-x86-zen5 --check --sample 8 --offset 0
 
       - name: Reproduce the Zen 5 sample in two more processes
-        # Where `changes` doesn't rule it out (the module's sources): with the process above, three.
+        # Where `changes` doesn't rule it out (the module's sources): with the process above, three eighths.
         if: needs.changes.outputs.zen5 != 'false'
         run: |
           for sample in 2 3; do
             echo "Zen 5 observation process $sample"
-            taskset -c 2 ./build/compiler measure-x86-zen5 --check --sample 8
+            taskset -c 2 ./build/compiler measure-x86-zen5 --check --sample 8 --offset "$((sample - 1))"
           done
 
       - name: Benchmark Zen 5 cost lookup

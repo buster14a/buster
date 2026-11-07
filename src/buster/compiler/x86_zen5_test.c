@@ -154,6 +154,18 @@ static bool x86_zen5_test_cases(void)
                                 X86_COST_MASKED, "a merging opmask");
     valid &= x86_zen5_test_kind((X86Instruction){ .form = X86_FORM_VMOVDQU32_ZM512_Z, .reg = 1, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .decorations = 4 },
                                 X86_FORM_VMOVDQU32_ZM512_Z, X86_COST_MASKED_MEMORY, "a masked store");
+    // Any opmask on memory: a zeroing masked load is the masked memory kind; merging into its destination has no row.
+    X86Instruction masked_load = { .form = X86_FORM_VMOVDQU8_Z_ZM512, .reg = 1, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE,
+                                   .decorations = 4 | BUSTER_X86_DECORATION_ZEROING };
+    valid &= x86_zen5_test_kind(masked_load, X86_FORM_VMOVDQU8_Z_ZM512, X86_COST_MASKED_MEMORY, "a zeroing masked load");
+    masked_load.decorations = 4;
+    valid &= x86_zen5_test_expect(x86_zen5_id(&masked_load) == 0, "a merging masked load has no row");
+    masked_load.decorations = 4 | BUSTER_X86_DECORATION_ZEROING;
+    masked_load.mode = BUSTER_X86_MEMORY_BASE_INDEX(0);
+    masked_load.index = 2;
+    valid &= x86_zen5_test_expect(x86_zen5_id(&masked_load) == 0, "a masked load with an index has no row");
+    valid &= x86_zen5_test_kind((X86Instruction){ .form = X86_FORM_VMOVDQU32_Z_ZM512, .reg = 1, .rm = 2, .decorations = 4 | BUSTER_X86_DECORATION_ZEROING },
+                                X86_FORM_VMOVDQU32_Z_ZM512, X86_COST_REGISTER, "a zeroing masked register move");
     const X86Instruction unmasked_row = { .form = X86_FORM_VADDPS_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = 3, .decorations = 4 };
     valid &= x86_zen5_test_expect(x86_zen5_id(&unmasked_row) == 0, "a merging opmask without a masked row has no case");
     const X86Instruction unknown[] = {
