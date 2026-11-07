@@ -19,9 +19,9 @@
 // transitions at both phases, its selected records, a call's saves and argument moves, a return's epilogue); then the
 // block's terminator. A jump's edge moves go before it. A conditional branch's go at its successors' starts or, for a
 // split critical edge, in a stub after the branch: the edge's moves, then a jump to the successor. A jump to the
-// record that follows it is left out, and a branch is inverted where its true successor follows it or where its true
-// edge alone has a stub, which then follows it. An indirect jump's (#789) go at its labels' blocks' starts or in stubs
-// after it, and each label's symbol where that jump enters it, its stub or its block (tier1_emit_cfg_labels); one that
+// record that follows it is left out. A branch is inverted to reach a lone stub inline or the next block directly;
+// with two stubs, the next block's stub goes last and falls into it. An indirect jump's (#789) go at its labels' blocks'
+// starts or in stubs after it, and each label's symbol where that jump enters it, its stub or its block (tier1_emit_cfg_labels); one that
 // can go to one label alone jumps there. Branch targets are record indices, which branch sizing takes.
 //
 // At every block's start, the emitter's view of where each value is becomes the block's entry state: the intervals
@@ -1806,48 +1806,38 @@ static Tier1EmitError tier1_emit_cfg_branch(Tier1EmitResult* emitted, uint32_t b
     const bool split_true = cfg->edge_placements[e_true] == TIER1_CFG_EDGE_SPLIT;
     const bool split_false = cfg->edge_placements[e_false] == TIER1_CFG_EDGE_SPLIT;
     const uint16_t inverse = tier1_emit_cfg_inverse(condition);
+    // With two stubs, put the next block's stub last, so its moves fall into that block. A lone stub stays inline
+    // after the conditional jump; without stubs, the next block is the fall-through successor.
+    const bool reverse = (!split_true && !split_false && t == b + 1) || (split_true && (!split_false || f == b + 1));
+    const uint32_t taken_edge = reverse ? e_false : e_true;
+    const uint32_t inline_edge = reverse ? e_true : e_false;
+    const uint32_t taken_block = reverse ? f : t;
+    const uint32_t inline_block = reverse ? t : f;
+    const bool taken_split = reverse ? split_false : split_true;
+    const bool inline_split = reverse ? split_true : split_false;
     Tier1EmitError error = inverse != X86_FORM_NONE ? TIER1_EMIT_OK : TIER1_EMIT_INVALID;
-    if (error == TIER1_EMIT_OK && t == b + 1 && !split_true && !split_false)
+    if (error == TIER1_EMIT_OK)
     {
-        // The true successor follows: jump on the inverse to the false one, and fall through.
-        error = tier1_emit_cfg_jump(buffer, inverse, f, pending_branches, pending_goals, pending, emitted);
+        error = tier1_emit_cfg_jump(buffer, reverse ? inverse : condition, taken_split ? BUSTER_TIER1_EMIT_CFG_STUB | taken_edge : taken_block, pending_branches, pending_goals, pending, emitted);
     }
-    else if (error == TIER1_EMIT_OK && split_true && !split_false)
+    if (error == TIER1_EMIT_OK && inline_split)
     {
-        // Only the true edge has a stub: jump on the inverse to the false successor and fall into the stub, so that the
-        // true path (a loop's back edge, often) takes one jump rather than two.
-        error = tier1_emit_cfg_jump(buffer, inverse, f, pending_branches, pending_goals, pending, emitted);
-        stub_first[e_true] = buffer->count;
+        stub_first[inline_edge] = buffer->count;
         emitted->edge_stubs += 1;
-        error = error == TIER1_EMIT_OK ? tier1_emit_cfg_moves(emitted, e_true, buffer) : error;
-        if (error == TIER1_EMIT_OK && t != b + 1)
-        {
-            error = tier1_emit_cfg_jump(buffer, X86_FORM_JMP_REL8, t, pending_branches, pending_goals, pending, emitted);
-        }
+        error = tier1_emit_cfg_moves(emitted, inline_edge, buffer);
     }
-    else if (error == TIER1_EMIT_OK)
+    if (error == TIER1_EMIT_OK && (inline_block != b + 1 || taken_split))
     {
-        error = tier1_emit_cfg_jump(buffer, condition, split_true ? BUSTER_TIER1_EMIT_CFG_STUB | e_true : t, pending_branches, pending_goals, pending, emitted);
-        // The false edge: its stub falls through from the branch, or a jump, unless its block follows.
-        if (error == TIER1_EMIT_OK && split_false)
+        error = tier1_emit_cfg_jump(buffer, X86_FORM_JMP_REL8, inline_block, pending_branches, pending_goals, pending, emitted);
+    }
+    if (error == TIER1_EMIT_OK && taken_split)
+    {
+        stub_first[taken_edge] = buffer->count;
+        emitted->edge_stubs += 1;
+        error = tier1_emit_cfg_moves(emitted, taken_edge, buffer);
+        if (error == TIER1_EMIT_OK && taken_block != b + 1)
         {
-            stub_first[e_false] = buffer->count;
-            emitted->edge_stubs += 1;
-            error = tier1_emit_cfg_moves(emitted, e_false, buffer);
-        }
-        if (error == TIER1_EMIT_OK && (f != b + 1 || split_true))
-        {
-            error = tier1_emit_cfg_jump(buffer, X86_FORM_JMP_REL8, f, pending_branches, pending_goals, pending, emitted);
-        }
-        if (error == TIER1_EMIT_OK && split_true)
-        {
-            stub_first[e_true] = buffer->count;
-            emitted->edge_stubs += 1;
-            error = tier1_emit_cfg_moves(emitted, e_true, buffer);
-            if (error == TIER1_EMIT_OK && t != b + 1)
-            {
-                error = tier1_emit_cfg_jump(buffer, X86_FORM_JMP_REL8, t, pending_branches, pending_goals, pending, emitted);
-            }
+            error = tier1_emit_cfg_jump(buffer, X86_FORM_JMP_REL8, taken_block, pending_branches, pending_goals, pending, emitted);
         }
     }
     return error;

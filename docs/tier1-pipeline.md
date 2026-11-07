@@ -198,7 +198,10 @@ required register, phis at their blocks' starts, parameters at entry), and its
 records take each edge's moves before the predecessor's jump, at the
 successor's start, or in a stub after the branch for a split critical edge,
 whose jumps then go to the stub. Jumps to the next block are left out, and a
-branch whose true successor follows is inverted. Where the IR's entry has
+branch whose true successor follows is inverted. With two critical-edge stubs,
+the stub whose target follows is emitted last and falls through. The C driver's
+optimizer places blocks in fall-through chains before the pipeline constructs
+its allocation and record maps ([#1218](commands/tier1.md#block-placement-and-critical-edge-fall-through-1218)). Where the IR's entry has
 predecessors, an empty entry block goes before it. The terminal tests' nonempty
 self-loops, conditional returns and phis go through it now, keeping their calls
 and jumps back, with no trap in their place.
