@@ -378,8 +378,6 @@ struct CheckProgramLowered
     uint64_t template_entries;
     uint64_t template_fast;
     uint64_t template_mismatches;
-    // The evaluated nodes #1048's statement sweep lowered (c_check_program_sweep.c), not as task nodes.
-    uint64_t sweep_nodes;
     // The symbols of the labels whose addresses the program takes (GNU C's &&label), each function's in the order of its
     // Tier0Function.label_entries, the functions' one after another: the emission defines each at its label's record
     // (Tier0Code.label_records). A jump table's labels are among them, at its dispatch (check_lower_switch_dispatch).
@@ -593,8 +591,6 @@ struct CheckLowerBuiltinOperands
 // twin against the general rules (check_program_lower_templates).
 #define BUSTER_CHECK_LOWER_TEMPLATES 1u
 #define BUSTER_CHECK_LOWER_TEMPLATES_CHECKED 2u
-// And whether it leaves #1048's statement sweep out (check_program_lower_unswept), the vector path's tasks' loop alone.
-#define BUSTER_CHECK_LOWER_UNSWEPT 4u
 #define BUSTER_CHECK_LOWER_OWNER_CONVERSION UINT32_C(0x20000000)
 #define BUSTER_CHECK_LOWER_OWNER_CONTROL UINT32_C(0x80000000)
 #define BUSTER_CHECK_LOWER_OWNER_TOKEN UINT32_C(0xC0000000)
@@ -626,14 +622,6 @@ struct CheckLowerOwners
     bool draining;
     bool overflow;
 };
-
-// #1048's statement sweep (c_check_program_sweep.c): the most nodes a statement's expression may have below its root, and
-// the most entries a node's slot holds (its own and its conversion's).
-#define BUSTER_CHECK_LOWER_SWEEP_NODES 2048u
-#define BUSTER_CHECK_LOWER_SWEEP_MOST 8u
-typedef struct CheckLowerSweepSlot CheckLowerSweepSlot;
-typedef struct CheckLowerSweepCall CheckLowerSweepCall;
-typedef struct CheckLowerSweep CheckLowerSweep;
 
 typedef struct CheckLowerWriter CheckLowerWriter;
 struct CheckLowerWriter
@@ -901,24 +889,6 @@ struct CheckLowerWriter
     bool template_check;
     uint64_t template_fast_nodes;
     uint64_t template_mismatches;
-    // #1048's statement sweep (c_check_program_sweep.c): whether the writer takes it (`sweep`, its columns allocated) and
-    // whether the body being lowered does (`sweep_body`: not a tracked one), its scratch for one statement's nodes by their
-    // distance below its root (the evaluated ones' bits, their states, targets, ancestors' calls and arguments and slots,
-    // the calls' rows, the bits of their subtrees' first nodes and the second pass's counts of the calls and arguments
-    // before those), and the nodes it lowered.
-    bool sweep;
-    bool sweep_body;
-    uint64_t* sweep_bits;
-    uint64_t* sweep_firsts;
-    uint8_t* sweep_states;
-    TypeId* sweep_targets;
-    uint32_t* sweep_ancestors;
-    CheckLowerSweepSlot* sweep_slots;
-    CheckLowerSweepCall* sweep_calls;
-    uint32_t* sweep_run_calls;
-    uint32_t* sweep_run_arguments;
-    CheckLowerSweep* sweep_view;
-    uint64_t sweep_nodes;
 };
 
 // The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.local_map).
@@ -12234,8 +12204,6 @@ static __attribute__((noinline)) void check_lower_drain_sources(CheckLowerWriter
     }
 }
 
-#include "c_check_program_sweep.c"
-
 // An initializer's value, converted to its part's type: its expression, or the object an overloaded function's
 // address selected.
 static void check_lower_part_value(CheckLowerWriter* writer, const CheckInitPart* write)
@@ -13599,9 +13567,6 @@ struct CheckLowerShared
     bool templates_allowed;
     bool template_check;
     bool templates;
-    // #1048's statement sweep (c_check_program_sweep.c): whether the writers take it, on the vector path without -g's
-    // tokens, a _BitInt type, overloads or node templates, in a program whose stream has its values in columns.
-    bool sweep;
     // Whether the parts read the TSC for --time-stages' lowering rows (CheckLowerPart.statement_ticks): the emission sets
     // it with a clock, after check_lower_prepare.
     bool timed;
@@ -13650,7 +13615,6 @@ struct CheckLowerPart
     uint64_t template_entries;
     uint64_t template_fast;
     uint64_t template_mismatches;
-    uint64_t sweep_nodes;
     // The TSC's ticks of its bodies' statements (their controls and tasks' loops), of the rest of its bodies' walks, and
     // of its ABI rows, abi_assign and functions' validation: --time-stages' lower.statements, lower.bodies and
     // lower.validate (check_clock_lower).
@@ -14280,10 +14244,6 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     shared->templates_allowed = valid && !sources && !shared->bit_ints && program->stream != NULL && program->stream->overload_address_count == 0;
     shared->templates = false;
     shared->template_check = false;
-    // #1048's statement sweep on the vector path (c_check_program_sweep.c), whose rules read the stream's columns and the
-    // types' classes and facts; the tasks' loop, the scalar path's, remains its exact twin.
-    shared->sweep = valid && !BUSTER_SCALAR_PATH(scalar) && !sources && shared->type_templates != NULL && !shared->bit_ints && !shared->overloads &&
-                    program->stream != NULL && program->stream->dense_values == NULL && program->stream->overload_count == 0;
     return valid;
 }
 
@@ -14356,11 +14316,9 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     // Give the following columns the same offset modulo 4 KB relative to the task stack as 32-byte
     // records. Padding is at most 4080 bytes, while each active task still touches just 16 bytes.
     BUSTER_CHECK_LOWER_COLUMN(tasks, CheckLowerTaskPacked, (uint64_t)capacity + (capacity & 255u));
-    // The entries' columns have room past their capacity for a sweep slot's whole copy (check_lower_sweep_up).
-    const uint64_t slack = shared->sweep ? BUSTER_CHECK_LOWER_SWEEP_MOST : 0;
-    BUSTER_CHECK_LOWER_COLUMN(kinds, uint8_t, capacity + slack);
-    BUSTER_CHECK_LOWER_COLUMN(classes, uint8_t, capacity + slack);
-    BUSTER_CHECK_LOWER_COLUMN(values, uint64_t, capacity + slack);
+    BUSTER_CHECK_LOWER_COLUMN(kinds, uint8_t, capacity);
+    BUSTER_CHECK_LOWER_COLUMN(classes, uint8_t, capacity);
+    BUSTER_CHECK_LOWER_COLUMN(values, uint64_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(tokens, uint32_t, sources ? capacity : 1);
     BUSTER_CHECK_LOWER_COLUMN(task_sources, uint32_t, sources ? capacity : 1);
     BUSTER_CHECK_LOWER_COLUMN(labels, uint32_t, capacity);
@@ -14426,23 +14384,6 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         writer->templates = valid;
     }
     writer->template_check = shared->template_check;
-    // #1048's statement sweep (c_check_program_sweep.c): its scratch for one statement's nodes, whose states the part clears
-    // before its first body (check_lower_part_body), as nothing is written here.
-    writer->sweep = valid && shared->sweep && !writer->templates;
-    if (writer->sweep)
-    {
-        BUSTER_CHECK_LOWER_COLUMN(sweep_bits, uint64_t, BUSTER_CHECK_LOWER_SWEEP_NODES / 64);
-        BUSTER_CHECK_LOWER_COLUMN(sweep_firsts, uint64_t, BUSTER_CHECK_LOWER_SWEEP_NODES / 64);
-        BUSTER_CHECK_LOWER_COLUMN(sweep_states, uint8_t, BUSTER_CHECK_LOWER_SWEEP_NODES);
-        BUSTER_CHECK_LOWER_COLUMN(sweep_targets, TypeId, BUSTER_CHECK_LOWER_SWEEP_NODES);
-        BUSTER_CHECK_LOWER_COLUMN(sweep_ancestors, uint32_t, BUSTER_CHECK_LOWER_SWEEP_NODES);
-        BUSTER_CHECK_LOWER_COLUMN(sweep_slots, CheckLowerSweepSlot, BUSTER_CHECK_LOWER_SWEEP_NODES);
-        BUSTER_CHECK_LOWER_COLUMN(sweep_calls, CheckLowerSweepCall, BUSTER_CHECK_LOWER_SWEEP_NODES);
-        BUSTER_CHECK_LOWER_COLUMN(sweep_run_calls, uint32_t, BUSTER_CHECK_LOWER_SWEEP_NODES);
-        BUSTER_CHECK_LOWER_COLUMN(sweep_run_arguments, uint32_t, BUSTER_CHECK_LOWER_SWEEP_NODES);
-        BUSTER_CHECK_LOWER_COLUMN(sweep_view, CheckLowerSweep, 1);
-        writer->sweep = valid;
-    }
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
@@ -14502,13 +14443,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     writer->template_spliced_entries = 0;
     writer->template_fast_nodes = 0;
     writer->template_mismatches = 0;
-    writer->sweep_nodes = 0;
-    if (writer->sweep)
-    {
-        memset(writer->sweep_bits, 0, BUSTER_CHECK_LOWER_SWEEP_NODES / 8);
-        memset(writer->sweep_firsts, 0, BUSTER_CHECK_LOWER_SWEEP_NODES / 8);
-        check_lower_sweep_view(writer);
-    }
     // With a clock (CheckLowerShared.timed), two TSC reads a body's statements and three a part
     // (CheckLowerPart.statement_ticks); without one, none.
     const bool timed = shared->timed;
@@ -14557,7 +14491,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->tail = BUSTER_CHECK_NONE;
         writer->chain = BUSTER_CHECK_NONE;
         writer->track = body.count != body.entry_count || shared->terminal;
-        writer->sweep_body = writer->sweep && !writer->track;
         writer->body = program->bodies + b;
         // The function's instruction set (CheckProgram.body_targets), and so the classes it takes.
         const uint32_t body_target = program->body_targets != 0 ? program->body_targets[b] : 0;
@@ -14914,29 +14847,22 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 // A statement's entries are its token's (check_lower_task_source sets a nested one's).
                 check_lower_change_source(writer, program->controls[body.first + i].token);
             }
-            if (!sources && writer->sweep_body && check_lower_sweep_control(writer, i))
+            check_lower_control(writer, i);
+            if (sources)
             {
-                // #1048's statement sweep lowered it (c_check_program_sweep.c), its task nodes drained.
+                check_lower_drain_sources(writer);
+            }
+            else if (writer->bit_ints)
+            {
+                check_lower_drain_bit_ints(writer);
+            }
+            else if (writer->template_ready)
+            {
+                check_lower_drain_templates(writer);
             }
             else
             {
-                check_lower_control(writer, i);
-                if (sources)
-                {
-                    check_lower_drain_sources(writer);
-                }
-                else if (writer->bit_ints)
-                {
-                    check_lower_drain_bit_ints(writer);
-                }
-                else if (writer->template_ready)
-                {
-                    check_lower_drain_templates(writer);
-                }
-                else
-                {
-                    check_lower_drain(writer);
-                }
+                check_lower_drain(writer);
             }
         }
         part->statement_ticks += timed ? __rdtsc() - statements_start : 0;
@@ -15304,7 +15230,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     part->template_entries = writer->template_spliced_entries;
     part->template_fast = writer->template_fast_nodes;
     part->template_mismatches = writer->template_mismatches;
-    part->sweep_nodes = writer->sweep_nodes;
     memcpy(part->runtimes, writer->runtimes, (uint64_t)writer->runtime_count * sizeof(uint16_t));
 }
 
@@ -15378,7 +15303,6 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
         lowered->template_entries += parts[p].template_entries;
         lowered->template_fast += parts[p].template_fast;
         lowered->template_mismatches += parts[p].template_mismatches;
-        lowered->sweep_nodes += parts[p].sweep_nodes;
         for (uint32_t i = 0; i < parts[p].runtime_count; i += 1)
         {
             const uint32_t runtime = parts[p].runtimes[i];
@@ -15450,7 +15374,6 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
     // #1048's node templates where the caller asks for them on any path (check_program_lower_templates).
     shared.templates = shared.templates || ((templates & BUSTER_CHECK_LOWER_TEMPLATES) != 0 && shared.templates_allowed);
     shared.template_check = (templates & BUSTER_CHECK_LOWER_TEMPLATES_CHECKED) != 0;
-    shared.sweep = shared.sweep && (templates & BUSTER_CHECK_LOWER_UNSWEPT) == 0;
     if (valid && !check_lower_writer_begin(&writer, &abi, &status, &shared, sources, scratch))
     {
         lowered->status = CHECK_PROGRAM_RESOURCE;
@@ -15505,13 +15428,6 @@ static __attribute__((noinline)) bool check_program_lower_owners(CheckProgramLow
                                                                  Arena* output, Arena* scratch)
 {
     return check_program_lower_body(lowered, program, true, true, owners, 0, output, scratch);
-}
-
-// The vector path's lowering without #1048's statement sweep (c_check_program_sweep.c), its tasks' loop alone, which the
-// tests compare with the sweep's (test-lowering-sweep): every function must be the same.
-static __attribute__((noinline)) bool check_program_lower_unswept(CheckProgramLowered* lowered, const CheckProgram* program, Arena* output, Arena* scratch)
-{
-    return check_program_lower_body(lowered, program, false, false, NULL, BUSTER_CHECK_LOWER_UNSWEPT, output, scratch);
 }
 
 // The lowering with #1048's node templates (c_check_program_templates.c) on any host's path, which the tests compare with
