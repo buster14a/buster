@@ -3049,6 +3049,54 @@ static void check_test_program_return_marks(CheckTest* test)
     check_test_types_close(&types);
 }
 
+// #1709: the return flow reads a byte per interned name instead of searching the catalogue for each call. Its table is
+// exactly the catalogue's entries with the 'r' attribute, and over every catalogue name, near misses and the
+// predefined names, the bytes equal the search's answers.
+static void check_test_program_return_library(CheckTest* test)
+{
+    uint32_t matched = 0;
+    bool ordered = true;
+    for (uint32_t i = 0; i < BUSTER_BUILTIN_INTRINSIC_COUNT; i += 1)
+    {
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_infos + i;
+        const bool listed = memchr(info->attributes, 'r', info->attributes_length) != NULL;
+        const BuiltinIntrinsicName* entry = listed && matched < BUSTER_ARRAY_LENGTH(check_program_return_library_entries) ?
+                                            check_program_return_library_entries + matched : NULL;
+        ordered = ordered && (!listed || (entry != NULL && entry->length == info->name_length && memcmp(entry->name, info->name, entry->length) == 0));
+        matched += listed ? 1 : 0;
+    }
+    check_test_expect(test, ordered && matched == BUSTER_ARRAY_LENGTH(check_program_return_library_entries),
+                      "the return flow's library names are exactly the catalogue's entries with the 'r' attribute");
+    InternTable identifiers = { 0 };
+    Arena scratch = arena_reserve(UINT64_C(1) << 20);
+    bool ready = scratch.base != NULL && intern_initialize(&identifiers);
+    static const char* const misses[] = { "exi", "exits", "abort_", "longjm", "_Exit_", "main", "" };
+    for (uint32_t i = 0; ready && i < BUSTER_BUILTIN_INTRINSIC_COUNT; i += 1)
+    {
+        ready = intern_find_or_add(&identifiers, (const uint8_t*)builtin_intrinsic_infos[i].name, builtin_intrinsic_infos[i].name_length) != 0;
+    }
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(misses) - 1; i += 1)
+    {
+        ready = intern_find_or_add(&identifiers, (const uint8_t*)misses[i], (uint32_t)strlen(misses[i])) != 0;
+    }
+    const uint8_t* names = ready ? check_program_return_library_names(&identifiers, &scratch) : NULL;
+    check_test_expect(test, names != NULL, "the return flow's library-name fixture interns the catalogue");
+    uint32_t equal = 0;
+    uint32_t unknown = 0;
+    for (uint32_t id = 1; names != NULL && id < identifiers.count; id += 1)
+    {
+        equal += names[id] == check_program_return_library_search(&identifiers, id) ? 1 : 0;
+        unknown += names[id] == BUSTER_CHECK_RETURN_UNKNOWN ? 1 : 0;
+    }
+    check_test_expect(test, names != NULL && equal == identifiers.count - 1 && unknown == BUSTER_ARRAY_LENGTH(check_program_return_library_entries) && names[0] == 0,
+                      "each interned name's return-flow byte equals the catalogue search's answer");
+    Arena empty = { 0 };
+    check_test_expect(test, check_program_return_library_names(NULL, &scratch) == NULL && check_program_return_library_names(&identifiers, &empty) == NULL,
+                      "without identifiers or room the return flow searches, as before");
+    intern_release(&identifiers);
+    arena_release(&scratch);
+}
+
 #include "c_check_program_batch_test.c"
 #include "c_check_literal_table_test.c"
 #include "c_check_power_divmod_test.c"
@@ -3465,6 +3513,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     {
         check_test_program_array_alignment(test, clang);
         check_test_program_return_marks(test);
+        check_test_program_return_library(test);
         check_test_literal_tables(test, clang);
         check_test_program_builtin_scratch(test, clang);
         check_test_program_copies(test, clang);
