@@ -1402,10 +1402,12 @@ static void check_init_test_index(CheckTest* test)
 }
 
 #include "c_check_init_old_style_test.c"
+#include "c_check_designator_lookup_test.c"
 
 static __attribute__((noinline)) void check_test_initializers(CheckTest* test, const char* clang)
 {
     check_init_test_index(test);
+    check_init_test_designator_lookup(test, clang);
     check_init_test_overload_constraints(test, clang);
     static const char overloads[] =
         "#define O __attribute__((overloadable))\n"
@@ -1970,3 +1972,4 @@ static __attribute__((noinline)) void check_test_initializers(CheckTest* test, c
 }
 
 #endif
+
