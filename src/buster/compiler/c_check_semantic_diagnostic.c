@@ -275,7 +275,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const TypeId stripped = type_strip_aligned(types, operand_type);
             const TypeId value = type_kind(types, stripped) == BUSTER_TYPE_KIND_ATOMIC ? types->types.base[type_index(stripped)] : operand_type;
             const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, value, check_semantic_operand_spelling(parser, input, operand));
-            const bool up =op == CHECK_OP_PRE_INCREMENT || op == CHECK_OP_POST_INCREMENT;
+            const bool up = op == CHECK_OP_PRE_INCREMENT || op == CHECK_OP_POST_INCREMENT;
             result = type.length != 0 ? check_warning_text(scratch, "cannot %s value of type %.*s", up ? "increment" : "decrement", (int)type.length, type.pointer) : NULL;
         }
         else if (report->diagnostic == CHECK_DIAG_INCOMPLETE && ((op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT) || op == CHECK_OP_ADD ||

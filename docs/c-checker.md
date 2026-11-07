@@ -7082,6 +7082,40 @@ arguments against the function. The checker now gives these as clang does.
   an object's value read, or an address converted to an integer narrower
   than a pointer (`check_init_converted_nonconstant`); an absolute address
   (`(int *)5`) stays a constant.
+- **A failed assignment conversion** (`check_driver_conversion_error`,
+  `check_driver_conversion_words`), as clang's `DiagnoseAssignmentResult` words it:
+  - its kind (`check_driver_conversion_kind`): an integer to a pointer and a
+    pointer, array or function to an integer ("incompatible integer to pointer
+    conversion", "incompatible pointer to integer conversion",
+    `[-Wint-conversion]`), two pointers ("incompatible pointer types",
+    `[-Wincompatible-pointer-types]`; two pointers to functions, "incompatible
+    function pointer types"), or any other ("… incompatible type …", of no
+    flag);
+  - its action: "initializing T with an expression of type S" at the
+    declarator, "assigning to T from S" at the `=`, "returning S from a function
+    with result type T" at the returned expression (T spelled with the
+    function's result typedef), "passing S to parameter of type T" at the
+    argument with "passing argument to parameter 'x' here" (or "… parameter
+    here") at the parameter's name, or where it has none the end of its
+    declarator (`check_driver_parameter_place`, as the sparse sources keep
+    pointer parameters' alone);
+  - the types as written: an array's and a function's unconverted, a qualified
+    lvalue's qualified, with their typedefs;
+  - clang's fix-it words (`check_driver_conversion_hint`,
+    `tryToFixConversion` with C's `compareTypesSimple`): "; dereference with *"
+    where the pointee converts (not of a null pointer constant), "; remove &" of
+    an `&x`, "; take the address with &" where an lvalue's address converts (not
+    a pointer's to a void pointer), "; remove *" of a `*p`.
+
+  An initializer's subobject is worded so from the initializers' walk
+  (`CheckInitializer.failed_source`), at its value; a record's or an array's
+  whole initializer of no braces whose value is no record of the type, at the
+  declarator: the record's initialization from the value, or "array
+  initializer must be an initializer list" (or "… or string literal", "… or
+  wide string literal", by the element type). A static object's braced
+  subobject whose converted value is then no constant gets clang's second
+  error, "initializer element is not a compile-time constant", at it too
+  (`check_init_value_nonconstant`).
 - **Indirection through a pointer to void** (`-Wvoid-ptr-dereference`, clang's
   `CheckIndirectionOperand`): "ISO C does not allow indirection on operand of
   type 'void *'" at the `*`, of the operand's type as written (its typedef
@@ -7107,8 +7141,6 @@ arguments against the function. The checker now gives these as clang does.
     prints without its typedef's name, and so does a member's type
     (`x.f++` of a member `uu f` prints `'struct u'` where clang's is
     `'uu' (aka 'struct u')`): a record's members keep no declaration.
-  - A braced scalar initializer's failed conversion (`static long x = { p };`)
-    is still "invalid initializer", with no non-constant error.
   - An assignment to a member that is const itself is "read-only variable is
     not assignable", where clang names the member with its note: a record's
     members keep no declaration. A typedef'd array's variable prints its
@@ -7117,12 +7149,6 @@ arguments against the function. The checker now gives these as clang does.
   - A typedef inside another typedef (`typedef VP *VPP`) loses its inner name
     in the void dereference's operand type (`**b`'s `'void *'` for clang's
     `'VP'`).
-  - Conversion errors other than an initializer's pointer and integer ones are
-    "incompatible operand or conversion types": an assignment's, a return's, an
-    argument's, an integer converted to a pointer and a record or floating
-    value converted to a scalar it can't be. Clang's fix-it suffixes ("; dereference
-    with *", "; take the address with &", "; remove *", "; remove &") are
-    missing everywhere.
 
 ## Ignorable and unsupported pragmas
 

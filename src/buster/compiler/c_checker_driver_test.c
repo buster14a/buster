@@ -7109,6 +7109,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 #include "c_check_attribute_checks_driver_test.c"
 #include "c_check_parse_note_driver_test.c"
 #include "c_check_operand_driver_test.c"
+#include "c_check_conversion_driver_test.c"
 #include "c_check_convention_driver_test.c"
 #include "c_check_interrupt_driver_test.c"
 #include "c_check_tier1_driver_test.c"
@@ -8467,6 +8468,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_operand_errors(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_conversion_errors(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
