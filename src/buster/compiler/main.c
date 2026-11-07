@@ -560,6 +560,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_lower_inventory_test.c"
 // #1048's test-lowering-templates: node templates against the tasks' rules, function for function.
 #include "buster/compiler/c_check_program_templates_test.c"
+// #1048's test-lowering-sweep: the statement sweep against the tasks' loop, function for function.
+#include "buster/compiler/c_check_program_sweep_test.c"
 #include "buster/compiler/tier0_source_benchmark_test.c"
 #include "buster/compiler/c_check_lanes_benchmark_test.c"
 #include "buster/compiler/c_check_request_test.c"
@@ -1294,6 +1296,10 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-lowering-templates") == 0)
     {
         result = run_lowering_templates_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-lowering-sweep") == 0)
+    {
+        result = run_lowering_sweep_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-source") == 0)
     {

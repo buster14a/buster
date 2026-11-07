@@ -6304,6 +6304,7 @@ static void check_test_source_benchmark(CheckTest* test);
 static void check_test_lowering_source_benchmark(CheckTest* test);
 static void check_test_lowering_inventory(CheckTest* test);
 static void check_test_lowering_templates(CheckTest* test);
+static void check_test_lowering_sweep(CheckTest* test);
 static void check_test_backend_source_benchmark(CheckTest* test);
 static void check_test_check_lanes_benchmark(CheckTest* test);
 static void check_test_requests(CheckTest* test);
@@ -6993,6 +6994,10 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_lowering_templates(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_lowering_sweep(&test);
             }
             if (check_test_takes())
             {
