@@ -1,0 +1,32 @@
+name: PR 1313 qualification access
+on:
+  push:
+    branches: [qualify/1313-codex]
+permissions:
+  contents: read
+concurrency:
+  group: buster-fast-9700x-1313-codex
+  cancel-in-progress: false
+jobs:
+  access:
+    runs-on:
+      group: buster-9700x-service-dispatch
+      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: 3
+    steps:
+      - name: Verify approved host and read qualification handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -n
+          grep -m1 '^model name' /proc/cpuinfo
+          grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
+          cat /var/lib/buster-9700x/owner
+          cat "$HOME/buster-fast-bench/README-9700x.md"
+          for script in run.sh run2.sh syntax.sh preprocess.sh; do
+            file="$HOME/buster-fast-bench/1313-devin-fresh/$script"
+            if [ -f "$file" ]; then
+              printf '\nSOURCE %s\n' "$file"
+              cat "$file"
+            fi
+          done
