@@ -894,6 +894,14 @@ static bool check_common_conversion_arms(const CheckGraph* graph, uint32_t node)
     return node < graph->count && (graph->ops[node] == CHECK_OP_CONDITIONAL || graph->ops[node] == CHECK_OP_COMMA);
 }
 
+// A source whose implicit conversion the literal warnings can report: an integer or floating constant
+// (check_common_conversion_leaf), or arms that carry the conversion to theirs. An address or complex constant
+// never warns there, so a call that passes a string literal schedules no conversion walk.
+static bool check_common_conversion_source(CheckConstantKind constant, bool arms)
+{
+    return constant == CHECK_CONSTANT_INTEGER || constant == CHECK_CONSTANT_FLOATING || arms;
+}
+
 // The division-warning visit one scan frame runs after its subtree: `emit_children`'s other half.
 static void check_common_div_own(CheckCommonEmission* emission, uint32_t node)
 {
@@ -1047,7 +1055,7 @@ static void check_common_call_argument(CheckCommonEmission* emission, uint32_t i
         const CheckConversion conversion = stream->argument_conversions[index];
         const bool arms = check_common_conversion_arms(graph, argument);
         if (argument < graph->count && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
-            (conversion.flags & BUSTER_CHECK_CONVERT_CAST) == 0 && (check_stream_constant_kind(stream, argument) != CHECK_CONSTANT_NONE || arms) &&
+            (conversion.flags & BUSTER_CHECK_CONVERT_CAST) == 0 && check_common_conversion_source(check_stream_constant_kind(stream, argument), arms) &&
             (check_common_emit_evaluated(emission, argument) || ((emission->emitted[argument] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0 &&
              (check_stream_constant_kind(stream, argument) == CHECK_CONSTANT_FLOATING || arms))))
         {
@@ -1074,7 +1082,7 @@ static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t 
         const uint32_t flags = stream->conversions[node].operands[conversion].flags;
         const bool arms = check_common_conversion_arms(graph, source);
         if (source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
-            (check_stream_constant_kind(stream, source) != CHECK_CONSTANT_NONE || arms) &&
+            check_common_conversion_source(check_stream_constant_kind(stream, source), arms) &&
             (evaluated || ((emission->emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0 &&
              (check_stream_constant_kind(stream, source) == CHECK_CONSTANT_FLOATING || arms))))
         {
@@ -2580,7 +2588,7 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
         if (source < graph->count && source < stream->count)
         {
             const CheckConstantKind constant = check_stream_constant_kind(stream, source);
-            if (constant != CHECK_CONSTANT_NONE || check_common_conversion_arms(graph, source))
+            if (check_common_conversion_source(constant, check_common_conversion_arms(graph, source)))
             {
                 const uint32_t flags = stream->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1u : 0u].flags;
                 const bool assignment = (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0;
@@ -2602,7 +2610,7 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
             if (source < graph->count && source < stream->count)
             {
                 const CheckConstantKind constant = check_stream_constant_kind(stream, source);
-                if (constant != CHECK_CONSTANT_NONE || check_common_conversion_arms(graph, source))
+                if (check_common_conversion_source(constant, check_common_conversion_arms(graph, source)))
                 {
                     const CheckConversion conversion_edge = stream->argument_conversions[offset + i];
                     const uint32_t flags = conversion_edge.flags;
