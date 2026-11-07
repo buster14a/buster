@@ -1441,6 +1441,254 @@ static bool check_driver_pointer_arguments(const Parser* parser, Preprocessor* p
     return call;
 }
 
+// clang's kinds of a failed simple assignment's conversion (Sema::CheckAssignmentConstraints, #147), each its own message:
+// an integer to a pointer (IntToPointer, -Wint-conversion's), a pointer, array or function to an integer (PointerToInt), two
+// pointers of incompatible types (IncompatiblePointer, -Wincompatible-pointer-types'; two pointers to functions,
+// IncompatibleFunctionPointer's -Wincompatible-function-pointer-types), and any other (Incompatible, an error of no flag).
+typedef enum CheckDriverConversion
+{
+    CHECK_DRIVER_CONVERSION_INT_POINTER,
+    CHECK_DRIVER_CONVERSION_POINTER_INT,
+    CHECK_DRIVER_CONVERSION_POINTERS,
+    CHECK_DRIVER_CONVERSION_FUNCTION_POINTERS,
+    CHECK_DRIVER_CONVERSION_INCOMPATIBLE,
+} CheckDriverConversion;
+
+static CheckDriverConversion check_driver_conversion_kind(const TypeTable* types, TypeId target, TypeId source)
+{
+    const TypeId to = type_conversion_operand(types, target);
+    const TypeId from = type_conversion_operand(types, source);
+    const uint8_t to_kind = type_kind(types, to);
+    const uint8_t from_kind = type_kind(types, from);
+    const bool from_pointer = from_kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(from_kind) || from_kind == BUSTER_TYPE_KIND_FUNCTION;
+    const bool from_integer = from_kind == BUSTER_TYPE_KIND_INTEGER || from_kind == BUSTER_TYPE_KIND_ENUM || from_kind == BUSTER_TYPE_KIND_BIT_INT;
+    const bool to_integer = to_kind == BUSTER_TYPE_KIND_INTEGER || to_kind == BUSTER_TYPE_KIND_ENUM || to_kind == BUSTER_TYPE_KIND_BIT_INT;
+    const bool to_function = to_kind == BUSTER_TYPE_KIND_POINTER && type_kind(types, type_conversion_operand(types, type_element(types, to))) == BUSTER_TYPE_KIND_FUNCTION;
+    const bool from_function = from_kind == BUSTER_TYPE_KIND_FUNCTION ||
+                               (from_kind == BUSTER_TYPE_KIND_POINTER && type_kind(types, type_conversion_operand(types, type_element(types, from))) == BUSTER_TYPE_KIND_FUNCTION);
+    return to_kind == BUSTER_TYPE_KIND_POINTER && from_integer ? CHECK_DRIVER_CONVERSION_INT_POINTER :
+           to_integer && from_pointer ? CHECK_DRIVER_CONVERSION_POINTER_INT :
+           to_kind == BUSTER_TYPE_KIND_POINTER && from_pointer ? (to_function && from_function ? CHECK_DRIVER_CONVERSION_FUNCTION_POINTERS : CHECK_DRIVER_CONVERSION_POINTERS) :
+           CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
+}
+
+// Whether `to` is at least as qualified as `from` and, through one level of pointers where both are, of the same
+// unqualified type and at least as qualified (clang's compareTypesSimple in C, of canonical types).
+static bool check_driver_conversion_same(const TypeTable* types, TypeId from, TypeId to)
+{
+    const uint32_t qualifiers = BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE | BUSTER_TYPE_RESTRICT;
+    bool same = (type_qualifiers(from) & ~type_qualifiers(to) & qualifiers) == 0;
+    TypeId left = type_strip_aligned(types, from);
+    TypeId right = type_strip_aligned(types, to);
+    if (type_kind(types, left) == BUSTER_TYPE_KIND_POINTER && type_kind(types, right) == BUSTER_TYPE_KIND_POINTER)
+    {
+        left = type_strip_aligned(types, type_element(types, left));
+        right = type_strip_aligned(types, type_element(types, right));
+    }
+    same = same && type_unqualified(left) == type_unqualified(right) && (type_qualifiers(left) & ~type_qualifiers(right) & qualifiers) == 0;
+    return same;
+}
+
+// clang's fix-it of a failed conversion of `node`'s value of `source`'s type to `target` (ConversionFixItGenerator::
+// tryToFixConversion, #147), as the message's last words: a pointer whose pointee converts, dereferenced ("; dereference
+// with *", or "; remove &" of an `&x`, but none of a null pointer constant); an lvalue whose address converts to a target
+// pointer ("; take the address with &", or "; remove *" of a `*p`, but none of a pointer to a void pointer); else none.
+static const char* check_driver_conversion_hint(const TypeTable* types, const CheckStream* stream, uint32_t node, TypeId source, TypeId target)
+{
+    const CheckGraph* graph = stream->graph;
+    const TypeId from = type_strip_aligned(types, source);
+    const TypeId to = type_strip_aligned(types, target);
+    uint32_t bare = node;
+    // The operand without its parentheses and casts, as clang's IgnoreParenCasts reads it for a null pointer constant.
+    for (uint32_t steps = 0; bare < graph->count && steps < graph->count && (graph->ops[bare] == CHECK_OP_CAST ||
+         (graph->ops[bare] == CHECK_OP_VALUE && graph->operand0[bare] < graph->count)); steps += 1)
+    {
+        bare = graph->operand0[bare];
+    }
+    const CheckValue zero = bare < stream->count ? check_stream_value(stream, bare) : (CheckValue){ 0 };
+    const bool null = zero.constant_kind == CHECK_CONSTANT_INTEGER && zero.integer == 0 && check_action_kind(types, zero.type) != BUSTER_TYPE_KIND_POINTER;
+    uint32_t written = node;
+    for (uint32_t steps = 0; written < graph->count && steps < graph->count && graph->ops[written] == CHECK_OP_VALUE && graph->operand0[written] < graph->count;
+         steps += 1)
+    {
+        written = graph->operand0[written];
+    }
+    const CheckOp op = written < graph->count ? graph->ops[written] : CHECK_OP_COUNT;
+    const char* result = "";
+    if (type_kind(types, from) == BUSTER_TYPE_KIND_POINTER && check_driver_conversion_same(types, type_element(types, from), to))
+    {
+        result = null ? "" : op == CHECK_OP_ADDRESS ? "; remove &" : "; dereference with *";
+    }
+    else if (type_kind(types, to) == BUSTER_TYPE_KIND_POINTER && node < stream->count && check_stream_category(stream, node) == CHECK_LVALUE &&
+             !(type_kind(types, from) == BUSTER_TYPE_KIND_POINTER && type_kind(types, type_strip_aligned(types, type_element(types, to))) == BUSTER_TYPE_KIND_VOID))
+    {
+        const TypeId pointee = type_strip_aligned(types, type_element(types, to));
+        const uint32_t qualifiers = BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE | BUSTER_TYPE_RESTRICT;
+        const bool taken = type_unqualified(from) == type_unqualified(pointee) && (type_qualifiers(from) & ~type_qualifiers(pointee) & qualifiers) == 0;
+        result = !taken ? "" : op == CHECK_OP_DEREFERENCE ? "; remove *" : "; take the address with &";
+    }
+    return result;
+}
+
+// The place of parameter `index` of the function declared at `declaration` (its name), for a note, where the sparse source
+// list keeps none (it keeps pointer parameters' alone): the parameter's own name, or, unnamed, the token that ends its
+// declarator (the `,` or `)` after it), where clang's unnamed parameter is. BUSTER_CHECK_NONE where its declarator has no
+// parameter list right after the name. A diagnosis's cold path.
+static uint32_t check_driver_parameter_place(const Parser* parser, const CheckInput* input, uint32_t declaration, uint32_t index)
+{
+    const uint32_t count = parser->tokens.count < input->token_count ? parser->tokens.count : input->token_count;
+    uint32_t open = declaration + 1;
+    while (open < count && parser->tokens.kinds[open] == PARSE_KIND_R_PAREN)
+    {
+        open += 1;
+    }
+    const bool listed = open < count && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN;
+    const uint32_t close = listed ? parser->tree.parents[open] : 0;
+    uint32_t result = BUSTER_CHECK_NONE;
+    uint32_t ordinal = 0;
+    uint32_t begin = open + 1;
+    uint32_t depth = 0;
+    for (uint32_t k = open + 1; listed && close < count && k <= close && result == BUSTER_CHECK_NONE; k += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[k];
+        const bool ends = k == close || (depth == 0 && kind == PARSE_KIND_COMMA);
+        if (ends && ordinal == index)
+        {
+            uint32_t named = BUSTER_CHECK_NONE;
+            for (uint32_t j = begin; j < k; j += 1)
+            {
+                named = parser->tokens.kinds[j] == PARSE_KIND_IDENTIFIER && input->declarations != NULL && input->declarations[j] == j &&
+                        input->declaration_kinds != NULL && input->declaration_kinds[j] == C_BINDING_OBJECT ? j : named;
+            }
+            result = named != BUSTER_CHECK_NONE ? named : k;
+        }
+        ordinal += ends ? 1 : 0;
+        begin = ends ? k + 1 : begin;
+        depth += kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE ? 1 : 0;
+        depth -= depth != 0 && (kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE) ? 1 : 0;
+    }
+    return result;
+}
+
+// A failed assignment conversion's error as clang words it (#147, Sema::DiagnoseAssignmentResult), where `report` is one:
+// an initializer's (at its declarator), an assignment's (at its `=`), a return's (at its expression) or a call's argument's
+// (at the argument, with "passing argument to parameter here" at its parameter, `*note_token` and `*note`, where the callee
+// is a function's own name). The types are as written, with their typedefs (an array's and a function's, a qualified
+// lvalue's), the target's as declared; the kind (check_driver_conversion_kind) chooses the words and the flag, and the
+// fix-it its last words (check_driver_conversion_hint). NULL for any other report, which the generic message keeps.
+static const char* check_driver_conversion_error(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                 CheckWarningSpelling* spell, const CheckReport* report, uint32_t* located, uint32_t* note_token,
+                                                 const char** note, Arena* scratch)
+{
+    const CheckGraph* graph = stream->graph;
+    const uint32_t node = report->node;
+    const uint32_t token = report->token;
+    const CheckOp op = node < stream->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const bool returning = op == CHECK_OP_CONVERT && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_RETURN;
+    const uint32_t argument_index = op == CHECK_OP_CALL ? stream->diagnostic_operands[node] : 0;
+    const bool passing = op == CHECK_OP_CALL && argument_index != 0 && graph->argument_counts != NULL && argument_index <= graph->argument_counts[node];
+    const bool applies = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE &&
+                         (op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || returning || passing);
+    uint32_t source = BUSTER_CHECK_NONE;
+    TypeId target = 0;
+    uint32_t target_spelling = 0;
+    uint32_t at = token;
+    *note_token = BUSTER_CHECK_NONE;
+    *note = NULL;
+    if (applies && op == CHECK_OP_INITIALIZE)
+    {
+        source = graph->operand0[node];
+        for (uint32_t declaration = 0; declaration < input->token_count && at == token; declaration += 1)
+        {
+            at = check_sparse_get(input->initializer_nodes, declaration) == node ? declaration : at;
+        }
+        target = check_input_object_spelling(types, input, parser, at, graph->types[node], graph->types[node], &target_spelling);
+    }
+    else if (applies && op == CHECK_OP_ASSIGN)
+    {
+        source = graph->operand1[node];
+        const uint32_t left = graph->operand0[node];
+        const TypeId lvalue = left < stream->count ? check_stream_type(stream, left) : 0;
+        target = left < stream->count ? check_input_object_spelling(types, input, parser, graph->tokens[left], 0, lvalue, &target_spelling) : 0;
+    }
+    else if (applies && returning)
+    {
+        source = graph->operand0[node];
+        const uint32_t function = check_semantic_function(parser, input, token);
+        target = graph->types[node];
+        target_spelling = function < input->token_count ? check_input_typedef_spelling(input, parser, function) : 0;
+        at = source < stream->count ? check_warning_graph_first(graph, parser, source) : token;
+    }
+    else if (applies)
+    {
+        // The callee's type's parameter, and its declaration's source where the callee is a function's own name
+        // (check_driver_pointer_arguments' sparse list).
+        const uint32_t index = argument_index - 1;
+        source = graph->argument_nodes[graph->argument_offsets[node] + index];
+        const uint32_t callee = graph->operand0[node];
+        TypeId function = callee < stream->count ? type_strip_aligned(types, check_stream_type(stream, callee)) : 0;
+        function = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, function)) : function;
+        uint32_t parameter_count = 0;
+        const TypeId* parameters = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? type_parameters(types, function, &parameter_count) : NULL;
+        target = parameters != NULL && index < parameter_count ? parameters[index] : 0;
+        const uint32_t name = callee < stream->count ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = name < input->token_count && input->declarations != NULL ? input->declarations[name] : BUSTER_CHECK_NONE;
+        const bool direct = callee < stream->count && graph->ops[callee] == CHECK_OP_VALUE && declaration < input->token_count &&
+                            input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+        uint32_t parameter = direct && check_sparse_present(input->parameter_sources) ? check_sparse_get(input->parameter_sources, declaration) : BUSTER_CHECK_NONE;
+        while (parameter < input->token_count && check_sparse_get(input->parameters, parameter) < index)
+        {
+            parameter = check_sparse_get(input->parameter_sources, parameter);
+        }
+        parameter = parameter < input->token_count && check_sparse_get(input->parameters, parameter) == index ? parameter :
+                    direct ? check_driver_parameter_place(parser, input, declaration, index) : BUSTER_CHECK_NONE;
+        if (parameter < input->token_count)
+        {
+            const bool named = parser->tokens.kinds[parameter] == PARSE_KIND_IDENTIFIER && input->declarations[parameter] == parameter &&
+                               input->declaration_kinds[parameter] == C_BINDING_OBJECT;
+            const uint32_t identifier = named ? parser->tokens.names[parameter] : 0;
+            *note_token = parameter;
+            *note = named ? check_warning_text(scratch, "passing argument to parameter '%.*s' here", (int)intern_length(pp->table, identifier),
+                                               intern_bytes(pp->table, identifier)) : "passing argument to parameter here";
+            target_spelling = check_driver_parameter_spelling(parser, input, parameter);
+        }
+    }
+    const char* result = NULL;
+    if (applies && source < stream->count && target != 0)
+    {
+        const TypeId value = check_stream_type(stream, source);
+        const uint32_t source_spelling = check_driver_pointer_spelling(parser, input, stream, types, source);
+        const String8 to = check_driver_warning_type(parser, pp, input, types, spell, scratch, target, target_spelling);
+        const String8 from = check_driver_warning_type(parser, pp, input, types, spell, scratch, value, source_spelling);
+        const CheckDriverConversion kind = check_driver_conversion_kind(types, target, value);
+        const bool incompatible = kind == CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
+        static const char* const lead[] = {
+            "incompatible integer to pointer conversion ",
+            "incompatible pointer to integer conversion ",
+            "incompatible pointer types ",
+            "incompatible function pointer types ",
+            "",
+        };
+        static const char* const flag[] = { " [-Wint-conversion]", " [-Wint-conversion]", " [-Wincompatible-pointer-types]",
+                                            " [-Wincompatible-function-pointer-types]", "" };
+        const char* hint = check_driver_conversion_hint(types, stream, source, value, target);
+        // clang's actions put the target first where they assign or initialize, the source first where they pass or return.
+        const String8 first = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE ? to : from;
+        const String8 second = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE ? from : to;
+        const char* action = op == CHECK_OP_INITIALIZE ? (incompatible ? "initializing %.*s with an expression of incompatible type %.*s" :
+                                                                         "initializing %.*s with an expression of type %.*s") :
+                             op == CHECK_OP_ASSIGN ? (incompatible ? "assigning to %.*s from incompatible type %.*s" : "assigning to %.*s from %.*s") :
+                             returning ? (incompatible ? "returning %.*s from a function with incompatible result type %.*s" :
+                                                         "returning %.*s from a function with result type %.*s") :
+                             (incompatible ? "passing %.*s to parameter of incompatible type %.*s" : "passing %.*s to parameter of type %.*s");
+        const char* words = to.length != 0 && from.length != 0 ?
+                            check_warning_text(scratch, action, (int)first.length, first.pointer, (int)second.length, second.pointer) : NULL;
+        result = words != NULL ? check_warning_text(scratch, "%s%s%s%s", lead[kind], words, hint, flag[kind]) : NULL;
+        *located = at;
+    }
+    return result;
+}
+
 static bool check_driver_reports(const Parser* parser, const Parser* original, Preprocessor* pp, uint32_t publication_end,
                                   const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                   const CheckRepair* repair, const CheckInput* original_pragmas, const CheckDriverDiagnostic* extra, uint32_t extra_count,
@@ -1820,6 +2068,14 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     if (x86_message == NULL && phase == 1)
                     {
                         x86_message = check_diagnostic_counted_ref(input, parser, stream->reports + index, &x86_location);
+                    }
+                    // A failed assignment conversion's clang words, with an argument's parameter note (#147).
+                    uint32_t conversion_note_token = BUSTER_CHECK_NONE;
+                    const char* conversion_note = NULL;
+                    if (x86_message == NULL && phase == 1)
+                    {
+                        x86_message = check_driver_conversion_error(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location,
+                                                                    &conversion_note_token, &conversion_note, scratch);
                     }
                     if (x86_message == NULL && phase == 1)
                     {
@@ -2556,6 +2812,11 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, start + 2, publication,
                                 "unsupported semantic '#pragma %.*s%s%.*s' directive",
                                 (int)first.length, first.pointer, vendor ? " " : "", (int)second.length, second.pointer);
+                        }
+                        else if (x86_message != NULL && x86_location < count && conversion_note != NULL && conversion_note_token < count)
+                        {
+                            const PPOutputDiagnosticNote note = { .token = parser->tokens.sources[conversion_note_token], .message = conversion_note };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[x86_location], publication, &note, 1, "%s", x86_message);
                         }
                         else if (x86_message != NULL && x86_location < count)
                         {
