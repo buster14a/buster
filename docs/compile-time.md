@@ -1657,6 +1657,43 @@ keeps the probes and the receipts.
 | user instructions | 1,304.696 M | 1,299.420 M | −0.40% |
 | `check-input` | 46.614 ms | 46.388 ms | −0.23 ms |
 
+## The coded walk's flush records its nodes 16 at a time (#1671)
+
+**What it replaces.** Each flush of the coded walk's batch called `check_graph_record_nodes`, which recorded the
+batch's nodes one at a time: about 0.8% of `-c sqlite3.c`'s cycles on the 9700X, about 15 cycles a node. It records:
+- each node's purity (`check_graph_pure`);
+- the validation's counters.
+
+`check_graph_run` takes these in place of a validation.
+
+**The change.** The flush's vector path records its 16 nodes in the step that writes them
+(`check_input_batch_record`), as `check_graph_validate_block` already computes purity:
+- **Each node's own part.** The operator's class from `check_graph_classes`' table (made once a walk), and the requested
+  type, builtin or void.
+- **A leaf's part.** Its type and overload head, gathered from its record by its slot.
+- **Operands before the 16** are gathered from `recorded_pure`. Those among them are taken in node order.
+- **The counters**, by popcounts and reductions.
+- **Around it.** The nodes a visit made before the batch are recorded first. The scalar path keeps
+  `check_graph_record_nodes` as the twin.
+
+**The checks.**
+- `test-checker` compares every source fixture's recorded facts with both validations.
+- A probe that validates every graph found `sqlite3.c`'s 309,214 nodes' recorded purity and counters equal to the
+  validation's.
+
+**Measured on the 9700X.** Main `73fcf006` against the head `c72eafc8`, in 8 interleaved rounds, then
+`measure-compile` each way. Every run held the lock on its own. The objects are the same bytes.
+[The record](https://github.com/buster14a/buster-performance/tree/bc06bdb55949dd46ca5b8d88d306eee7be20ba27/docs/measurements/check-input-1671-coded-record-2026-11-07)
+keeps the receipts, each build's profile and the probe.
+
+| measure | main | head | difference |
+| --- | ---: | ---: | ---: |
+| wall time | 119.810 ms | 119.135 ms | −0.56% |
+| user cycles | 582.419 M | 578.394 M | −0.69% |
+| user instructions | 1,307.854 M | 1,298.923 M | −0.68% |
+| `check-input` | 44.619 ms | 43.946 ms | −0.67 ms |
+| `expressions.actions` | 10.269 ms | 9.546 ms | −0.72 ms |
+
 ## The passes after checking (#592)
 
 #641 removes more token-domain work from the same handoffs. Initializer plans keep only their ascending
