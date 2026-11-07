@@ -2102,8 +2102,18 @@ static bool check_input_fallthrough_dead(CheckInputReader* reader, uint32_t toke
         if (parent < count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_BLOCK)
         {
             // The block's statements before this one, in order: each label lets control in (live), each statement that
-            // never completes makes what follows dead.
-            for (uint32_t child = reader->first_child[parent]; child != BUSTER_CHECK_NONE && child < statement; child = reader->next_child[child])
+            // never completes makes what follows dead. The pass's fallthroughs come in source order, so each block's scan
+            // resumes where the last query of it stopped (#1357): a scan is a prefix of the block's statements, each
+            // classified once, and any prefix that ends before `statement` (or is empty) resumes; a query before the
+            // kept prefix's end scans from the start and leaves the longer prefix kept.
+            const bool cached = reader->fallthrough_block_next != NULL && reader->fallthrough_block_next[parent] != 0;
+            const uint32_t cached_last = cached ? reader->fallthrough_block_last[parent] : BUSTER_CHECK_NONE;
+            const bool resumable = cached && (cached_last == BUSTER_CHECK_NONE || cached_last < statement);
+            const uint32_t next = resumable ? reader->fallthrough_block_next[parent] : 0;
+            uint32_t child = !resumable ? reader->first_child[parent] : next == UINT32_MAX ? BUSTER_CHECK_NONE : next - 1;
+            uint32_t last = resumable ? reader->fallthrough_block_last[parent] : BUSTER_CHECK_NONE;
+            uint8_t block_state = resumable ? reader->fallthrough_block_state[parent] : 2;
+            for (; child != BUSTER_CHECK_NONE && child < statement; child = reader->next_child[child])
             {
                 uint32_t inner = child;
                 bool labeled = false;
@@ -2113,8 +2123,16 @@ static bool check_input_fallthrough_dead(CheckInputReader* reader, uint32_t toke
                     inner = check_input_fallthrough_labeled(reader, inner);
                 }
                 const bool leaves = parser->tree.roles[child] != PARSE_ROLE_OPEN_BLOCK && check_input_fallthrough_leaves(reader, child);
-                state = leaves ? 0 : labeled ? 1 : state;
+                block_state = leaves ? 0 : labeled ? 1 : block_state;
+                last = child;
             }
+            if (reader->fallthrough_block_next != NULL && (!cached || resumable))
+            {
+                reader->fallthrough_block_next[parent] = child == BUSTER_CHECK_NONE ? UINT32_MAX : child + 1;
+                reader->fallthrough_block_last[parent] = last;
+                reader->fallthrough_block_state[parent] = block_state;
+            }
+            state = block_state != 2 ? block_state : state;
             statement = parent;
         }
         else
@@ -2356,6 +2374,21 @@ static void check_input_fallthrough_placements(CheckInputReader* reader)
     const uint32_t recorded = reader->fallthrough_count;
     uint32_t function = BUSTER_CHECK_NONE;
     uint32_t reported = count;
+    // The blocks' resumable scans (check_input_fallthrough_dead), for this pass alone; without room, each query scans.
+    const uint64_t mark = reader->scratch->length;
+    reader->fallthrough_block_next = recorded != 0 ? arena_push_array(reader->scratch, count, sizeof(uint32_t), 64) : NULL;
+    reader->fallthrough_block_last = reader->fallthrough_block_next != NULL ? arena_push_array(reader->scratch, count, sizeof(uint32_t), 64) : NULL;
+    reader->fallthrough_block_state = reader->fallthrough_block_last != NULL ? arena_push_array(reader->scratch, count, sizeof(uint8_t), 64) : NULL;
+    if (reader->fallthrough_block_state == NULL)
+    {
+        arena_pop_to(reader->scratch, mark);
+        reader->fallthrough_block_next = NULL;
+        reader->fallthrough_block_last = NULL;
+    }
+    else
+    {
+        memset(reader->fallthrough_block_next, 0, (uint64_t)count * sizeof(uint32_t));
+    }
     for (uint32_t i = 0; i < recorded; i += 1)
     {
         const uint32_t token = reader->fallthrough_tokens[i];
@@ -2375,6 +2408,10 @@ static void check_input_fallthrough_placements(CheckInputReader* reader)
         }
     }
     reader->fallthrough_count = 0;
+    reader->fallthrough_block_next = NULL;
+    reader->fallthrough_block_last = NULL;
+    reader->fallthrough_block_state = NULL;
+    arena_pop_to(reader->scratch, mark);
 }
 
 // Whether clang's analysis of the function's CFG, which reports a misplaced fallthrough, runs where `token` is:
