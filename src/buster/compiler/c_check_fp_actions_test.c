@@ -288,6 +288,16 @@ static void check_test_half_constant_actions(CheckTest* test, TypeTable* table)
             check_test_expect(test, runtime.diagnostic == CHECK_DIAG_NONE && runtime.value.fault == CHECK_FAULT_UNSUPPORTED_CONSTANT,
                               "half runtime arithmetic retains its excess-precision lowering");
         }
+        const CheckAction divide = {
+            .op = CHECK_OP_DIVIDE,
+            .operands = { check_test_float(formats[format], 1), check_test_float(formats[format], 3) },
+            .context = { .constant_evaluated = true },
+        };
+        const CheckActionResult quotient = check_test_action(test, table, divide);
+        const long double rounded_third = format == 0 ? 0x1.554p-2L : 0x1.56p-2L;
+        check_test_expect(test, quotient.diagnostic == CHECK_DIAG_NONE && quotient.value.fault == CHECK_FAULT_NONE &&
+                               quotient.value.constant_kind == CHECK_CONSTANT_FLOATING && quotient.value.floating == rounded_third,
+                          "half required division rounds one third to the source format in both action paths");
         const long double midpoint = format == 0 ? 2048 : 256;
         CheckAction action = {
             .op = CHECK_OP_ADD,
