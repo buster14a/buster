@@ -2245,13 +2245,35 @@ the kernel's setting in force:
 | c-testsuite's 220, mean | `always` | | | 3.20 ms | 5.63 ms | 1.71 ms |
 
 - **Empty file.** `backend-setup` is the stage clock's boundary alone, under
-  every page policy: 0.004 ms on the 9700X and 0.008 to 0.010 ms on the VM. A
-  unit without a selected body initializes nothing (#689), and the baked
-  executable has nothing to initialize.
+  every page policy: 0.004 ms on the 9700X, and 0.007 to 0.010 ms on the VM
+  (with its own default, huge pages off, too). A unit without a selected body
+  initializes none of the backend's tables (#689), and the baked executable
+  has none to initialize.
 - **With a function.** The baked executable's `backend-setup` is 0.003 ms on
-  the 9700X and 0.008 to 0.009 ms on the VM, with one or two faults. Building the tables
-  when the process runs costs about 1,135 faults on both machines: 0.75 to
-  0.86 ms on the 9700X, and 2.2 ms on the VM under `madvise` and `always` alike.
+  the 9700X and 0.008 to 0.009 ms on the VM, with one or two faults. Building
+  the tables when the process runs costs about 1,135 faults on both machines:
+  0.75 to 0.86 ms on the 9700X, and 2.2 ms on the VM under `madvise` and
+  `always` alike.
+- **Assembly inputs (#1571).** Two routes still rebuilt the x86 semantics'
+  tables in a baked executable, writing their baked pages:
+  - a compile with an assembly or other non-C input (`-c foo.s`, or C files
+    with one), which sets the driver's `mixed_inputs`;
+  - `compiler assemble`.
+
+  They now test `x86_semantics_initialized` first, as the other routes do.
+  Their objects are unchanged, and an executable that isn't baked builds the
+  tables once, as before. Two rounds of `measure-compile --runs 41`, CPU 2,
+  against the build before:
+  - on the 9700X, at `ec5f0f6b`, where the two files are `main`'s:
+    - `-c foo.s` takes 0.479 and 0.476 ms with 230 faults, against 0.546 ms
+      with 269, 13% less;
+    - a link of a C file and `foo.s` takes 1.181 and 1.193 ms with 529
+      faults, against 1.268 and 1.283 ms with 568;
+  - on the VM:
+    - `-c foo.s` takes 2.40 and 2.57 ms with 675 faults, against 2.64 and
+      2.89 ms with 716;
+    - the link takes 4.18 and 4.39 ms with 1,202 faults, against 4.49 and
+      4.63 ms with 1,243.
 - **Under the VM's own default** (huge pages off), the baked executable's
   `backend-setup` is the same, 0.007 to 0.009 ms. c-testsuite's programs take
   3.21 and 3.34 ms there, against 5.55 and 5.74 ms built.
@@ -2272,8 +2294,9 @@ the kernel's setting in force:
   - the checker's reader (`check-input`), 1.0 to 1.2 ms;
   - `setup`, 0.45 to 0.55 ms.
 
-  The process outside the span (exec, `main`'s dispatch and exit) takes 1.2 to
-  1.6 ms for any input. tcc's whole compile of `empty.c` takes 1.65 to 1.79 ms.
+  On the VM, the process outside the span (exec, `main`'s dispatch and exit)
+  takes 1.2 to 1.6 ms for any input, and tcc's whole compile of `empty.c`
+  takes 1.65 to 1.79 ms. On the 9700X they take 0.24 to 0.39 ms and 0.36 ms.
   - `setup`'s faults come from first touching the executable's pages. From
     `check_driver_command`'s entry to `check_driver_flow`'s (`setup` and
     `lanes-start`), gdb and `/proc/PID/smaps` show about 1.4 MB of code,
