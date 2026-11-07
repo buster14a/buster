@@ -36,8 +36,12 @@ static void check_test_driver_return_calls(CheckTest* test, const char* clang, c
         { "noreturn or ordinary call", "_Noreturn void die(void); void g(void); int f(int x){if(x)die();else g();}\n", 1, 1 },
         { "GNU noreturn declaration", "int die(void) __attribute__((noreturn)); int f(void){die();}\n", 0, 0 },
         { "inherited noreturn declaration", "_Noreturn void die(void); void die(void); int f(void){die();}\n", 0, 0 },
+        { "later translation-unit noreturn does not change an earlier body", "void die(void); int f(void){die();} _Noreturn void die(void);\n", 1, 1 },
+        { "later block noreturn does not change an earlier call", "void die(void); int f(void){die(); _Noreturn void die(void);}\n", 1, 1 },
+        { "block noreturn applies to a later call", "void die(void); int f(void){die(); _Noreturn void die(void); die();}\n", 0, 0 },
         { "parenthesized direct noreturn", "_Noreturn void die(void); int f(void){(&die)();}\n", 0, 0 },
         { "noreturn initializer", "_Noreturn int die(void); int f(void){int n=die();(void)n;}\n", 0, 0 },
+        { "ordinary direct initializer", "int g(void); int f(void){int n=g();(void)n;}\n", 1, 1 },
         { "noreturn comma operand", "_Noreturn int die(void); int f(void){(void)(die(),1);}\n", 0, 0 },
         { "unevaluated ordinary call", "int g(void); int f(void){(void)sizeof(g());}\n", 1, 1 },
         { "unevaluated noreturn call", "_Noreturn int die(void); int f(void){(void)sizeof(die());}\n", 1, 1 },
@@ -56,10 +60,15 @@ static void check_test_driver_return_calls(CheckTest* test, const char* clang, c
         { "builtin stop on one branch", "int f(int x){if(x)__builtin_trap();}\n", 1, 1 },
         { "conservative query contract", "_Noreturn int die(void); int f(void){(void)__builtin_constant_p(die());}\n", 0, 0 },
         { "ordinary indirect call remains conservative", "void (*p)(void); int f(void){p();}\n", 0, 1 },
+        { "ordinary indirect initializer remains conservative", "int (*p)(void); int f(void){int n=p();(void)n;}\n", 0, 1 },
+        { "qualified indirect initializer remains conservative", "int (*p)(void) __attribute__((noreturn)); int f(void){int n=p();(void)n;}\n", 0, 0 },
+        { "qualified typedef initializer remains conservative", "typedef int (*NR)(void) __attribute__((noreturn)); NR p; int f(void){int n=p();(void)n;}\n", 0, 0 },
         { "qualified indirect call remains conservative", "void (*p)(void) __attribute__((noreturn)); int f(void){p();}\n", 0, 0 },
         { "qualified typedef call remains conservative", "typedef void (*NR)(void) __attribute__((noreturn)); NR p; int f(void){p();}\n", 0, 0 },
         { "analyzer noreturn remains conservative", "void die(void) __attribute__((analyzer_noreturn)); int f(void){die();}\n", 0, 0 },
         { "inherited analyzer contract remains conservative", "void die(void) __attribute__((analyzer_noreturn)); void die(void); int f(void){die();}\n", 0, 0 },
+        { "wrapped analyzer contract remains conservative", "void die(void) __attribute__((__analyzer_noreturn__)); int f(void){die();}\n", 0, 0 },
+        { "inherited wrapped analyzer remains conservative", "void die(void) __attribute__((__analyzer_noreturn__)); void die(void); int f(void){die();}\n", 0, 0 },
     };
     static const char* const flags[] = { NULL, "-Werror=return-type", "-Wno-return-type", "-w" };
     char path[PATH_MAX];

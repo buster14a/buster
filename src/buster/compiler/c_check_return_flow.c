@@ -28,7 +28,7 @@ static bool check_program_return_unknowns(const CheckProgram* program, Arena* sc
         for (uint32_t a = 0; ready && attributes != NULL && a < attributes->count; a += 1)
         {
             const CheckInputAttribute* attribute = attributes->records + a;
-            const String8 name = { .pointer = (char*)intern_bytes(program->identifiers, attribute->name), .length = intern_length(program->identifiers, attribute->name) };
+            const String8 name = check_input_attribute_spelling(program->identifiers, attribute->name);
             const uint32_t object = input->objects[token];
             const bool analyzer = !attribute->ignored && !attribute->subject_ignored && check_input_attribute_equal(name, "analyzer_noreturn");
             const bool ignored = attribute->kind == CHECK_ATTRIBUTE_NORETURN && (attribute->ignored || attribute->subject_ignored);
@@ -59,7 +59,7 @@ static uint8_t check_program_return_call(const CheckProgram* program, uint32_t n
     const uint32_t overload = check_program_builtin_index(stream->overloads, stream->overload_count, sizeof(CheckOverloadEffect), node);
     uint32_t use = BUSTER_CHECK_NONE;
     const uint32_t object = overload == BUSTER_CHECK_NONE ? check_target_feature_noreturn_object(program, node, &use) : 0;
-    const uint32_t declaration = use < input->token_count ? input->declarations[use] : BUSTER_CHECK_NONE;
+    const uint32_t declaration = input->declarations != NULL && use < input->token_count ? input->declarations[use] : BUSTER_CHECK_NONE;
     const bool direct = object != 0 && declaration < input->token_count && input->objects[declaration] == object &&
                         input->declaration_kinds[declaration] == C_BINDING_FUNCTION && input->function_flags != NULL;
     const bool known = direct && (unknowns == NULL || unknowns[object] >= use);

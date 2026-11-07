@@ -2946,6 +2946,25 @@ static void check_test_program_return_marks(CheckTest* test)
                                query_facts[1] == BUSTER_CHECK_RETURN_UNKNOWN,
                           "an evaluated query operand never promotes its conservative warning contract to a guaranteed stop");
     }
+    if (ready)
+    {
+        // Reader-independent inputs may have a checked function designator without source declaration bindings.
+        // Missing optional provenance keeps the call conservative instead of indexing an absent column.
+        CheckOp ops[] = { CHECK_OP_VALUE, CHECK_OP_CALL };
+        uint32_t tokens[] = { 0, 0 };
+        uint32_t first[] = { BUSTER_CHECK_NONE, 0 };
+        uint32_t absent[] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+        CheckValue values[] = { { .type = function, .category = CHECK_FUNCTION, .object = 1 },
+                                { .type = record, .category = CHECK_RVALUE } };
+        const CheckInput input = { .token_count = 1, .graph = { .count = BUSTER_ARRAY_LENGTH(ops), .ops = ops,
+                                       .tokens = tokens, .operand0 = first, .operand1 = absent, .operand2 = absent } };
+        const CheckStream stream = { .dense_values = values };
+        const CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input,
+                                       .stream = &stream, .object_count = 2 };
+        check_test_expect(test, check_program_return_call(&program, 1, NULL) == BUSTER_CHECK_RETURN_UNKNOWN,
+                          "a call without optional source declaration bindings remains conservative");
+    }
+
     arena_release(&scratch);
     check_test_types_close(&types);
 }
