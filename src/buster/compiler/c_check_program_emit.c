@@ -322,6 +322,12 @@ struct CheckEmitGrowth
 // output and the steps' scratch, reserved at the
 // lane's first body and emptied for each, and the forms the lane's last target allows (X86_FORM_COUNT entries).
 #define BUSTER_CHECK_TIER1_STEPS 8
+// --tier1-schedule's variants (#172): none, each block's records after allocation (c_check_tier1_schedule.c), or each
+// block's IR instructions before selection and allocation (tier1_schedule_ir.c).
+#define BUSTER_CHECK_TIER1_SCHEDULE_NONE 0
+#define BUSTER_CHECK_TIER1_SCHEDULE_POST 1
+#define BUSTER_CHECK_TIER1_SCHEDULE_PRE 2
+
 typedef struct CheckTier1Lane CheckTier1Lane;
 struct CheckTier1Lane
 {
@@ -337,6 +343,8 @@ struct CheckTier1Lane
     // The emission's inline callees (#1282, c_check_tier1_inline.c), null for none; and the lane's cache of their
     // prepared IR, a state and a function per body, for the generation it was made for.
     const struct CheckTier1Inline* inlining;
+    // --tier1-schedule's variant (BUSTER_CHECK_TIER1_SCHEDULE_*, #172), which the emission sets for each body.
+    uint8_t schedule;
     Arena inline_cache;
     uint64_t inline_generation;
     struct IrFunction* inline_functions;
@@ -390,6 +398,9 @@ struct CheckTier1Counts
     uint32_t row_moves;
     // The calls of always_inline functions it expanded (#1282, c_check_tier1_inline.c).
     uint32_t inlined_calls;
+    // With --tier1-schedule (#172), the blocks scheduled and the records or IR instructions that changed places.
+    uint32_t schedule_blocks;
+    uint32_t schedule_moved;
 };
 
 #define BUSTER_CHECK_TIER1_OPERATIONS 256
@@ -425,6 +436,8 @@ struct CheckTier1Report
     uint64_t machine_rows;
     uint64_t row_moves;
     uint64_t inlined_calls;
+    uint64_t schedule_blocks;
+    uint64_t schedule_moved;
 };
 
 // #1059's coverage of the operations a helper may implement, summed over a command's units (--helper-report): each
@@ -633,6 +646,8 @@ struct CheckProgramLanes
     bool tier1_no_lifetimes;
     // --tier1-no-inline keeps every call of the unit's always_inline functions (#1282's comparison).
     bool tier1_no_inline;
+    // --tier1-schedule's variant (BUSTER_CHECK_TIER1_SCHEDULE_*, #172's measurement): none by default.
+    uint8_t tier1_schedule;
     CheckTier1Report tier1_report;
     FILE* tier1_refusals;
     // Every emission's plan of its helpers' operations, summed (#1059, --helper-report), where the command asks for it
@@ -1160,6 +1175,7 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
     const CheckTier1Fault* fault = run->lanes->tier1_fault;
     fault = fault != NULL && fault->body == b + 1 ? fault : NULL;
     lane->tier1->inlining = run->tier1_inline;
+    lane->tier1->schedule = run->lanes->tier1_schedule;
     CheckTier1Outcome outcome = naked ? check_tier1_failure(CHECK_TIER1_NAKED, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_NAKED, UINT32_MAX, 0) :
                                         check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
                                                             !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, run->verify, run->sources, lane->scratch,
@@ -4073,6 +4089,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.machine_rows += compiled ? counts->machine_rows : 0;
         lanes->tier1_report.row_moves += compiled ? counts->row_moves : 0;
         lanes->tier1_report.inlined_calls += compiled ? counts->inlined_calls : 0;
+        lanes->tier1_report.schedule_blocks += compiled ? counts->schedule_blocks : 0;
+        lanes->tier1_report.schedule_moved += compiled ? counts->schedule_moved : 0;
     }
     if (!valid)
     {

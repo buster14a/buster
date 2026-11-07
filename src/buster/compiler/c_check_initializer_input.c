@@ -275,6 +275,27 @@ struct CheckInitDiagnostic
     uint32_t warning_token;
 };
 
+// Whether a static object's scalar initializer, whose INITIALIZE (`initialize`, to the declared `target`) failed as one of
+// clang's conversions it warns of and still makes (-Wint-conversion's between a pointer and an integer,
+// -Wincompatible-pointer-types' between pointers: errors by default), is no constant after that conversion, which clang
+// reports next, at the initializer (#147): an object's value read, or an address converted to an integer narrower than
+// a pointer. Another failed conversion, of a record or a floating value, is the initializer's only error.
+static bool check_init_converted_nonconstant(const CheckInput* input, const CheckStream* stream, const TypeTable* types, TypeId target, uint32_t initialize)
+{
+    const uint32_t source = input->graph.operand0[initialize];
+    const bool known = source < stream->count && stream->diagnostics[source] == CHECK_DIAG_NONE;
+    const CheckValue value = known ? check_stream_value(stream, source) : (CheckValue){ 0 };
+    const uint8_t to = check_action_kind(types, type_conversion_operand(types, target));
+    const uint8_t from = known ? check_action_kind(types, type_conversion_operand(types, value.type)) : BUSTER_TYPE_KIND_VOID;
+    const bool designator = type_kind_is_array(from) || from == BUSTER_TYPE_KIND_FUNCTION;
+    const bool pointer = from == BUSTER_TYPE_KIND_POINTER || designator;
+    const bool integer = from == BUSTER_TYPE_KIND_INTEGER || from == BUSTER_TYPE_KIND_ENUM || from == BUSTER_TYPE_KIND_BIT_INT;
+    const bool converted = (to == BUSTER_TYPE_KIND_INTEGER && pointer) || (to == BUSTER_TYPE_KIND_POINTER && (pointer || integer));
+    const bool read = value.category == CHECK_LVALUE && !designator;
+    const bool narrowed = to == BUSTER_TYPE_KIND_INTEGER && value.constant_kind == CHECK_CONSTANT_ADDRESS && type_size(types, target) < 8;
+    return converted && (read || !check_value_static_initializer(&value, false) || narrowed);
+}
+
 // Diagnose complete roots before before_token (exclusive). A report elsewhere in the unit no longer cuts the
 // scan: the declaration that holds it is excluded by its nodes' completeness instead, so a later declaration's
 // independent warnings survive (#992).
@@ -391,11 +412,23 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         const uint32_t declaration = declarations[d];
         const uint32_t begin = check_sparse_get(input->initializer_begins, declaration);
         const uint32_t end = check_sparse_get(input->initializer_ends, declaration);
-        bool eligible = begin < end && end <= cutoff && end <= check_input_diagnostic_limit(input, begin) && type_is_valid(types, input->declared_types[declaration]);
+        // A scalar initializer's INITIALIZE (CheckInput.initializer_nodes) is at the declarator, outside the initializer's
+        // tokens: the conversion error it has is clang's one for the initializer, which isn't checked again here (#147).
+        const uint32_t initialize = check_sparse_get(input->initializer_nodes, declaration);
+        const bool placed = begin < end && end <= cutoff && end <= check_input_diagnostic_limit(input, begin) && type_is_valid(types, input->declared_types[declaration]);
+        bool eligible = placed && (initialize >= stream->count || complete[initialize]);
         for (uint32_t token = begin; eligible && token < end; token += 1)
         {
             const uint32_t node = input->token_nodes[token];
             eligible = node == BUSTER_CHECK_NONE || (node < stream->count && complete[node]);
+        }
+        if (placed && !eligible && initialize < stream->count && stream->diagnostics[initialize] == CHECK_DIAG_INCOMPATIBLE &&
+            check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) != 0 && begin < result->token &&
+            check_init_converted_nonconstant(input, stream, types, input->declared_types[declaration], initialize))
+        {
+            result->status = CHECK_INIT_NON_CONSTANT;
+            result->token = begin;
+            result->completion = end;
         }
         if (eligible)
         {

@@ -165,6 +165,12 @@ need. It is a measurement option, off by default, and the measurement says to
 keep it off: its class representatives lengthen live ranges that Tier 1's
 allocation pays for in moves and spills.
 
+`--tier1-schedule=post` and `--tier1-schedule=pre` schedule Tier 1's code block
+by block, after allocation on its machine records or before selection on its IR
+(#172). They are measurement options too, off by default; [the scheduling
+guide](tier1-scheduling.md) has their contracts and the 9700X's measurement of
+what they save and cost.
+
 The figures are from two hosts, `BUSTER_DEBUG_INFO=0`, Clang 23, one pinned
 CPU: a Ryzen 9 7940HS (Zen 4) and the approved Ryzen 7 9700X (Zen 5) under its
 shared lock. The source is a local `sqlite3.c` of 2,604 functions (2,155 of them

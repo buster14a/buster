@@ -440,12 +440,30 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
             const bool contextual = check_driver_warning_parentheses(parser, types, declaration, declared, scratch, &names);
             const String8 sugared = contextual ? type_print(types, scratch, type, (String8){ 0 }, &names, options) : (String8){ 0 };
             String8 canonical = { 0 };
-            if (names.alias_count != 0)
+            // clang's desugaring stops at a vector type's own typedef, the one whose underlying type is the vector
+            // (desugarForDiagnostic: "People want their vec4"): a typedef of that typedef's a.k.a. is that one's name,
+            // and that one has none. The chain of typedef specifiers from the alias's declaration leads to it.
+            const uint8_t alias_kind = alias_type != 0 ? type_kind(types, type_strip_aligned(types, alias_type)) : 0;
+            uint32_t vector_name = alias_kind == BUSTER_TYPE_KIND_VECTOR || alias_kind == BUSTER_TYPE_KIND_EXT_VECTOR ? spelling : 0;
+            for (uint32_t steps = 0; vector_name != 0 && steps < 64; steps += 1)
+            {
+                const uint32_t inner = check_input_typedef_spelling(input, parser, vector_name);
+                const bool same = inner != 0 && inner < input->token_count && input->declared_types[inner] == alias_type;
+                vector_name = same ? inner : vector_name;
+                steps = same ? steps : 64;
+            }
+            TypeId vector_type = vector_name != 0 ? input->declared_types[vector_name] : 0;
+            const uint32_t vector_identifier = vector_name != 0 ? parser->tokens.names[vector_name] : 0;
+            String8 vector_alias = vector_name != 0 ? (String8){ .pointer = (char*)intern_bytes(pp->table, vector_identifier),
+                                                                 .length = intern_length(pp->table, vector_identifier) } : (String8){ 0 };
+            if (names.alias_count != 0 && vector_name != spelling)
             {
                 // clang's `(aka '...')`: the same type with the typedef sugar expanded — an anonymous record's
-                // typedef stays, since it is that record's own name.
+                // typedef stays, since it is that record's own name; a vector's own typedef stays too.
                 TypeNames expand = names;
-                expand.alias_count = 0;
+                expand.alias_count = vector_name != 0 ? 1 : 0;
+                expand.alias_types = &vector_type;
+                expand.alias_names = &vector_alias;
                 expand.parenthesis_count = 0;
                 canonical = type_print(types, scratch, type, (String8){ 0 }, &expand, options);
             }

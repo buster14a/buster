@@ -193,16 +193,38 @@ static void tier1_schedule_test_examples(Tier1ScheduleTest* test, Tier1ScheduleG
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, separated), "compare and branch stay adjacent");
     tier1_schedule_test_compare(test, input, scalar, vector);
 
+    // A load moves among the records that don't access memory; any two accesses keep their order (no alias analysis,
+    // and a volatile access stays where it was among the others).
     records[0] = tier1_schedule_test_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_R8, X86_REGISTER_R9);
     records[0].mode = BUSTER_X86_MEMORY_BASE;
     records[1] = tier1_schedule_test_instruction(X86_FORM_NOT_RM64, 0, X86_REGISTER_R10);
     input.count = 2;
-    tier1_schedule_test_expect(test, x86_zen5_id(records) != 0 && !tier1_schedule_verify(input, reversed), "known L1 case remains a possible fault and memory barrier");
+    tier1_schedule_test_expect(test, x86_zen5_id(records) != 0 && tier1_schedule_verify(input, reversed), "a known L1 load moves past a register operation");
+    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_expect(test, tier1_schedule_block(input, vector, order, 8, true, &stats) == TIER1_SCHEDULE_OK && stats.pinned == 0 &&
+                                         vector->latencies[0] == 4 * BUSTER_X86_COST_SCALE, "a load is no barrier, its measured latency its weight");
+    records[1] = tier1_schedule_test_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_R10, X86_REGISTER_R11);
+    records[1].mode = BUSTER_X86_MEMORY_BASE;
+    tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "two loads keep their order");
+    tier1_schedule_test_compare(test, input, scalar, vector);
+    records[1] = tier1_schedule_test_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_R10, X86_REGISTER_R11);
+    records[1].mode = BUSTER_X86_MEMORY_BASE;
+    tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "a load and a store keep their order");
+    tier1_schedule_test_compare(test, input, scalar, vector);
+    records[0] = tier1_schedule_test_instruction(X86_FORM_NOT_RM64, 0, X86_REGISTER_R8);
+    tier1_schedule_test_expect(test, tier1_schedule_verify(input, reversed), "a store moves past a register operation");
+    tier1_schedule_test_compare(test, input, scalar, vector);
+    records[1] = tier1_schedule_test_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_R10, X86_REGISTER_R8);
+    records[1].mode = BUSTER_X86_MEMORY_BASE;
+    tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "a store stays after its value's definition");
     tier1_schedule_test_compare(test, input, scalar, vector);
     records[0] = tier1_schedule_test_instruction(X86_FORM_ADD_RM64_IMM8, 0, X86_REGISTER_R8);
     records[0].immediate = 4;
-    tier1_schedule_test_expect(test, x86_zen5_id(records) == 0 && !tier1_schedule_verify(input, reversed), "unmeasured immediate is unknown and stays pinned");
+    records[1] = tier1_schedule_test_instruction(X86_FORM_NOT_RM64, 0, X86_REGISTER_R10);
+    tier1_schedule_test_expect(test, x86_zen5_id(records) == 0 && tier1_schedule_verify(input, reversed), "an unmeasured immediate moves");
     tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_expect(test, tier1_schedule_block(input, vector, order, 8, true, &stats) == TIER1_SCHEDULE_OK && stats.unknown_cases == 1 &&
+                                         vector->latencies[0] == BUSTER_X86_COST_SCALE, "an unmeasured case is counted unknown and weighs its class");
     records[0] = tier1_schedule_test_instruction(X86_FORM_DIV_RM64, 0, X86_REGISTER_R8);
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "possible arithmetic fault stays pinned");
     tier1_schedule_test_compare(test, input, scalar, vector);
@@ -216,12 +238,55 @@ static void tier1_schedule_test_examples(Tier1ScheduleTest* test, Tier1ScheduleG
     records[0].mode = BUSTER_X86_MEMORY_BASE;
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "a locked compare-exchange stays pinned");
     tier1_schedule_test_compare(test, input, scalar, vector);
+    // A floating operation reads MXCSR's controls and may set its sticky status flags: floating operations move among
+    // the others, and stmxcsr, which reads the status flags, stays pinned, as do calls (fesetround's, fetestexcept's).
     records[0] = tier1_schedule_test_instruction(X86_FORM_ADDSD_X_XM64, 0, 1);
-    tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "a floating addition, which reads and writes MXCSR, stays pinned");
+    tier1_schedule_test_expect(test, tier1_schedule_verify(input, reversed), "a floating addition moves past a register operation");
     tier1_schedule_test_compare(test, input, scalar, vector);
+    records[1] = tier1_schedule_test_instruction(X86_FORM_MULSD_X_XM64, 2, 3);
+    tier1_schedule_test_expect(test, tier1_schedule_verify(input, reversed), "two independent floating operations change places");
+    tier1_schedule_test_compare(test, input, scalar, vector);
+    records[1] = tier1_schedule_test_instruction(X86_FORM_STMXCSR_M32, 0, X86_REGISTER_R8);
+    records[1].mode = BUSTER_X86_MEMORY_BASE;
+    tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "stmxcsr stays after a floating operation");
+    tier1_schedule_test_compare(test, input, scalar, vector);
+    records[1] = tier1_schedule_test_instruction(X86_FORM_NOT_RM64, 0, X86_REGISTER_R9);
     records[0] = tier1_schedule_test_instruction(X86_FORM_MOV_RM8_R8, X86_REGISTER_R8, X86_REGISTER_R9);
     records[1] = tier1_schedule_test_instruction(X86_FORM_NOT_RM64, 0, X86_REGISTER_R9);
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "partial register write retains the whole-register dependency");
+    tier1_schedule_test_compare(test, input, scalar, vector);
+
+    // Flags: a writer whose flags are overwritten before any read is dead, and two dead writers may change places; a
+    // live writer (read, or the block's last) keeps its order with every other writer and its readers.
+    records[0] = tier1_schedule_test_instruction(X86_FORM_ADD_RM64_R64, X86_REGISTER_R9, X86_REGISTER_R8);
+    records[1] = tier1_schedule_test_instruction(X86_FORM_ADD_RM64_R64, X86_REGISTER_R11, X86_REGISTER_R10);
+    records[2] = tier1_schedule_test_instruction(X86_FORM_ADD_RM64_R64, X86_REGISTER_R13, X86_REGISTER_R12);
+    input.count = 3;
+    const uint16_t dead_swapped[] = { 1, 0, 2 };
+    const uint16_t live_swapped[] = { 0, 2, 1 };
+    tier1_schedule_test_expect(test, tier1_schedule_verify(input, dead_swapped), "two dead flag writers change places");
+    tier1_schedule_test_expect(test, !tier1_schedule_verify(input, live_swapped), "the block's last flag writer stays last");
+    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_expect(test, tier1_schedule_block(input, vector, order, 8, true, &stats) == TIER1_SCHEDULE_OK && stats.dead_flags == 2 && stats.edges == 2,
+                               "dead flag writers depend only on the live one");
+    records[0] = tier1_schedule_test_instruction(X86_FORM_CMP_RM64_R64, X86_REGISTER_R9, X86_REGISTER_R8);
+    records[1] = tier1_schedule_test_instruction(X86_FORM_SETE_RM8, 0, X86_REGISTER_R10);
+    records[2] = tier1_schedule_test_instruction(X86_FORM_NOT_RM64, 0, X86_REGISTER_R11);
+    const uint16_t reader_first[] = { 2, 0, 1 };
+    const uint16_t reader_split[] = { 0, 2, 1 };
+    tier1_schedule_test_expect(test, tier1_schedule_verify(input, reader_first) && tier1_schedule_verify(input, reader_split), "a flags reader moves with its writer");
+    tier1_schedule_test_compare(test, input, scalar, vector);
+    records[2] = tier1_schedule_test_instruction(X86_FORM_ADD_RM64_R64, X86_REGISTER_R13, X86_REGISTER_R12);
+    tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reader_split), "no flag writer between a reader and its writer");
+    tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reader_first), "no reordering of the block's last flag writer");
+    tier1_schedule_test_compare(test, input, scalar, vector);
+    records[1] = tier1_schedule_test_instruction(X86_FORM_CMOVE_R64_RM64, X86_REGISTER_R10, X86_REGISTER_R11);
+    tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reader_split), "no flag writer between a cmov and its writer");
+    tier1_schedule_test_compare(test, input, scalar, vector);
+    records[1] = tier1_schedule_test_instruction(X86_FORM_CALL_REL32, 0, 0);
+    records[2] = tier1_schedule_test_instruction(X86_FORM_NOT_RM64, 0, X86_REGISTER_R11);
+    const uint16_t across[] = { 0, 2, 1 };
+    tier1_schedule_test_expect(test, !tier1_schedule_verify(input, across), "a call is a barrier");
     tier1_schedule_test_compare(test, input, scalar, vector);
 
     Tier1ScheduleStats saved;

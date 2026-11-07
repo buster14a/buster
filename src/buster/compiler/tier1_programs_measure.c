@@ -7,6 +7,7 @@
 //
 //   build/compiler measure-tier1-programs --clang PATH [--tcc PATH] --sqlite DIR --speedtest DIR --lua DIR --scripts DIR
 //                                         [--runs N] [--warmups N] [--directory DIR] [--keep] [--uncounted]
+//                                         [--variant OPTION]...
 //
 // The programs and their inputs are #1189's (buster-performance's tier1-gap-1189-2026-11-03, after the cc3387f record's):
 // - speedtest1: DIR/sqlite3.c (--sqlite: the frozen corpus's SQLite 3.53.2 amalgamation) and DIR/speedtest1.c
@@ -19,7 +20,9 @@
 //   them (-std=gnu99 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX, linked with -lm -ldl; tcc without -std=gnu99), running each of the
 //   five scripts in --scripts' DIR (calls, tables, strings, arithmetic and closures).lua.
 // --tier1's builds are `--tier1 -fno-asynchronous-unwind-tables`, as the records', and tcc's are left out without
-// --tcc. Before any timing, speedtest1's --verify must give one verification hash by every build, and each script's
+// --tcc. Each --variant (up to BUSTER_TIER1_PROGRAMS_VARIANTS) adds a build of --tier1's with OPTION after its options
+// (#172's `--variant --tier1-schedule=post`), named `--tier1 OPTION`, whose medians the report also gives against
+// --tier1's. Before any timing, speedtest1's --verify must give one verification hash by every build, and each script's
 // output by every build must be clang -O0's byte for byte.
 //
 // Then --runs rounds (11), after --warmups (1) in which every build runs every program once: each round runs every
@@ -37,6 +40,8 @@
 #include <dirent.h>
 
 #define BUSTER_TIER1_PROGRAMS_BUILDS 5
+#define BUSTER_TIER1_PROGRAMS_VARIANTS 4
+#define BUSTER_TIER1_PROGRAMS_MAX_BUILDS (BUSTER_TIER1_PROGRAMS_BUILDS + BUSTER_TIER1_PROGRAMS_VARIANTS)
 #define BUSTER_TIER1_PROGRAMS_SCRIPTS 5
 // speedtest1, then the five scripts.
 #define BUSTER_TIER1_PROGRAMS_LISTS (1 + BUSTER_TIER1_PROGRAMS_SCRIPTS)
@@ -82,13 +87,19 @@ struct Tier1Programs
     uint32_t runs;
     uint32_t warmups;
     uint32_t build_count;
+    // Each build's kind (Tier1ProgramsBuild: a variant's is --tier1's), its variant's option (null for none), its name
+    // and its files' suffix. The fixed builds come first, at their Tier1ProgramsBuild indices, then the variants.
+    uint8_t kinds[BUSTER_TIER1_PROGRAMS_MAX_BUILDS];
+    const char* variants[BUSTER_TIER1_PROGRAMS_MAX_BUILDS];
+    char names[BUSTER_TIER1_PROGRAMS_MAX_BUILDS][96];
+    char files[BUSTER_TIER1_PROGRAMS_MAX_BUILDS][16];
     // --uncounted: a run need not be counted (a host without the counters, as a virtual machine's), its cycles and
     // instructions then 0.
     bool uncounted;
     char directory[PATH_MAX];
     // Each build's executables, and the errors of every build's commands.
-    char speedtests[BUSTER_TIER1_PROGRAMS_BUILDS][PATH_MAX];
-    char luas[BUSTER_TIER1_PROGRAMS_BUILDS][PATH_MAX];
+    char speedtests[BUSTER_TIER1_PROGRAMS_MAX_BUILDS][PATH_MAX];
+    char luas[BUSTER_TIER1_PROGRAMS_MAX_BUILDS][PATH_MAX];
     char errors[PATH_MAX];
     // speedtest1's database, and SQLITE_TMPDIR's directory, made fresh before each of its runs.
     char database[PATH_MAX];
@@ -144,10 +155,11 @@ static void tier1_programs_add(Tier1ProgramsCommand* c, const char* argument)
     }
 }
 
-// The compiler of build `b` and its options before a build's own: this executable, with --tier1's for Tier 1's build,
-// clang with its -O level, or tcc.
-static void tier1_programs_compiler(const Tier1Programs* p, uint32_t b, Tier1ProgramsCommand* c)
+// The compiler of build `b` and its options before a build's own: this executable, with --tier1's for Tier 1's build
+// and a variant's option after them, clang with its -O level, or tcc.
+static void tier1_programs_compiler(const Tier1Programs* p, uint32_t build, Tier1ProgramsCommand* c)
 {
+    const uint32_t b = p->kinds[build];
     c->count = 0;
     c->arguments[0] = NULL;
     if (b == TIER1_PROGRAMS_TIER0 || b == TIER1_PROGRAMS_TIER1)
@@ -168,6 +180,10 @@ static void tier1_programs_compiler(const Tier1Programs* p, uint32_t b, Tier1Pro
         tier1_programs_add(c, "--tier1");
         tier1_programs_add(c, "-fno-asynchronous-unwind-tables");
     }
+    if (p->variants[build] != NULL)
+    {
+        tier1_programs_add(c, p->variants[build]);
+    }
 }
 
 // Build `b`'s speedtest1 and Lua, each command's errors appended to p->errors. Returns whether every command succeeded.
@@ -175,8 +191,8 @@ static bool tier1_programs_build(Tier1Programs* p, uint32_t b)
 {
     // speedtest1 as one translation unit (this compiler's direct path takes one file, and tcc's build as the record's),
     // or clang's object of each and a link.
-    const bool ours = b != TIER1_PROGRAMS_CLANG_O0 && b != TIER1_PROGRAMS_CLANG_O2;
-    const char* file = tier1_programs_build_files[b];
+    const bool ours = p->kinds[b] != TIER1_PROGRAMS_CLANG_O0 && p->kinds[b] != TIER1_PROGRAMS_CLANG_O2;
+    const char* file = p->files[b];
     char unity[PATH_MAX];
     char objects[2][PATH_MAX];
     char sources[2][PATH_MAX];
@@ -227,7 +243,7 @@ static bool tier1_programs_build(Tier1Programs* p, uint32_t b)
     // Lua: one command of its 33 sources.
     char lua_paths[BUSTER_TIER1_PROGRAMS_LUA_SOURCES][PATH_MAX];
     tier1_programs_compiler(p, b, &c);
-    if (b != TIER1_PROGRAMS_TCC)
+    if (p->kinds[b] != TIER1_PROGRAMS_TCC)
     {
         tier1_programs_add(&c, "-std=gnu99");
     }
@@ -243,7 +259,7 @@ static bool tier1_programs_build(Tier1Programs* p, uint32_t b)
     tier1_programs_add(&c, "-lm");
     tier1_programs_add(&c, "-ldl");
     ok = ok && c.count < BUSTER_TIER1_PROGRAMS_ARGUMENTS && tier1_programs_spawn(c.arguments, NULL, p->errors);
-    printf("measure-tier1-programs: %s's builds %s\n", tier1_programs_build_names[b], ok ? "built" : "FAILED");
+    printf("measure-tier1-programs: %s's builds %s\n", p->names[b], ok ? "built" : "FAILED");
     return ok;
 }
 
@@ -301,13 +317,13 @@ static void tier1_programs_list(const Tier1Programs* p, uint32_t b, uint32_t l, 
 static bool tier1_programs_check(Arena* arena, Tier1Programs* p)
 {
     char* argv[BUSTER_TIER1_PROGRAMS_SPEEDTEST_OPTIONS + 4];
-    char outputs[BUSTER_TIER1_PROGRAMS_BUILDS][PATH_MAX];
+    char outputs[BUSTER_TIER1_PROGRAMS_MAX_BUILDS][PATH_MAX];
     char reference[256] = { 0 };
     bool ok = true;
     for (uint32_t b = 0; ok && b < p->build_count; b += 1)
     {
         tier1_programs_list(p, b, 0, true, argv);
-        ok = tier1_programs_path(outputs[b], "%s/verify-%s.txt", p->directory, tier1_programs_build_files[b]) && tier1_programs_fresh(p) &&
+        ok = tier1_programs_path(outputs[b], "%s/verify-%s.txt", p->directory, p->files[b]) && tier1_programs_fresh(p) &&
              tier1_programs_spawn(argv, outputs[b], p->errors);
         const uint64_t mark = arena->length;
         const char* text = ok ? measure_compile_read(arena, outputs[b]) : NULL;
@@ -319,7 +335,7 @@ static bool tier1_programs_check(Arena* arena, Tier1Programs* p)
             memcpy(reference, line, length);
         }
         ok = ok && strlen(reference) == length && memcmp(reference, line, length) == 0;
-        printf("measure-tier1-programs: %s's speedtest1 --verify: %.*s%s\n", tier1_programs_build_names[b], (int)length, line != NULL ? line : "", ok ? "" : " (FAILED)");
+        printf("measure-tier1-programs: %s's speedtest1 --verify: %.*s%s\n", p->names[b], (int)length, line != NULL ? line : "", ok ? "" : " (FAILED)");
         arena_pop_to(arena, mark);
     }
     for (uint32_t s = 0; ok && s < BUSTER_TIER1_PROGRAMS_SCRIPTS; s += 1)
@@ -327,7 +343,7 @@ static bool tier1_programs_check(Arena* arena, Tier1Programs* p)
         for (uint32_t b = 0; ok && b < p->build_count; b += 1)
         {
             char name[64];
-            snprintf(name, sizeof(name), "%s-%s.out", tier1_programs_scripts[s], tier1_programs_build_files[b]);
+            snprintf(name, sizeof(name), "%s-%s.out", tier1_programs_scripts[s], p->files[b]);
             tier1_programs_list(p, b, 1 + s, false, argv);
             ok = tier1_programs_path(outputs[b], "%s/%s", p->directory, name) && tier1_programs_spawn(argv, outputs[b], p->errors);
         }
@@ -377,10 +393,10 @@ static uint64_t tier1_programs_time(Arena* arena, Tier1Programs* p, Tier1Program
             failures += !passed;
             printf("tier1-programs-run\t%s\t%llu\t%llu\t%s\t%s\t%llu\t%llu\t%llu\t%d\t%d\n", warmup ? "warm-up" : "measured",
                    (unsigned long long)(warmup ? run : run - p->warmups) + 1, (unsigned long long)position + 1, l == 0 ? "speedtest1" : tier1_programs_scripts[l - 1],
-                   tier1_programs_build_files[b], (unsigned long long)one.wall_ns, (unsigned long long)one.cycles, (unsigned long long)one.instructions, status, one.counted);
+                   p->files[b], (unsigned long long)one.wall_ns, (unsigned long long)one.cycles, (unsigned long long)one.instructions, status, one.counted);
             if (!passed)
             {
-                printf("measure-tier1-programs: %s's %s: FAILED (status %d, counted %d)\n", tier1_programs_build_names[b], l == 0 ? "speedtest1" : tier1_programs_scripts[l - 1], status,
+                printf("measure-tier1-programs: %s's %s: FAILED (status %d, counted %d)\n", p->names[b], l == 0 ? "speedtest1" : tier1_programs_scripts[l - 1], status,
                        one.counted);
             }
             if (!warmup)
@@ -424,19 +440,26 @@ static void tier1_programs_report(const Tier1Programs* p, const Tier1ProgramsMed
         {
             const Tier1ProgramsMedians* m = &medians[l * p->build_count + b];
             printf("%s by %s: %u runs, median %.3f ms wall (%.3f to %.3f), %llu user cycles, %llu instructions\n", l == 0 ? "speedtest1" : tier1_programs_scripts[l - 1],
-                   tier1_programs_build_names[b], p->runs, (double)m->wall_ns / 1e6, (double)m->wall_low / 1e6, (double)m->wall_high / 1e6, (unsigned long long)m->cycles,
+                   p->names[b], p->runs, (double)m->wall_ns / 1e6, (double)m->wall_low / 1e6, (double)m->wall_high / 1e6, (unsigned long long)m->cycles,
                    (unsigned long long)m->instructions);
         }
     }
-    // Rows by metric of speedtest1 and of Lua's sum, columns by build, then --tier1 against clang -O2 and -O0.
+    // Rows by metric of speedtest1 and of Lua's sum, columns by build, then --tier1 against clang -O2 and -O0, and each
+    // variant against --tier1.
     static const char* const metrics[3] = { "ms (median)", "user cycles, M", "instructions, M" };
+    const uint32_t fixed = p->tcc != NULL ? BUSTER_TIER1_PROGRAMS_BUILDS : BUSTER_TIER1_PROGRAMS_BUILDS - 1;
     printf("\n| Program | ");
     for (uint32_t b = 0; b < p->build_count; b += 1)
     {
-        printf("%s | ", tier1_programs_build_names[b]);
+        printf("%s | ", p->names[b]);
     }
-    printf("`--tier1` / clang -O2 | `--tier1` / clang -O0 |\n| --- |");
-    for (uint32_t b = 0; b < p->build_count + 2; b += 1)
+    printf("`--tier1` / clang -O2 | `--tier1` / clang -O0 |");
+    for (uint32_t b = fixed; b < p->build_count; b += 1)
+    {
+        printf(" `%s` / `--tier1` |", p->names[b]);
+    }
+    printf("\n| --- |");
+    for (uint32_t b = 0; b < p->build_count + 2 + (p->build_count - fixed); b += 1)
     {
         printf(" ---: |");
     }
@@ -445,7 +468,7 @@ static void tier1_programs_report(const Tier1Programs* p, const Tier1ProgramsMed
     {
         for (uint32_t metric = 0; metric < 3; metric += 1)
         {
-            double sums[BUSTER_TIER1_PROGRAMS_BUILDS] = { 0 };
+            double sums[BUSTER_TIER1_PROGRAMS_MAX_BUILDS] = { 0 };
             for (uint32_t b = 0; b < p->build_count; b += 1)
             {
                 for (uint32_t l = program == 0 ? 0 : 1; l < (program == 0 ? 1u : BUSTER_TIER1_PROGRAMS_LISTS); l += 1)
@@ -472,6 +495,17 @@ static void tier1_programs_report(const Tier1Programs* p, const Tier1ProgramsMed
                     printf(" none |");
                 }
             }
+            for (uint32_t b = fixed; b < p->build_count; b += 1)
+            {
+                if (sums[TIER1_PROGRAMS_TIER1] > 0)
+                {
+                    printf(" %.4f |", sums[b] / sums[TIER1_PROGRAMS_TIER1]);
+                }
+                else
+                {
+                    printf(" none |");
+                }
+            }
             printf("\n");
         }
     }
@@ -484,6 +518,8 @@ static int run_tier1_programs_measure(int argc, char** argv)
     const char* parent = oracle_temporary_directory();
     bool keep = false;
     bool valid = arena.base != 0;
+    const char* variant_options[BUSTER_TIER1_PROGRAMS_VARIANTS] = { 0 };
+    uint32_t variant_count = 0;
     int i = 1;
     while (valid && i < argc)
     {
@@ -534,6 +570,11 @@ static int run_tier1_programs_measure(int argc, char** argv)
         {
             p.uncounted = true;
         }
+        else if (strcmp(argv[i], "--variant") == 0 && pair && variant_count < BUSTER_TIER1_PROGRAMS_VARIANTS)
+        {
+            variant_options[variant_count] = argv[i + 1];
+            variant_count += 1;
+        }
         else
         {
             valid = false;
@@ -542,6 +583,21 @@ static int run_tier1_programs_measure(int argc, char** argv)
     }
     valid = valid && p.clang != NULL && p.sqlite != NULL && p.speedtest != NULL && p.lua != NULL && p.scripts != NULL;
     p.build_count = p.tcc != NULL ? BUSTER_TIER1_PROGRAMS_BUILDS : BUSTER_TIER1_PROGRAMS_BUILDS - 1;
+    for (uint32_t b = 0; b < p.build_count; b += 1)
+    {
+        p.kinds[b] = (uint8_t)b;
+        snprintf(p.names[b], sizeof(p.names[b]), "%s", tier1_programs_build_names[b]);
+        snprintf(p.files[b], sizeof(p.files[b]), "%s", tier1_programs_build_files[b]);
+    }
+    for (uint32_t v = 0; v < variant_count; v += 1)
+    {
+        const uint32_t b = p.build_count + v;
+        p.kinds[b] = TIER1_PROGRAMS_TIER1;
+        p.variants[b] = variant_options[v];
+        snprintf(p.names[b], sizeof(p.names[b]), "--tier1 %.80s", variant_options[v]);
+        snprintf(p.files[b], sizeof(p.files[b]), "variant%u", v + 1);
+    }
+    p.build_count += variant_count;
     const int length = valid ? snprintf(p.directory, sizeof(p.directory), "%s/measure-tier1-programs-XXXXXX", parent) : -1;
     valid = valid && length > 0 && (size_t)length + 64 < sizeof(p.directory);
     const bool made = valid && mkdtemp(p.directory) != NULL;
@@ -549,7 +605,7 @@ static int run_tier1_programs_measure(int argc, char** argv)
     if (!valid)
     {
         fprintf(stderr, "usage: measure-tier1-programs --clang PATH [--tcc PATH] --sqlite DIR --speedtest DIR --lua DIR --scripts DIR [--runs N] [--warmups N] [--directory DIR] [--keep] "
-                        "[--uncounted]\n");
+                        "[--uncounted] [--variant OPTION]...\n");
     }
     else if (!made)
     {
@@ -581,7 +637,7 @@ static int run_tier1_programs_measure(int argc, char** argv)
             ok = tier1_programs_build(&p, b);
         }
         ok = ok && tier1_programs_check(&arena, &p);
-        Tier1ProgramsMedians medians[BUSTER_TIER1_PROGRAMS_BUILDS * BUSTER_TIER1_PROGRAMS_LISTS] = { 0 };
+        Tier1ProgramsMedians medians[BUSTER_TIER1_PROGRAMS_MAX_BUILDS * BUSTER_TIER1_PROGRAMS_LISTS] = { 0 };
         ok = ok && tier1_programs_time(&arena, &p, medians) == 0;
         if (ok)
         {

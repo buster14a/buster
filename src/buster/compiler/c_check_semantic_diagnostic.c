@@ -216,6 +216,28 @@ static const char* check_semantic_assert(const Parser* parser, Preprocessor* pp,
     return check_semantic_text(pp, result);
 }
 
+// The typedef-specifier declaration an operand's type is spelled with (check_input_typedef_spelling), or 0: its object's
+// declaration's, through parentheses, dereferences and subscripts to the named object, or a member's own. Clang's type
+// keeps that sugar: `(*p)++` of a `v4si *p` prints 'v4si'.
+static uint32_t check_semantic_operand_spelling(const Parser* parser, const CheckInput* input, uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    uint32_t result = 0;
+    uint32_t at = node;
+    for (uint32_t steps = 0; result == 0 && at < graph->count && steps < graph->count; steps += 1)
+    {
+        const CheckOp op = graph->ops[at];
+        const uint32_t token = graph->tokens[at];
+        const uint32_t named = op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW ? token + 1 : token;
+        const uint32_t declaration = named < input->token_count && input->declarations != NULL && parser->tokens.kinds[named] == PARSE_KIND_IDENTIFIER ?
+                                     input->declarations[named] : 0;
+        result = declaration != 0 && declaration < input->token_count ? check_input_typedef_spelling(input, parser, declaration) : 0;
+        const bool through = declaration == 0 && (op == CHECK_OP_VALUE || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT);
+        at = result == 0 && through ? graph->operand0[at] : BUSTER_CHECK_NONE;
+    }
+    return result;
+}
+
 static const char* check_semantic_expression(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             const TypeTable* types, const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location, Arena* scratch)
 {
@@ -241,6 +263,17 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const String8 name = check_semantic_name(parser, pp, token + 1);
             *location = token + 1;
             result = type.length != 0 ? check_warning_text(scratch, "no member named '%.*s' in %.*s", (int)name.length, name.pointer, (int)type.length, type.pointer) : NULL;
+        }
+        else if (report->diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED && op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT &&
+                 operand_type != 0 && !check_action_steppable(types, operand_type))
+        {
+            // clang's err_typecheck_illegal_increment_decrement, the operand's type as written (its qualifiers kept),
+            // an _Atomic one's value type.
+            const TypeId stripped = type_strip_aligned(types, operand_type);
+            const TypeId value = type_kind(types, stripped) == BUSTER_TYPE_KIND_ATOMIC ? types->types.base[type_index(stripped)] : operand_type;
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, value, check_semantic_operand_spelling(parser, input, operand));
+            const bool up =op == CHECK_OP_PRE_INCREMENT || op == CHECK_OP_POST_INCREMENT;
+            result = type.length != 0 ? check_warning_text(scratch, "cannot %s value of type %.*s", up ? "increment" : "decrement", (int)type.length, type.pointer) : NULL;
         }
         else if (report->diagnostic == CHECK_DIAG_LVALUE_REQUIRED &&
                  (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)))
