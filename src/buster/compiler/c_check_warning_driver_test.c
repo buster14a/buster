@@ -20,6 +20,18 @@ struct CheckDriverDefaultWarningFixture
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        .name = "one parenthesized comparison does not hide the other warning",
+        .source = "int f(int a,int b,int c,int d){return ((a<b) & c<d)+(a==b ^ (c!=d));}\n",
+        .warnings = 2,
+        .notes = 4,
+    },
+    {
+        .name = "parenthesized eager chain leaves outer precedence visible",
+        .source = "int f(int a,int b,int c,int d,int e,int g){return (a<b & c<d) ^ e<g;}\n",
+        .warnings = 1,
+        .notes = 2,
+    },
+    {
         .name = "constant initializer comparison pairs",
         .source = "int a=1<2 & 3<4; static int b=1==2 ^ 3!=4; int f(void){return a+b;}\n",
     },
