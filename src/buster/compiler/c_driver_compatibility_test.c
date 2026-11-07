@@ -128,6 +128,8 @@ static void cc_compat_release(CCCompatibilityRun* run)
 #include "c_check_target_feature_emission_test.c"
 #endif
 
+#include "c_driver_warning_options_test.c"
+
 // GCC inserts empty lines before -MP rules while Clang does not. Ignore only empty physical lines at line starts;
 // preserve every other byte, notably escaped filename spaces/tabs and raw -MT expressions. These bounded oracle
 // cases fit a single Clang rule line, so line wrapping needs no normalization.
@@ -741,6 +743,7 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
         files &= cc_compat_write(&test, "space.c", "#include \"space #$.h\"\nint space;\n");
         files &= cc_compat_write(&test, "main.c", "extern int puts(const char*);\n_Thread_local int local = 7;\nint main(void) { puts(\"CC smoke\"); return local != 7; }\n");
         cc_compat_expect(&test, files, "write CC fixtures");
+        cc_compat_warning_options(&test);
         cc_compat_preprocessor_languages(&test);
         const char* const basic[] = { "-M", "./a.c", NULL };
         cc_compat_oracle(&test, "-M defaults and leading ./ normalization", NULL, basic, NULL);

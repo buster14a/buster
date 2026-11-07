@@ -1761,9 +1761,9 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_publish(Pre
 // The cutoff has no source location or notes; once fatal, later errors and warnings contribute neither text nor counts.
 static bool pp_diagnostic_begin(Preprocessor* pp, PPSeverity* severity, bool* limited)
 {
-    // A source pragma's error is MAPPED_ERROR and keeps clang's ordinary error severity under -Wfatal-errors; every
-    // other error becomes fatal below. It has no effect on warnings, and the error budget can't cut in first: the
-    // diagnostic is already fatal.
+    // A source pragma's error, or a command-line warning whose complete policy was already resolved, is MAPPED_ERROR
+    // and keeps its ordinary error severity under -Wfatal-errors; every other error becomes fatal below. It has no
+    // effect on warnings, and the error budget can't cut in first: the diagnostic is already fatal.
     const bool source_error = *severity == PP_SEVERITY_MAPPED_ERROR;
     *severity = (source_error || *severity == PP_SEVERITY_DEFERRED_ERROR) ? PP_SEVERITY_ERROR :
                 *severity == PP_SEVERITY_MAPPED_FATAL ? PP_SEVERITY_FATAL : *severity;
@@ -17689,6 +17689,8 @@ static uint32_t pp_feature_lookup(const PPFeature* table, uint32_t count, const 
     return result;
 }
 
+#include "c_preprocessor_warning_options.c"
+
 // Whether `name` is `text`'s `size` bytes (with `prefix`, whether it starts with them), ASCII case aside, as clang's
 // __is_target_* builtins compare names.
 static bool pp_name_matches(const uint8_t* name, uint32_t length, const char* text, uint32_t size, bool prefix)
@@ -19133,9 +19135,10 @@ static bool pp_command_include_raw(Preprocessor* pp, const char* path)
 // Runs the main file, then gives the output's keywords their kinds. Returns false if there were errors.
 static bool pp_run_prelude(Preprocessor* pp)
 {
-    bool result = true;
+    pp_warning_options_diagnose(pp);
+    bool result = !pp->fatal;
     // The predefines.
-    if (pp->options.predefines_path != 0)
+    if (result && pp->options.predefines_path != 0)
     {
         const uint32_t file = pp_lookup_path(pp, pp->options.predefines_path, (uint32_t)strlen(pp->options.predefines_path), BUSTER_PP_NONE, 0, BUSTER_PP_SYSTEM_FILE);
         pp->flt_eval_method = predefines_eval_method(&pp->options.predefines);
@@ -19150,7 +19153,7 @@ static bool pp_run_prelude(Preprocessor* pp)
             pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't read the predefines file '%s': %s", pp->options.predefines_path, pp_read_error(pp, file));
         }
     }
-    else
+    else if (result)
     {
         // Made in scratch memory, which only pp_virtual_file's copy of the text outlives.
         Scratch scratch = scratch_begin(&pp->arena);
@@ -22334,7 +22337,7 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
         // An alias of clang's (-mpascal-strings) is read as the option it stands for (-fpascal-strings).
         const char* argument = predefines_alias(arguments[i]);
         const bool malformed_linker = strcmp(argument, "-Wl") == 0 || strncmp(argument, "-Wl=", 4) == 0;
-        if ((strncmp(argument, "-W", 2) == 0 && strncmp(argument, "-Wl,", 4) != 0 && !malformed_linker) || strcmp(argument, "-w") == 0 ||
+        if ((strncmp(argument, "-W", 2) == 0 && !pp_warning_transport(argument) && !malformed_linker) || strcmp(argument, "-w") == 0 ||
             strcmp(argument, "-pedantic") == 0 || strcmp(argument, "-pedantic-errors") == 0)
         {
             warnings[options->semantic_warning_option_count++] = argument;

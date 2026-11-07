@@ -778,6 +778,11 @@ static void ir_interpreter_test_atomic_rmw(IrInterpreterTestTally* tally, Arena*
         const IrInterpreterProgram program = { .functions = &code, .function_count = 1 };
         ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ .low = 18 },
                                 "atomic addition and exchange return old values and leave the sum and the operand");
+        // A store's hardware xchg does not add an old-value read to its IR semantics, even with all memory checks on.
+        function.flags[2] = BUSTER_IR_ATOMIC | BUSTER_IR_FENCE_SEQ_CST << BUSTER_IR_ORDER_SHIFT;
+        ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ .low = 18 },
+                                "a seq_cst store initializes undefined bytes with memory checks enabled");
+        function.flags[2] = 0;
         // a = cas x, 5, 3 (5, x 3); b = cas x, 5, 5 (3, x 3): a + b + x, 13 had the second stored and 15 had the first
         // not.
         ir_interpreter_test_instruction(&function, 4, IR_ATOMIC_RMW, IR_I32, 0, 1, 3);

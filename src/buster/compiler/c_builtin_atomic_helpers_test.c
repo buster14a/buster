@@ -280,7 +280,7 @@ static int run_builtin_atomic_helper_tests(int argc, char** argv)
         const uint32_t bytes = load || store ? 1u << (i % 4) : 0;
         const CBuiltinAtomicHelper helper = cbuiltin_atomic_helper_emit(id, bytes, &arena);
         const uint32_t parameters = load ? 2 : store ? 3 : i == 10 ? 0 : 1;
-        const uint32_t records = load ? 2 : store ? 3 : i == 9 ? 1 : 2;
+        const uint32_t records = i == 9 ? 1 : 2;
         valid = cbuiltin_atomic_test_expect(&test, helper.code.error == TIER0_OK && helper.code.count == records && helper.code.branch_count == 0 &&
             helper.code.reference_count == 0 && helper.parameter_count == parameters && helper.result_class == (load ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_VOID) &&
             helper.compiler_barrier && helper.required_alignment == bytes && x86_validate(helper.code.records, helper.code.count) == helper.code.count &&
@@ -290,6 +290,19 @@ static int run_builtin_atomic_helper_tests(int argc, char** argv)
             valid = cbuiltin_atomic_test_expect(&test, helper.parameter_classes[0] == (load || store ? BUSTER_TYPED_CLASS_U64 : parameters ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_VOID) &&
                 helper.parameter_classes[1] == (load ? BUSTER_TYPED_CLASS_I32 : store ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_VOID) &&
                 helper.parameter_classes[2] == (store ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_VOID), "helper parameter machine classes", i);
+        }
+        if (valid && store)
+        {
+            static const uint16_t forms[BUSTER_CBUILTIN_ATOMIC_TEST_WIDTHS] = {
+                X86_FORM_XCHG_RM8_R8,
+                X86_FORM_XCHG_RM16_R16,
+                X86_FORM_XCHG_RM32_R32,
+                X86_FORM_XCHG_RM64_R64,
+            };
+            const X86Instruction exchange = helper.code.records[0];
+            valid = cbuiltin_atomic_test_expect(&test, exchange.form == forms[i - 4] && exchange.mode == BUSTER_X86_MEMORY_BASE &&
+                exchange.reg == X86_REGISTER_RSI && exchange.rm == X86_REGISTER_RDI && helper.code.records[1].form == X86_FORM_RET,
+                "store helper is one width-matched memory xchg and ret, without mfence", i);
         }
         for (uint32_t path = 0; valid && path < 2; path += 1)
         {

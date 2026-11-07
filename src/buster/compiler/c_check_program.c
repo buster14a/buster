@@ -305,6 +305,10 @@ struct CheckProgram
     // declaration is at or before its definition, as clang takes it (check_program_interrupt): the lowering's writer reads
     // it of the body it lowers.
     uint32_t* object_interrupt;
+    // Per object, its first declaration with x86's force_align_arg_pointer attribute (#1447, not ignored), and
+    // BUSTER_CHECK_NONE for the others; null in a unit without one, the usual one. A function's body realigns the stack
+    // in its prologue when that declaration is at or before its definition (check_program_realign), as object_interrupt's.
+    uint32_t* object_realign;
     // Per object, whether a declaration of the function has GNU's always_inline attribute (BUSTER_CHECK_PROGRAM_INLINE_ALWAYS)
     // or noinline (BUSTER_CHECK_PROGRAM_INLINE_NEVER), not ignored; null in a unit without either. --tier1's inliner
     // (#1282, c_check_tier1_inline.c) expands the calls of a defined function of internal linkage with the first and not
@@ -532,6 +536,7 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALWAYS_INLINE 16u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_NOINLINE 32u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_INTERRUPT 64u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_REALIGN 128u
 // CheckProgram.object_inline's bits.
 #define BUSTER_CHECK_PROGRAM_INLINE_ALWAYS 1u
 #define BUSTER_CHECK_PROGRAM_INLINE_NEVER 2u
@@ -540,7 +545,7 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 // attribute (CheckProgram.object_naked), a target or target_clones attribute (CheckProgramTargetEvents), one of a
 // callee's that code generation's check of target features reads, always_inline, flatten or noreturn (#775,
 // CheckProgram.attribute_keys), an alias, ifunc or weakref attribute (#147, CheckProgram.aliases), and x86's interrupt
-// (#147, CheckProgram.object_interrupt).
+// (#147, CheckProgram.object_interrupt) and force_align_arg_pointer (#1447, CheckProgram.object_realign).
 static uint32_t check_program_attribute_bits(const CheckInputAttributes* attributes)
 {
     uint32_t bits = 0;
@@ -557,7 +562,8 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
                                  0;
         const uint32_t inlining = kind == CHECK_ATTRIBUTE_ALWAYS_INLINE ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALWAYS_INLINE : kind == CHECK_ATTRIBUTE_NOINLINE ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_NOINLINE : 0;
         const uint32_t interrupt = kind == CHECK_ATTRIBUTE_INTERRUPT && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_INTERRUPT : 0;
-        bits |= attribute->ignored ? 0 : bit | inlining | interrupt;
+        const uint32_t realign = kind == CHECK_ATTRIBUTE_FORCE_ALIGN_ARG_POINTER ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_REALIGN : 0;
+        bits |= attribute->ignored ? 0 : bit | inlining | interrupt | realign;
     }
     return bits;
 }
@@ -756,7 +762,10 @@ static bool check_program_runtime_effects(const CheckProgram* program, uint32_t 
 static bool check_program_runtime_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
 {
     const CheckGraph* graph = &program->input->graph;
-    const CheckValue checked_value = check_stream_value(program->stream, condition);
+    // A condition that is no constant and no query has no truth to know (check_action_truth), which its columns say
+    // without the copy of its whole value.
+    const bool candidate = graph->ops[condition] == CHECK_OP_BUILTIN_QUERY || check_stream_constant_kind(program->stream, condition) != CHECK_CONSTANT_NONE;
+    const CheckValue checked_value = candidate ? check_stream_value(program->stream, condition) : (CheckValue){ 0 };
     const CheckValue* value = &checked_value;
     const bool environment = graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
     bool runtime = false;
@@ -774,7 +783,7 @@ static bool check_program_runtime_truth(const CheckProgram* program, uint32_t no
     }
     // A source constant proves a translation-time value. Runtime floating truth conversions can still observe
     // the environment or raise an exception, including a signaling NaN whose bits are known here.
-    const bool known = available && (runtime || ((value->flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
+    const bool known = candidate && available && (runtime || ((value->flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
                                    !(environment && check_action_floating_type(program->types, value->type)))) &&
                        value->fault == CHECK_FAULT_NONE &&
                        check_action_truth(program->types, value, truth);
@@ -2352,7 +2361,9 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
         uint8_t* seen = (uint8_t*)writer->tasks;
         uint32_t* queue = writer->labels;
         const CheckGraph* graph = &program->input->graph;
-        for (uint32_t pass = 0; pass < (return_warnings ? 2u : 1u); pass += 1)
+        // The first walk is the aggregate return's alone: a scalar return's lowering reads neither its falls nor its
+        // entries' kinds, so that a scalar body takes the warning's walk only.
+        for (uint32_t pass = aggregate ? 0u : 1u; pass < (return_warnings ? 2u : 1u); pass += 1)
         {
             bool warning_safe = true;
             memset(seen, 0, body->count);
@@ -3183,6 +3194,23 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
                 program->object_interrupt[object] = token;
             }
         }
+        // x86's force_align_arg_pointer (#1447), a function's declarations', as object_interrupt's.
+        if ((function_attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_REALIGN) != 0)
+        {
+            if (program->object_realign == 0 && room)
+            {
+                program->object_realign = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1);
+                room = program->object_realign != 0;
+                if (room)
+                {
+                    memset(program->object_realign, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+                }
+            }
+            if (room && program->object_realign[object] == BUSTER_CHECK_NONE)
+            {
+                program->object_realign[object] = token;
+            }
+        }
     }
     return room;
 }
@@ -3194,6 +3222,15 @@ static bool check_program_interrupt(const CheckProgram* program, uint32_t b)
 {
     const CheckProgramBody body = program->bodies[b];
     return program->object_interrupt != 0 && body.object < program->object_count && program->object_interrupt[body.object] <= body.declaration;
+}
+
+// Whether body `b`'s prologue realigns the stack (#1447): some declaration of its function up to its definition has x86's
+// force_align_arg_pointer attribute (CheckProgram.object_realign), as clang takes it; clang ignores one after the
+// definition, with a warning.
+static bool check_program_realign(const CheckProgram* program, uint32_t b)
+{
+    const CheckProgramBody body = program->bodies[b];
+    return program->object_realign != 0 && body.object < program->object_count && program->object_realign[body.object] <= body.declaration;
 }
 
 // The static objects' declarations, needs, naked functions and target attributes, by object, in token order (#530):
@@ -3817,7 +3854,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     // Source warning contracts are a single postorder reduction, reused by every body's CFG walk. They neither
     // alter emission reachability nor run on a rejected stream. Warning-disabled commands keep no extra facts.
     const uint8_t* return_facts = valid && program->status == CHECK_PROGRAM_OK && options.return_warnings && node_count != 0 ?
-                                    check_program_return_facts(program, scratch, options.return_flow_work) : NULL;
+                                    check_program_return_facts(program, scratch, options.return_flow_work, BUSTER_SCALAR_PATH(options.scalar)) : NULL;
     valid = valid && (!options.return_warnings || node_count == 0 || return_facts != NULL) && program->status == CHECK_PROGRAM_OK;
     uint32_t reference_count = 0;
     for (uint32_t b = 0; valid && b < body_count && program->status == CHECK_PROGRAM_OK; b += 1)

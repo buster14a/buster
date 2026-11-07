@@ -614,6 +614,10 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
         "static const char*dead_text=\"in an unreferenced initializer\";int tested(int n){const char*s=\"in tested\";return n+s[1]+text[2];}",
         "string-literals-of-emitted-and-unreferenced-definitions", 1, 3, clang, true);
     check_test_program_selection_case(test,
+        "static const char*dead(void){return \"pooled\";}static const char*live=\"pooled\";"
+        "int tested(int n){const char*p=\"pooled\";return n+(p==live);}",
+        "pooled-live-literals-after-an-unreferenced-first-occurrence", 1, 3, clang, true);
+    check_test_program_selection_case(test,
         "static int kept(int n) __attribute__((used));static int kept(int n){return n+1;}static int kept_data __attribute__((used))=3;"
         "int tested(int n){return n;}",
         "used-function-and-object-roots", 2, 1, clang, true);
