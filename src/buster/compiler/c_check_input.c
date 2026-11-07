@@ -4048,10 +4048,10 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
                 attribute->specifier_applied = base != 0;
                 specifier_abi_applied |= attribute->specifier_applied;
             }
-            if (!attribute->ignored && !attribute->specifier_ignored && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION &&
-                !attribute->specifier_applied && attribute->value != CHECK_CALL_IGNORED_X86_32 && attributes->calling_convention == CHECK_CALL_DEFAULT)
+            // (The first convention asked for, but no_caller_saved_registers with System V's: check_input_convention_merge.)
+            if (!attribute->ignored && !attribute->specifier_ignored && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !attribute->specifier_applied)
             {
-                attributes->calling_convention = (CheckInputCallingConvention)attribute->value;
+                attributes->calling_convention = check_input_convention_merge(attributes->calling_convention, (CheckInputCallingConvention)attribute->value);
             }
         }
         valid &= base != 0;
@@ -5149,7 +5149,8 @@ static void check_input_attribute_type_warnings(CheckInputReader* reader, CheckI
                 check_input_attribute_function_type_warning(reader, attribute, base, type, name, split, completion);
             }
             else if (placed && applies && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->value == CHECK_CALL_IGNORED_X86_32 &&
-                !check_input_attribute_kernel(reader, attribute) && list->error == CHECK_ATTRIBUTE_ERROR_NONE && check_input_attribute_pcs_valid(reader, attribute))
+                     attribute->convention_count == BUSTER_CHECK_COUNT_NONE && !check_input_attribute_kernel(reader, attribute) &&
+                     list->error == CHECK_ATTRIBUTE_ERROR_NONE && check_input_attribute_pcs_valid(reader, attribute))
             {
                 check_input_attribute_unsupported_at(reader, attribute, completion);
             }
