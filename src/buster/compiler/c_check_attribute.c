@@ -7301,7 +7301,10 @@ static void check_input_deprecated_use(CheckInputReader* reader, CheckInputDepre
 // Bit t of `words`, a word for each 64 tokens: whether the identifier at t is a use or a declaration whose key a
 // deprecated or unavailable attribute marks (`marks`, check_input_deprecated_key's), 16 identifiers a gather. The vector
 // path's walks (check_input_availability_events, check_input_deprecated_block) visit these and few other tokens.
-static void check_input_deprecated_marked(const CheckInputReader* reader, const uint32_t* marks, uint64_t* words)
+// Keep this whole-column leaf out of the large reader's frame: LLVM 23.1.4 MSan can allocate wide callback
+// shadows at a check inside the loop after inlining (#1610). Its own small instrumentation context retains every
+// check without inheriting the reader's callback threshold. The loop and its vector-only admission stay unchanged.
+static __attribute__((noinline)) void check_input_deprecated_marked(const CheckInputReader* reader, const uint32_t* marks, uint64_t* words)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
