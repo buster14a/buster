@@ -781,6 +781,38 @@ static bool check_program_runtime_truth(const CheckProgram* program, uint32_t no
     return known;
 }
 
+// A branch condition's truth as clang's CFG builder prunes its edges (#1447, CFGBuilder::tryEvaluateBool, whose
+// EvaluateAsBooleanCondition ignores side effects), which the -Wreturn-type walk and the runtime warnings' reachability
+// (check_common_body_reached) model: a known value's (check_program_runtime_truth), and a logical operator's that one
+// operand decides though the other isn't known, `0 && x` and `1 || x` by the left and `x && 0` and `x || 1` by the right,
+// or both together, through the condition's own node, conversions, casts and `!`. A conversion keeps the truth of the
+// 0 or 1 such an operator gives, the one value it isn't already known for. `depth` bounds the operands followed.
+#define BUSTER_CHECK_BRANCH_TRUTH_DEPTH 64u
+static bool check_program_branch_truth(const CheckProgram* program, uint32_t node, uint32_t condition, uint32_t depth, bool* truth)
+{
+    const CheckGraph* graph = &program->input->graph;
+    bool known = check_program_runtime_truth(program, node, condition, truth);
+    const CheckOp op = !known && depth != 0 && condition < graph->count ? graph->ops[condition] : CHECK_OP_COUNT;
+    if (op == CHECK_OP_CONDITION || op == CHECK_OP_CONVERT || op == CHECK_OP_CAST || op == CHECK_OP_NOT)
+    {
+        bool inner = false;
+        known = check_program_branch_truth(program, node, graph->operand0[condition], depth - 1, &inner);
+        *truth = inner != (op == CHECK_OP_NOT);
+    }
+    else if (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
+    {
+        const bool disjunction = op == CHECK_OP_LOGICAL_OR;
+        bool left = false;
+        bool right = false;
+        const bool left_known = check_program_branch_truth(program, node, graph->operand0[condition], depth - 1, &left);
+        const bool right_known = (!left_known || left != disjunction) &&
+                                 check_program_branch_truth(program, node, graph->operand1[condition], depth - 1, &right);
+        known = (left_known && left == disjunction) || (right_known && (left_known || right == disjunction));
+        *truth = left_known && left == disjunction ? left : left_known ? (disjunction ? left || right : left && right) : right;
+    }
+    return known;
+}
+
 static bool check_program_case_value(const CheckProgram* program, uint32_t node, TypeId target, unsigned __int128* result)
 {
     uint32_t width = 0;
@@ -2373,7 +2405,7 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                 {
                     bool truth = false;
                     const bool jump = entry->kind == CHECK_CONTROL_JUMP;
-                    const bool known = pass != 0 && !jump && check_program_runtime_truth(program, entry->node, entry->node, &truth);
+                    const bool known = pass != 0 && !jump && check_program_branch_truth(program, entry->node, entry->node, BUSTER_CHECK_BRANCH_TRUTH_DEPTH, &truth);
                     const bool taken = truth == (entry->kind == CHECK_CONTROL_BRANCH_TRUE);
                     targets[0] = jump || !known || taken ? entry->target : BUSTER_CHECK_NONE;
                     next = !jump && (!known || !taken);

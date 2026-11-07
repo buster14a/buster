@@ -851,12 +851,56 @@ static void check_common_emit_kids(CheckCommonEmission* emission, uint32_t node,
 static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t node);
 static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node);
 
-// The division-warning visit one scan frame runs after its subtree: `emit_children`'s other half.
+// A dereference clang warns its optimizer deletes (#1447, -Wnull-dereference, clang's CheckForNullPointerDereference):
+// `*` of a null pointer constant through casts (its operand an integer constant 0 once the casts are passed, as
+// IgnoreParenCasts and isNullPointerConstant find it), of a type that is neither volatile nor an array's or a
+// function's, whose value an lvalue conversion would read. Whether its value is read is check_common_div_own's.
+static bool check_common_null_dereference(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
+{
+    bool result = false;
+    if (node < graph->count && graph->ops[node] == CHECK_OP_DEREFERENCE)
+    {
+        uint32_t operand = graph->operand0[node];
+        for (uint32_t steps = 0; operand < graph->count && graph->ops[operand] == CHECK_OP_CAST && steps < graph->count; steps += 1)
+        {
+            operand = graph->operand0[operand];
+        }
+        // (Every dereference asks, as the reach is made: the constant first, which nearly none has.)
+        if (check_common_integer_constant(stream, operand) && check_stream_value(stream, operand).integer == 0)
+        {
+            const TypeId type = check_stream_type(stream, node);
+            const TypeId bare = type != 0 ? type_unqualified(type_strip_aligned(types, type)) : 0;
+            const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_VOID;
+            result = (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) == 0 && !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION &&
+                     kind != BUSTER_TYPE_KIND_VOID;
+        }
+    }
+    return result;
+}
+
+// The division-warning visit one scan frame runs after its subtree: `emit_children`'s other half. A null dereference's
+// too (check_common_null_dereference), which clang's DiagRuntimeBehavior defers to the body's end with them: reachable,
+// evaluated and read, as an lvalue conversion or an assignment's (or a compound one's) destination reads it, not where its
+// address is taken, a member of it named or it is stepped, with clang's note at the same `*`.
 static void check_common_div_own(CheckCommonEmission* emission, uint32_t node)
 {
     const CheckGraph* graph = &emission->input->graph;
     const CheckOp op = graph->ops[node];
-    if (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER)
+    if (op == CHECK_OP_DEREFERENCE && check_common_null_dereference(graph, emission->stream, emission->types, node))
+    {
+        const uint32_t parent = emission->parents != NULL ? emission->parents[node] : BUSTER_CHECK_NONE;
+        const CheckOp parent_op = parent < graph->count ? graph->ops[parent] : CHECK_OP_COUNT;
+        const bool unread = parent_op == CHECK_OP_ADDRESS || (parent_op == CHECK_OP_MEMBER && graph->operand0[parent] == node) ||
+                            (parent_op >= CHECK_OP_PRE_INCREMENT && parent_op <= CHECK_OP_POST_DECREMENT);
+        if (!unread)
+        {
+            const uint32_t star = graph->tokens[node];
+            const CheckCommonNote note = { star, "consider using __builtin_trap() or qualifying pointer with 'volatile'" };
+            check_common_report_deferred(emission->parser, emission->pp, emission->input, star, CHECK_WARNING_ID_NULL_DEREFERENCE, false,
+                                         "indirection of non-volatile null pointer will be deleted, not trap", &note, 1, emission->scratch);
+        }
+    }
+    else if (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER)
     {
         const uint32_t divisor = graph->operand1[node];
         const uint32_t contexts = graph->contexts != NULL ? graph->contexts[node] : 0;
@@ -2231,11 +2275,13 @@ static bool check_common_own_candidate(const Parser* parser, const CheckGraph* g
 // A node's own bits of its reach (BUSTER_CHECK_REACH_*): its own frame's candidate, a division by a constant, a comparison.
 // A plain `x = y` is a candidate for -Wself-assign alone, and a comparison's bit is -Wsign-compare's: each counts only where
 // its warning may report.
-static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* graph, const CheckStream* stream, uint32_t node,
+static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node,
                                       const CheckCommonEnabled* enabled)
 {
     const CheckOp op = graph->ops[node];
-    const bool division = (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && check_common_integer_constant(stream, graph->operand1[node]);
+    // (A null dereference's in the division scan too, check_common_div_own.)
+    const bool division = ((op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && check_common_integer_constant(stream, graph->operand1[node])) ||
+                          (op == CHECK_OP_DEREFERENCE && check_common_null_dereference(graph, stream, types, node));
     const bool comparison = enabled->sign_compare && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
     const uint8_t result = (uint8_t)((check_common_own_candidate(parser, graph, stream, node, enabled->self_assign) ? BUSTER_CHECK_REACH_TREE : 0u) |
                                      (division ? BUSTER_CHECK_REACH_DIVISION : 0u) | (comparison ? BUSTER_CHECK_REACH_SIGN : 0u));
@@ -4185,7 +4231,7 @@ static void check_common_body_reached(const CheckProgram* program, const CheckPr
         {
             bool truth = false;
             const bool jump = entry->kind == CHECK_CONTROL_JUMP;
-            const bool known = !jump && check_program_runtime_truth(program, entry->node, entry->node, &truth);
+            const bool known = !jump && check_program_branch_truth(program, entry->node, entry->node, BUSTER_CHECK_BRANCH_TRUTH_DEPTH, &truth);
             const bool taken = truth == (entry->kind == CHECK_CONTROL_BRANCH_TRUE);
             targets[0] = jump || !known || taken ? entry->target : BUSTER_CHECK_NONE;
             next = !jump && (!known || !taken);
@@ -4248,9 +4294,11 @@ static void check_common_body_reached(const CheckProgram* program, const CheckPr
 // or after a `for (;;)` that cannot fall through, evaluates nothing — clang's -Wuninitialized, unused-result,
 // bounds and division checks all stay silent there. The entries whose `node` names a source expression's
 // value — evaluates, returns, branch and switch conditions, indirect jumps, variable bounds and statement
-// results — clear their root here, which keeps the node's whole operand chain unevaluated.
+// results — clear their root here, which keeps the node's whole operand chain unevaluated. Initializer entries
+// name a plan instead of a node. Their part roots and scalar conversion roots also become propagation barriers:
+// a declaration's unreferenced discard wrapper must not make its unreachable initializer evaluated again.
 static bool check_common_unreachable(const CheckProgram* program, const CheckGraph* graph,
-                                     uint8_t* evaluated, Arena* scratch)
+                                     uint8_t* evaluated, uint8_t** blocked, Arena* scratch)
 {
     bool valid = true;
     for (uint32_t b = 0; valid && b < program->body_count; b += 1)
@@ -4278,6 +4326,38 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
             if (expression && seen[i] == 0 && entries[i].node < graph->count)
             {
                 evaluated[entries[i].node] = 0;
+            }
+            if (kind == CHECK_CONTROL_INITIALIZE && seen[i] == 0 && program->initializers != NULL &&
+                entries[i].target < program->initializers->count && *blocked == NULL)
+            {
+                // (The barriers' bytes, which a unit without such an initializer never takes.)
+                *blocked = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count);
+                valid = *blocked != NULL;
+                if (valid)
+                {
+                    memset(*blocked, 0, graph->count);
+                }
+            }
+            if (valid && kind == CHECK_CONTROL_INITIALIZE && seen[i] == 0 && program->initializers != NULL &&
+                entries[i].target < program->initializers->count)
+            {
+                const uint32_t declaration = entries[i].token;
+                const uint32_t scalar = declaration < program->input->token_count ?
+                                        check_common_sparse_get(program->input->initializer_nodes, declaration) : BUSTER_CHECK_NONE;
+                if (scalar < graph->count)
+                {
+                    evaluated[scalar] = 0;
+                    (*blocked)[scalar] = 1;
+                }
+                const CheckInitializer* plan = program->initializers->plans + entries[i].target;
+                for (uint32_t part = 0; part < plan->count; part += 1)
+                {
+                    if (plan->parts[part].kind == CHECK_INIT_VALUE && plan->parts[part].node < graph->count)
+                    {
+                        evaluated[plan->parts[part].node] = 0;
+                        (*blocked)[plan->parts[part].node] = 1;
+                    }
+                }
             }
         }
     }
@@ -4481,9 +4561,14 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
     {
         for (uint32_t node = 0; node < graph->count; node += 1)
         {
-            evaluated[node] = parents[node] == BUSTER_CHECK_NONE;
+            // Exclude dropped ranges before propagating evaluation.
+            evaluated[node] = parents[node] == BUSTER_CHECK_NONE &&
+                              (program == NULL || program->dropped_range_count == 0 || !check_program_token_dropped(program, graph->tokens[node]));
         }
-        if (program != NULL && program->controls != NULL && !check_common_unreachable(program, graph, evaluated, scratch))
+        // An unreachable initializer's roots, which no parent makes evaluated (check_common_unreachable); NULL in a unit
+        // without one, whose propagation then reads no barrier.
+        uint8_t* blocked = NULL;
+        if (program != NULL && program->controls != NULL && !check_common_unreachable(program, graph, evaluated, &blocked, scratch))
         {
             result = NULL;
         }
@@ -4523,7 +4608,7 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
             const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
             {
-                if (operands[i] < graph->count && (i >= 32 || (mask & (1u << i)) != 0))
+                if (operands[i] < graph->count && (blocked == NULL || blocked[operands[i]] == 0) && (i >= 32 || (mask & (1u << i)) != 0))
                 {
                     evaluated[operands[i]] = 1;
                 }
@@ -4533,7 +4618,7 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
                 for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
                 {
                     const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
-                    if (argument < graph->count && (i >= 32 || (mask & (1u << i)) != 0))
+                    if (argument < graph->count && (blocked == NULL || blocked[argument] == 0) && (i >= 32 || (mask & (1u << i)) != 0))
                     {
                         evaluated[argument] = 1;
                     }
@@ -4566,7 +4651,7 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
             // A comma's left operand and a cast to void's, statement-level or explicit, drop their operand's result.
             const TypeId result_type = op == CHECK_OP_CAST ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, node))) : 0;
             const bool discards = op == CHECK_OP_COMMA || (result_type != 0 && type_kind(types, result_type) == BUSTER_TYPE_KIND_VOID);
-            uint8_t bits = check_common_own_reach(parser, graph, stream, node, enabled);
+            uint8_t bits = check_common_own_reach(parser, graph, stream, types, node, enabled);
             const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
             {

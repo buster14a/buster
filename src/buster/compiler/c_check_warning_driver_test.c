@@ -636,6 +636,50 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 10,
     },
     {
+        // A dereference of a null pointer constant (#1447, -Wnull-dereference): read or assigned (a compound assignment's
+        // too, a cast to void's operand too), through casts (a void pointer's, a constant expression's), with clang's note;
+        // not its address, a member of it, its increment, a volatile one, a pointer variable's, a subscript, sizeof's
+        // operand, nor unreachable code.
+        .name = "null pointer dereferences",
+        .source = "struct S { int a; };\nint g(int);\nint f(int n) {\n"
+                  "  *(int *)0 = 1; *(int *)0 += 2; int x = *(int *)0; g(*(int *)0); int k = n ? *(int *)0 : 1;\n"
+                  "  int c = *(const int *)(0); int l = *(int *)(1 - 1); int t = *(char *)(void *)0L;\n"
+                  "  int m = (*(struct S *)0).a; int *q = &*(int *)0; (*(int *)0)++; *(volatile int *)0 = 3;\n"
+                  "  int *p = 0; *p = 4; int y = ((int *)0)[0]; int s = sizeof(*(int *)0); ((struct S *)0)->a = 2;\n"
+                  "  if (0) { int z = *(int *)0; (void)z; }\n"
+                  "  (void)*(int *)0;\n"
+                  "  return x + k + c + l + t + m + y + s + (q != 0);\n  *(int *)0 = 9;\n}\n",
+        .warnings = 9,
+        .notes = 9,
+    },
+    {
+        // Unreachable initializers (#1447): after a return, in a constant false branch and in a `while (0)`'s body,
+        // clang's runtime behavior's warnings (array bounds, division by zero, null dereference) stay silent.
+        .name = "runtime warnings skip unreachable initializers",
+        .source = "int a[2];\nint f(int n) {\n"
+                  "  if (0) { int d = a[5]; int e = n / 0; int z = *(int *)0; (void)d; (void)e; (void)z; }\n"
+                  "  while (0) { int d = a[5]; int e = n / 0; int z = *(int *)0; (void)d; (void)e; (void)z; }\n"
+                  "  return n;\n"
+                  "  { int d = a[5]; int e = n / 0; int z = *(int *)0; (void)d; (void)e; (void)z; }\n}\n",
+    },
+    {
+        // A logical operator one operand decides though the other isn't known (#1447, clang's CFG tryEvaluateBool):
+        // `x && 0` and `x || 1`, through `!` and casts, prune the arm they leave out for the runtime warnings and for
+        // -Wreturn-type alike; `x && (x || 1)` and `x && 1` decide nothing.
+        .name = "short-circuit conditions one operand decides",
+        .source = "int a[2];\nint f(int n) {\n"
+                  "  if (n && 0) { n = n / 0; }\n"
+                  "  if (!(n || 1)) { n = a[5]; }\n"
+                  "  if ((long)(n || 1)) { n += 1; } else { n = n % 0; }\n"
+                  "  while (n && 0) { n = *(int *)0; }\n"
+                  "  if (n && (n || 1)) { n = n / 0; }\n"
+                  "  return n;\n}\n"
+                  "int g(int n) {\n  if (n || 1) return 1;\n}\n"
+                  "int h(int n) {\n  while (n || 1) { if (n) return 2; }\n}\n"
+                  "int k(int n) {\n  if (n && 1) return 1;\n}\n",
+        .warnings = 2,
+    },
+    {
         // An assignment to a const variable, through an array's subscripts or a record's members to it, or through a
         // pointer to a const record (#147): the variable named with its declared type and the "declared const here" note at
         // its name; a pointer's target is the generic error.

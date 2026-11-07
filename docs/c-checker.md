@@ -3974,7 +3974,7 @@ unless `--keep` or a failure.
 
 `c_check_common_warnings.c`, included by the driver, reports the expression
 warnings that need the completed graph or the parser's operator tree:
-`-Wdivision-by-zero`, `-Wconstant-conversion`, `-Warray-bounds`,
+`-Wdivision-by-zero`, `-Wnull-dereference`, `-Wconstant-conversion`, `-Warray-bounds`,
 `-Wsign-compare`, `-Wunused-comparison`, `-Wunused-value`,
 `-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
 bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
@@ -7072,6 +7072,30 @@ arguments against the function. The checker now gives these as clang does.
   clang's IsAfterAmp is the token's), nor in sizeof's or alignof's operand
   (`check_warning_graph_void_dereferences`, one reverse pass marking the
   queries' operands, only in a unit that has such a dereference).
+- **Indirection through a null pointer** (`-Wnull-dereference`, #1447, clang's
+  `CheckForNullPointerDereference`): "indirection of non-volatile null pointer
+  will be deleted, not trap" with its note "consider using __builtin_trap() or
+  qualifying pointer with 'volatile'", both at the `*`, of a `*` whose operand
+  is a null pointer constant through casts (an integer constant 0 once the
+  casts are passed: `*(int *)0`, `*(char *)(void *)0L`, `*(int *)(1 - 1)`), of
+  a type neither volatile nor an array's or a function's
+  (`check_common_null_dereference`), where an lvalue conversion or an
+  assignment (a compound one's too) reads it: not under `&`, `.` or an
+  increment, nor through a pointer variable, `->` or a subscript. As clang's
+  `DiagRuntimeBehavior`, reachable and evaluated code alone, at the body's end
+  with the division warnings (the division scan's, `check_common_div_own`).
+- **Unreachable code, as clang's CFG prunes it** (#1447). The runtime
+  warnings (division by zero, array bounds, null dereference) skip an
+  initializer after a `return` or in a dead branch, as they already skipped
+  its expression statements: `check_common_unreachable` clears its scalar and
+  braced roots and makes them barriers that no discarding parent re-evaluates.
+  A constant `if`'s dropped ranges are left out too. A branch condition's truth
+  (`check_program_branch_truth`, clang's `tryEvaluateBool`) also counts a
+  logical operator that one operand decides though the other isn't known:
+  `x && 0` and `x || 1`, through `!`, casts and conversions. That covers
+  `if (n && 0)`'s body, `if (n || 1)`'s else and `while (n && 0)`'s body.
+  `-Wreturn-type`'s walk takes the same truth, so `if (n || 1) return 1;` ends
+  a function without the warning.
 - **A const variable's assignment.** "cannot assign to variable 'x' with
   const-qualified type 'const int'" with clang's "variable 'x' declared const
   here" note at its name, as clang's `DiagnoseConstAssignment` walks to it:
