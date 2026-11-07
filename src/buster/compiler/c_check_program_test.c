@@ -123,7 +123,9 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
     }
     memset(planned, 0, (uint64_t)words * sizeof(uint64_t));
     CheckProgram program = { .input = &input, .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
-    const bool compound = check_program_plans(&program, parser, given, plan_first, planned, next);
+    uint32_t parents[BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+    parents[count] = poison;
+    const bool compound = check_program_plans(&program, parser, given, plan_first, planned, next, parents);
     // The oracle: each plan's statement, or a compound literal's mark, or none.
     uint32_t statements[BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
     bool expected_compound = false;
@@ -178,7 +180,7 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
         }
         same &= link == BUSTER_CHECK_NONE;
     }
-    same &= plan_first[count] == poison && plan_next[plans] == poison;
+    same &= plan_first[count] == poison && plan_next[plans] == poison && parents[count] == poison;
     check_test_expect(test, same && compound == expected_compound && program.status == expected_status && program.token == expected_token,
                       listed ? "check_program's plans link each statement's initializers in order and mark exactly those statements"
                              : "check_program's plans write and mark nothing for a unit without initializer plans");
@@ -3314,6 +3316,34 @@ static void check_test_program_array_alignment(CheckTest* test, const char* clan
         "arrays-of-16-bytes-aligned-to-16", clang);
 }
 
+static void check_test_program_many_declarators(CheckTest* test, const char* clang)
+{
+    char source[32768];
+    uint32_t length = 0;
+    bool valid = true;
+    for (uint32_t kind = 0; valid && kind < 2; kind += 1)
+    {
+        const int prefix = snprintf(source + length, sizeof(source) - length, "%s", kind == 0 ? "static int " : "int tested(int n){int ");
+        valid = prefix > 0 && (uint32_t)prefix < sizeof(source) - length;
+        length += valid ? (uint32_t)prefix : 0;
+        for (uint32_t i = 0; valid && i < 257; i += 1)
+        {
+            const int written = snprintf(source + length, sizeof(source) - length, "%s%c%u=%s%u", i != 0 ? "," : "", kind == 0 ? 'g' : 'a', i,
+                                         kind == 0 ? "" : "n+", i);
+            valid = written > 0 && (uint32_t)written < sizeof(source) - length;
+            length += valid ? (uint32_t)written : 0;
+        }
+        const int suffix = valid ? snprintf(source + length, sizeof(source) - length, "%s", kind == 0 ? ";" : ";return a0+a128+a256+g0+g128+g256;}") : -1;
+        valid = suffix > 0 && (uint32_t)suffix < sizeof(source) - length;
+        length += valid ? (uint32_t)suffix : 0;
+    }
+    check_test_expect(test, valid, "257 file-scope and local declarators fit the generated source buffer");
+    if (valid)
+    {
+        check_test_program_source(test, source, "many-declarators", clang);
+    }
+}
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
     if (check_test_takes())
@@ -3418,6 +3448,14 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_control_walks(test);
         check_test_program_addressed(test);
         check_test_program_scans(test);
+        check_test_program_many_declarators(test, clang);
+        check_test_program_source(test,
+            "struct S{int x;};static int a=2,b=3,c=4;"
+            "int tested(int n){int x=n,y=x+1,z=y+2;int r=x+y+z;"
+            "{struct S p=(struct S){x},q={y};int i=p.x,j=q.x;r+=i+j;}"
+            "for(int i=0,j=2;i<3;i++,j++){int u=i,v=j;r+=u+v;}"
+            "int s=({int i=n+3,j=i+2;i+j;}),t=s+1;return r+s+t+a+b+c;}",
+            "multi-declarator-plan-scopes", clang);
         check_test_program_local_bits(test);
         check_test_program_resolve_labels(test);
         check_test_program_bodies(test, clang);
@@ -5230,3 +5268,4 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
 }
 
 #endif
+

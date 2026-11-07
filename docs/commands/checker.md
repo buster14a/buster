@@ -6,6 +6,25 @@ requirements. [Command index](README.md).
 
 ## Module overview
 
+Multi-declarator declarations reuse compressed ancestor paths (#1378):
+`check_program_plans` finds initializer statements in a private parent copy
+borrowed from its existing `seen` scratch column, then clears it before object
+and flow processing. `check_input_unused_events` makes a separate scope-parent
+copy only when a selected local unused warning needs one. It retains the
+nearest block/body/compound closing brace and leaves record braces out. Neither
+copy changes the parser or outlives its phase; each predicate has its own copy.
+Parent-copy initialization touches four bytes per token. The warning phase also
+reserves that amount of temporary scratch; program planning reuses existing
+storage. These costs and small-unit latency remain part of physical performance
+qualification, alongside 4,000/8,000/16,000-declarator scaling.
+
+The reader's random-parent oracle covers both predicates, backward links,
+cycles, missing ancestors, empty input and an immutable 4,096-link chain. The
+existing poisoned plan tests still check exact statement links and compound
+literal handling. Native scalar/vector source fixtures cover 257 static/local
+declarators, nested scopes, for declarations and statement/compound expressions;
+unused-warning fixtures also check exact scope-completion tokens.
+
 - `src/buster/compiler/c_check_actions.c` supplies the reader-independent
   expression rules and constant folding for #133. `c_checker.c` checks an
   explicit postorder operand graph either a node at a time or in batches of
@@ -293,3 +312,4 @@ compatibility byte comparisons and the separate `-E` behavior.
 zeroed configuration on failure. The existing instrumentation tests retain
 coverage cancellation and non-emitting predefines. This is the `-f`/`-m`
 semantic boundary, not a claim to audit every `-g`, `-O`, `-W` or linker option.
+
