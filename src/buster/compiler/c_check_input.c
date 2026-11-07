@@ -1487,6 +1487,12 @@ struct CheckInputReader
     // replay has resolved the uses that analysis reads: a callee's declaration, a constant's (#1126's review).
     uint32_t* fallthrough_tokens;
     uint32_t fallthrough_count;
+    // check_input_fallthrough_dead's resumable scan of each block's statements (#1357), by the block's token, for the
+    // placement pass alone: the next statement to classify plus one (0 for a block not scanned yet), the last one it
+    // classified, and the state after it. Null outside the pass, or where its scratch had no room.
+    uint32_t* fallthrough_block_next;
+    uint32_t* fallthrough_block_last;
+    uint8_t* fallthrough_block_state;
     uint32_t fallthrough_capacity;
     // The statement attributes' checks of a statement with a _Generic or __builtin_choose_expr in it (#147: nomerge's, and
     // clang's statement noinline's and always_inline's), whose calls are its selections' selected arms' alone: recorded
