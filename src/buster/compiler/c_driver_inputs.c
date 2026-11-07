@@ -4,6 +4,9 @@
 // checker. Known unsupported source suffixes are refused; unknown suffixes remain linker inputs, never speculative C,
 // and the foreign reader diagnoses their format.
 
+#ifndef BUSTER_C_DRIVER_INPUTS
+#define BUSTER_C_DRIVER_INPUTS
+
 typedef enum CheckDriverInputKind
 {
     CHECK_DRIVER_INPUT_AUTO,
@@ -144,3 +147,5 @@ static CheckDriverInput check_driver_classify(const char* path, CheckDriverInput
     }
     return result;
 }
+
+#endif

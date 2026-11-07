@@ -214,6 +214,18 @@ suffix for following inputs only; `-x none` restores suffix inference. Joined
 A non-regular C or preprocessed-assembly source (`/dev/null`, a FIFO, `/dev/fd/N`)
 is read to EOF once, like stdin. Include probes still refuse those files.
 
+The `-E`, `-M` and `-MM` driver uses the same positional language classification:
+`.S` and `-x assembler-with-cpp` enable assembly tokenization and
+`__ASSEMBLER__` for that input alone; `.s` and `-x assembler` have no
+preprocessing action. `-x c` overrides either suffix and `-x none` restores it.
+Preprocessing stdin defaults to C. Option operands never select a language, and
+after `--` every argument is an input filename. The shared option parser collects
+per-input language records once, then each unit initializes its own preprocessor
+from the command's common options and its recorded language. The single-input
+`pp_parse_options` API retains its existing callers and default C behavior.
+`test-checker-driver`'s compatibility cases check mixed language order, both
+kernels, option boundaries and a `.S` preprocessing/reassembly execution round-trip.
+
 C-only links retain the existing direct path, including its shared-library
 version validation and runtime snapshot. When a `-lNAME` or `-l:FILE` request
 selects a populated archive, the source command uses the mixed/foreign path
