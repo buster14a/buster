@@ -106,71 +106,118 @@ static bool dependency_prepare(DependencyOutput* output, const DependencyOptions
     return result;
 }
 
-// Compare directory identities as well as existing file identities: ./new.o and new.o alias even before either
-// exists. A dangling output symlink is conservatively refused because its eventual target cannot be checked yet.
-static bool dependency_same_file(const char* a, const char* b)
+// One admission-time observation per path. The command opens no outputs until admission succeeds; these
+// observations have the same filesystem race limitations as the former pairwise stat checks.
+typedef struct DependencyIdentity DependencyIdentity;
+struct DependencyIdentity
 {
-    struct stat first;
-    struct stat second;
-    const bool have_a = stat(a, &first) == 0;
-    const bool have_b = stat(b, &second) == 0;
-    bool result = strcmp(a, b) == 0 || (have_a && have_b && first.st_dev == second.st_dev && first.st_ino == second.st_ino);
-    if (!result)
+    const char* path;
+    const char* base;
+    dev_t device;
+    ino_t inode;
+    dev_t parent_device;
+    ino_t parent_inode;
+    bool found;
+    bool parent_found;
+    bool dangling;
+};
+
+// Optional probe accounting lets the driver regression assert the syscall bound without a tracing harness.
+static bool dependency_probe(const char* path, struct stat* status, bool link, uint64_t* probes)
+{
+    if (probes != NULL)
     {
-        result = (!have_a && lstat(a, &first) == 0 && S_ISLNK(first.st_mode)) || (!have_b && lstat(b, &second) == 0 && S_ISLNK(second.st_mode));
+        *probes += 1;
     }
-    if (!result)
+    return (link ? lstat(path, status) : stat(path, status)) == 0;
+}
+
+static DependencyIdentity dependency_identity(const char* path, uint64_t* probes)
+{
+    const char* slash = strrchr(path, '/');
+    DependencyIdentity result = {
+        .path = path,
+        .base = slash != NULL ? slash + 1 : path,
+    };
+    struct stat status;
+    result.found = dependency_probe(path, &status, false, probes);
+    if (result.found)
     {
-        const char* slash_a = strrchr(a, '/');
-        const char* slash_b = strrchr(b, '/');
-        const char* base_a = slash_a != NULL ? slash_a + 1 : a;
-        const char* base_b = slash_b != NULL ? slash_b + 1 : b;
-        if (strcmp(base_a, base_b) == 0)
+        result.device = status.st_dev;
+        result.inode = status.st_ino;
+    }
+    else
+    {
+        result.dangling = dependency_probe(path, &status, true, probes) && S_ISLNK(status.st_mode);
+    }
+    const size_t length = slash != NULL ? (size_t)(slash - path) : 1;
+    char directory[PATH_MAX];
+    if (length < sizeof(directory))
+    {
+        const size_t bytes = length != 0 ? length : 1;
+        memcpy(directory, slash != NULL ? path : ".", bytes);
+        directory[bytes] = 0;
+        result.parent_found = dependency_probe(directory, &status, false, probes);
+        if (result.parent_found)
         {
-            const size_t length_a = slash_a != NULL ? (size_t)(slash_a - a) : 1;
-            const size_t length_b = slash_b != NULL ? (size_t)(slash_b - b) : 1;
-            char directory_a[PATH_MAX];
-            char directory_b[PATH_MAX];
-            if (length_a < sizeof(directory_a) && length_b < sizeof(directory_b))
-            {
-                const size_t bytes_a = length_a != 0 ? length_a : 1;
-                const size_t bytes_b = length_b != 0 ? length_b : 1;
-                memcpy(directory_a, slash_a != NULL ? a : ".", bytes_a);
-                memcpy(directory_b, slash_b != NULL ? b : ".", bytes_b);
-                directory_a[bytes_a] = 0;
-                directory_b[bytes_b] = 0;
-                result = stat(directory_a, &first) == 0 && stat(directory_b, &second) == 0 && first.st_dev == second.st_dev && first.st_ino == second.st_ino;
-            }
+            result.parent_device = status.st_dev;
+            result.parent_inode = status.st_ino;
         }
     }
     return result;
 }
 
+// Directory identity plus basename also detects nonexistent aliases, e.g. ./new.o and new.o. A dangling
+// symlink on either side remains a conservative refusal because its eventual target cannot be checked yet.
+static bool dependency_identities_overlap(const DependencyIdentity* a, const DependencyIdentity* b)
+{
+    return strcmp(a->path, b->path) == 0 ||
+           (a->found && b->found && a->device == b->device && a->inode == b->inode) ||
+           a->dangling || b->dangling ||
+           (a->parent_found && b->parent_found && a->parent_device == b->parent_device && a->parent_inode == b->parent_inode &&
+            strcmp(a->base, b->base) == 0);
+}
+
 // Refuse destructive overlaps before opening primary outputs, including a depfile naming a different input unit.
-// This is cold command admission, and runs only for dependency requests. Shared -MF destinations are allowed: the
-// argv-last unit replaces the earlier complete rule, as Clang does, without racing concurrent writers.
-static bool dependency_check_destinations(const DependencyOptions* options, char** sources, uint32_t count, const char* primary, bool objects, bool executable, Arena* arena)
+// Shared -MF destinations are allowed: the argv-last unit replaces the earlier complete rule, as Clang does.
+static bool dependency_check_destinations_counted(const DependencyOptions* options, char** sources, uint32_t count, const char* primary, bool objects, bool executable,
+                                                Arena* arena, uint64_t* probes)
 {
     bool result = true;
-    // These option values and source names are immutable during admission. A shared destination still checks
-    // every source and artifact, but repeating that same complete check for each unit adds no information.
+    // Names and options remain immutable during admission. Only multiple distinct destinations need stored
+    // observations: a shared destination already examines each source and artifact just once.
     const bool enabled = options->enabled;
     const bool only = options->only;
     const bool shared = options->path != NULL || only || primary != NULL;
     const uint32_t destinations = shared && count != 0 ? 1 : count;
     const char** artifacts = NULL;
+    DependencyIdentity* inputs = NULL;
+    DependencyIdentity* outputs = NULL;
     for (uint32_t i = 0; enabled && result && i < destinations; i += 1)
     {
         const char* destination = dependency_destination(options, sources[i], primary, arena);
         result = destination != NULL && destination[0] != 0;
         if (result && strcmp(destination, "-") != 0)
         {
+            const DependencyIdentity target = dependency_identity(destination, probes);
+            if (destinations > 1 && inputs == NULL)
+            {
+                inputs = arena_push(arena, (uint64_t)count * sizeof(*inputs), _Alignof(DependencyIdentity));
+                result = inputs != NULL;
+            }
             for (uint32_t j = 0; result && j < count; j += 1)
             {
-                result = strcmp(sources[j], "-") == 0 || !dependency_same_file(destination, sources[j]);
+                if (strcmp(sources[j], "-") != 0)
+                {
+                    const DependencyIdentity input = i == 0 ? dependency_identity(sources[j], probes) : inputs[j];
+                    if (inputs != NULL && i == 0)
+                    {
+                        inputs[j] = input;
+                    }
+                    result = !dependency_identities_overlap(&target, &input);
+                }
             }
-            // Materialize implicit object names only when a non-stdout destination needs them. The array and
-            // strings remain in the command arena, so later destinations reuse the exact same bounded storage.
+            // Materialize implicit object names only when a non-stdout destination needs them.
             if (result && !only && objects && primary == NULL && artifacts == NULL)
             {
                 artifacts = arena_push(arena, (uint64_t)count * sizeof(*artifacts), _Alignof(const char*));
@@ -181,10 +228,21 @@ static bool dependency_check_destinations(const DependencyOptions* options, char
                     result = artifacts[j] != NULL;
                 }
             }
-            for (uint32_t j = 0; result && !only && j < count; j += 1)
+            const uint32_t output_count = only ? 0 : primary != NULL || (!objects && executable) ? 1 : objects ? count : 0;
+            if (result && destinations > 1 && output_count != 0 && outputs == NULL)
             {
-                const char* artifact = primary != NULL ? primary : objects ? artifacts[j] : executable ? "a.out" : NULL;
-                result = (!objects || artifact != NULL) && (artifact == NULL || !dependency_same_file(destination, artifact));
+                outputs = arena_push(arena, (uint64_t)output_count * sizeof(*outputs), _Alignof(DependencyIdentity));
+                result = outputs != NULL;
+            }
+            for (uint32_t j = 0; result && j < output_count; j += 1)
+            {
+                const char* artifact = primary != NULL ? primary : objects ? artifacts[j] : "a.out";
+                const DependencyIdentity output = i == 0 ? dependency_identity(artifact, probes) : outputs[j];
+                if (outputs != NULL && i == 0)
+                {
+                    outputs[j] = output;
+                }
+                result = !dependency_identities_overlap(&target, &output);
             }
         }
         if (!result)
@@ -193,6 +251,11 @@ static bool dependency_check_destinations(const DependencyOptions* options, char
         }
     }
     return result;
+}
+
+static bool dependency_check_destinations(const DependencyOptions* options, char** sources, uint32_t count, const char* primary, bool objects, bool executable, Arena* arena)
+{
+    return dependency_check_destinations_counted(options, sources, count, primary, objects, executable, arena, NULL);
 }
 
 // Named destinations are replaced only after a complete successful write and close. A temporary sibling makes rename

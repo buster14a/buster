@@ -2984,7 +2984,71 @@ static void check_test_driver_array_alignment(CheckTest* test, const char* clang
     unlink(linked);
 }
 
-// Exercise admission directly so its command-arena growth is visible independently of compilation.
+// Filesystem fixtures keep the conservative overlap relation independent of the identity representation.
+// The two missing spellings and the directory symlink must alias even though the leaf does not exist.
+static void check_test_dependency_identities(CheckTest* test, const char* directory)
+{
+    char paths[10][512];
+    snprintf(paths[0], sizeof(paths[0]), "%s/admission-identity-file", directory);
+    snprintf(paths[1], sizeof(paths[1]), "%s/admission-identity-hard", directory);
+    snprintf(paths[2], sizeof(paths[2]), "%s/admission-identity-link", directory);
+    snprintf(paths[3], sizeof(paths[3]), "%s/admission-identity-absent", directory);
+    snprintf(paths[4], sizeof(paths[4]), "%s/./admission-identity-absent", directory);
+    snprintf(paths[5], sizeof(paths[5]), "%s/admission-identity-dangling", directory);
+    snprintf(paths[6], sizeof(paths[6]), "%s/admission-identity-distinct", directory);
+    snprintf(paths[7], sizeof(paths[7]), "%s/admission-identity-missing-dir/admission-identity-absent", directory);
+    snprintf(paths[8], sizeof(paths[8]), "%s/./admission-identity-file", directory);
+    snprintf(paths[9], sizeof(paths[9]), "%s/admission-identity-directory/admission-identity-absent", directory);
+    char linked_directory[512];
+    snprintf(linked_directory, sizeof(linked_directory), "%s/admission-identity-directory", directory);
+    const bool ready = parse_test_write(paths[0], "identity", 8) && link(paths[0], paths[1]) == 0 &&
+                       symlink("admission-identity-file", paths[2]) == 0 && symlink("admission-identity-absent", paths[5]) == 0 &&
+                       symlink(".", linked_directory) == 0;
+    check_test_expect(test, ready, "dependency identity fixture creation");
+    if (ready)
+    {
+        DependencyIdentity identities[10];
+        uint64_t probes = 0;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(identities); i += 1)
+        {
+            identities[i] = dependency_identity(paths[i], &probes);
+        }
+        check_test_expect(test, probes <= 3 * BUSTER_ARRAY_LENGTH(identities), "identity collection uses at most three probes per path");
+        for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(identities); a += 1)
+        {
+            for (uint32_t b = 0; b < BUSTER_ARRAY_LENGTH(identities); b += 1)
+            {
+                const bool file_a = a <= 2 || a == 8;
+                const bool file_b = b <= 2 || b == 8;
+                const bool missing_a = a == 3 || a == 4 || a == 9;
+                const bool missing_b = b == 3 || b == 4 || b == 9;
+                const bool expected = a == b || a == 5 || b == 5 || (file_a && file_b) || (missing_a && missing_b);
+                check_test_expect(test, dependency_identities_overlap(&identities[a], &identities[b]) == expected,
+                                  "dependency identity preserves textual, inode, parent and dangling-link overlap");
+            }
+        }
+        const DependencyIdentity root = dependency_identity("/buster-dependency-admission-root-missing", NULL);
+        struct stat root_status;
+        check_test_expect(test, stat("/", &root_status) == 0 && root.parent_found && root.parent_device == root_status.st_dev &&
+                                root.parent_inode == root_status.st_ino, "root-level dependency path observes the root directory");
+        char long_path[PATH_MAX + 8];
+        memset(long_path, 'x', sizeof(long_path));
+        long_path[PATH_MAX] = '/';
+        long_path[PATH_MAX + 1] = 'a';
+        long_path[PATH_MAX + 2] = 0;
+        const DependencyIdentity long_identity = dependency_identity(long_path, NULL);
+        check_test_expect(test, !long_identity.found && !long_identity.parent_found && !long_identity.dangling &&
+                                dependency_identities_overlap(&long_identity, &long_identity),
+                          "overlong parent keeps textual equality without truncating directory identity");
+    }
+    unlink(paths[0]);
+    unlink(paths[1]);
+    unlink(paths[2]);
+    unlink(paths[5]);
+    unlink(linked_directory);
+}
+
+// Exercise admission directly so its syscall count and command-arena growth are visible independently of compilation.
 static void check_test_dependency_admission(CheckTest* test, const char* directory)
 {
     char names[32][512];
@@ -3004,14 +3068,33 @@ static void check_test_dependency_admission(CheckTest* test, const char* directo
         {
             arena_pop_to(&arena, 0);
             const uint32_t count = counts[i];
-            const bool admitted = dependency_check_destinations(&options, sources, count, NULL, true, false, &arena);
-            check_test_expect(test, admitted && arena.length <= (uint64_t)count * 80 + 8,
-                              "distinct dependency destinations use linear filename storage");
+            uint64_t probes = 0;
+            const bool admitted = dependency_check_destinations_counted(&options, sources, count, NULL, true, false, &arena, &probes);
+            const uint64_t storage = (uint64_t)count * (80 + 2 * sizeof(DependencyIdentity)) + 3 * _Alignof(DependencyIdentity);
+            check_test_expect(test, admitted && arena.length <= storage,
+                              "distinct dependency destinations use linear filename and identity storage");
+            check_test_expect(test, admitted && probes <= (uint64_t)count * 9 && (count == 0 || probes != 0),
+                              "dependency admission probes each source, object and destination at most three times");
         }
         arena_pop_to(&arena, 0);
+        sources[31] = "-";
+        uint64_t probes = 0;
+        check_test_expect(test, dependency_check_destinations_counted(&options, sources, 32, NULL, true, false, &arena, &probes) && probes <= 32 * 9,
+                          "reused input identities skip stdin in every destination pass");
+        sources[31] = names[31];
+        arena_pop_to(&arena, 0);
+        probes = 0;
+        check_test_expect(test, dependency_check_destinations_counted(&options, sources, 32, NULL, false, true, &arena, &probes) && probes <= (32 * 2 + 1) * 3,
+                          "implicit executable identity is collected once across all destinations");
+        arena_pop_to(&arena, 0);
+        probes = 0;
+        check_test_expect(test, dependency_check_destinations_counted(&options, sources, 32, NULL, false, false, &arena, &probes) && probes <= 32 * 6,
+                          "syntax-only dependency admission probes no primary output");
+        arena_pop_to(&arena, 0);
         options.path = "-";
-        check_test_expect(test, dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena) && arena.length == 0,
-                          "stdout dependency admission needs no object names");
+        probes = 0;
+        check_test_expect(test, dependency_check_destinations_counted(&options, sources, 32, NULL, true, false, &arena, &probes) && arena.length == 0 && probes == 0,
+                          "stdout dependency admission needs no storage or filesystem probes");
         options.path = names[31];
         check_test_expect(test, !dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
                           "shared dependency destination checks the last source");
@@ -3023,6 +3106,12 @@ static void check_test_dependency_admission(CheckTest* test, const char* directo
         check_test_expect(test, dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena) && arena.length <= 32 * 40,
                           "shared dependency destination reuses bounded object names");
         const uint64_t capacity = arena.capacity;
+        arena_pop_to(&arena, 0);
+        arena.capacity = 64;
+        options.path = NULL;
+        check_test_expect(test, !dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
+                          "identity-array capacity exhaustion refuses admission before reuse");
+        options.path = "dependency-admission-shared.d";
         arena_pop_to(&arena, 0);
         arena.capacity = 0;
         check_test_expect(test, !dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
@@ -8595,6 +8684,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_dependency_identities(&test, directory);
                 check_test_dependency_admission(&test, directory);
                 check_test_driver_dependencies(&test, clang, executable, directory);
             }
