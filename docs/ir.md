@@ -514,14 +514,16 @@ which promotion, private-field replacement, Tier 1's folding and both
 interpreters read in place of `BUSTER_IR_VOLATILE`) and those of its order. Its
 machine obligations are an ordinary access's, since a naturally aligned access
 of 1, 2, 4 or 8 bytes is atomic on x86-64 and its total store order gives a
-load's and a release store's orders, and, for a seq_cst store, the
-`fence.void seq_cst` after it, which the producer writes as its own instruction.
+load's and a release store's orders. A seq_cst store expressed as
+`store ... atomic seq_cst` requires a following `fence.void seq_cst`, which the
+producer writes as its own instruction. The C producer instead uses the tagged
+exchange described below.
 Both verifiers check the flags (`ir_access_flags_valid`; the vector path sends
 any row with flags past `volatile` to the scalar rule), and the type and the
 alignment (`ir_atomic_access`): an atomic access declared below its natural
 alignment is refused, since the backend emits one access of its size whatever
-the address. The typed stream's producer is the C lowering's direct
-atomic load or store ([the builtin integration guide](c-builtins-integration.md)'s
+the address. The C lowering uses this path for direct atomic loads and weaker
+stores ([the builtin integration guide](c-builtins-integration.md)'s
 "Helper contracts and direct forms"): its marked `LOAD`, `STORE` or `SET`
 (`BUSTER_TYPED_ACCESS_ATOMIC`), which `ir_lower` translates with its class's
 natural alignment, which the checker proved, and refuses in another shape. `tests/ir/atomics.ir` reads every order back, `test-ir`'s verifier

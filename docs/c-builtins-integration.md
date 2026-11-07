@@ -860,7 +860,7 @@ fence or locked access, no floating environment read or exception raised, that
 its contract doesn't have (but where it is `UNMODELED`), no trap without a
 return its contract doesn't allow, and each claim backed by its code but where
 the contract is `UNMODELED`, whose effects are bounds (a load reads its object
-and a store writes it and fences; a
+and a store helper's exchange reads and writes it with a locked access; a
 read/modify/write writes its object with a locked access; a thread fence fences
 and a signal fence only returns; a terminal builtin traps and doesn't return; a
 claim of the floating environment reads MXCSR or the x87's control word; errno
@@ -1043,7 +1043,7 @@ line of the totals over its units (`helpers`, with `units`, `refused`: units the
 lowering refused an operation by name, `direct`: the lowered code's direct
 forms, an atomic access's marked `LOAD`, `STORE`, `SET` or source-store exchange,
 a read/modify/write's other
-`ATOMIC_RMW` or `ATOMIC_CAS`, a fence's `FENCE` (but a seq_cst store's own) and an
+`ATOMIC_RMW` or `ATOMIC_CAS`, an explicit fence's `FENCE` and an
 asm statement's `X86` entry in its caller, `helper`: the
 lowered code's call sites of a helper,
 an explicit builtin's, an implicit `_Atomic` access's, a generic form's and an

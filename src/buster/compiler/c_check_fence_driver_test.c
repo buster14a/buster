@@ -53,7 +53,7 @@ static const char check_test_fence_litmus_source[] =
     "    for (int i = 1; i <= ITERATIONS; i++) { wait_for(&go, i); y = 1; __atomic_signal_fence(__ATOMIC_SEQ_CST); r1 = x; __atomic_store_n(&done1, i, __ATOMIC_RELEASE); }\n"
     "    return unused;\n"
     "}\n"
-    // #1059's direct atomic accesses: a seq_cst store and a seq_cst load, whose store's fence forbids the outcome, and
+    // #1059's direct atomic accesses: a seq_cst store and a seq_cst load, whose store's exchange forbids the outcome, and
     // relaxed ones, which allow it.
     "void* sequential0(void* unused)\n"
     "{\n"
@@ -652,7 +652,7 @@ static void check_test_driver_asm_unwind(CheckTest* test, const char* executable
 // load and compound assignment (its lock xadd, the typed stream's ATOMIC_RMW), an explicit store, compare-exchange (its
 // ATOMIC_CAS) and load, a fence, an asm statement placed in its caller (a nop's) and one of fixed registers (rdtsc's),
 // which keeps its helper. Its `direct` columns are the lowered code's direct forms (four accesses, two read/modify/writes,
-// one fence: a seq_cst store's own isn't one; the placed statement's X86 entry), its `helper` columns its call sites of
+// one explicit fence; the placed statement's X86 entry), its `helper` columns its call sites of
 // each family's helpers, every call in the object (rdtsc's statement's), and `planned` the signatures (that statement's
 // helper alone: neither read/modify/write takes a leaf). By both paths, and by --helper-forms.
 static void check_test_driver_helper_report(CheckTest* test, const char* executable, const char* directory)

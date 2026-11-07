@@ -175,7 +175,8 @@ table. The kinds are:
 - An integer class's `LOAD`, `STORE` and `SET` (#1059) take `value` 0 for an ordinary access, or
   `BUSTER_TYPED_ACCESS_ATOMIC` with a C memory order for an atomic one: a single naturally aligned access of the class's
   bytes, whose code is an ordinary access's (atomic on x86-64, whose total store order gives a load's and a release
-  store's orders); a seq_cst store's fence is the `FENCE` of seq_cst its producer writes after it. Tier 0 doesn't read
+  store's orders). A seq_cst store expressed as `STORE` or `SET` requires a following `FENCE` of seq_cst; the C producer
+  uses the tagged `ATOMIC_RMW` exchange described below. Tier 0 doesn't read
   the marker, whose code is the same either way; `ir_lower` translates it to the IR's atomic access and refuses another
   shape.
 - `ATOMIC_RMW` (#1059), an atomic read/modify/write, pops an address (U64) and an operand of an integer `class` and
