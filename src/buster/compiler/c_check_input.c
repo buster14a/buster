@@ -1710,6 +1710,12 @@ struct CheckInputReader
     // quadratic in its elements. The scalar reader walks the chains, as the twin of these counts.
     uint32_t* value_counts;
     uint32_t* value_next;
+    // The scalar reader's walks, by the chain head they started at (--scalar alone, #1665): the last value each walk reached
+    // and how many it counted, so that a walk of a chain that holds an already walked one steps over it rather than through
+    // it again, whose separators, each a child of the next, each walk the chains before them. A node's entry is cleared as
+    // it's made and where its chain is cut back to it; chains only grow at their ends otherwise, past what a hop lands on.
+    uint32_t* walk_ends;
+    uint32_t* walk_counts;
     // Under PPOptions.expression_numbering alone, a byte a token: 1 where the coded walk's class action left it to the
     // walk's visit (check_input_expression_numbering's barriers); null otherwise.
     uint8_t* expression_declined;
@@ -9262,6 +9268,10 @@ static inline __attribute__((always_inline)) uint32_t check_input_add_node(Check
     else
     {
         reader->value_next[node] = BUSTER_CHECK_NONE;
+        if (reader->walk_ends != NULL)
+        {
+            reader->walk_ends[node] = BUSTER_CHECK_NONE;
+        }
         reader->output->graph.source_positions[node] = check_input_expression_end(reader, token);
         // The reader's suppressions are nearly always there, and a floating-point environment of the unit's own rarely
         // (#1175): without the hints, clang jumped around each once a node.
@@ -9823,10 +9833,22 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             last = reader->last_value[child];
             if (scalar)
             {
-                for (uint32_t n = begin; n != BUSTER_CHECK_NONE; n = reader->value_next[n])
+                // A walk of the links, hopping over each chain an earlier walk counted (walk_ends, #1665).
+                uint32_t walked = 0;
+                uint32_t tail = begin;
+                for (uint32_t n = begin; n != BUSTER_CHECK_NONE;)
                 {
-                    count += 1;
+                    const uint32_t hop = reader->walk_ends != NULL ? reader->walk_ends[n] : BUSTER_CHECK_NONE;
+                    walked += hop != BUSTER_CHECK_NONE ? reader->walk_counts[n] : 1;
+                    tail = hop != BUSTER_CHECK_NONE ? hop : n;
+                    n = reader->value_next[tail];
                 }
+                if (reader->walk_ends != NULL)
+                {
+                    reader->walk_ends[begin] = tail;
+                    reader->walk_counts[begin] = walked;
+                }
+                count += walked;
             }
             else
             {
@@ -10105,6 +10127,10 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 last = first;
                 count = 1;
                 reader->value_next[first] = BUSTER_CHECK_NONE;
+                if (reader->walk_ends != NULL)
+                {
+                    reader->walk_ends[first] = BUSTER_CHECK_NONE;
+                }
             }
         }
     }
@@ -11567,6 +11593,14 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     valid &= parser->sizes != 0 || sizes != 0;
     reader.subtree_sizes = parser->sizes != 0 ? parser->sizes : sizes;
     reader.value_next = valid ? arena_push_array(scratch, graph_capacity, sizeof(uint32_t), 64) : 0;
+    // The scalar reader's hops (#1665); without room, its walks step through every link.
+    reader.walk_ends = valid && parser->options.scalar ? arena_push_array(scratch, graph_capacity, sizeof(uint32_t), 64) : 0;
+    reader.walk_counts = reader.walk_ends != 0 ? arena_push_array(scratch, graph_capacity, sizeof(uint32_t), 64) : 0;
+    reader.walk_ends = reader.walk_counts != 0 ? reader.walk_ends : 0;
+    if (reader.walk_ends != 0)
+    {
+        memset(reader.walk_ends, 0xff, (uint64_t)graph_capacity * sizeof(uint32_t));
+    }
     valid &= reader.value_next != 0;
     // The columns few tokens have an entry in, and the binding table, which has room for four events a token and fills
     // a few at its start, in an arena of their own that the reader unmaps when it returns (#572). Its pages are new and
