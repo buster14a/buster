@@ -1069,7 +1069,7 @@ alike over the code's placements on the 9700X, and that `benchmark-ir` and
 graph check, the type windows and the optimizer's single verification per
 preparation, with AUTO verifying by the vector twin, measured over six placements
 of the backend's unit and three rounds against `9bb5060e` and main `ec5f0f6b`
-([the record](https://github.com/buster14a/buster-performance/tree/1e8f8ae383405083bf7689fe1883ef4b5c92e3f1/docs/measurements/ir-graph-786-2026-11-06)):
+([the record](https://github.com/buster14a/buster-performance/tree/b7f697e78b47b392a4108be388a22bc126c69374/docs/measurements/ir-graph-786-2026-11-06)):
 
 | Row (median over placements) | `9bb5060e` | Main | #786 | Spread over placements, #786 |
 | --- | ---: | ---: | ---: | ---: |

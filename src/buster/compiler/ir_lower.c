@@ -675,7 +675,9 @@ static __attribute__((always_inline)) inline void ir_typed_lanes(IrTypedSink* si
     }
 }
 
-static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands)
+// `unmasked`: a comparison into a mask alone (#1623, IrSimdTypedOperation.compare_mask) whose writemask the typed stream
+// gives every lane of (ir_typed_unmasked), so that its mask is the vcmp's alone, with no AND.
+static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands, bool unmasked)
 {
     static const uint8_t ops[IR_SIMD_OPERATION_COUNT] = {
         [IR_SIMD_ADD] = IR_ADD,
@@ -694,7 +696,14 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         [IR_SIMD_FDIV] = IR_FDIV,
     };
     uint32_t value = BUSTER_IR_NONE;
-    if (operation->expand_mask)
+    if (operation->compare_mask)
+    {
+        // The lanes' mask, `type` (the decoder made the row's result bytes the lanes' mask's), and the writemask's AND.
+        const uint32_t mask = ir_typed_emit(sink, IR_VCMP, type, operands[0], operands[1], operation->predicate, 0);
+        ir_typed_lanes(sink, mask, operation->lane);
+        value = unmasked ? mask : ir_typed_emit(sink, IR_AND, type, mask, operands[2], BUSTER_IR_NONE, 0);
+    }
+    else if (operation->expand_mask)
     {
         // The comparison's mask, a bit per lane, and -1 or 0 in each lane by it, at the same lanes' width.
         const IrType mask_type = (IrType)ir_lane_mask(type, operation->lane);
@@ -713,6 +722,17 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         ir_typed_lanes(sink, value, operation->lane);
     }
     return value;
+}
+
+// Whether entry `i`, a comparison into a mask alone (#1623), has a writemask of every lane: a constant whose bits for
+// the lanes are all set, converted to the mask, just before it, as the comparison intrinsics' rows without a mask
+// operand have it (_mm512_cmpeq_epi8_mask's -1). The typed stream decides it, so both lowering passes agree.
+static bool ir_typed_unmasked(const Tier0Function* input, const IrSimdTypedOperation* operation, uint32_t i)
+{
+    const uint32_t lanes = operation->compare_mask ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) : 0;
+    const uint64_t every = lanes >= 64 ? UINT64_MAX : (UINT64_C(1) << lanes) - 1;
+    return lanes != 0 && i >= 2 && input->kinds[i - 1] == BUSTER_TYPED_CONVERT && input->classes[i - 1] == BUSTER_TYPED_CLASS_MASK && input->kinds[i - 2] == BUSTER_TYPED_CONST &&
+           input->classes[i - 2] >= BUSTER_TYPED_CLASS_I8 && input->classes[i - 2] <= BUSTER_TYPED_CLASS_U64 && (input->values[i - 2] & every) == every;
 }
 
 // A scalar BMI instruction's row (#141, ir_simd_typed_intrinsic) as its IR intrinsic of the operands its record places.

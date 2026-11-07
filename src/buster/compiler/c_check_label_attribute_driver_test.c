@@ -210,6 +210,13 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
         { "a reachable fallthrough after a loop whose if body breaks", "int f(int x, int y) {\nswitch (x) {\ncase 1: while (1) if (y) break; __attribute__((fallthrough)); x++;\ncase 2: return x;\n}\nreturn 0;\n}\n" },
         { "a reachable fallthrough after a loop's else break", "int f(int x, int y) {\nswitch (x) {\ncase 1: for (;;) if (y) ; else break; __attribute__((fallthrough)); x++;\ncase 2: return x;\n}\nreturn 0;\n}\n" },
         { "a reachable fallthrough after a false condition's else break", "int f(int x, int y) {\nswitch (x) {\ncase 1: while (1) { if (0) { } else break; } __attribute__((fallthrough)); x++;\ncase 2: return x;\n}\nreturn 0;\n}\n" },
+        // One switch's fallthroughs, reachable and dead in turn, some in nested blocks: each resumes its block's scan
+        // where the one before stopped (#1357), and only case 7's, reachable and not before a label, is misplaced.
+        { "one block's reachable and dead fallthroughs in turn",
+          "int f(int x, int y) {\nswitch (x) {\ncase 1: x++; __attribute__((fallthrough));\ncase 2: return 1; __attribute__((fallthrough)); x++;\n"
+          "case 3: x++; __attribute__((fallthrough));\ncase 4: { y++; __attribute__((fallthrough)); }\ncase 5: { return 2; } __attribute__((fallthrough)); y++;\n"
+          "case 6: x--; break; __attribute__((fallthrough)); x++;\ncase 7: y--; __attribute__((fallthrough)); y++;\ncase 8: y--; __attribute__((fallthrough));\n"
+          "default: return x + y;\n}\n}\n" },
         // Clang's analysis runs at a function's end only where no error came before it.
         { "a misplaced fallthrough after an undeclared identifier",
           "int f(int x) {\nswitch (x) {\ncase 1: undeclared_thing; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
