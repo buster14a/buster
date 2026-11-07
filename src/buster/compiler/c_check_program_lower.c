@@ -3407,8 +3407,21 @@ static bool check_lower_unsigned_power(const CheckLowerWriter* writer, uint32_t 
         {
             const CheckValue value = check_stream_value(stream, operand);
             const CheckOp op = graph->ops[operand];
-            const uint64_t divisor = class == BUSTER_TYPED_CLASS_U32 ? (uint32_t)value.integer : (uint64_t)value.integer;
-            replace = value.constant_kind == CHECK_CONSTANT_INTEGER && value.fault == CHECK_FAULT_NONE && value.category == CHECK_RVALUE &&
+            const uint8_t source_class = check_lower_class(writer, value.type);
+            const bool plain_integer = source_class >= BUSTER_TYPED_CLASS_I8 && source_class <= BUSTER_TYPED_CLASS_U64 &&
+                                       (check_lower_facts(writer, value.type) & BUSTER_CHECK_LOWER_TYPE_BIT_INT) == 0;
+            uint64_t bits = (uint64_t)value.integer;
+            // CheckValue stores bits masked to its own type. Restore that type's sign before converting to the
+            // unsigned arithmetic width; e.g. (short)-32768 becomes 0xffff8000, not the power of two 0x8000.
+            if (plain_integer && source_class <= BUSTER_TYPED_CLASS_U32)
+            {
+                const uint32_t width = 8u << ((source_class - 1) / 2);
+                const uint64_t mask = (UINT64_C(1) << width) - 1;
+                bits &= mask;
+                bits |= (source_class & 1) != 0 && (bits >> (width - 1)) != 0 ? ~mask : 0;
+            }
+            const uint64_t divisor = class == BUSTER_TYPED_CLASS_U32 ? (uint32_t)bits : bits;
+            replace = plain_integer && value.constant_kind == CHECK_CONSTANT_INTEGER && value.fault == CHECK_FAULT_NONE && value.category == CHECK_RVALUE &&
                       value.overload_head == 0 && (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 &&
                       op != CHECK_OP_STATEMENT_VALUE && op != CHECK_OP_INITIALIZE && op != CHECK_OP_BUILTIN_QUERY &&
                       divisor != 0 && (divisor & (divisor - 1)) == 0;

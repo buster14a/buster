@@ -78,3 +78,9 @@ the templates took. A change to `check_lower_expand`'s rules for what the table
 takes changes the templates too: run the command on `sqlite3.c`, Lua and
 c-testsuite. [The lowering guide](../../docs/c-lowering.md)'s "Node templates
 over a body: the first path (#1048)" has the coverage and the measurements.
+
+Unsigned power-of-two division and remainder normalize proven integer constants
+from their source type before testing the arithmetic-width value. The regression
+includes negative signed char/short/int constants widened to U32/U64, their
+compound assignments, and positive narrow constants that still select shifts or
+masks. Source `_BitInt` values retain ordinary lowering in this optimization.
