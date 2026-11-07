@@ -109,7 +109,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
     }
     const bool incomplete = type_kind(reader->types, type) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
     if (valid && (incomplete || check_const_eligible(reader->types, type) || check_input_auto_type(type) ||
-                  (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_DEDUCED) != 0))
+                  (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0))
     {
         check_input_rare_claim(reader, &reader->incomplete_array_types[declaration]);
         reader->incomplete_array_types[declaration] = incomplete ? type : 0;
@@ -508,12 +508,12 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
     const uint32_t assignment = check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) ? declaration : begin - 1;
     TypeId type = reader->declared_types[declaration];
     bool valid = begin < end && end <= parser->tokens.count;
-    if (valid && (check_input_auto_type(type) || (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_DEDUCED) != 0))
+    if (valid && (check_input_auto_type(type) || (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0))
     {
         type = check_input_auto_type_finish(reader, declaration, begin, end, type);
         valid = type != 0 && check_input_cleanup_deduced(reader, declaration, type);
     }
-    if (valid && (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0)
+    if (valid && (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0)
     {
         valid = check_input_constexpr_finish(reader, declaration, begin, end, &type);
     }

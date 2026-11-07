@@ -152,8 +152,9 @@ serial finishing. Success and retry return it exactly once.
    ("The rare columns' pages by the unit's size (#847)", below). The reader
    works out the rule's lanes from the parser's tree before its top level's walk
    (`CheckDeferred.planned`), and `check_deferred_bodies` works them out again
-   from the top level's cuts. A reading on one lane keeps the huge pages, as
-   source order does.
+   from the top level's cuts. A reading on one lane keeps the huge pages.
+   Source order's are base pages, whose vector path reads none that no write
+   claimed (`CheckInputReader.rare_marks`, #628; `docs/c-checker.md`).
 4. **A body** (`check_deferred_body`). The lane sets its reader to what source
    order's is at the body's opening, the position checks:
    - each name the body and its parameters spell, once (a stamp per name),
@@ -364,9 +365,10 @@ passes every checker test.
   be copied by one of them at least and by no more (`CheckDeferred.copies`),
   and its bodies' tokens that pay for a lane (`CheckDeferred.lane_tokens`) be
   the rule's, worked out again from the unit's tokens outside its bodies and
-  its size. Its arena of rare columns must be base pages throughout exactly
-  where those lanes are more than one in a large unit, and source order's
-  never (`CheckInput.rare_columns_shared`, #764), and its lanes must claim
+  its size. Its arena of rare columns must be shared, in base pages
+  throughout, exactly where those lanes are more than one in a large unit,
+  and source order's never (`CheckInput.rare_columns_shared`, #764; source
+  order's are base pages of its own, #628), and its lanes must claim
   its regions exactly where they are more than one in a smaller one
   (`CheckDeferred.claiming`, #847), those of the many bodies, which declare
   locals, a region at least (`CheckDeferred.claimed`); the rule's fixtures

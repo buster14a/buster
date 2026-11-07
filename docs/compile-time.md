@@ -1179,6 +1179,79 @@ with the variants' patches). None is in, since each raises the kernel's cycles:
   skip what nothing wrote, so that the columns could be base pages that fault
   only where written, with no populate.
 
+### The rare columns read only where written (#628)
+
+What the section above found to make the rare columns pay is in, with its two
+free scratch changes:
+- **The scratch after the reader** goes back past 96 bytes a token beyond its
+  length (`check_driver_discard_scratch`), which the stages up to
+  `check_program` push again, and the common warnings pop what they push.
+- **The rare columns** of a reading in source order are base pages, with a bit
+  per 64 bytes of them that every write's claim sets
+  (`CheckInputReader.rare_marks`). The vector path's hot reads (the
+  expressions' classes, the declarations' first tokens, the builtins' count)
+  give 0 where no bit is set, without touching the page: a scalar read reads
+  the column's first entry and clears it, and a vector load reads a static line
+  of zeros (`check_input_rare_line`). The scalar path reads every entry, and
+  counts the 64 bytes a mark misses (`check_input_rare_verify`,
+  `CheckInput.visit_misses`). A page's bit would do
+  for the reads, but the tests' small fixtures put several columns in a page,
+  where one column's write hid another's missing mark: with a claim left out
+  on purpose, `test-checker` found none by pages and 212 by 64 bytes.
+
+A tracer that protected the columns' pages and logged each first touch
+counted the pages `sqlite3.c`'s compile maps there: 6,660 before the marks,
+of which about 6,170 were first read, and 884 after, 685 first written and
+199 first read, nearly all by two byte gathers (of `static_initializers` and
+`declaration_flags`, in the expressions' batches), which the marks don't
+gate.
+
+On the VM with huge pages, main `4e5abcb0` against the change's first version
+on it: the peak is 255,160 → 249,208 KiB, for 893 more faults, with the objects the same
+bytes. The backend's end is now the compile's peak.
+
+On the 9700X, main `872cb8fe` against the change (the record's `pr4`), each
+compile under its own grant of the lock, the order alternating by round
+([the record](https://github.com/buster14a/buster-performance/tree/a27a3d5175cdbbc10f95231b055bd2c564d51420/docs/measurements/rare-marks-628-2026-11-07),
+with the earlier versions' patches), every object the same bytes in six modes
+and the diagnostics too (medians):
+
+| measure | main | the change |
+| --- | ---: | ---: |
+| task clock, the step's options (9 rounds) | 122.03 ms | 120.43 ms |
+| user cycles | 591.42 M | 582.72 M |
+| kernel cycles | 86.08 M | 84.25 M |
+| `check-input` | 46.70 ms | 44.77 ms |
+| page faults | 5,840 | 6,650 |
+| peak RSS | 258,196 KiB | 248,284 KiB |
+| task clock, `-w` (5 rounds) | 107.02 ms | 105.72 ms |
+| kernel cycles, `-w` | 86.33 M | 84.62 M |
+| peak RSS, `-w` | 258,200 KiB | 248,284 KiB |
+
+The change is faster in each round, by 1.06 to 2.39 ms, and by 0.75 to 2.20 ms
+with `-w`. Its 810 more faults are the base pages', which fault 4 KiB at a
+time.
+
+**A load masked to no lanes.** The first three versions of the gate cost 4.0
+to 5.0 ms each on the 9700X, for the same peak. All of it was in the
+expressions' classes' pass, which took 5.3 ms rather than 0.48: it masked its
+vector loads of `builtins` and `specifier_finishes` to no lanes where no bit
+was set, ten of them every 64 tokens. A masked-off lane doesn't fault its page
+in, and at a page that isn't mapped such a load cost far more than a load.
+Timed alone, a load a page over 16,384
+base pages, in TSC ticks a load:
+
+| load | ticks |
+| --- | ---: |
+| every lane, at written pages | 35.5 |
+| no lanes, at written pages | 37.5 |
+| no lanes, at pages a read mapped to the zero page | 8.4 |
+| no lanes, at untouched pages | 174.1 |
+
+Since no fault maps those pages, every later load there costs the same again.
+The gated loads now read `check_input_rare_line`'s static line of zeros
+instead, and the classes' pass takes 0.43 ms.
+
 ## The checker's graph and program passes (#530)
 
 **Measured against `main` on the 9700X.** Medians of 15 interleaved

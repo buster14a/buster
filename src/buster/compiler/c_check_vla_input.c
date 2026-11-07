@@ -567,7 +567,8 @@ static void check_input_vla_finish(CheckInputReader* reader)
     bool lifetimes = BUSTER_SCALAR_PATH(parser->options.scalar);
     for (uint32_t first = 0; !lifetimes && first < parser->tokens.count; first += 16)
     {
-        lifetimes = check_input_scan_nonzero32(reader->vla_scope_ends, first, parser->tokens.count) != 0;
+        // 64 bytes of the column that no write claimed are all zero (check_input_rare_marked, #628).
+        lifetimes = check_input_rare_marked(reader, reader->vla_scope_ends + first) && check_input_scan_nonzero32(reader->vla_scope_ends, first, parser->tokens.count) != 0;
     }
     const uint32_t scanned = lifetimes ? parser->tokens.count : 0;
     uint32_t depth = 0;
