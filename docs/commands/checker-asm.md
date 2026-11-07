@@ -41,6 +41,12 @@ requirements. [Command index](README.md).
   compiling/linking everywhere. `test-assembler --cross-check` compares all
   five operand forms of `kmovb/w/d/q` in both syntaxes with GNU as; eligible
   targets also check malformed register and memory widths.
+  The lowering reserves its existing non-asm operation allowance plus one
+  row for each placed statement in the largest selected body; lanes reuse that
+  room between functions. `test-checker-driver`'s capacity section compiles and
+  executes distinct/repeated-template bodies across the former 4096-row
+  boundary and compares both kernels with Clang and independent unsigned
+  models (#1359).
   `test-checker --program-asm` runs the inline-assembly source fixtures alone;
   the full `test-checker` command continues to include them.
   `test-checker-driver` links and runs naked functions' labels and a template's
