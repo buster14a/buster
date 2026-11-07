@@ -1909,6 +1909,34 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         }
         if (lowered)
         {
+            if (strcmp(name, "unsigned-power-two-divmod") == 0)
+            {
+                uint32_t divides = 0;
+                uint32_t shifts = 0;
+                uint32_t masks = 0;
+                for (uint32_t p = 0; p < 2; p += 1)
+                {
+                    for (uint32_t b = 0; b < lower[p].count; b += 1)
+                    {
+                        const Tier0Function* function = lower[p].functions + b;
+                        for (uint32_t e = 0; e < function->count; e += 1)
+                        {
+                            divides += function->kinds[e] == BUSTER_TYPED_DIV || function->kinds[e] == BUSTER_TYPED_MOD;
+                            shifts += function->kinds[e] == BUSTER_TYPED_SHR;
+                            masks += function->kinds[e] == BUSTER_TYPED_AND;
+                        }
+                    }
+                }
+                check_test_expect(test, divides == 0 && shifts != 0 && masks != 0,
+                                  "unsigned constant powers of two lower to shifts/masks on both paths without division");
+                CheckProgramLowered templated = { 0 };
+                bool same = check_program_lower_templates(&templated, &program, true, &output, &scratch) && templated.count == lower[0].count;
+                for (uint32_t b = 0; same && b < templated.count; b += 1)
+                {
+                    same = check_test_program_function(templated.functions + b, lower[0].functions + b);
+                }
+                check_test_expect(test, same, "experimental node templates retain the exact power-of-two task stream");
+            }
             for (uint32_t p = 0; p < 2; p += 1)
             {
                 check_test_expect(test, expected_pools < 0 || lower[p].initializers.count == (uint32_t)expected_pools,
@@ -2935,6 +2963,7 @@ static void check_test_program_return_marks(CheckTest* test)
 
 #include "c_check_program_batch_test.c"
 #include "c_check_literal_table_test.c"
+#include "c_check_power_divmod_test.c"
 
 static void check_test_program_many_arguments(CheckTest* test, const char* clang)
 {
@@ -3328,6 +3357,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_atomic_accesses(test, clang);
         check_test_program_atomic_rmws(test, clang);
         check_test_program_batch(test);
+        check_test_power_divmod(test, clang);
         check_test_program_many_arguments(test, clang);
         check_test_program_many_aggregate_returns(test, clang);
         check_test_program_source(test,
@@ -5230,3 +5260,4 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
 }
 
 #endif
+
