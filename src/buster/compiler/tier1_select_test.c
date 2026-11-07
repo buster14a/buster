@@ -535,11 +535,30 @@ static void tier1_select_test_node(IrFunction* function, uint32_t i, uint8_t op,
 // An intrinsic of BMI (#141) of operands of `bits` bits, as the instructions' pseudocode has it, independently of the IR's
 // interpreter: pdep and pext through the mask's set bits from its lowest, bzhi and bextr by the bits of the control's
 // bytes they keep; the bit operations (#1374) bit by bit and byte by byte, bsf's and bsr's of 0 the width, as the
-// others' (which the fixtures' operands never are).
+// others' (which the fixtures' operands never are); the signed overflows (#1385) by the host compiler's builtins on the
+// width's signed integers.
 static uint64_t tier1_select_test_intrinsic(uint32_t operation, uint32_t bits, uint64_t a, uint64_t b)
 {
     uint64_t result = 0;
-    if (operation >= BUSTER_IR_INTRINSIC_TZCNT && operation <= BUSTER_IR_INTRINSIC_BSR)
+    if (operation >= BUSTER_IR_INTRINSIC_SADDO && operation <= BUSTER_IR_INTRINSIC_SMULO && bits == 32)
+    {
+        int32_t sum = 0;
+        const int32_t x = (int32_t)(uint32_t)a;
+        const int32_t y = (int32_t)(uint32_t)b;
+        result = operation == BUSTER_IR_INTRINSIC_SADDO   ? __builtin_add_overflow(x, y, &sum)
+                 : operation == BUSTER_IR_INTRINSIC_SSUBO ? __builtin_sub_overflow(x, y, &sum)
+                                                          : __builtin_mul_overflow(x, y, &sum);
+    }
+    else if (operation >= BUSTER_IR_INTRINSIC_SADDO && operation <= BUSTER_IR_INTRINSIC_SMULO)
+    {
+        int64_t sum = 0;
+        const int64_t x = (int64_t)a;
+        const int64_t y = (int64_t)b;
+        result = operation == BUSTER_IR_INTRINSIC_SADDO   ? __builtin_add_overflow(x, y, &sum)
+                 : operation == BUSTER_IR_INTRINSIC_SSUBO ? __builtin_sub_overflow(x, y, &sum)
+                                                          : __builtin_mul_overflow(x, y, &sum);
+    }
+    else if (operation >= BUSTER_IR_INTRINSIC_TZCNT && operation <= BUSTER_IR_INTRINSIC_BSR)
     {
         const bool trailing = operation == BUSTER_IR_INTRINSIC_TZCNT || operation == BUSTER_IR_INTRINSIC_BSF;
         uint32_t zeros = 0;
@@ -1151,6 +1170,60 @@ static void tier1_select_test_intrinsics(Tier1SelectTest* test)
                         tier1_select_test_expect(test, planned == TIER1_SELECT_OK && plan.patterns[3].rule == TIER1_RULE_INTRINSIC &&
                                                      (needs ? emitted == TIER1_SELECT_ERROR_TARGET && node == 3 : emitted == TIER1_SELECT_OK),
                                                  "x86-64's baseline refuses tzcnt, lzcnt and popcnt as the target's, and takes bsf, bsr and bswap");
+                        arena_pop_to(&output, 0);
+                    }
+                    arena_pop_to(&input, 0);
+                }
+            }
+        }
+    }
+    // The signed overflows (#1385), of both widths: of the parameters in both orders, of one and the other masked small, and
+    // of one masked value twice, into a destination apart and into either operand's register, run by both covers against
+    // the host compiler's builtins; their forms are x86-64's baseline's.
+    static const uint8_t overflows[] = { BUSTER_IR_INTRINSIC_SADDO, BUSTER_IR_INTRINSIC_SSUBO, BUSTER_IR_INTRINSIC_SMULO };
+    static const uint8_t overflow_destinations[] = { X86_REGISTER_RAX, X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RCX };
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(overflows); k += 1)
+    {
+        for (uint32_t width = 4; width <= 8; width += 4)
+        {
+            for (uint32_t shape = 0; shape < 4; shape += 1)
+            {
+                for (uint32_t d = 0; d < BUSTER_ARRAY_LENGTH(overflow_destinations); d += 1)
+                {
+                    // Shape 0 takes (a, b), 1 (b, a), 2 (a, b & 0x3f3f) and 3 (b & 0x3f3f, b & 0x3f3f).
+                    const uint8_t type = width == 4 ? IR_I32 : IR_I64;
+                    const IrSizes sizes = {
+                        .instruction_count = 6,
+                        .block_count = 1,
+                        .constant_count = 1,
+                        .parameter_count = 2,
+                    };
+                    IrFunction function;
+                    const IrError created = ir_create(&input, &sizes, &function);
+                    tier1_select_test_expect(test, created == IR_OK, "create overflow intrinsic IR fixture");
+                    if (created == IR_OK)
+                    {
+                        function.block_offsets[1] = 6;
+                        function.result_type = type;
+                        function.parameter_types[0] = type;
+                        function.parameter_types[1] = type;
+                        function.constants[0].low = 0x3f3f;
+                        uint8_t registers[6] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RCX, X86_REGISTER_RCX, overflow_destinations[d], X86_REGISTER_RAX };
+                        tier1_select_test_node(&function, 0, IR_PARAM, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                        tier1_select_test_node(&function, 1, IR_PARAM, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                        tier1_select_test_node(&function, 2, IR_CONST, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                        tier1_select_test_node(&function, 3, IR_AND, type, 1, 2, BUSTER_IR_NONE);
+                        const uint32_t left = shape == 1 ? 1 : shape == 3 ? 3 : 0;
+                        const uint32_t right = shape == 0 ? 1 : shape == 1 ? 0 : 3;
+                        tier1_select_test_node(&function, 4, IR_INTRINSIC, type, left, right, overflows[k]);
+                        tier1_select_test_node(&function, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                        const bool verified = ir_verify_scalar(&function, &scratch, 0).error == IR_OK && ir_verify(&function, &scratch, 0).error == IR_OK;
+                        tier1_select_test_expect(test, verified, "overflow intrinsic IR fixture verifies by both paths");
+                        tier1_select_test_plan_execute(test, &function, registers, &output, &scratch);
+                        Tier1SelectPlan plan;
+                        uint32_t node = 0;
+                        const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, false, &plan, &node);
+                        tier1_select_test_expect(test, planned == TIER1_SELECT_OK && plan.patterns[4].rule == TIER1_RULE_INTRINSIC, "an overflow intrinsic is its rule's");
                         arena_pop_to(&output, 0);
                     }
                     arena_pop_to(&input, 0);

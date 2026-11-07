@@ -737,22 +737,16 @@ static bool ir_typed_unmasked(const Tier0Function* input, const IrSimdTypedOpera
 
 // A scalar BMI instruction's row (#141, ir_simd_typed_intrinsic) as its IR intrinsic of the operands its record places;
 // a bit builtin's (#1374, ir_simd_typed_bits) as its intrinsic of its operand's type, a count of 64 bits narrowed to its
-// result's type.
+// result's type; and a signed overflow builtin's flag (#1385, ir_simd_typed_overflow) as its intrinsic of its operands'
+// type, a long's 0 or 1 narrowed to its int.
 static __attribute__((always_inline)) inline uint32_t ir_typed_intrinsic(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands)
 {
-    uint32_t value = BUSTER_IR_NONE;
-    if (operation->operand_count == 1)
+    const IrType source = (IrType)ir_typed_types[operation->operand_classes[0]];
+    const uint32_t b = operation->operand_count == 1 ? BUSTER_IR_NONE : operands[operation->intrinsic_operands[1]];
+    uint32_t value = ir_typed_emit(sink, IR_INTRINSIC, source, operands[operation->intrinsic_operands[0]], b, operation->intrinsic - 1u, 0);
+    if (source != type)
     {
-        const IrType source = (IrType)ir_typed_types[operation->operand_classes[0]];
-        value = ir_typed_emit(sink, IR_INTRINSIC, source, operands[0], BUSTER_IR_NONE, operation->intrinsic - 1u, 0);
-        if (source != type)
-        {
-            value = ir_typed_emit(sink, IR_TRUNC, type, value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-        }
-    }
-    else
-    {
-        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[operation->intrinsic_operands[0]], operands[operation->intrinsic_operands[1]], operation->intrinsic - 1u, 0);
+        value = ir_typed_emit(sink, IR_TRUNC, type, value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
     }
     return value;
 }

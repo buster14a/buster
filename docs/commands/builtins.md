@@ -27,7 +27,14 @@ requirements. [Command index](README.md).
   them natively against clang -O0's build, and the classic ones (`ctz` to
   `bswap64`, #1374: one instruction each by the target, the guide's "The bit
   builtins' instructions") at `x86-64`, `x86-64-v2`, `x86-64-v3` and `znver5`,
-  checking that their rows are the target's forms. So are the alignment builtins
+  checking that their rows are the target's forms. The overflow builtins
+  (#1385, the guide's "The overflow builtins' instructions") are signed longs'
+  rows of the operation and `seto` and the other classes' cheapest recipes:
+  `test-builtin-lowering` runs every recipe natively against clang's builtins,
+  `test-checker`'s `overflow-instruction-rows` program by both paths against
+  clang -O0 with the rows' forms, `test-checker-driver`'s `tier1-overflow`
+  fixture by `--tier1`, and `tests/ir-source/overflow-builtins.c` the IR's
+  lowerings, both interpreters and Tier 1. So are the alignment builtins
   (`align_up`, `align_down`, `is_aligned`, folded from a declaration's alignment
   as clang folds them) and `expect_with_probability`, whose recipes reuse the
   bit builtins' and `expect`'s; `test-checker --program-align` runs them, and

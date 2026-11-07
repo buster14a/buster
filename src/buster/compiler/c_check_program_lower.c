@@ -7864,6 +7864,57 @@ static void check_lower_builtin_finish(CheckLowerWriter* writer, const CBuiltinL
     }
 }
 
+// A signed 64-bit overflow builtin of one class (#1385: its operands and its destination long's, long long's or a signed
+// _BitInt(64)'s) as clang -O0's code computes it, in place of c_builtin_lower.c's recipe: the operation's value stored
+// through the destination pointer, then its flag as an X86 row of the operation and seto (into the first scratch
+// register, zero-extended into the int result's): the second operand added to the first's register (add) or multiplied
+// into it (imul), which the row may write, or the two compared (cmp, a difference). The operands are in the locals
+// check_lower_builtin_prepare evaluated them into. The IR takes the row as its intrinsic (saddo, ssubo, smulo:
+// ir_simd_typed_overflow). Whether it lowered the call: where not, the recipe does.
+static bool check_lower_overflow_row(CheckLowerWriter* writer, const CBuiltinLowerCall* call, TypeId type)
+{
+    const uint32_t long_type = 64 | BUSTER_CBUILTIN_SIGNED;
+    const bool lowered = call->id >= CBUILTIN_ADD_OVERFLOW && call->id <= CBUILTIN_MUL_OVERFLOW && call->a_type == long_type && call->b_type == long_type &&
+                         call->result_type == long_type && writer->output->status == CHECK_PROGRAM_OK;
+    if (lowered)
+    {
+        const bool subtract = call->id == CBUILTIN_SUB_OVERFLOW;
+        const bool multiply = call->id == CBUILTIN_MUL_OVERFLOW;
+        const uint8_t r = BUSTER_TIER0_ROLE_INTEGER_RESULT;
+        const uint8_t i0 = BUSTER_TIER0_ROLE_INTEGER(0);
+        const uint8_t i1 = BUSTER_TIER0_ROLE_INTEGER(1);
+        const uint8_t s0 = BUSTER_TIER0_ROLE_SCRATCH(0);
+        const uint32_t form = subtract ? X86_FORM_CMP_R64_RM64 : multiply ? X86_FORM_IMUL_R64_RM64 : X86_FORM_ADD_R64_RM64;
+        Tier0Operation row;
+        memset(&row, 0, sizeof(row));
+        row.records[0] = check_vector_lower_record(form, i0, 0, i1);
+        row.records[1] = check_vector_lower_record(X86_FORM_SETO_RM8, 0, 0, s0);
+        row.records[2] = check_vector_lower_record(X86_FORM_MOVZX_R32_RM8, r, 0, s0);
+        row.record_count = 3;
+        row.operand_count = 2;
+        row.operand_classes[0] = BUSTER_TYPED_CLASS_I64;
+        row.operand_classes[1] = BUSTER_TYPED_CLASS_I64;
+        row.result_class = BUSTER_TYPED_CLASS_I32;
+        const uint32_t index = check_lower_operation_add(writer, &row);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, call->destination);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, call->a);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, call->b);
+        check_lower_emit(writer, subtract ? BUSTER_TYPED_SUB : multiply ? BUSTER_TYPED_MUL : BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_I64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_I64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, call->a);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, call->b);
+        check_lower_emit(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_I32, index);
+        const uint8_t class = check_lower_value_class(writer, type);
+        if (class != BUSTER_TYPED_CLASS_I32)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, class, 0);
+        }
+        // An X86 entry makes the function one with vectors (Tier0Function.vectors), whatever its values' classes.
+        writer->vectors = true;
+    }
+    return lowered;
+}
+
 static void check_lower_builtin_emit(CheckLowerWriter* writer, CheckLowerTask task)
 {
     CBuiltinLowerBuffer buffer = {
@@ -7873,8 +7924,12 @@ static void check_lower_builtin_emit(CheckLowerWriter* writer, CheckLowerTask ta
         .local_capacity = writer->local_capacity < BUSTER_TIER0_MAX_LOCALS ? writer->local_capacity : BUSTER_TIER0_MAX_LOCALS,
         .scratch = &writer->builtin_scratch,
     };
-    const CBuiltinLowerResult result = BUSTER_SCALAR_PATH(writer->scalar) ? cbuiltin_lower_scalar(&buffer, writer->builtins + task.node) : cbuiltin_lower(&buffer, writer->builtins + task.node);
-    check_lower_builtin_finish(writer, &buffer, result, task.type);
+    const CBuiltinLowerCall* call = writer->builtins + task.node;
+    if (!check_lower_overflow_row(writer, call, task.type))
+    {
+        const CBuiltinLowerResult result = BUSTER_SCALAR_PATH(writer->scalar) ? cbuiltin_lower_scalar(&buffer, call) : cbuiltin_lower(&buffer, call);
+        check_lower_builtin_finish(writer, &buffer, result, task.type);
+    }
     writer->builtin_depth -= 1;
 }
 

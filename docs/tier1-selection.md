@@ -143,7 +143,13 @@ patterns are:
   instruction of the width, the operand in `rm` and the destination in `reg`, any register, the operand's too; and
   `bswap`, the operand moved into the destination where it isn't there, then swapped in place. The allow-list refuses
   `tzcnt` without BMI, `lzcnt` without LZCNT and `popcnt` without POPCNT; `test-tier1-select` runs each of both widths
-  into its operand's register and into two others, natively on both paths.
+  into its operand's register and into two others, natively on both paths. The signed overflows (#1385), `saddo`, `ssubo` and
+  `smulo`, are `TIER1_RULE_INTRINSIC` too (`tier1_select_overflow`): `add` or `imul` into the destination, which takes
+  the left operand first unless it holds an operand already (both operations and their flags commute), or `cmp` of
+  the two, which writes no register; then `mov` of 0 into the destination, which keeps the flags, and `seto` into its
+  low byte, the destination any register. `test-tier1-select` runs each of both widths from both operand orders, of a
+  masked operand and of one value twice, into a register apart and into each operand's, natively on both paths
+  against the host compiler's builtins.
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
   flags-aware form chooser, comparison/branch fusion, simple selects using
   `cmov`, unconditional branches, returns and `IR_UNREACHABLE` as `ud2`.

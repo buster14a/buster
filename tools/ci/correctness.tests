@@ -757,6 +757,11 @@ test "$("$BUSTER_COMPILER" test-ir-source --print exchanged tests/ir-source/atom
 # Each bitwise, minimum and maximum read/modify/write of the fixture's (twelve, GNU's, __sync's and C11's) is a loop of
 # compare-exchanges, the IR's `rmw ... cas`, none a helper's call, in both forms.
 test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomics.c | grep -c ' cas ')" -eq 24
+== Test the overflow builtins through the IR's lowerings, promotion, text, interpreters and Tier 1 against clang
+# #1385: signed longs' rows of the operation and seto are the IR's saddo, ssubo and smulo, the other classes' recipes
+# 64-bit operations and 128-bit products; the program runs in the IR's forms, the typed stream's interpreter and Tier 1.
+"$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/overflow-builtins.c
+"$BUSTER_COMPILER" test-ssa-source --typed --tier1 --clang clang tests/ir-source/overflow-builtins.c
 == Test deferred-body source-position environments
 "$BUSTER_COMPILER" test-environments
 == Test experimental Tier 1 scheduling, model coverage and native execution

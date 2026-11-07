@@ -2016,6 +2016,35 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                     check_test_expect(test, exact, "the classic bit builtins' rows are the target's forms, of both widths, on both paths");
                 }
             }
+            if (strcmp(name, "overflow-instruction-rows") == 0)
+            {
+                // The signed longs' overflow builtins' rows (#1385, check_lower_overflow_row): a sum's add, a product's imul and a
+                // difference's cmp, each with seto, on both paths, and no 32-bit form, which ints' recipes don't take.
+                for (uint32_t p = 0; p < 2; p += 1)
+                {
+                    uint32_t found[3] = { 0 };
+                    uint32_t narrow = 0;
+                    for (uint32_t b = 0; b < lower[p].count; b += 1)
+                    {
+                        const Tier0Function* function = lower[p].functions + b;
+                        for (uint32_t r = 0; r < function->operation_count; r += 1)
+                        {
+                            const Tier0Operation* row = function->operations + r;
+                            const bool flag = row->record_count >= 3 && row->records[row->record_count - 2].form == X86_FORM_SETO_RM8;
+                            for (uint32_t k = 0; flag && k < row->record_count; k += 1)
+                            {
+                                const uint32_t form = row->records[k].form;
+                                found[0] += form == X86_FORM_ADD_R64_RM64;
+                                found[1] += form == X86_FORM_IMUL_R64_RM64;
+                                found[2] += form == X86_FORM_CMP_R64_RM64;
+                                narrow += form == X86_FORM_ADD_R32_RM32 || form == X86_FORM_IMUL_R32_RM32 || form == X86_FORM_CMP_R32_RM32;
+                            }
+                        }
+                    }
+                    check_test_expect(test, found[0] != 0 && found[1] != 0 && found[2] != 0 && narrow == 0,
+                                      "the signed longs' overflow builtins are add, imul and cmp rows with seto, on both paths");
+                }
+            }
             if (strcmp(name, "unsigned-power-two-divmod") == 0)
             {
                 uint32_t divides = 0;
@@ -3903,6 +3932,26 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "int tested(int n){int x=9;int a=0&&__builtin_add_overflow(1,2,(int*)0);"
             "int b=n?__builtin_add_overflow(n,7,&x):__builtin_mul_overflow(3,4,&x);"
             "return a+b+x+(int)sizeof(__builtin_add_overflow(7,8,&x));}", "overflow-selected-effects", clang);
+        // #1385's recipes and rows: signed longs' sums, differences and products as the operation and seto (the generic and
+        // the typed builtins), unsigned longs' carries and 128-bit products, ints' 64-bit operations, and mixed
+        // signedness, an unsigned 32-bit product past 2^63 into a _BitInt(63) and long, and bool and signed char
+        // destinations, of boundary values around each width (check_test_program_source_native_bounds checks the rows).
+        check_test_program_source(test,
+            "static const long values[]={0,1,2,-1,-2,0x7fffffffL,0x80000000L,-0x80000000L,3037000499L,3037000500L,-3037000500L,0x100000000L,"
+            "0x7fffffffffffffffL,0x7ffffffffffffffeL,-0x7fffffffffffffffL-1,-0x7fffffffffffffffL};"
+            "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}"
+            "int tested(int n){h=(unsigned)n;for(unsigned i=0;i<16;i++)for(unsigned j=0;j<16;j++){"
+            "long a=values[i],b=values[(j+(unsigned)n)%16],r;unsigned long ua=(unsigned long)a,ub=(unsigned long)b,ur;long long ll;"
+            "int ia=(int)a,ib=(int)b,ir;unsigned uia=(unsigned)a,uib=(unsigned)b,ui;signed char c;_Bool bo;signed _BitInt(63) w;"
+            "mix(__builtin_add_overflow(a,b,&r));mix(r);mix(__builtin_sub_overflow(a,b,&r));mix(r);mix(__builtin_mul_overflow(a,b,&r));mix(r);"
+            "mix(__builtin_saddll_overflow(a,b,&ll));mix(ll);mix(__builtin_ssubl_overflow(a,b,&r));mix(r);mix(__builtin_smull_overflow(a,b,&r));mix(r);"
+            "mix(__builtin_add_overflow(ua,ub,&ur));mix(ur);mix(__builtin_sub_overflow(ua,ub,&ur));mix(ur);mix(__builtin_mul_overflow(ua,ub,&ur));mix(ur);"
+            "mix(__builtin_mul_overflow(a,ub,&r));mix(r);mix(__builtin_add_overflow(a,ub,&ir));mix(ir);mix(__builtin_mul_overflow(a,b,&ir));mix(ir);"
+            "mix(__builtin_add_overflow(ia,ib,&ir));mix(ir);mix(__builtin_sub_overflow(ia,ib,&ir));mix(ir);mix(__builtin_mul_overflow(ia,ib,&ir));mix(ir);"
+            "mix(__builtin_mul_overflow(uia,uib,&ui));mix(ui);mix(__builtin_sub_overflow(uia,uib,&r));mix(r);"
+            "mix(__builtin_mul_overflow(uia,uib,&w));mix((unsigned long long)w);mix(__builtin_mul_overflow(uia,uib,&r));mix(r);"
+            "mix(__builtin_add_overflow(ia,uib,&c));mix(c);mix(__builtin_sub_overflow(ia,ib,&bo));mix(bo);}"
+            "return (int)(h^(h>>32));}", "overflow-instruction-rows", clang);
         check_test_program_source(test,
             "int tested(int n){n+=10;typedef int A[n++];int x=n;n+=3;return (int)sizeof(A)+(int)sizeof(A)+n+x;}",
             "vla-typedef-captures-bound-once", clang);
