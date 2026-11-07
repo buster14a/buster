@@ -6778,7 +6778,8 @@ arguments against the function. The checker now gives these as clang does.
   after a conversion clang warns of and makes (`-Wint-conversion`'s and
   `-Wincompatible-pointer-types`'), where the converted value is no constant:
   an object's value read, or an address converted to an integer narrower
-  than a pointer (`check_init_converted_nonconstant`).
+  than a pointer (`check_init_converted_nonconstant`); an absolute address
+  (`(int *)5`) stays a constant.
 - **Differences left.**
   - `++` and `--` of a complex type are refused ("arithmetic operands
     required"), where clang takes them.
@@ -6786,7 +6787,11 @@ arguments against the function. The checker now gives these as clang does.
     permitted here", where clang's is "arithmetic on a pointer to an incomplete
     type" with a "forward declaration" note.
   - A vector type reached through a pointer typedef (`typedef v4si *pv;`)
-    prints without its typedef's name.
+    prints without its typedef's name, and so does a member's type
+    (`x.f++` of a member `uu f` prints `'struct u'` where clang's is
+    `'uu' (aka 'struct u')`): a record's members keep no declaration.
+  - A braced scalar initializer's failed conversion (`static long x = { p };`)
+    is still "invalid initializer", with no non-constant error.
   - `(*p)++` of a `void *p` lacks clang's `-Wvoid-ptr-dereference` warning
     before its error, and `c++` of a const variable clang's "variable 'c'
     declared const here" note.

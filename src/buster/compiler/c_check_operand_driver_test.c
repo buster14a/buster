@@ -64,6 +64,11 @@ static void check_test_driver_operand_errors(CheckTest* test, const char* clang,
         { "static float f;\nint *q = &f;\n", "-std=gnu17" },
         { "static int a[2];\nlong x = a;\n", "-std=gnu17" },
         { "void f(void) { static float g; static int *q = &g; (void)q; }\n", "-std=gnu17" },
+        // An absolute address stays a constant, however narrow the integer it converts to.
+        { "static int b = (int *)0;\n", "-std=gnu17" },
+        { "static short c = (char *)0x1000;\n", "-std=gnu17" },
+        { "static int d = (void *)0;\n", "-std=gnu17" },
+        { "static long e = (int *)-1;\n", "-std=gnu17" },
         // __clang__ before :: in a GNU list and a C23 one.
         { "int x __attribute__((__clang__::unused));\n", "-std=gnu17" },
         { "void f(void) __attribute__((__clang__::noreturn));\n", "-std=gnu17" },

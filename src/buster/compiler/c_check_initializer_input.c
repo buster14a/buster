@@ -278,8 +278,9 @@ struct CheckInitDiagnostic
 // Whether a static object's scalar initializer, whose INITIALIZE (`initialize`, to the declared `target`) failed as one of
 // clang's conversions it warns of and still makes (-Wint-conversion's between a pointer and an integer,
 // -Wincompatible-pointer-types' between pointers: errors by default), is no constant after that conversion, which clang
-// reports next, at the initializer (#147): an object's value read, or an address converted to an integer narrower than
-// a pointer. Another failed conversion, of a record or a floating value, is the initializer's only error.
+// reports next, at the initializer (#147): an object's value read, or an object's address converted to an integer
+// narrower than a pointer (an absolute address, `(int *)5`'s, stays a constant). Another failed conversion, of a record or a
+// floating value, is the initializer's only error.
 static bool check_init_converted_nonconstant(const CheckInput* input, const CheckStream* stream, const TypeTable* types, TypeId target, uint32_t initialize)
 {
     const uint32_t source = input->graph.operand0[initialize];
@@ -292,7 +293,7 @@ static bool check_init_converted_nonconstant(const CheckInput* input, const Chec
     const bool integer = from == BUSTER_TYPE_KIND_INTEGER || from == BUSTER_TYPE_KIND_ENUM || from == BUSTER_TYPE_KIND_BIT_INT;
     const bool converted = (to == BUSTER_TYPE_KIND_INTEGER && pointer) || (to == BUSTER_TYPE_KIND_POINTER && (pointer || integer));
     const bool read = value.category == CHECK_LVALUE && !designator;
-    const bool narrowed = to == BUSTER_TYPE_KIND_INTEGER && value.constant_kind == CHECK_CONSTANT_ADDRESS && type_size(types, target) < 8;
+    const bool narrowed = to == BUSTER_TYPE_KIND_INTEGER && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && type_size(types, target) < 8;
     return converted && (read || !check_value_static_initializer(&value, false) || narrowed);
 }
 
