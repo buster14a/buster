@@ -196,6 +196,12 @@ static void ir_sroa_test_guards(IrOptimizeTest* test)
         ready = mprotect((char*)mapping + p * page, page, PROT_NONE) == 0;
     }
     ir_optimize_test_expect(test, ready, "SROA guarded field column setup");
+    // Each root's chain (#1366) over fields whose roots interleave, as inlined calls leave them: both paths' queries
+    // against the scan of the function's whole field table that the chain replaces, with the columns ending at a guard
+    // page so that a read past a column faults.
+    uint32_t root_first[3];
+    uint32_t root_last[3];
+    uint32_t field_next[33];
     for (uint32_t count = 0; ready && count <= 33; count += 1)
     {
         IrSroaWork work = {
@@ -204,13 +210,29 @@ static void ir_sroa_test_guards(IrOptimizeTest* test)
             .field_offsets = (uint64_t*)((char*)mapping + 3 * page - count * 8),
             .field_types = (uint32_t*)((char*)mapping + 5 * page - count * 4),
             .field_sizes = (uint32_t*)((char*)mapping + 7 * page - count * 4),
+            .root_first = root_first,
+            .root_last = root_last,
+            .field_next = field_next,
         };
+        memset(root_first, 0, sizeof(root_first));
+        memset(root_last, 0, sizeof(root_last));
         for (uint32_t i = 0; i < count; i += 1)
         {
-            work.field_roots[i] = ir_optimize_test_random(test) % 3;
+            const uint32_t root = ir_optimize_test_random(test) % 3;
+            work.field_roots[i] = root;
             work.field_offsets[i] = ir_optimize_test_random(test) % 128;
             work.field_types[i] = IR_I8 + ir_optimize_test_random(test) % 4;
             work.field_sizes[i] = (ir_type_bits[work.field_types[i]] + 7) / 8;
+            field_next[i] = 0;
+            if (root_last[root] == 0)
+            {
+                root_first[root] = i + 1;
+            }
+            else
+            {
+                field_next[root_last[root] - 1] = i + 1;
+            }
+            root_last[root] = i + 1;
         }
         for (uint32_t trial = 0; trial < 256; trial += 1)
         {
@@ -218,11 +240,21 @@ static void ir_sroa_test_guards(IrOptimizeTest* test)
             const uint64_t offset = ir_optimize_test_random(test) % 128;
             const uint32_t type = IR_I8 + ir_optimize_test_random(test) % 4;
             const uint32_t size = (ir_type_bits[type] + 7) / 8;
+            uint32_t expected = BUSTER_IR_NONE;
+            bool expected_overlap = false;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const bool same = work.field_roots[i] == root && work.field_offsets[i] == offset && work.field_types[i] == type;
+                expected = same ? i : expected;
+                expected_overlap = expected_overlap || (!same && work.field_roots[i] == root && offset < work.field_offsets[i] + work.field_sizes[i] &&
+                                                        work.field_offsets[i] < offset + size);
+            }
             bool scalar_overlap = false;
             bool vector_overlap = false;
             const uint32_t scalar = ir_sroa_field(&work, root, offset, type, size, true, &scalar_overlap);
             const uint32_t vector = ir_sroa_field(&work, root, offset, type, size, false, &vector_overlap);
-            ir_optimize_test_expect(test, scalar == vector && scalar_overlap == vector_overlap, "SROA guarded scalar/vector exact field and overlap queries");
+            ir_optimize_test_expect(test, scalar == expected && vector == expected && scalar_overlap == expected_overlap && vector_overlap == expected_overlap,
+                                    "SROA guarded per-root field and overlap queries against the whole table's scan");
         }
     }
     if (mapping != MAP_FAILED)

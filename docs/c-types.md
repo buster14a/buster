@@ -216,6 +216,20 @@ insertion a name: it is the lookups that every access runs. The checker keeps
 each access's offset in its stream (`CheckStream.member_offsets`), which the
 lowering reads instead of looking the member up again.
 
+Designated initializer names (#1498) consume the same index one record at a
+time (`check_init_member` in `c_check_initializer.c`). The result is that
+record's immediate member, including an anonymous member on the path to the
+name, rather than the final named leaf. The initializer cursor enters each
+anonymous record so its union history, brace elision and following positional
+values retain their existing meaning. A scalar parser selects the scalar
+scan/probe twins; baseline hosts do likewise. No new index, per-designator
+allocation or path representation is produced. Exhausted lookup capacity
+retains the prior direct-member scan and anonymous-member search. The original
+`c_check_designator_lookup_test.c` fixtures cover scan/index boundaries, wide
+records, exhausted capacity, missing names and anonymous-union continuation;
+the source fixtures compare independent bytes with emitted ELF and Clang.
+This change has not yet been measured end to end on the 9700X.
+
 **Measured together with the consumers.** On the locked 9700X, CPU 2, main
 `92c025e7` against `7a0597bf`, eight alternating `perf stat -r 3` rounds of
 the frozen SQLite `-c` configuration give median task clock 147.135 →
@@ -565,3 +579,4 @@ columns and exact twins. `test-types` checks legal batch partitions, layout,
 compatibility and Clang rules; [#133](https://github.com/buster14a/buster/issues/133)/[#137](https://github.com/buster14a/buster/issues/137) require actual source request streams,
 small/large combined costs, memory and conditioned occupancy before changing
 these interfaces.
+

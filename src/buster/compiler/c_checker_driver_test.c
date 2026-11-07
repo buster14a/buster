@@ -364,11 +364,11 @@ static bool check_test_driver_needed(const char* path, char* names, uint64_t cap
     return valid;
 }
 
-// The direct path's -l libraries, through the production command (#145): a program that calls libm's functions, takes
+// The driver's -l libraries, through the production command (#145): a program that calls libm's functions, takes
 // one's address and reads libm's signgam (data, through its GOT slot), linked with -lm by both paths into the same bytes,
 // that runs and prints what this executable's own libm computes, needing libm.so.6 before libc.so.6; one that calls
-// none, with -lm, needing libc.so.6 alone; and the refusals, each named: no -lm, a library no directory has, and an
-// archive with members.
+// none, with -lm, needing libc.so.6 alone; and the refusals, each named: no -lm and a library no directory has.
+// An archive containing only its empty symbol index adds nothing and links the plain program (#1470).
 static void check_test_driver_libraries(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] = "#include <math.h>\n#include <stdio.h>\ndouble (*pick)(double) = cos;\n"
@@ -436,7 +436,6 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
     } const refusals[] = {
         { "no -lm", "undefined reference to 'cos'", { (char*)executable, "-o", outputs[0], source, NULL } },
         { "a library nowhere", "cannot find -lbuster_nowhere", { (char*)executable, "-o", outputs[0], source, "-lm", "-lbuster_nowhere", NULL } },
-        { "an archive with members", "unsupported: static libraries", { (char*)executable, "-o", outputs[0], source, "-L", (char*)directory, "-lbuster_members", NULL } },
     };
     for (uint32_t r = 0; written && r < BUSTER_ARRAY_LENGTH(refusals); r += 1)
     {
@@ -444,6 +443,19 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
         check_test_expect(test, status == 1 && text != NULL && strstr(text, refusals[r].message) != NULL, refusals[r].name);
         free(text);
     }
+    char* const indexed_arguments[] = { (char*)executable, "-o", outputs[0], plain_source, "-L", (char*)directory, "-lbuster_members", NULL };
+    const int indexed_status = written ? check_test_driver_spawn(indexed_arguments, &text) : -1;
+    if (written)
+    {
+        free(text);
+    }
+    check_test_expect(test, indexed_status == 0, "an archive containing only its empty symbol index links");
+    memset(captured, 0, sizeof(captured));
+    output = indexed_status == 0 ? popen(outputs[0], "r") : NULL;
+    const size_t indexed_got = output != NULL ? fread(captured, 1, sizeof(captured) - 1, output) : 0;
+    const int indexed_closed = output != NULL ? pclose(output) : -1;
+    check_test_expect(test, indexed_closed == 0 && indexed_got == sizeof("plain\n") - 1 && memcmp(captured, "plain\n", indexed_got) == 0,
+                      "the indexed-archive link replaces the math executable and runs the plain program");
     unlink(source);
     unlink(plain_source);
     unlink(archive_path);
@@ -1338,7 +1350,7 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
 
 // __builtin_call_with_static_chain (#148): calls whose callees read the chain in r10 through naked functions (direct,
 // indirect, of an aggregate result, a floating one, variadic, past six arguments, in a loop, a musttail return's, which
-// clang's code makes an ordinary call; its callee, chain and arguments evaluated in that order), built by both paths at
+// clang's code makes an ordinary call; its callee, chain and argument each evaluated once, without a fixed order), built by both paths at
 // Tier 0 and Tier 1 (--tier1 --verify, whose certificate checks each call's sequence), each the output of clang -O0's
 // build of the same program.
 static void check_test_driver_static_chain(CheckTest* test, const char* clang, const char* executable, const char* directory)
@@ -1351,10 +1363,10 @@ static void check_test_driver_static_chain(CheckTest* test, const char* clang, c
                                   "__attribute__((naked, noinline)) double chain_double(double x) { __asm__(\"cvtsi2sdq %r10, %xmm1\\n\\taddsd %xmm1, %xmm0\\n\\tret\"); }\n"
                                   "__attribute__((naked, noinline)) struct S chain_struct(void) { __asm__(\"movq %rdi, %rax\\n\\tmovq %r10, (%rdi)\\n\\tmovq $2, 8(%rdi)\\n\\tmovq $3, 16(%rdi)\\n\\tret\"); }\n"
                                   "__attribute__((naked, noinline)) long chain_variadic(int n, ...) { __asm__(\"movq %r10, %rax\\n\\taddq %rsi, %rax\\n\\tret\"); }\n"
-                                  "static int order[8]; static int at;\n"
-                                  "static long (*pick(long (*f)(long)))(long) { order[at++] = 1; return f; }\n"
-                                  "static char* chain_of(char* p) { order[at++] = 2; return p; }\n"
-                                  "static long arg(long x) { order[at++] = 3; return x; }\n"
+                                  "static int evaluated[3];\n"
+                                  "static long (*pick(long (*f)(long)))(long) { evaluated[0] += 1; return f; }\n"
+                                  "static char* chain_of(char* p) { evaluated[1] += 1; return p; }\n"
+                                  "static long arg(long x) { evaluated[2] += 1; return x; }\n"
                                   "static char buffer[64];\n"
                                   "static void target(void) {}\n"
                                   "__attribute__((noinline)) long t_direct(char* p) { return __builtin_call_with_static_chain(read_chain(), p); }\n"
@@ -1379,10 +1391,10 @@ static void check_test_driver_static_chain(CheckTest* test, const char* clang, c
                                   "    long (*volatile f)(long) = chain_plus;\n"
                                   "    long (*g)(int, ...) = chain_variadic;\n"
                                   "    long q = __builtin_call_with_static_chain(pick(f)(arg(k)), chain_of((char*)40));\n"
-                                  "    printf(\"%ld %d%d%d %ld\\n\", q, order[0], order[1], order[2], __builtin_call_with_static_chain(g(1, 5L), (char*)6));\n"
+                                  "    printf(\"%ld %d%d%d %ld\\n\", q, evaluated[0], evaluated[1], evaluated[2], __builtin_call_with_static_chain(g(1, 5L), (char*)6));\n"
                                   "    printf(\"%ld %ld %ld %ld %ld\\n\", t_direct((char*)9), t_plus(5, (char*)100), t_swap((char*)100, 5), t_sum((char*)1000), t_indirect(chain_plus, (char*)40, k));\n"
                                   "    printf(\"%ld %ld %ld %ld %ld\\n\", t_indirect_r10((char*)40, chain_plus, k), t_variadic((char*)12), t_variadic_indirect(chain_variadic, (char*)6), t_loop((char*)10, 4), t_tail(5, (char*)300));\n"
-                                  "    return 0;\n"
+                                  "    return evaluated[0] != 1 || evaluated[1] != 1 || evaluated[2] != 1;\n"
                                   "}\n";
     char source[256];
     char outputs[5][256];
@@ -2971,6 +2983,159 @@ static void check_test_driver_array_alignment(CheckTest* test, const char* clang
     }
     unlink(linked);
 }
+
+// Filesystem fixtures keep the conservative overlap relation independent of the identity representation.
+// The two missing spellings and the directory symlink must alias even though the leaf does not exist.
+static void check_test_dependency_identities(CheckTest* test, const char* directory)
+{
+    char paths[10][512];
+    snprintf(paths[0], sizeof(paths[0]), "%s/admission-identity-file", directory);
+    snprintf(paths[1], sizeof(paths[1]), "%s/admission-identity-hard", directory);
+    snprintf(paths[2], sizeof(paths[2]), "%s/admission-identity-link", directory);
+    snprintf(paths[3], sizeof(paths[3]), "%s/admission-identity-absent", directory);
+    snprintf(paths[4], sizeof(paths[4]), "%s/./admission-identity-absent", directory);
+    snprintf(paths[5], sizeof(paths[5]), "%s/admission-identity-dangling", directory);
+    snprintf(paths[6], sizeof(paths[6]), "%s/admission-identity-distinct", directory);
+    snprintf(paths[7], sizeof(paths[7]), "%s/admission-identity-missing-dir/admission-identity-absent", directory);
+    snprintf(paths[8], sizeof(paths[8]), "%s/./admission-identity-file", directory);
+    snprintf(paths[9], sizeof(paths[9]), "%s/admission-identity-directory/admission-identity-absent", directory);
+    char linked_directory[512];
+    snprintf(linked_directory, sizeof(linked_directory), "%s/admission-identity-directory", directory);
+    const bool ready = parse_test_write(paths[0], "identity", 8) && link(paths[0], paths[1]) == 0 &&
+                       symlink("admission-identity-file", paths[2]) == 0 && symlink("admission-identity-absent", paths[5]) == 0 &&
+                       symlink(".", linked_directory) == 0;
+    check_test_expect(test, ready, "dependency identity fixture creation");
+    if (ready)
+    {
+        DependencyIdentity identities[10];
+        uint64_t probes = 0;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(identities); i += 1)
+        {
+            identities[i] = dependency_identity(paths[i], &probes);
+        }
+        check_test_expect(test, probes <= 3 * BUSTER_ARRAY_LENGTH(identities), "identity collection uses at most three probes per path");
+        for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(identities); a += 1)
+        {
+            for (uint32_t b = 0; b < BUSTER_ARRAY_LENGTH(identities); b += 1)
+            {
+                const bool file_a = a <= 2 || a == 8;
+                const bool file_b = b <= 2 || b == 8;
+                const bool missing_a = a == 3 || a == 4 || a == 9;
+                const bool missing_b = b == 3 || b == 4 || b == 9;
+                const bool expected = a == b || a == 5 || b == 5 || (file_a && file_b) || (missing_a && missing_b);
+                check_test_expect(test, dependency_identities_overlap(&identities[a], &identities[b]) == expected,
+                                  "dependency identity preserves textual, inode, parent and dangling-link overlap");
+            }
+        }
+        const DependencyIdentity root = dependency_identity("/buster-dependency-admission-root-missing", NULL);
+        struct stat root_status;
+        check_test_expect(test, stat("/", &root_status) == 0 && root.parent_found && root.parent_device == root_status.st_dev &&
+                                root.parent_inode == root_status.st_ino, "root-level dependency path observes the root directory");
+        char long_path[PATH_MAX + 8];
+        memset(long_path, 'x', sizeof(long_path));
+        long_path[PATH_MAX] = '/';
+        long_path[PATH_MAX + 1] = 'a';
+        long_path[PATH_MAX + 2] = 0;
+        const DependencyIdentity long_identity = dependency_identity(long_path, NULL);
+        check_test_expect(test, !long_identity.found && !long_identity.parent_found && !long_identity.dangling &&
+                                dependency_identities_overlap(&long_identity, &long_identity),
+                          "overlong parent keeps textual equality without truncating directory identity");
+    }
+    unlink(paths[0]);
+    unlink(paths[1]);
+    unlink(paths[2]);
+    unlink(paths[5]);
+    unlink(linked_directory);
+}
+
+// Exercise admission directly so its syscall count and command-arena growth are visible independently of compilation.
+static void check_test_dependency_admission(CheckTest* test, const char* directory)
+{
+    char names[32][512];
+    char* sources[32];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sources); i += 1)
+    {
+        snprintf(names[i], sizeof(names[i]), "%s/dependency-admission-%02u.c", directory, i);
+        sources[i] = names[i];
+    }
+    const uint32_t counts[] = { 0, 1, 16, 32 };
+    DependencyOptions options = { .enabled = true };
+    Arena arena = arena_reserve(UINT64_C(1) << 20);
+    check_test_expect(test, arena.base != NULL, "dependency admission scratch");
+    if (arena.base != NULL)
+    {
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(counts); i += 1)
+        {
+            arena_pop_to(&arena, 0);
+            const uint32_t count = counts[i];
+            uint64_t probes = 0;
+            const bool admitted = dependency_check_destinations_counted(&options, sources, count, NULL, true, false, &arena, &probes);
+            const uint64_t storage = (uint64_t)count * (80 + 2 * sizeof(DependencyIdentity)) + 3 * _Alignof(DependencyIdentity);
+            check_test_expect(test, admitted && arena.length <= storage,
+                              "distinct dependency destinations use linear filename and identity storage");
+            check_test_expect(test, admitted && probes <= (uint64_t)count * 9 && (count == 0 || probes != 0),
+                              "dependency admission probes each source, object and destination at most three times");
+        }
+        arena_pop_to(&arena, 0);
+        sources[31] = "-";
+        uint64_t probes = 0;
+        check_test_expect(test, dependency_check_destinations_counted(&options, sources, 32, NULL, true, false, &arena, &probes) && probes <= 32 * 9,
+                          "reused input identities skip stdin in every destination pass");
+        sources[31] = names[31];
+        arena_pop_to(&arena, 0);
+        probes = 0;
+        check_test_expect(test, dependency_check_destinations_counted(&options, sources, 32, NULL, false, true, &arena, &probes) && probes <= (32 * 2 + 1) * 3,
+                          "implicit executable identity is collected once across all destinations");
+        arena_pop_to(&arena, 0);
+        probes = 0;
+        check_test_expect(test, dependency_check_destinations_counted(&options, sources, 32, NULL, false, false, &arena, &probes) && probes <= 32 * 6,
+                          "syntax-only dependency admission probes no primary output");
+        arena_pop_to(&arena, 0);
+        options.path = "-";
+        probes = 0;
+        check_test_expect(test, dependency_check_destinations_counted(&options, sources, 32, NULL, true, false, &arena, &probes) && arena.length == 0 && probes == 0,
+                          "stdout dependency admission needs no storage or filesystem probes");
+        options.path = names[31];
+        check_test_expect(test, !dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
+                          "shared dependency destination checks the last source");
+        options.path = "dependency-admission-31.o";
+        check_test_expect(test, !dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
+                          "shared dependency destination checks the last implicit object");
+        options.path = "dependency-admission-shared.d";
+        arena_pop_to(&arena, 0);
+        check_test_expect(test, dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena) && arena.length <= 32 * 40,
+                          "shared dependency destination reuses bounded object names");
+        const uint64_t capacity = arena.capacity;
+        arena_pop_to(&arena, 0);
+        arena.capacity = 64;
+        options.path = NULL;
+        check_test_expect(test, !dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
+                          "identity-array capacity exhaustion refuses admission before reuse");
+        options.path = "dependency-admission-shared.d";
+        arena_pop_to(&arena, 0);
+        arena.capacity = 0;
+        check_test_expect(test, !dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
+                          "object-name capacity exhaustion refuses admission");
+        options.path = "-";
+        check_test_expect(test, dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
+                          "stdout admission succeeds with exhausted scratch");
+        options.enabled = false;
+        options.path = "";
+        check_test_expect(test, dependency_check_destinations(&options, NULL, 32, NULL, true, false, &arena),
+                          "disabled admission does not read sources");
+        options.enabled = true;
+        check_test_expect(test, dependency_check_destinations(&options, NULL, 0, NULL, true, false, &arena),
+                          "empty admission does not inspect destination");
+        arena.capacity = capacity;
+        options.path = "dependency-admission-shared.d";
+        options.only = true;
+        arena_pop_to(&arena, 0);
+        check_test_expect(test, dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena) && arena.length == 0,
+                          "dependency-only admission needs no object names");
+    }
+    arena_release(&arena);
+}
+
 
 // A library that a needed library refers to (#398's review): main calls a_func, which libA defines and which calls
 // b_func, which libB defines. Where libA's DT_NEEDED doesn't name libB, the executable needs both, in the line's order,
@@ -4715,49 +4880,141 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     free(text);
     text = NULL;
     // BUSTER_HUGE_PAGES (#1109, arena_page_policy), each case with this process's own setting, which the child inherits,
-    // as the system's or off: "0" turns transparent huge pages off for the process; "1" leaves them as the system has
-    // them, even where the process that started it had them off; without it, they are off on a virtual machine (CPUID's
-    // hypervisor bit), which the child must decide itself, and elsewhere as the process that started it had them.
+    // as the system's or off, and with the busy test's answer forced (BUSTER_TEST_HOST_BUSY, #672): "0" turns transparent
+    // huge pages off for the process; "1" leaves them as the system has them, even where the process that started it had
+    // them off; without it, they are off on a virtual machine (CPUID's hypervisor bit), which the child must decide
+    // itself, and elsewhere as the process that started it had them, but on a busy host, with them on, its arenas alone
+    // take base pages ("busy").
     const char* pages_saved = getenv("BUSTER_HUGE_PAGES");
     char* pages_copy = pages_saved != NULL ? strdup(pages_saved) : NULL;
+    const char* busy_saved = getenv("BUSTER_TEST_HOST_BUSY");
+    char* busy_copy = busy_saved != NULL ? strdup(busy_saved) : NULL;
     const int pages_own = prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0);
     uint32_t eax = 0;
     uint32_t ebx = 0;
     uint32_t ecx = 0;
     uint32_t edx = 0;
     const bool virtual_machine = __get_cpuid(1, &eax, &ebx, &ecx, &edx) != 0 && (ecx & (1u << 31)) != 0;
-    // Each case: the variable's value (null for none), this process's setting, and whether the child's are off.
+    // Each case: the variable's value (null for none), this process's setting, whether the host is busy, and the child's
+    // report.
     const struct
     {
         const char* setting;
         int inherited;
-        bool off;
+        const char* busy;
+        const char* report;
     } pages_cases[] = {
-        { "0", 0, true },
-        { "1", 1, false },
-        { NULL, 0, virtual_machine },
-        { NULL, 1, true },
+        { "0", 0, "0", "off" },
+        { "1", 1, "0", "system" },
+        { NULL, 0, "0", virtual_machine ? "off" : "system" },
+        { NULL, 1, "0", "off" },
+        { "0", 0, "1", "off" },
+        { "1", 0, "1", "system" },
+        { NULL, 0, "1", virtual_machine ? "off" : "busy" },
+        { NULL, 1, "1", "off" },
     };
-    bool paged = made && (pages_saved == NULL || pages_copy != NULL) && pages_own >= 0;
+    bool paged = made && (pages_saved == NULL || pages_copy != NULL) && (busy_saved == NULL || busy_copy != NULL) && pages_own >= 0;
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(pages_cases); c += 1)
     {
-        paged = paged && prctl(PR_SET_THP_DISABLE, pages_cases[c].inherited, 0, 0, 0) == 0 &&
+        paged = paged && prctl(PR_SET_THP_DISABLE, pages_cases[c].inherited, 0, 0, 0) == 0 && setenv("BUSTER_TEST_HOST_BUSY", pages_cases[c].busy, 1) == 0 &&
                 (pages_cases[c].setting != NULL ? setenv("BUSTER_HUGE_PAGES", pages_cases[c].setting, 1) : unsetenv("BUSTER_HUGE_PAGES")) == 0;
         const int pages_status = paged ? check_test_driver_spawn(syntax, &text) : -1;
-        const char* expected = pages_cases[c].off ? "\ntime-process\thuge-pages\toff\n" : "\ntime-process\thuge-pages\tsystem\n";
+        char expected[64];
+        snprintf(expected, sizeof(expected), "\ntime-process\thuge-pages\t%s\n", pages_cases[c].report);
         paged = pages_status == 0 && text != NULL && strstr(text, expected) != NULL;
+        if (!paged)
+        {
+            printf("  huge pages, case %u: status %d, expected%s", c, pages_status, expected);
+        }
         free(text);
         text = NULL;
     }
+    // A busy host's decision is the arenas' alone: a program that the compiler starts, as time-runs times one, has huge
+    // pages as the compiler's parent had them (#1561's review), where the virtual machine's rule turns them off for the
+    // compiler and what it starts. The program reads its own setting (/proc/self/status' THP_enabled).
+    char thp_path[256];
+    char thp_script[400];
+    snprintf(thp_path, sizeof(thp_path), "%s/time_stages_thp.txt", directory);
+    snprintf(thp_script, sizeof(thp_script), "grep THP_enabled /proc/self/status > '%s'", thp_path);
+    char* const timed_child[] = { compiler, "time-runs", "--runs", "1", "--executable", "/bin/sh", "--list", "-c", thp_script, NULL };
+    unlink(thp_path);
+    paged = paged && prctl(PR_SET_THP_DISABLE, 0, 0, 0, 0) == 0 && setenv("BUSTER_TEST_HOST_BUSY", "1", 1) == 0 && unsetenv("BUSTER_HUGE_PAGES") == 0;
+    const int child_status = paged ? check_test_driver_spawn_stream(timed_child, &text, true) : -1;
+    free(text);
+    text = NULL;
+    char thp_text[64] = { 0 };
+    FILE* thp_file = child_status == 0 ? fopen(thp_path, "r") : NULL;
+    const size_t thp_length = thp_file != NULL ? fread(thp_text, 1, sizeof(thp_text) - 1, thp_file) : 0;
+    if (thp_file != NULL)
+    {
+        fclose(thp_file);
+    }
+    const char* thp_expected = virtual_machine ? "THP_enabled:\t0\n" : "THP_enabled:\t1\n";
+    const bool inherited_right = thp_length != 0 && strcmp(thp_text, thp_expected) == 0;
+    if (!inherited_right)
+    {
+        printf("  huge pages: the program time-runs started (status %d) reported \"%s\", where %s was expected\n", child_status, thp_text, thp_expected);
+    }
+    paged = paged && child_status == 0 && inherited_right;
+    unlink(thp_path);
+    // So does a program interpret-c runs in the compiler's own process (#1561's review): it reads its THP_enabled as a
+    // program its parent started would, but where BUSTER_HUGE_PAGES or the virtual machine's rule decides.
+    static const char thp_program[] = "#include <stdio.h>\n"
+                                      "#include <string.h>\n"
+                                      "int main(void)\n"
+                                      "{\n"
+                                      "    FILE* file = fopen(\"/proc/self/status\", \"r\");\n"
+                                      "    char line[256];\n"
+                                      "    int found = 0;\n"
+                                      "    while (file != 0 && fgets(line, sizeof(line), file) != 0)\n"
+                                      "    {\n"
+                                      "        if (strncmp(line, \"THP_enabled:\", 12) == 0)\n"
+                                      "        {\n"
+                                      "            fputs(line, stdout);\n"
+                                      "            found = 1;\n"
+                                      "        }\n"
+                                      "    }\n"
+                                      "    if (file != 0)\n"
+                                      "    {\n"
+                                      "        fclose(file);\n"
+                                      "    }\n"
+                                      "    return found ? 0 : 1;\n"
+                                      "}\n";
+    char thp_source[256];
+    snprintf(thp_source, sizeof(thp_source), "%s/time_stages_thp.c", directory);
+    char* const interpreted[] = { compiler, "interpret-c", thp_source, NULL };
+    const bool thp_written = parse_test_write(thp_source, thp_program, sizeof(thp_program) - 1);
+    // The variable unset, then "1", with the busy test forced and the parent's huge pages on.
+    const char* interpreted_settings[] = { NULL, "1" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(interpreted_settings); i += 1)
+    {
+        paged = paged && thp_written &&
+                (interpreted_settings[i] != NULL ? setenv("BUSTER_HUGE_PAGES", interpreted_settings[i], 1) : unsetenv("BUSTER_HUGE_PAGES")) == 0;
+        const int interpreted_status = paged ? check_test_driver_spawn_stream(interpreted, &text, true) : -1;
+        const char* interpreted_expected = virtual_machine && interpreted_settings[i] == NULL ? "THP_enabled:\t0\n" : "THP_enabled:\t1\n";
+        const bool interpreted_right = interpreted_status == 0 && text != NULL && strstr(text, interpreted_expected) != NULL;
+        if (!interpreted_right)
+        {
+            printf("  huge pages: interpret-c's program, BUSTER_HUGE_PAGES %s (status %d), printed \"%s\", where %s was expected\n",
+                   interpreted_settings[i] != NULL ? interpreted_settings[i] : "unset", interpreted_status, text != NULL ? text : "", interpreted_expected);
+        }
+        paged = paged && interpreted_right;
+        free(text);
+        text = NULL;
+    }
+    unlink(thp_source);
     paged = (pages_own < 0 || prctl(PR_SET_THP_DISABLE, pages_own, 0, 0, 0) == 0) && paged;
     paged = (pages_copy != NULL ? setenv("BUSTER_HUGE_PAGES", pages_copy, 1) == 0 : unsetenv("BUSTER_HUGE_PAGES") == 0) && paged;
+    paged = (busy_copy != NULL ? setenv("BUSTER_TEST_HOST_BUSY", busy_copy, 1) == 0 : unsetenv("BUSTER_TEST_HOST_BUSY") == 0) && paged;
     free(pages_copy);
+    free(busy_copy);
     printf("  huge pages: %s\n", virtual_machine ? "a virtual machine (CPUID's hypervisor bit): off without BUSTER_HUGE_PAGES, by the child's own test" :
-                                                   "not a virtual machine: as the parent had them without BUSTER_HUGE_PAGES");
+                                                   "not a virtual machine: as the parent had them without BUSTER_HUGE_PAGES, the arenas' alone off on a busy host");
     check_test_expect(test, paged, virtual_machine ? "BUSTER_HUGE_PAGES=0 turns huge pages off for the process, 1 leaves them as the system has them, and "
-                                                     "on this virtual machine they are off without it" :
+                                                     "on this virtual machine they are off without it, for the programs it starts or interprets too" :
                                                      "BUSTER_HUGE_PAGES=0 turns huge pages off for the process, 1 leaves them as the system has them, and "
-                                                     "on this machine, not virtual, they are as the process's parent had them without it");
+                                                     "on this machine, not virtual, they are as the process's parent had them without it; a busy host turns "
+                                                     "them off for the arenas alone, not for the programs the compiler starts or interprets");
     // measure-compile on the same source, with this compiler as its reference, and with a reference that fails.
     char* const measured[] = { compiler, "measure-compile", "--runs", "2", "--directory", (char*)directory, "--reference", compiler, "--", "-c", source, NULL };
     char* const failed[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference", "/bin/false", "--", "-c", source, NULL };
@@ -6169,8 +6426,11 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
 #include "c_check_ms_struct_driver_test.c"
 #include "c_check_ignored_pragma_driver_test.c"
 #include "c_check_implicit_driver_test.c"
+#include "c_check_self_assign_driver_test.c"
 #include "c_check_kr_driver_test.c"
 #include "c_check_return_driver_test.c"
+#include "c_check_return_call_driver_test.c"
+#include "c_check_void_conditional_driver_test.c"
 #include "c_check_fortify_driver_test.c"
 #include "c_check_library_driver_test.c"
 #include "c_check_transparent_driver_test.c"
@@ -6388,6 +6648,7 @@ static void check_test_driver_declspec_literals(CheckTest* test, const char* cla
 #include "c_check_label_attribute_driver_test.c"
 #include "c_check_resume_driver_test.c"
 #include "c_check_empty_declaration_driver_test.c"
+#include "c_check_block_attribute_driver_test.c"
 #include "c_check_resume_corpus_test.c"
 #include "c_check_kr_recovery_driver_test.c"
 #include "c_check_lane_attribute_driver_test.c"
@@ -7270,6 +7531,8 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_initializer_warning_test.c"
 #include "c_check_warning_driver_test.c"
 #include "c_check_redefinition_driver_test.c"
+#include "c_check_format_bitint_driver_test.c"
+#include "c_check_sign_compare_driver_test.c"
 
 // The terminal CLI may leave mappings for exit, but callers that go on compiling must retain the reusable command's
 // cleanup contract. Warm each route once so lazy thread scratch and libc state are outside the comparison.
@@ -7402,6 +7665,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     const char* clang = "clang";
     const char* executable = NULL;
     bool lazy = false;
+    bool sign_compare_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -7412,6 +7676,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--executable") == 0 && i + 1 < argc)
         {
             executable = argv[++i];
+        }
+        else if (strcmp(argv[i], "--sign-compare-only") == 0)
+        {
+            sign_compare_only = true;
         }
         else if (strcmp(argv[i], "--lazy-system-headers") == 0)
         {
@@ -7431,6 +7699,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             options = false;
         }
     }
+    options &= !sign_compare_only || (!lazy && check_driver_part.count == 1);
     check_test_expect(&test, options, "driver test options are recognized");
     // The library-builtin table is pinned to BUSTER_CLANG_REFERENCE_VERSION: a different clang release is reported with
     // both versions, and the library comparisons then skip only the names that depend on its table (#1131).
@@ -7443,7 +7712,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     // _optimize_pragmas and _kr_policy), whose gates below have no `!lazy`. Every other check runs the same commands
     // either way, so the eager command's run of them is the lazy one's too; repeating them took 90% of the lazy
     // command's time. A section that comes to take `lazy` loses the `!lazy` of its gate.
-    if (!lazy && check_test_driver_takes())
+    if (!sign_compare_only && !lazy && check_test_driver_takes())
     {
         check_test_driver_warning_order(&test);
         check_test_driver_unselected_roots(&test);
@@ -7914,12 +8183,16 @@ static int run_checker_driver_tests(int argc, char** argv)
     char directory[] = "/tmp/buster-checker-driver-XXXXXX";
     const bool temporary = options && mkdtemp(directory) != NULL;
     check_test_expect(&test, temporary, "driver test directory is available");
+    if (temporary && sign_compare_only)
+    {
+        check_test_driver_sign_compare(&test, clang, executable, directory);
+    }
     const char* clang_arguments[] = { "-std=gnu17", "-w" };
-    if (temporary && !lazy && check_test_driver_takes())
+    if (temporary && !sign_compare_only && !lazy && check_test_driver_takes())
     {
         check_test_driver_deep(&test, clang, executable, directory);
     }
-    for (uint32_t i = 0; temporary && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    for (uint32_t i = 0; temporary && !sign_compare_only && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
         if (check_test_driver_takes())
         {
@@ -7985,7 +8258,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             unlink(source);
         }
     }
-    if (temporary)
+    if (temporary && !sign_compare_only)
     {
         if (!lazy && check_test_driver_takes())
         {
@@ -8020,6 +8293,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_resumed_declarations(&test, clang, executable, directory);
             check_test_driver_empty_declarations(&test, clang, executable, directory);
+            check_test_driver_block_attributes(&test, clang, executable, directory);
             check_test_corpus_resumed_declarations(&test, clang, directory);
             check_test_driver_kr_recovery(&test, clang, executable, directory);
         }
@@ -8049,6 +8323,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_redefinitions(&test, clang, executable, directory);
             }
+            check_test_driver_format_bitints(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
@@ -8062,6 +8337,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_large_function(&test, clang, executable, directory);
+            check_test_driver_large_asm(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
@@ -8165,6 +8441,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_conventions(&test, clang, executable, directory);
+                check_test_driver_preserving_frames(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -8194,9 +8471,21 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_returns(&test, clang, executable, directory);
             }
+            if (!lazy)
+            {
+                check_test_driver_return_calls(&test, clang, executable, directory);
+            }
+            if (!lazy)
+            {
+                check_test_driver_self_assign_macros(&test, clang, executable, directory);
+            }
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_fortify(&test, clang, executable, directory);
+            }
+            if (!lazy)
+            {
+                check_test_driver_void_conditionals(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -8425,6 +8714,8 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_dependency_identities(&test, directory);
+                check_test_dependency_admission(&test, directory);
                 check_test_driver_dependencies(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
@@ -8485,6 +8776,9 @@ static int run_checker_driver_tests(int argc, char** argv)
                 check_test_driver_cpu_pinning(&test, executable, directory);
             }
         }
+    }
+    if (temporary)
+    {
         rmdir(directory);
     }
     check_test_expect(&test, check_driver_part.taken != 0, "the driver test's part runs some of its checks");

@@ -79,7 +79,7 @@ static void ir_verified_test_rebuild(IrOptimizeTest* test, const IrFunction* fun
     arena_pop_to(output, mark);
 }
 
-static void ir_verified_test_case(IrOptimizeTest* test, const IrFunction* input, Arena* output, Arena* analyses, Arena* reference, Arena* scratch, uint32_t passes, uint32_t path, bool fallback)
+static void ir_verified_test_case(IrOptimizeTest* test, const IrFunction* input, Arena* output, Arena* analyses, Arena* reference, Arena* scratch, uint32_t passes, uint32_t path, bool fallback, bool scalar_override)
 {
     const uint64_t output_mark = output->length;
     const uint64_t analysis_mark = analyses->length;
@@ -88,6 +88,7 @@ static void ir_verified_test_case(IrOptimizeTest* test, const IrFunction* input,
     IrOptimizeOptions options = ir_optimize_options();
     options.passes = passes;
     options.path = path;
+    options.scalar = scalar_override;
     options.sweep_limit = fallback ? 0 : options.sweep_limit;
     IrOptimizeResult expected = { 0 };
     IrOptimizeResult actual = { 0 };
@@ -100,6 +101,11 @@ static void ir_verified_test_case(IrOptimizeTest* test, const IrFunction* input,
     ir_optimize_test_expect(test, after.error == IR_OK, "verified handoff: fixture accepted");
     if (before.error == IR_OK && after.error == IR_OK)
     {
+        const bool explicit_scalar = path == BUSTER_IR_OPTIMIZE_SCALAR || (path == BUSTER_IR_OPTIMIZE_AUTO && scalar_override);
+        (void)explicit_scalar;
+        const DominatorPath expected_path = actual.function.block_count == 0 || BUSTER_SCALAR_PATH(explicit_scalar) ? DOMINATOR_SCALAR : DOMINATOR_VECTOR;
+        ir_optimize_test_expect(test, analysis.dominators.path == expected_path,
+                                "verified handoff: final dominance follows caller policy, not pass heuristic");
         ir_optimize_test_expect(test, ir_optimize_test_equal(&expected.function, &actual.function), "verified handoff: unchanged optimized IR");
         ir_optimize_test_expect(test, expected.folded == actual.folded && expected.removed_blocks == actual.removed_blocks &&
                                 expected.removed_instructions == actual.removed_instructions && expected.sccp_visits == actual.sccp_visits &&
@@ -291,6 +297,41 @@ static void ir_verified_test_failures(IrOptimizeTest* test, Arena* input, Arena*
     arena_pop_to(input, 0);
 }
 
+
+static void ir_verified_test_dominator_policy(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
+{
+    IrFunction function = { 0 };
+    const bool created = ir_optimize_test_diamond(input, &function, 2);
+    ir_optimize_test_expect(test, created, "dominator policy: branchy fixture allocation");
+    if (created)
+    {
+        ir_optimize_test_expect(test, ir_optimize_auto_scalar(&function), "dominator policy: fixture chooses scalar transformation passes");
+        for (uint32_t explicit_scalar = 0; explicit_scalar < 2; explicit_scalar += 1)
+        {
+            IrOptimizeWork work = { 0 };
+            const uint64_t output_mark = output->length;
+            const uint64_t scratch_mark = scratch->length;
+            const IrCheck check = ir_optimize_prepare_twins(&work, &function, output, scratch, true, explicit_scalar != 0, true);
+            ir_optimize_test_expect(test, check.error == IR_OK, "dominator policy: preparation accepted");
+            if (check.error == IR_OK)
+            {
+                const DominatorPath expected = BUSTER_SCALAR_PATH(explicit_scalar != 0) ? DOMINATOR_SCALAR : DOMINATOR_VECTOR;
+                ir_optimize_test_expect(test, work.scalar && work.dominators.path == expected,
+                                        "dominator policy: scalar passes do not force scalar dominance");
+                // Independently known diamond: entry dominates every block, neither arm dominates the join.
+                const uint32_t join = function.block_count - 1;
+                ir_optimize_test_expect(test, dominators_dominates(&work.dominators, 0, join) &&
+                                        !dominators_dominates(&work.dominators, 1, join) &&
+                                        !dominators_dominates(&work.dominators, 2, join),
+                                        "dominator policy: diamond relation is unchanged");
+            }
+            arena_pop_to(scratch, scratch_mark);
+            arena_pop_to(output, output_mark);
+        }
+    }
+    arena_pop_to(input, 0);
+}
+
 static void ir_verified_tests(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(8ull << 20);
@@ -337,18 +378,21 @@ static void ir_verified_tests(IrOptimizeTest* test)
         {
             for (uint32_t passes = 0; passes < 8; passes += 1)
             {
-                ir_verified_test_case(test, &function, &output, &analyses, &reference, &scratch, passes, path, false);
+                ir_verified_test_case(test, &function, &output, &analyses, &reference, &scratch, passes, path, false, false);
             }
         }
         if (created)
         {
-            ir_verified_test_case(test, &function, &output, &analyses, &reference, &scratch, 7, BUSTER_IR_OPTIMIZE_VECTOR, true);
+            ir_verified_test_case(test, &function, &output, &analyses, &reference, &scratch, 7, BUSTER_IR_OPTIMIZE_VECTOR, true, false);
+            ir_verified_test_case(test, &function, &output, &analyses, &reference, &scratch, 0, BUSTER_IR_OPTIMIZE_AUTO, false, true);
+            ir_verified_test_case(test, &function, &output, &analyses, &reference, &scratch, 0, BUSTER_IR_OPTIMIZE_VECTOR, false, true);
             ir_verified_test_owned(test, &function, &input, &output, &analyses, &reference, &scratch);
         }
         arena_pop_to(&input, 0);
     }
     if (ready)
     {
+        ir_verified_test_dominator_policy(test, &input, &output, &scratch);
         ir_verified_test_failures(test, &input, &output, &analyses, &reference, &scratch);
     }
     arena_release(&scratch);

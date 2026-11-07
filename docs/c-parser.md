@@ -351,7 +351,14 @@ before it visible, and its tree joins the vector path's. The whole unit goes to
 the scalar parser instead when the brackets don't balance, K5 can't decide its
 statements, the nesting is too deep, or a fallback declaration has an error,
 runs out of memory or declares a file-scope typedef name again as an ordinary
-identifier, which changes how the rest of the unit parses.
+identifier, which changes how the rest of the unit parses. So it does when a
+fallback declaration's block item has GNU attributes before a name the
+declaration never bound (`ParseScalarResult.undecided`): whether that name is
+an earlier file-scope declaration's or tag's decides between clang's
+"expected identifier or '('" or "must use 'struct' tag" and an implicit int's
+declarator
+(`parse_scalar_attribute_name`, #147), and only the whole unit's parse has
+those declarations. Valid code meets it only as C89's implicit int.
 
 On the corpora, the fallback takes these declarations, all valid code (the
 benchmark's counts; `test-parser --explain` says why for each):

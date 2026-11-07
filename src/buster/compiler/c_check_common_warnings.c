@@ -672,8 +672,8 @@ typedef struct CheckCommonEmission
     const uint8_t* evaluated;
     const uint32_t* parents;
     uint8_t* emitted;
-    // Whether a discarded conditional's arms carry an effect, held at the conditionals and the commas alone: CONDITIONAL
-    // answers its arms', COMMA its result operand's, and every other node is its own effect (check_common_arm_of).
+    // Whether a discarded arm is quiet: an effect or explicit void cast along its value path. CONDITIONAL answers
+    // its arms', COMMA its result operand's, SELECT its chosen value's; others are checked directly (check_common_arm_of).
     // Children precede parents in the graph, so one ascending pass fills it and every query stays iterative.
     const uint8_t* arm_effects;
     // What each node's subtree holds for the walks (BUSTER_CHECK_REACH_*), so that a walk enters only the subtrees where
@@ -687,7 +687,52 @@ typedef struct CheckCommonEmission
     uint32_t work_capacity;
     uint32_t work_count;
     Arena* scratch;
+    // Each token's subtree's first token (check_common_emission_subtree_start, #1350), built at the first query; null
+    // before it, and after an allocation that failed (which fails the unit), the queries then left to
+    // check_common_subtree_start.
+    uint32_t* subtree_starts;
+    bool subtree_starts_failed;
 } CheckCommonEmission;
+
+// check_common_subtree_start for the emission's queries, from a column of every token's subtree start built once
+// (#1350): a comma chain's k-th left operand is the chain before it, so the binary search's climbs cost O(k log k) a
+// comma. A subtree is a run of tokens and a node's children are in source order, so a node's run starts where its
+// first child's does when that child is before it, and at the node otherwise: one ascending pass fills the column.
+static uint32_t check_common_emission_subtree_start(CheckCommonEmission* emission, uint32_t root)
+{
+    const Parser* parser = emission->parser;
+    const uint32_t count = parser->tokens.count;
+    if (emission->subtree_starts == NULL && !emission->subtree_starts_failed && count != 0)
+    {
+        uint32_t* first = CHECK_COMMON_PUSH_ARRAY(emission->scratch, uint32_t, count);
+        uint32_t* starts = first != NULL ? CHECK_COMMON_PUSH_ARRAY(emission->scratch, uint32_t, count) : NULL;
+        emission->subtree_starts_failed = starts == NULL;
+        // A failed allocation fails the unit, as every common warning's scratch does; the search stands in until it stops.
+        if (starts == NULL)
+        {
+            check_common_exhausted(emission->pp);
+        }
+        if (starts != NULL)
+        {
+            memset(first, 0xff, (uint64_t)count * sizeof(uint32_t));
+            for (uint32_t token = count; token-- > 0;)
+            {
+                const uint32_t parent = parser->tree.parents[token];
+                if (parent < count && parent != token)
+                {
+                    first[parent] = token;
+                }
+            }
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                starts[token] = first[token] < token ? starts[first[token]] : token;
+            }
+            emission->subtree_starts = starts;
+        }
+    }
+    const uint32_t result = root < count && emission->subtree_starts != NULL ? emission->subtree_starts[root] : check_common_subtree_start(parser, root);
+    return result;
+}
 
 // The worklist frame kinds.
 #define BUSTER_CHECK_EMIT_TREE 0u
@@ -757,30 +802,35 @@ static bool check_common_literal_zero(const Parser* parser, const CheckStream* s
     return result;
 }
 
-// Whether a conditional's arm carries an effect along its own value path and so keeps the statement quiet:
-// `x ? f() : y` and `x ? (y, x = 1) : z` do not report, while `x ? (x = 1, y) : z` still does because the
-// comma's value is the quiet `y`.
-static bool check_common_arm_of(const CheckGraph* graph, const uint8_t* arm_effects, uint32_t node)
+// Whether an arm's value path accepts discard: an effect or an explicit cast to void. Conditional, comma and
+// selected-value results use postorder facts, so nested void casts stay quiet while inner diagnostics still run.
+// An implicit conversion is not an explicit discard, and a side effect off the comma's result path is not enough.
+static bool check_common_arm_of(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types,
+                                 const uint8_t* arm_effects, uint32_t node)
 {
     const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
-    const bool result = node < graph->count &&
-                        (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA ? arm_effects[node] != 0 : check_common_node_effect(graph, node));
+    const bool void_cast = op == CHECK_OP_CAST &&
+                           type_kind(types, type_unqualified(type_strip_aligned(types, check_stream_type(stream, node)))) == BUSTER_TYPE_KIND_VOID;
+    const bool result = node < graph->count && (void_cast ||
+                        (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA || op == CHECK_OP_SELECT ? arm_effects[node] != 0 : check_common_node_effect(graph, node)));
     return result;
 }
 
 static bool check_common_arm_at(const CheckCommonEmission* emission, uint32_t node)
 {
-    return check_common_arm_of(&emission->input->graph, emission->arm_effects, node);
+    return check_common_arm_of(&emission->input->graph, emission->stream, emission->types, emission->arm_effects, node);
 }
 
-// One conditional's or comma's arm-effect column entry, in graph order so every operand's already holds.
-static bool check_common_arm_effect(const CheckGraph* graph, const uint8_t* arm_effects, uint32_t node)
+// One conditional, comma or selected-value entry, after every operand's entry.
+static bool check_common_arm_effect(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types,
+                                     const uint8_t* arm_effects, uint32_t node)
 {
     const CheckOp op = graph->ops[node];
     const uint32_t first = graph->operand1[node];
     const uint32_t second = graph->operand2[node];
-    const bool result = op == CHECK_OP_CONDITIONAL ? check_common_arm_of(graph, arm_effects, first) || check_common_arm_of(graph, arm_effects, second) :
-                        op == CHECK_OP_COMMA ? check_common_arm_of(graph, arm_effects, first) : check_common_node_effect(graph, node);
+    const bool result = op == CHECK_OP_CONDITIONAL ? check_common_arm_of(graph, stream, types, arm_effects, first) || check_common_arm_of(graph, stream, types, arm_effects, second) :
+                        op == CHECK_OP_COMMA ? check_common_arm_of(graph, stream, types, arm_effects, first) :
+                        op == CHECK_OP_SELECT ? check_common_arm_of(graph, stream, types, arm_effects, graph->operand0[node]) : check_common_node_effect(graph, node);
     return result;
 }
 
@@ -891,8 +941,10 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
         bool integer = left < graph->count && right < graph->count &&
                        check_common_integer(types, check_stream_type(stream, left), &left_width, &left_signed) &&
                        check_common_integer(types, check_stream_type(stream, right), &right_width, &right_signed);
-        // Integer promotions apply before the comparison: signed char and unsigned char both promote to
-        // int, so the sign comparison sees the promoted operand, not the narrow type spelled at the source.
+        // Keep the source operands' unsignedness before promotion: a narrow unsigned value still cannot
+        // be negative after it becomes int (#1391). Explicit casts retain their own result type here.
+        const bool unsigned_operands = integer && !left_signed && !right_signed;
+        // Promotions still determine which signed values the common comparison type can represent.
         if (left_width != 0 && left_width < 32)
         {
             left_width = 32;
@@ -941,7 +993,7 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
             constant_suppressed = constant_suppressed || signed_op == CHECK_OP_NOT || (signed_op >= CHECK_OP_LESS && signed_op <= CHECK_OP_NOT_EQUAL) ||
                                   signed_op == CHECK_OP_LOGICAL_AND || signed_op == CHECK_OP_LOGICAL_OR;
         }
-        if (integer && left_signed != right_signed && !constant_suppressed && (left_signed ? left_width <= right_width : right_width <= left_width))
+        if (integer && !unsigned_operands && left_signed != right_signed && !constant_suppressed && (left_signed ? left_width <= right_width : right_width <= left_width))
         {
             const String8 left_name = check_driver_warning_type(parser, emission->pp, emission->input, types, emission->spell, scratch,
                                                                 check_stream_type(stream, left), 0);
@@ -956,6 +1008,17 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
             }
         }
     }
+}
+
+// Clang's self-assignment check asks whether the operator or either bare identifier is a macro location.
+// Body tokens and substituted arguments both retain this flag; no expansion-history replay is needed.
+static bool check_common_from_macro(const Parser* parser, const Preprocessor* pp, uint32_t token)
+{
+    const uint32_t source = parser != NULL && parser->tokens.sources != NULL && token < parser->tokens.count ?
+                               parser->tokens.sources[token] : BUSTER_PP_NONE;
+    const bool result = pp != NULL && pp->output.flags != NULL && source < pp->output.count &&
+                        (pp->output.flags[source] & BUSTER_PP_FROM_MACRO) != 0;
+    return result;
 }
 
 static bool check_common_call_prototype(const CheckCommonEmission* emission, uint32_t node)
@@ -1053,7 +1116,8 @@ static void check_common_own(CheckCommonEmission* emission, uint32_t node)
                                    graph->ops[left] == CHECK_OP_VALUE && graph->ops[right] == CHECK_OP_VALUE;
         if (!volatile_object && plain_lvalues && left_value.category == CHECK_LVALUE &&
             right_value.category == CHECK_LVALUE && left_value.object != 0 && left_value.object == right_value.object &&
-            left_value.offset == 0 && right_value.offset == 0)
+            left_value.offset == 0 && right_value.offset == 0 && !check_common_from_macro(parser, pp, token) &&
+            !check_common_from_macro(parser, pp, graph->tokens[left]) && !check_common_from_macro(parser, pp, graph->tokens[right]))
         {
             const String8 type_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, left_value.type, 0);
             if (type_name.length != 0)
@@ -1201,7 +1265,7 @@ static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t no
         }
         left = up;
     }
-    const uint32_t left_start = check_common_subtree_start(parser, left);
+    const uint32_t left_start = check_common_emission_subtree_start(emission, left);
     const uint32_t left_result = check_common_result_root(graph, left_node);
     const bool left_effect = left_node < graph->count ?
                              (graph->ops[left_node] == CHECK_OP_CONDITIONAL ? check_common_arm_at(emission, left_node) :
@@ -1308,7 +1372,7 @@ static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node)
         }
         const uint32_t right_result = check_common_result_root(graph, right_node);
         const uint32_t right = right_result < graph->count && graph->tokens[right_result] < count ? graph->tokens[right_result] : comma + 1;
-        const uint32_t right_start = right < count ? check_common_subtree_start(parser, right) : right;
+        const uint32_t right_start = right < count ? check_common_emission_subtree_start(emission, right) : right;
         const bool right_cast = right < count && parser->tree.roles[right] == PARSE_ROLE_CLOSE_CAST;
         const bool right_void = right_cast && check_common_void_cast(parser, pp, input, stream, types, right);
         const bool right_zero = check_common_literal_zero(parser, stream, graph, zero_node);
@@ -1727,6 +1791,35 @@ static uint32_t check_common_next_op(const CheckGraph* graph, const CheckCommonO
     return result;
 }
 
+// The comparison is already a direct child of the bitwise operator. Climb from the adjacent token on
+// the other side to that operand's source root. Group/cast/generic wrappers remain explicit, and enum
+// initializers need no retained runtime graph. A nested bitwise root ends the climb before its subtree.
+static bool check_common_bitwise_precedence(const Parser* parser, uint32_t comparison, uint32_t bitwise)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t at = comparison < bitwise ? bitwise + 1 : bitwise != 0 ? bitwise - 1 : count;
+    uint8_t role = PARSE_ROLE_NONE;
+    bool found = false;
+    for (uint32_t steps = 0; at < count && steps < count; steps += 1)
+    {
+        const uint32_t parent = parser->tree.parents[at];
+        if (parent == bitwise)
+        {
+            role = parser->tree.roles[at];
+            found = true;
+            break;
+        }
+        if (parent >= count || parent == at)
+        {
+            break;
+        }
+        at = parent;
+    }
+    const bool other_bitwise = role == PARSE_ROLE_BITWISE_AND || role == PARSE_ROLE_BITWISE_OR || role == PARSE_ROLE_BITWISE_XOR;
+    const bool result = found && !check_common_comparison_role(role) && !other_bitwise;
+    return result;
+}
+
 static void check_common_parentheses(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                      Arena* scratch)
 {
@@ -1758,7 +1851,7 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
         }
         else if (parent_role == PARSE_ROLE_BITWISE_AND || parent_role == PARSE_ROLE_BITWISE_OR || parent_role == PARSE_ROLE_BITWISE_XOR)
         {
-            if (role == PARSE_ROLE_EQUALITY || role == PARSE_ROLE_RELATIONAL)
+            if (check_common_comparison_role(role) && check_common_bitwise_precedence(parser, token, parent))
             {
                 const char* lower = check_common_operator_spelling(parser, parent);
                 const char* upper = check_common_operator_spelling(parser, token);
@@ -1822,7 +1915,13 @@ static uint32_t check_common_expansion_point(const Parser* parser, Preprocessor*
         const uint32_t source = parser->tokens.sources[token];
         if (source < pp->output.count && pp->output.locations[source] != 0)
         {
-            const uint32_t location = pp_expansion_location(pp, source, pp_history_at(pp, source));
+            uint32_t location = pp->output.locations[source];
+            if (pp->output.flags[source] & BUSTER_PP_FROM_MACRO)
+            {
+                // Only a candidate that needs a macro's invocation asks for the deferred history. Ordinary file
+                // tokens keep their positions without replaying the unit, even when another token expands a macro.
+                location = pp_history_ensure(pp) ? pp_output_expansion_begin(pp, source, pp_history_at(pp, source)) : 0;
+            }
             const uint32_t range = pp_find_range(pp, location);
             const char* file = NULL;
             uint32_t file_length = 0;
@@ -1865,7 +1964,8 @@ static void check_common_empty_bodies(const Parser* parser, Preprocessor* pp, co
             // provides (its spelling line is its definition's).
             bool warn = kind == PARSE_KIND_IF || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_FOR ||
                         kind == PARSE_KIND_SWITCH;
-            warn = warn && !has_else && check_common_spelling_line(parser, pp, token) != 0 &&
+            warn = warn && !has_else && check_common_severity(pp, parser, input, token, CHECK_WARNING_ID_EMPTY_BODY, false) != CHECK_WARNING_IGNORE &&
+                   check_common_spelling_line(parser, pp, token) != 0 &&
                    check_common_spelling_line(parser, pp, token) == check_common_expansion_point(parser, pp, parent, 0);
             uint32_t publication = token;
             if (warn && loop)
@@ -2727,14 +2827,25 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
 
 // A printf-family call's format string: its name decides the format argument, and a literal's bytes decide each
 // conversion's expected type.
-static uint32_t check_common_format_index(String8 name)
+// Only infer a plain library name's format where the unit keeps it a builtin. Explicit __builtin_ spellings
+// remain builtins under the same options; dprintf, absent from the builtin catalog, needs an explicit attribute.
+static uint32_t check_common_format_index(String8 name, const PPOptions* options)
 {
+    const bool explicit_builtin = name.length > 10 && memcmp(name.pointer, "__builtin_", 10) == 0;
+    if (explicit_builtin)
+    {
+        name.pointer += 10;
+        name.length -= 10;
+    }
     uint32_t result = UINT32_MAX;
     if (name.length == 6 && memcmp(name.pointer, "printf", 6) == 0) result = 0;
     else if (name.length == 7 && memcmp(name.pointer, "fprintf", 7) == 0) result = 1;
     else if (name.length == 7 && memcmp(name.pointer, "sprintf", 7) == 0) result = 1;
     else if (name.length == 8 && memcmp(name.pointer, "snprintf", 8) == 0) result = 2;
-    else if (name.length == 7 && memcmp(name.pointer, "dprintf", 7) == 0) result = 1;
+    if (result != UINT32_MAX && !explicit_builtin && !pp_library_builtin(options, (const uint8_t*)name.pointer, (uint32_t)name.length))
+    {
+        result = UINT32_MAX;
+    }
     return result;
 }
 
@@ -2746,7 +2857,8 @@ static bool check_common_format_integer_class(TypeTable* types, TypeId type, cha
     uint32_t width = 0;
     bool sign = false;
     const TypeId stripped = type_unqualified(type_strip_aligned(types, type));
-    bool result = check_action_integer_type(types, type, &width, &sign);
+    // Equal widths do not make a _BitInt a printf builtin integer class, including through a %n pointer.
+    bool result = type_kind(types, stripped) != BUSTER_TYPE_KIND_BIT_INT && check_action_integer_type(types, type, &width, &sign);
     if (result)
     {
         if (w_width != 0)
@@ -2797,7 +2909,8 @@ static bool check_common_format_width(TypeTable* types, TypeId type)
 {
     uint32_t width = 0;
     bool sign = false;
-    const bool result = check_action_integer_type(types, type, &width, &sign) && width <= 32;
+    const TypeId stripped = type_unqualified(type_strip_aligned(types, type));
+    const bool result = type_kind(types, stripped) != BUSTER_TYPE_KIND_BIT_INT && check_action_integer_type(types, type, &width, &sign) && width <= 32;
     return result;
 }
 
@@ -2826,7 +2939,8 @@ static bool check_common_format_char_pointer(TypeTable* types, TypeId type, bool
     }
     uint32_t width = 0;
     bool sign = false;
-    const bool integer = check_action_integer_type(types, element, &width, &sign);
+    const TypeId stripped = type_unqualified(type_strip_aligned(types, element));
+    const bool integer = type_kind(types, stripped) != BUSTER_TYPE_KIND_BIT_INT && check_action_integer_type(types, element, &width, &sign);
     const bool result = indirect && integer && (wide ? width == 32 && sign : width == 8);
     return result;
 }
@@ -2837,6 +2951,35 @@ static bool check_common_format_floating(TypeTable* types, TypeId type, bool lon
     const uint8_t kind = type_kind(types, stripped);
     const bool result = long_double ? kind == BUSTER_TYPE_KIND_FLOATING && stripped == BUSTER_TYPE_LONG_DOUBLE :
                                      kind == BUSTER_TYPE_KIND_FLOATING && stripped != BUSTER_TYPE_LONG_DOUBLE;
+    return result;
+}
+
+// Whether this source/parameter type belongs to a bit-precise format class, directly or through one pointer/array.
+static bool check_common_format_bit_precise(const TypeTable* types, TypeId type)
+{
+    const TypeId stripped = type_unqualified(type_strip_aligned(types, type));
+    const uint8_t kind = type_kind(types, stripped);
+    const bool indirect = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind);
+    const bool result = kind == BUSTER_TYPE_KIND_BIT_INT ||
+                        (indirect && type_kind(types, type_unqualified(type_strip_aligned(types, type_element(types, stripped)))) == BUSTER_TYPE_KIND_BIT_INT);
+    return result;
+}
+
+// A fixed parameter has already converted an argument before format checking. Honor that conversion when
+// either class is bit-precise; variadic promotions retain the source class. Other existing classes stay unchanged.
+static TypeId check_common_format_argument_type(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t offset, uint32_t argument)
+{
+    const uint32_t node = graph->argument_nodes[offset + argument];
+    TypeId result = node < graph->count ? check_stream_type(stream, node) : 0;
+    if (stream->argument_conversions != NULL)
+    {
+        const CheckConversion conversion = stream->argument_conversions[offset + argument];
+        if ((conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && conversion.type != 0 &&
+            (check_common_format_bit_precise(types, result) || check_common_format_bit_precise(types, conversion.type)))
+        {
+            result = conversion.type;
+        }
+    }
     return result;
 }
 
@@ -3109,7 +3252,7 @@ static void check_common_format_report_type(const Parser* parser, Preprocessor* 
                                             uint32_t format_token, const char* expected, bool width, uint32_t* order, Arena* scratch)
 {
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
-    const TypeId type = argument_node < graph->count ? check_stream_type(stream, argument_node) : 0;
+    const TypeId type = check_common_format_argument_type(graph, stream, types, offset, argument);
     const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type);
     const uint32_t at_token = argument_node < graph->count ? check_common_argument_start(parser, graph->tokens[argument_node]) : format_token;
     if (actual.length != 0)
@@ -3134,7 +3277,7 @@ static void check_common_format_width_report(const Parser* parser, Preprocessor*
                                              uint32_t format_token, uint64_t literal_offset, bool precision, uint32_t* order, Arena* scratch)
 {
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
-    const TypeId type = argument_node < graph->count ? check_stream_type(stream, argument_node) : 0;
+    const TypeId type = check_common_format_argument_type(graph, stream, types, offset, argument);
     const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type);
     if (actual.length != 0)
     {
@@ -3207,17 +3350,28 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
 {
     const CheckGraph* graph = &input->graph;
     const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
-    static const CheckOp calls[] = { CHECK_OP_CALL };
+    static const CheckOp calls[] = { CHECK_OP_CALL, CHECK_OP_BUILTIN_X86 };
     const CheckCommonOps set = check_common_ops(calls, BUSTER_ARRAY_LENGTH(calls));
     CheckCommonScan scan = { 0 };
     for (uint32_t node = check_common_next_op(graph, &set, &scan, vector); node < graph->count; node = check_common_next_op(graph, &set, &scan, vector))
     {
-        if (graph->ops[node] != CHECK_OP_CALL || stream->diagnostics[node] != CHECK_DIAG_NONE)
+        const bool intrinsic = graph->ops[node] == CHECK_OP_BUILTIN_X86;
+        if ((graph->ops[node] != CHECK_OP_CALL && !intrinsic) || stream->diagnostics[node] != CHECK_DIAG_NONE)
         {
             continue;
         }
-        const uint32_t callee = graph->operand0[node];
-        const uint32_t callee_token = callee < graph->count ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+        const uint32_t callee = !intrinsic ? graph->operand0[node] : BUSTER_CHECK_NONE;
+        uint32_t callee_token = callee < graph->count ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+        if (intrinsic)
+        {
+            // Explicit library builtins keep their source call receipt through deferred merging too. The graph
+            // checks their prototype through BUILTIN_X86, not through an ordinary CALL node.
+            const uint32_t closing = graph->tokens[node];
+            const uint32_t id = input->intrinsic_ids != NULL && closing < input->token_count ? input->intrinsic_ids[closing] : 0;
+            const CheckInputIntrinsicCall* call = input->intrinsic_calls != NULL && id != 0 && id <= input->intrinsic_call_count ?
+                                                  input->intrinsic_calls + id - 1 : NULL;
+            callee_token = call != NULL && call->closing == closing ? call->keyword : BUSTER_CHECK_NONE;
+        }
         if (callee_token >= parser->tokens.count || parser->tokens.kinds[callee_token] != PARSE_KIND_IDENTIFIER)
         {
             continue;
@@ -3225,7 +3379,11 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
         const uint32_t name_id = parser->tokens.names[callee_token];
         const String8 name = { .pointer = (char*)intern_bytes(pp->table, name_id), .length = intern_length(pp->table, name_id) };
         const uint32_t callee_object = callee < graph->count ? check_stream_object(stream, callee) : 0;
-        const uint32_t definition = program != NULL && callee_object != 0 && callee_object <= program->object_count ?
+        // A source use reads its visible declaration snapshot, not a later declaration of the same object.
+        const uint32_t visible = input->declarations != NULL && callee_token < input->token_count ?
+                                 input->declarations[callee_token] : BUSTER_CHECK_NONE;
+        const uint32_t definition = visible < input->token_count ? visible :
+                                    program != NULL && callee_object != 0 && callee_object <= program->object_count ?
                                     program->object_declarations[callee_object] : BUSTER_CHECK_NONE;
         // A spelled printf-family name only applies where the callee resolves to a function declaration
         // or stays undeclared: a local object — a function pointer named `printf` — can shadow the
@@ -3233,7 +3391,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
         const bool function_callee = callee_object == 0 ||
                                      (definition < input->token_count && input->declaration_kinds != NULL &&
                                       input->declaration_kinds[definition] == C_BINDING_FUNCTION);
-        uint32_t format_index = function_callee ? check_common_format_index(name) : UINT32_MAX;
+        uint32_t format_index = function_callee ? check_common_format_index(name, &pp->options) : UINT32_MAX;
         uint32_t first_argument = format_index != UINT32_MAX ? format_index + 1 : UINT32_MAX;
         if (format_index == UINT32_MAX && definition < input->token_count)
         {
@@ -3689,8 +3847,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         {
                             break;
                         }
-                        const uint32_t width_node = graph->argument_nodes[offset + width_index];
-                        const TypeId width_type = width_node < graph->count ? check_stream_type(stream, width_node) : 0;
+                        const TypeId width_type = check_common_format_argument_type(graph, stream, types, offset, width_index);
                         if (!check_common_format_width(types, width_type))
                         {
                             check_common_format_width_report(parser, pp, input, stream, types, spell, graph, offset, width_index, format_token,
@@ -3742,8 +3899,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         {
                             break;
                         }
-                        const uint32_t precision_node = graph->argument_nodes[offset + precision_index];
-                        const TypeId precision_type = precision_node < graph->count ? check_stream_type(stream, precision_node) : 0;
+                        const TypeId precision_type = check_common_format_argument_type(graph, stream, types, offset, precision_index);
                         if (!check_common_format_width(types, precision_type))
                         {
                             check_common_format_width_report(parser, pp, input, stream, types, spell, graph, offset, precision_index, format_token,
@@ -3819,7 +3975,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                     else if (conversion_argument && value_checked && args_checked)
                     {
                         const uint32_t argument_node = graph->argument_nodes[offset + value_index];
-                        const TypeId type = argument_node < graph->count ? check_stream_type(stream, argument_node) : 0;
+                        const TypeId type = check_common_format_argument_type(graph, stream, types, offset, value_index);
                         const bool long_double = length_modifier == 'L';
                         const bool w_check = length_modifier == 'w' && w_digits;
                         // `I`+`c` never reaches this block and `I`+`C` keeps `C`'s own `wchar_t` check, so
@@ -3973,10 +4129,94 @@ static bool check_common_enum_value(const CheckInput* input, const Parser* parse
 
 // -Wswitch: an enum selector and case labels that name every handled enumerator, with no default. A case whose
 // expression is not a single enumerator name leaves the answer to a full constant evaluator.
+// The unit-wide indexes the enum switches read (#1348), built at the first one: the program's cases sorted by owner
+// (stable, so each switch's cases keep the program's order) and each enumerator token's first retained value. A switch
+// then finds its cases by a binary search and an enumerator's value by one load, not a scan of the unit's.
+typedef struct CheckCommonSwitchIndex CheckCommonSwitchIndex;
+struct CheckCommonSwitchIndex
+{
+    uint32_t* case_owners;
+    uint32_t* case_order;
+    uint32_t* enum_values;
+    bool built;
+};
+
+static void check_common_switch_index(CheckCommonSwitchIndex* index, const Parser* parser, Preprocessor* pp, const CheckInput* input,
+                                      const CheckProgram* program, Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    index->built = true;
+    const uint32_t cases = program != NULL ? program->case_count : 0;
+    uint32_t* owners = cases != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, cases) : NULL;
+    uint32_t* order = owners != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, cases) : NULL;
+    uint32_t* owners_out = order != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, cases) : NULL;
+    uint32_t* order_out = owners_out != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, cases) : NULL;
+    uint32_t* digits = order_out != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, 2049) : NULL;
+    // A failed allocation fails the unit, as every common warning's scratch does; the scans stand in until it stops.
+    if (cases != 0 && digits == NULL)
+    {
+        check_common_exhausted(pp);
+    }
+    if (digits != NULL)
+    {
+        for (uint32_t c = 0; c < cases; c += 1)
+        {
+            owners[c] = program->cases[c].owner;
+            order[c] = c;
+        }
+        // An LSD radix sort, 11 bits a pass: each pass is stable, so equal owners keep the program's order.
+        for (uint32_t shift = 0; shift < 33; shift += 11)
+        {
+            memset(digits, 0, 2049 * sizeof(uint32_t));
+            for (uint32_t c = 0; c < cases; c += 1)
+            {
+                digits[((owners[c] >> shift) & 0x7ff) + 1] += 1;
+            }
+            for (uint32_t d = 1; d < 2049; d += 1)
+            {
+                digits[d] += digits[d - 1];
+            }
+            for (uint32_t c = 0; c < cases; c += 1)
+            {
+                const uint32_t at = digits[(owners[c] >> shift) & 0x7ff]++;
+                owners_out[at] = owners[c];
+                order_out[at] = order[c];
+            }
+            uint32_t* swap = owners;
+            owners = owners_out;
+            owners_out = swap;
+            swap = order;
+            order = order_out;
+            order_out = swap;
+        }
+        index->case_owners = owners;
+        index->case_order = order;
+    }
+    uint32_t* values = input->enum_values != NULL && count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
+    if (input->enum_values != NULL && count != 0 && values == NULL)
+    {
+        check_common_exhausted(pp);
+    }
+    if (values != NULL)
+    {
+        memset(values, 0xff, (uint64_t)count * sizeof(uint32_t));
+        for (uint32_t i = input->enum_value_count; i-- > 0;)
+        {
+            const uint32_t token = input->enum_values[i].token;
+            if (token < count)
+            {
+                values[token] = i;
+            }
+        }
+        index->enum_values = values;
+    }
+}
+
 static void check_common_switches(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                   TypeTable* types, CheckWarningSpelling* spell, const CheckProgram* program, Arena* scratch)
 {
     const uint32_t count = parser->tokens.count;
+    CheckCommonSwitchIndex index = { 0 };
     const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
     static const uint8_t roles[] = { PARSE_ROLE_LEAF_RIGHT };
     CheckCommonScan scan = { 0 };
@@ -4012,6 +4252,10 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         {
             continue;
         }
+        if (!index.built)
+        {
+            check_common_switch_index(&index, parser, pp, input, program, scratch);
+        }
         const uint32_t body = closer + 1 < count ? closer + 1 : count;
         const uint32_t body_end = body < count && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE ? check_common_parent(parser, body) : count;
         bool has_default = false;
@@ -4022,7 +4266,22 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         const uint32_t case_bound = body_end > body ? body_end - body : 0;
         uint32_t* found = case_bound != 0 && program != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, case_bound) : NULL;
         uint32_t found_count = 0;
-        if (found != NULL)
+        if (found != NULL && index.case_owners != NULL)
+        {
+            uint32_t low = 0;
+            uint32_t high = program->case_count;
+            while (low < high)
+            {
+                const uint32_t middle = low + (high - low) / 2;
+                low = index.case_owners[middle] < closer ? middle + 1 : low;
+                high = index.case_owners[middle] < closer ? high : middle;
+            }
+            for (uint32_t k = low; k < program->case_count && index.case_owners[k] == closer && found_count < case_bound; k += 1)
+            {
+                found[found_count++] = index.case_order[k];
+            }
+        }
+        else if (found != NULL)
         {
             for (uint32_t c = 0; c < program->case_count; c += 1)
             {
@@ -4103,7 +4362,9 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
             {
                 const uint32_t name = parser->tokens.names[at];
                 unsigned __int128 value = 0;
-                values_known = check_common_enum_value(input, parser, enum_open, enum_close, name, &value);
+                const uint32_t retained = index.enum_values != NULL ? index.enum_values[at] : BUSTER_CHECK_NONE;
+                values_known = index.enum_values != NULL ? retained != BUSTER_CHECK_NONE : check_common_enum_value(input, parser, enum_open, enum_close, name, &value);
+                value = retained != BUSTER_CHECK_NONE ? input->enum_values[retained].value : value;
                 TypeId value_type = input->declared_types[at];
                 value_type = value_type != 0 ? type_unqualified(type_strip_aligned(types, value_type)) : 0;
                 if (value_type != 0 && types->types.kind[type_index(value_type)] == BUSTER_TYPE_KIND_ENUM)
@@ -4239,12 +4500,17 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         {
             uint32_t* missing = CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, enum_count);
             unsigned __int128* missing_values = missing != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, unsigned __int128, enum_count) : NULL;
-            if (missing == NULL || missing_values == NULL)
+            uint32_t* order = missing_values != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, enum_count) : NULL;
+            uint32_t* merged = order != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, enum_count) : NULL;
+            if (merged == NULL)
             {
                 check_common_exhausted(pp);
             }
-            values_known = missing != NULL && missing_values != NULL;
-            uint32_t missing_count = 0;
+            values_known = merged != NULL;
+            // The uncovered enumerators in declaration order, then stably merge-sorted by value (#1348): each run of
+            // equal values lists its first-declared enumerator once, the list the value-deduplicated insertion it
+            // replaces built, already in value order.
+            uint32_t uncovered = 0;
             for (uint32_t e = 0; values_known && e < enum_count; e += 1)
             {
                 bool covered = false;
@@ -4255,30 +4521,39 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
                     const unsigned __int128 hi_key = item->range ? check_program_case_order(program, item, true) : lo_key;
                     covered = all_case_keys[e] >= lo_key && all_case_keys[e] <= hi_key;
                 }
-                for (uint32_t m = 0; !covered && m < missing_count && !covered; m += 1)
-                {
-                    covered = all_keys[e] == missing_values[m];
-                }
                 if (!covered)
+                {
+                    order[uncovered++] = e;
+                }
+            }
+            for (uint32_t width = 1; values_known && width < uncovered; width *= 2)
+            {
+                for (uint32_t low = 0; low < uncovered; low += 2 * width)
+                {
+                    const uint32_t middle = low + width < uncovered ? low + width : uncovered;
+                    const uint32_t high = middle + width < uncovered ? middle + width : uncovered;
+                    uint32_t left = low;
+                    uint32_t right = middle;
+                    for (uint32_t k = low; k < high; k += 1)
+                    {
+                        const bool take_left = left < middle && (right >= high || all_keys[order[left]] <= all_keys[order[right]]);
+                        merged[k] = take_left ? order[left++] : order[right++];
+                    }
+                }
+                uint32_t* swap = order;
+                order = merged;
+                merged = swap;
+            }
+            uint32_t missing_count = 0;
+            for (uint32_t k = 0; values_known && k < uncovered; k += 1)
+            {
+                const uint32_t e = order[k];
+                if (missing_count == 0 || missing_values[missing_count - 1] != all_keys[e])
                 {
                     missing[missing_count] = all_names[e];
                     missing_values[missing_count] = all_keys[e];
                     missing_count += 1;
                 }
-            }
-            for (uint32_t i = 1; i < missing_count; i += 1)
-            {
-                const uint32_t name = missing[i];
-                const unsigned __int128 value = missing_values[i];
-                uint32_t j = i;
-                while (j > 0 && missing_values[j - 1] > value)
-                {
-                    missing[j] = missing[j - 1];
-                    missing_values[j] = missing_values[j - 1];
-                    j -= 1;
-                }
-                missing[j] = name;
-                missing_values[j] = value;
             }
             char* list = values_known && missing_count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, char, 512) : NULL;
             if (values_known && missing_count != 0 && list == NULL)
@@ -4810,9 +5085,9 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
                 }
             }
             reach[node] = bits;
-            if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA)
+            if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA || op == CHECK_OP_SELECT)
             {
-                arm_effects[node] = check_common_arm_effect(graph, arm_effects, node);
+                arm_effects[node] = check_common_arm_effect(graph, stream, types, arm_effects, node);
             }
         }
         evaluated = check_common_evaluated(graph, stream, types, parser, program, parents, scratch);

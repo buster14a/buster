@@ -69,6 +69,9 @@ struct IrSimdTypedOperation
     uint8_t operand_bytes[BUSTER_TIER0_OPERATION_OPERANDS];
     // #717 represents a C comparison as a mask followed by -1/0 vector lanes, not the raw mask alone.
     bool expand_mask;
+    // A comparison into a mask alone (#1623, ir_simd_typed_compare_mask): the mask of the lanes' vcmp ANDed with its
+    // third operand, the writemask, which the lowering leaves out where the typed stream's writemask has every lane set.
+    bool compare_mask;
     // A row of opmask instructions alone (#179, ir_simd_typed_mask_row): its masks' bytes (0 for a vector operation), its
     // records' steps in order, and the register its result is in when they end.
     uint8_t mask_bytes;
@@ -79,6 +82,9 @@ struct IrSimdTypedOperation
     // (BUSTER_IR_INTRINSIC_* + 1, 0 for any other row), and the operands its a and b are, the source and the other.
     uint8_t intrinsic;
     uint8_t intrinsic_operands[2];
+    // A scalar's bit splat (#1450): the bytes repeated by the exact broadcast form, zero for every other row.
+    // Integer rows may use a wider scalar register; lowering truncates it to these bytes before the splat.
+    uint8_t splat_bytes;
     // A row the IR has no operation of its own for (#141, ir_simd_typed_machine_row): the row itself, which a row call
     // runs (IrFunction.rows).
     bool machine;
@@ -106,6 +112,49 @@ static uint64_t ir_typed_vector_moves(uint32_t bytes, uint64_t target_features)
            (target_features & evex) == evex                                      ? evex :
            bytes == 16 && (target_features & BUSTER_X86_FEATURE(AVX)) == 0 ? 0 :
                                                                                    BUSTER_X86_FEATURE(AVX);
+}
+
+// A comparison's opmask forms (#717's C comparisons, #1623's comparisons into a mask), by its lanes: signed and unsigned
+// integers' vpcmp and vpcmpu of each width, floats' and doubles' vcmpps and vcmppd (unsigned_lanes 0).
+static const uint16_t ir_simd_typed_comparisons[IR_SIMD_LANE_COUNT][2][3] = {
+    [IR_SIMD_LANE_I32] = { { X86_FORM_VPCMPD_K_X_XM128_IMM8, X86_FORM_VPCMPD_K_Y_YM256_IMM8, X86_FORM_VPCMPD_K_Z_ZM512_IMM8 },
+                           { X86_FORM_VPCMPUD_K_X_XM128_IMM8, X86_FORM_VPCMPUD_K_Y_YM256_IMM8, X86_FORM_VPCMPUD_K_Z_ZM512_IMM8 } },
+    [IR_SIMD_LANE_I8] = { { X86_FORM_VPCMPB_K_X_XM128_IMM8, X86_FORM_VPCMPB_K_Y_YM256_IMM8, X86_FORM_VPCMPB_K_Z_ZM512_IMM8 },
+                          { X86_FORM_VPCMPUB_K_X_XM128_IMM8, X86_FORM_VPCMPUB_K_Y_YM256_IMM8, X86_FORM_VPCMPUB_K_Z_ZM512_IMM8 } },
+    [IR_SIMD_LANE_I16] = { { X86_FORM_VPCMPW_K_X_XM128_IMM8, X86_FORM_VPCMPW_K_Y_YM256_IMM8, X86_FORM_VPCMPW_K_Z_ZM512_IMM8 },
+                           { X86_FORM_VPCMPUW_K_X_XM128_IMM8, X86_FORM_VPCMPUW_K_Y_YM256_IMM8, X86_FORM_VPCMPUW_K_Z_ZM512_IMM8 } },
+    [IR_SIMD_LANE_I64] = { { X86_FORM_VPCMPQ_K_X_XM128_IMM8, X86_FORM_VPCMPQ_K_Y_YM256_IMM8, X86_FORM_VPCMPQ_K_Z_ZM512_IMM8 },
+                           { X86_FORM_VPCMPUQ_K_X_XM128_IMM8, X86_FORM_VPCMPUQ_K_Y_YM256_IMM8, X86_FORM_VPCMPUQ_K_Z_ZM512_IMM8 } },
+    [IR_SIMD_LANE_F32] = { { X86_FORM_VCMPPS_K_X_XM128_IMM8, X86_FORM_VCMPPS_K_Y_YM256_IMM8, X86_FORM_VCMPPS_K_Z_ZM512_IMM8 },
+                           { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE } },
+    [IR_SIMD_LANE_F64] = { { X86_FORM_VCMPPD_K_X_XM128_IMM8, X86_FORM_VCMPPD_K_Y_YM256_IMM8, X86_FORM_VCMPPD_K_Z_ZM512_IMM8 },
+                           { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE } },
+};
+
+// A comparison's predicate from its immediate (ir_simd_typed_comparisons' forms): integers' as vpcmp's immediates (0 ==,
+// 1 <, 2 <=, 4 !=, 5 >=, 6 >), unsigned lanes' as vpcmpu's, and floating lanes' as vcmpps' EQ_OQ, NEQ_UQ, LT_OS, LE_OS,
+// GT_OS and GE_OS, C's ==, !=, <, <=, > and >=. False for any other immediate (vpcmp's false and true, vcmpps' other
+// predicates), which no IR predicate is.
+static bool ir_simd_typed_predicate(int64_t immediate, bool floating, bool unsigned_lanes, IrSimdPredicate* predicate)
+{
+    bool result = true;
+    switch (floating ? immediate + 0x100 : immediate)
+    {
+        case 0: *predicate = IR_SIMD_EQ; break;
+        case 4: *predicate = IR_SIMD_NE; break;
+        case 1: *predicate = unsigned_lanes ? IR_SIMD_ULT : IR_SIMD_LT; break;
+        case 2: *predicate = unsigned_lanes ? IR_SIMD_ULE : IR_SIMD_LE; break;
+        case 6: *predicate = unsigned_lanes ? IR_SIMD_UGT : IR_SIMD_GT; break;
+        case 5: *predicate = unsigned_lanes ? IR_SIMD_UGE : IR_SIMD_GE; break;
+        case 0x100: *predicate = IR_SIMD_EQ; break;
+        case 0x104: *predicate = IR_SIMD_NE; break;
+        case 0x101: *predicate = IR_SIMD_LT; break;
+        case 0x102: *predicate = IR_SIMD_LE; break;
+        case 0x10e: *predicate = IR_SIMD_GT; break;
+        case 0x10d: *predicate = IR_SIMD_GE; break;
+        default: result = false; break;
+    }
+    return result;
 }
 
 static IrSimdTypedStatus ir_simd_typed_operation(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
@@ -148,23 +197,6 @@ static IrSimdTypedStatus ir_simd_typed_operation(const Tier0Operation* source, u
         { { X86_FORM_VDIVPD_X_X_XM128_EVEX, X86_FORM_VDIVPD_Y_Y_YM256_EVEX, X86_FORM_VDIVPD_Z_Z_ZM512 }, IR_SIMD_FDIV, IR_SIMD_LANE_F64 },
     };
     static const uint16_t complement[3] = { X86_FORM_VPTERNLOGQ_X_X_XM128_IMM8, X86_FORM_VPTERNLOGQ_Y_Y_YM256_IMM8, X86_FORM_VPTERNLOGQ_Z_Z_ZM512_IMM8 };
-    // A comparison's opmask and its expansion to -1 and 0 lanes (#717's C comparisons), by its lanes: signed and unsigned
-    // integers' vpcmp and vpcmpu of each width, floats' and doubles' vcmpps and vcmppd (unsigned_lanes 0), and the
-    // expansion of the lanes' width, vpmovm2b to vpmovm2q (a float's lanes are doublewords, a double's quadwords).
-    static const uint16_t comparisons[IR_SIMD_LANE_COUNT][2][3] = {
-        [IR_SIMD_LANE_I32] = { { X86_FORM_VPCMPD_K_X_XM128_IMM8, X86_FORM_VPCMPD_K_Y_YM256_IMM8, X86_FORM_VPCMPD_K_Z_ZM512_IMM8 },
-                               { X86_FORM_VPCMPUD_K_X_XM128_IMM8, X86_FORM_VPCMPUD_K_Y_YM256_IMM8, X86_FORM_VPCMPUD_K_Z_ZM512_IMM8 } },
-        [IR_SIMD_LANE_I8] = { { X86_FORM_VPCMPB_K_X_XM128_IMM8, X86_FORM_VPCMPB_K_Y_YM256_IMM8, X86_FORM_VPCMPB_K_Z_ZM512_IMM8 },
-                              { X86_FORM_VPCMPUB_K_X_XM128_IMM8, X86_FORM_VPCMPUB_K_Y_YM256_IMM8, X86_FORM_VPCMPUB_K_Z_ZM512_IMM8 } },
-        [IR_SIMD_LANE_I16] = { { X86_FORM_VPCMPW_K_X_XM128_IMM8, X86_FORM_VPCMPW_K_Y_YM256_IMM8, X86_FORM_VPCMPW_K_Z_ZM512_IMM8 },
-                               { X86_FORM_VPCMPUW_K_X_XM128_IMM8, X86_FORM_VPCMPUW_K_Y_YM256_IMM8, X86_FORM_VPCMPUW_K_Z_ZM512_IMM8 } },
-        [IR_SIMD_LANE_I64] = { { X86_FORM_VPCMPQ_K_X_XM128_IMM8, X86_FORM_VPCMPQ_K_Y_YM256_IMM8, X86_FORM_VPCMPQ_K_Z_ZM512_IMM8 },
-                               { X86_FORM_VPCMPUQ_K_X_XM128_IMM8, X86_FORM_VPCMPUQ_K_Y_YM256_IMM8, X86_FORM_VPCMPUQ_K_Z_ZM512_IMM8 } },
-        [IR_SIMD_LANE_F32] = { { X86_FORM_VCMPPS_K_X_XM128_IMM8, X86_FORM_VCMPPS_K_Y_YM256_IMM8, X86_FORM_VCMPPS_K_Z_ZM512_IMM8 },
-                               { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE } },
-        [IR_SIMD_LANE_F64] = { { X86_FORM_VCMPPD_K_X_XM128_IMM8, X86_FORM_VCMPPD_K_Y_YM256_IMM8, X86_FORM_VCMPPD_K_Z_ZM512_IMM8 },
-                               { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE } },
-    };
     static const uint16_t expansions[IR_SIMD_LANE_COUNT][3] = {
         [IR_SIMD_LANE_I32] = { X86_FORM_VPMOVM2D_X_K, X86_FORM_VPMOVM2D_Y_K, X86_FORM_VPMOVM2D_Z_K },
         [IR_SIMD_LANE_I8] = { X86_FORM_VPMOVM2B_X_K, X86_FORM_VPMOVM2B_Y_K, X86_FORM_VPMOVM2B_Z_K },
@@ -319,26 +351,10 @@ static IrSimdTypedStatus ir_simd_typed_operation(const Tier0Operation* source, u
                     const bool floating = ir_simd_lane_floating((IrSimdLane)lane);
                     for (uint32_t unsigned_lanes = 0; expansion && unsigned_lanes < (floating ? 1u : 2u); unsigned_lanes += 1)
                     {
-                        expected = (X86Instruction){ .form = comparisons[lane][unsigned_lanes][width], .reg = 1, .vvvv = v0, .rm = v1, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = record->immediate };
+                        expected = (X86Instruction){ .form = ir_simd_typed_comparisons[lane][unsigned_lanes][width], .reg = 1, .vvvv = v0, .rm = v1, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = record->immediate };
                         if (memcmp(record, &expected, sizeof(expected)) == 0)
                         {
-                            bool predicate = true;
-                            switch (floating ? record->immediate + 0x100 : record->immediate)
-                            {
-                                case 0: candidate.predicate = IR_SIMD_EQ; break;
-                                case 4: candidate.predicate = IR_SIMD_NE; break;
-                                case 1: candidate.predicate = unsigned_lanes != 0 ? IR_SIMD_ULT : IR_SIMD_LT; break;
-                                case 2: candidate.predicate = unsigned_lanes != 0 ? IR_SIMD_ULE : IR_SIMD_LE; break;
-                                case 6: candidate.predicate = unsigned_lanes != 0 ? IR_SIMD_UGT : IR_SIMD_GT; break;
-                                case 5: candidate.predicate = unsigned_lanes != 0 ? IR_SIMD_UGE : IR_SIMD_GE; break;
-                                case 0x100: candidate.predicate = IR_SIMD_EQ; break;
-                                case 0x104: candidate.predicate = IR_SIMD_NE; break;
-                                case 0x101: candidate.predicate = IR_SIMD_LT; break;
-                                case 0x102: candidate.predicate = IR_SIMD_LE; break;
-                                case 0x10e: candidate.predicate = IR_SIMD_GT; break;
-                                case 0x10d: candidate.predicate = IR_SIMD_GE; break;
-                                default: predicate = false; break;
-                            }
+                            const bool predicate = ir_simd_typed_predicate(record->immediate, floating, unsigned_lanes != 0, &candidate.predicate);
                             if (predicate)
                             {
                                 candidate.operation = IR_SIMD_COMPARE;
@@ -615,8 +631,60 @@ static IrSimdTypedStatus ir_simd_typed_intrinsic(const Tier0Operation* source, u
     return status;
 }
 
-// A row's decoding: a mask result's by ir_simd_typed_mask_row, an int's of mask operands by ir_simd_typed_mask_test, an
-// unsigned int's or long's of integers by ir_simd_typed_intrinsic, any other's by ir_simd_typed_operation.
+// The producer's single-record EVEX broadcasts (#1450). No decorated, memory or fixed-register row is inferred as a
+// splat. Floating forms copy bits without evaluating them; byte/word scalars are extended to a 32-bit register by the
+// producer, and a half's bits use the integer word form and its U32 source. Lowering truncates those carriers explicitly.
+static IrSimdTypedStatus ir_simd_typed_splat(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    static const uint16_t forms[6][3] = {
+        { X86_FORM_VPBROADCASTB_X_R32, X86_FORM_VPBROADCASTB_Y_R32, X86_FORM_VPBROADCASTB_Z_R32 },
+        { X86_FORM_VPBROADCASTW_X_R32, X86_FORM_VPBROADCASTW_Y_R32, X86_FORM_VPBROADCASTW_Z_R32 },
+        { X86_FORM_VPBROADCASTD_X_R32, X86_FORM_VPBROADCASTD_Y_R32, X86_FORM_VPBROADCASTD_Z_R32 },
+        { X86_FORM_VPBROADCASTQ_X_R64, X86_FORM_VPBROADCASTQ_Y_R64, X86_FORM_VPBROADCASTQ_Z_R64 },
+        { X86_FORM_VBROADCASTSS_X_XM32_EVEX, X86_FORM_VBROADCASTSS_Y_XM32_EVEX, X86_FORM_VBROADCASTSS_Z_XM32 },
+        { X86_FORM_VPBROADCASTQ_X_XM64_EVEX, X86_FORM_VBROADCASTSD_Y_XM64_EVEX, X86_FORM_VBROADCASTSD_Z_XM64 },
+    };
+    static const uint8_t bytes[6] = { 1, 2, 4, 8, 4, 8 };
+    IrSimdTypedStatus status = source != NULL && result != NULL ? IR_SIMD_TYPED_UNSUPPORTED : IR_SIMD_TYPED_INVALID;
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR &&
+        (source->result_bytes == 16 || source->result_bytes == 32 || source->result_bytes == 64) &&
+        source->operand_count == 1 && source->record_count == 1 && source->operand_bytes[0] == 0)
+    {
+        const uint32_t width = source->result_bytes == 16 ? 0 : source->result_bytes == 32 ? 1 : 2;
+        const uint8_t class = source->operand_classes[0];
+        for (uint32_t form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            const bool floating = form >= 4;
+            const bool scalar = floating ? class == (form == 4 ? BUSTER_TYPED_CLASS_F32 : BUSTER_TYPED_CLASS_F64) :
+                                          tier0_class_integer(class) && tier0_class_bytes(class) >= (bytes[form] == 8 ? 8u : 4u) && tier0_class_bytes(class) <= 8;
+            const X86Instruction expected = {
+                .form = forms[form][width],
+                .reg = BUSTER_TIER0_ROLE_VECTOR(0),
+                .rm = floating ? BUSTER_TIER0_ROLE_FLOATING(0) : BUSTER_TIER0_ROLE_INTEGER(0),
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+            };
+            if (scalar && memcmp(source->records, &expected, sizeof(expected)) == 0)
+            {
+                const uint64_t required = ir_typed_vector_moves(source->result_bytes, target_features) | (x86_target_requirement(expected.form) & ~BUSTER_X86_TARGET_KNOWN);
+                status = (target_features & required) == required ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_TARGET;
+                if (status == IR_SIMD_TYPED_OK)
+                {
+                    IrSimdTypedOperation candidate = {
+                        .operation = IR_SIMD_OPERATION_COUNT,
+                        .shape = (IrSimdShape)(IR_SIMD_V4I32 + width),
+                        .required_features = required,
+                        .operand_count = 1,
+                        .splat_bytes = bytes[form],
+                    };
+                    candidate.operand_classes[0] = class;
+                    *result = candidate;
+                }
+            }
+        }
+    }
+    return status;
+}
+
 // Any other X86 row (#141): one whose operands and result are of classes a row call takes (ir_row_type: integers of 1
 // to 8 bytes, floats and doubles, vectors of 4, 8, 16, 32 or 64 bytes whatever their elements, masks and, for its
 // result, void), IR_SIMD_TYPED_UNSUPPORTED otherwise, and whose records' forms the target has, IR_SIMD_TYPED_TARGET
@@ -662,14 +730,106 @@ static IrSimdTypedStatus ir_simd_typed_machine_row(const Tier0Operation* source,
     return status;
 }
 
+// A comparison into a mask alone (#1623): a comparison intrinsic's row as the opmask conversion leaves it
+// (c_check_program_x86.c's COMPARE), two vectors of one width (16, 32 or 64 bytes) and a writemask of the result's width,
+// one record of ir_simd_typed_comparisons' form of their lanes into MASK_RESULT, register-direct, MASK(2) its only
+// decoration and an immediate an IR predicate takes (ir_simd_typed_predicate). Its operands may be in either order: the
+// front end swaps a float compare's for clang's > and >= (check_x86_lower_float_predicate: GT_OS as LT_OS of the swapped
+// pair), and the other order is the reversed predicate of the operands in theirs (a < b as b > a), exact for every lane
+// and NaN, and the same instruction's exceptions. Its mask is the lanes' vcmp ANDed with the writemask (compare_mask),
+// and the result's bytes must be the lanes' mask's (ir_lane_mask's: a byte for 8 lanes or fewer). It is taken only
+// where the target has every form Tier 1 selects for it: the comparison's own, AVX512F and VL below 64 bytes, and its
+// mask width's moves and kand (DQ for a byte's, BW for 32 and 64 lanes'); otherwise, and for an immediate no IR
+// predicate is, a memory operand, a broadcast, rounding or any other decoration, it stays a machine row.
+static IrSimdTypedStatus ir_simd_typed_compare_mask(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    static const uint8_t reversed[IR_SIMD_PREDICATE_COUNT] = {
+        [IR_SIMD_EQ] = IR_SIMD_EQ,
+        [IR_SIMD_NE] = IR_SIMD_NE,
+        [IR_SIMD_LT] = IR_SIMD_GT,
+        [IR_SIMD_LE] = IR_SIMD_GE,
+        [IR_SIMD_GT] = IR_SIMD_LT,
+        [IR_SIMD_GE] = IR_SIMD_LE,
+        [IR_SIMD_ULT] = IR_SIMD_UGT,
+        [IR_SIMD_ULE] = IR_SIMD_UGE,
+        [IR_SIMD_UGT] = IR_SIMD_ULT,
+        [IR_SIMD_UGE] = IR_SIMD_ULE,
+    };
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint32_t bytes = source->operand_bytes[0];
+    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+    const bool admitted = source->result_class == BUSTER_TYPED_CLASS_MASK && source->record_count == 1 && source->operand_count == 3 &&
+                          source->operand_classes[0] == BUSTER_TYPED_CLASS_VECTOR && source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR &&
+                          source->operand_bytes[1] == bytes && (bytes == 16 || bytes == 32 || bytes == 64) &&
+                          source->operand_classes[2] == BUSTER_TYPED_CLASS_MASK && source->operand_bytes[2] == source->result_bytes;
+    const X86Instruction* record = &source->records[0];
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    for (uint32_t lane = 0; admitted && lane < IR_SIMD_LANE_COUNT; lane += 1)
+    {
+        const bool floating = ir_simd_lane_floating((IrSimdLane)lane);
+        const uint32_t lanes = 8u * bytes / ir_simd_lane_bits((IrSimdLane)lane);
+        const uint32_t mask_bytes = lanes <= 8 ? 1 : lanes / 8;
+        for (uint32_t form = 0; form < (floating ? 2u : 4u); form += 1)
+        {
+            const uint32_t unsigned_lanes = form >> 1;
+            const bool swapped = (form & 1) != 0;
+            const X86Instruction expected = {
+                .form = ir_simd_typed_comparisons[lane][unsigned_lanes][width],
+                .reg = BUSTER_TIER0_ROLE_MASK_RESULT,
+                .vvvv = swapped ? v1 : v0,
+                .rm = swapped ? v0 : v1,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .decorations = BUSTER_TIER0_DECORATION_MASK(2),
+                .immediate = record->immediate,
+            };
+            IrSimdPredicate predicate = IR_SIMD_EQ;
+            if (memcmp(record, &expected, sizeof(expected)) == 0 && mask_bytes == source->result_bytes &&
+                ir_simd_typed_predicate(record->immediate, floating, unsigned_lanes != 0, &predicate))
+            {
+                candidate.operation = IR_SIMD_COMPARE;
+                candidate.lane = (IrSimdLane)lane;
+                candidate.predicate = swapped ? (IrSimdPredicate)reversed[predicate] : predicate;
+                candidate.compare_mask = true;
+            }
+        }
+    }
+    const uint32_t mask = source->result_bytes;
+    candidate.required_features = (x86_target_requirement(record->form) & ~BUSTER_X86_TARGET_KNOWN) | BUSTER_X86_FEATURE(AVX512F) |
+                                  (width < 2 ? BUSTER_X86_FEATURE(AVX512VL) : 0) | (mask == 1 ? BUSTER_X86_FEATURE(AVX512DQ) : 0) |
+                                  (mask >= 4 ? BUSTER_X86_FEATURE(AVX512BW) : 0);
+    const IrSimdTypedStatus status = candidate.operation != IR_SIMD_OPERATION_COUNT && (target_features & candidate.required_features) == candidate.required_features ?
+                                         IR_SIMD_TYPED_OK : IR_SIMD_TYPED_UNSUPPORTED;
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        candidate.operand_count = source->operand_count;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
+// A row's decoding: masks, scalar intrinsics, lane operations, comparisons into a mask alone, then exact scalar splats;
+// other admitted forms stay machine rows. A semantic match whose target lacks a required feature stays refused, but a
+// comparison into a mask alone, whose machine row a target may still run, stays one.
 static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
 {
     const bool masks = source != NULL && source->operand_count != 0 && source->operand_classes[0] == BUSTER_TYPED_CLASS_MASK && tier0_class_integer(source->result_class);
     const bool scalar = source != NULL && (source->result_class == BUSTER_TYPED_CLASS_U32 || source->result_class == BUSTER_TYPED_CLASS_U64) && !masks;
-    const IrSimdTypedStatus status = source != NULL && source->result_class == BUSTER_TYPED_CLASS_MASK ? ir_simd_typed_mask_row(source, target_features, result) :
+    IrSimdTypedStatus status = source != NULL && source->result_class == BUSTER_TYPED_CLASS_MASK ? ir_simd_typed_mask_row(source, target_features, result) :
                                      masks                                                             ? ir_simd_typed_mask_test(source, target_features, result) :
                                      scalar                                                            ? ir_simd_typed_intrinsic(source, target_features, result) :
                                                                                                          ir_simd_typed_operation(source, target_features, result);
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_MASK)
+    {
+        status = ir_simd_typed_compare_mask(source, target_features, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED)
+    {
+        status = ir_simd_typed_splat(source, target_features, result);
+    }
     // A row the IR's own operations don't take is its machine row (#141); one they take but the target refuses stays
     // refused.
     return status == IR_SIMD_TYPED_UNSUPPORTED ? ir_simd_typed_machine_row(source, target_features, result) : status;

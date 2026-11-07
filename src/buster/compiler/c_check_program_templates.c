@@ -352,9 +352,14 @@ static CheckLowerTemplateUse check_lower_template_classify(const CheckLowerWrite
     }
     else if (check_lower_binary(op) != BUSTER_TYPED_NONE && op < CHECK_OP_PRE_INCREMENT && !arithmetic)
     {
+        uint8_t binary = check_lower_binary(op);
+        uint64_t right = 0;
+        const bool power = check_lower_unsigned_power(writer, node, class, &binary, &right);
+        // A rewritten right operand no longer has its child's original entries. Leave this root to the task loop;
+        // its children may still be closed templates. The fast twin makes the same choice below.
         // The shifts' and compares' counts are of these classes too, so check_lower_count adds nothing.
         if (check_lower_template_class(check_lower_class(writer, type_a)) && check_lower_template_class(check_lower_class(writer, type_b)) &&
-            !check_lower_aggregate(writer, type_a))
+            !check_lower_aggregate(writer, type_a) && !power)
         {
             use.kind = CHECK_LOWER_TEMPLATE_BINARY;
             check_lower_template_child(writer, &use, a, false, type_a);
@@ -1073,8 +1078,11 @@ static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* 
         }
         else if (binary != BUSTER_TYPED_NONE)
         {
+            uint8_t selected = binary;
+            uint64_t right = 0;
+            const bool power = check_lower_unsigned_power(writer, node, class, &selected, &right);
             if (check_lower_template_class(check_lower_class(writer, type_a)) && check_lower_template_class(check_lower_class(writer, type_b)) &&
-                !check_lower_aggregate(writer, type_a))
+                !check_lower_aggregate(writer, type_a) && !power)
             {
                 check_lower_template_put(entries, binary, class, 0);
                 fast.count = 2;
@@ -1286,3 +1294,4 @@ static inline __attribute__((always_inline)) bool check_lower_template_splice(Ch
 }
 
 #endif
+

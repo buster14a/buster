@@ -30,6 +30,12 @@ requirements. [Command index](README.md).
   with clang's after them for the headers they don't supply (never for a name
   they have, so their `#include_next` reaches the C library's), and
   `-nobuiltininc` leaves out the compiler's headers, whichever they are.
+  `-I-` is rejected (`please use -iquote instead`); a directory named `-` is `-I./-`.
+  A newline in `-D` is kept out of the directive and warned about. An `-include`
+  path containing `"` or a newline is not pasted into `#include "..."`.
+  A raw forced include skipped by `#pragma once` or an include guard leaves the synthetic include depth balanced;
+  the following ordinary forced header still observes level 1, its child level 2, and the main file level 0 (#1616).
+  `-E -fpreprocessed` is rejected; a `.i` input is already preprocessed.
   `docs/c-preprocessor.md` explains the design, the `clang -E`
   oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
   (`main.c` includes it; `./build/compiler test-preprocessor` runs them),
@@ -133,6 +139,15 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   options that change clang's keywords, lexing or `-E` output, which
   `pp_parse_options` models or refuses where their family's last option turns
   them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; #embed's vector/scalar text and lookup checks;
+  the search directories' listings (`pp_test_directory_listings`, #653): the opens a listed directory saves after its
+  32nd failed probe, the names it can't rule out still opened (another case, a subdirectory, a dangling link,
+  `.` and `..`, a name past ASCII or past `NAME_MAX`), a cache another unit shares, a directory with a name past
+  ASCII never listed, one of 64 names put off by its first look and listed at its 256th, and every path, file and
+  error the same as with listings off;
+  the directory-read boundary (`pp_test_directory_reads`, #1604): exact returned-byte MSan shadow, untouched
+  guards and unread tails, short reads, EOF and failed calls, plus guarded malformed/truncated records. The generic
+  raw `getdents64` syscall wrapper unpoisons only a positive returned range; no listing semantic or EMFILE-policy
+  change is implied by that instrumentation boundary;
   the named UCNs' places (`pp_test_named_ucns`): each error at its UCN's backslash, by both kernels, and with
   `--clang` where clang's `-pedantic` warning that a named UCN is its extension is, or for a name no character has
   its error, three columns before it (clang reads one past an identifier's first character silently); one in an
@@ -142,7 +157,13 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   the prelude's failures (#361): the command line's arena push and its `-D`/`-U` and
   `-include` files each failed in turn (the arena cut short, the data table full), each
   a fatal error that stops the prelude and fails the run, beside controls that
-  succeed (no `-include` file made without one); and the fuzz batch: its isolation rules checked on small sources (what a case
+  succeed (no `-include` file made without one). `c_preprocessor_forced_include_test.c` checks raw entry's
+  synthetic/real range failures, successful cleanup and fatal live-context depth ownership on both kernels;
+  the CC compatibility fixtures repeat quote-named once/guarded/plain headers before an ordinary forced header,
+  through preprocessing and syntax-only actions on both kernels. Clang cannot spell these quote-named
+  command-line includes, so its six oracle routes use safe hard links whose device and inode match the raw
+  headers, each included twice. The oracle checks the same header semantics and include levels; the Buster
+  routes retain the exact quote-containing operands. The fuzz batch: its isolation rules checked on small sources (what a case
   leaves open makes clang read it alone), its comparison on pairs of texts
   (whitespace between tokens doesn't count, a literal's contents and joined
   tokens do, and our tokens that don't lex back, as an unterminated literal,
@@ -374,7 +395,7 @@ refresh are in [the measurement record](https://github.com/buster14a/buster-perf
 Its invocation scripts take a separate normal shared-host lock for each command.
 
 `./build/compiler benchmark-preprocessor [--clang] [--markers] [--only
-vectorized|scalar] [--read-limit N,...] [options] file...` preprocesses each file from nothing per
+vectorized|scalar] [--read-limit N,...] [--listing-misses N,...] [options] file...` preprocesses each file from nothing per
 run (a new intern table and preprocessor), with the vectorized kernels and their
 scalar twins, 21 passes after a warm-up, and reports the medians of time, cycles
 and instructions per input token and per output token, IPC, each phase's share
@@ -403,7 +424,12 @@ The older per-pass run totals still include intermediate captures and must
 not be divided by the final output count to claim a share of that output.
 `--read-limit` gives a list of the largest files a run reads rather than maps
 (16 KB by default; 0 maps every file), each run in turn in every pass, which
-must all give the same output.
+must all give the same output. `--listing-misses` does the same for the failed
+probes after which a search directory's names are first looked at (32 by default; 0 never
+reads them: `docs/c-files.md`, "Search directories' listings"), each with each
+read limit, so that one executable compares listings on and off, in turns.
+The probe counts then also give the directories listed and the opens their
+listings saved.
 `--clang` also times `clang -E -P` with the same options, a process per file, with `--buster-headers` translated to ours' search and every argument passed (`pp_clang_preprocess`). A failed clang run fails the benchmark and reports no timing.
 Our predefines follow the target options as clang's do; `--predefines FILE`
 still replaces them (the benchmark leaves it out of clang's command line). The
@@ -459,3 +485,18 @@ share. Run it under the 9700X's lock with `taskset -c 2`;
 after a warm-up: medians per input byte, and the text's throughput. The two
 texts must be the same. Run it pinned to one CPU; `docs/c-preprocessor.md` has
 the 9700X's numbers.
+
+## Scalar-host preparation (#1369)
+
+Production preparation chooses vector kernels only when the host build supports
+BUSTER_HOST_VECTOR and the caller has not requested scalar execution. This also
+selects whole-file scalar refinement instead of emulated 512-bit chunk/window
+refinement on baseline hosts. Shared file caches inherit the same preparation
+policy. Explicit low-level window tests still exercise both kernel protocols on
+baseline hosts; the scalar-reference and window-unit fixtures check the default
+host/option policy before those test-only overrides.
+
+This bounded change does not change parser dispatch or replace the scalar hash's
+software AES implementation. Existing token, macro, diagnostic and window twins
+remain the correctness checks. Baseline/AVX2-host end-to-end timing on the approved
+9700X remains pending; no measured speedup is claimed here.

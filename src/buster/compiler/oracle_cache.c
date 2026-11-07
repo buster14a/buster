@@ -419,6 +419,12 @@ static bool oracle_hash_tool(OracleHash* hash, const char* name, char* path, siz
 static const char* const oracle_environment_names[] = {
     "CCC_OVERRIDE_OPTIONS", "CLANG_NO_DEFAULT_CONFIG", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH",
     "OBJC_INCLUDE_PATH", "OBJCPLUS_INCLUDE_PATH", "COMPILER_PATH", "LIBRARY_PATH", "GCC_EXEC_PREFIX",
+    "GCC_EXTRA_DIAGNOSTIC_OUTPUT",
+    "GCC_COLORS",
+    "GCC_URLS",
+    "TERM_URLS",
+    "TERM",
+    "GCC_DIAGNOSTICS_LOG",
     "DEPENDENCIES_OUTPUT", "SUNPRO_DEPENDENCIES", "SOURCE_DATE_EPOCH", "SDKROOT", "TZ", "LANG", "LC_ALL",
     "LC_CTYPE", "LC_MESSAGES", "LD_LIBRARY_PATH", "LD_PRELOAD", "PATH",
 };
@@ -1126,11 +1132,11 @@ static bool oracle_epoch_valid(const char* epoch)
 
 // The run's key, with its roots found in its strings and its tool's path: false if its cache is off, its tool isn't on
 // PATH, its input can't be read, it has more roots than BUSTER_ORACLE_ROOTS or more files than BUSTER_ORACLE_FILES, or it
-// is a compiler's run (OracleRun.dependencies) that writes a dependency file of its own (an argument of -M's family),
-// which isn't one of its files, or whose environment doesn't set SOURCE_DATE_EPOCH: its __DATE__ and __TIME__ would be
-// when it ran, however its sources spell them (a token pasted from two halves among them), and clang's __TIMESTAMP__
-// too. With the epoch, which the key has, they are the epoch's; a tool whose __TIMESTAMP__ doesn't follow it has the
-// files' times in its entry (oracle_tool_epoch).
+// is a compiler's run (OracleRun.dependencies) that writes a dependency file of its own (-M arguments or
+// dependency-output environment variables), which isn't one of its files, or whose environment doesn't set
+// SOURCE_DATE_EPOCH: its __DATE__ and __TIME__ would be when it ran, however its sources spell them (a token pasted
+// from two halves among them), and clang's __TIMESTAMP__ too. With the epoch, which the key has, they are the epoch's;
+// a tool whose __TIMESTAMP__ doesn't follow it has the files' times in its entry (oracle_tool_epoch).
 static bool oracle_run_key(OracleRun* run)
 {
     bool result = oracle_cache_active(run->cache) && run->arguments != 0 && run->arguments[0] != 0 && run->file_count <= BUSTER_ORACLE_FILES;
@@ -1143,6 +1149,8 @@ static bool oracle_run_key(OracleRun* run)
     result = length > 0 && (size_t)length < sizeof(run->working);
     char* const* environment = run->environment != 0 ? run->environment : environ;
     result = result && (!run->dependencies || oracle_epoch_valid(oracle_variable(environment, "SOURCE_DATE_EPOCH")));
+    // GCC can write an additional log whose bytes are not among the caller-declared outputs.
+    result = result && (!run->dependencies || oracle_variable(environment, "GCC_DIAGNOSTICS_LOG") == 0);
     oracle_roots_begin(&run->roots);
     uint64_t count = 0;
     while (result && run->arguments[count] != 0)
@@ -1151,6 +1159,9 @@ static bool oracle_run_key(OracleRun* run)
         result = !(count != 0 && run->dependencies && strncmp(run->arguments[count], "-M", 2) == 0);
         count += 1;
     }
+    // Environment-driven dependency files are not among the outputs that the caller declares for replay.
+    result = result && (!run->dependencies || (oracle_variable(environment, "DEPENDENCIES_OUTPUT") == 0 &&
+                                               oracle_variable(environment, "SUNPRO_DEPENDENCIES") == 0));
     if (result)
     {
         oracle_roots_find(&run->roots, run->working);
@@ -2069,7 +2080,8 @@ static OraclePath oracle_process_link(const char* link, bool followed, OracleUse
 // its end if `followed` (all but lstat, readlink, readlinkat, and newfstatat and statx with AT_SYMLINK_NOFOLLOW):
 //   - a path in one of the run's roots is kept, wherever $TMPDIR is (/dev/shm, say);
 //   - the package manager's files (under /usr but /usr/local, and /bin, /sbin, /lib, /lib32, /lib64 and /libx32, which
-//     merged-usr systems link into /usr) are left out: the package database's identity in every key stands for them;
+//     merged-usr systems link into /usr) are left out for canonical spellings: the package database's identity in
+//     every key stands for them. Repeated separators and dot components are kept without rewriting the path;
 //   - the kernel's (/proc and /sys), which describe the processes and the machine and change with no file changing,
 //     are left out where a call checks for them (access, chdir) and refused where it stats, opens, reads or changes
 //     them; and a process's paths, which /dev/fd, /dev/stdin, /dev/stdout and /dev/stderr lead to, by
@@ -2091,7 +2103,10 @@ static OraclePath oracle_path_rule(const OracleRun* run, const char* path, bool 
     {
         package |= oracle_path_under(path, packaged[p], &rest);
     }
-    package &= !oracle_path_under(path, "/usr/local", &rest);
+    const size_t length = strlen(path);
+    const bool simple = strstr(path, "//") == 0 && strstr(path, "/./") == 0 &&
+                        !(length >= 2 && strcmp(path + length - 2, "/.") == 0);
+    package &= simple && !oracle_path_under(path, "/usr/local", &rest);
     // A process's paths: /proc/PID's (and its task's), and /dev/fd's and the standard streams', which lead to the
     // caller's /proc/self/fd's.
     char link[BUSTER_ORACLE_PATH_BYTES + 8];
@@ -2682,7 +2697,8 @@ static void oracle_run_reset(OracleRun* run)
 
 // --- Entries ---
 
-static const char oracle_magic[8] = { 'B', 'U', 'S', 'T', 'O', 'R', 'C', '3' };
+// Version 4 rejects entries whose package-path rules could omit noncanonical /usr/local dependencies.
+static const char oracle_magic[8] = { 'B', 'U', 'S', 'T', 'O', 'R', 'C', '4' };
 
 // An entry's flags: its files' modification times are part of what its run read (oracle_tool_epoch).
 #define BUSTER_ORACLE_TIMES 1u

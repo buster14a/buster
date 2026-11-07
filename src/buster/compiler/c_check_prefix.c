@@ -597,7 +597,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             memset(view->tokens.flags + total, 0, BUSTER_PARSE_TOKEN_PADDING);
             // (Every pragma position is at most the count: the last segment took them all.)
             origin = next_origin;
-            memset(meanings, PARSE_MEANING_UNBOUND, original->meanings.capacity);
+            memset(meanings, PARSE_MEANING_ORDINARY, original->meanings.capacity);
             for (uint32_t i = 0; i < BUSTER_PARSE_PREDECLARED_TYPEDEFS; i += 1)
             {
                 meanings[view->predeclared[i]] = PARSE_MEANING_TYPEDEF;

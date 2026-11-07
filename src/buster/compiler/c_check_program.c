@@ -175,6 +175,9 @@ struct CheckProgramOptions
     // accesses', the read/modify/writes' (compare-exchanges and fetch loops among them) builtins, and asm statements. An
     // implicit _Atomic object's accesses have no helper to take, and stay the typed stream's.
     uint32_t helper_forms;
+    // The scratch gives its pages past this pass's columns back in whole huge pages (arena_discard_huge): a lane of the
+    // C driver's units that will compile another unit after this one (#777), whose parse and reader push as far again.
+    bool discard_huge;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -1356,7 +1359,7 @@ static bool check_control_fold_operand(const CheckControlWriter* writer, uint32_
                              offset.constant_kind == CHECK_CONSTANT_INTEGER && offset.integer <= program->types->types.extent[type_index(type)];
         object = bounded ? array : BUSTER_CHECK_NONE;
     }
-    const bool named = object < graph->count && graph->ops[object] == CHECK_OP_VALUE && check_graph_leaf_of(graph, object)->object != 0 &&
+    const bool named = object < graph->count && graph->ops[object] == CHECK_OP_VALUE && check_graph_leaf_object(graph, object) != 0 &&
                        (value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
     return operand < graph->count && (check_control_fold_value(&value) || named) && check_control_fold_push(writer, depth, visits, operand);
 }
@@ -2324,49 +2327,14 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
     }
 }
 
-// A direct function call's source contract: 1 may return, 2 never returns, 0 is not known here. Keep indirect
-// calls and plain library declarations whose builtin contract is not retained conservative. The ordinary direct
-// call no longer suppresses the whole body's warning merely because it has a call in it.
-static uint32_t check_program_return_call(const CheckProgram* program, uint32_t node)
-{
-    const CheckInput* input = program->input;
-    const CheckGraph* graph = &input->graph;
-    uint32_t result = 0;
-    if (node < graph->count && graph->ops[node] == CHECK_OP_CALL && graph->tokens != NULL && input->declarations != NULL)
-    {
-        uint32_t callee = graph->operand0[node];
-        for (uint32_t steps = 0; callee < graph->count && steps < graph->count &&
-             (graph->ops[callee] == CHECK_OP_CONVERT || graph->ops[callee] == CHECK_OP_POSITIVE ||
-              graph->ops[callee] == CHECK_OP_ADDRESS || graph->ops[callee] == CHECK_OP_DEREFERENCE); steps += 1)
-        {
-            callee = graph->operand0[callee];
-        }
-        const uint32_t token = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
-        const uint32_t declaration = token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
-        if (declaration < input->token_count && type_kind(program->types, type_strip_aligned(program->types, input->declared_types[declaration])) == BUSTER_TYPE_KIND_FUNCTION)
-        {
-            const bool noreturn = input->function_flags != NULL && (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_NORETURN) != 0;
-            result = noreturn ? 2 : 1;
-            if (!noreturn && program->identifiers != NULL && program->parser != NULL)
-            {
-                const uint32_t name = program->parser->tokens.names[declaration];
-                const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)intern_bytes(program->identifiers, name), intern_length(program->identifiers, name));
-                if (info != NULL && memchr(info->attributes, 'r', info->attributes_length) != NULL)
-                {
-                    result = 0;
-                }
-            }
-        }
-    }
-    return result;
-}
+#include "c_check_return_flow.c"
 
 // Aggregate returns need an address even at a reachable implicit return. Reuse the completed writer's label and
 // task scratch for a bounded CFG worklist; each control enters once. The first walk retains both conditional edges,
 // as Tier 0 validates them, and removes dead transfers without renumbering labels. The second selects constant
 // conditions for the source warning. Statement-expression regions keep the lowering's existing stack tracking.
-static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, uint32_t* node_marks, uint32_t* node_stack, uint64_t* work,
-                                     bool return_warnings, bool noreturn_warnings)
+static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, const uint8_t* return_facts, bool return_warnings,
+                                      bool noreturn_warnings)
 {
     CheckProgram* program = writer->program;
     const TypeId result = type_conversion_operand(program->types, type_return(program->types, program->input->declared_types[body->declaration]));
@@ -2382,21 +2350,10 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
         uint8_t* seen = (uint8_t*)writer->tasks;
         uint32_t* queue = writer->labels;
         const CheckGraph* graph = &program->input->graph;
-        // Reference epochs are body identities, below token_count < 2^29. Temporarily OR the disjoint high bit
-        // into their already initialized node marks, then restore every touched word before references consume it.
-        // This avoids clearing the whole unit's graph for each small aggregate body. The task records are dead;
-        // their suffix holds the visited IDs apart from the control marks. capacity is 8 * token_count + 16 plus
-        // the cleanups' room, so round its byte offset up to a u32's and keep graph->count <= capacity within the
-        // existing allocation.
-        const uint32_t warning_mark = UINT32_C(1) << 31;
-        _Static_assert(sizeof(CheckControlTask) >= 8, "control tasks hold byte marks and an aligned u32 visited list");
-        const uint64_t touched_offset = ((uint64_t)writer->capacity + 3) & ~(uint64_t)3;
-        uint32_t* touched = (uint32_t*)((uint8_t*)writer->tasks + touched_offset);
-        for (uint32_t pass = 0; pass < 2; pass += 1)
+        for (uint32_t pass = 0; pass < (return_warnings ? 2u : 1u); pass += 1)
         {
-            bool warning_safe = graph->count <= writer->capacity;
+            bool warning_safe = true;
             memset(seen, 0, body->count);
-            uint32_t touched_count = 0;
             uint32_t head = 0;
             uint32_t tail = 1;
             queue[0] = 0;
@@ -2477,103 +2434,28 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                     }
                     next = entry->kind != CHECK_CONTROL_JUMP_INDIRECT;
                 }
-                // A discarded expression has a void cast wrapper; conversions and condition wrappers also always
-                // evaluate their operand. A terminal call beneath those wrappers ends this path, while a call in a
-                // conditional operand remains conservative. Lifetime entries carry a start/end flag, not a node.
-                uint32_t expression = entry->kind != CHECK_CONTROL_LIFETIME ? entry->node : BUSTER_CHECK_NONE;
-                for (uint32_t steps = 0; pass != 0 && expression < graph->count && steps < graph->count &&
-                     (graph->ops[expression] == CHECK_OP_CAST || graph->ops[expression] == CHECK_OP_CONVERT ||
-                      graph->ops[expression] == CHECK_OP_POSITIVE || graph->ops[expression] == CHECK_OP_CONDITION); steps += 1)
+                if (pass != 0)
                 {
-                    expression = graph->operand0[expression];
-                }
-                const bool terminal_call = pass != 0 && check_program_return_call(program, expression) == 2;
-                if (terminal_call)
-                {
-                    next = false;
-                    targets[0] = BUSTER_CHECK_NONE;
-                    returns = true;
-                }
-                if (pass != 0 && warning_safe && entry->kind != CHECK_CONTROL_LIFETIME && entry->node < graph->count &&
-                    (node_marks[entry->node] & warning_mark) == 0)
-                {
-                    uint32_t depth = 1;
-                    node_stack[0] = entry->node;
-                    node_marks[entry->node] |= warning_mark;
-                    touched[touched_count++] = entry->node;
-                    while (depth != 0 && warning_safe)
+                    uint8_t fact = entry->node < graph->count ? return_facts[entry->node] : 0;
+                    if (entry->kind == CHECK_CONTROL_INITIALIZE && program->initializers != NULL && entry->target < program->initializers->count)
                     {
-                        const uint32_t node = node_stack[--depth];
-                        if (work != NULL)
+                        const CheckInitializer* plan = program->initializers->plans + entry->target;
+                        for (uint32_t part = 0; part < plan->count; part += 1)
                         {
-                            *work += 1;
+                            const CheckInitPart* value = plan->parts + part;
+                            fact |= value->kind == CHECK_INIT_VALUE && value->node < graph->count ? return_facts[value->node] : 0;
                         }
-                        const CheckOp op = graph->ops[node];
-                        warning_safe = op != CHECK_OP_BUILTIN_QUERY &&
-                                       (op != CHECK_OP_CALL || check_program_return_call(program, node) == 1 || (terminal_call && node == expression));
-                        if (op == CHECK_OP_BUILTIN_MISC)
-                        {
-                            const uint32_t effect = check_program_builtin_index(program->stream->misc, program->stream->misc_count, sizeof(CheckBuiltinMiscEffect), node);
-                            warning_safe = effect != BUSTER_CHECK_NONE && (!program->stream->misc[effect].terminates || node == expression);
-                            if (warning_safe && program->stream->misc[effect].terminates)
-                            {
-                                next = false;
-                                targets[0] = BUSTER_CHECK_NONE;
-                                returns = true;
-                            }
-                        }
-                        if (warning_safe && op != CHECK_OP_VALUE && op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
-                        {
-                            uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
-                            if (op == CHECK_OP_VARARGS)
-                            {
-                                const uint32_t effect = graph->argument_offsets[node];
-                                warning_safe = effect < program->stream->varargs_count && program->stream->varargs[effect].node == node;
-                                const uint32_t evaluated = warning_safe ? program->stream->varargs[effect].evaluated_operands : 0;
-                                for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(operands); o += 1)
-                                {
-                                    operands[o] = (evaluated & (1u << o)) != 0 ? operands[o] : BUSTER_CHECK_NONE;
-                                }
-                            }
-                            bool truth = false;
-                            if ((op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL) &&
-                                check_program_runtime_truth(program, node, operands[0], &truth))
-                            {
-                                if (op == CHECK_OP_CONDITIONAL)
-                                {
-                                    operands[truth ? 2 : 1] = BUSTER_CHECK_NONE;
-                                }
-                                else if (truth == (op == CHECK_OP_LOGICAL_OR))
-                                {
-                                    operands[1] = BUSTER_CHECK_NONE;
-                                }
-                            }
-                            for (uint32_t o = 0; warning_safe && o < BUSTER_ARRAY_LENGTH(operands); o += 1)
-                            {
-                                const uint32_t operand = operands[o];
-                                if (operand < graph->count && (node_marks[operand] & warning_mark) == 0)
-                                {
-                                    node_marks[operand] |= warning_mark;
-                                    touched[touched_count++] = operand;
-                                    node_stack[depth++] = operand;
-                                }
-                            }
-                            if (warning_safe && check_graph_has_arguments(op))
-                            {
-                                const uint32_t mask = check_program_argument_mask(program, node);
-                                for (uint32_t a = 0; a < graph->argument_counts[node]; a += 1)
-                                {
-                                    const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
-                                    const bool evaluated = op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || (a < 32 && (mask & (1u << a)) != 0);
-                                    if (evaluated && argument < graph->count && (node_marks[argument] & warning_mark) == 0)
-                                    {
-                                        node_marks[argument] |= warning_mark;
-                                        touched[touched_count++] = argument;
-                                        node_stack[depth++] = argument;
-                                    }
-                                }
-                            }
-                        }
+                    }
+                    // A guaranteed nonreturning expression ends only this CFG edge. Unknown contracts retain the
+                    // previous conservative warning policy; an unrelated proven stop never hides another fall-off.
+                    if ((fact & BUSTER_CHECK_RETURN_STOPS) != 0)
+                    {
+                        targets[0] = BUSTER_CHECK_NONE;
+                        next = false;
+                    }
+                    else
+                    {
+                        warning_safe &= (fact & BUSTER_CHECK_RETURN_UNKNOWN) == 0;
                     }
                 }
                 targets[1] = next && index + 1 < body->count ? index + 1 : BUSTER_CHECK_NONE;
@@ -2586,10 +2468,6 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                         queue[tail++] = target;
                     }
                 }
-            }
-            for (uint32_t t = 0; t < touched_count; t += 1)
-            {
-                node_marks[touched[t]] &= ~warning_mark;
             }
             const bool falls = body->count != 0 && seen[body->count - 1] != 0;
             if (pass == 0)
@@ -2781,7 +2659,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
         const CheckOp op = graph->ops[node];
         if (op == CHECK_OP_VALUE)
         {
-            const CheckValue value = *check_graph_leaf_of(graph, node);
+            const CheckValue value = check_graph_leaf_value(graph, node);
             if (value.overload_head == 0 && value.object != 0 && value.object < program->object_count &&
                 ((value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0 || check_input_bit(program->input->declaration_bits, value.object - 1, BUSTER_CHECK_BITS_STATIC)) && seen[value.object] != epoch)
             {
@@ -3079,21 +2957,28 @@ static bool check_program_runtime_object(const CheckInput* input, const TypeTabl
 // statement's first entry is written, and its bit set in `planned`, at its first plan, and no other entry of plan_first is
 // (#877). A compound literal's plan joins no statement's list; true when one of a runtime object does.
 static bool check_program_plans(CheckProgram* program, const Parser* parser, const CheckInitializers* initializers, uint32_t* plan_first, uint64_t* planned,
-                                uint32_t* plan_next)
+                                uint32_t* plan_next, uint32_t* parents)
 {
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
     bool compound_initializers = false;
+    uint64_t work = 0;
+    bool cached = false;
     for (uint32_t i = initializers != 0 ? initializers->count : 0; i-- > 0;)
     {
         const uint32_t declaration = initializers->declaration_tokens[i];
         const bool compound = declaration < count && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND);
         uint32_t token = declaration < count && check_sparse_get(input->initializer_begins, declaration) != 0 ? check_sparse_get(input->initializer_begins, declaration) - 1 : BUSTER_CHECK_NONE;
-        uint32_t steps = 0;
-        while (!compound && token < count && steps < count && parser->tree.roles[token] != PARSE_ROLE_TERMINATOR)
+        if (!compound)
         {
-            token = parser->tree.parents[token];
-            steps += 1;
+            if (!cached && count != 0 && work >= count)
+            {
+                // Only copy after the uncached walks paid a token-wide pass. The caller lends not-yet-live `seen`
+                // scratch, cleared before its later uses: no extra retained column or copy for cheap queries (#1378).
+                memcpy(parents, parser->tree.parents, (uint64_t)count * sizeof(uint32_t));
+                cached = true;
+            }
+            token = check_input_cached_ancestor(parser, token, cached ? parents : NULL, false, &work);
         }
         if (compound)
         {
@@ -3102,7 +2987,7 @@ static bool check_program_plans(CheckProgram* program, const Parser* parser, con
             plan_next[i] = BUSTER_CHECK_NONE;
             compound_initializers |= !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC);
         }
-        else if (token < count && steps < count)
+        else if (token < count)
         {
             if (!check_program_bit(planned, token))
             {
@@ -3604,7 +3489,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint32_t* lifetime_next = lifetimes ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* lifetime_stamps = lifetimes ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     valid = valid && (!lifetimes || (lifetime_first != 0 && lifetime_next != 0 && lifetime_stamps != 0));
-    const uint64_t lifetime_room = valid && lifetimes ? check_program_lifetime_blocks(parser, input, lifetime_first, lifetime_next) : 0;
+    const uint64_t lifetime_room = valid && lifetimes ? check_program_lifetime_blocks(parser, input, lifetime_first, lifetime_next, lifetime_stamps) : 0;
     valid = valid && cleanup_room + lifetime_room <= UINT32_MAX - ((uint64_t)count * 8 + 16);
     const uint32_t capacity = valid ? (uint32_t)((uint64_t)count * 8 + 16 + cleanup_room + lifetime_room) : 0;
     // The bodies' labels, the worklist of a body's controls and the unit's controls, with room for 8 a token: each body
@@ -3675,9 +3560,16 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         program->status = CHECK_PROGRAM_RESOURCE;
     }
     // The scratch's pages past these columns go back to the kernel (arena_discard, #628): in the C driver they are the
-    // parse's and the reader's, which touched 77 MB of sqlite3.c's scratch against these columns' 51, and which this pass
-    // and the backend would otherwise hold while their outputs take pages of their own, through the compile's peak.
-    if (valid)
+    // parse's and the reader's, which touched 77 MB of sqlite3.c's scratch against these columns' 51, and which this
+    // pass and the backend would otherwise hold while their outputs take pages of their own, through the compile's
+    // peak. A lane of several units that has another to compile gives them back in whole huge pages
+    // (CheckProgramOptions.discard_huge, #777): the huge page a discard frees part of is split, and its next unit's
+    // parse and reader fault the part in again a base page at a time, as each later unit does.
+    if (valid && options.discard_huge)
+    {
+        arena_discard_huge(scratch);
+    }
+    else if (valid)
     {
         arena_discard(scratch);
     }
@@ -3730,7 +3622,6 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             program->lifetime_first = lifetime_first;
             program->lifetime_next = lifetime_next;
         }
-        memset(seen, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(nodes, 0, ((uint64_t)node_count + 1) * sizeof(uint32_t));
         if (options.return_flow_work != NULL)
         {
@@ -3761,7 +3652,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             node_next[node] = token_first[token];
             token_first[token] = node;
         }
-        const bool compound_initializers = check_program_plans(program, parser, options.initializers, plan_first, planned, plan_next);
+        const bool compound_initializers = check_program_plans(program, parser, options.initializers, plan_first, planned, plan_next, seen);
+        memset(seen, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         if (compound_initializers && program->status == CHECK_PROGRAM_OK)
         {
             program->compound_initializers = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, options.initializers->count);
@@ -3900,6 +3792,11 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         .fold_capacity = node_count + 1,
         .capacity = capacity,
     };
+    // Source warning contracts are a single postorder reduction, reused by every body's CFG walk. They neither
+    // alter emission reachability nor run on a rejected stream. Warning-disabled commands keep no extra facts.
+    const uint8_t* return_facts = valid && program->status == CHECK_PROGRAM_OK && options.return_warnings && node_count != 0 ?
+                                    check_program_return_facts(program, scratch, options.return_flow_work) : NULL;
+    valid = valid && (!options.return_warnings || node_count == 0 || return_facts != NULL) && program->status == CHECK_PROGRAM_OK;
     uint32_t reference_count = 0;
     for (uint32_t b = 0; valid && b < body_count && program->status == CHECK_PROGRAM_OK; b += 1)
     {
@@ -3932,7 +3829,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             const uint32_t name = parser->tokens.names[declaration];
             body->is_main = intern_length(options.identifiers, name) == 4 && memcmp(intern_bytes(options.identifiers, name), "main", 4) == 0;
         }
-        check_program_return_flow(&writer, body, nodes, stack, options.return_flow_work, options.return_warnings, options.noreturn_warnings);
+        check_program_return_flow(&writer, body, return_facts, options.return_warnings, options.noreturn_warnings);
         body->reference_count = check_program_references(program, entries + start, body->entry_count, program->body_count, seen, nodes, stack, reference_items, needed);
         if (body->reference_count > UINT32_MAX - reference_count)
         {
@@ -4094,3 +3991,4 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 #include "c_check_program_emit.c"
 
 #endif
+

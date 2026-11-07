@@ -60,7 +60,7 @@ static void check_test_literal_quad(CheckTest* test, Arena* scratch)
         if (!exact[i].imaginary && literal.valid)
         {
             CheckValue negative = { .type = type };
-            check_action_fold_floating(CHECK_OP_NEGATIVE, &value, &value, &negative, 0);
+            check_action_fold_floating(CHECK_OP_NEGATIVE, &value, &value, &negative, 0, false);
             check_action_quad_bits(negative.floating, words);
             check_test_expect(test, negative.constant_kind == CHECK_CONSTANT_FLOATING && negative.fault == CHECK_FAULT_NONE &&
                               words[0] == exact[i].low && words[1] == (exact[i].high ^ (UINT64_C(1) << 63)),

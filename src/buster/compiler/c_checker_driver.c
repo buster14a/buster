@@ -3146,7 +3146,16 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     }
     check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_BUILD);
     arena_pop_to(scratch, mark);
-    check_program_lanes_release(lanes);
+    // A units' lane keeps lane 0's writer's columns for its next unit (check_program_lanes_settle, #442); a command of one
+    // file is done with them.
+    if (lanes != NULL && lanes->units_lane != NULL)
+    {
+        check_program_lanes_settle(lanes);
+    }
+    else
+    {
+        check_program_lanes_release(lanes);
+    }
     arena_release(&bytes);
     arena_release(&output);
     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
@@ -3601,6 +3610,8 @@ struct CheckDriverLibraries
     ForeignArgument* arguments;
     uint32_t argument_count;
 };
+
+#include "c_driver_named_libraries.c"
 
 // Says why the -l libraries didn't import (runtime_libraries_import's error).
 static void check_driver_libraries_failed(const RuntimeLibraries* libraries, RuntimeError error)
@@ -4116,6 +4127,7 @@ struct CheckDriverCommand
 typedef struct CheckUnitsKept CheckUnitsKept;
 static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock, bool release);
 static void check_units_admit(struct CheckUnitsLane* lane, uint32_t tokens);
+static bool check_units_discard_huge(struct CheckUnitsLane* lane);
 
 // A unit's deferred bodies' lanes in the command's flow (#151, CheckDeferredFlow): the emission's lanes (`lanes`), whose
 // worker budget's slots the bodies take under a lease of their own, and whether giving them back failed.
@@ -4360,11 +4372,14 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         {
             // The table's columns in base pages: each has room for every type the unit could make, far apart, of which
             // a unit makes few (sqlite3.c's 716,380 tokens, 3,434 types), at each column's start. In huge pages each
-            // column's first touch cleared a 2 MB page: 39 MB of sqlite3.c's peak RSS (#528).
+            // column's first touch cleared a 2 MB page: 39 MB of sqlite3.c's peak RSS (#528). The index's first
+            // BUSTER_TYPE_INDEX_SMALL_BYTES too, which hold a unit's buckets but the largest's: sqlite3.c's take 128 KB,
+            // where the index's first huge page took 2 MB (#672).
             const uint64_t type_bytes = type_capacity_bytes(capacity);
+            const uint64_t index_bytes = type_index_capacity_bytes(capacity);
             const bool fail_types = check_driver_test_failed_types != NULL && strcmp(path, check_driver_test_failed_types) == 0;
             type_arena = !fail_types ? arena_reserve_small(type_bytes, type_bytes) : (Arena){ 0 };
-            index_arena = !fail_types ? arena_reserve(type_index_capacity_bytes(capacity)) : (Arena){ 0 };
+            index_arena = !fail_types ? arena_reserve_small(index_bytes, BUSTER_TYPE_INDEX_SMALL_BYTES) : (Arena){ 0 };
             ready = !fail_types && capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
             if (!ready)
             {
@@ -4672,6 +4687,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .lifetimes = lanes != NULL && lanes->tier1 && !lanes->tier1_no_lifetimes,
                         .asm_helpers = lanes != NULL && lanes->tier1,
                         .helper_forms = lanes != NULL ? lanes->helper_forms : 0,
+                        // A units lane with a unit left to take gives its scratch's pages back in whole huge pages
+                        // (#777).
+                        .discard_huge = lanes != NULL && lanes->units_lane != NULL && check_units_discard_huge(lanes->units_lane),
                     });
                     const bool program_diagnostics = result == 0 ||
                         (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && pp->errors != 0 &&
@@ -4880,7 +4898,9 @@ static int check_driver_one_unit(const CheckDriverRun* run)
     static CheckDeferred deferred;
     const bool interned = intern_initialize(&identifiers);
     DependencyOutput dependency = { 0 };
-    int result = check_driver_unit(run->command, &run->command->options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
+    PPOptions options = run->command->options;
+    options.preprocessed = run->command->inputs != NULL && run->command->inputs[0].preprocessed;
+    int result = check_driver_unit(run->command, &options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
                                   run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, stderr, NULL, run->release, &dependency, run->arena,
                                   run->command->deferred_bodies ? &deferred : NULL, NULL);
     if (result == 0)
@@ -5051,6 +5071,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     if (time_stages)
     {
         check_clock_start(&clock_storage);
+        clock_storage.pages_busy = arena_pages_busy;
     }
     time_stages = false;
     worker_budget_initialize(&worker_budget, getenv("MAKEFLAGS"), BUSTER_CHECK_EMIT_MAX_LANES);
@@ -5601,16 +5622,34 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         }
     }
     parsed = parsed && dependency_check_destinations(&options.dependencies, inputs, input_count, output, emit_object, link, &arena);
-    if (parsed && stdin_count != 0)
+    // Resolve the remaining request refusals before the archive probe or any source stream is opened: PIC/PIE,
+    // instrumentation, ABI layouts and the language/target. The Tier 1 combination check has no source dependency.
+    const CheckRequestRefusal refusal = parsed ? check_request_refusal(&request, &options, emit_object || link) : codegen;
+    const bool invalid_tier1 = !lanes->tier1 && (lanes->tier1_strict || tier1_report || lanes->tier1_refusals != NULL || lanes->tier1_no_rematerialize ||
+                                               tier1_gvn || lanes->tier1_no_lifetimes || lanes->tier1_no_inline);
+    const bool libraries_ready = !parsed || refusal.error != CHECK_REQUEST_ACCEPTED || !link || mixed_inputs || libraries.count == 0 ||
+                                 worker_budget.dry_run || invalid_tier1 || check_driver_named_archives(&libraries, runtime_kind, &arena, &mixed_inputs);
+    if (parsed && libraries_ready && stdin_count != 0)
     {
         parsed = driver_read_stdin(&arena, &options.stdin_source);
         options.stdin_ready = parsed;
     }
-    // The rest of what the request asks for that the driver doesn't implement, refused before any unit or output is
-    // opened: position-independent code when it emits code (the parser already resolves the last PIC/PIE option; Tier 0
-    // can't yet emit shared-library-safe symbol and TLS accesses, #811; non-emitting actions keep PIC), the ABI layouts
-    // the checker doesn't implement, never emitted silently, and a language or target it doesn't take.
-    const CheckRequestRefusal refusal = parsed ? check_request_refusal(&request, &options, emit_object || link) : codegen;
+    if (parsed && libraries_ready)
+    {
+        char** sources = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, (uint64_t)input_count + 1);
+        uint32_t source_inputs = 0;
+        parsed = sources != NULL && (input_count == 0 || input_kinds != NULL);
+        for (uint32_t i = 0; parsed && i < input_count; i += 1)
+        {
+            const CheckDriverInputKind kind = input_kinds[i].kind;
+            if (kind == CHECK_DRIVER_INPUT_C || kind == CHECK_DRIVER_INPUT_ASSEMBLY_CPP)
+            {
+                sources[source_inputs] = inputs[i];
+                source_inputs += 1;
+            }
+        }
+        parsed = parsed && driver_cache_streams(&arena, sources, source_inputs, &options);
+    }
     options.semantic_pragmas = true;
     options.timing = time_stages;
     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
@@ -5709,8 +5748,14 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         check_request_describe(stderr, &refusal);
         fprintf(stderr, "\n");
     }
-    else if ((lanes->tier1_strict || tier1_report || lanes->tier1_refusals != NULL || lanes->tier1_no_rematerialize || tier1_gvn || lanes->tier1_no_lifetimes || lanes->tier1_no_inline) &&
-             !lanes->tier1)
+    else if (!libraries_ready)
+    {
+        if (arena_failure.bytes != 0)
+        {
+            arena_report_failure(stderr, "named-library arguments", (uint64_t)(count + 1) * sizeof(String8));
+        }
+    }
+    else if (invalid_tier1)
     {
         fprintf(stderr, "error: %s needs --tier1\n", lanes->tier1_strict ? "--tier1-strict" : tier1_report ? "--tier1-report" : lanes->tier1_refusals != NULL ? "--tier1-refusals" :
                                                     lanes->tier1_no_rematerialize ? "--tier1-no-rematerialize" : tier1_gvn ? "--tier1-gvn" :
@@ -5824,3 +5869,4 @@ static int run_check_command(int count, char** arguments, bool executable)
 {
     return run_check_command_mode(count, arguments, executable, true);
 }
+

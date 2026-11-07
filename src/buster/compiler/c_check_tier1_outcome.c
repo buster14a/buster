@@ -68,8 +68,8 @@ typedef enum CheckTier1Fallback
 // refusals say which shape to take first. Indirect and variadic are kinds the boundary takes, which the counts still tell
 // apart. A call has every kind it has, so the kinds' counts can sum past the calls'. Stack arguments are the arguments
 // past the boundary's limit (BUSTER_TIER1_SELECT_MAX_ARGUMENTS), not every argument the ABI passes on the stack, which
-// Tier 1 takes below it (#141); an ABI record is one the boundary refuses, the call's or an argument's, or aggregates'
-// parts in registers past the staging slots. The boundary takes floating and long double arguments and results (#141),
+// Tier 1 takes below it (#141); an ABI record is one the boundary refuses, the call's or an argument's. Aggregate
+// staging past the red zone is frame storage (#1450). The boundary takes floating and long double arguments and results (#141),
 // with or without a record, so no kind names them: one with a record it refuses is an ABI record's.
 typedef enum CheckTier1CallKind
 {

@@ -32,7 +32,7 @@ static void check_program_symbol_expression(const CheckProgram* program, uint32_
     const CheckOp op = graph->ops[node];
     if (op == CHECK_OP_VALUE)
     {
-        const CheckValue value = *check_graph_leaf_of(graph, node);
+        const CheckValue value = check_graph_leaf_value(graph, node);
         if (value.overload_head == 0)
         {
             check_program_symbol_reference(program, first, value.object, point);

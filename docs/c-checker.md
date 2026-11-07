@@ -889,7 +889,7 @@ their arrays need no padding and are accessed only within their counts.
 | `ops` | `count` `CheckOp` entries; one operation per stable node ID. |
 | `operand0`, `operand1`, `operand2` | `count` 32-bit entries each. Used operands are earlier node IDs; absent operands are `BUSTER_CHECK_NONE`. Arity is checked. |
 | `tokens` | Optional `count` 32-bit source-token identities. If absent, diagnostics use node IDs. |
-| `leaves`, `leaf_slots` | `leaf_count` `CheckValue` records, one per `VALUE` node in node order, and `count` 32-bit slots: a `VALUE` node's is its record's index, the next after the previous `VALUE` node's, and every other node's is `BUSTER_CHECK_NONE` (`check_graph_leaf_of`). Only `VALUE` reads a record, so other nodes take none of its 96 bytes (#572). |
+| `leaf_records`, `leaf_payloads`, `leaf_slots` | `leaf_count` 32-byte `CheckGraphLeaf` records, one per `VALUE` node in node order, and `count` 32-bit slots: a `VALUE` node's is its record's index, the next after the previous `VALUE` node's, and every other node's is `BUSTER_CHECK_NONE`. Only `VALUE` reads a record, so other nodes take none (#572). A record holds the value's type, category, flags, constant kind, object, overload set and its integer's low 64 bits; a value with more (`check_graph_leaf_rest`: a wider integer, a floating payload, an offset, a bit-field's place, a fault) also takes the next whole `CheckValue` row of `leaf_payloads`, at most one a leaf (#628). A hand-built graph may hold the leaves whole in `dense_leaves` instead. `check_graph_leaf_value` and its field accessors read either form, and `check_graph_set_leaf` (a leaf's first write) and `check_graph_update_leaf` (a write over one, in the row it has) write it. Both validators refuse a record whose row is past the graph's rows or holds another value than the record in the fields both hold, rows past their room, and rows without their column (`check_graph_leaf_valid_at`, `check_graph_validate_lists`). |
 | `types`, `members` | Optional `count` columns containing a requested destination/query `TypeId` or member identifier. A missing column supplies zero. |
 | `contexts` | Optional `count` bytes. The documented bits request an ICE, a true static assertion, or a static initializer. Unknown bits are invalid. |
 | `argument_offsets`, `argument_counts` | Optional `count` 32-bit columns. A call owns a bounded slice of `argument_nodes`; its callee is `operand0`. |
@@ -1086,8 +1086,9 @@ output cache line twice. When validation is required (an external producer or
 from a prefix sum. A block with an invalid node, a `VARARGS` or x86 builtin
 or a sideband entry goes to `check_graph_validate_node`, the scalar
 validator's step. Most of that validation's time is the leaves' records it
-reads: two cache lines of each 96-byte record, which since #572 lie one after
-another, as only `VALUE` nodes have one. `test-checker` compares the two
+reads, which since #572 lie one after another, as only `VALUE` nodes have one,
+and since #628 are 32 bytes each, half a cache line, where a 96-byte value took
+two. `test-checker` compares the two
 validators on random graphs whole, with each rule broken, and with their
 columns ending at `PROT_NONE` pages.
 
@@ -1931,12 +1932,31 @@ What the lowering covers past scalars (#145's programs):
   median increases 0.79% with overlapping ranges. The report preserves these
   limits and the full evidence.
 - **Initializers.** A local object's plan is applied in order: the object is
-  cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
-  128 bytes) unless its first part clears it whole, then each part's zeros,
-  bytes or value is stored, an aggregate's copied.
+  cleared first unless its first part writes it whole (zeros, or an
+  aggregate's copy of the object's size, as `T x = *p;` and `T x = f();`, which
+  writes its padding too), then each part's zeros, bytes or value is stored, an
+  aggregate's copied. Zeros of up to 128 bytes are stores of 8 down to 1 bytes;
+  past 128 bytes (`BUSTER_CHECK_LOWER_FILL_UNROLLED`) they are one call of the
+  target C library's `memset`, as clang `-O0`'s code clears them (#1376), the
+  whole object's and each zero part's. Each such call is counted with the
+  unit's runtime calls when its pools are planned (`check_lower_init_pools`).
+  A volatile object, or one with a volatile part, keeps its stores, a loop of
+  8-byte stores past 128 bytes. A compound literal of the object's size that
+  initializes it whole (`T x = (T){ ... };`, as many literals deep as there
+  are) writes its parts into the object itself, as clang's code initializes it
+  in place, rather than into its own object, cleared, filled and then copied;
+  neither may have a volatile part. The [9700X record](https://github.com/buster14a/buster-performance/tree/c0fddb73e121b6a8a5c30d1364954be2ccc3879e/docs/measurements/zero-initializers-1376-2026-11-06)
+  compares `2dc50258` with `ba2e80ab`: `int a[256] = { 0 };` takes 26.3 → 4.3 ns
+  a call in Tier 0 and 26.8 → 3.4 ns in Tier 1 (clang `-O0`: 4.3), and
+  `struct Big b = (struct Big){ .flags = i };` 19.0 → 2.6 ns (clang `-O0`:
+  2.4). Up to 128 bytes the code is unchanged; calling memset below 64 bytes
+  would cost 2 to 4.5 times the stores. `sqlite3.c`'s compile time doesn't
+  change (+0.0007% instructions); the compiler's own `main.c` makes 171 more
+  memset calls and 1.9% less text.
   Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
   plans use a readonly byte image and one call to the target C library's
-  `memcpy` (#598). The image ends at the last explicit value; omitted trailing
+  `memcpy` (#598). The call returns the destination and discards it, which is the
+  interpreter's pointer-result copy (#1550). The image ends at the last explicit value; omitted trailing
   storage is cleared separately. Images with internal holes larger than their
   payload keep the existing writes, avoiding large readonly zero gaps for sparse
   initializers. This preserves checked string truncation,
@@ -3958,7 +3978,14 @@ arm a `_Generic` or `__builtin_choose_expr` selects. A dereference, a
 comparison, a comma's left operand, a `?:` condition (a GNU `?:` included), a
 selection's controlling expression and its other arms consume it or don't
 return it. `-Wempty-body` leaves an `if` that has an
-`else` alone, and `-Wparentheses` covers a `for` condition as well as an `if`,
+`else` alone. A loop and its following statement use their outer macro
+invocations' columns, including an argument-first or nested expansion (#1339).
+Only an enabled candidate whose position comes from a macro requests deferred
+expansion history; file-spelled positions and units without empty-body candidates keep
+that history deferred. The driver tests compare quiet, indented and same-line
+body, object, argument, nested and pasted macro cases with Clang on both paths,
+and check that file-spelled candidates and suppressed warnings do not replay history.
+`-Wparentheses` covers a `for` condition as well as an `if`,
 `while` or `?:` condition; a write in that condition is a use of the parameter,
 not an unused-but-set statement write. The `-Wswitch` definition is the one its
 selector's tag type names, so a fixed underlying type and a shadowing tag in
@@ -4226,7 +4253,9 @@ they do per token where little of it was per declaration or expression:
   operators, operands and calls, and the names of the builtin constants, the
   varargs, `transparent_union`, `overloadable`, `_Generic` and
   `__builtin_choose_expr`) in one pass, 64 tokens' kinds and roles and 16
-  tokens' names at a time. The same pass writes each token's syntax bits
+  tokens' names at a time. It compares 16 names with each sought name only
+  where a filter of those names in two registers (`CheckInputFilter`) passes
+  one of them, which few tokens' names do (#529). The same pass writes each token's syntax bits
   (`CheckInputReader.syntax`, `BUSTER_CHECK_SYNTAX_*`): one of the names whose
   builtins the walk prepares, an attribute's start, and a string or
   `__func__`. The walk in source order tests a bit where it compared the
@@ -4346,13 +4375,17 @@ they do per token where little of it was per declaration or expression:
   are no longer among those over 0.41%.
 
 Both ordinary and declaration-time `_Generic` readers use the same association
-index (`c_check_generic.c`). Pointers, arrays and atomic wrappers ending at a
-nominal struct or union use that tag as a necessary compatibility key. Other
-types share an ambiguous key: enums and integers, function prototypes,
-transparent-union parameters and the two vector kinds still receive exact
-source-position-aware compatibility checks. Qualifiers and alignment never
-replace those checks. The control's key also filters provably incompatible
-control matches.
+index (`c_check_generic.c`). Pointers, arrays, atomic wrappers and function
+returns ending at a stable leaf use its unqualified TypeId as a necessary
+compatibility key (#1499). Both vector kinds instead hash their stored element
+TypeId and extent, the fields compatibility compares across those kinds.
+Integers and enums keep one ambiguous key: their compatibility is not
+transitive, and completing an enum after an earlier association must not stale
+its stored key. Function parameters are never traversed for a key because
+transparent unions can make different parameter tags compatible. Every
+candidate still receives the exact source-position-aware compatibility check;
+hash collisions only add candidates. Qualifiers and alignment never replace
+those checks. The control's key also filters provably incompatible matches.
 
 The producer appends associations in source order into scratch-owned key and
 type columns. Each hash probe compares sixteen owned keys at once; the scalar
@@ -4369,6 +4402,15 @@ duplicate validation makes zero compatibility queries; a control with one of
 those keys needs one exact query. Hash probing and input reading remain. This
 is a bounded improvement for the nominal families in #602; a large family
 sharing an ambiguous key can still require quadratic compatibility work.
+The stable-leaf extension also separates distinct `_BitInt` widths, vector
+shapes and functions returning distinct records. Its regression fixtures
+assert zero duplicate queries for 257-member families and compare both source
+readers with Clang. Pairwise controls cover the two vector kinds, enums,
+qualifiers, arrays, function prototypes and source-time transparent unions;
+an enum completed after insertion must still match its integer type.
+No end-to-end timing or optimized-assembly result is yet recorded for #1499's
+extension. Integer/enum families and functions differing only in parameters
+remain in the conservative partition; this does not close the whole issue.
 `test-checker` compares the index with independent pairwise semantic queries,
 checks source-time transparent unions, guarded groups, collisions, exhaustion
 and the query-count bound, and checks both source readers against Clang.
@@ -4981,7 +5023,12 @@ the oracle.
   The graph run, which now copies each leaf into the stream's columns, could
   then take them as they are. It isn't done here: 46 places read leaves as
   whole `CheckValue`s through `check_graph_leaf_of`, most in the graph run and
-  the reader's later passes, outside the walk.
+  the reader's later passes, outside the walk. #628 since made the leaves
+  32-byte records with an integer's low 64 bits, so that the literals and
+  enumerators need no row either (24,071 of `sqlite3.c`'s leaves had more than
+  the columns, 80 have more than a record); the graph run writes an
+  identifier's record into the stream's columns without a value between them
+  ("The graph's leaves" in `docs/compile-time.md`).
 
 What is left of the reader's per-token work is the walks' work where they
 act, the expression-comma propagation, graph construction and the remaining
@@ -5488,16 +5535,35 @@ change, it refused such a declaration by name.
   A member has "type name requires a specifier or qualifier" after
   C23 ones, which clang's specifiers don't hold (GNU ones count as
   specifiers there).
-- **Ordinary names after GNU attributes.** At a block item, a declaration
-  prefix containing only GNU attributes before an already visible ordinary
-  identifier (`int x; ... __attribute__(()) x = 1;`) reports "expected
-  identifier or '('" at the name. The parser looks up those names, including
-  parameters, enumerators and functions; a vector fallback that needs earlier
-  ordinary declarations requests the complete unit's bindings. An unbound
-  name still takes the implicit-int path. File scope retains Clang 23.1.4's
-  distinct behavior: `int x; __attribute__(()) x = 1;` reports the missing
-  type's implicit-int error in C17. Typedef names, statement attributes and
-  labels keep their respective declaration and statement paths.
+- **A name after a block item's GNU attributes.** Clang's statement reader
+  asks Sema what an identifier is before it reads a declaration
+  (`TryAnnotateName`), and a name of no type is an annotation token no
+  declarator starts with. So where GNU attributes make a block item a
+  declaration, an identifier there that names an object, a function, an
+  enumerator or a parameter in scope, or before C23 one before `(` (which
+  clang declares implicitly as a function), is its "expected identifier or
+  '('", in every standard (`int x; void f(void) { __attribute__(()) x = 1;
+  }`). A name of no ordinary binding that a tag in scope has is clang's
+  "must use 'struct' tag to refer to type 'x'" (its
+  `isTagTypeWithMissingTag`, the tag's keyword named), and any other an
+  implicit int's declarator, which C89 takes. The parser decides it
+  (`parse_scalar_attribute_name`): its bindings tell a name it bound as an
+  ordinary identifier (`PARSE_MEANING_DECLARED`) from one it never bound, and
+  it keeps the tags in scope (`ParseScalar.tags`), each declaration popped at
+  its scope's end with its undo-log entry (the binding trace's, or one of its
+  own). A tag a definition's parameter list declares is in scope in its body
+  (C17 6.2.1p4), kept with the parameters and bound again there. A
+  prototype's tag ends with its list, and a K&R definition's declarations'
+  tags end with them, as clang's do.
+  The vector path's fallback parses one declaration with the file-scope
+  typedef names alone, so a name it never bound there may be a file-scope
+  object's or tag's, and the whole unit goes to the scalar parser
+  (`ParseScalarResult.undecided`), which has every earlier declaration. An
+  empty list (`__attribute__(())`) is a declaration's, as clang's needs an
+  attribute to read a statement; after a control statement's head (`if
+  (1) __attribute__((unused)) x = 1;`, where C has no declaration) and before
+  a label's name they are a statement's, in the checker as in the parser
+  (`check_input_statement_attributes`).
 - **Statement attributes' handlers.** As clang's SemaStmtAttr takes them
   (`check_input_statement_attribute_kinds`), each with -Wignored-attributes'
   warning at the statement's first token: GNU's `noinline` and
@@ -5538,6 +5604,11 @@ change, it refused such a declaration by name.
   no further (`check_input_asm_statement_attributes`); its GNU ones, but a
   label's, are the parser's "an attribute list cannot appear here" at the
   first (clang's `ProhibitAttributes`).
+- **Differences left.** After a block item's GNU attributes, a name the
+  parser can't classify as clang's Sema does: clang's typo correction of an
+  undeclared name (its "did you mean" and then "expected identifier or
+  '('"), a builtin's name without a call, and the "call to undeclared
+  function" error clang gives before that one in C99 and later.
 - **Tests.** `test-checker`'s attribute fixtures check the vocabulary's
   order and lookups and what each kind of name keeps
   (`c_check_attribute_test.c`). `test-checker-driver` compares the warning
@@ -5549,7 +5620,10 @@ change, it refused such a declaration by name.
   misspellings of every spelling, made by a fixed generator
   (`check_test_driver_attribute_typos`). It also asks clang every listed
   spelling again (`check_test_driver_unknown_attributes`). `test-parser`'s
-  snippets cover the statement and declaration forms against clang.
+  snippets cover the statement and declaration forms against clang, and
+  `check_test_driver_block_attributes` (`c_check_block_attribute_driver_test.c`)
+  the whole output, by both paths, of names after a block item's GNU
+  attributes, under C89, gnu89, gnu17 and gnu23.
 
 The vocabulary is regenerated where clang's changes, from the installed
 `clang` and its `libclang-cpp`, in a scratch directory:
@@ -5983,7 +6057,19 @@ arguments against the function. The checker now gives these as clang does.
   `deprecated` or `unavailable` attribute was read: the uses are the tokens
   bound to another declaration, and each marked declaration is found once by
   the declaration its uses count by (its object's first, its tag's first),
-  chained in source order to the next of the same one.
+  chained in source order to the next of the same one. The scalar path walks
+  every token twice, for the contexts and for the uses. The vector path visits
+  only the tokens where a step can do anything (#1489):
+  - the identifiers whose key is marked, found 16 at a time by gathers
+    (`check_input_deprecated_marked`);
+  - the tag keywords and names, the functions' names and the marked members'
+    names;
+  - the bodies' and scopes' braces;
+  - every identifier, where a tag is marked.
+
+  It counts each visited token's bracket levels and parameter lists from
+  64-token masks by popcount. Both paths run the same step at each token they
+  visit (`check_input_availability_token`, `check_input_deprecated_use`).
 - **Deprecated and unavailable members** (`check_input_member_uses`). A
   struct's or union's member that such an attribute marks is recorded when
   its record is completed, by its index in the type table's members
@@ -6748,3 +6834,4 @@ source coordinates. Command-line policy, source-ordered diagnostic push/pop,
 macro invocation locations, system headers, parser recovery, and EOF directives
 use the same warning machinery. A warning promoted to an error prevents object
 emission. Neither classification nor warning policy changes `-E` output.
+

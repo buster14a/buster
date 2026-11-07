@@ -47,6 +47,12 @@ struct IrSroaWork
     uint32_t* field_alignments;
     uint32_t* field_slots;
     uint32_t field_count;
+    // Each root's fields in creation order (#1366), as indices plus one (0 for none, as ir_allocate zeroes them): a
+    // root's first and last field and each field's next of its root. The field queries walk one root's fields, not the
+    // function's: the table holds every split slot's fields, and inlined calls with aggregates leave thousands of slots.
+    uint32_t* root_first;
+    uint32_t* root_last;
+    uint32_t* field_next;
     // Per instruction, whether it is a dead store (ir_sroa_dead_stores), and how many there are.
     uint8_t* dead;
     uint32_t dead_count;
@@ -303,51 +309,28 @@ static void ir_sroa_dead_stores(IrSroaWork* work, uint64_t* lows, uint64_t* high
     }
 }
 
-// Exact scalar and vector interval/key queries. The caller proves offset+size is inside the source slot, so ends
-// cannot wrap. Inactive lanes never read fields; the arrays have field_count logical elements, without padding.
+// The exact interval/key query over `root`'s fields alone, in creation order (#1366): its field of `offset` and `type`, and
+// whether another of its fields overlaps the access. The caller proves offset+size is inside the source slot, so ends
+// cannot wrap. Both paths walk the root's chain. A root has a handful of fields (one per distinct access, 16 for a
+// 64-byte vector of int), and the 8-wide compare the vector path had over the function's whole field table was what
+// made the pass quadratic in inlined calls: over one root's fields it would mostly run on a partial vector.
 static uint32_t ir_sroa_field(const IrSroaWork* work, uint32_t root, uint64_t offset, uint32_t type, uint32_t size, bool scalar, bool* overlap)
 {
     (void)scalar;
 
     uint32_t found = BUSTER_IR_NONE;
     bool conflict = false;
-    if (BUSTER_SCALAR_PATH(scalar))
+    for (uint32_t next = work->root_first[root]; next != 0; next = work->field_next[next - 1])
     {
-        for (uint32_t i = 0; i < work->field_count; i += 1)
+        const uint32_t i = next - 1;
+        const bool same = work->field_offsets[i] == offset && work->field_types[i] == type;
+        if (same)
         {
-            if (work->field_roots[i] == root)
-            {
-                const bool same = work->field_offsets[i] == offset && work->field_types[i] == type;
-                if (same)
-                {
-                    found = i;
-                }
-                else if (offset < work->field_offsets[i] + work->field_sizes[i] && work->field_offsets[i] < offset + size)
-                {
-                    conflict = true;
-                }
-            }
+            found = i;
         }
-    }
-    else
-    {
-        for (uint64_t first = 0; first < work->field_count; first += 8)
+        else if (offset < work->field_offsets[i] + work->field_sizes[i] && work->field_offsets[i] < offset + size)
         {
-            const uint32_t count = work->field_count - first < 8 ? work->field_count - first : 8;
-            const __mmask8 valid = (UINT32_C(1) << count) - 1;
-            const __m256i roots = _mm256_maskz_loadu_epi32(valid, work->field_roots + first);
-            const __m256i types = _mm256_maskz_loadu_epi32(valid, work->field_types + first);
-            const __m256i sizes = _mm256_maskz_loadu_epi32(valid, work->field_sizes + first);
-            const __m512i offsets = _mm512_maskz_loadu_epi64(valid, work->field_offsets + first);
-            const __m512i ends = _mm512_add_epi64(offsets, _mm512_cvtepu32_epi64(sizes));
-            const __mmask8 roots_equal = valid & _mm256_cmpeq_epi32_mask(roots, _mm256_set1_epi32(root));
-            const __mmask8 same = roots_equal & _mm512_cmpeq_epi64_mask(offsets, _mm512_set1_epi64(offset)) & _mm256_cmpeq_epi32_mask(types, _mm256_set1_epi32(type));
-            const __mmask8 intersect = roots_equal & _mm512_cmplt_epu64_mask(_mm512_set1_epi64(offset), ends) & _mm512_cmplt_epu64_mask(offsets, _mm512_set1_epi64(offset + size));
-            if (same != 0)
-            {
-                found = first + 31 - __builtin_clz((uint32_t)same);
-            }
-            conflict = conflict || (intersect & ~same) != 0;
+            conflict = true;
         }
     }
     *overlap = conflict;
@@ -385,6 +368,15 @@ static void ir_sroa_fields(IrSroaWork* work, bool scalar)
                     {
                         field = work->field_count++;
                         work->field_counts[root] += 1;
+                        if (work->root_last[root] == 0)
+                        {
+                            work->root_first[root] = field + 1;
+                        }
+                        else
+                        {
+                            work->field_next[work->root_last[root] - 1] = field + 1;
+                        }
+                        work->root_last[root] = field + 1;
                         work->field_roots[field] = root;
                         work->field_offsets[field] = offset;
                         work->field_types[field] = type;
@@ -494,9 +486,11 @@ static IrError ir_sroa_view(IrSroaWork* work, Arena* scratch, IrFunction* result
             // which become addresses themselves, and goes with the dead code.
             else if (root != BUSTER_IR_NONE && work->refused[root] == 0 && f->type[i] == IR_PTR)
             {
-                for (uint32_t field = 0; field < work->field_count; field += 1)
+                // The root's fields in creation order, the last of `offset` winning as in a scan of the whole table (#1366).
+                for (uint32_t next = work->root_first[root]; next != 0; next = work->field_next[next - 1])
                 {
-                    if (work->field_roots[field] == root && work->field_offsets[field] == work->offsets[i])
+                    const uint32_t field = next - 1;
+                    if (work->field_offsets[field] == work->offsets[i])
                     {
                         view.op[i] = IR_STACK_ADDR;
                         view.a[i] = work->field_slots[field];
@@ -575,6 +569,9 @@ static __attribute__((unused)) IrCheck ir_optimize_sroa(const IrFunction* functi
         work.field_sizes = ir_allocate(scratch, n, 4, &ok);
         work.field_alignments = ir_allocate(scratch, n, 4, &ok);
         work.field_slots = ir_allocate(scratch, n, 4, &ok);
+        work.root_first = ir_allocate(scratch, function->slot_count, 4, &ok);
+        work.root_last = ir_allocate(scratch, function->slot_count, 4, &ok);
+        work.field_next = ir_allocate(scratch, n, 4, &ok);
         work.dead = ir_allocate(scratch, n, 1, &ok);
         check.error = ok ? IR_OK : IR_ERROR_MEMORY;
         if (ok && n != 0)

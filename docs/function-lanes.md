@@ -393,8 +393,9 @@ of `sqlite3.c` took 6.7 billion kernel cycles against one lane's 0.17, and
 were slower than 4 lanes'. The lanes' scratch arenas are in base pages
 (`arena_reserve_small`), so a lane clears only what it touches: 0.58 billion.
 So are lane 0's writer's columns (`CheckEmitRun.columns`), in the first lane's
-scratch of `CheckProgramLanes.arenas`, or without lanes an arena of the
-emission's own: in the caller's scratch, they cleared a huge page each too.
+scratch of `CheckProgramLanes.arenas`, or without lanes the calling thread's
+(`check_program_thread_columns`): in the caller's scratch, they cleared a huge
+page each too.
 On one lane on the 9700X, the lowering of `sqlite3.c` added 56 MB to the peak
 RSS, and 9.8 MB with them in base pages (#531). The functions' columns and
 bytes are packed, and keep huge pages past their first 64 KB.
@@ -402,7 +403,13 @@ bytes are packed, and keep huge pages past their first 64 KB.
 Lane 0's arena is reserved for exactly the room its writer's columns take
 (`check_lower_writer_bytes`: the writer's pushes on an arena of no memory,
 `arena_measure`, so that the room doesn't depend on what the caller's arenas
-hold), and the first lane's scratch is kept while it has that room. The other
+hold), and the first lane's scratch is kept while it has that room, as the
+calling thread's is without lanes. A units' lane keeps it from one unit to the
+next, as it keeps its own three arenas (`check_program_lanes_settle`, the
+translation units guide's "Memory"). Until #442, both were reserved again for
+each unit: the reservation, its release and the faults of the pages its
+columns' starts touch were most of a small unit's time after checking (the
+lowering guide's "Whole-unit passes after checking"). The other
 lanes' arenas are 64 GB each, since their scratch also holds their functions'
 Tier 0 code, whose size isn't known before they run; a lane that can't
 reserve its arenas refuses its parts, and the calling thread runs them again.
@@ -760,3 +767,6 @@ This does not change the tables or their hot lookup paths. The encoder's
 fixup-copy layout retains the measured choice documented in
 [x86-64-encoder.md](x86-64-encoder.md#fixups); lazy/subset tables would also have
 to cover validation, arbitrary asm forms and helpers before the workers start.
+Since #1078, `build.sh` bakes the tables into the executable, so a unit with
+selected bodies starts with them built too. The initializers run only where the
+executable isn't baked ([compile-time](compile-time.md), "Baked tables").

@@ -236,7 +236,9 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 stack[depth] = plan->operations[value].machine         ? ir_typed_machine_row(&sink, input->operations + value, type, stack + depth) :
                                plan->operations[value].mask_bytes != 0 ? ir_typed_mask_row(&sink, plan->operations + value, stack + depth) :
                                plan->operations[value].intrinsic != 0  ? ir_typed_intrinsic(&sink, plan->operations + value, type, stack + depth) :
-                                                                         ir_typed_vector_operation(&sink, plan->operations + value, type, stack + depth);
+                               plan->operations[value].splat_bytes != 0 ? ir_typed_splat(&sink, plan->operations + value, type, stack[depth]) :
+                                                                         ir_typed_vector_operation(&sink, plan->operations + value, type, stack + depth,
+                                                                                                   ir_typed_unmasked(input, plan->operations + value, i));
                 classes[depth] = class;
                 depth += class != BUSTER_TYPED_CLASS_VOID;
                 break;

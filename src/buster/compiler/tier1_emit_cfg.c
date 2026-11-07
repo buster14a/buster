@@ -245,7 +245,8 @@ static bool tier1_emit_cfg_overflow_area(const IrFunction* function, uint32_t sl
 // aggregate's copy, tier1_select_aggregate_parameter's) and one for the hidden pointer an aggregate result returns
 // through, which the entry stores (tier1_emit_cfg_entry); then, for a function with long doubles (#141), one per F80
 // node, its value's 16 bytes (tier1_emit_cfg_x87_object), and the x87's scratch object past them, which a conversion's
-// control words and its integer or floating value pass through. Their rows follow in that order.
+// control words and its integer or floating value pass through. A call's overflow staging object (#1450) is last,
+// where one is needed. Their rows follow in that order.
 static uint32_t tier1_emit_cfg_record_count(const IrFunction* function)
 {
     return function->slot_count + (function->parameter_passed != 0 ? function->parameter_count + 1 : 0);
@@ -253,7 +254,7 @@ static uint32_t tier1_emit_cfg_record_count(const IrFunction* function)
 
 static uint32_t tier1_emit_cfg_object_count(const IrFunction* function, const Tier1EmitPrepared* prepared)
 {
-    return tier1_emit_cfg_record_count(function) + prepared->x87_count + (prepared->x87_count != 0 ? 1 : 0);
+    return tier1_emit_cfg_record_count(function) + prepared->x87_count + (prepared->x87_count != 0 ? 1 : 0) + (prepared->staging_slots != 0 ? 1 : 0);
 }
 
 // A long double node's frame object (#141), or the x87 scratch object for UINT32_MAX.
@@ -276,15 +277,17 @@ static bool tier1_emit_cfg_record_copied(const IrPassed* record)
 // parameter in registers of its own, or one on the stack whole (whose copy is its stack slots, tier1_emit_cfg_incoming),
 // takes a row of one byte, which nothing reads, as a function without the hidden pointer does for it, and so does an
 // ignored aggregate of no bytes.
-static uint32_t tier1_emit_cfg_record_object_bytes(const IrFunction* function, uint32_t object)
+static uint32_t tier1_emit_cfg_record_object_bytes(const IrFunction* function, const Tier1EmitPrepared* prepared, uint32_t object)
 {
+    // The optional final object stages all register-passed aggregate parts of the largest call (#1450).
+    const bool staging = prepared->staging_slots != 0 && object + 1 == tier1_emit_cfg_object_count(function, prepared);
     // A long double's object and the x87 scratch object (#141): 16 bytes, aligned to 16.
     const bool x87 = object >= tier1_emit_cfg_record_count(function);
     const uint32_t parameter = object - function->slot_count;
     const IrPassed* record = parameter < function->parameter_count ? tier1_select_parameter_record(function, parameter) : 0;
     const bool copied = tier1_emit_cfg_record_copied(record) || (record != 0 && record->size != 0 && record->location.kind == BUSTER_ABI_LOCATION_IGNORE);
     const bool hidden = parameter == function->parameter_count && function->result_size != 0 && function->result_abi.kind == BUSTER_ABI_RESULT_MEMORY;
-    return x87 ? 16 : copied ? (record->size + 7u) & ~7u : hidden ? 8 : 1;
+    return staging ? 8 * prepared->staging_slots : x87 ? 16 : copied ? (record->size + 7u) & ~7u : hidden ? 8 : 1;
 }
 
 // Whether frame object `object` has its address in the caller's frame, past the return address, `*past` bytes into the
@@ -326,12 +329,15 @@ static uint32_t tier1_emit_cfg_frame_flags(const IrFunction* function, const Tie
            (function->parameter_passed != 0 || vector_constants ? BUSTER_TIER1_FRAME_NO_RED_ZONE : 0) | (dynamic ? BUSTER_TIER1_FRAME_DYNAMIC_STACK : 0);
 }
 
-// The alignment's log2 that rsp keeps in a dynamic frame (#141): 16 bytes', or a realigned frame's. An allocation rounds
-// its size up to it, and so does each call's outgoing area (tier1_emit_cfg_call_area).
-static uint8_t tier1_emit_cfg_stack_alignment(const Tier1Frame* frame)
+// The alignment's log2 that rsp keeps in a dynamic frame (#141): the most any call's stack arguments need, 16 bytes or a
+// 32- or 64-byte vector's or an over-aligned aggregate's (Tier1EmitPrepared.call_abi), so that every call after an
+// allocation finds its area aligned. An allocation rounds its size up to it, and so does each call's outgoing area
+// (tier1_emit_cfg_call_area). The prologue realigns rsp to the frame's alignment, which includes the calls'; a frame
+// object's own alignment past that is its base register's (rbp or r15), not rsp's, and an IR allocation's address is
+// 16-byte aligned. A frame realigned to a megabyte (#1450) therefore doesn't round each allocation and call to it.
+static uint8_t tier1_emit_cfg_stack_alignment(const Tier1EmitResult* emitted)
 {
-    const uint32_t alignment = frame->alignment > 16 ? frame->alignment : 16;
-    return (uint8_t)__builtin_ctz(alignment);
+    return emitted->prepared.call_abi.stack_alignment_log2 > BUSTER_ABI_STACK_ALIGNMENT_LOG2 ? emitted->prepared.call_abi.stack_alignment_log2 : BUSTER_ABI_STACK_ALIGNMENT_LOG2;
 }
 
 // A call's outgoing area in a dynamic frame (Tier1Frame.dynamic_outgoing, #141): its stack bytes rounded up to the
@@ -339,26 +345,39 @@ static uint8_t tier1_emit_cfg_stack_alignment(const Tier1Frame* frame)
 // a call without stack arguments or in a fixed frame, whose area is the frame's own.
 static uint32_t tier1_emit_cfg_call_area(const Tier1EmitResult* emitted, uint32_t stack_bytes)
 {
-    const uint32_t alignment = UINT32_C(1) << tier1_emit_cfg_stack_alignment(&emitted->frame);
+    const uint32_t alignment = UINT32_C(1) << tier1_emit_cfg_stack_alignment(emitted);
     return emitted->frame.dynamic_outgoing && stack_bytes != 0 ? (stack_bytes + alignment - 1) & ~(alignment - 1) : 0;
 }
 
 // rsp less or plus a call's outgoing area (#141): `sub rsp, area` or `add rsp, area`. Under stack-clash protection
 // (#177, `probe`), the area's lowest byte is touched after the subtraction, as an allocation's is
 // (tier1_emit_cfg_probed_allocation): rsp starts at a touched address (the probed frame's or an allocation's), and the
-// call's stores may write the area's lowest bytes first. An area of a page or more would need a touch per page, which
-// no register is free to loop with while the arguments are in theirs; the selection takes no by-value aggregate that
-// large, and such an area is refused (TIER1_EMIT_UNSUPPORTED: Tier 0 then compiles the function, its outgoing area in
-// its probed frame).
+// call's stores may write the area's lowest bytes first. At a page or more, the frame prologue's loop touches every
+// page and the final partial step. R11 is the selector's reserved scratch, so the loop preserves all arguments and an
+// indirect callee still in their allocated registers. Dynamic frames keep the CFA in rbp throughout it.
 static Tier1EmitError tier1_emit_cfg_adjust(uint32_t area, bool release, bool probe, Tier1EmitBuffer* buffer)
 {
     const uint16_t form = area <= 127 ? (release ? X86_FORM_ADD_RM64_IMM8 : X86_FORM_SUB_RM64_IMM8) : (release ? X86_FORM_ADD_RM64_IMM32 : X86_FORM_SUB_RM64_IMM32);
     const X86Instruction record = { .form = form, .rm = X86_REGISTER_RSP, .immediate = (int32_t)area };
     const X86Instruction touch = { .form = X86_FORM_OR_RM8_IMM8, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE };
     const bool probed = probe && !release && area != 0;
-    Tier1EmitError error = probed && area >= BUSTER_TIER1_FRAME_PAGE_BYTES ? TIER1_EMIT_UNSUPPORTED : TIER1_EMIT_OK;
-    error = error != TIER1_EMIT_OK || area == 0 || tier1_emit_append(buffer, record) ? error : TIER1_EMIT_MEMORY;
-    error = error != TIER1_EMIT_OK || !probed || tier1_emit_append(buffer, touch) ? error : TIER1_EMIT_MEMORY;
+    const bool loop = probed && area >= BUSTER_TIER1_FRAME_PAGE_BYTES;
+    const uint32_t records = area == 0 ? 0 : loop ? 6u + 2u * (area % BUSTER_TIER1_FRAME_PAGE_BYTES != 0) : 1u + probed;
+    Tier1EmitError error = area > INT32_MAX ? TIER1_EMIT_LIMIT : TIER1_EMIT_OK;
+    if (error == TIER1_EMIT_OK)
+    {
+        error = buffer->count <= buffer->capacity && records <= buffer->capacity - buffer->count &&
+                (!loop || buffer->branch_count < buffer->branch_capacity) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
+    }
+    if (error == TIER1_EMIT_OK && loop)
+    {
+        (void)tier1_frame_emit_probe_allocate(area, buffer);
+    }
+    else if (error == TIER1_EMIT_OK)
+    {
+        error = area == 0 || tier1_emit_append(buffer, record) ? error : TIER1_EMIT_MEMORY;
+        error = error != TIER1_EMIT_OK || !probed || tier1_emit_append(buffer, touch) ? error : TIER1_EMIT_MEMORY;
+    }
     return error;
 }
 
@@ -532,19 +551,24 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             // A call with ABI records (#789): its records' totals, and the alignment its outgoing area needs at rsp, past
             // 16 bytes for an argument on the stack aligned past them (a 32- or 64-byte vector, an over-aligned aggregate).
             // The frame takes the most of them (Tier1FrameRequest.calls): it realigns itself to it, and a dynamic frame
-            // rounds its allocations and calls' areas to it (tier1_emit_cfg_stack_alignment; #1204's review).
+            // rounds its allocations and calls' areas to it (tier1_emit_cfg_stack_alignment; #1204's review, #1450).
             const AbiCall* abi = call->abi != 0 ? &function->abi_calls[call->abi - 1].call : 0;
             const uint32_t general = abi != 0 ? abi->integer_registers : places.general;
             const uint32_t vectors = abi != 0 ? abi->vector_registers : places.vector;
             const uint32_t stacked = tier1_select_call_stack_bytes(function, call);
+            const uint32_t staged = tier1_select_call_staging_slots(function, call);
             const uint8_t aligned = abi != 0 ? abi->stack_alignment_log2 : BUSTER_ABI_STACK_ALIGNMENT_LOG2;
             prepared->call_abi.integer_registers = prepared->call_abi.integer_registers > general ? prepared->call_abi.integer_registers : (uint8_t)general;
             prepared->call_abi.vector_registers = prepared->call_abi.vector_registers > vectors ? prepared->call_abi.vector_registers : (uint8_t)vectors;
             prepared->call_abi.stack_bytes = prepared->call_abi.stack_bytes > stacked ? prepared->call_abi.stack_bytes : stacked;
             prepared->call_abi.stack_alignment_log2 = prepared->call_abi.stack_alignment_log2 > aligned ? prepared->call_abi.stack_alignment_log2 : aligned;
+            prepared->staging_slots = staged > prepared->staging_slots ? staged : prepared->staging_slots;
         }
     }
     error = ok || error != TIER1_EMIT_OK ? error : TIER1_EMIT_MEMORY;
+    // Only calls that overflow the red zone add storage. The last frame object then holds every call's staged parts,
+    // before and after register moves, with a lifetime covering the function so it aliases no spill or local object.
+    prepared->staging_slots = prepared->staging_slots > BUSTER_TIER1_SELECT_STAGING_SLOTS ? prepared->staging_slots : 0;
     // A reference for each call and each symbol's address, and how the symbols are reached.
     emitted->reference_capacity = prepared->call_count + symbols;
     emitted->symbol_access = options->symbol_access;
@@ -600,7 +624,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             // (#789), aligned to 8 where they hold anything.
             const IrSlot* slot = o < function->slot_count ? &function->slots[o] : 0;
             const bool anchor = slot != 0 && (slot->flags & (BUSTER_IR_SLOT_REGISTER_SAVE_AREA | BUSTER_IR_SLOT_OVERFLOW_AREA)) != 0;
-            const uint32_t record_bytes = slot == 0 ? tier1_emit_cfg_record_object_bytes(function, o) : 0;
+            const uint32_t record_bytes = slot == 0 ? tier1_emit_cfg_record_object_bytes(function, prepared, o) : 0;
             prepared->sizes[count + fixed_columns + o] = slot == 0 ? record_bytes : !anchor && slot->size != 0 ? (uint32_t)slot->size : 1;
             prepared->alignments[count + fixed_columns + o] = slot == 0 ? (record_bytes == 16 && o >= tier1_emit_cfg_record_count(function) ? 16 : record_bytes > 1 ? 8 : 1) :
                                                                           !anchor && slot->alignment != 0 ? slot->alignment : 1;
@@ -1379,7 +1403,7 @@ static Tier1EmitError tier1_emit_cfg_stack_argument(Tier1EmitResult* emitted, ui
 }
 
 // A by-value aggregate argument's bytes [from, from + size) from its address, node `value`'s at its call's use phase
-// `position` (#789), to rsp + `to`: through the scratch register from the address's register, or, where the allocation has
+// `position` (#789), to `to_base` + `to`: through the scratch register from the address's register, or, where the allocation has
 // the address in a slot or recomputes it, from the scratch register, which takes it, through rax, which the red zone's
 // save slot holds meanwhile (BUSTER_TIER1_EMIT_STAGING_SAVE). The address's use isn't required: a call may pass more
 // aggregates than the registers its first allocation gives its uses.
@@ -1413,7 +1437,7 @@ static Tier1EmitError tier1_emit_cfg_aggregate_address(Tier1EmitResult* emitted,
     return error;
 }
 
-static Tier1EmitError tier1_emit_cfg_aggregate_copy(Tier1EmitResult* emitted, uint32_t value, uint32_t position, int32_t to, uint32_t from, uint32_t size, Tier1EmitBuffer* buffer)
+static Tier1EmitError tier1_emit_cfg_aggregate_copy(Tier1EmitResult* emitted, uint32_t value, uint32_t position, uint8_t to_base, int32_t to, uint32_t from, uint32_t size, Tier1EmitBuffer* buffer)
 {
     uint8_t source = BUSTER_TIER1_SELECT_SCRATCH;
     bool registered = false;
@@ -1423,7 +1447,7 @@ static Tier1EmitError tier1_emit_cfg_aggregate_copy(Tier1EmitResult* emitted, ui
     const X86Instruction save = { .displacement = save_slot, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_RM64_R64 };
     const X86Instruction restore = { .displacement = save_slot, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_R64_RM64 };
     error = error != TIER1_EMIT_OK || registered || tier1_emit_append(buffer, save) ? error : TIER1_EMIT_MEMORY;
-    error = error != TIER1_EMIT_OK || tier1_emit_copy_bytes(buffer, data, X86_REGISTER_RSP, to, source, (int32_t)from, size) ? error : TIER1_EMIT_MEMORY;
+    error = error != TIER1_EMIT_OK || tier1_emit_copy_bytes(buffer, data, to_base, to, source, (int32_t)from, size) ? error : TIER1_EMIT_MEMORY;
     error = error != TIER1_EMIT_OK || registered || tier1_emit_append(buffer, restore) ? error : TIER1_EMIT_MEMORY;
     return error;
 }
@@ -2817,11 +2841,11 @@ static Tier1EmitError tier1_emit_cfg_probed_allocation(const Tier1SelectHoles* h
 }
 
 // A node's holes from `registers`, by node, as the emitter's view has them (#939: the certificate of the code builds them
-// from the allocation's): an allocation rounds to the alignment rsp keeps (#141), a realigned frame's past 16 bytes.
+// from the allocation's): an allocation rounds to the alignment rsp keeps (#141), its calls' past 16 bytes.
 static Tier1SelectHoles tier1_emit_cfg_holes(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, const uint8_t* registers, uint32_t node)
 {
     Tier1SelectHoles holes = tier1_select_holes(plan, registers, node);
-    holes.scale = holes.rule == TIER1_RULE_ALLOCA || holes.rule == TIER1_RULE_ALLOCA_IMMEDIATE ? tier1_emit_cfg_stack_alignment(&emitted->frame) : holes.scale;
+    holes.scale = holes.rule == TIER1_RULE_ALLOCA || holes.rule == TIER1_RULE_ALLOCA_IMMEDIATE ? tier1_emit_cfg_stack_alignment(emitted) : holes.scale;
     holes.vex = emitted->prepared.vex;
     holes.avx2 = emitted->prepared.avx2;
     holes.sse = emitted->prepared.sse;
@@ -2916,21 +2940,23 @@ static uint64_t tier1_emit_cfg_record_capacity(const IrFunction* function, bool 
         records += op == IR_VCONST ? 17u : 0;
         // A machine row's records, its operands' moves and its result's (#141, tier1_emit_cfg_row).
         records += call != 0 && call->row != 0 ? BUSTER_TIER1_EMIT_ROW_RECORDS : 0;
-        // A dynamic allocation's probes (#177, tier1_emit_cfg_probed_allocation), past its rule's, and a call area's touch
-        // (tier1_emit_cfg_adjust), in a probed frame alone.
+        // A dynamic allocation's probes (#177, tier1_emit_cfg_probed_allocation), past its rule's, and a call area's
+        // loop and final touch (tier1_emit_cfg_adjust: up to eight records replacing its one subtraction).
         records += probe && op == IR_ALLOCA ? BUSTER_TIER1_EMIT_PROBE_RECORDS : 0;
-        records += probe && call != 0 ? 1u : 0;
+        records += probe && call != 0 ? 7u : 0;
     }
     return records;
 }
 
-// The dynamic allocations' probes' branches (#177, tier1_emit_cfg_probed_allocation), three each.
+// The dynamic allocations' probes' branches (#177, tier1_emit_cfg_probed_allocation), three each, and each call area's
+// possible probe loop's one (#1450, tier1_emit_cfg_adjust).
 static uint64_t tier1_emit_cfg_probe_branches(const IrFunction* function)
 {
     uint64_t branches = 0;
     for (uint32_t node = 0; node < function->instruction_count; node += 1)
     {
         branches += function->op[node] == IR_ALLOCA ? BUSTER_TIER1_EMIT_PROBE_BRANCHES : 0;
+        branches += tier1_select_function_call(function, node) ? 1u : 0;
     }
     return branches;
 }
@@ -3047,6 +3073,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     uint32_t* spill_ids = ok ? ir_allocate(scratch, (uint64_t)count + 1, 4, &ok) : 0;
     uint32_t* cursors = ok ? ir_allocate(scratch, (uint64_t)input->position_count + 1, 4, &ok) : 0;
     uint32_t* entry_offsets = ok ? ir_allocate(scratch, (uint64_t)blocks + 1, 4, &ok) : 0;
+    uint32_t* entry_edges = ok ? ir_allocate(scratch, blocks, 4, &ok) : 0;
     uint32_t* block_first = ok ? ir_allocate(scratch, (uint64_t)blocks + 1, 4, &ok) : 0;
     uint32_t* stub_first = ok ? ir_allocate(scratch, (uint64_t)input->edge_count + 1, 4, &ok) : 0;
     uint32_t* pending_branches = ok ? ir_allocate(scratch, branch_capacity + 1, 4, &ok) : 0;
@@ -3073,6 +3100,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         memset(transitions.registers, UINT8_MAX, (uint64_t)count + 1);
         memset(spill_ids, 0xff, ((uint64_t)count + 1) * 4);
         memset(entry_offsets, 0, ((uint64_t)blocks + 1) * 4);
+        tier1_cfg_single_predecessor_edges(input, entry_edges);
         for (uint32_t v = 0; v < input->value_count; v += 1)
         {
             spill_ids[emitted->value_nodes[v]] = allocation->spill_ids[v];
@@ -3195,11 +3223,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         // The single incoming edge's moves, where tier1_cfg placed them at this block's start.
         if (only != UINT32_MAX)
         {
-            uint32_t e = input->successor_offsets[only];
-            while (input->successors[e] != b)
-            {
-                e += 1;
-            }
+            const uint32_t e = entry_edges[b];
             if (cfg->edge_placements[e] == TIER1_CFG_EDGE_SUCCESSOR)
             {
                 error = tier1_emit_cfg_moves(emitted, e, &buffer);
@@ -3315,7 +3339,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                         tier1_emit_mark(&buffer, tier1_origin(TIER1_ORIGIN_MOVE, use), value);
                     }
                     // A by-value aggregate (#789): its bytes from its address now, before the moves, on the stack whole into
-                    // its slots, else each part in a register into the red zone's next staging slot, which tier1_emit_call
+                    // its slots, else each part in a register into the next staging slot, which tier1_emit_call
                     // loads its register from after the moves, a 64-byte one into the next of zmm16 and on (#141), and a part
                     // in a stack slot (#141) into that slot.
                     const IrPassed* record = aggregate ? tier1_select_argument_record(function, called, argument) : 0;
@@ -3324,7 +3348,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                     const uint32_t part_count = record != 0 && !whole ? tier1_select_location_parts(record->location, record->size, parts) : 0;
                     if (whole && registered && error == TIER1_EMIT_OK)
                     {
-                        error = tier1_emit_cfg_aggregate_copy(emitted, value, use, (int32_t)record->location.stack_offset, 0, record->size, &buffer);
+                        error = tier1_emit_cfg_aggregate_copy(emitted, value, use, X86_REGISTER_RSP, (int32_t)record->location.stack_offset, 0, record->size, &buffer);
                     }
                     for (uint32_t k = 0; registered && error == TIER1_EMIT_OK && k < part_count; k += 1)
                     {
@@ -3333,7 +3357,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                         // next of zmm16 and on, as tier1_emit_call numbers them.
                         const bool zmm = !slot && tier1_select_part_in_zmm(parts[k].bytes);
                         const uint32_t slots = slot ? 0 : tier1_select_argument_part_slots(parts[k].bytes);
-                        const int32_t to = slot ? (int32_t)record->location.stack_offset : tier1_emit_staging_part(staged, parts[k].bytes);
+                        const Tier1EmitInto to = slot ? (Tier1EmitInto){ .displacement = (int32_t)record->location.stack_offset, .base = X86_REGISTER_RSP, .valid = true } :
+                                                  zmm ? (Tier1EmitInto){ .valid = true } : tier1_emit_argument_staging(emitted, staged, parts[k].bytes);
                         if (zmm)
                         {
                             error = staged_zmm < BUSTER_ABI_VECTOR_ARGUMENTS ? tier1_emit_cfg_aggregate_zmm(emitted, value, use, (uint8_t)(BUSTER_TIER1_SELECT_PART_ZMM + staged_zmm), parts[k].offset, &buffer)
@@ -3341,8 +3366,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                         }
                         else
                         {
-                            error = slot || staged + slots <= BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS ? tier1_emit_cfg_aggregate_copy(emitted, value, use, to, parts[k].offset, parts[k].bytes, &buffer)
-                                                                                                                       : TIER1_EMIT_ALLOCATION;
+                            error = to.valid ? tier1_emit_cfg_aggregate_copy(emitted, value, use, to.base, to.displacement, parts[k].offset, parts[k].bytes, &buffer) : TIER1_EMIT_ALLOCATION;
                         }
                         staged += slots;
                         staged_zmm += zmm ? 1 : 0;
@@ -3830,3 +3854,4 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     }
     return error;
 }
+

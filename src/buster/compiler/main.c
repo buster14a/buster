@@ -1645,6 +1645,8 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
 }
 
 #if BUSTER_UNIT == BUSTER_UNIT_DRIVER
+#include "buster/compiler/main_response.c"
+
 // The commands of source files (-E, -fsyntax-only, -c and a link, main_information's): what no unit's main_command
 // takes. It runs after the driver's main_command has returned rather than inside it (#652): that function's frame is 140
 // KB, the inlined locals of the tests' and benchmarks' commands, and a compile run below it touched pages of it that its
@@ -1655,7 +1657,7 @@ static __attribute__((noinline)) int main_source_command(int argc, char** argv)
     arena_static_base_pages();
     arena_limits_fix();
     // Semantic checking and object emission share the same typed source stream in the checker's unit.
-    if (!main_information(argc - 1, argv + 1, &result))
+    if (main_response_expand(&argc, &argv) && !main_information(argc - 1, argv + 1, &result))
     {
         result = main_preprocessing(argc - 1, argv + 1) ? main_preprocessor_command(argc - 1, argv + 1) : run_source_check_command(argc - 1, argv + 1);
     }

@@ -52,6 +52,7 @@ static void check_test_varargs_graph_guards(CheckTest* test, TypeTable* table, T
     {
         graph.count = 0;
         graph.leaf_count = 0;
+        graph.leaf_payload_count = 0;
         graph.varargs_count = 0;
         graph.capacity = count == 0 ? 0 : count + 1;
         graph.varargs_capacity = count;

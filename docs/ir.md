@@ -123,7 +123,7 @@ column comparisons deterministic.
 | `param` | `a` indexes `parameter_types` |
 | Unary / conversion | `a` is the source value |
 | Binary arithmetic | `a,b` are values; result/operand types agree |
-| `intrinsic` | `a,b` of the result's type, `i32` or `i64`; `c` the operation (`BUSTER_IR_INTRINSIC_*`, printed after the operands as a comparison's predicate is), each a pure operation the optimizer doesn't fold (#141): `mulhu`, an `i64`'s alone, the high 64 bits of their unsigned 128-bit product, which Tier 1's split of the 128-bit integers makes ([the Tier 1 guide](tier1.md)'s "The 128-bit integers"); and the x86 builtins' bit manipulations, as BMI's instructions give them, `a` the source: `pdep` and `pext` (`a`'s low bits deposited at mask `b`'s set bits, or its bits there packed into the low ones), `bzhi` (`a` with its bits from `b`'s low byte up cleared, none past the width) and `bextr` (`a`'s bits from `b`'s low byte up, as many as its second byte says, zeros past the width), which the typed stream's rows of BMI2 and BMI1 lower to ([the SIMD IR guide](ir-simd.md)'s "Scalar x86 builtins") |
+| `intrinsic` | `c` the operation (`BUSTER_IR_INTRINSIC_*`, printed after the operands). Binary scalar kinds use `a,b` of the result's type, `i32` or `i64`: `mulhu` (an `i64`'s high unsigned product), `pdep`, `pext`, `bzhi` and `bextr` with BMI semantics. Unary `splat` uses scalar `a` (`i8`, `i16`, `i32`, `i64`, `f32` or `f64`), absent `b` and a vector result, repeating the scalar's raw bits. All kinds have zero flags; see [Intrinsics](#intrinsics-141) and [scalar splats](ir-simd.md#scalar-splats-1450). |
 | Shifts | `a` matches the result; `b` has an integer type |
 | `icmp`, `fcmp` | `a,b` are equally typed; `c` is `IrPredicate`; result is `i1` |
 | `select` | `a:i1`, `b,c` match the result type |
@@ -259,7 +259,9 @@ block are structurally valid; removing trivial phis is an SSA construction/clean
 assumption imposed by this representation.
 
 `ir_build_uses` fully verifies the function, then counts uses, prefix-sums the
-counts and fills `IrUses`. `offsets` has `instruction_count + 1` entries;
+counts and fills `IrUses`. A caller that has just verified the function, as the
+optimizer's preparation has, calls `ir_cfg_validated` and `ir_uses_validated`,
+which build the same arrays without verifying it again (#786). `offsets` has `instruction_count + 1` entries;
 `uses` contains `(instruction, operand)` pairs. Positions 0/1/2 denote a/b/c,
 and 3 plus the argument/incoming index denotes a call or phi side operand.
 Each slice is stable in instruction/operand order, and repeated operands produce
@@ -267,28 +269,59 @@ repeated uses. Void-result instructions have empty slices. Block IDs, symbols,
 slots, constants and side-table offsets never count as value uses. Derived counts
 are accumulated in u64 and checked before becoming u32 offsets.
 
+The builder has two twins (#1634). The scalar one, `ir_uses_validated_scalar`,
+decodes each operand through `ir_operand`. The vector one, `ir_uses_validated`,
+decodes 16 instructions at a time (`ir_uses_batch`):
+
+- One byte permute of the opcode tables gives every instruction's `a`, `b` and
+  `c` masks. One compare per column finds the optional operands that are present.
+- Two permutes per vector interleave the three columns into `ir_operand`'s
+  order (instruction by instruction, then `a`, `b`, `c`).
+- A compress by the `pdep`-spread masks keeps the operands that are values. The
+  count and fill loops then walk that stream with no per-operand decode.
+- A phi's inputs or a call's arguments follow that instruction's own fixed
+  operands, so the stream is cut at each phi or call.
+
+Both twins allocate the same arrays and build identical lists. The optimizer's
+preparation uses the scalar twin on its scalar path. Placing a use is still
+a dependent increment of its value's cursor, so a value with many uses
+serializes its own increments in both twins.
+
 ## Verification
 
 `ir_verify` checks common instruction rules 16 rows at a time. Byte-permute tables
 classify operand roles and semantic rules; type-set membership, operand/result
-agreement and terminator masks are vector comparisons. Indexed type reads use
-bounded scalar byte loads into the batch, avoiding hardware gathers and accidental
-four-byte reads from byte columns. Constants, calls, phis, switches and conversions
-use exact scalar handling; a failing vector batch also uses the scalar rule to
-produce the same diagnostic. `ir_verify_scalar` checks one instruction at a time.
-Both return the same `IrCheck` fields, including the first error location.
+agreement and terminator masks are vector comparisons. An operand's type is a
+byte permute of two registers holding the 128 types that end with the batch's
+own (all of a function of at most 128 instructions), or of one holding the
+function's first 64 (its parameters' and entry constants'); only a value in
+neither is a byte load of its own, so no read is a hardware gather or an
+accidental four-byte read from a byte column (`ir_operand_types`, #786).
+Constants, calls, phis, switches and conversions use exact scalar handling; a
+failing vector batch also uses the scalar rule to produce the same diagnostic.
+`ir_verify_scalar` checks one instruction at a time. Both return the same
+`IrCheck` fields, including the first error location.
 
 The graph phase checks phi coverage/types, duplicate switch constants and use
 ordering. Duplicate switch detection uses stable byte-radix sorting with at most
-16 passes, so adversarial i128 keys cannot cause a quadratic hash-probe scan.
+16 passes, so adversarial i128 keys cannot cause a quadratic hash-probe scan. The
+vector path finds the phis and switches 64 operations at a time; a phi after a
+non-phi of its block is the first misplaced one, so the check needs no state
+carried through the block.
 
 An optional `IrDominance` view supplies trusted half-open dominator-tree intervals.
 Both endpoints are zero for an unreachable block. The verifier checks use order
 within a block regardless of this view. With it, cross-block definitions must
 enclose the use block's interval; cross-block uses involving unreachable blocks
 are rejected. Phi uses use their predecessor's position and interval. The vector
-path compares batches of 16 uses; the scalar twin performs the same comparisons
-one at a time. `dominance_checked` distinguishes complete interval checking from
+path checks 16 instructions' operand columns at a time (`ir_dominance_batch`,
+#786): a use of an earlier value of its own block, the common case, needs nothing
+more, and its batch's blocks, at most 16 consecutive ones, give each lane's block
+start and interval by a permute of one load. With the view, an earlier block's
+definition has its block and interval gathered. A use at or after its own
+instruction, a phi's and a call's operands, and a failing lane go to the exact
+per-instruction check (`ir_check_operands`), which is the scalar twin, in order,
+so both report the same first error. `dominance_checked` distinguishes complete interval checking from
 structural verification. The verifier does not construct or prove the supplied
 dominator tree: #174 owns that analysis.
 
@@ -529,19 +562,28 @@ against clang.
 ### Intrinsics (#141)
 
 `intrinsic` keeps its operation in `c` (`BUSTER_IR_INTRINSIC_*`): `mulhu`,
-`pdep`, `pext`, `bzhi` and `bextr`, one opcode since the opcode tables'
+`pdep`, `pext`, `bzhi`, `bextr` and the unary scalar `splat`, one opcode since the opcode tables'
 byte-permute register holds 64 and was full, the 128-bit integers' `mulhu`
 before it the opcode's. The text names the operation after the operands, as a
 comparison's predicate (`%2 = intrinsic.i64 %0, %1 pdep`). Both verifiers check
-it by its own rule (`IR_RULE_INTRINSIC`, which the vector path checks with the
-others rather than deferring it): both operands of the result's type, `i32` or
-`i64`, an operation below the count, and `mulhu` an `i64`'s alone. The
-interpreter evaluates each as the instruction's pseudocode has it; the
-optimizer's passes neither fold it nor number its values, nor move it out of a
-loop; dead code removes an unused one. The typed stream's BMI rows lower to it
+it by its own rule (`IR_RULE_INTRINSIC`, deferred by the batch verifier): the
+five scalar kinds require both operands of the result's type, `i32` or `i64`,
+and `mulhu` an `i64`'s alone. `splat` requires one scalar `a` (`i8`, `i16`, `i32`,
+`i64`, `f32` or `f64`), absent `b`, a vector result and zero flags. Its scalar
+type gives the lane width and its raw bits are repeated unchanged, including
+NaN payloads and signed zero (`%7 = intrinsic.v8i32 %3 splat`). The opcode's
+operand metadata makes `b` optional; the semantic rule makes it mandatory for
+the five binary kinds. The shared interpreter evaluates the scalar kinds as
+their instruction pseudocode specifies and the splat as a bit copy. SCCP,
+GVN and LICM can fold, reuse or move splats under their ordinary rules; the
+five scalar kinds retain their previous optimization boundary. Dead code
+removes an unused intrinsic. The typed stream's BMI rows lower to it
 ([the SIMD IR guide](ir-simd.md)'s "Scalar x86 builtins"), and Tier 1 selects
-`mulhu` as `mul` and the others as their VEX instructions ([the selection
-guide](tier1-selection.md)). `tests/ir/intrinsics.ir` reads each operation of
+`mulhu` as `mul` and the other scalar kinds as their VEX instructions ([the selection
+guide](tier1-selection.md)). Exact single-record producer splats also lower to
+it; their target checks and native bit-copy expansion are documented in
+[SIMD IR](ir-simd.md#scalar-splats-1450). `tests/ir/splats.ir` reads every scalar
+type and vector width back. `tests/ir/intrinsics.ir` reads each scalar operation of
 both widths back, `test-ir-parse` refuses an unnamed or unknown operation, an
 `i32`'s `mulhu`, an `i16`'s and mixed operand types, `test-ir-interpreter` checks
 each against values a Zen 5's instructions give (an index, a start or a length
@@ -614,9 +656,9 @@ These are bits, not floats, and the existing types keep them exact:
 
 - the lowering gives them no floating operation: only a row reads one, and the
   IR's own vector decoders take 16, 32 and 64 bytes alone;
-- SCCP and dead code elimination have no floating arithmetic to fold them by;
-  their constants are bit patterns, a signaling NaN's among them, and GVN numbers
-  no floating operation but `fneg`, which they never have;
+- SCCP and dead code elimination fold no scalar floating arithmetic, and these
+  carriers are scalars: their constants are bit patterns, a signaling NaN's among
+  them, and GVN numbers no floating operation but `fneg`, which they never have;
 - Tier 1's moves of `f32` and `f64` are bit moves ([the selection
   guide](tier1-selection.md)'s "Machine rows"). Each row operand is zero-extended
   into its role, as Tier 0's reloads leave it, which the rows rely on. The
@@ -650,8 +692,10 @@ floating environment and termination.
 - **Constant propagation and dead code** (`ir_optimize.c`). Loads, stores,
   calls, fences, `rmw`s, branches, returns and `unreachable` are unconditional
   roots (`ir_optimize_roots`), never dropped or folded. The floating operations
-  are roots too, and nothing folds them: the pass has no floating arithmetic, so
-  a `FENV_ACCESS` region's rounding and exception flags stay the code's.
+  are roots too. SCCP folds no scalar floating arithmetic, and folds a vector's
+  floating lanes only where every rounding, FTZ and DAZ gives the same bits
+  (#1450), keeping the operation's row for its flags. So a `FENV_ACCESS` region's
+  rounding and exception flags stay the code's.
 - **GVN and LICM** take allow-lists of pure operations (`ir_gvn_classify`'s and
   `ir_licm_classify`'s tables). Neither numbers nor moves a load, a store, a call,
   a fence, an `rmw` or a floating operation other than `fneg`, so a new operation
@@ -828,12 +872,20 @@ and vector classification produce identical columns, side arrays and block range
 ./build/compiler benchmark-ir-source [--only VARIANT] [--after-scalar MS] [preprocessor options] file...
 ```
 
-`test-ir` has independently expected CFG/use lists and rejection fixtures,
+`test-ir` compares the two use-list twins on its printer fixtures, guarded
+tails, every-operand-kind fixture, generated functions and allocation
+failures. `test-ir-source` compares them on every lowered and promoted source
+form (`uses_forms`, `uses_failed`). `test-ir` also has independently expected CFG/use lists and rejection fixtures,
 conversion and constant coverage, loop/diamond/self phis, duplicate targets,
 8,192 adversarial i128 switch cases, guarded columns of lengths 0 through 33,
 dominance tails, overflow, arena rollback, exact printer text and random
 integer DAG mutations. Agreement alone is insufficient: malformed fixtures must
-be rejected by both paths. A labels fixture (`ir_test_labels`) checks
+be rejected by both paths. Generated functions of up to 40 blocks, with phis,
+selects, stores, addresses with and without an index and returns, are valid but
+for where each value is used; both paths must report the first use error, or
+none, that an independent oracle gives under no dominator view, a chain of
+blocks (some unreachable) and random intervals (`ir_test_dominance_generated`,
+#786: four per `--count`). A labels fixture (`ir_test_labels`) checks
 `br_indirect`'s successors (three labels, two distinct blocks: two edges), a
 label's phi, and the refusals of a label without a block beside an indirect
 branch, a label past the blocks, a branch through an integer and a missing label
@@ -1029,6 +1081,39 @@ Zen 4 laptop: its vector path runs 1.1% fewer instructions than main's, with 13.
 more of its dispatch slots left empty by the front end. The lowering of the
 generated programs does 1.8% more work, the new kinds' and records' tests, and
 takes 3% to 8% longer there (within 1% on the laptop's larger programs).
+
+### The verifier, the CFG builder and the optimizer over placements (#786)
+
+#786 asked that the verifier's, the CFG builder's and the optimizer's hot loops run
+alike over the code's placements on the 9700X, and that `benchmark-ir` and
+`benchmark-ir-optimize` be at or below #774's base, `9bb5060e`. Their data-parallel
+graph check, the type windows and the optimizer's single verification per
+preparation, with AUTO verifying by the vector twin, measured over six placements
+of the backend's unit and three rounds against `9bb5060e` and main `ec5f0f6b`
+([the record](https://github.com/buster14a/buster-performance/tree/b7f697e78b47b392a4108be388a22bc126c69374/docs/measurements/ir-graph-786-2026-11-06)):
+
+| Row (median over placements) | `9bb5060e` | Main | #786 | Spread over placements, #786 |
+| --- | ---: | ---: | ---: | ---: |
+| Vector verifier, 32 instructions (ns/instruction) | 5.866 | 5.289 | 1.804 | 2.4% |
+| Vector verifier, 262,144 instructions | 5.604 | 5.101 | 1.269 | 1.1% |
+| Scalar verifier, 32 instructions | 9.445 | 9.332 | 9.225 | 2.4% |
+| Scalar verifier, 262,144 instructions | 8.790 | 8.582 | 8.108 | 1.4% |
+| CFG, 32 instructions | 1.683 | 1.500 | 1.488 | 2.2% |
+| CFG, 262,144 instructions | 1.357 | 1.480 | 1.080 | 1.6% |
+| Uses, 262,144 instructions | 12.529 | 11.680 | 7.726 | 1.0% |
+| Optimizer, phi-diamond, scalar (ns/input instruction) | 150.916 | 168.841 | 133.337 | 1.8% |
+| Optimizer, loop, scalar | 133.305 | 146.459 | 116.136 | 2.2% |
+| Optimizer, jump-chain, scalar | 60.731 | 63.488 | 49.005 | 0.6% |
+| Optimizer, small-dag, AUTO | – | 59.444 | 39.368 | 3.1% |
+
+Every row of both benchmarks is below `9bb5060e`'s at its median, and in 106 of 108
+pairs at the same placement (the 32-instruction scalar verifier at two, +0.1% and
++0.5%); the verifier's and the CFG builder's spreads over placements are 1.1% to 2.4%,
+against `9bb5060e`'s 3.8% to 25.2%. The vector verifier's front end leaves 0.09% of its
+dispatch slots empty, against main's 12.4%, with 76 taken branches per 1,000
+instructions against 108. On the frozen `sqlite3.c`'s functions `benchmark-ir-source`'s
+`verify` takes 11.59 ns per typed entry against main's 21.14, with 181 instructions
+against 331, and `promote`, whose result it verifies, 127.22 against 142.16.
 
 ### Initial 9700X qualification
 

@@ -6,6 +6,50 @@ requirements. [Command index](README.md).
 
 ## Module overview
 
+Plain printf-family format inference follows the library builtin eligibility
+policy (#1390): `-ffreestanding`, `-fno-builtin` and exact
+`-fno-builtin-NAME` exclusions disable the name's inferred contract;
+`-fbuiltin` follows the existing last-option policy. Explicit `__builtin_`
+spellings and retained `format(printf, ...)` attributes remain checked.
+`dprintf` has no builtin catalog row and requires an explicit format attribute.
+Bare compatible function redeclarations inherit their visible predecessor's
+format records without mutating published metadata; binding-only readers with
+no optional attribute column retain its absence. Each call reads the
+declaration visible there, so later or closed-block annotations do not leak.
+A first block-scope extern remains discoverable by a later file declaration;
+a block redeclaration of an existing outer declaration keeps its scope end.
+Without a visible predecessor, the canonical first declaration supplies that
+contract even when a later block redeclaration has expired.
+Explicit library builtins use their retained intrinsic source-call receipt,
+including after deferred-body merging.
+The original default-warning fixtures cover those boundaries, redeclarations,
+embedded NULs, complete Clang diagnostics, warning promotion/suppression and
+scalar/vector object twins at one and three requested lanes.
+
+Multi-declarator declarations reuse compressed ancestor paths (#1378):
+`check_program_plans` finds initializer statements in a private parent copy
+borrowed from its existing `seen` scratch column, then clears it before object
+and flow processing. `check_input_unused_events` makes a separate scope-parent
+copy only when selected local unused warnings have paid for one. Both callers
+first walk original parents, accumulating their work; once that reaches the
+unit's token count, subsequent queries use a copy. Cheap queries pay no copy or
+extra allocation, and total uncached work is at most twice the token count.
+The scope predicate retains the
+nearest block/body/compound closing brace and leaves record braces out. Neither
+copy changes the parser or outlives its phase; each predicate has its own copy.
+When activated, parent-copy initialization touches four bytes per token. The warning phase also
+reserves that amount of temporary scratch; program planning reuses existing
+storage. These costs and small-unit latency remain part of physical performance
+qualification, alongside 4,000/8,000/16,000-declarator scaling.
+
+The reader's random-parent oracle covers both predicates, backward links,
+cycles, missing ancestors, empty input and an immutable 4,096-link chain. The
+existing poisoned plan tests still check exact statement links and compound
+literal handling; a focused one/two/three-query fixture checks that the copy is
+delayed until the raw-walk budget is spent. Native scalar/vector source fixtures cover 257 static/local
+declarators, nested scopes, for declarations and statement/compound expressions;
+unused-warning fixtures also check exact scope-completion tokens.
+
 - `src/buster/compiler/c_check_actions.c` supplies the reader-independent
   expression rules and constant folding for #133. `c_checker.c` checks an
   explicit postorder operand graph either a node at a time or in batches of
@@ -78,12 +122,17 @@ requirements. [Command index](README.md).
   first-argument selection with later arguments checked but not evaluated, nested comma expressions, scalar and
   aggregate conversions, static bytes, deduction and invalid forms. These checks remain in the default suite too.
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
-  wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes.
+  wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes; and
+  #1376's clears (`c_check_program_clear_test.c`): each path's shape (memset past 128 bytes, no loop, no clear before
+  a whole object's copy, compound literals in place, a volatile object's stores) and native runs on a dirtied stack.
   `--program-vectors` selects the vector, x86 builtin and half-precision programs alone (`c_check_program_vector_test.c`,
   `c_check_program_x86_test.c`, `c_check_program_vector_builtins_test.c`, `c_check_program_fp16_test.c`,
   `c_check_program_half_test.c`), run against clang -O0's code where the host has their features.
   Byte funnel shifts of 16-byte vectors require XOP: these tests compile/link everywhere and execute only where
   XOP is present; `test-x86-intrinsics` also checks their emitted expressions against Clang, including `_mm_rot_epi8`.
+  Required constant evaluation folds `_Float16` and `__bf16` arithmetic in the source format after each operation
+  (#1497); runtime half-precision chains retain their target's excess-precision behavior. The constant-source and
+  floating-action fixtures cover that distinction, ties, subnormals and negative zero.
   `--program-library` selects the library builtins' tables, constant folds and programs alone
   (`c_check_program_library_test.c`).
   `--transitions` selects the memoized transitions' fixtures, classes, static words and table limits alone (`c_check_transitions_test.c`).
@@ -95,6 +144,18 @@ requirements. [Command index](README.md).
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
   `--requests` selects #1057's request tests (`c_check_request_test.c`) and the source benchmarks' preparation tests.
+  `c_check_self_assign_driver_test.c` checks #1391's macro self-assignment boundary. The warning is suppressed
+  when the assignment operator or either variable-name use comes from a macro body or substituted argument;
+  macro-produced parentheses or declarations alone do not suppress an ordinary source assignment. Original
+  fixtures compare independent counts, severity and complete diagnostic lines with Clang through default,
+  scalar and deferred reader routes, including warning flags and source diagnostic pragmas.
+  `-Wsign-compare` retains the original unsignedness of both operands before narrow integer promotion (#1391).
+  An `unsigned char` or `unsigned short` promoted to `int` cannot become negative; signed casts, arithmetic
+  results and genuine signed operands keep their existing diagnostics. `c_check_sign_compare_driver_test.c`
+  compares independent counts, severity and complete Clang diagnostic lines through default/scalar compilation
+  and a deferred route that requires two admitted reader lanes. Run `test-checker-driver --sign-compare-only`
+  with `--executable build/compiler` under a two-CPU grant; the shared correctness inventory
+  supplies that grant. This is a type-local fix; general expression ranges and bitfield ranges remain separate.
   `c_check_noderef_driver_test.c`, in the attribute-effects driver section,
   compares original GNU `noderef` placement, propagation, conversion,
   address-cancellation and unevaluated-expression fixtures with pinned Clang
@@ -105,6 +166,28 @@ requirements. [Command index](README.md).
   and GNU range initialization, including preservation and removal of marks.
   Each body has at most one warned dereference because Clang's delayed warning
   order for multiple accesses is unstable across invocations.
+  Bitwise/comparison `-Wparentheses` diagnostics distinguish a single bare comparison from eager logical
+  comparison pairs and unparenthesized bitwise chains (#1390). Parenthesized operands retain their explicit
+  grouping. Original default-warning fixtures compare complete diagnostics and independent counts against
+  pinned Clang through scalar/vector and one/three-lane readers, including warning promotion and suppression.
+  Explicit void casts on a conditional arm's value path suppress the conditional's unused-result marker (#1390).
+  The existing postorder conditional/comma and selected-value facts carry that discard intent through nested
+  arms and transparent GNU/generic wrappers, while inner comma and division diagnostics still run.
+  `c_check_void_conditional_driver_test.c` covers those boundaries,
+  scalar-result controls, for clauses, macros and source policy through default and scalar modes and a requested
+  deferred-option route. These single-file syntax-only commands are capped at one lane and use the ordinary-reader
+  fallback; they do not establish admitted deferred-reader coverage.
+  `c_check_return_flow.c` supplies source return-warning facts for checked graphs. Ordinary direct calls no longer
+  suppress a function's `-Wreturn-type` warning; a proven direct `noreturn` call or terminating builtin ends only its
+  own warning-flow edge. Short circuit, conditional and unevaluated operands retain their execution rules, and
+  emission reachability is unchanged. Indirect calls (including GNU `noreturn` pointer/typedef contracts), overloads,
+  analyzer annotations, semantic queries, conditional classifier contracts and library-policy contracts remain
+  conservative until their retained facts are available here (#1393 remains open). Indirect calls in automatic
+  initializer value parts share that conservative boundary, including ordinary pointers whose Clang warning is
+  currently suppressed here; GNU noreturn pointer/typedef initializers need it until callable-type facts are retained.
+  `c_check_return_call_driver_test.c` exercises direct-call fall-off,
+  path-local termination, initializer/comma operands, warning flags and those conservative boundaries through the
+  ordinary, scalar and deferred readers against Clang, with independent warning counts.
   `c_check_data.c` and `c_check_data_input.c` turn selected static scalar definitions into real
   Link atoms/fixups; their tests compare emitted ELF bytes with Clang objects.
   `benchmark-checker --shape wide|chain` measures synthetic graph checking,
@@ -135,6 +218,60 @@ suite also checks current glibc's Clang fortify wrappers at `_FORTIFY_SOURCE=2/3
 including ordinary function addresses and scalar/vector, eager/lazy headers.
 The object-size attributes currently use conservative unknown bounds, without
 Clang's hidden-parameter ABI ([fortify compatibility](../c-builtins-fortify.md#current-glibcs-clang-wrappers-1361)).
+
+## System-header token bitmap and MSan (#1610)
+
+The source reader maps parser tokens' source indices to system-header bits in
+`check_input_system_token_map`. It clamps indices at or beyond the preprocessor
+output count to the user-file sentinel, gathers the low level byte in groups of
+16 and finishes the tail with the scalar twin. History/run selection, arena
+ownership and the graph's final sentinel remain in `check_input_system_tokens`.
+
+The mapping kernel is deliberately `noinline`. In the pinned LLVM 23.1.4
+([revision 7a941dfb](https://github.com/llvm/llvm-project/blob/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/llvm/lib/Transforms/Instrumentation/MemorySanitizer.cpp#L1480-L1508)),
+MSan switches large functions to callback checks; wide shadows take a temporary
+`alloca` at the check site. Inlining the bitmap loop into the large reader can
+therefore make that temporary consume stack on each iteration. The small
+separate function retains the vector path and every sanitizer check, and
+avoids inheriting the reader's callback threshold. This is a source diagnosis
+consistent with the actual native MSan O3 stack-overflow reports; generated
+instrumented IR/assembly and post-fix sanitizer execution must be checked
+separately. No stack limit or sanitizer suppression changes are involved, and
+no performance improvement is claimed.
+
+`test-checker`'s input-scan section runs `c_check_system_tokens_test.c`: 228
+scalar/vector pairs at lengths 0 through 65, vector boundaries and 2,097,167
+tokens, with output limits 0, 1 and 67. Every byte is compared with independent
+level classes, including both system levels and other byte values. Source
+columns end at protected pages; level padding ends at a protected page; output
+prefixes and sentinels must stay unchanged. This is semantic and memory-boundary
+coverage. A small direct caller alone need not reproduce LLVM's large-function
+threshold. The existing repository-translation-unit checking command is the
+previously failing MSan regression and remains required for crash validation.
+
+The first post-merge native MSan run passed the bitmap's 228 controls, then
+reported another stack overflow in `check_input_deprecated_marked` during the
+separate main.c compilation. That existing whole-column vector leaf is also
+kept `noinline`, preserving its body and `count <= INT32_MAX`/host-vector
+admission in `check_input_deprecated_uses`. It still scans the full input;
+isolation keeps its instrumentation separate from the large reader. The
+scalar warning walk, marked-declaration chains, contexts, ordering, allocation
+and scratch lifetime are unchanged. This follows the same pinned-compiler
+source inference, with every sanitizer check retained and no stack/flag
+adjustment. Actual native MSan main.c compilation and a clean final audit
+remain the decisive crash qualification; further wide-check sites must be
+judged by their own evidence.
+
+`c_check_deprecated_marked_test.c` adds 456 native-vector cases through the
+existing deprecated-walk section. It compares every word with independent
+per-token scalar key routing across lengths 0–65, 16/64-token boundaries and
+2,097,167 tokens, null/present objects, zero/valid/invalid object-first keys,
+invalid declarations, identifier densities and zero/high-bit marks. Exact
+input/table ends are protected; output prefixes, suffixes and unused final
+bits must be preserved. Baseline hosts retain the kernel's vector admission
+and report that this direct kernel control is skipped. Existing scalar/vector
+source diagnostic fixtures continue unchanged. A small direct caller is
+semantic/bounds coverage and need not reproduce the large-reader threshold.
 
 ## Object and linkage options (#1124)
 
@@ -288,3 +425,35 @@ compatibility byte comparisons and the separate `-E` behavior.
 zeroed configuration on failure. The existing instrumentation tests retain
 coverage cancellation and non-emitting predefines. This is the `-f`/`-m`
 semantic boundary, not a claim to audit every `-g`, `-O`, `-W` or linker option.
+
+
+## Bit-precise format arguments (#1392)
+
+`_BitInt(N)` is a distinct integer type even when its width equals an ordinary
+`char`, `short` or `int`. Variadic argument promotions do not turn it into
+those types. The printf integer-class and dynamic width/precision checks
+therefore reject bit-precise arguments for ordinary conversions, including
+`%n`'s pointed-to class, string pointees and C23 `wN` modifiers. Explicit casts and arithmetic
+that produce the required ordinary type remain valid. A fixed parameter of
+an attributed nonvariadic function has already converted its argument: for a
+bit-precise source or target (including a pointer/array of bit-precise elements),
+format checking and its type spelling use that recorded assignment conversion
+rather than the source type.
+
+The behavior was checked in the pinned Clang 23.1.4 source, revision
+[7a941dfb](https://github.com/llvm/llvm-project/blob/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/clang/lib/AST/FormatString.cpp#L445-L650),
+`ArgType::matchesType`, and `CheckPrintfHandler::HandleAmount` in
+[SemaChecking.cpp](https://github.com/llvm/llvm-project/blob/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/clang/lib/Sema/SemaChecking.cpp).
+No upstream implementation or fixture is imported.
+
+`c_check_format_bitint_driver_test.c` adds 25 original fixtures to
+`test-checker-driver` through the shared default-warning harness. Independent
+warning counts and complete Clang diagnostics cover narrow and equal-width
+arguments, one-bit unsigned values, character conversions, string/count pointers,
+dynamic width/precision, C23 exact-width formats, explicit casts, usual
+arithmetic conversions, fixed-parameter conversions and ordinary integer and
+boolean controls. Syntax checks and object emission run under the default
+policy, `-Werror` and `-w`, through both kernels and requested lane counts;
+promoted errors must preserve existing output. This is the bit-precise
+subscope of #1392. Boolean-valued `int` expressions and typedef-sugar spelling
+remain separate work; this change does not advertise complete parity.

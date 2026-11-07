@@ -38,8 +38,133 @@ static uint32_t ir_simd_lower_expected(CheckOp op, uint32_t a, uint32_t b, bool 
     return value;
 }
 
+static void ir_simd_lower_splats(IrLowerTestTally* tally)
+{
+    static const TypeId elements[] = { BUSTER_TYPE_UCHAR, BUSTER_TYPE_USHORT, BUSTER_TYPE_UINT, BUSTER_TYPE_ULLONG, BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_USHORT };
+    // Byte/word operands are extended before the producer row. The last row carries distinct high bits as a half's
+    // 32-bit carrier may: narrowing is explicit in semantic IR, never inferred from a register's unspecified bits.
+    static const uint8_t classes[] = { BUSTER_TYPED_CLASS_U32, BUSTER_TYPED_CLASS_U32, BUSTER_TYPED_CLASS_U32, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_F32, BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_U32 };
+    static const uint64_t bits[] = { 0x81, 0x8001, UINT32_C(0x800000a1), UINT64_C(0x80000001000000a1), UINT32_C(0x7f800031), UINT64_C(0x7ff0000000000031), UINT32_C(0xdead8001) };
+    TypeTestTable table = {0};
+    Arena output = arena_reserve(UINT64_C(1) << 24);
+    Arena twin = arena_reserve(UINT64_C(1) << 24);
+    Arena scratch = arena_reserve(UINT64_C(1) << 26);
+    Arena execution = arena_reserve(UINT64_C(1) << 26);
+    Arena native_arena = arena_reserve(UINT64_C(1) << 26);
+    Tier0TestVectorShared* shared = mmap(0, sizeof(*shared), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    uint8_t* images = calloc(2, 4 * BUSTER_TIER0_TEST_PAGE);
+    const bool ready = type_test_table_open(&table, 256) && output.base != 0 && twin.base != 0 && scratch.base != 0 && execution.base != 0 && native_arena.base != 0 && shared != MAP_FAILED && images != 0;
+    ir_lower_test_expect(tally, ready, "scalar splat lowering storage", 0, 0);
+    const uint64_t features = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512BW);
+    const X86Target target = { .features = features };
+    const X86Target host = x86_target_native();
+    const bool native = (host.features & features) == features;
+    const uint8_t local_class = BUSTER_TYPED_CLASS_U64;
+    const uint8_t local_flags = 0;
+    const AbiLocation parameter = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE } };
+    uint32_t cases = 0;
+    uint32_t native_cases = 0;
+    for (uint32_t width = 0; ready && width < 3; width += 1)
+    {
+        const uint32_t bytes = 16u << width;
+        for (uint32_t scalar = 0; scalar < BUSTER_ARRAY_LENGTH(elements); scalar += 1)
+        {
+            const uint32_t lane_bytes = (uint32_t)type_size(&table.table, elements[scalar]);
+            const TypeId type = type_vector(&table.table, elements[scalar], bytes / lane_bytes, false);
+            Tier0Operation row = {0};
+            const char* reason = check_vector_lower_row(&table.table, &target, false, BUSTER_CHECK_VECTOR_SPLAT, type, classes[scalar], &row);
+            ir_lower_test_expect(tally, reason == NULL, "the scalar splat producer builds a row", width, scalar);
+            const uint8_t kinds[] = { BUSTER_TYPED_LOCAL, BUSTER_TYPED_LOCAL, BUSTER_TYPED_LOAD, BUSTER_TYPED_X86, BUSTER_TYPED_STORE, BUSTER_TYPED_DISCARD, BUSTER_TYPED_RETURN };
+            const uint8_t typed_classes[] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, classes[scalar], BUSTER_TYPED_CLASS_VECTOR, BUSTER_TYPED_CLASS_VECTOR, BUSTER_TYPED_CLASS_VECTOR, BUSTER_TYPED_CLASS_VOID };
+            const uint64_t values[] = { 0, 0, 0, 0, bytes, 0, 0 };
+            const Tier0Function source = {
+                .kinds = kinds,
+                .classes = typed_classes,
+                .values = values,
+                .count = BUSTER_ARRAY_LENGTH(kinds),
+                .local_classes = &local_class,
+                .local_flags = &local_flags,
+                .local_count = 1,
+                .parameter_count = 1,
+                .parameters = &parameter,
+                .result = { .kind = BUSTER_ABI_RESULT_IGNORE },
+                .operations = &row,
+                .operation_count = 1,
+                .vectors = true,
+            };
+            IrFunction a = {0};
+            IrFunction b = {0};
+            const IrCheck ca = ir_lower_typed_target(&source, IR_VOID, 3, features, &output, &scratch, &a);
+            const IrCheck cb = ir_lower_typed_target_scalar(&source, IR_VOID, 3, features, &twin, &scratch, &b);
+            const bool lowered = reason == NULL && ca.error == IR_OK && cb.error == IR_OK && ir_lower_test_equal(&a, &b);
+            ir_lower_test_expect(tally, lowered, "both typed adapters lower scalar splats identically", width, scalar);
+            uint32_t splats = 0;
+            uint32_t narrowed = 0;
+            for (uint32_t i = 0; lowered && i < a.instruction_count; i += 1)
+            {
+                splats += a.op[i] == IR_INTRINSIC && a.c[i] == BUSTER_IR_INTRINSIC_SPLAT;
+                narrowed += a.op[i] == IR_TRUNC;
+            }
+            ir_lower_test_expect(tally, lowered && a.row_count == 0 && b.row_count == 0 && a.call_count == 0 && splats == 1 && narrowed == (scalar < 2 || scalar == 6),
+                                 "one pure splat replaces its machine row and narrows wider bit carriers explicitly", width, scalar);
+            uint8_t expected[80];
+            memset(expected, 0xa5, sizeof(expected));
+            for (uint32_t byte = 0; byte < bytes; byte += 1)
+            {
+                expected[8 + byte] = (uint8_t)(bits[scalar] >> (8 * (byte % lane_bytes)));
+            }
+            for (uint32_t path = 0; lowered && path < 2; path += 1)
+            {
+                uint8_t actual[80];
+                memset(actual, 0xa5, sizeof(actual));
+                memcpy(actual + 8, bits + scalar, tier0_class_bytes(classes[scalar]));
+                const InterpreterBinding binding = { .symbol = 2, .bytes = actual, .size = sizeof(actual), .writable = true };
+                const IrInterpreterFunction function = { .symbol = 1, .function = path == 0 ? &a : &b };
+                const IrInterpreterProgram program = { .functions = &function, .function_count = 1, .bindings = &binding, .binding_count = 1 };
+                const InterpreterValue argument = { .low = (uintptr_t)(actual + 8) };
+                const InterpreterResult result = ir_interpret(&program, 1, &argument, 1, 0, &execution);
+                ir_lower_test_expect(tally, result.status == INTERPRETER_OK && memcmp(actual, expected, sizeof(actual)) == 0 && execution.length == 0,
+                                     "lowered scalar splats preserve raw bits and exact-width memory", width, scalar);
+            }
+            if (lowered)
+            {
+                Tier0TestTally native_tally = {0};
+                Tier0Error error = TIER0_OK;
+                const uint32_t length = tier0_test_vector_encode(&native_tally, "IR scalar splat producer", &source, &native_arena, images, images + 4 * BUSTER_TIER0_TEST_PAGE, TIER0_OK, &error);
+                ir_lower_test_expect(tally, length != 0 && native_tally.failures == 0, "both Tier 0 paths encode the same scalar splat producer", width, scalar);
+                if (native && length != 0)
+                {
+                    memset(shared->out, 0xa5, sizeof(shared->out));
+                    memcpy(shared->out[0] + 8, bits + scalar, tier0_class_bytes(classes[scalar]));
+                    const bool ran = tier0_test_vector_native(images, length, ir_simd_lower_native, shared);
+                    ir_lower_test_expect(tally, ran && memcmp(shared->out, expected, sizeof(expected)) == 0, "native producer and semantic splat agree bit for bit", width, scalar);
+                    native_cases += ran;
+                }
+                cases += 1;
+            }
+            arena_pop_to(&output, 0);
+            arena_pop_to(&twin, 0);
+            arena_pop_to(&native_arena, 0);
+        }
+    }
+    ir_lower_test_expect(tally, cases == 3 * BUSTER_ARRAY_LENGTH(elements), "every scalar splat producer was lowered", cases, 0);
+    printf("IR scalar splat lowering: %u cases, %u gated native runs%s\n", cases, native_cases, native ? "" : " (AVX-512 native execution unavailable)");
+    if (shared != MAP_FAILED)
+    {
+        munmap(shared, sizeof(*shared));
+    }
+    free(images);
+    type_test_table_close(&table);
+    arena_release(&native_arena);
+    arena_release(&execution);
+    arena_release(&scratch);
+    arena_release(&twin);
+    arena_release(&output);
+}
+
 static void ir_simd_lower_tests(IrLowerTestTally* tally)
 {
+    ir_simd_lower_splats(tally);
     TypeTestTable table = {0};
     Arena output = arena_reserve(UINT64_C(1) << 24);
     Arena twin = arena_reserve(UINT64_C(1) << 24);

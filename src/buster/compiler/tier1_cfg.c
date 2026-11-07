@@ -226,43 +226,63 @@ static bool tier1_cfg_input_valid(const Tier1CfgInput* input, Arena* scratch)
     valid = valid && input->successor_offsets[0] == 0 && input->successor_offsets[input->block_count] == input->edge_count;
     valid = valid && input->predecessor_offsets[0] == 0 && input->predecessor_offsets[input->block_count] == input->edge_count;
     valid = valid && input->predecessor_offsets[1] == 0;
-    // The two views must describe one edge set: count each edge from both sides in one array.
-    uint32_t* counts = valid ? arena_push_array(scratch, input->block_count, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-    valid = valid && counts != 0;
+    // Transpose the successor view into the predecessor ranges, then consume each source once. Neither CSR view
+    // needs sorted rows; the caller's predecessor order (and therefore its phi operands) stays unchanged. Check all
+    // offsets before indexing either edge array, including intermediate offsets beyond the declared edge count.
+    const uint32_t blocks = input->block_count;
+    const uint32_t edges = input->edge_count;
+    const uint32_t* const successor_offsets = input->successor_offsets;
+    const uint32_t* const predecessor_offsets = input->predecessor_offsets;
+    const uint32_t* const successors = input->successors;
+    const uint32_t* const predecessor_sources = input->predecessors;
+    for (uint32_t b = 0; valid && b < blocks; b += 1)
+    {
+        valid = successor_offsets[b] <= successor_offsets[b + 1] && successor_offsets[b + 1] <= edges && predecessor_offsets[b] <= predecessor_offsets[b + 1] && predecessor_offsets[b + 1] <= edges;
+    }
+    uint32_t* cursors = valid ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    uint32_t* marks = valid ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    uint32_t* incoming = valid ? arena_push_array(scratch, (uint64_t)edges + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    valid = valid && cursors != 0 && marks != 0 && incoming != 0;
     if (valid)
     {
-        memset(counts, 0, (uint64_t)input->block_count * sizeof(uint32_t));
+        memcpy(cursors, predecessor_offsets, (uint64_t)blocks * sizeof(uint32_t));
+        memset(marks, 0, (uint64_t)blocks * sizeof(uint32_t));
     }
-    for (uint32_t b = 0; valid && b < input->block_count; b += 1)
+    for (uint32_t b = 0; valid && b < blocks; b += 1)
     {
-        valid = input->successor_offsets[b] <= input->successor_offsets[b + 1] && input->predecessor_offsets[b] <= input->predecessor_offsets[b + 1];
-        for (uint32_t e = input->successor_offsets[b]; valid && e < input->successor_offsets[b + 1]; e += 1)
+        const uint32_t end = successor_offsets[b + 1];
+        for (uint32_t e = successor_offsets[b]; valid && e < end; e += 1)
         {
-            valid = input->successors[e] < input->block_count;
-            for (uint32_t f = input->successor_offsets[b]; valid && f < e; f += 1)
+            const uint32_t target = successors[e];
+            valid = target < blocks && cursors[target] < predecessor_offsets[target + 1];
+            if (valid)
             {
-                valid = input->successors[f] != input->successors[e];
+                incoming[cursors[target]] = b;
+                cursors[target] += 1;
             }
-            counts[valid ? input->successors[e] : 0] += valid;
         }
     }
-    for (uint32_t b = 0; valid && b < input->block_count; b += 1)
+    for (uint32_t b = 0; valid && b < blocks; b += 1)
     {
-        for (uint32_t e = input->predecessor_offsets[b]; valid && e < input->predecessor_offsets[b + 1]; e += 1)
+        const uint32_t first = predecessor_offsets[b];
+        const uint32_t end = predecessor_offsets[b + 1];
+        const uint32_t stamp = b + 1;
+        valid = cursors[b] == end;
+        for (uint32_t e = first; valid && e < end; e += 1)
         {
-            const uint32_t source = input->predecessors[e];
-            valid = source < input->block_count;
-            bool found = false;
-            for (uint32_t f = valid ? input->successor_offsets[source] : 0; valid && !found && f < input->successor_offsets[source + 1]; f += 1)
-            {
-                found = input->successors[f] == b;
-            }
-            valid = valid && found;
+            const uint32_t source = incoming[e];
+            valid = marks[source] != stamp;
+            marks[source] = stamp;
         }
-    }
-    for (uint32_t b = 0; valid && b < input->block_count; b += 1)
-    {
-        valid = counts[b] == input->predecessor_offsets[b + 1] - input->predecessor_offsets[b];
+        for (uint32_t e = first; valid && e < end; e += 1)
+        {
+            const uint32_t source = predecessor_sources[e];
+            valid = source < blocks && marks[source] == stamp;
+            if (valid)
+            {
+                marks[source] = 0;
+            }
+        }
     }
     // Phis: none in the entry; each value at most once, defined at its block's start, one operand of its class per
     // predecessor.
@@ -314,6 +334,25 @@ static bool tier1_cfg_input_valid(const Tier1CfgInput* input, Arena* scratch)
     }
     arena_pop_to(scratch, saved);
     return valid;
+}
+
+// For a validated input, publish the sole incoming edge's successor-CSR index per block, or NONE. The emitter owns
+// `edges`, a disjoint block_count-entry scratch column. One edge sweep replaces a search per single-predecessor block.
+static void tier1_cfg_single_predecessor_edges(const Tier1CfgInput* input, uint32_t* edges)
+{
+    const uint32_t blocks = input->block_count;
+    const uint32_t count = input->edge_count;
+    const uint32_t* const successors = input->successors;
+    const uint32_t* const offsets = input->predecessor_offsets;
+    memset(edges, 0xff, (uint64_t)blocks * sizeof(uint32_t));
+    for (uint32_t e = 0; e < count; e += 1)
+    {
+        const uint32_t target = successors[e];
+        if (offsets[target + 1] - offsets[target] == 1)
+        {
+            edges[target] = e;
+        }
+    }
 }
 
 // Value v's interval that covers `position`, by binary search, or BUSTER_TIER1_CFG_NONE. The verifier and the
@@ -2325,3 +2364,4 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
     arena_pop_to(scratch, saved);
     return valid;
 }
+

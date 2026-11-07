@@ -65,6 +65,7 @@ struct CheckUnitsUnit
 {
     const char* path;
     CheckDriverInputKind kind;
+    bool preprocessed;
     uint64_t bytes;
     const char* object;
     int status;
@@ -132,6 +133,11 @@ struct CheckUnitsLane
     ArenaPool pool;
     CheckUnitsMemory* memory;
     uint64_t held;
+    // The run whose units the lane takes, which tells its unit's checker whether a unit is left to take
+    // (check_units_discard_huge), and the lane's units whose checker gave its scratch's pages back in whole huge pages,
+    // for one (--shared-parts' report).
+    const struct CheckUnitsRun* run;
+    uint32_t discarded_huge;
 };
 
 #include "c_driver_mixed.c"
@@ -161,7 +167,22 @@ struct CheckUnitsRun
     // for --shared-parts' and --units-memory's reports.
     uint32_t taking;
     uint32_t kept;
+    // The units the lanes have taken so far (check_units_lane), which reaches `count` once none is left to take
+    // (check_units_discard_huge). A lane counts its unit after taking it, so the count may lag the takes, never lead
+    // them.
+    uint32_t started;
 };
+
+// Whether `lane`'s unit gives its scratch's pages back in whole huge pages (CheckProgramOptions.discard_huge, #777),
+// counted on the lane: when a unit of its run is still to be taken, which a lane that finishes its unit takes next,
+// likely this one, pushing as far into its scratch again. The count may lag a take, which only frees a unit's pages in
+// whole huge pages where none was left to take.
+static bool check_units_discard_huge(CheckUnitsLane* lane)
+{
+    const bool result = lane->run != NULL && __atomic_load_n(&lane->run->started, __ATOMIC_RELAXED) < lane->run->count;
+    lane->discarded_huge += result ? 1 : 0;
+    return result;
+}
 
 // Copies `link`, a unit's whole link (check_driver_object's, its code and data published and link_check passed), into
 // `kept`: its tables, names and atoms' bytes into its arenas, with each record's id as it was; and marks its undefined
@@ -2147,10 +2168,11 @@ static bool check_units_lane_ready(CheckUnitsLane* lane, const CheckDriverComman
     return lane->ready;
 }
 
-// A lane's memory that the link doesn't read, its file cache, intern table and three arenas, released when it has
-// compiled its units (#778): into its pool (arena_pool), when its caller set one, whose MADV_DONTNEED frees an arena's
-// pages under the address space's lock for reading, so that the lanes free theirs at once, at the end of their run,
-// where the calling thread would free every lane's after it, one after another. The links it kept stay in their arenas.
+// A lane's memory that the link doesn't read, its file cache, intern table, three arenas and its functions' lane 0's
+// writer's columns, released when it has compiled its units (#778): into its pool (arena_pool), when its caller set
+// one, whose MADV_DONTNEED frees an arena's pages under the address space's lock for reading, so that the lanes free
+// theirs at once, at the end of their run, where the calling thread would free every lane's after it, one after another.
+// The links it kept stay in their arenas.
 // A lane whose setup failed releases what it reserved before the failure, which its table and cache keep as their
 // initializers left them (a lane that took no unit, or released them already, has them zero, which their releases take).
 // Then it gives back what it held of the run's memory (check_units_memory_give).
@@ -2162,15 +2184,17 @@ static void check_units_lane_release(CheckUnitsLane* lane)
     arena_release(&lane->output);
     arena_release(&lane->scratch);
     arena_release(&lane->arena);
+    check_program_lanes_release(&lane->functions);
     check_units_memory_give(lane);
 }
 
 // A unit, on the lane that took it: compiled by check_driver_unit with the lane's intern table and file cache, its
 // functions on the lane alone, its diagnostics into its own stream, and with a link to make, its link kept. The arenas
 // it reserves start with BUSTER_CHECK_UNITS_SMALL_BYTES of base pages unless its source is large. The lane's three
-// arenas are emptied after it, their pages kept for the next unit with the bytes the unit left there: the compile
-// reads nothing in them it didn't write, which --poison-arenas checks (arena_poison: a pattern in place of those bytes;
-// docs/translation-units.md, "Memory", has why and what reserving or clearing them again costs).
+// arenas, and its functions' lane 0's writer's columns (#442), are emptied after it, their pages kept for the next unit
+// with the bytes the unit left there: the compile reads nothing in them it didn't write, which --poison-arenas checks
+// (arena_poison: a pattern in place of those bytes; docs/translation-units.md, "Memory", has why and what reserving or
+// clearing them again costs).
 static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, CheckUnitsUnit* unit)
 {
     const CheckDriverCommand* command = run->command;
@@ -2192,8 +2216,11 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
         PPOptions options = command->options;
         options.files = &lane->cache;
         options.diagnostics = errors;
+        options.preprocessed = unit->preprocessed;
         unit->kept = (CheckUnitsKept){ .arena = &lane->kept, .bytes = &lane->kept_bytes };
-        // On the board, the unit's functions as parts that the lanes without units may take (#777).
+        // On the board, the unit's functions as parts that the lanes without units may take (#777). Lane 0's writer's
+        // columns stay the lane's from one unit to the next, as its three arenas do (check_program_lanes_settle, #442).
+        const Arena columns = lane->functions.arenas[0].scratch;
         lane->functions = (CheckProgramLanes){
             .lanes = run->board != NULL ? run->board->lanes : 1,
             .board = run->board,
@@ -2210,7 +2237,9 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             .units_lane = lane,
             .helper_forms = command->helper_forms,
         };
+        lane->functions.arenas[0].scratch = columns;
         lane->memory = run->memory;
+        lane->run = run;
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
         arena_small_floor = unit->bytes < BUSTER_CHECK_UNITS_LARGE_SOURCE ? BUSTER_CHECK_UNITS_SMALL_BYTES : 0;
         if (unit->kind == CHECK_DRIVER_INPUT_ASSEMBLY || unit->kind == CHECK_DRIVER_INPUT_ASSEMBLY_CPP)
@@ -2282,8 +2311,8 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             __atomic_fetch_add(&report->row_moves, unit_report->row_moves, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->inlined_calls, unit_report->inlined_calls, __ATOMIC_RELAXED);
         }
-        check_program_lanes_release(&lane->functions);
-        Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena };
+        check_program_lanes_settle(&lane->functions);
+        Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena, &lane->functions.arenas[0].scratch };
         for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(arenas); a += 1)
         {
             if (command->poison_arenas)
@@ -2328,6 +2357,7 @@ static void check_units_lane(void* argument)
     arena_pool = &lane->pool;
     for (uint64_t taken = lane_take(run->count); taken < run->count; taken = lane_take(run->count))
     {
+        __atomic_add_fetch(&run->started, 1, __ATOMIC_RELAXED);
         const Lane group = lane_alone();
         check_units_compile(run, lane, run->units + run->order[taken]);
         lane_restore(group);
@@ -2506,6 +2536,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             const uint32_t cost = size < UINT32_MAX ? (uint32_t)size : UINT32_MAX - 1;
             units[u].path = inputs[u];
             units[u].kind = command->inputs != NULL ? command->inputs[u].kind : CHECK_DRIVER_INPUT_C;
+            units[u].preprocessed = command->inputs != NULL && command->inputs[u].preprocessed;
             units[u].bytes = units[u].kind != CHECK_DRIVER_INPUT_LINK ? size : 0;
             keys[u] = (uint64_t)(UINT32_MAX - cost) << 32 | u;
         }
@@ -2528,9 +2559,18 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             ready = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize();
         }
+        // And the lowering's runtime functions' names' lengths and hashes (#442), which every unit's lowering reads, before
+        // the lanes start: a lowering that finds them unmade measures and hashes the names itself, as the emission's
+        // backend setup leaves it to.
+        if (ready && emitting && !check_lower_runtime_names_ready)
+        {
+            check_lower_runtime_names_initialize();
+        }
+        // A baked executable starts with the semantics tables built (baked.h, #590), and x86_semantics_initialize rebuilds
+        // them unconditionally, writing the baked pages: only an executable that isn't baked runs it (#1571).
         if (ready && command->mixed_inputs)
         {
-            ready = x86_encoder_initialize() && x86_semantics_initialize();
+            ready = x86_encoder_initialize() && (x86_semantics_initialized || x86_semantics_initialize());
         }
         if (ready && emitting && command->unwind_tables && !unwind_ready)
         {
@@ -2606,6 +2646,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             {
                 if (!units[order[i]].compiled)
                 {
+                    __atomic_add_fetch(&run.started, 1, __ATOMIC_RELAXED);
                     check_units_compile(&run, states, units + order[i]);
                 }
             }
@@ -2639,8 +2680,15 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             }
             if (command->shared_parts)
             {
+                uint32_t discarded_huge = 0;
+                for (uint32_t l = 0; l < active; l += 1)
+                {
+                    discarded_huge += states[l].discarded_huge;
+                }
                 fprintf(stderr, "shared parts: %llu taken by lanes without units\n", (unsigned long long)(board != NULL ? board->others : 0));
                 fprintf(stderr, "units' lanes: %u left %s memory to the exit\n", run.kept, run.kept != 1 ? "their" : "its");
+                fprintf(stderr, "units' scratch: %u gave %s pages back in whole huge pages, for a unit left to take\n", discarded_huge,
+                        discarded_huge != 1 ? "their" : "its");
             }
             if (command->units_memory != 0)
             {

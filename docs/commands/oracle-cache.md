@@ -39,6 +39,12 @@ key is SHA-256 of:
   (`oracle_environment_names`) with their values, each with its roots made
   alike (below); its time limit; and the bytes of its standard input.
 
+The keyed diagnostic controls include GCC's extra fix-it output, colors and
+URL settings (including `TERM_URLS` and `TERM`). Unset and empty values remain
+distinct. A compiler run with `GCC_DIAGNOSTICS_LOG` set (even to an empty
+value) executes without cache admission, as its log may be outside the
+caller-declared replay artifacts.
+
 A compiler's run (`OracleRun.dependencies`) is traced: it runs under a seccomp
 filter that stops each call of its processes that looks at a path (`open`,
 `stat`, `access`, `readlink`, `execve` and their kin), lists a directory, or
@@ -79,8 +85,14 @@ wrote is taken when the object there is the one that compile left. What the
 cache leaves out (`oracle_path_rule`, by what each call does at a path,
 `OracleUse`): the package manager's files (under `/usr` but `/usr/local`, and
 `/bin`, `/sbin` and `/lib*`), the package database's identity standing for
-them. The kernel's (`/proc`, `/sys`), which describe the processes and the
-machine, change with no file changing (a process's id in `/proc/self/stat`,
+them. This exemption applies only to simple path spellings: repeated slashes
+and `.` components keep their own dependency records, so `/usr//local` and
+`/usr/./local` cannot bypass the `/usr/local` exception. The original spelling
+is retained; neither `..` nor symbolic links are collapsed. Entry version 4
+rejects older records that may have omitted these dependencies.
+
+The kernel's (`/proc`, `/sys`), which describe the processes and the machine,
+change with no file changing (a process's id in `/proc/self/stat`,
 the time in `/proc/uptime`, the inode and times `stat` gives of `/proc/self`,
 its process's): a check for one (`access`, `faccessat2` and `chdir`, which say
 whether it is there, as LLVM checks for `/proc/self/fd` and `/proc/self/exe`)
@@ -169,8 +181,11 @@ too). The tests that compare with compilers through the cache fix the
 epoch where it isn't set (`oracle_epoch_begin`: test-preprocessor,
 test-parser, test-checker, test-checker-asm, test-checker-driver, test-tier0,
 test-calling-convention, test-c-testsuite; test-checker-corpus fixes its
-own), for the compilers and their own preprocessor alike. A run with `-M`
-options of its own, or more than 8 roots, isn't kept.
+own), for the compilers and their own preprocessor alike. A compiler run with
+`-M` options or either `DEPENDENCIES_OUTPUT` or `SUNPRO_DEPENDENCIES` set
+(including an empty value) is not kept: these can write a dependency file that
+the caller has not declared for replay. The environment is still passed to
+the compiler, which runs normally. A run with more than 8 roots is not kept.
 
 The roots: a test makes its files in directories of `mkdtemp`'s under
 `$TMPDIR` (or `/tmp`), whose names differ from one run to the next. Tests build

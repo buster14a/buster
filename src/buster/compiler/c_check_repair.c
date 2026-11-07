@@ -281,7 +281,7 @@ static CheckRepairStatus check_repair_make(CheckRepair* repair, const Parser* or
         memcpy(view->tokens.names, original->tokens.names, (uint64_t)cut * sizeof(uint32_t));
         memcpy(view->tokens.sources, original->tokens.sources, (uint64_t)cut * sizeof(uint32_t));
         memcpy(view->tokens.flags, original->tokens.flags, cut);
-        memset(view->meanings.meanings, PARSE_MEANING_UNBOUND, view->meanings.capacity);
+        memset(view->meanings.meanings, PARSE_MEANING_ORDINARY, view->meanings.capacity);
         for (uint32_t i = 0; i < BUSTER_PARSE_PREDECLARED_TYPEDEFS; i += 1)
         {
             view->meanings.meanings[view->predeclared[i]] = PARSE_MEANING_TYPEDEF;

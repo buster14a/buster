@@ -239,7 +239,7 @@ static bool check_query_syntax(const TypeTable* types, const CheckGraph* graph, 
     const CBuiltinId builtin = (CBuiltinId)(graph->members != NULL ? graph->members[node] : 0);
     bool effect = op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || op == CHECK_OP_ASSIGN || op == CHECK_OP_BUILTIN_OVERFLOW ||
                   op == CHECK_OP_VARARGS || op == CHECK_OP_BUILTIN_ATOMIC || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
-    effect |= op == CHECK_OP_VALUE && (check_graph_leaf_of(graph, node)->flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
+    effect |= op == CHECK_OP_VALUE && (check_graph_leaf_flags(graph, node) & BUSTER_CHECK_SIDE_EFFECT) != 0;
     const CheckRegionProof* region = op == CHECK_OP_STATEMENT_VALUE ? check_graph_region_proof(graph, node) : NULL;
     effect |= op == CHECK_OP_STATEMENT_VALUE && region == NULL && ((graph->members != NULL ? graph->members[node] : 0) & BUSTER_CHECK_SIDE_EFFECT) != 0;
     if (region != NULL)
@@ -553,8 +553,94 @@ static void check_query_prove(TypeTable* types, const CheckGraph* graph, const C
     proof->values[0].flags |= (differs || (proof->values[2].flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0) ? BUSTER_CHECK_FP_ENVIRONMENT : 0;
 }
 
+// Whether two values are the same as the stream holds them (check_stream_set_value_flags): every field a reader reads,
+// a long double component by its ten meaningful bytes.
+static bool check_query_same_value(const CheckValue* a, const CheckValue* b)
+{
+    return a->type == b->type && a->category == b->category && a->flags == b->flags && a->constant_kind == b->constant_kind && a->integer == b->integer &&
+           a->floating_storage[0] == b->floating_storage[0] && (a->floating_storage[1] & 0xffff) == (b->floating_storage[1] & 0xffff) &&
+           a->imaginary_storage[0] == b->imaginary_storage[0] && (a->imaginary_storage[1] & 0xffff) == (b->imaginary_storage[1] & 0xffff) &&
+           a->object == b->object && a->overload_head == b->overload_head && a->offset == b->offset && a->bit_width == b->bit_width &&
+           a->fault == b->fault && a->fault_node == b->fault_node && a->object_bit_offset == b->object_bit_offset;
+}
+
+// Whether `node`'s stored result is what check_graph_store of `result` would write: its value, conversions, diagnostic
+// and its operand, warnings and member offset.
+static bool check_query_stored(const CheckStream* stream, uint32_t node, const CheckActionResult* result)
+{
+    CheckValue written = result->value;
+    written.flags = check_value_source_flags((CheckOp)stream->graph->ops[node], result->value.flags);
+    const CheckValue stored = check_stream_value(stream, node);
+    bool same = check_query_same_value(&stored, &written) && stream->diagnostics[node] == result->diagnostic &&
+                stream->diagnostic_operands[node] == result->diagnostic_operand && stream->warnings[node] == result->warnings &&
+                stream->member_offsets[node] == result->member_offset;
+    const CheckNodeConversions* conversions = stream->conversions + node;
+    for (uint32_t i = 0; same && i < BUSTER_ARRAY_LENGTH(result->conversions); i += 1)
+    {
+        const CheckConversion fields = check_conversion_fields(&result->conversions[i]);
+        same = conversions->operands[i].type == fields.type && conversions->operands[i].flags == fields.flags;
+    }
+    const CheckConversion store = check_conversion_fields(&result->store_conversion);
+    same = same && conversions->store.type == store.type && conversions->store.flags == store.flags;
+    return same;
+}
+
+// The constant_p query at `node` as the replay publishes it, from its proofs (check_graph_query_runtime): its argument
+// loaded as the node's evaluation loads it (check_graph_action), the stream's value of its argument node.
+static void check_query_publish(TypeTable* types, const CheckGraph* graph, const CheckStream* stream, const CheckQueryProof* proofs, const uint32_t* indices,
+                                CheckValue* arguments, uint32_t node, CheckBuiltinQueryResult* checked)
+{
+    check_stream_value_to(stream, graph->argument_nodes[graph->argument_offsets[node]], &arguments[0]);
+    const CheckQueryProof* proof = proofs + indices[node];
+    const CheckQueryProof* child = proofs + indices[graph->argument_nodes[graph->argument_offsets[node]]];
+    const CheckBuiltinCall* witness = check_graph_builtin_call(graph, node);
+    const CheckBuiltinQueryAction input = {
+        .id = CBUILTIN_CONSTANT_P,
+        .arguments = arguments,
+        .argument_count = 1,
+        .node = node,
+        .context = check_graph_context(graph, node, false),
+        .string_literal_start = witness != NULL && witness->string_literal_start,
+        .absolute_address_constant = witness != NULL && witness->absolute_address_constant,
+        .complex_constant = child->values[0].constant_kind == CHECK_CONSTANT_COMPLEX,
+        .constant_p_source_proof = proof->values[0].integer != 0 ? CHECK_BUILTIN_QUERY_PROOF_ONE : CHECK_BUILTIN_QUERY_PROOF_ZERO,
+        .constant_p_runtime_plan = proof->evaluated != 0 ? CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_KNOWN : CHECK_BUILTIN_QUERY_RUNTIME_SKIP,
+        .constant_p_runtime_result = (uint8_t)proof->values[2].integer,
+        .constant_p_runtime_effects = {
+            .flags = child->values[2].flags & BUSTER_CHECK_SIDE_EFFECT,
+            .fault = child->values[2].fault,
+            .fault_node = child->values[2].fault != CHECK_FAULT_NONE ? child->values[2].fault_node : 0,
+            .reads_fp_environment = (child->values[2].flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0,
+            .may_raise_fp_exceptions = (child->values[2].flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0,
+        },
+        .constant_p_context_sensitive = true,
+    };
+    check_builtin_query(types, &input, checked, 1);
+    checked->action.value.flags |= proof->values[0].flags & BUSTER_CHECK_FP_ENVIRONMENT;
+}
+
+// The query effect the replay updates for `node`, from its published result.
+static void check_query_effect_publish(CheckBuiltinQueryEffect* effect, const CheckBuiltinQueryResult* checked)
+{
+    effect->runtime_value = checked->runtime_value;
+    effect->evaluated_operands = checked->evaluated_operands;
+    effect->source_proof = checked->source_proof;
+    effect->runtime_plan = checked->runtime_plan;
+    effect->runtime_effects = checked->runtime_effects;
+    effect->unsupported = checked->unsupported;
+    effect->known = checked->known;
+}
+
+// Whether `node` is a constant_p query the replay publishes from its proofs.
+static bool check_query_published(const CheckGraph* graph, const CheckStream* stream, uint32_t node)
+{
+    return graph->ops[node] == CHECK_OP_BUILTIN_QUERY && (graph->members != NULL ? graph->members[node] : 0) == CBUILTIN_CONSTANT_P &&
+           graph->argument_counts[node] == 1 && stream->diagnostics[node] == CHECK_DIAG_NONE;
+}
+
+// `replay`: replay every node whatever the queries' results (CheckOptions.replay_queries).
 static bool check_graph_query_runtime(TypeTable* types, const CheckGraph* graph, CheckStream* stream, Arena* scratch,
-                                      uint8_t* marked, uint32_t* indices, CheckValue* arguments, uint32_t maximum_arguments, bool scalar)
+                                      uint8_t* marked, uint32_t* indices, CheckValue* arguments, uint32_t maximum_arguments, bool scalar, bool replay)
 {
     (void)scalar;
 
@@ -657,6 +743,45 @@ static bool check_graph_query_runtime(TypeTable* types, const CheckGraph* graph,
             }
         }
     }
+    // The replay below evaluates every node again to publish the queries' plans and what their values reach. Where each
+    // published query's result is the one the first evaluation stored (its value, conversions, diagnostic and warnings),
+    // no node's value changes, so the replay would write every other node as the first evaluation did, the vector path
+    // and the scalar one being twins, and every side table as it holds it (#1628). Then only the replay's own writes are
+    // left: the marked nodes' source warnings and the published queries' effects.
+    bool unchanged = !replay;
+    for (uint32_t node = 0; unchanged && node < graph->count; node += 1)
+    {
+        if (marked[node] != 0 && check_query_published(graph, stream, node))
+        {
+            CheckBuiltinQueryResult checked;
+            check_query_publish(types, graph, stream, proofs, indices, arguments, node, &checked);
+            const uint32_t index = check_query_effect_index(stream->queries, stream->query_count, sizeof(*stream->queries), node);
+            unchanged = index < stream->query_count && stream->queries[index].node == node && check_query_stored(stream, node, &checked.action);
+        }
+    }
+    if (unchanged)
+    {
+        for (uint32_t node = 0; node < graph->count; node += 1)
+        {
+            if (marked[node] != 0 && check_query_published(graph, stream, node))
+            {
+                CheckBuiltinQueryResult checked;
+                check_query_publish(types, graph, stream, proofs, indices, arguments, node, &checked);
+                const uint32_t index = check_query_effect_index(stream->queries, stream->query_count, sizeof(*stream->queries), node);
+                check_query_effect_publish(stream->queries + index, &checked);
+            }
+            else if (marked[node] != 0)
+            {
+                stream->warnings[node] |= proofs[indices[node]].source_warnings;
+            }
+        }
+        if (stream->statistics.scratch_bytes < scratch->length)
+        {
+            stream->statistics.scratch_bytes = scratch->length;
+        }
+        stream->statistics.query_proof_nodes += (uint64_t)count * 3;
+        return true;
+    }
     const CheckStatistics statistics = stream->statistics;
     if (stream->statistics.scratch_bytes < scratch->length)
     {
@@ -680,44 +805,12 @@ static bool check_graph_query_runtime(TypeTable* types, const CheckGraph* graph,
         {
             stream->warnings[node] |= proofs[indices[node]].source_warnings;
         }
-        if (graph->ops[node] == CHECK_OP_BUILTIN_QUERY && (graph->members != NULL ? graph->members[node] : 0) == CBUILTIN_CONSTANT_P && graph->argument_counts[node] == 1 && stream->diagnostics[node] == CHECK_DIAG_NONE)
+        if (check_query_published(graph, stream, node))
         {
-            const CheckQueryProof* proof = proofs + indices[node];
-            const CheckQueryProof* child = proofs + indices[graph->argument_nodes[graph->argument_offsets[node]]];
-            const CheckBuiltinCall* witness = check_graph_builtin_call(graph, node);
-            const CheckBuiltinQueryAction input = {
-                .id = CBUILTIN_CONSTANT_P,
-                .arguments = arguments,
-                .argument_count = 1,
-                .node = node,
-                .context = check_graph_context(graph, node, false),
-                .string_literal_start = witness != NULL && witness->string_literal_start,
-                .absolute_address_constant = witness != NULL && witness->absolute_address_constant,
-                .complex_constant = child->values[0].constant_kind == CHECK_CONSTANT_COMPLEX,
-                .constant_p_source_proof = proof->values[0].integer != 0 ? CHECK_BUILTIN_QUERY_PROOF_ONE : CHECK_BUILTIN_QUERY_PROOF_ZERO,
-                .constant_p_runtime_plan = proof->evaluated != 0 ? CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_KNOWN : CHECK_BUILTIN_QUERY_RUNTIME_SKIP,
-                .constant_p_runtime_result = (uint8_t)proof->values[2].integer,
-                .constant_p_runtime_effects = {
-                    .flags = child->values[2].flags & BUSTER_CHECK_SIDE_EFFECT,
-                    .fault = child->values[2].fault,
-                    .fault_node = child->values[2].fault != CHECK_FAULT_NONE ? child->values[2].fault_node : 0,
-                    .reads_fp_environment = (child->values[2].flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0,
-                    .may_raise_fp_exceptions = (child->values[2].flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0,
-                },
-                .constant_p_context_sensitive = true,
-            };
             CheckBuiltinQueryResult checked;
-            check_builtin_query(types, &input, &checked, 1);
-            checked.action.value.flags |= proof->values[0].flags & BUSTER_CHECK_FP_ENVIRONMENT;
+            check_query_publish(types, graph, stream, proofs, indices, arguments, node, &checked);
             check_graph_store(stream, node, &checked.action);
-            CheckBuiltinQueryEffect* effect = stream->queries + stream->query_count - 1;
-            effect->runtime_value = checked.runtime_value;
-            effect->evaluated_operands = checked.evaluated_operands;
-            effect->source_proof = checked.source_proof;
-            effect->runtime_plan = checked.runtime_plan;
-            effect->runtime_effects = checked.runtime_effects;
-            effect->unsupported = checked.unsupported;
-            effect->known = checked.known;
+            check_query_effect_publish(stream->queries + stream->query_count - 1, &checked);
         }
     }
     const uint64_t scratch_peak = stream->statistics.scratch_bytes;

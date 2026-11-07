@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <math.h>
+#include <float.h>
 #include "host_math.h"
 #include "host_isa.h"
 #include "c_check_warning_events.c"
@@ -564,8 +565,9 @@ static bool check_action_float_supported(const TypeTable* table, TypeId type)
 }
 
 // The half-precision formats: _Float16's and __fp16's IEEE binary16 and __bf16's bfloat16. A constant of one is folded
-// where its value is exact or rounded once, as clang folds it: a conversion to one, a negation, a unary + and a compare.
-// Its arithmetic isn't: clang computes it in float at run time (excess precision, c_check_program_half.c), which a
+// where its value is exact or rounded once: a conversion, a negation, a unary + and a compare. Required constant
+// evaluation also rounds arithmetic after each operation, as clang's APFloat evaluator does. The runtime graph must
+// not fold that arithmetic: clang computes its chains in float (excess precision, c_check_program_half.c), which a
 // constant rounded per operation wouldn't be.
 typedef enum CheckHalf
 {
@@ -721,17 +723,35 @@ static uint16_t check_action_half_bits(CheckHalf format, long double value)
     return bits;
 }
 
-// A format's bits' value, exactly (a float's too).
+// A format's bits' value, exactly (a float's too). Decoding a NaN preserves its representation: semantic
+// conversions and arithmetic decide whether to quiet it, not a vector lane's read from constant bytes (#1598).
 static long double check_action_half_value(CheckHalf format, uint16_t bits)
 {
+    _Static_assert(sizeof(long double) == 16 && LDBL_MANT_DIG == 64 && LDBL_MAX_EXP == 16384, "the checker host uses x87 extended precision");
     const uint32_t precision = format == CHECK_HALF_IEEE ? 11 : 8;
     const uint32_t greatest = format == CHECK_HALF_IEEE ? 15 : 127;
     const uint32_t mantissa = bits & ((1u << (precision - 1)) - 1);
     const uint32_t field = (bits & 0x7fffu) >> (precision - 1);
-    const long double magnitude = field == 2 * greatest + 1 ? (mantissa != 0 ? __builtin_nanl("") : __builtin_infl()) :
-                                  field == 0                ? host_ldexpl((long double)mantissa, 1 - (int)greatest - (int)(precision - 1)) :
-                                                              host_ldexpl((long double)(mantissa | (1u << (precision - 1))), (int)field - (int)greatest - (int)(precision - 1));
-    return (bits & 0x8000u) != 0 ? -magnitude : magnitude;
+    long double result = 0;
+    if (field == 2 * greatest + 1 && mantissa != 0)
+    {
+        // The fraction occupies the x87 significand's top bits, as check_action_nan_bits reads it. Construct
+        // even the sign from bytes: a host floating conversion or arithmetic must not quiet a signaling NaN.
+        const uint64_t significand = UINT64_C(0x8000000000000000) | ((uint64_t)mantissa << (64 - precision));
+        const uint16_t exponent = (uint16_t)(0x7fffu | (bits & 0x8000u));
+        uint8_t bytes[16] = { 0 };
+        memcpy(bytes, &significand, sizeof(significand));
+        memcpy(bytes + 8, &exponent, sizeof(exponent));
+        memcpy(&result, bytes, sizeof(result));
+    }
+    else
+    {
+        const long double magnitude = field == 2 * greatest + 1 ? __builtin_infl() :
+                                      field == 0                ? host_ldexpl((long double)mantissa, 1 - (int)greatest - (int)(precision - 1)) :
+                                                                  host_ldexpl((long double)(mantissa | (1u << (precision - 1))), (int)field - (int)greatest - (int)(precision - 1));
+        result = (bits & 0x8000u) != 0 ? -magnitude : magnitude;
+    }
+    return result;
 }
 
 static long double check_action_round_float(TypeId type, long double value)
@@ -1432,7 +1452,7 @@ static uint32_t check_action_fold_integer(CheckIntegerFold fold, CheckValue* val
     return check_action_fold_integer_result(fold, value, answer, fault);
 }
 
-static void check_action_fold_floating(CheckOp op, const CheckValue* a, const CheckValue* b, CheckValue* value, uint32_t node)
+static void check_action_fold_floating(CheckOp op, const CheckValue* a, const CheckValue* b, CheckValue* value, uint32_t node, bool constant_evaluated)
 {
     long double number = 0;
     bool integer = op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
@@ -1483,10 +1503,22 @@ static void check_action_fold_floating(CheckOp op, const CheckValue* a, const Ch
     {
         BUSTER_CHECK_REAL_OPERATION(long double);
     }
-    else if (check_action_half_format(a->type) != CHECK_HALF_NONE && (op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || integer))
+    else if (check_action_half_format(a->type) != CHECK_HALF_NONE && (op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || integer || constant_evaluated))
     {
-        // A half-precision constant's exact operations (CheckHalf): its arithmetic is clang's at run time.
+        // Only required constant evaluation rounds each arithmetic node to its half format. Runtime chains keep
+        // their excess precision. x87's precision and exponent range suffice for both formats' finite operations.
         BUSTER_CHECK_REAL_OPERATION(long double);
+        if (!integer && isnan(number))
+        {
+            // APFloat keeps the first NaN operand's sign/payload, quieted; an invalid operation on non-NaNs makes
+            // a positive canonical NaN. x87 can choose another operand or make its negative indefinite NaN.
+            number = isnan(a->floating) ? a->floating : isnan(b->floating) ? b->floating : __builtin_nanl("");
+            uint64_t significand = 0;
+            memcpy(&significand, &number, sizeof(significand));
+            significand |= UINT64_C(1) << 62;
+            memcpy(&number, &significand, sizeof(significand));
+        }
+        number = integer ? number : check_action_round_float(a->type, number);
     }
     else
     {
@@ -1642,7 +1674,7 @@ static void check_action_arithmetic(TypeTable* table, const CheckAction* action,
                 }
                 else if (left.constant_kind == CHECK_CONSTANT_FLOATING && (unary || right.constant_kind == CHECK_CONSTANT_FLOATING))
                 {
-                    check_action_fold_floating(op, &left, &right, &result->value, action->node);
+                    check_action_fold_floating(op, &left, &right, &result->value, action->node, action->context.constant_evaluated);
                 }
                 else if (left.constant_kind == CHECK_CONSTANT_COMPLEX && (unary || right.constant_kind == CHECK_CONSTANT_COMPLEX))
                 {

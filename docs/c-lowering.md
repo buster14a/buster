@@ -268,7 +268,8 @@ compile takes the fragments (`CheckLowerWriter.fragments`, which only their
 test sets): on the 9700X they cost `sqlite3.c`'s statements more than they
 saved ("The vector path's fast paths" below), and none takes the leaf path
 either ("The leaf path and the runtimes' names"). The wrappers' and truth
-tests' path described here still runs.
+tests' path described here still runs. Larger fragments didn't pay either
+("Nested fragments (#868)" below).
 
 Ordinary unary and binary operations can join their immediately preceding leaf
 operands when their consuming edges need no conversion. Bounded gathers and
@@ -332,6 +333,78 @@ missing optional workspace, addresses, VLA indirection, compound initialization
 and a neighboring body's local map. Guarded pending stacks check mixed tasks,
 labels, every entry-capacity limit, invalid classes and untouched
 output tails. Source fixtures also compare native effects with Clang.
+
+## Nested fragments (#868)
+
+#868 asked whether #624's fragments could take more than a node with adjacent
+leaf operands. On `sqlite3.c` (main at `586c2ae2`), 13,784 of 259,895
+evaluated expression occurrences (5.30%) took them. In `((a + b) + c) + d`,
+only `a + b` did: a parent's operands had to be leaves or constants next to it.
+
+#883 tried closed postorder fragments of up to 16 integer nodes. Each root
+proved its fragment's order, types, conversions and room before one bulk
+write. #624's adjacent path stayed, and the expansion was the oracle. On the
+9700X, against main at `c1c5ed02`, with the checker's code at six placements
+that all gave the same objects
+([the record](https://github.com/buster14a/buster-performance/tree/101a0b1b18f1d4eb0fb68c8c6ba92e575e56689c/docs/measurements/pr883-fragment-placement-2026-10-31)):
+
+- coverage rose from 13,784 to 14,425 occurrences (5.30% to 5.55%);
+- 11,290 roots tried a fragment and 275 closed one (2.4%); 7,978 stopped at
+  an operator outside the table and 1,268 at the order check
+  ([the inventory](https://github.com/buster14a/buster-performance/tree/101a0b1b18f1d4eb0fb68c8c6ba92e575e56689c/docs/measurements/nested-fragments-883-2026-10-30));
+- the records classified rose from 13,885 to 17,442;
+- `sqlite3.c`'s `lower` on one lane rose by 0.196 ms (95% CI +0.165 to
+  +0.233), and by 0.220 ms from fresh copies of the executables;
+- the 8-lane whole compile stayed within its A/A spread, and Lua's `lower`
+  rose by 0.0035 ms.
+
+A second version (`5aebc491`) read the values only for structurally closed
+runs; single-lane emission was still 2.7% higher. #883 was closed without
+merging.
+
+Two later results explain why:
+
+- **Too little to amortize.** #1048's inventory (below) found that a maximal
+  subtree of nodes a template table covers holds 2.83 nodes on `sqlite3.c`,
+  so a proof made root by root has almost nothing to spread its cost over.
+- **The base path stopped paying.** #624's own fragments cost more than they
+  save: #1235 measured `lower` 0.27 ms lower without them, and no compile has
+  taken them since ("The vector path's fast paths").
+
+To see where that stands now, main at `ec5f0f6b` ran on the 9700X against the
+same executable with the fragments forced on: a measurement-only toggle,
+`CheckLowerWriter.fragments` set from the environment, which main doesn't
+have. The method:
+
+- two builds, with the checker's code 2,048 bytes apart in its page
+  (`BUSTER_CHECKER_OFFSET` 0 and 2048);
+- the frozen `sqlite3.c` and Lua 5.4.8's 34 units as inputs;
+- ten rounds, each of `measure-compile --runs 11` for every input, build and
+  variant, pinned to CPU 2, with the variants' order alternating by round.
+
+Every build and variant gave the same objects. Forced on, the fragments took
+14,564 of `sqlite3.c`'s 266,735 evaluated nodes (5.46%) and 3,068 of Lua's
+67,586 (4.54%). Medians of the ten rounds, both builds; each difference pairs
+the variants of one round and build
+([the record](https://github.com/buster14a/buster-performance/tree/1ebd8a1b0dd67749c9f921787afe99c437a1a8b7/docs/measurements/lowering-fragments-868-2026-11-06)):
+
+| row | off (main) | on | on − off, median (range) | pairs above 0 |
+| --- | ---: | ---: | ---: | ---: |
+| `sqlite3.c` `lower` | 10.305 ms | 10.728 ms | +0.431 (+0.352 to +0.513) | 20 of 20 |
+| `sqlite3.c` `lower.statements` | 6.700 ms | 7.119 ms | +0.429 (+0.302 to +0.529) | 20 of 20 |
+| `sqlite3.c` default wall | 140.548 ms | 140.758 ms | +0.390 (−0.228 to +1.113) | 19 of 20 |
+| Lua's units' `lower.statements`, summed | 2.301 ms | 2.407 ms | +0.105 (+0.059 to +0.138) | 20 of 20 |
+
+The fragments added 4.05 M of the compile's 1,636 M user instructions and
+saved no cycles (perf's counters of 11 compiles of each variant). Their cost
+has grown from #1235's 0.27 ms, as the tasks' loop got cheaper per node and
+the fragments' proof didn't.
+
+So a larger fragment would extend a path that already costs more than it
+saves, by a proof that #883 measured slower again. #868 is closed with that
+answer: batching root by root doesn't pay at any fragment size measured. The
+lowering's speed is #1048's question, a pass over a body's nodes as a whole,
+which the sections below measure.
 
 ## Node templates over a body: the inventory (#1048)
 
@@ -1699,3 +1772,49 @@ reuses those rows without a mutable cross-unit cache; derived classifications
 and dependency scheduling remain private to each unit. The historical numbers
 above predate that change and do not measure its effect.
 These are the post-checking path's times, not the whole compiler's, and not what the selection saves against `--lower-all`.
+
+### A small unit's fixed cost after checking (#442)
+
+A rebaseline on 2026-11-06 compiled the same harness into main before #418 (`3bfb4a72`), #418's merge (`54703dcf`) and
+main at `ec5f0f6b`, and ran them on the 9700X under its lock, pinned to CPU 2
+([the record](https://github.com/buster14a/buster-performance/tree/73009c83386222d63bc625b657c4c4a52e8c5240/docs/measurements/lowering-fixed-cost-442-2026-11-06)).
+#418's merge still cost what it did, +1.6% on c-testsuite and −0.3% under 300 tokens. But main's path after checking
+had grown to +54% over main before #418, and to +177% on its 154 programs under 300 tokens: a 9-token unit took 6.8 µs
+where main before #418 took 1.7. #418 didn't add that. Three pieces of every unit's setup did, each the same in every
+unit:
+
+- **Lane 0's writer's columns.** #531 put them in an arena of base pages, which a `CheckProgramLanes` keeps while it has
+  their room. But an emission without lanes reserved one and released it each time, and the C driver released a units'
+  lane's lanes after each unit (`check_driver_object`): an `mmap`, `mprotect`s, a `getrlimit` and an `munmap`, and a
+  fault for each page the columns' starts touch. The calling thread now keeps its own (`check_program_thread_columns`),
+  and a units' lane its lanes' first from one unit to the next (`check_program_lanes_settle`).
+- **The runtime functions' names.** The preparation looks up about 185 of them in the unit's identifiers, so that a
+  call of one takes the symbol of the unit's declaration of its name, and it measured and hashed each spelling for
+  every unit. Their lengths and hashes are baked with the backend's tables (`check_lower_runtime_names_initialize`), so a
+  unit's lookups are its table's probes.
+- **The builtin types' rows.** The 64 builtin types' classes and facts were classified by the rules for every unit.
+  The vector path copies them (`check_lower_builtin_classes` and `check_lower_builtin_facts`, a 64-byte vector each,
+  plain char's class by `TypeTable.char_unsigned`), and `test-checker` compares the copy with its twin's rules with
+  plain char signed and unsigned.
+
+c-testsuite's 220 programs, each file's least run minimum over 4 rounds of 101 passes, summed:
+
+| | Main before #418 (ns) | #418's merge | Main at `ec5f0f6b` | #442 (#1568) |
+| --- | ---: | ---: | ---: | ---: |
+| All 220 | 1,865,081 | +1.6% | +54.4% | −23.1% |
+| The 216 whose output #418 kept | 1,727,545 | +1.5% | +58.8% | −22.2% |
+| The 4 whose output #418 changed | 137,536 | +3.3% | −1.2% | −35.4% |
+| Under 300 tokens (154) | 481,282 | −0.3% | +177.3% | +7.6% |
+| 3,000 tokens or more (60) | 1,306,044 | +2.4% | +10.1% | −34.2% |
+
+Every round's sum agreed (−22.6 to −23.8%), and against main at `ec5f0f6b` the change is −50.2% in all and −61.1% under
+300 tokens, every file faster. Under 300 tokens the kept columns took −52.0% off main's time, the baked names a further
+−11.2% and the copied rows a further −10.6%. What the smallest units keep, about 240 ns a file over main before #418, is
+setup that main added since #418: in the emission (+5.6%) the names' probes and the rest of the lowering's setup, and in
+the object (+36%) the definitions' named sections (#619) among it. The synthetic units of 2,000 definitions, whose few
+tokens leave the per-unit setup little to cost, are 3.4 to 7.8% faster than main at `ec5f0f6b`; their emission is at
+most 2.6% over main before #418's, and their selection, about twice its, is per-definition work main has added since,
+not #418's. The whole compiler gains less: `-c --lanes 1` of all 220 programs at once, through the units' lanes, took 1.51%
+less than main at `ec5f0f6b` (8 of 8 paired runs), as a small unit's compile is mostly its checking. Every object, of
+c-testsuite's programs by `-c`, `-c -g`, `-funsigned-char`, `--scalar` and the units' path, and `main.c`'s, is byte for
+byte main's.

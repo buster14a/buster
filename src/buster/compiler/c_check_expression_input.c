@@ -205,10 +205,10 @@ static inline __attribute__((always_inline)) uint32_t check_input_batch_add(Chec
     return result;
 }
 
-// The leaf of the batch's VALUE node `node`, which its maker writes whole.
-static inline CheckValue* check_input_batch_leaf(CheckInputReader* reader, const CheckInputBatch* batch, uint32_t node)
+// Writes the leaf of the batch's VALUE node `node`, which its maker writes whole, once (check_graph_set_leaf_at).
+static inline __attribute__((always_inline)) void check_input_batch_set_leaf(CheckInputReader* reader, const CheckInputBatch* batch, uint32_t node, const CheckValue* value)
 {
-    return reader->output->graph.leaves + batch->leaf_slots[node - batch->base];
+    check_graph_set_leaf_at(&reader->output->graph, batch->leaf_slots[node - batch->base], value);
 }
 
 static inline __m512i check_input_gather_bytes(__mmask16 lanes, __m512i indices, const uint8_t* column);
@@ -398,9 +398,9 @@ static void check_input_expression_list(CheckInputReader* reader, CheckInputBatc
 typedef struct CheckInputIdentifiers CheckInputIdentifiers;
 struct CheckInputIdentifiers
 {
-    // Per identifier of the chunk, in its order: the leaf's first two words (type and category; flags and constant kind),
-    // its ninth (object and overload head), the declaration, whose enumerator's value an enumeration's leaf holds, and
-    // the identifier's status (BUSTER_CHECK_IDENTIFIER_*).
+    // Per identifier of the chunk, in its order: its leaf's fields in pairs, each pair a word as the value lays them out (type
+    // and category; flags and constant kind; object and overload head), the declaration, whose enumerator's value an
+    // enumeration's leaf holds, and the identifier's status (BUSTER_CHECK_IDENTIFIER_*).
     uint64_t types[BUSTER_CHECK_EXPRESSION_CHUNK];
     uint64_t flags[BUSTER_CHECK_EXPRESSION_CHUNK];
     uint64_t objects[BUSTER_CHECK_EXPRESSION_CHUNK];
@@ -419,7 +419,7 @@ _Static_assert(sizeof(CheckValue) == 96 && offsetof(CheckValue, category) == 4 &
                offsetof(CheckValue, imaginary_storage) == 48 && offsetof(CheckValue, object) == 64 && offsetof(CheckValue, overload_head) == 68 &&
                offsetof(CheckValue, offset) == 72 && offsetof(CheckValue, object_bit_offset) == 92 && sizeof(CheckCategory) == 4 &&
                sizeof(CheckConstantKind) == 4 && BUSTER_CHECK_ICE < 256 && BUSTER_CHECK_STATIC_OBJECT < 256 && BUSTER_CHECK_REGISTER < 256,
-               "an identifier's leaf is written as twelve words, of which three vary but for an enumerator's value");
+               "an identifier's entry holds its leaf's fields as three of the value's words, which vary but for an enumerator's value");
 
 // The identifier `token`'s entry `at` in `identifiers`, as the walk's action makes its leaf: the scalar twin of
 // check_input_expression_identifiers' vector path.
@@ -828,23 +828,19 @@ static bool check_input_expression_identifier(CheckInputReader* reader, CheckInp
         if (node != BUSTER_CHECK_NONE)
         {
             const unsigned __int128 integer = (status & BUSTER_CHECK_IDENTIFIER_ENUMERATOR) != 0 ? reader->enum_values[identifiers->declarations[at]] : 0;
-            // The twelve words, all else zero (no x87 store of the zero floating parts).
-            const uint64_t words[12] =
+            // Its three words and its enumerator's value, all else zero (no x87 store of the zero floating parts): its leaf's
+            // record, and a row only for an enumerator's value past 64 bits.
+            const CheckValue value =
             {
-                identifiers->types[at],
-                identifiers->flags[at],
-                (uint64_t)integer,
-                (uint64_t)(integer >> 64),
-                0,
-                0,
-                0,
-                0,
-                identifiers->objects[at],
-                0,
-                0,
-                0,
+                .type = (TypeId)identifiers->types[at],
+                .category = (CheckCategory)(identifiers->types[at] >> 32),
+                .flags = (uint32_t)identifiers->flags[at],
+                .constant_kind = (CheckConstantKind)(identifiers->flags[at] >> 32),
+                .integer = integer,
+                .object = (uint32_t)identifiers->objects[at],
+                .overload_head = (uint32_t)(identifiers->objects[at] >> 32),
             };
-            memcpy(check_input_batch_leaf(reader, batch, node), words, sizeof(words));
+            check_input_batch_set_leaf(reader, batch, node, &value);
             check_input_expression_value(reader, token, node);
         }
     }
@@ -874,11 +870,11 @@ static bool check_input_expression_literal(CheckInputReader* reader, CheckInputB
             const uint32_t node = check_input_batch_add(reader, batch, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, CHECK_INPUT_FORM_LEAF);
             if (node != BUSTER_CHECK_NONE)
             {
-                CheckValue* leaf = check_input_batch_leaf(reader, batch, node);
-                *leaf = check_input_literal_value(reader, token, literal);
+                const CheckValue value = check_input_literal_value(reader, token, literal);
+                check_input_batch_set_leaf(reader, batch, node, &value);
                 if (reader->output->overload_heads != NULL)
                 {
-                    reader->output->overload_heads[token] = leaf->overload_head;
+                    reader->output->overload_heads[token] = value.overload_head;
                 }
                 check_input_expression_value(reader, token, node);
             }
@@ -1016,8 +1012,7 @@ static bool check_input_expression_string(CheckInputReader* reader, CheckInputBa
         const uint32_t node = check_input_batch_add(reader, batch, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, CHECK_INPUT_FORM_LEAF);
         if (node != BUSTER_CHECK_NONE)
         {
-            CheckValue* leaf = check_input_batch_leaf(reader, batch, node);
-            *leaf = (CheckValue)
+            const CheckValue value =
             {
                 .type = string->type,
                 .category = CHECK_LVALUE,
@@ -1025,9 +1020,10 @@ static bool check_input_expression_string(CheckInputReader* reader, CheckInputBa
                 .constant_kind = CHECK_CONSTANT_ADDRESS,
                 .object = string->object,
             };
+            check_input_batch_set_leaf(reader, batch, node, &value);
             if (reader->output->overload_heads != NULL)
             {
-                reader->output->overload_heads[token] = leaf->overload_head;
+                reader->output->overload_heads[token] = value.overload_head;
             }
             check_input_expression_value(reader, token, node);
         }

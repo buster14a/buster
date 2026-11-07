@@ -125,8 +125,8 @@ static CheckTier1Outcome check_tier1_step(CheckTier1Stage stage, CheckTier1Cause
 // The kinds of the call at `node` (CheckTier1CallKind's bits), for a selection refusal there (#1116): each shape of it
 // that the selector's call boundary doesn't take, by the selector's own predicates (tier1_select_call_supported's), so
 // that the report follows the boundary as it grows; and whether it is indirect or variadic, which the boundary takes.
-// An ABI record the boundary refuses, the call's or an argument's, is `abi-record`, and so are aggregates' parts in
-// registers past the staging slots (#141); an argument without one is named by its type. Every argument is looked at,
+// An ABI record the boundary refuses, the call's or an argument's, is `abi-record`; an argument without one is named by
+// its type. Staging past the red zone is frame storage (#1450), not a selection refusal. Every argument is looked at,
 // those past the boundary's limit too (the verifier bounds them all), so that a call past the limit still names its
 // other kinds.
 static uint32_t check_tier1_call_kinds(const IrFunction* ir, uint32_t node)
@@ -142,7 +142,6 @@ static uint32_t check_tier1_call_kinds(const IrFunction* ir, uint32_t node)
         kinds |= (tier1_select_call_abi(ir, node, descriptor) ? 0 : 1u) << CHECK_TIER1_CALL_ABI_RECORD;
         kinds |= (descriptor->argument_count > BUSTER_TIER1_SELECT_MAX_ARGUMENTS ? 1u : 0) << CHECK_TIER1_CALL_STACK_ARGUMENTS;
         kinds |= (tier1_select_call_arity(descriptor) ? 0 : 1u) << CHECK_TIER1_CALL_ARGUMENT_COUNT;
-        uint32_t staged = 0;
         for (uint32_t argument = 0; argument < descriptor->argument_count; argument += 1)
         {
             const uint32_t type = tier1_select_argument_type(ir, descriptor, argument);
@@ -150,9 +149,7 @@ static uint32_t check_tier1_call_kinds(const IrFunction* ir, uint32_t node)
             const bool taken = record != 0 ? tier1_select_record_supported(record, type) : tier1_select_call_argument(type);
             const uint32_t shape = record != 0 ? CHECK_TIER1_CALL_ABI_RECORD : type == IR_I1 || type == IR_I8 || type == IR_I16 ? CHECK_TIER1_CALL_NARROW_ARGUMENT : CHECK_TIER1_CALL_OTHER_ARGUMENT;
             kinds |= (taken ? 0 : 1u) << shape;
-            staged += taken ? tier1_select_argument_slots(record) : 0;
         }
-        kinds |= (staged <= BUSTER_TIER1_SELECT_STAGING_SLOTS ? 0 : 1u) << CHECK_TIER1_CALL_ABI_RECORD;
         kinds |= (tier1_select_call_result(result) ? 0 : 1u) << CHECK_TIER1_CALL_OTHER_RESULT;
     }
     return kinds;
@@ -295,10 +292,13 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     uint32_t inlined_calls = 0;
     const CheckTier1Inline* inlining = lane->inlining;
     const uint64_t body = inlining != NULL ? (uint64_t)(function - inlining->lowered->functions) : UINT64_MAX;
+    // Whether `lowered` is still the lowering's verified result: inlining's expansion isn't verified until promotion.
+    bool lowered_verified = true;
     if (stage == CHECK_TIER1_COMPILED && inlining != NULL && function >= inlining->lowered->functions && body < inlining->program->body_count &&
         check_tier1_inline(lane, (uint32_t)body, &lowered, target, scalar, &expanded, &inlined_calls))
     {
         lowered = expanded;
+        lowered_verified = false;
     }
     IrFunction promoted = { 0 };
     // #866's congruence solver, before promotion, so that promotion's phi placement decides what its merged values
@@ -321,7 +321,12 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     const IrFunction* unssa = gvn_applied ? &gvn_result.function : &lowered;
     if (stage == CHECK_TIER1_COMPILED)
     {
-        const IrCheck check = scalar ? ssa_ir_promote_scalar(unssa, &lane->steps[1], scratch, &promoted) : ssa_ir_promote(unssa, &lane->steps[1], scratch, &promoted);
+        // GVN's result and the lowering's are each verified whole as they're made, so promotion doesn't verify them again
+        // (#1379); an inlined expansion it does.
+        const bool verified = gvn_applied || lowered_verified;
+        const IrCheck check = verified ? ssa_ir_promote_verified_input(unssa, !scalar, &lane->steps[1], scratch, &promoted) :
+                              scalar   ? ssa_ir_promote_scalar(unssa, &lane->steps[1], scratch, &promoted) :
+                                         ssa_ir_promote(unssa, &lane->steps[1], scratch, &promoted);
         outcome = check_tier1_step(CHECK_TIER1_PROMOTION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
         outcome.operation = check.instruction < unssa->instruction_count ? unssa->op[check.instruction] : IR_OP_COUNT;

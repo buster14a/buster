@@ -675,7 +675,9 @@ static __attribute__((always_inline)) inline void ir_typed_lanes(IrTypedSink* si
     }
 }
 
-static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands)
+// `unmasked`: a comparison into a mask alone (#1623, IrSimdTypedOperation.compare_mask) whose writemask the typed stream
+// gives every lane of (ir_typed_unmasked), so that its mask is the vcmp's alone, with no AND.
+static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands, bool unmasked)
 {
     static const uint8_t ops[IR_SIMD_OPERATION_COUNT] = {
         [IR_SIMD_ADD] = IR_ADD,
@@ -694,7 +696,14 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         [IR_SIMD_FDIV] = IR_FDIV,
     };
     uint32_t value = BUSTER_IR_NONE;
-    if (operation->expand_mask)
+    if (operation->compare_mask)
+    {
+        // The lanes' mask, `type` (the decoder made the row's result bytes the lanes' mask's), and the writemask's AND.
+        const uint32_t mask = ir_typed_emit(sink, IR_VCMP, type, operands[0], operands[1], operation->predicate, 0);
+        ir_typed_lanes(sink, mask, operation->lane);
+        value = unmasked ? mask : ir_typed_emit(sink, IR_AND, type, mask, operands[2], BUSTER_IR_NONE, 0);
+    }
+    else if (operation->expand_mask)
     {
         // The comparison's mask, a bit per lane, and -1 or 0 in each lane by it, at the same lanes' width.
         const IrType mask_type = (IrType)ir_lane_mask(type, operation->lane);
@@ -715,10 +724,33 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
     return value;
 }
 
+// Whether entry `i`, a comparison into a mask alone (#1623), has a writemask of every lane: a constant whose bits for
+// the lanes are all set, converted to the mask, just before it, as the comparison intrinsics' rows without a mask
+// operand have it (_mm512_cmpeq_epi8_mask's -1). The typed stream decides it, so both lowering passes agree.
+static bool ir_typed_unmasked(const Tier0Function* input, const IrSimdTypedOperation* operation, uint32_t i)
+{
+    const uint32_t lanes = operation->compare_mask ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) : 0;
+    const uint64_t every = lanes >= 64 ? UINT64_MAX : (UINT64_C(1) << lanes) - 1;
+    return lanes != 0 && i >= 2 && input->kinds[i - 1] == BUSTER_TYPED_CONVERT && input->classes[i - 1] == BUSTER_TYPED_CLASS_MASK && input->kinds[i - 2] == BUSTER_TYPED_CONST &&
+           input->classes[i - 2] >= BUSTER_TYPED_CLASS_I8 && input->classes[i - 2] <= BUSTER_TYPED_CLASS_U64 && (input->values[i - 2] & every) == every;
+}
+
 // A scalar BMI instruction's row (#141, ir_simd_typed_intrinsic) as its IR intrinsic of the operands its record places.
 static __attribute__((always_inline)) inline uint32_t ir_typed_intrinsic(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands)
 {
     return ir_typed_emit(sink, IR_INTRINSIC, type, operands[operation->intrinsic_operands[0]], operands[operation->intrinsic_operands[1]], operation->intrinsic - 1u, 0);
+}
+
+static __attribute__((always_inline)) inline uint32_t ir_typed_splat(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, uint32_t scalar)
+{
+    const IrType source = (IrType)ir_typed_types[operation->operand_classes[0]];
+    const uint32_t bits = 8u * operation->splat_bytes;
+    if (ir_type_bits[source] != bits)
+    {
+        const IrType narrowed = bits == 8 ? IR_I8 : bits == 16 ? IR_I16 : IR_I32;
+        scalar = ir_typed_emit(sink, IR_TRUNC, narrowed, scalar, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    }
+    return ir_typed_emit(sink, IR_INTRINSIC, type, scalar, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_SPLAT, 0);
 }
 
 // Any other X86 row (#141, ir_simd_typed_machine_row) as a row call of the operands on the stack, in their order: the row
@@ -1302,11 +1334,12 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.instruction = entry;
         }
     }
-    if (check.error == IR_OK && (input->unwind_init || input->returns_twice))
+    if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input)))
     {
-        // __builtin_unwind_init's frame, which saves every callee-saved register (Tier0Function.unwind_init), and
-        // __builtin_setjmp's, which keeps nothing in one (Tier0Function.returns_twice), are Tier 0's: ordinary Tier 1 falls
-        // back to them.
+        // __builtin_unwind_init's frame, which saves every callee-saved register (Tier0Function.unwind_init),
+        // __builtin_setjmp's, which keeps nothing in one (Tier0Function.returns_twice), and a preserving function's, which
+        // keeps registers for its caller past them (#147, Tier0Function.preserve_general), are Tier 0's: ordinary Tier 1
+        // falls back to them.
         check.error = IR_ERROR_UNSUPPORTED;
     }
     if (check.error == IR_OK)

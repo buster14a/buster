@@ -19,9 +19,9 @@
 // (CheckProgramAsm.reason, c_check_program_asm.c), and the part stands ready for when it takes one.
 //
 // Included by c_check_program.c. Only a program asked for them (CheckProgramOptions.lifetimes, the C driver's --tier1)
-// computes them, so a compile without --tier1 pays nothing for them. Their passes are walks up the parse tree from a
-// unit's local declarations, its jumps, its cases and its labels, each bounded by its depth: scalar, as the control
-// stream they feed is (docs/tier1-frame.md's "Slot sharing between objects").
+// computes them, so a compile without --tier1 pays nothing for them. Local ownership and control capacity are linear
+// passes using memoized parent paths; goto/case bypasses still walk ancestors. The scratch column later used
+// for bypass stamps holds the planning passes' temporary facts (docs/tier1-frame.md's "Slot sharing between objects").
 
 // Whether `token` is a local declaration of an object: the lowering's own test (check_lower_local_declaration), whose
 // locals the program's bodies allocate.
@@ -31,33 +31,58 @@ static bool check_program_lifetime_local(const CheckInput* input, uint32_t token
            input->declaration_kinds[token] == C_BINDING_OBJECT && !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC);
 }
 
-// The innermost block around `token` (its closing brace), or BUSTER_CHECK_NONE where the function's body is the
-// innermost, or nothing is.
-static uint32_t check_program_lifetime_block(const Parser* parser, uint32_t token)
-{
-    const uint32_t count = parser->tokens.count;
-    uint32_t ancestor = parser->tree.parents[token];
-    uint32_t steps = 0;
-    while (ancestor < count && steps < count && parser->tree.roles[ancestor] != PARSE_ROLE_CLOSE_BLOCK && parser->tree.roles[ancestor] != PARSE_ROLE_CLOSE_BODY)
-    {
-        ancestor = parser->tree.parents[ancestor];
-        steps += 1;
-    }
-    return ancestor < count && parser->tree.roles[ancestor] == PARSE_ROLE_CLOSE_BLOCK ? ancestor : BUSTER_CHECK_NONE;
-}
-
 // Each block's local declarations, linked in token order from `first` (by the block's closing brace, BUSTER_CHECK_NONE
 // for a block without any) through `next` (by declaration); both have a token's room each. Returns the most
 // CHECK_CONTROL_LIFETIME entries the writer can make of them: a start and an end per such block, and an end per block
-// such a jump leaves, each jump (a token of role RETURN) counted for every such block around it.
-static uint64_t check_program_lifetime_blocks(const Parser* parser, const CheckInput* input, uint32_t* first, uint32_t* next)
+// such a jump leaves, each jump (a token of role RETURN) counted for every such block around it. `work` has count + 1
+// entries, distinct from the immutable parser/input and both outputs. Each parent path stops at a cached answer, then
+// retraces its previously unknown nodes to publish that answer. Each node is filled once, so the total is linear for
+// a valid tree. This needs no postorder: tree-only driver parses do not retain one. No extra allocation is needed.
+static uint64_t check_program_lifetime_blocks(const Parser* parser, const CheckInput* input, uint32_t* first, uint32_t* next, uint32_t* work)
 {
     const uint32_t count = input->token_count;
+    const uint32_t* const parents = parser->tree.parents;
+    const uint8_t* const roles = parser->tree.roles;
     uint64_t room = 0;
     memset(first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+    memset(work, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+    // The closest block or function-body boundary above each token. A declaration in the function's own block keeps
+    // its whole-function lifetime, so a body resets the inherited block to NONE.
+    for (uint32_t token = 0; token < count; token += 1)
+    {
+        uint32_t ancestor = token;
+        uint32_t block = count;
+        uint32_t steps = 0;
+        while (ancestor < count && work[ancestor] == BUSTER_CHECK_NONE && steps < count)
+        {
+            const uint32_t parent = parents[ancestor];
+            const uint8_t role = parent < count ? roles[parent] : PARSE_ROLE_CLOSE_BODY;
+            if (role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY)
+            {
+                block = role == PARSE_ROLE_CLOSE_BLOCK ? parent : count;
+                ancestor = count;
+            }
+            else
+            {
+                ancestor = parent;
+            }
+            steps += 1;
+        }
+        block = ancestor < count && work[ancestor] != BUSTER_CHECK_NONE ? work[ancestor] : block;
+        ancestor = token;
+        steps = 0;
+        while (ancestor < count && work[ancestor] == BUSTER_CHECK_NONE && steps < count)
+        {
+            work[ancestor] = block;
+            const uint32_t parent = parents[ancestor];
+            const uint8_t role = parent < count ? roles[parent] : PARSE_ROLE_CLOSE_BODY;
+            ancestor = role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY ? count : parent;
+            steps += 1;
+        }
+    }
     for (uint32_t token = count; token-- > 0;)
     {
-        const uint32_t block = check_program_lifetime_local(input, token) ? check_program_lifetime_block(parser, token) : BUSTER_CHECK_NONE;
+        const uint32_t block = check_program_lifetime_local(input, token) && work[token] < count ? work[token] : BUSTER_CHECK_NONE;
         if (block != BUSTER_CHECK_NONE)
         {
             room += first[block] == BUSTER_CHECK_NONE ? 2 : 0;
@@ -65,15 +90,37 @@ static uint64_t check_program_lifetime_blocks(const Parser* parser, const CheckI
             first[block] = token;
         }
     }
-    for (uint32_t token = 0; token < count; token += 1)
+    // Reuse the same column for the number of blocks with locals above a token. Count jumps after all declarations
+    // have been linked, since a declaration later in the block has the same block lifetime as an earlier one.
+    if (room != 0)
     {
-        uint32_t ancestor = parser->tree.roles[token] == PARSE_ROLE_RETURN ? parser->tree.parents[token] : count;
-        uint32_t steps = 0;
-        while (ancestor < count && steps < count && parser->tree.roles[ancestor] != PARSE_ROLE_CLOSE_BODY)
+        memset(work, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        for (uint32_t token = 0; token < count; token += 1)
         {
-            room += parser->tree.roles[ancestor] == PARSE_ROLE_CLOSE_BLOCK && first[ancestor] != BUSTER_CHECK_NONE ? 1 : 0;
-            ancestor = parser->tree.parents[ancestor];
-            steps += 1;
+            uint32_t ancestor = token;
+            uint32_t depth = 0;
+            uint32_t steps = 0;
+            while (ancestor < count && work[ancestor] == BUSTER_CHECK_NONE && steps < count)
+            {
+                const uint32_t parent = parents[ancestor];
+                const bool inside = parent < count && roles[parent] != PARSE_ROLE_CLOSE_BODY;
+                depth += inside && roles[parent] == PARSE_ROLE_CLOSE_BLOCK && first[parent] != BUSTER_CHECK_NONE;
+                ancestor = inside ? parent : count;
+                steps += 1;
+            }
+            depth += ancestor < count && work[ancestor] != BUSTER_CHECK_NONE ? work[ancestor] : 0;
+            ancestor = token;
+            steps = 0;
+            while (ancestor < count && work[ancestor] == BUSTER_CHECK_NONE && steps < count)
+            {
+                work[ancestor] = depth;
+                const uint32_t parent = parents[ancestor];
+                const bool inside = parent < count && roles[parent] != PARSE_ROLE_CLOSE_BODY;
+                depth -= inside && roles[parent] == PARSE_ROLE_CLOSE_BLOCK && first[parent] != BUSTER_CHECK_NONE;
+                ancestor = inside ? parent : count;
+                steps += 1;
+            }
+            room += roles[token] == PARSE_ROLE_RETURN ? work[token] : 0;
         }
     }
     return room;
@@ -163,3 +210,4 @@ static void check_program_lifetime_entered(const CheckProgram* program, const Pa
         }
     }
 }
+

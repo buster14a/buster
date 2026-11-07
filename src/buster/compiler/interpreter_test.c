@@ -843,6 +843,94 @@ static double interpreter_test_native_mixed(int64_t a, double b, int64_t c, doub
     return result;
 }
 
+// A callback-taking native's stand-in: it records any entry without invoking or registering the supplied value.
+// Refusal tests can therefore prove the host was never entered without risking a signal or exit-handler side effect.
+static uint64_t interpreter_test_native_callback_spy(uint64_t value, uint64_t* calls)
+{
+    *calls += 1;
+    return value;
+}
+
+static void interpreter_test_native_callbacks(InterpreterTestTally* tally, Arena* scratch)
+{
+    const uint8_t kinds[] = {
+        BUSTER_TYPED_GLOBAL_ADDRESS,
+        BUSTER_TYPED_GLOBAL_ADDRESS,
+        BUSTER_TYPED_GLOBAL_ADDRESS,
+        BUSTER_TYPED_CALL,
+        BUSTER_TYPED_RETURN,
+    };
+    const uint8_t classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+    };
+    uint64_t values[] = { 3, 2, 4, 0, 0 };
+    SymbolId target = 3;
+    const uint32_t first = 0;
+    const uint32_t count = 2;
+    const uint8_t variadic = 0;
+    const uint8_t arguments[] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64 };
+    Tier0Function functions[] = {
+        {
+            .call_targets = &target,
+            .call_first = &first,
+            .call_argument_counts = &count,
+            .call_variadic = &variadic,
+            .argument_classes = arguments,
+            .call_count = 1,
+            .argument_count = 2,
+        },
+        { 0 },
+        { 0 },
+    };
+    const SymbolId symbols[] = { 1, 2, 5 };
+    uint64_t tokens[2] = { 0 };
+    const uint64_t addresses[] = { (uintptr_t)&tokens[0], (uintptr_t)&tokens[1], (uintptr_t)&tokens[1] };
+    uint64_t calls = 0;
+    const InterpreterNativeBinding native = { .symbol = 3, .address = (void*)interpreter_test_native_callback_spy };
+    const InterpreterBinding binding = { .symbol = 4, .bytes = (uint8_t*)&calls, .size = sizeof(calls), .writable = true };
+    InterpreterProgram program = {
+        .functions = functions,
+        .function_symbols = symbols,
+        .function_count = BUSTER_ARRAY_LENGTH(functions),
+        .bindings = &binding,
+        .binding_count = 1,
+        .natives = &native,
+        .native_count = 1,
+    };
+    const SymbolId arguments_symbols[] = { 2, 5, 4, 3 };
+    for (uint32_t canonical = 0; canonical < 2; canonical += 1)
+    {
+        program.function_addresses = canonical != 0 ? addresses : 0;
+        for (uint32_t indirect = 0; indirect < 2; indirect += 1)
+        {
+            const uint32_t start = indirect != 0 ? 0 : 1;
+            target = indirect != 0 ? 0 : 3;
+            functions[0].kinds = kinds + start;
+            functions[0].classes = classes + start;
+            functions[0].values = values + start;
+            functions[0].count = BUSTER_ARRAY_LENGTH(kinds) - start;
+            for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(arguments_symbols); a += 1)
+            {
+                values[1] = arguments_symbols[a];
+                calls = 0;
+                const uint64_t mark = scratch->length;
+                InterpreterResult result;
+                const bool ran = interpreter_typed_run(&program, 1, 0, 0, scratch, 0, &result);
+                const bool callback = a < 2;
+                const uint64_t expected = a == 2 ? (uintptr_t)&calls : (uintptr_t)native.address;
+                interpreter_test_expect(tally, callback ? !ran && result.status == INTERPRETER_NATIVE && calls == 0 :
+                                                        ran && result.status == INTERPRETER_OK && result.value.low == expected && calls == 1,
+                                        "typed native calls refuse function tokens and aliases before host entry; data and native addresses remain accepted");
+                interpreter_test_expect(tally, scratch->length == mark, "typed native callback refusal releases scratch");
+            }
+        }
+    }
+}
+
 static void interpreter_test_native(InterpreterTestTally* tally, Arena* scratch)
 {
     const uint8_t kinds[] = {
@@ -1693,6 +1781,7 @@ static int run_interpreter_tests(int argc, char** argv)
         interpreter_test_wide(&tally, &scratch);
         interpreter_test_limits(&tally, &scratch);
         interpreter_test_native(&tally, &scratch);
+        interpreter_test_native_callbacks(&tally, &scratch);
         interpreter_test_chain(&tally, &scratch);
         interpreter_test_heap(&tally, &scratch);
         interpreter_test_mappings(&tally, &scratch);

@@ -33,6 +33,10 @@ requirements. [Command index](README.md).
   syntax, limitations, example and measurement method are in
   [docs/assembler.md](../../docs/assembler.md). `.S` uses the shared preprocessor's
   explicit assembly mode, including `-I`, `-D`, `-U` and source line markers.
+  The in-memory printer's cookie callback marks only its appended destination
+  bytes initialized under MSan, preserving the original stdio input's shadow.
+  Reader tests retain the large-stream byte comparison and add exact-range,
+  source-poison and guard controls (#1605).
 
 The section-group fixtures (`assembler_groups_test.c`, #1268) validate duplicate
 section names, `SHT_GROUP` signatures and relocation membership, malformed

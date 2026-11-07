@@ -56,6 +56,11 @@
 //     CPU, which this thread's mask is cut to, read their group as sharing it, and the lane that waited for lane 0's
 //     stall must have slept; two lanes on the process's own CPUs, where it has more than one, read theirs as not sharing
 //     them.
+//   - Thread counts, which the teams and sessions checks compare: a thread is counted from /proc/self/task unless its
+//     stat's flags say it has begun to exit, as a thread just joined may still be listed (lane_test_task_exiting). The
+//     flags read from stat texts of a command with spaces and parentheses, and none from texts that stop short of them;
+//     this thread read as live; and BUSTER_LANE_TEST_JOINS threads started and joined, the count after each join the
+//     count before them.
 //   - Teams: one group kept across operations with different active lane counts, with the same thread identities,
 //     published inputs and completed outputs, no work on inactive lanes, and worker scratch released between runs, or
 //     with lane_team_keep_scratch kept, emptied, and released when the team stops.
@@ -498,6 +503,28 @@ static bool lane_test_arenas(void)
 {
     LaneTestTally tally = { 0 };
 
+    // /proc/loadavg's runnable tasks, which arena_host_busy compares with the CPUs online (#672).
+    static const struct
+    {
+        const char* text;
+        uint64_t runnable;
+    } loads[] = {
+        { "0.52 0.58 0.59 8/1234 56789\n", 8 },
+        { "12.00 9.50 7.25 1/987 4321\n", 1 },
+        { "0.00 0.00 0.00 15/15 1", 15 },
+        { "0.00 0.00 0.00 99999999999/5 1\n", UINT32_MAX },
+        { "0.00 0.00 0.00 /5 1\n", 0 },
+        { "no slash here\n", 0 },
+        { "", 0 },
+    };
+    for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(loads); i += 1)
+    {
+        lane_test_expect(&tally, arena_loadavg_runnable(loads[i].text, strlen(loads[i].text)) == loads[i].runnable,
+                         "/proc/loadavg's runnable tasks were misread");
+    }
+    // Text cut before the slash says nothing.
+    lane_test_expect(&tally, arena_loadavg_runnable(loads[0].text, 15) == 0, "/proc/loadavg cut before its slash was read");
+
     // Every power-of-two alignment, each after a 1-byte push that leaves the arena misaligned.
     Arena arena = arena_reserve(64ull << 20);
     lane_test_expect(&tally, arena.base != 0 && arena.capacity == 64ull << 20, "a 64 MB arena couldn't be reserved");
@@ -556,6 +583,45 @@ static bool lane_test_arenas(void)
                 fresh = bytes[i] == 0;
             }
             lane_test_expect(&tally, fresh, "a push past a discard didn't take its pages again, zero");
+        }
+        arena_release(&discarded);
+    }
+    // arena_discard_huge (#777): the same from the first huge page boundary past the length, but only to the last one at or
+    // below the peak, so that no huge page is freed in part: the bytes past it keep what was written, the length and the
+    // peak stay, and a push past the length takes the freed pages again, zero.
+    for (uint64_t l = 0; l < BUSTER_ARRAY_LENGTH(discard_lengths); l += 1)
+    {
+        Arena discarded = arena_reserve(64ull << 20);
+        uint8_t* bytes = discarded.base != 0 ? arena_push(&discarded, written_bytes, 64) : 0;
+        lane_test_expect(&tally, bytes == discarded.base && bytes != 0, "an arena to discard in whole huge pages couldn't be pushed");
+        if (bytes != 0)
+        {
+            memset(bytes, 0x5a, written_bytes);
+            const uint64_t length = discard_lengths[l];
+            arena_pop_to(&discarded, length);
+            const uint64_t peak = discarded.peak;
+            arena_discard_huge(&discarded);
+            const uintptr_t boundary = ((uintptr_t)bytes + length + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+            const uintptr_t last = ((uintptr_t)bytes + peak) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+            const uint64_t cut = boundary - (uintptr_t)bytes;
+            const uint64_t stop = last > boundary ? last - (uintptr_t)bytes : cut;
+            bool kept = true;
+            bool zeroed = true;
+            for (uint64_t i = 0; i < written_bytes; i += 1)
+            {
+                const bool freed = i >= cut && i < stop;
+                kept &= freed || bytes[i] == 0x5a;
+                zeroed &= !freed || bytes[i] == 0;
+            }
+            lane_test_expect(&tally, stop > cut && kept && zeroed && discarded.length == length && discarded.peak == peak,
+                             "a discard in whole huge pages freed part of one, missed a whole one, or moved the length or the peak");
+            const uint8_t* again = arena_push(&discarded, stop - length, 1);
+            bool fresh = again == bytes + length;
+            for (uint64_t i = cut; fresh && i < stop; i += 1)
+            {
+                fresh = bytes[i] == 0;
+            }
+            lane_test_expect(&tally, fresh, "a push past a discard in whole huge pages didn't take its pages again, zero");
         }
         arena_release(&discarded);
     }
@@ -749,6 +815,43 @@ static bool lane_test_arenas(void)
         lane_test_expect(&tally, head && head_end && !head_huge, "the start of an arena takes huge pages once its pushes go past it");
     }
     arena_release(&large);
+
+    // On a busy host (arena_pages_busy, #672) an arena is advised against huge pages throughout, and its commits past its
+    // base pages advise none; so is an arena of tables. The process's own setting (PR_SET_THP_DISABLE) stays as it was,
+    // for the processes it starts.
+    const bool was_busy = arena_pages_busy;
+    const int was_disabled = prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0);
+    arena_pages_busy = true;
+    Arena busy = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+    const uint8_t* busy_past = busy.base != 0 ? arena_push(&busy, 3 * BUSTER_ARENA_HUGE_PAGE_BYTES, 1) : 0;
+    lane_test_expect(&tally, busy_past == busy.base && busy.base != 0, "a busy host's arena couldn't be pushed past its base pages");
+    if (busy_past != 0)
+    {
+        const bool busy_head = lane_test_vm_flag((uintptr_t)busy.base, "nh", &found) && found;
+        const bool busy_tail = lane_test_vm_flag((uintptr_t)busy.base + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES, "nh", &found) && found;
+        const bool busy_end = lane_test_vm_flag((uintptr_t)busy.base + BUSTER_LANE_TEST_LARGE_ARENA - 1, "nh", &found) && found;
+        const bool busy_huge = lane_test_vm_flag((uintptr_t)busy.base + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES, "hg", &found);
+        const bool busy_capable = lane_test_huge_capable((uintptr_t)busy.base + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES, &found) || !found;
+        lane_test_expect(&tally, busy_head && busy_tail && busy_end && !busy_huge && !busy_capable && !busy.huge,
+                         "a busy host's arena may take huge pages");
+    }
+    arena_release(&busy);
+    ArenaTable busy_tables[] = {
+        { .bytes = 8 * BUSTER_ARENA_HUGE_PAGE_BYTES, .small = BUSTER_ARENA_SMALL_BYTES },
+        { .bytes = 8 * BUSTER_ARENA_HUGE_PAGE_BYTES, .small = BUSTER_ARENA_SMALL_BYTES },
+    };
+    Arena busy_arena = arena_reserve_tables(busy_tables, BUSTER_ARRAY_LENGTH(busy_tables));
+    if (busy_arena.base != 0)
+    {
+        const uintptr_t inside = (uintptr_t)busy_tables[1].base + 4 * BUSTER_ARENA_HUGE_PAGE_BYTES;
+        const bool tables_refused = lane_test_vm_flag(inside, "nh", &found) && found;
+        const bool tables_capable = lane_test_huge_capable(inside, &found) || !found;
+        lane_test_expect(&tally, tables_refused && !tables_capable, "a busy host's arena of tables may take huge pages");
+    }
+    lane_test_expect(&tally, busy_arena.base != 0, "a busy host's arena of tables couldn't be reserved");
+    arena_release(&busy_arena);
+    arena_pages_busy = was_busy;
+    lane_test_expect(&tally, prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) == was_disabled, "a busy host's arenas changed the process's huge pages");
 
     // An arena with 2 MB or more of base pages (a units lane's floor, #152) is advised against huge pages there, and
     // asks for them past.
@@ -2000,7 +2103,61 @@ static void lane_test_team_main(void* argument)
     }
 }
 
-// Counts this process's threads, including the calling one. The one-lane check must not create an idle worker.
+// The kernel's flag on a task that has begun to exit (PF_EXITING in include/linux/sched.h), in its /proc stat's flags.
+#define BUSTER_LANE_TEST_TASK_EXITING 0x4u
+// The threads lane_test_thread_counts starts and joins, each followed by a count.
+#define BUSTER_LANE_TEST_JOINS 512
+
+// The flags of a task's /proc stat text of `length` bytes: the seventh field past the closing parenthesis of its
+// command, which may itself hold spaces and parentheses (state, ppid, pgrp, session, tty_nr, tpgid, flags). False for a
+// text that stops short of a digit of it.
+static bool lane_test_stat_flags(const char* text, uint64_t length, uint64_t* flags)
+{
+    uint64_t end = length;
+    for (uint64_t i = 0; i < length; i += 1)
+    {
+        end = text[i] == ')' ? i : end;
+    }
+    uint64_t position = end < length ? end + 1 : length;
+    uint32_t spaces = 0;
+    while (position < length && spaces < 7)
+    {
+        spaces += text[position] == ' ' ? 1 : 0;
+        position += 1;
+    }
+    uint64_t value = 0;
+    uint32_t digits = 0;
+    while (spaces == 7 && digits < 20 && position + digits < length && text[position + digits] >= '0' && text[position + digits] <= '9')
+    {
+        value = value * 10 + (uint64_t)(text[position + digits] - '0');
+        digits += 1;
+    }
+    *flags = value;
+    return digits != 0;
+}
+
+// Whether /proc/self/task's entry `name` is a thread that has begun to exit, or is gone. The kernel flags a thread
+// exiting (BUSTER_LANE_TEST_TASK_EXITING) before it wakes the thread that joins it, and lists it in /proc/self/task until
+// it releases it, which can come after pthread_join has returned: a count taken then, as a check's first is after an
+// earlier check joined its lanes, would take the thread for a live one.
+static bool lane_test_task_exiting(const char* name)
+{
+    char path[64];
+    char text[512];
+    const int length = snprintf(path, sizeof(path), "/proc/self/task/%s/stat", name);
+    const int file = length > 0 && (size_t)length < sizeof(path) ? open(path, O_RDONLY | O_CLOEXEC) : -1;
+    const ssize_t bytes = file >= 0 ? read(file, text, sizeof(text)) : -1;
+    if (file >= 0)
+    {
+        close(file);
+    }
+    uint64_t flags = 0;
+    const bool read_flags = bytes > 0 && lane_test_stat_flags(text, (uint64_t)bytes, &flags);
+    return !read_flags || (flags & BUSTER_LANE_TEST_TASK_EXITING) != 0;
+}
+
+// Counts this process's threads, including the calling one, but not those that have begun to exit
+// (lane_test_task_exiting). The one-lane check must not create an idle worker.
 static uint32_t lane_test_thread_count(void)
 {
     DIR* directory = opendir("/proc/self/task");
@@ -2010,15 +2167,76 @@ static uint32_t lane_test_thread_count(void)
         struct dirent* entry;
         while ((entry = readdir(directory)) != 0)
         {
-            result += entry->d_name[0] >= '0' && entry->d_name[0] <= '9' ? 1 : 0;
+            result += entry->d_name[0] >= '0' && entry->d_name[0] <= '9' && !lane_test_task_exiting(entry->d_name) ? 1 : 0;
         }
         closedir(directory);
     }
     return result;
 }
 
-// pthread_join observes thread completion; /proc can briefly retain the kernel's task record while it finishes its
-// exit. Bound that observation separately from the operation watchdog.
+static void* lane_test_nothing(void* argument)
+{
+    return argument;
+}
+
+// Thread counts (lane_test_thread_count): stat texts' flags, read past commands with spaces and parentheses, and refused
+// where a text stops short of them; this thread, read as live; and BUSTER_LANE_TEST_JOINS threads started and joined,
+// each followed by a count that must be the one before them all. On a 4-CPU cloud VM, a count that listed every thread
+// of /proc/self/task took the joined thread for a live one in about 1% of counts.
+static uint64_t lane_test_thread_counts(void)
+{
+    static const struct
+    {
+        const char* text;
+        bool read;
+        uint64_t flags;
+    } stats[] = {
+        { "1234 (compiler) S 1 1234 1234 34816 1234 4194560 113 0 0 0", true, 4194560 },
+        { "77 (a) b (c)) R 1 2 3 0 -1 4194372 5", true, 4194372 },
+        { "5 () D 0 0 0 0 -1 4 0", true, 4 },
+        { "9 (x) S 1 2 3 4 5 ", false, 0 },
+        { "9 (x) S 1 2 3 4 5", false, 0 },
+        { "9 x S 1 2 3 4 5 6 7", false, 0 },
+        { "", false, 0 },
+    };
+    uint64_t failures = 0;
+    for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(stats); i += 1)
+    {
+        uint64_t flags = UINT64_MAX;
+        const bool read = lane_test_stat_flags(stats[i].text, strlen(stats[i].text), &flags);
+        failures += read != stats[i].read || (read && flags != stats[i].flags) ? 1 : 0;
+    }
+    char name[32];
+    snprintf(name, sizeof(name), "%ld", (long)syscall(SYS_gettid));
+    failures += lane_test_task_exiting(name) ? 1 : 0;
+    // ThreadSanitizer starts a thread of its own with the process's first other thread: one started and joined first
+    // leaves the detector's running before the count the others are compared with, which is taken just after a join.
+    pthread_t first;
+    if (pthread_create(&first, 0, lane_test_nothing, 0) == 0)
+    {
+        pthread_join(first, 0);
+    }
+    const uint32_t before = lane_test_thread_count();
+    failures += before == UINT32_MAX ? 1 : 0;
+    uint32_t wrong = 0;
+    for (uint32_t i = 0; i < BUSTER_LANE_TEST_JOINS; i += 1)
+    {
+        pthread_t thread;
+        const bool created = pthread_create(&thread, 0, lane_test_nothing, 0) == 0;
+        if (created)
+        {
+            pthread_join(thread, 0);
+        }
+        wrong += !created || lane_test_thread_count() != before ? 1 : 0;
+    }
+    failures += wrong;
+    printf("thread counts: %u stat texts, this thread live, %u threads each counted after its join, %lu wrong\n", (unsigned)BUSTER_ARRAY_LENGTH(stats),
+           BUSTER_LANE_TEST_JOINS, (unsigned long)failures);
+    return failures;
+}
+
+// lane_test_thread_count leaves out a thread that has begun to exit, as every thread a join has returned for has. The
+// retries, bounded apart from the operation watchdog, leave room for a thread that ends without a join.
 static bool lane_test_threads_stopped(uint32_t expected)
 {
     uint32_t count = lane_test_thread_count();
@@ -2162,13 +2380,6 @@ static uint64_t lane_test_team_keep(uint32_t threads_before)
     }
     return failures;
 }
-
-#if __has_feature(thread_sanitizer)
-static void* lane_test_nothing(void* argument)
-{
-    return argument;
-}
-#endif
 
 static uint64_t lane_test_teams(void)
 {
@@ -3482,6 +3693,7 @@ static int run_lane_tests(int argc, char** argv)
     {
         bool passed = lane_test_watchdog();
         passed = lane_test_arenas() && passed;
+        passed = lane_test_thread_counts() == 0 && passed;
         passed = lane_test_teams() == 0 && passed;
         passed = lane_test_cpuinfo_controls() == 0 && passed;
         passed = lane_test_cores() == 0 && passed;

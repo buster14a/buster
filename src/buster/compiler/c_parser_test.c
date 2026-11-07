@@ -490,6 +490,61 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "struct S { int a; [[deprecated]] *p; };\n", "1:34: type name requires a specifier or qualifier", 0 },
     { "[[deprecated]] *p;\n", "1:17: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     { "void f(void) { __attribute__(()) __attribute__(()) *p; }\n", "1:53: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    // A block item's GNU attributes before a name of no type (#147): clang asks what the name is first (TryAnnotateName),
+    // and a declared object's, function's, enumerator's or parameter's, or one it declares implicitly before a `(`, starts
+    // no declarator, in any standard; an undeclared name is an implicit int's declarator. After a control statement's
+    // head, a label's name or `__extension__`, and in a for's first clause, they are no declaration's.
+    { "int x; void f(void) { __attribute__(()) x = 1; }\n", "1:41: expected identifier or '('", 0 },
+    { "int x; void f(void) { __attribute__((unused)) __attribute__(()) x; }\n", "1:65: expected identifier or '('", 0 },
+    { "void g(void); enum { E }; void f(int p) { __attribute__(()) g(); }\n", "1:61: expected identifier or '('", 0 },
+    { "enum { E }; void f(void) { __attribute__(()) E; }\n", "1:46: expected identifier or '('", 0 },
+    { "void f(int p) { __attribute__(()) p = 1; }\n", "1:35: expected identifier or '('", 0 },
+    { "void f(void) { __attribute__(()) f; }\n", "1:34: expected identifier or '('", 0 },
+    { "void f(void) { int x; { __attribute__((aligned(4))) x[1]; } }\n", "1:53: expected identifier or '('", 0 },
+    { "int x; void f(void) { switch (1) { case 1: __attribute__(()) x = 1; } }\n", "1:62: expected identifier or '('", 0 },
+    { "int x; void f(void) { ({ __attribute__(()) x = 1; }); }\n", "1:44: expected identifier or '('", 0 },
+    { "int x; void f(void) { __attribute__(()) x = 1; }\n", "1:41: expected identifier or '('", "c89" },
+    { "int x; void f(void) { __attribute__(()) x = 1; }\n", "1:41: expected identifier or '('", "c23" },
+    { "void f(void) { __attribute__(()) foo(); }\n", "1:34: expected identifier or '('", "c89" },
+    { "int f(a) int a; { __attribute__(()) a = 1; return a; }\n", "1:37: expected identifier or '('", 0 },
+    { "int x, y; void g(void) { int z = 2; z = 3; } void f(void) { __attribute__(()) x = 1; }\n", "1:79: expected identifier or '('", "c89" },
+    { "void f(void) { __attribute__(()) y = 1; y = 2; }\n", "", "c89" },
+    { "void g(void) { int z = 2; z = 3; } void f(void) { __attribute__(()) w = 1; w = 2; } int w;\n", "", "c89" },
+    { "void f(void) { int x = sizeof(struct { int x; }); __attribute__(()) x = 1; }\n", "1:69: expected identifier or '('", 0 },
+    { "void f(void) { { int x; } __attribute__(()) x = 1; }\n", "1:45: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "void f(void) { for (int x = 0;;) { } __attribute__(()) x; }\n", "1:56: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "int x; void f(void) { int x; { typedef int x; __attribute__(()) x y; } }\n", "", 0 },
+    { "int x; void f(void) { if (1) __attribute__(()) x = 1; L: __attribute__(()) x = 1; __attribute__(()) x: ; }\n", "", 0 },
+    { "int x; void f(void) { __extension__ __attribute__(()) x = 1; }\n", "1:55: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "int x; void f(void) { for (__attribute__(()) x = 1;;) ; }\n", "1:46: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "int x; void f(void) { __attribute__(()) static x = 1; __attribute__(()) *x; }\n", "1:48: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    // A name of no ordinary binding that a tag in scope has, clang's Sema's error first (isTagTypeWithMissingTag), the tag
+    // in scope as its scope keeps it (the parser's ParseScalar.tags): an ordinary binding first, a tag of a block that
+    // ended none, and a file-scope tag before the fallback's declaration through the whole unit. Before C23 a `(` makes
+    // the name an implicit function's; C23 has none.
+    { "struct x { int v; }; void f(void) { __attribute__(()) x = 1; }\n", "1:55: must use 'struct' tag to refer to type 'x'", "gnu89", true },
+    { "struct x { int v; }; void f(void) { __attribute__((unused)) x; }\n", "1:61: must use 'struct' tag to refer to type 'x'", 0, true },
+    { "union u { int v; }; void f(void) { __attribute__(()) u; }\n", "1:54: must use 'union' tag to refer to type 'u'", "c89", true },
+    { "enum e { A }; void f(void) { __attribute__(()) e = 1; }\n", "1:48: must use 'enum' tag to refer to type 'e'", "gnu89", true },
+    { "struct x; void f(void) { { __attribute__(()) x = 1; } }\n", "1:46: must use 'struct' tag to refer to type 'x'", "gnu89", true },
+    { "void g(void) { struct x { int v; }; } void f(void) { __attribute__(()) x = 1; x = 2; }\n", "", "gnu89" },
+    { "struct x { int v; }; void f(void) { int x; __attribute__(()) x = 1; }\n", "1:62: expected identifier or '('", "gnu89" },
+    { "int y; void g(void) { y = 1; } struct x { int v; }; void h(void) { y = 2; } void f(void) { __attribute__(()) x = 1; }\n",
+      "1:110: must use 'struct' tag to refer to type 'x'", "gnu89", true },
+    { "struct x { int v; }; void f(void) { __attribute__(()) x(1); }\n", "1:55: must use 'struct' tag to refer to type 'x'", "c23", true },
+    // A tag a definition's parameter list declares is in scope in its body (C17 6.2.1p4; #1556's review), a block in it
+    // too, behind a parameter of its name none; a prototype's (a declaration's, or a parameter's in the list) ends with
+    // its list, a K&R definition's declarations' with them (clang's), and the body's with the body.
+    { "void f(struct S *p) { __attribute__(()) S = 1; }\n", "1:41: must use 'struct' tag to refer to type 'S'", "gnu89", true },
+    { "void f(struct S { int a; } p) { { __attribute__(()) S = 1; } }\n", "1:53: must use 'struct' tag to refer to type 'S'", 0, true },
+    { "void f(union U *p) { __attribute__(()) U; }\n", "1:40: must use 'union' tag to refer to type 'U'", "c89", true },
+    { "void f(enum E { A } e) { __attribute__(()) E = 1; }\n", "1:44: must use 'enum' tag to refer to type 'E'", "gnu89", true },
+    { "void f(struct S *S) { __attribute__(()) S = 1; }\n", "1:41: expected identifier or '('", "gnu89" },
+    { "int f(a) struct S *a; { __attribute__(()) S = 1; return 0; }\n", "", "c89" },
+    { "void g(struct S *p); void f(void) { __attribute__(()) S = 1; }\n", "", "c89" },
+    { "int f(void (*q)(struct S *r)) { __attribute__(()) S = 1; return 0; }\n", "", "c89" },
+    { "void f(struct S *p) { } void g(void) { __attribute__(()) S = 1; }\n", "", "c89" },
+    { "void f(void) { __attribute__(()) x(1); }\n", "1:36: expected parameter declarator", "c23" },
     { "void f(__attribute__((aligned(8))) *p);\n", "1:37: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     { "enum E : int { A }; enum F : unsigned char;\n", "", 0 },
     // A typedef's first declarator after an enum's underlying type and body is a type name (K3 skips the base).
@@ -3951,6 +4006,61 @@ static uint32_t parse_test_diagnostic_places(void)
     return failures;
 }
 
+// The places of __clang__'s _Clang reading (parse_clang_scope_numbers) and the expansion history they ask for (#628): with
+// the history deferred, as the drivers have it, a unit whose macros' numbers follow commas in calls' arguments and that has
+// no `[[` keeps it deferred, by both paths, where every such unit replayed its preprocessing for it; one with a `[[` before
+// such a comma asks for it, as an attribute list's comma may be one.
+static uint32_t parse_test_clang_places_history(void)
+{
+    // Each source and whether its history stays deferred: a macro's number after a comma is a place only past the unit's
+    // first `[[`, as the vector path's mask has it within a block of 64 tokens and the scalar path's flag at each token.
+    static const char* const sources[] =
+    {
+        "#define N 1\n#define M 2\nint f(int, int);\nint g(void) { return f(M, N) + f(2, N); }\n",
+        "#define N 1\n[[deprecated]] int a;\nint f(int, int);\nint g(void) { return f(2, N); }\n",
+        "#define N 1\nint f(int, int);\nint g(void) { return f(2, N); }\n[[deprecated]] int a;\n",
+        "#define N 1\nint f(int, int);\nint g(void) { return f(2, N); }\n[[deprecated]] int a;\nint h(void) { return f(3, N); }\n",
+    };
+    static const bool deferred_sources[] = { true, false, true, false };
+    uint32_t failures = 0;
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+    {
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            const PPOptions options =
+            {
+                .language = { .standard = 2023, .gnu = true },
+                .scalar = scalar != 0,
+                .defer_history = true,
+                .quiet = true,
+                .no_standard_includes = true,
+            };
+            const ParseOptions parse_options = { .scalar = scalar != 0 };
+            static InternTable table;
+            static Preprocessor pp;
+            static Parser parser;
+            table = (InternTable){ 0 };
+            pp = (Preprocessor){ 0 };
+            parser = (Parser){ 0 };
+            const bool ready = intern_initialize(&table) && pp_initialize(&pp, &options, &table) && parse_initialize(&parser, &parse_options, options.language) &&
+                               pp_run_source(&pp, "places.c", (const uint8_t*)sources[s], strlen(sources[s])) && pp.history_deferred &&
+                               parse_translation_unit(&parser, &pp);
+            const bool deferred = deferred_sources[s];
+            const bool passed = ready && pp.history_deferred == deferred && (pp.history_replay == NULL) == deferred;
+            if (!passed)
+            {
+                parse_test_report("parser: __clang__'s places, source %u%s: the history is %s, not %s\n", s, scalar != 0 ? " (scalar)" : "",
+                                  pp.history_deferred ? "deferred" : "recorded", deferred ? "deferred" : "recorded");
+            }
+            failures += !passed;
+            parse_release(&parser);
+            pp_release(&pp);
+            intern_release(&table);
+        }
+    }
+    return failures;
+}
+
 static uint32_t parse_test_driver_limits(char** arguments, int count, int capture, ParseTestProbe* shared, const char* name, bool preprocess)
 {
     uint32_t failures = 0;
@@ -4295,6 +4405,7 @@ static int run_parser_tests(int argument_count, char** arguments)
             failures += parse_test_check_postorder_self(&arena);
             failures += parse_test_workspace_budget();
             failures += parse_test_diagnostic_places();
+            failures += parse_test_clang_places_history();
             failures += parse_test_check_k6_tables();
             failures += parse_test_check_handoff(options.language, seed);
             failures += parse_test_check_snippets(directory, clang);

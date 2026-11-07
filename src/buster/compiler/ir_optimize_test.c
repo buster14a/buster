@@ -224,6 +224,8 @@ static bool ir_optimize_test_equal(const IrFunction* a, const IrFunction* b)
         equal = equal && memcmp(a->block_offsets, b->block_offsets, ((uint64_t)a->block_count + 1) * 4) == 0;
         equal = equal && (a->extra_count == 0 || memcmp(a->extra, b->extra, (uint64_t)a->extra_count * 4) == 0);
         equal = equal && (a->constant_count == 0 || memcmp(a->constants, b->constants, (uint64_t)a->constant_count * sizeof(IrConstant)) == 0);
+        equal = equal && a->vector_constant_count == b->vector_constant_count &&
+                (a->vector_constant_count == 0 || memcmp(a->vector_constants, b->vector_constants, (uint64_t)a->vector_constant_count * sizeof(IrSimdValue)) == 0);
         equal = equal && (a->call_count == 0 || memcmp(a->calls, b->calls, (uint64_t)a->call_count * sizeof(IrCall)) == 0);
         equal = equal && a->label_count == b->label_count && (a->label_count == 0 || memcmp(a->labels, b->labels, (uint64_t)a->label_count * 4) == 0);
         equal = equal && a->abi_call_count == b->abi_call_count && (a->abi_call_count == 0 || memcmp(a->abi_calls, b->abi_calls, (uint64_t)a->abi_call_count * sizeof(IrAbiCall)) == 0);
@@ -1241,6 +1243,8 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
 static void ir_optimize_text_tests(IrOptimizeTest* test);
 static int ir_optimize_text_print_fixtures(void);
 
+#include "ir_optimize_simd_test.c"
+
 static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
 {
     IrOptimizeTest test = { .random = 139 };
@@ -1274,6 +1278,7 @@ static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
         ir_optimize_test_folds(&test);
         ir_optimize_test_fold_guards(&test);
         ir_optimize_test_ir(&test);
+        ir_optimize_test_simd(&test);
         ir_optimize_text_tests(&test);
         printf("ir-optimize: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;

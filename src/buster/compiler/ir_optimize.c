@@ -25,10 +25,11 @@ struct IrOptimizeOptions
 {
     uint32_t passes;
     uint32_t sweep_limit;
-    // The caller's requested path. AUTO picks a twin by the function's size (#860): the vector passes' per-call
-    // set-up (verification, the dominator rows and the CFG's pointer jumping, in prepare and again in result
-    // verification) doesn't pay on small functions, so below the measured bound the scalar passes run. VECTOR and
-    // SCALAR force a twin on every size: tests and benchmarks request them so each stays checked everywhere.
+    // The caller's requested path. AUTO picks the passes' twin by the function's size (#860): the vector passes'
+    // per-call set-up doesn't pay on small functions, so below the measured bound the scalar passes run. Dominators
+    // use their own AUTO matrix budget, independently of this pass heuristic (#1352); the verifier runs its vector
+    // twin unless `scalar` asks for the scalar twins. VECTOR
+    // and SCALAR force a twin on every size: tests and benchmarks request them so each stays checked everywhere.
     uint32_t path;
     // The twin the internals run, resolved from `path` and the function's size by ir_optimize. The modules that call
     // the internal pieces without ir_optimize set it directly (ir_optimize_licm.c, ir_optimize_sroa.c).
@@ -66,6 +67,12 @@ struct IrOptimizeWork
     Dominators dominators;
     uint8_t* states;
     IrConstant* values;
+    // Allocated lazily by the first SIMD transfer; scalar functions keep their two-word lattice and no wide map.
+    uint32_t* vector_indices;
+    IrSimdValue* vector_values;
+    Arena* scratch;
+    IrError simd_error;
+    bool scalar;
     uint8_t* blocks;
     uint8_t* edges;
     uint8_t* live;
@@ -864,13 +871,8 @@ static uint8_t ir_optimize_transfer(const IrOptimizeWork* work, uint32_t i, IrCo
             }
         }
     }
-    // A vector (#141) is never a constant: its lanes aren't the scalar folds' one integer (a v4i32 addition isn't an i128
-    // one), a bitcast of a constant to it included, and IR_CONST has no vector type. Its copies, phis and selects keep the
-    // states of their vector operands, which are never constants either.
-    if ((BUSTER_IR_VECTORS >> f->type[i]) & 1)
-    {
-        result = IROPT_OVERDEFINED;
-    }
+    // Vector results, vector comparisons and vector-source bitcasts use ir_optimize_simd_transfer, not this scalar
+    // lattice. In particular their sparse payload indices are never interpreted as integer constant bits.
     return result;
 }
 
@@ -890,6 +892,8 @@ static bool ir_optimize_publish(IrOptimizeWork* work, uint32_t i, uint8_t state,
     }
     return changed;
 }
+
+#include "ir_optimize_simd.c"
 
 static bool ir_optimize_mark_edge(IrOptimizeWork* work, uint32_t edge, bool queue)
 {
@@ -968,9 +972,18 @@ static __attribute__((aligned(64))) bool ir_optimize_visit(IrOptimizeWork* work,
     bool changed = false;
     if (work->blocks[work->cfg.instruction_blocks[i]] != 0)
     {
-        IrConstant value = { 0 };
-        const uint8_t state = ir_optimize_transfer(work, i, &value);
-        changed = ir_optimize_publish(work, i, state, value, queue);
+        const IrFunction* f = work->function;
+        const uint32_t op = f->op[i];
+        if (ir_vector_type(f->type[i]) || op == IR_VCMP || (op == IR_BITCAST && ir_vector_type(f->type[f->a[i]])))
+        {
+            changed = ir_optimize_simd_visit(work, i, queue);
+        }
+        else
+        {
+            IrConstant value = { 0 };
+            const uint8_t state = ir_optimize_transfer(work, i, &value);
+            changed = ir_optimize_publish(work, i, state, value, queue);
+        }
         if (ir_terminator_table[work->function->op[i]] != 0)
         {
             changed = ir_optimize_control(work, i, queue) || changed;
@@ -1040,7 +1053,7 @@ static void ir_optimize_sccp_sweeps(IrOptimizeWork* work, uint32_t limit)
                         const uint32_t i = first + lane;
                         bool swap;
                         operation[lane] = ir_optimize_fold_operation(f, i, &swap);
-                        if (operation[lane] != 0 && work->states[f->a[i]] == IROPT_CONSTANT && work->states[f->b[i]] == IROPT_CONSTANT && ir_type_bits[f->type[f->a[i]]] <= 64 && work->values[f->b[i]].high == 0)
+                        if (operation[lane] != 0 && !ir_vector_type(f->type[i]) && work->states[f->a[i]] == IROPT_CONSTANT && work->states[f->b[i]] == IROPT_CONSTANT && ir_type_bits[f->type[f->a[i]]] <= 64 && work->values[f->b[i]].high == 0)
                         {
                             active |= UINT32_C(1) << lane;
                             width[lane] = ir_type_bits[f->type[f->a[i]]];
@@ -1109,9 +1122,10 @@ static uint32_t ir_optimize_single_successor(const IrOptimizeWork* work, uint32_
 
 // 1 is an unconditional effect; 2 is a potential fault or floating-environment effect, discharged only by
 // a successful constant transfer. Loads remain roots even when nonvolatile: there is no dereferenceability proof. 3 is a
-// vector comparison (#141's element types), a floating-environment effect where its lanes are floating ones (a NaN
-// operand raises MXCSR's invalid flag, or traps where it is unmasked, as fcmp's does), whose mask is never a constant;
-// an integer one's is none, and it goes where its mask is unused.
+// vector comparison (#141's element types). SIMD floating arithmetic and comparisons are roots whatever SCCP learns:
+// it folds a value only where every MXCSR gives it (ir_optimize_simd.c), and the rewrite keeps the original row, with
+// its operands live, for its flags and traps.
+// An integer comparison has no such effect and goes where its mask is unused.
 static const uint8_t ir_optimize_roots[64] = {
         [IR_LOAD] = 1,
         [IR_STORE] = 1,
@@ -1153,7 +1167,7 @@ static const uint8_t ir_optimize_roots[64] = {
 static bool ir_optimize_root(const IrOptimizeWork* work, uint32_t i)
 {
     const uint32_t kind = ir_optimize_roots[work->function->op[i]];
-    const bool result = kind == 1 || (kind == 2 && work->states[i] != IROPT_CONSTANT) || (kind == 3 && work->function->flags[i] >= IR_SIMD_LANE_F32);
+    const bool result = kind == 1 || (kind == 2 && work->states[i] != IROPT_CONSTANT) || ir_optimize_simd_effect(work->function, i);
     return result;
 }
 
@@ -1162,7 +1176,7 @@ static __attribute__((aligned(64))) bool ir_optimize_mark_operands(IrOptimizeWor
     const IrFunction* f = work->function;
     bool changed = false;
     const bool collapsed_branch = (f->op[i] == IR_CBR || f->op[i] == IR_SWITCH) && ir_optimize_single_successor(work, work->cfg.instruction_blocks[i]) != BUSTER_IR_NONE;
-    if (work->states[i] != IROPT_CONSTANT && !collapsed_branch)
+    if ((work->states[i] != IROPT_CONSTANT || ir_optimize_simd_effect(f, i)) && !collapsed_branch)
     {
         const uint64_t count = ir_operand_count(f, i);
         for (uint32_t number = 0; number < count; number += 1)
@@ -1228,9 +1242,10 @@ static __attribute__((aligned(64))) void ir_optimize_dce(IrOptimizeWork* work, I
                     const __m128i op = _mm_maskz_loadu_epi8(valid, f->op + at);
                     const __m128i kinds = _mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_zextsi128_si512(op), _mm512_loadu_si512(ir_optimize_roots)));
                     const __m128i states = _mm_maskz_loadu_epi8(valid, work->states + at);
-                    // A vector comparison's (kind 3) floating lanes: its flags F32 or F64, which the verifier bounds.
+                    // SIMD floating arithmetic (kind 2) and comparisons (kind 3) retain their effects, folded or not.
                     const __m128i flags = _mm_maskz_loadu_epi8(valid, f->flags + at);
-                    const __mmask16 floating = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(3)) & _mm_cmpge_epu8_mask(flags, _mm_set1_epi8(IR_SIMD_LANE_F32));
+                    const __mmask16 floating = (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(3)) | _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(2))) &
+                                              _mm_cmpge_epu8_mask(flags, _mm_set1_epi8(IR_SIMD_LANE_F32));
                     const __mmask16 roots = valid & (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(1)) | (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(2)) & _mm_cmpneq_epi8_mask(states, _mm_set1_epi8(IROPT_CONSTANT))) |
                                                 floating);
                     _mm_mask_storeu_epi8(work->live + at, valid, _mm_maskz_set1_epi8(roots, 1));
@@ -1282,15 +1297,20 @@ static __attribute__((aligned(64))) void ir_optimize_dce(IrOptimizeWork* work, I
     }
 }
 
-// `simd`: whether the caller's passes take a function with SIMD values: SCCP, dead code and CFG cleanup, whose folds of
-// and, or, xor, not and bitcast keep a mask's bits as an integer's of its width (#179), and which take no vector for a
-// constant (#141, ir_optimize_transfer). GVN, LICM, SROA and the inliner don't.
-static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* work, const IrFunction* function, Arena* output, Arena* scratch, bool scalar, bool simd)
+// `simd`: admission for callers that model vectors and masks. SCCP, GVN and LICM set it; SROA's default does not.
+// The first SIMD SCCP transfer allocates its sparse wide lattice, so this common preparation stays scalar-sized.
+// `scalar` picks the passes' twin, and `verify_scalar` the verifier's (ir_optimize's AUTO verifies with the vector
+// twin whatever the passes' size bound picks, #786). Dominators follow that explicit caller policy too (#1352),
+// not the pass heuristic: the analysis owns its matrix budget and scalar fallback.
+static __attribute__((aligned(64))) IrCheck ir_optimize_prepare_twins(IrOptimizeWork* work, const IrFunction* function, Arena* output, Arena* scratch, bool scalar, bool verify_scalar, bool simd)
 {
     (void)scalar;
+    (void)verify_scalar;
 
     work->function = function;
-    IrCheck check = BUSTER_SCALAR_PATH(scalar) ? ir_verify_scalar(function, scratch, 0) : ir_verify(function, scratch, 0);
+    work->scratch = scratch;
+    work->scalar = scalar;
+    IrCheck check = BUSTER_SCALAR_PATH(verify_scalar) ? ir_verify_scalar(function, scratch, 0) : ir_verify(function, scratch, 0);
     if (check.error == IR_OK && !simd && ir_function_has_simd_path(function, !scalar))
     {
         check.error = IR_ERROR_UNSUPPORTED;
@@ -1301,13 +1321,15 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
     {
         check = ir_check(IR_ERROR_PHI, 0, 0);
     }
+    // Verified above, the graph and the use lists are built without checking the function again, as ir_build_cfg and
+    // ir_build_uses would, which checked its shape and rows three times and its graph twice in each preparation (#786).
     if (check.error == IR_OK)
     {
-        check.error = ir_build_cfg(function, scratch, output, &work->cfg);
+        check.error = ir_cfg_validated(function, scratch, output, &work->cfg);
     }
     if (check.error == IR_OK)
     {
-        check.error = ir_build_uses(function, scratch, output, &work->uses);
+        check.error = BUSTER_SCALAR_PATH(verify_scalar) ? ir_uses_validated_scalar(function, scratch, output, &work->uses) : ir_uses_validated(function, scratch, output, &work->uses);
     }
     if (check.error == IR_OK)
     {
@@ -1322,7 +1344,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
         };
         DominatorOptions options = dominators_options();
         options.outputs = 0;
-        options.path = BUSTER_SCALAR_PATH(scalar) ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
+        options.path = BUSTER_SCALAR_PATH(verify_scalar) ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
         const DominatorStatus status = dominators_analyze(scratch, output, &cfg, options, &work->dominators);
         check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_DOMINANCE;
     }
@@ -1356,6 +1378,11 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
         }
     }
     return check;
+}
+
+static IrCheck ir_optimize_prepare(IrOptimizeWork* work, const IrFunction* function, Arena* output, Arena* scratch, bool scalar, bool simd)
+{
+    return ir_optimize_prepare_twins(work, function, output, scratch, scalar, scalar, simd);
 }
 
 static uint32_t ir_optimize_phi_inputs(const IrOptimizeWork* work, uint32_t instruction)
@@ -1440,11 +1467,19 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                     const bool phi = f->op[i] == IR_PHI && work->states[i] != IROPT_CONSTANT;
                     if (work->live[i] != 0 && phi == (phase == 0))
                     {
+                        sizes.instruction_count += work->states[i] == IROPT_CONSTANT && ir_optimize_simd_effect(f, i);
                         values[i] = sizes.instruction_count++;
                         const uint32_t kind = ir_optimize_rewrite_kinds[f->op[i]];
-                        if (work->states[i] == IROPT_CONSTANT && f->op[i] != IR_CONST)
+                        if (work->states[i] == IROPT_CONSTANT && f->op[i] != IR_CONST && f->op[i] != IR_VCONST)
                         {
-                            sizes.constant_count += 1;
+                            if (ir_vector_type(f->type[i]))
+                            {
+                                sizes.vector_constant_count += 1;
+                            }
+                            else
+                            {
+                                sizes.constant_count += 1;
+                            }
                         }
                         else if (kind == 1)
                         {
@@ -1529,6 +1564,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
         candidate.incoming = f->incoming;
         uint32_t extra = 0;
         uint32_t constants = f->constant_count;
+        uint32_t vector_constants = f->vector_constant_count;
         uint32_t calls = 0;
         uint32_t instructions = 0;
         for (uint32_t block = 0; block < f->block_count; block += 1)
@@ -1553,15 +1589,38 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                             candidate.b[out] = f->b[i];
                             candidate.c[out] = f->c[i];
                             const uint32_t target = ir_optimize_single_successor(work, block);
-                            if (work->states[i] == IROPT_CONSTANT && op != IR_CONST)
+                            if (work->states[i] == IROPT_CONSTANT && op != IR_CONST && op != IR_VCONST)
                             {
-                                candidate.op[out] = IR_CONST;
-                                candidate.a[out] = constants;
+                                // A known floating value does not discharge its environment effects. Keep its original
+                                // row immediately before the constant used by its consumers, with every operand live.
+                                if (ir_optimize_simd_effect(f, i))
+                                {
+                                    const uint32_t effect = out - 1;
+                                    const uint32_t mask = ir_value_mask(f, i);
+                                    candidate.op[effect] = op;
+                                    candidate.type[effect] = f->type[i];
+                                    candidate.flags[effect] = f->flags[i];
+                                    candidate.alignment_log2[effect] = f->alignment_log2[i];
+                                    candidate.a[effect] = (mask & 1) != 0 ? values[f->a[i]] : f->a[i];
+                                    candidate.b[effect] = (mask & 2) != 0 ? values[f->b[i]] : f->b[i];
+                                    candidate.c[effect] = (mask & 4) != 0 ? values[f->c[i]] : f->c[i];
+                                    instructions += 1;
+                                }
+                                const bool vector = ir_vector_type(f->type[i]);
+                                candidate.op[out] = vector ? IR_VCONST : IR_CONST;
+                                candidate.a[out] = vector ? vector_constants : constants;
                                 candidate.b[out] = BUSTER_IR_NONE;
                                 candidate.c[out] = BUSTER_IR_NONE;
                                 candidate.flags[out] = 0;
                                 candidate.alignment_log2[out] = 0;
-                                candidate.constants[constants++] = work->values[i];
+                                if (vector)
+                                {
+                                    candidate.vector_constants[vector_constants++] = work->vector_values[work->vector_indices[i]];
+                                }
+                                else
+                                {
+                                    candidate.constants[constants++] = work->values[i];
+                                }
                                 work->statistics.folded += 1;
                             }
                             else if (op == IR_BR || ((op == IR_CBR || op == IR_SWITCH) && target != BUSTER_IR_NONE))
@@ -1645,20 +1704,21 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
             }
         }
         candidate.block_offsets[candidate.block_count] = candidate.instruction_count;
-        work->statistics.removed_instructions = f->instruction_count - candidate.instruction_count;
+        work->statistics.removed_instructions = f->instruction_count > candidate.instruction_count ? f->instruction_count - candidate.instruction_count : 0;
         work->statistics.removed_blocks = f->block_count - candidate.block_count;
         *result = candidate;
     }
     return error;
 }
 
-static IrCheck ir_optimize_verify_result(const IrFunction* function, Arena* output, Arena* scratch, bool scalar)
+static IrCheck ir_optimize_verify_twins(const IrFunction* function, Arena* output, Arena* scratch, bool scalar, bool verify_scalar)
 {
     (void)scalar;
+    (void)verify_scalar;
 
     const uint64_t mark = scratch->length;
     IrOptimizeWork verification = { 0 };
-    IrCheck check = ir_optimize_prepare(&verification, function, output, scratch, BUSTER_SCALAR_PATH(scalar), true);
+    IrCheck check = ir_optimize_prepare_twins(&verification, function, output, scratch, BUSTER_SCALAR_PATH(scalar), BUSTER_SCALAR_PATH(verify_scalar), true);
     if (check.error == IR_OK)
     {
         const IrDominance dominance = {
@@ -1666,10 +1726,17 @@ static IrCheck ir_optimize_verify_result(const IrFunction* function, Arena* outp
             .leave = verification.dominators.subtree_end,
             .block_count = function->block_count,
         };
-        check = BUSTER_SCALAR_PATH(scalar) ? ir_verify_scalar(function, scratch, &dominance) : ir_verify(function, scratch, &dominance);
+        // ir_optimize_prepare_twins verified the function whole on the verifier's path, so only the graph against the
+        // dominance it built is left to check (#1379).
+        check = ir_verify_graph(function, scratch, &dominance, !BUSTER_SCALAR_PATH(verify_scalar));
     }
     arena_pop_to(scratch, mark);
     return check;
+}
+
+static IrCheck ir_optimize_verify_result(const IrFunction* function, Arena* output, Arena* scratch, bool scalar)
+{
+    return ir_optimize_verify_twins(function, output, scratch, scalar, scalar);
 }
 
 // #860's AUTO bound, measured on the 9700X against both twins on benchmark-ir-optimize's shapes and
@@ -1694,11 +1761,15 @@ static __attribute__((aligned(64))) IrCheck ir_optimize(const IrFunction* functi
     const uint64_t scratch_mark = scratch->length;
     IrOptimizeWork work = { 0 };
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, options.passes);
+    // The verifier's twin is the caller's: AUTO's size bound picks the passes' alone, since the vector verifier is the
+    // faster at every size (#786).
+    const bool verify_scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR || (options.path == BUSTER_IR_OPTIMIZE_AUTO && options.scalar);
+    (void)verify_scalar;
     if (output != scratch && options.path <= BUSTER_IR_OPTIMIZE_SCALAR && (options.passes & ~(BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG)) == 0)
     {
         options.scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR ||
                          (options.path == BUSTER_IR_OPTIMIZE_AUTO && (options.scalar || ir_optimize_auto_scalar(function)));
-        check = ir_optimize_prepare(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
+        check = ir_optimize_prepare_twins(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), BUSTER_SCALAR_PATH(verify_scalar), true);
     }
     if (check.error == IR_OK)
     {
@@ -1736,15 +1807,19 @@ static __attribute__((aligned(64))) IrCheck ir_optimize(const IrFunction* functi
                 }
             }
         }
-        ir_optimize_dce(&work, options);
-        check.error = ir_optimize_rewrite(&work, output, scratch, options, &work.statistics.function);
+        check.error = work.simd_error;
+        if (check.error == IR_OK)
+        {
+            ir_optimize_dce(&work, options);
+            check.error = ir_optimize_rewrite(&work, output, scratch, options, &work.statistics.function);
+        }
     }
     // Load-bearing: the C driver's --tier1 plans this result by tier1_select_plan_verified, which doesn't verify it again,
     // its uses dominated by their definitions (c_check_tier1.c, #141). Weakening this verification needs the driver to
     // verify instead (tier1_select_plan).
     if (check.error == IR_OK)
     {
-        check = ir_optimize_verify_result(&work.statistics.function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
+        check = ir_optimize_verify_twins(&work.statistics.function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), BUSTER_SCALAR_PATH(verify_scalar));
     }
     if (check.error == IR_OK)
     {

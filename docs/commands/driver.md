@@ -170,10 +170,38 @@ the contract, publication guarantees and the remaining compatibility limits,
 and `test-checker-driver`'s `c_driver_compatibility_test.c` exercises real
 executable invocations against Clang and GNU Make.
 
+## Response files
+
+Source commands expand `@file` before information probes and selection of
+preprocessing, compilation or linking (#1476). Arguments replace that word in
+place, including after `--`; write `./@name.c` to name a literal source
+whose basename starts with `@`. Nested paths and source/output paths use the
+process's working directory. Utility commands, the private worker guardian and
+libFuzzer retain their own arguments; Make's dry run reads no response files.
+
+The byte grammar uses ASCII whitespace as separators, single or double quotes
+to keep whitespace inside a word, and backslash to quote the next byte inside
+or outside either quote. Quoted and unquoted portions join; empty quoted words
+remain arguments. A bare `@` stays literal. There is no shell or environment
+expansion. These are the GNU-style response-file conventions described in
+[GCC 7.1's overall options](https://gcc.gnu.org/onlinedocs/gcc-7.1.0/gcc/Overall-Options.html);
+malformed-input behavior is this driver's explicit refusal, not a claim of
+complete GCC/Clang compatibility.
+
+Expansion admits regular files only, at most 32 active files, 4,096 file
+occurrences, 16 MiB of aggregate response bytes and 65,536 expanded operands.
+Active device/inode pairs detect cycles, while repeated sibling files are
+allowed and charged again. Missing/nonregular files, read errors, changed file
+sizes, embedded NULs, unfinished quotes/escapes and exhausted budgets fail
+before source/output access. Successful argument storage lives until process
+exit, as the original `argv` does. The CC compatibility suite compares valid
+cases with Clang and checks that refusals preserve an existing object.
+
 ## Mixed inputs
 
 The implicit compile/link driver classifies each positional input before opening
-it (#1120). `.c`, `.h` and `.i` are C; `.s` is assembly; `.S` is preprocessed
+it (#1120). `.c` and `.h` are C; `.i` is C that has already been preprocessed:
+directives run, and tokens are not macro-expanded again. `.s` is assembly; `.S` is preprocessed
 assembly. `.o`, `.a`, `.so` and versioned `.so.*` are linker inputs. Known
 unsupported source suffixes, including C++ (`.cpp`, `.cc`, `.cxx`, `.C`, `.ii`
 and C++ headers and module sources), Objective-C (`.m`, `.mi`, `.mm`, `.M`, `.mii`),
@@ -184,10 +212,34 @@ a warning; the foreign reader diagnoses their actual format.
 `-x c`, `-x assembler` and `-x assembler-with-cpp` override the
 suffix for following inputs only; `-x none` restores suffix inference. Joined
 `-xLANG` works too. Stdin requires an explicit language at that operand.
+A non-regular C or preprocessed-assembly source (`/dev/null`, a FIFO, `/dev/fd/N`)
+is read to EOF once, like stdin. Include probes still refuse those files.
 
-C-only commands retain the existing direct path. Mixed commands compile C and
-assembly on the unit scheduler's lanes, retain their ELF objects in memory,
-and use the built-in foreign resolver and writer with the discovered C runtime.
+The `-E`, `-M` and `-MM` driver uses the same positional language classification:
+`.S` and `-x assembler-with-cpp` enable assembly tokenization and
+`__ASSEMBLER__` for that input alone; `.s` and `-x assembler` have no
+preprocessing action. `-x c` overrides either suffix and `-x none` restores it.
+Preprocessing stdin defaults to C. Option operands never select a language, and
+after `--` every argument is an input filename. The shared option parser collects
+per-input language records once, then each unit initializes its own preprocessor
+from the command's common options and its recorded language. The single-input
+`pp_parse_options` API retains its existing callers and default C behavior.
+`test-checker-driver`'s compatibility cases check mixed language order, both
+kernels, option boundaries and a `.S` preprocessing/reassembly execution round-trip.
+
+C-only links retain the existing direct path, including its shared-library
+version validation and runtime snapshot. When a `-lNAME` or `-l:FILE` request
+selects a populated archive, the source command uses the mixed/foreign path
+(#1470), so that archive gets the same lazy member selection and input ordering
+as a positional archive. Empty archives retain the direct path. The selection
+keeps `-L` directory order and static runtime mode; named DSOs on an archive
+link keep their named-search identity and as-needed state. Exact `-l:FILE`
+DSO-only links retain the direct importer's existing refusal. No new runtime or
+writer mode is introduced. `-c` and syntax checking do not resolve libraries.
+
+Mixed commands compile C and assembly on the unit scheduler's lanes, retain
+their ELF objects in memory, and use the built-in foreign resolver and writer
+with the discovered C runtime.
 No host compiler/linker or temporary object files are used. Input order, `-l`
 state, archive extraction, named sections, C DWARF and unwind records survive
 this boundary. Each `.S` unit owns its preprocessing state on its lane, including
@@ -215,3 +267,4 @@ The last command runs the focused original argv-level fixtures, also included
 in `test-checker-driver`: own/Clang objects, object-only links, lazy archives,
 shared libraries, runtime modes, scalar/multiple lanes and worker caps, parallel
 `.S`, positional languages, stdin, compile-only output and failure preservation.
+
