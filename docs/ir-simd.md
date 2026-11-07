@@ -364,6 +364,17 @@ invalid flag, or traps where it is unmasked), whose mask may go unused; an
 integer comparison goes with its mask. `test-ir-optimize` checks both paths,
 and `test-checker-driver` an unused comparison of a NaN natively, by both tiers.
 
+The lanes cost compile time even without vectors. On the 9700X, `--tier1 -c
+sqlite3.c` (no vectors) ran 29.2M more user instructions (+0.44%) with #1413's
+lanes than at its base. Exact counts per pipeline stage (#1450's item 5) put
+19.7M in the IR verifier's checks of lane metadata (+2.21% of its work), 6.1M in
+the optimizer's own passes, 2.7M in Tier 1's emission and 1.4M in the typed
+lowering, with selection 0.7M cheaper; nothing outside Tier 1 changed. Cycles
+were flat, so the cost is accepted. [The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-remaining-1450-2026-11-06)
+(buster-performance#303) has the measurement patch, the counts and a sampled
+profile that inlining and throttling made unusable.
+
 ## Machine rows (#141)
 
 Any other `X86` row, one the decoders above don't take, is the IR's machine row

@@ -250,8 +250,20 @@ untouched reservation, past a guard page (LLVM's constraint). Other frames
 under a page, with a frame pointer or not, leave less than a page untouched,
 and the next call's return address is the next touch. Until #1450 a frame
 pointer alone made both tiers touch, so with `-fno-omit-frame-pointer` every
-call did a read-modify-write of `[rsp]`. That isn't the default: Tier 0's Lua
-touches in two functions only (#1450's record).
+call did a read-modify-write of `[rsp]`. That isn't the default.
+
+The option's run-time cost is placement. #177 timed Tier 0's `closures.lua`
+4.59% slower with it, in one layout per build. Tier 0's Lua probes in two
+functions only: `luaV_execute`, whose 5,064-byte frame takes a page's loop and
+a remainder's touch on every call, and `luaL_loadfilex`. A cycles profile
+doesn't place the difference at the probe: `luaV_execute`'s share falls. Over
+16 recorded link orders of fixed objects (the [profiling
+guide](commands/profiling.md)'s protocol), the option's paired effect on
+`closures.lua` is -1.02% at Tier 0 (95% interval -2.37% to +0.35%) and -1.37% at
+Tier 1 (-3.75% to +1.07%). Layout alone spreads Tier 0's time over 14%, and in
+the normal order the option is 6.2% faster (#1450's item 6, [the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-remaining-1450-2026-11-06),
+buster-performance#303).
 
 - **Tier 1's prologue** takes `PROBE_STACK` (`Tier1EmitOptions.frame_flags`):
   the planner's `PROBE_ALLOCATE` and `PROBE_ALIGN` above, with their frame
