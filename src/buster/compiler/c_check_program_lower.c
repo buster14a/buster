@@ -12539,7 +12539,7 @@ static bool check_lower_init_reentry(CheckLowerWriter* writer)
         uint32_t token = opening;
         for (; !reentry && !scalar && end - token >= BUSTER_CHECK_PROGRAM_LANES; token += BUSTER_CHECK_PROGRAM_LANES)
         {
-            uint32_t selected = _mm512_cmp_epu32_mask(_mm512_loadu_si512(declarations + token), _mm512_set1_epi32((int)input->token_count), _MM_CMPINT_LT);
+            uint32_t selected = _mm512_cmplt_epu32_mask(_mm512_loadu_si512(declarations + token), _mm512_set1_epi32((int)input->token_count));
             if (intrinsics != NULL)
             {
                 selected |= _mm512_cmpneq_epi32_mask(_mm512_loadu_si512(intrinsics + token), _mm512_setzero_si512());
