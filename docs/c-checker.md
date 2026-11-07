@@ -4339,13 +4339,17 @@ they do per token where little of it was per declaration or expression:
   are no longer among those over 0.41%.
 
 Both ordinary and declaration-time `_Generic` readers use the same association
-index (`c_check_generic.c`). Pointers, arrays and atomic wrappers ending at a
-nominal struct or union use that tag as a necessary compatibility key. Other
-types share an ambiguous key: enums and integers, function prototypes,
-transparent-union parameters and the two vector kinds still receive exact
-source-position-aware compatibility checks. Qualifiers and alignment never
-replace those checks. The control's key also filters provably incompatible
-control matches.
+index (`c_check_generic.c`). Pointers, arrays, atomic wrappers and function
+returns ending at a stable leaf use its unqualified TypeId as a necessary
+compatibility key (#1499). Both vector kinds instead hash their stored element
+TypeId and extent, the fields compatibility compares across those kinds.
+Integers and enums keep one ambiguous key: their compatibility is not
+transitive, and completing an enum after an earlier association must not stale
+its stored key. Function parameters are never traversed for a key because
+transparent unions can make different parameter tags compatible. Every
+candidate still receives the exact source-position-aware compatibility check;
+hash collisions only add candidates. Qualifiers and alignment never replace
+those checks. The control's key also filters provably incompatible matches.
 
 The producer appends associations in source order into scratch-owned key and
 type columns. Each hash probe compares sixteen owned keys at once; the scalar
@@ -4362,6 +4366,15 @@ duplicate validation makes zero compatibility queries; a control with one of
 those keys needs one exact query. Hash probing and input reading remain. This
 is a bounded improvement for the nominal families in #602; a large family
 sharing an ambiguous key can still require quadratic compatibility work.
+The stable-leaf extension also separates distinct `_BitInt` widths, vector
+shapes and functions returning distinct records. Its regression fixtures
+assert zero duplicate queries for 257-member families and compare both source
+readers with Clang. Pairwise controls cover the two vector kinds, enums,
+qualifiers, arrays, function prototypes and source-time transparent unions;
+an enum completed after insertion must still match its integer type.
+No end-to-end timing or optimized-assembly result is yet recorded for #1499's
+extension. Integer/enum families and functions differing only in parameters
+remain in the conservative partition; this does not close the whole issue.
 `test-checker` compares the index with independent pairwise semantic queries,
 checks source-time transparent unions, guarded groups, collisions, exhaustion
 and the query-count bound, and checks both source readers against Clang.
@@ -6774,3 +6787,4 @@ source coordinates. Command-line policy, source-ordered diagnostic push/pop,
 macro invocation locations, system headers, parser recovery, and EOF directives
 use the same warning machinery. A warning promoted to an error prevents object
 emission. Neither classification nor warning policy changes `-E` output.
+
