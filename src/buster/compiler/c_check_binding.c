@@ -172,10 +172,10 @@ static uint32_t check_input_operation_events(const CBindings* events, uint8_t op
         const uint32_t length = events->count - first < 64 ? events->count - first : 64;
         const __mmask64 lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
         const __m512i operations = _mm512_maskz_loadu_epi8(lanes, events->operation + first);
-        const uint64_t declares = _mm512_mask_cmpeq_epi8_mask(lanes, operations, _mm512_set1_epi8((char)operation));
+        const uint64_t matches = _mm512_mask_cmpeq_epi8_mask(lanes, operations, _mm512_set1_epi8((char)operation));
         for (uint32_t part = 0; part < length; part += 16)
         {
-            const __mmask16 selected = (__mmask16)(declares >> part);
+            const __mmask16 selected = (__mmask16)(matches >> part);
             _mm512_mask_compressstoreu_epi32(list + found, selected, _mm512_add_epi32(_mm512_set1_epi32((int32_t)(first + part)), lanes16));
             found += (uint32_t)__builtin_popcount(selected);
         }
@@ -387,7 +387,7 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
     // twin, visits every event (#529).
     const bool listed = !BUSTER_SCALAR_PATH(parser->options.scalar);
     const uint64_t list_mark = reader->scratch != NULL ? reader->scratch->length : 0;
-    uint32_t* uses = valid && listed && reader->scratch != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)events->count + 15) : NULL;
+    uint32_t* uses = valid && listed && reader->scratch != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count) : NULL;
     const uint32_t use_count = uses != NULL ? check_input_operation_events(events, C_BINDING_USE, uses) : events->count;
     const bool deferred = valid && reader->deferred != NULL && check_deferred_binding_answers(reader->deferred, reader, resolved);
     for (uint32_t at = 0; valid && !deferred && at < use_count; at += 1)
@@ -410,7 +410,7 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
             memset(used_tokens, 0, count);
             memset(parameters, 0, count);
             memset(reported, 0, count);
-            uint32_t* declares = uses != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)events->count + 15) : NULL;
+            uint32_t* declares = uses != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count) : NULL;
             const uint32_t declare_count = declares != NULL ? check_input_operation_events(events, C_BINDING_DECLARE, declares) : events->count;
             for (uint32_t at_use = 0; at_use < use_count; at_use += 1)
             {
