@@ -2859,12 +2859,27 @@ static Tier1SelectHoles tier1_emit_cfg_holes(const Tier1SelectPlan* plan, const 
 static Tier1EmitError tier1_emit_cfg_kernel(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, const Tier1SelectHoles* holes, uint32_t node, Tier1SelectRecords* records, LinkReference* reference, bool* referenced)
 {
     const IrFunction* function = plan->function;
+    // Resolve a folded frame address before expansion, so comparisons and two-operand arithmetic see the actual
+    // base when checking destination aliases. A comparison's memory access precedes its SETcc or branches.
+    const Tier1SelectPattern* pattern = &plan->patterns[node];
+    const bool object = pattern->stack_object != BUSTER_IR_NONE;
+    int32_t object_offset = 0;
+    int32_t displacement = 0;
+    const bool placed = !object || (tier1_emit_cfg_object(function, emitted, pattern->stack_object, &object_offset) &&
+                                   !__builtin_add_overflow(object_offset, pattern->displacement, &displacement));
+    Tier1SelectHoles object_holes;
+    if (object && placed)
+    {
+        object_holes = *holes;
+        object_holes.memory.rm = (uint8_t)emitted->frame.base_register;
+        object_holes.memory.displacement = displacement;
+        holes = &object_holes;
+    }
     Tier1SelectRecords selected_records = tier1_select_expand(holes);
-    Tier1EmitError error = selected_records.overflowed ? TIER1_EMIT_INVALID : TIER1_EMIT_OK;
+    Tier1EmitError error = !placed ? TIER1_EMIT_FRAME : selected_records.overflowed ? TIER1_EMIT_INVALID : TIER1_EMIT_OK;
     *referenced = false;
     // A frame object's address, from the frame's base at the object's offset; an overflow area's from the incoming frame
     // (#789).
-    int32_t object_offset = 0;
     if (plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS)
     {
         const uint32_t object = (uint32_t)plan->patterns[node].immediate;
@@ -2874,19 +2889,6 @@ static Tier1EmitError tier1_emit_cfg_kernel(const Tier1SelectPlan* plan, const T
         error = selected_records.count == 1 && found ? error : TIER1_EMIT_FRAME;
         selected_records.records[0].rm = base;
         selected_records.records[0].displacement = object_offset;
-    }
-    // A load, a store or an address through a frame object: the frame's base register at the object's offset plus the
-    // walked displacement, as the object's lea's. The memory record is the last one.
-    if (plan->patterns[node].stack_object != BUSTER_IR_NONE && error == TIER1_EMIT_OK)
-    {
-        int32_t total = 0;
-        error = selected_records.count != 0 && tier1_emit_cfg_object(function, emitted, plan->patterns[node].stack_object, &object_offset) && !__builtin_add_overflow(object_offset, plan->patterns[node].displacement, &total) ? TIER1_EMIT_OK
-                                                                                                                                                                                                                     : TIER1_EMIT_FRAME;
-        if (error == TIER1_EMIT_OK)
-        {
-            selected_records.records[selected_records.count - 1].rm = (uint8_t)emitted->frame.base_register;
-            selected_records.records[selected_records.count - 1].displacement = total;
-        }
     }
     // A symbol's address, its reference the record's: a lea of it, or a load of its GOT slot. A thread-local's (#141), as
     // Tier 0's: the thread pointer, fs:[0], plus its offset, a TPOFF32 immediate for the image's own (local-exec); or for

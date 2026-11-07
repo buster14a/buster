@@ -131,6 +131,36 @@ patterns are:
   no load folds past. Other atomic operations reach it as calls of the unit's leaves. A fence of a constant order is the IR's `fence` (`TIER1_RULE_FENCE`): `mfence` for a thread fence of `seq_cst`
   and no records for the others, a barrier no selection moves an access across. A volatile load remains a separate
   access; a store retains its original order and access width.
+- Integer comparisons can fold a single-use load into `cmp` under the same
+  access-order proof (#1218), including a materialized boolean, an extended
+  truth value and a fused conditional branch. Either operand may be a direct
+  32- or 64-bit load; a load originally on the left swaps the predicate when
+  the other register becomes the left operand. The latest legal load is
+  selected when both operands load, preserving their original access order.
+  A zero/sign extension of a byte, word or dword load can be removed when
+  comparing with an immediate that the same extension represents exactly.
+  The memory access keeps the source width, and a signed predicate on a
+  removed zero extension becomes unsigned. Arbitrary register comparisons
+  through an extension, truncations, shared values and observable accesses
+  remain unfolded. Immediate admission still uses the comparison width, so
+  some representable narrowed immediates, such as an I32 zero extension to
+  I64 compared with `0xffffffff`, remain conservative misses. Direct-load
+  productions include their savings in the BURS grammar; promoted-load
+  removal is a legality-dependent candidate refinement whose grammar cost
+  conservatively still includes the removed load/extension. Exact pricing
+  would need comparison-aware promotion classes.
+
+  The proof runs at the final consumer, so a branch or truth extension cannot
+  move an access past an operation after the original comparison. Both address
+  values remain effective uses. A boolean destination overlapping an address
+  register or the other operand is cleared with a flag-preserving move after
+  `cmp`. Frame addresses are resolved before pattern expansion, exposing the
+  actual base to this alias check and placing the displacement on `cmp`
+  rather than its following `setcc` or branch records. Guard-page predicate
+  tests, access-order fixtures and realigned frame-object execution cover
+  these cases in `test-tier1-select` and `test-tier1-emit`. This implements
+  compare-load folding; #1218's broader branch-layout, workload instruction
+  count and runtime acceptance remain separate.
 - The IR's `intrinsic` (#141): `mulhu` is `TIER1_RULE_MULTIPLY_HIGH` (one operand in `rax`, `mul` of the other, its
   `rdx` the result, saved around as a division's fixed registers are), and the x86 builtins' `pdep`, `pext`, `bzhi`
   and `bextr` of an `I32` or an `I64` are `TIER1_RULE_INTRINSIC`, their one VEX instruction of the width
@@ -608,7 +638,7 @@ operand, type, immediate, memory-order and single-use constraints.
 
 The vector path covers the integer core by bottom-up rewriting
 (`tier1_select_burs.c`, #141's design: Pelegrí-Llopart and Graham's BURS, as
-iburg and burg build it). Its grammar is a C table of 69 patterns, each
+iburg and burg build it). Its grammar is a C table of patterns, each
 a nonterminal's derivation from an operator and its children's nonterminals, or
 from another nonterminal, at the structural cost below; a pattern stands for one
 candidate kind of `tier1_select_candidates`, an inner one (an address's piece,
