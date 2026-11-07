@@ -180,6 +180,16 @@ unused-warning fixtures also check exact scope-completion tokens.
   scalar-result controls, for clauses, macros and source policy through default and scalar modes and a requested
   deferred-option route. These single-file syntax-only commands are capped at one lane and use the ordinary-reader
   fallback; they do not establish admitted deferred-reader coverage.
+  Runtime `-Wshift-count-negative` and `-Wshift-count-overflow` warnings inspect an independently constant count
+  even when the left operand is not constant (#1394). The ordinary shift uses the promoted left type's value width;
+  compound shifts use the original lvalue type, matching Clang. The existing evaluated-expression walk excludes
+  unselected and unreachable operands. Retained runtime constant-fold warnings join that walk without being
+  rendered or counted twice, preserving their order with new runtime warnings and discarded expressions;
+  required-constant warnings and groups collected before a failed program keep their original publication.
+  `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both
+  shift directions, narrow promotions, 128-bit and bit-precise widths, compound assignments, side effects, macros
+  and warning policy. The shared default-warning harness covers syntax checking and object publication through
+  both kernels and requested one/three-lane options, including `-Werror`, output preservation and `-w`.
   `c_check_return_flow.c` supplies source return-warning facts for checked graphs. Ordinary direct calls no longer
   suppress a function's `-Wreturn-type` warning; a proven direct `noreturn` call or terminating builtin ends only its
   own warning-flow edge. Short circuit, conditional and unevaluated operands retain their execution rules, and
