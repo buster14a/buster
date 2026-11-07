@@ -2972,6 +2972,70 @@ static void check_test_driver_array_alignment(CheckTest* test, const char* clang
     unlink(linked);
 }
 
+// Exercise admission directly so its command-arena growth is visible independently of compilation.
+static void check_test_dependency_admission(CheckTest* test, const char* directory)
+{
+    char names[32][512];
+    char* sources[32];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sources); i += 1)
+    {
+        snprintf(names[i], sizeof(names[i]), "%s/dependency-admission-%02u.c", directory, i);
+        sources[i] = names[i];
+    }
+    const uint32_t counts[] = { 0, 1, 16, 32 };
+    DependencyOptions options = { .enabled = true };
+    Arena arena = arena_reserve(UINT64_C(1) << 20);
+    check_test_expect(test, arena.base != NULL, "dependency admission scratch");
+    if (arena.base != NULL)
+    {
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(counts); i += 1)
+        {
+            arena_pop_to(&arena, 0);
+            const uint32_t count = counts[i];
+            const bool admitted = dependency_check_destinations(&options, sources, count, NULL, true, false, &arena);
+            check_test_expect(test, admitted && arena.length <= (uint64_t)count * 80 + 8,
+                              "distinct dependency destinations use linear filename storage");
+        }
+        arena_pop_to(&arena, 0);
+        options.path = "-";
+        check_test_expect(test, dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena) && arena.length == 0,
+                          "stdout dependency admission needs no object names");
+        options.path = names[31];
+        check_test_expect(test, !dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
+                          "shared dependency destination checks the last source");
+        options.path = "dependency-admission-31.o";
+        check_test_expect(test, !dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
+                          "shared dependency destination checks the last implicit object");
+        options.path = "dependency-admission-shared.d";
+        arena_pop_to(&arena, 0);
+        check_test_expect(test, dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena) && arena.length <= 32 * 40,
+                          "shared dependency destination reuses bounded object names");
+        const uint64_t capacity = arena.capacity;
+        arena_pop_to(&arena, 0);
+        arena.capacity = 0;
+        check_test_expect(test, !dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
+                          "object-name capacity exhaustion refuses admission");
+        options.path = "-";
+        check_test_expect(test, dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
+                          "stdout admission succeeds with exhausted scratch");
+        options.enabled = false;
+        options.path = "";
+        check_test_expect(test, dependency_check_destinations(&options, NULL, 32, NULL, true, false, &arena),
+                          "disabled admission does not read sources");
+        options.enabled = true;
+        check_test_expect(test, dependency_check_destinations(&options, NULL, 0, NULL, true, false, &arena),
+                          "empty admission does not inspect destination");
+        arena.capacity = capacity;
+        options.path = "dependency-admission-shared.d";
+        options.only = true;
+        arena_pop_to(&arena, 0);
+        check_test_expect(test, dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena) && arena.length == 0,
+                          "dependency-only admission needs no object names");
+    }
+    arena_release(&arena);
+}
+
+
 // A library that a needed library refers to (#398's review): main calls a_func, which libA defines and which calls
 // b_func, which libB defines. Where libA's DT_NEEDED doesn't name libB, the executable needs both, in the line's order,
 // either way round (GNU ld refuses -lB -lA); where it does (libAB), the executable needs libAB alone, as GNU ld links
@@ -8508,6 +8572,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_dependency_admission(&test, directory);
                 check_test_driver_dependencies(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
