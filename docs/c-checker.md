@@ -1747,6 +1747,23 @@ literal: it finds the backslashes with `memchr` and reads only escape
 sequences byte by byte, a cold path of short, rare strings with no vector
 twin; both checker paths call it the same way.
 
+The universal character names valid there are those clang's
+`ProcessUCNEscape` takes in any string literal, which it checks there too
+(`check_literal_unevaluated_ucn`), each error at the backslash:
+- **Digits:** "\u used with no following hex digits" (or `\U`), and
+  "incomplete universal character name" short of four (eight).
+- **Value:** "invalid universal character" for a surrogate or a value past
+  U+10FFFF.
+- **Before C23:** a value below U+00A0 other than `$`, `@` and `` ` `` is
+  "universal character name refers to a control character" or "character 'c'
+  cannot be specified by a universal character name".
+- **Delimited `\u{…}`:** the delimited escapes' errors, and an overflow is
+  "hex escape sequence out of range".
+- **Named `\N{…}`:** only its braces are checked ("expected '{' after '\N'
+  escape sequence", incomplete, empty).
+
+Such an error drops the construct as the others do, with no unevaluated error.
+
 clang then drops what the literal belonged to, and its diagnostics stop there.
 The reader (`check_input_unevaluated_strings`) reports
 `CHECK_INPUT_UNEVALUATED_ESCAPE` once at the literal's first refused token
@@ -1767,8 +1784,9 @@ behavior's warnings), is neither required to be an integer constant nor
 asserted. Where the parse failed, a repaired view keeps the report
 (`check_repair_input_report`), and the tokens before the first syntax error
 that no view checked are read as `check_driver_unparsed_literals` reads their
-numeric constants (`check_driver_unparsed_strings`: GNU attributes' string
-arguments and static assertions' messages). A `#line` directive's is dropped
+numeric constants (`check_driver_unparsed_strings`: GNU attributes' and known C23
+attributes' string arguments, a standard one's or a `gnu::` or `clang::` one's,
+and static assertions' messages). A `#line` directive's is dropped
 by the preprocessor (`pp_decode_file_name`), whose unknown-escape warning has
 no flag, as its other warnings haven't. Asm labels and statements, pragmas'
 strings and `_Pragma` read evaluated literals, as clang's do.
@@ -1777,7 +1795,11 @@ Not clang's yet: the encoding prefix's -Winvalid-unevaluated-string warning
 (a prefixed argument stays "expected string literal"), -pedantic's warnings of
 the non-standard escapes, the "expanded from macro" note of a literal that is
 a macro's argument, and what follows `\x` without digits, which clang alone
-keeps (its attribute still applies). Like the checker's other errors, the
+keeps (its attribute still applies). A named universal character name's name:
+clang decodes `\N{…}` by Unicode's names, and checks a name against them
+("'x' is not a valid Unicode character name" with its notes), while the
+compiler takes no named escape anywhere, so a well-formed one stays the
+decoders' refusal. Like the checker's other errors, the
 first one ends the unit's semantic diagnostics after its declaration.
 
 ### Large integer literal tables (#658)

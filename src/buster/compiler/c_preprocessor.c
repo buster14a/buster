@@ -14165,13 +14165,13 @@ static uint32_t pp_decode_file_name(Preprocessor* pp, const uint8_t* spelling, u
     bool valid = length >= 2 && spelling[0] == '"' && spelling[length - 1] == '"';
     bool reported = false;
     bool counted_error = false;
-    const uint32_t escapes = valid ? check_literal_unevaluated_escapes(spelling, length, NULL, &counted_error) : 0;
+    const uint32_t escapes = valid ? check_literal_unevaluated_escapes(spelling, length, pp->options.language.standard >= 2023, NULL, &counted_error) : 0;
     if (escapes != 0)
     {
         Scratch scratch = scratch_begin(0);
         CheckEscapeDiagnostic* diagnostics = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length));
         bool had_error = false;
-        const uint32_t count = diagnostics != NULL ? check_literal_unevaluated_escapes(spelling, length, diagnostics, &had_error) : 0;
+        const uint32_t count = diagnostics != NULL ? check_literal_unevaluated_escapes(spelling, length, pp->options.language.standard >= 2023, diagnostics, &had_error) : 0;
         for (uint32_t i = 0; i < count; i += 1)
         {
             const CheckEscapeDiagnostic* diagnostic = diagnostics + i;
@@ -14204,10 +14204,25 @@ static uint32_t pp_decode_file_name(Preprocessor* pp, const uint8_t* spelling, u
                     pp_diagnose(pp, PP_SEVERITY_ERROR, at, "invalid digit '%c' in escape sequence", (char)character);
                     break;
                 case CHECK_ESCAPE_DIAGNOSTIC_OPEN_BRACE:
-                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "expected '{' after '\\o' escape sequence");
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "expected '{' after '\\%c' escape sequence", (char)character);
                     break;
                 case CHECK_ESCAPE_DIAGNOSTIC_CLOSE_BRACE:
                     pp_diagnose(pp, PP_SEVERITY_ERROR, at, "expected '}'");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_DIGITS:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "\\%c used with no following hex digits", (char)character);
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_INCOMPLETE:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "incomplete universal character name");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_INVALID:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "invalid universal character");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_CONTROL:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "universal character name refers to a control character");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_BASIC:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, at, "character '%c' cannot be specified by a universal character name", (char)character);
                     break;
                 default:
                     pp_diagnose(pp, PP_SEVERITY_ERROR, at, "invalid escape sequence '%.*s' in an unevaluated string literal", (int)diagnostic->length,

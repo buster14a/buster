@@ -1287,7 +1287,7 @@ static uint32_t check_input_unevaluated_refused(CheckInputReader* reader, uint32
         uint32_t length = 0;
         const bool spelled = check_input_spelling(reader, token, &bytes, &length);
         bool had_error = false;
-        refused = spelled && check_literal_unevaluated_escapes(bytes, length, NULL, &had_error) != 0 ? token : BUSTER_CHECK_NONE;
+        refused = spelled && check_literal_unevaluated_escapes(bytes, length, reader->pp != NULL && reader->pp->options.language.standard >= 2023, NULL, &had_error) != 0 ? token : BUSTER_CHECK_NONE;
         arena_pop_to(reader->scratch, mark);
     }
     *end = last;

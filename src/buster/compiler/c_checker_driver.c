@@ -667,7 +667,7 @@ static void check_driver_escapes(const Parser* parser, Preprocessor* pp, const C
         const String8 spelling = check_warning_string_spelling(parser, pp, token, scratch);
         const uint32_t length = (uint32_t)spelling.length;
         CheckEscapeDiagnostic* diagnostics = length != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length)) : NULL;
-        const uint32_t count = diagnostics != NULL ? check_literal_unevaluated_escapes((const uint8_t*)spelling.pointer, length, diagnostics, &had_error) : 0;
+        const uint32_t count = diagnostics != NULL ? check_literal_unevaluated_escapes((const uint8_t*)spelling.pointer, length, pp->options.language.standard >= 2023, diagnostics, &had_error) : 0;
         for (uint32_t i = 0; i < count && !pp->fatal; i += 1)
         {
             const CheckEscapeDiagnostic* diagnostic = diagnostics + i;
@@ -714,10 +714,26 @@ static void check_driver_escapes(const Parser* parser, Preprocessor* pp, const C
                     pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "invalid digit '%c' in escape sequence", character);
                     break;
                 case CHECK_ESCAPE_DIAGNOSTIC_OPEN_BRACE:
-                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "expected '{' after '\\o' escape sequence");
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "expected '{' after '\\%c' escape sequence", character);
                     break;
                 case CHECK_ESCAPE_DIAGNOSTIC_CLOSE_BRACE:
                     pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "expected '}'");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_DIGITS:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "\\%c used with no following hex digits", character);
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_INCOMPLETE:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "incomplete universal character name");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_INVALID:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "invalid universal character");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_CONTROL:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "universal character name refers to a control character");
+                    break;
+                case CHECK_ESCAPE_DIAGNOSTIC_UCN_BASIC:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "character '%c' cannot be specified by a universal character name",
+                                                 character);
                     break;
                 default:
                     pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "invalid escape sequence '%.*s' in an unevaluated string literal",
@@ -815,7 +831,7 @@ static bool check_driver_unparsed_escapes(const Parser* parser, Preprocessor* pp
         const uint64_t mark = scratch->length;
         const String8 spelling = check_warning_string_spelling(parser, pp, token, scratch);
         bool had_error = false;
-        refused = spelling.length != 0 && check_literal_unevaluated_escapes((const uint8_t*)spelling.pointer, (uint32_t)spelling.length, NULL, &had_error) != 0 ? token : end;
+        refused = spelling.length != 0 && check_literal_unevaluated_escapes((const uint8_t*)spelling.pointer, (uint32_t)spelling.length, pp->options.language.standard >= 2023, NULL, &had_error) != 0 ? token : end;
         arena_pop_to(scratch, mark);
     }
     if (refused != end)
@@ -825,16 +841,51 @@ static bool check_driver_unparsed_escapes(const Parser* parser, Preprocessor* pp
     return refused != end;
 }
 
-// The unevaluated string literals a failed parse left unchecked, from `begin` to its first error, as
-// check_driver_unparsed_literals reads its constants (#147): a GNU attribute's string arguments (its name's row; the
-// first whose escape sequence clang refuses drops the attribute, its later ones unread) and a static assertion's
-// message, each wholly before that error. clang diagnoses their escapes as it parses them. The unknown escape's warning
-// is the command line's: the pragmas are the checked view's.
-static void check_driver_unparsed_strings(const Parser* parser, Preprocessor* pp, uint32_t begin, Arena* scratch)
+// An attribute's arguments in parentheses, from the `(` at `k`, split at their top-level commas, as
+// check_driver_unparsed_strings reads them: the escapes of each argument its name's `row` reads as an unevaluated string
+// literal, to the first whose escape clang refuses (which drops the attribute, its later arguments unread). Returns the
+// token past the `)`.
+static uint32_t check_driver_unparsed_arguments(const Parser* parser, Preprocessor* pp, const CheckInputArgumentsRow* row, uint32_t k, uint32_t end, Arena* scratch)
 {
     static const CheckInput none = { 0 };
     const uint8_t* kinds = parser->tokens.kinds;
     const uint32_t identifiers = BUSTER_CHECK_ARGUMENTS_VARIADIC_IDENTIFIER | BUSTER_CHECK_ARGUMENTS_STRICT_IDENTIFIER;
+    uint32_t argument = k + 1;
+    uint32_t index = 0;
+    uint32_t depth = 0;
+    bool refused = false;
+    k = argument;
+    while (k < end && !(depth == 0 && kinds[k] == PARSE_KIND_R_PAREN))
+    {
+        const uint8_t at = kinds[k];
+        depth += at == PARSE_KIND_L_PAREN || at == PARSE_KIND_L_SQUARE || at == PARSE_KIND_L_BRACE;
+        depth -= depth != 0 && (at == PARSE_KIND_R_PAREN || at == PARSE_KIND_R_SQUARE || at == PARSE_KIND_R_BRACE);
+        const bool last = k + 1 < end && depth == 0 && kinds[k + 1] == PARSE_KIND_R_PAREN;
+        if (depth == 0 && (at == PARSE_KIND_COMMA || last))
+        {
+            const uint32_t stop = at == PARSE_KIND_COMMA ? k : k + 1;
+            const bool lone = stop == argument + 1 && kinds[argument] == PARSE_KIND_IDENTIFIER;
+            const bool identifier = row != NULL && lone && ((index == 0 && (row->flags & BUSTER_CHECK_ARGUMENTS_IDENTIFIER) != 0) || (row->flags & identifiers) != 0);
+            const bool string = row != NULL && index < 32 && ((row->strings >> index) & 1u) != 0 && (row->flags & (identifiers | BUSTER_CHECK_ARGUMENTS_TYPE)) == 0;
+            refused = refused || (string && !identifier && check_driver_unparsed_escapes(parser, pp, &none, argument, stop, scratch));
+            index += 1;
+            argument = stop + 1;
+        }
+        k += 1;
+    }
+    return k + (k < end ? 1 : 0);
+}
+
+// The unevaluated string literals a failed parse left unchecked, from `begin` to its first error, as
+// check_driver_unparsed_literals reads its constants (#147): a GNU attribute's string arguments (its name's row; the
+// first whose escape sequence clang refuses drops the attribute, its later ones unread), a known C23 attribute's (a
+// standard one's, deprecated's and nodiscard's, or one of gnu::'s or clang::'s, the GNU name's row) and a static
+// assertion's message, each wholly before that error. clang diagnoses their escapes as it parses them. The unknown
+// escape's warning is the command line's: the pragmas are the checked view's.
+static void check_driver_unparsed_strings(const Parser* parser, Preprocessor* pp, uint32_t begin, Arena* scratch)
+{
+    static const CheckInput none = { 0 };
+    const uint8_t* kinds = parser->tokens.kinds;
     uint32_t end = parser->tokens.count;
     for (uint32_t d = 0; d < parser->diagnostic_count && end == parser->tokens.count; d += 1)
     {
@@ -845,41 +896,28 @@ static void check_driver_unparsed_strings(const Parser* parser, Preprocessor* pp
     {
         const uint8_t kind = kinds[t];
         const bool gnu = kind == PARSE_KIND_ATTRIBUTE && t + 2 < end && kinds[t + 1] == PARSE_KIND_L_PAREN && kinds[t + 2] == PARSE_KIND_L_PAREN;
+        const bool standard = kind == PARSE_KIND_L_SQUARE && t + 1 < end && kinds[t + 1] == PARSE_KIND_L_SQUARE;
         const bool assertion = kind == PARSE_KIND_STATIC_ASSERT && t + 1 < end && kinds[t + 1] == PARSE_KIND_L_PAREN;
-        uint32_t k = gnu ? t + 3 : assertion ? t + 2 : t + 1;
-        // A GNU list's items, to its inner `)`: a name, and its arguments in parentheses, split at their commas.
-        while (gnu && k < end && kinds[k] != PARSE_KIND_R_PAREN)
+        uint32_t k = gnu ? t + 3 : standard || assertion ? t + 2 : t + 1;
+        // A list's items, to its inner `)` or its `]`: a name (a C23 one's after its scope and `::`), and its arguments in
+        // parentheses, split at their commas.
+        while ((gnu || standard) && k < end && kinds[k] != (gnu ? PARSE_KIND_R_PAREN : PARSE_KIND_R_SQUARE))
         {
-            const uint32_t name = k;
-            const CheckInputArgumentsRow* row = kinds[name] != PARSE_KIND_COMMA && parser->tokens.names[name] != 0 ?
-                                                check_input_arguments_row(check_input_attribute_spelling(pp->table, parser->tokens.names[name])) : NULL;
-            k += 1;
+            const bool scoped = standard && k + 3 < end && kinds[k] == PARSE_KIND_IDENTIFIER && kinds[k + 1] == PARSE_KIND_COLON &&
+                                kinds[k + 2] == PARSE_KIND_COLON && (parser->tokens.flags[k + 2] & BUSTER_PARSE_COLONCOLON_SECOND) != 0;
+            const uint32_t name = scoped ? k + 3 : k;
+            const String8 scope = scoped ? check_input_attribute_spelling(pp->table, parser->tokens.names[k]) : (String8){ "", 0 };
+            const String8 spelled = kinds[name] != PARSE_KIND_COMMA && parser->tokens.names[name] != 0 ?
+                                    check_input_attribute_spelling(pp->table, parser->tokens.names[name]) : (String8){ "", 0 };
+            const bool known = gnu || (scoped ? check_input_attribute_equal(scope, "gnu") || check_input_attribute_equal(scope, "__gnu__") ||
+                                                check_input_attribute_equal(scope, "clang") || check_input_attribute_equal(scope, "_Clang") :
+                                                check_input_attribute_equal(spelled, "deprecated") || check_input_attribute_equal(spelled, "nodiscard") ||
+                                                check_input_attribute_equal(spelled, "__deprecated__") || check_input_attribute_equal(spelled, "__nodiscard__"));
+            const CheckInputArgumentsRow* row = known && spelled.length != 0 ? check_input_arguments_row(spelled) : NULL;
+            k = name + 1;
             if (kinds[name] != PARSE_KIND_COMMA && k < end && kinds[k] == PARSE_KIND_L_PAREN)
             {
-                uint32_t argument = k + 1;
-                uint32_t index = 0;
-                uint32_t depth = 0;
-                bool refused = false;
-                k = argument;
-                while (k < end && !(depth == 0 && kinds[k] == PARSE_KIND_R_PAREN))
-                {
-                    const uint8_t at = kinds[k];
-                    depth += at == PARSE_KIND_L_PAREN || at == PARSE_KIND_L_SQUARE || at == PARSE_KIND_L_BRACE;
-                    depth -= depth != 0 && (at == PARSE_KIND_R_PAREN || at == PARSE_KIND_R_SQUARE || at == PARSE_KIND_R_BRACE);
-                    const bool last = k + 1 < end && depth == 0 && kinds[k + 1] == PARSE_KIND_R_PAREN;
-                    if (depth == 0 && (at == PARSE_KIND_COMMA || last))
-                    {
-                        const uint32_t stop = at == PARSE_KIND_COMMA ? k : k + 1;
-                        const bool lone = stop == argument + 1 && kinds[argument] == PARSE_KIND_IDENTIFIER;
-                        const bool identifier = row != NULL && lone && ((index == 0 && (row->flags & BUSTER_CHECK_ARGUMENTS_IDENTIFIER) != 0) || (row->flags & identifiers) != 0);
-                        const bool string = row != NULL && index < 32 && ((row->strings >> index) & 1u) != 0 && (row->flags & (identifiers | BUSTER_CHECK_ARGUMENTS_TYPE)) == 0;
-                        refused = refused || (string && !identifier && check_driver_unparsed_escapes(parser, pp, &none, argument, stop, scratch));
-                        index += 1;
-                        argument = stop + 1;
-                    }
-                    k += 1;
-                }
-                k += k < end;
+                k = check_driver_unparsed_arguments(parser, pp, row, k, end, scratch);
             }
         }
         // A static assertion's message, after the condition's top-level comma, to its `)`.
@@ -897,7 +935,7 @@ static void check_driver_unparsed_strings(const Parser* parser, Preprocessor* pp
         {
             check_driver_unparsed_escapes(parser, pp, &none, comma + 1, k, scratch);
         }
-        t = gnu || assertion ? k : t + 1;
+        t = gnu || standard || assertion ? k : t + 1;
     }
 }
 

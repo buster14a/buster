@@ -377,7 +377,8 @@ static __attribute__((noinline, cold)) bool check_literal_diagnose(const uint8_t
 // The diagnostics of an unevaluated string literal's escape sequences (#147): clang's StringLiteralParser with
 // StringLiteralEvalMethod::Unevaluated reads an attribute's string argument, a static assertion's message and a #line
 // directive's file name so, and takes only the simple escapes there (\\ \' \" \? \a \b \f \n \r \t \v) and the
-// universal character names, which the decoders read. Every other escape sequence is "invalid escape sequence 'S' in an
+// universal character names, which the decoders read, after clang's own checks of them (check_literal_unevaluated_ucn).
+// Every other escape sequence is "invalid escape sequence 'S' in an
 // unevaluated string literal", S as written, after the diagnostics clang's ProcessCharEscape gives it first; then clang
 // drops what the literal belonged to (an attribute, a static assertion, the directive). Each is at the escape's
 // backslash. A literal's characters are a byte wide there, whatever its prefix, as clang's are: an octal or hexadecimal
@@ -394,12 +395,22 @@ typedef enum CheckEscapeDiagnosticKind
     // "hex escape sequence out of range" and "octal escape sequence out of range".
     CHECK_ESCAPE_DIAGNOSTIC_HEX_RANGE,
     CHECK_ESCAPE_DIAGNOSTIC_OCTAL_RANGE,
-    // A delimited escape's (\x{...} and \o{...}): "delimited escape sequence cannot be empty", "invalid digit 'c' in escape
-    // sequence" (`character`), "expected '{' after '\o' escape sequence" and "expected '}'".
+    // A delimited escape's (\x{...}, \o{...}, \u{...} and \N{...}): "delimited escape sequence cannot be empty", "invalid
+    // digit 'c' in escape sequence" (`character`), "expected '{' after '\c' escape sequence" (`character` the escape's
+    // letter, o or N) and "expected '}'".
     CHECK_ESCAPE_DIAGNOSTIC_EMPTY,
     CHECK_ESCAPE_DIAGNOSTIC_DIGIT,
     CHECK_ESCAPE_DIAGNOSTIC_OPEN_BRACE,
     CHECK_ESCAPE_DIAGNOSTIC_CLOSE_BRACE,
+    // A universal character name's (check_literal_unevaluated_ucn): "\c used with no following hex digits" (`character` u
+    // or U), "incomplete universal character name", "invalid universal character" (a surrogate or past U+10FFFF), and
+    // before C23 "universal character name refers to a control character" and "character 'c' cannot be specified by a
+    // universal character name" (`character` the basic one).
+    CHECK_ESCAPE_DIAGNOSTIC_UCN_DIGITS,
+    CHECK_ESCAPE_DIAGNOSTIC_UCN_INCOMPLETE,
+    CHECK_ESCAPE_DIAGNOSTIC_UCN_INVALID,
+    CHECK_ESCAPE_DIAGNOSTIC_UCN_CONTROL,
+    CHECK_ESCAPE_DIAGNOSTIC_UCN_BASIC,
     // "invalid escape sequence 'S' in an unevaluated string literal", S the escape's `length` bytes.
     CHECK_ESCAPE_DIAGNOSTIC_UNEVALUATED,
 } CheckEscapeDiagnosticKind;
@@ -428,13 +439,82 @@ static void check_literal_escape_append(CheckEscapeDiagnostic* output, uint32_t*
     *count += 1;
 }
 
+// A universal character name at the backslash at `escape` (before `end`), \u, \U or \N, as clang's ProcessUCNEscape
+// checks it in any string literal (an unevaluated one's too): a numeric one's digits (four of \u, eight of \U, or \u{...}'s
+// delimited ones) and its value, a named one's braces. A named one's name is the decoders' (which take none). Its
+// diagnostics appended at the backslash, `*failed` set by any. Returns the offset past what clang reads of it.
+static uint32_t check_literal_unevaluated_ucn(const uint8_t* bytes, uint32_t escape, uint32_t end, bool c23, CheckEscapeDiagnostic* output, uint32_t* count, bool* failed)
+{
+    const uint8_t letter = bytes[escape + 1];
+    uint32_t at = escape + 2;
+    uint8_t kind = CHECK_ESCAPE_DIAGNOSTIC_NONE;
+    uint8_t character = 0;
+    bool invalid = false;
+    if (letter == 'N')
+    {
+        const bool braced = at < end && bytes[at] == '{';
+        uint32_t close = braced ? at + 1 : at;
+        while (braced && close < end && bytes[close] != '}')
+        {
+            close += 1;
+        }
+        kind = !braced ? CHECK_ESCAPE_DIAGNOSTIC_OPEN_BRACE : close == end ? CHECK_ESCAPE_DIAGNOSTIC_UCN_INCOMPLETE :
+               close == at + 1 ? CHECK_ESCAPE_DIAGNOSTIC_EMPTY : CHECK_ESCAPE_DIAGNOSTIC_NONE;
+        character = letter;
+        at = braced && close < end ? close + 1 : braced ? close : at;
+    }
+    else
+    {
+        const bool delimited = letter == 'u' && at < end && bytes[at] == '{';
+        at += delimited ? 1 : 0;
+        const bool digits_follow = delimited || (at < end && check_literal_is_hex_digit(bytes[at]));
+        const uint32_t width = letter == 'u' ? 4 : 8;
+        uint32_t value = 0;
+        uint32_t digits = 0;
+        bool overflow = false;
+        bool closed = false;
+        bool reading = digits_follow;
+        while (reading && at < end && (delimited || digits != width))
+        {
+            const uint8_t digit = bytes[at];
+            const bool hex = check_literal_is_hex_digit(digit);
+            closed = delimited && digit == '}';
+            if (!closed && !hex && delimited)
+            {
+                check_literal_escape_append(output, count, CHECK_ESCAPE_DIAGNOSTIC_DIGIT, escape, 0, digit);
+            }
+            invalid |= !closed && !hex;
+            overflow |= hex && (value & 0xF0000000u) != 0;
+            value = hex && (value & 0xF0000000u) == 0 ? value << 4 | (check_literal_is_digit(digit) ? (uint32_t)(digit - '0') : (uint32_t)((digit | 32u) - 'a' + 10)) : value;
+            digits += (!closed && !hex) || (hex && !overflow) ? 1 : 0;
+            // A plain name's first other byte ends it; a delimited one reads on to its brace.
+            reading = !closed && (hex || delimited);
+            at += reading || closed ? 1 : 0;
+        }
+        const bool basic = value < 0xA0 && value != 0x24 && value != 0x40 && value != 0x60;
+        kind = !digits_follow ? CHECK_ESCAPE_DIAGNOSTIC_UCN_DIGITS : overflow ? CHECK_ESCAPE_DIAGNOSTIC_HEX_RANGE :
+               delimited && !closed ? CHECK_ESCAPE_DIAGNOSTIC_CLOSE_BRACE :
+               digits == 0 ? CHECK_ESCAPE_DIAGNOSTIC_EMPTY : !delimited && digits != width ? CHECK_ESCAPE_DIAGNOSTIC_UCN_INCOMPLETE :
+               invalid ? CHECK_ESCAPE_DIAGNOSTIC_NONE : (value >= 0xD800 && value <= 0xDFFF) || value > 0x10FFFF ? CHECK_ESCAPE_DIAGNOSTIC_UCN_INVALID :
+               !c23 && basic ? (value >= 0x20 && value < 0x7F ? CHECK_ESCAPE_DIAGNOSTIC_UCN_BASIC : CHECK_ESCAPE_DIAGNOSTIC_UCN_CONTROL) : CHECK_ESCAPE_DIAGNOSTIC_NONE;
+        character = kind == CHECK_ESCAPE_DIAGNOSTIC_UCN_DIGITS ? letter : (uint8_t)value;
+    }
+    if (kind != CHECK_ESCAPE_DIAGNOSTIC_NONE)
+    {
+        check_literal_escape_append(output, count, kind, escape, 0, character);
+    }
+    *failed |= invalid || kind != CHECK_ESCAPE_DIAGNOSTIC_NONE;
+    return at;
+}
+
 // One escape sequence, at the backslash at `escape` (before `end`, the closing quote), as clang's ProcessCharEscape reads
 // it in an unevaluated string literal: its diagnostics appended, in clang's order. Returns the offset past it. A
-// universal character name is past its letter alone: its digits hold no backslash, and the decoders check them.
+// universal character name is check_literal_unevaluated_ucn's (`c23`: whether the unit's standard is C23's).
 // `*failed` is clang's StringLiteralParser.hadError, the whole literal's, across its tokens: an earlier error (the
 // unevaluated one, a delimited escape's, an out of range hexadecimal or delimited octal one) silences the range errors
 // that test it (a plain octal escape's doesn't), and this escape's errors set it.
-static uint32_t check_literal_unevaluated_escape(const uint8_t* bytes, uint32_t escape, uint32_t end, CheckEscapeDiagnostic* output, uint32_t* count, bool* had_error)
+static uint32_t check_literal_unevaluated_escape(const uint8_t* bytes, uint32_t escape, uint32_t end, bool c23, CheckEscapeDiagnostic* output, uint32_t* count,
+                                                 bool* had_error)
 {
     const uint8_t c = escape + 1 < end ? bytes[escape + 1] : '\\';
     uint32_t at = escape + 2 <= end ? escape + 2 : end;
@@ -444,7 +524,11 @@ static uint32_t check_literal_unevaluated_escape(const uint8_t* bytes, uint32_t 
     bool delimited = false;
     bool closed = false;
     bool failed = *had_error;
-    if (c == 'x')
+    if (c == 'u' || c == 'U' || c == 'N')
+    {
+        at = check_literal_unevaluated_ucn(bytes, escape, end, c23, output, count, &failed);
+    }
+    else if (c == 'x')
     {
         uint32_t value = 0;
         bool overflow = false;
@@ -515,7 +599,7 @@ static uint32_t check_literal_unevaluated_escape(const uint8_t* bytes, uint32_t 
     else if (c == 'o' && (at == end || bytes[at] != '{'))
     {
         failed = true;
-        check_literal_escape_append(output, count, CHECK_ESCAPE_DIAGNOSTIC_OPEN_BRACE, escape, 0, 0);
+        check_literal_escape_append(output, count, CHECK_ESCAPE_DIAGNOSTIC_OPEN_BRACE, escape, 0, 'o');
     }
     else if (c == 'o')
     {
@@ -572,8 +656,9 @@ static uint32_t check_literal_unevaluated_escape(const uint8_t* bytes, uint32_t 
 // the literal's error state (check_literal_unevaluated_escape), false before its first token, carried from token to
 // token. Its backslashes are found with memchr (libc's vector search); only an escape sequence's own bytes are read one
 // at a time. Its callers' strings are an attribute's arguments', a static assertion's message and a #line directive's
-// file name: short and few, a cold path of no vector twin.
-static uint32_t check_literal_unevaluated_escapes(const uint8_t* bytes, uint32_t length, CheckEscapeDiagnostic* output, bool* had_error)
+// file name: short and few, a cold path of no vector twin. `c23`: whether the unit's standard is C23's, which takes a universal
+// character name of a control or basic character in a literal.
+static uint32_t check_literal_unevaluated_escapes(const uint8_t* bytes, uint32_t length, bool c23, CheckEscapeDiagnostic* output, bool* had_error)
 {
     const uint8_t* quote = length != 0 ? memchr(bytes, '"', length) : NULL;
     const uint32_t begin = quote != NULL ? (uint32_t)(quote - bytes) + 1 : length;
@@ -583,7 +668,7 @@ static uint32_t check_literal_unevaluated_escapes(const uint8_t* bytes, uint32_t
     while (at < end)
     {
         const uint8_t* backslash = memchr(bytes + at, '\\', end - at);
-        at = backslash != NULL ? check_literal_unevaluated_escape(bytes, (uint32_t)(backslash - bytes), end, output, &count, had_error) : end;
+        at = backslash != NULL ? check_literal_unevaluated_escape(bytes, (uint32_t)(backslash - bytes), end, c23, output, &count, had_error) : end;
     }
     return count;
 }
