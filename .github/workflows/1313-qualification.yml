@@ -1,69 +1,50 @@
-name: PR 1313 bounded qualification
+name: PR 1313 native qualification
 on:
   push:
     branches: [qualify/1313-codex]
 permissions:
   contents: read
+  actions: read
 concurrency:
-  group: buster-fast-9700x-1313-codex
-  cancel-in-progress: true
+  group: buster-fast-9700x-1313-codex-measure
+  cancel-in-progress: false
 jobs:
-  access:
-    runs-on: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
-    timeout-minutes: 3
+  proof:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 12
     steps:
-      - name: Verify approved host and read qualification handoff
+      - name: Require both unchanged candidate validations
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          uname -n
-          grep -m1 '^model name' /proc/cpuinfo
-          grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
-          cat /var/lib/buster-9700x/owner
-          cat "$HOME/buster-fast-bench/README-9700x.md"
-          for script in run.sh run2.sh syntax.sh preprocess.sh; do
-            file="$HOME/buster-fast-bench/1313-devin-fresh/$script"
-            if [ -f "$file" ]; then
-              printf '\nSOURCE %s\n' "$file"
-              cat "$file"
+          test "$(gh api repos/buster14a/buster/actions/runs/42370777091 --jq .head_sha)" = ae0a1db8e2302b82caf3c2f64afcd8fa9a67468a
+          for attempt in $(seq 1 40); do
+            gh api repos/buster14a/buster/actions/runs/42370777091/jobs?per_page=100 > proof.json
+            if jq -e '[.jobs[] | select(.name == "validate (native)" or .name == "validate (x86-64)")] | length == 2 and all(.[]; .status == "completed" and .conclusion == "success")' proof.json; then
+              printf '%s\n' 'Both pinned-candidate hosted validations passed'; exit 0
             fi
+            if jq -e '[.jobs[] | select(.name == "validate (native)" or .name == "validate (x86-64)")] | any(.[]; .status == "completed" and .conclusion != "success")' proof.json; then exit 1; fi
+            sleep 15
           done
-  validate:
-    runs-on: ubuntu-26.04
+          exit 1
+  measure:
+    needs: proof
+    runs-on: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
     timeout-minutes: 20
-    strategy:
-      fail-fast: true
-      matrix:
-        arch: [x86-64, native]
-    env:
-      BUSTER_HOST_ARCH: ${{ matrix.arch }}
-      BUSTER_DEBUG_INFO: '0'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           ref: eb40d4a401d4dc696df0ea7e5ba3e09d7fe7cc1a
           persist-credentials: false
-      - name: Stage pinned tools
-        run: bash tools/ci/setup-hosted.sh
-      - name: Build candidate
-        run: ./build.sh
-      - name: Driver, emission selection, and standalone oracle coverage
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./build/compiler test-checker --program-selection
-          ./build/compiler test-checker-driver --executable "$PWD/build/compiler"
-          clang -std=c17 -O1 -Wall -Wextra -Werror -DBUSTER_DRIVER_COMPAT_STANDALONE src/buster/compiler/c_driver_compatibility_test.c -o build/driver-compat
-          build/driver-compat "$PWD/build/compiler" clang
-  measure:
-    needs: [access, validate]
-    runs-on: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
-    timeout-minutes: 8
-    steps:
+      - name: Stage the same official toolchain for all roles
+        run: bash tools/ci/setup-benchpress.sh
       - name: Build pinned roles and measure under the runner hook lock
         shell: bash
         run: |
           set -euo pipefail
+          export LC_ALL=C
           test "$(uname -s)" = Linux
           grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
           cat /var/lib/buster-9700x/owner
@@ -94,7 +75,13 @@ jobs:
             (cd "$root/$role" && BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh) > "$out/build-$role.log" 2>&1
             tail -n8 "$out/build-$role.log"
             sha256sum "$root/$role/build/compiler" | tee -a "$out/binaries.sha256"
+            object=$(rg --files --hidden --no-ignore "$root/$role/build/cmake" | sed -n '/\/Release\/.*main_unit_checker.c.o$/p' | head -n1)
+            test -f "$object"
+            objcopy --dump-section ".rodata.str1.1=$out/$role-checker-strings" "$object" /dev/null
+            sha256sum "$out/$role-checker-strings" | tee -a "$out/checker-strings.sha256"
+            readelf -WS "$root/$role/build/compiler" > "$out/sections-$role.txt"
           done
+          if cmp -s "$out/base-checker-strings" "$out/isolated-checker-strings"; then printf "CHECKER_STRING_POOLS_IDENTICAL\n"; else printf "CHECKER_STRING_POOLS_DIFFER\n"; fi
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
           sqlite="$corpus/sqlite/sqlite3.c"
           printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite" | sha256sum --check | tee "$out/input.txt"
