@@ -297,6 +297,8 @@ typedef struct ObjectSectionFormat ObjectSectionFormat;
 struct ObjectSectionFormat
 {
     const char* name;
+    // The name's bytes but its NUL, which the object's section names take without a strlen of each (#1629).
+    uint32_t name_length;
     uint32_t type;
     uint64_t flags;
     uint64_t entry_size;
@@ -305,12 +307,14 @@ struct ObjectSectionFormat
 static const ObjectSectionFormat object_class_sections[BUSTER_LINK_CLASS_COUNT] = {
     [BUSTER_LINK_CLASS_NONE] = {
         .name = "",
+        .name_length = sizeof("") - 1,
         .type = SHT_NULL,
         .flags = 0,
         .entry_size = 0,
     },
     [BUSTER_LINK_CLASS_RODATA] = {
         .name = ".rodata",
+        .name_length = sizeof(".rodata") - 1,
         .type = SHT_PROGBITS,
         .flags = SHF_ALLOC,
         .entry_size = 0,
@@ -318,6 +322,7 @@ static const ObjectSectionFormat object_class_sections[BUSTER_LINK_CLASS_COUNT] 
     // Strings of one-byte characters, each ending with a NUL, which linkers merge.
     [BUSTER_LINK_CLASS_STRINGS] = {
         .name = ".rodata.str1.1",
+        .name_length = sizeof(".rodata.str1.1") - 1,
         .type = SHT_PROGBITS,
         .flags = SHF_ALLOC | SHF_MERGE | SHF_STRINGS,
         .entry_size = 1,
@@ -325,66 +330,77 @@ static const ObjectSectionFormat object_class_sections[BUSTER_LINK_CLASS_COUNT] 
     // Unwind tables, the type GNU as gives .eh_frame on x86-64.
     [BUSTER_LINK_CLASS_EH_FRAME] = {
         .name = ".eh_frame",
+        .name_length = sizeof(".eh_frame") - 1,
         .type = SHT_X86_64_UNWIND,
         .flags = SHF_ALLOC,
         .entry_size = 0,
     },
     [BUSTER_LINK_CLASS_TEXT] = {
         .name = ".text",
+        .name_length = sizeof(".text") - 1,
         .type = SHT_PROGBITS,
         .flags = SHF_ALLOC | SHF_EXECINSTR,
         .entry_size = 0,
     },
     [BUSTER_LINK_CLASS_INIT] = {
         .name = ".init",
+        .name_length = sizeof(".init") - 1,
         .type = SHT_PROGBITS,
         .flags = SHF_ALLOC | SHF_EXECINSTR,
         .entry_size = 0,
     },
     [BUSTER_LINK_CLASS_FINI] = {
         .name = ".fini",
+        .name_length = sizeof(".fini") - 1,
         .type = SHT_PROGBITS,
         .flags = SHF_ALLOC | SHF_EXECINSTR,
         .entry_size = 0,
     },
     [BUSTER_LINK_CLASS_TDATA] = {
         .name = ".tdata",
+        .name_length = sizeof(".tdata") - 1,
         .type = SHT_PROGBITS,
         .flags = SHF_WRITE | SHF_ALLOC | SHF_TLS,
         .entry_size = 0,
     },
     [BUSTER_LINK_CLASS_TBSS] = {
         .name = ".tbss",
+        .name_length = sizeof(".tbss") - 1,
         .type = SHT_NOBITS,
         .flags = SHF_WRITE | SHF_ALLOC | SHF_TLS,
         .entry_size = 0,
     },
     [BUSTER_LINK_CLASS_INIT_ARRAY] = {
         .name = ".init_array",
+        .name_length = sizeof(".init_array") - 1,
         .type = SHT_INIT_ARRAY,
         .flags = SHF_WRITE | SHF_ALLOC,
         .entry_size = 8,
     },
     [BUSTER_LINK_CLASS_FINI_ARRAY] = {
         .name = ".fini_array",
+        .name_length = sizeof(".fini_array") - 1,
         .type = SHT_FINI_ARRAY,
         .flags = SHF_WRITE | SHF_ALLOC,
         .entry_size = 8,
     },
     [BUSTER_LINK_CLASS_DATA_RELRO] = {
         .name = ".data.rel.ro",
+        .name_length = sizeof(".data.rel.ro") - 1,
         .type = SHT_PROGBITS,
         .flags = SHF_WRITE | SHF_ALLOC,
         .entry_size = 0,
     },
     [BUSTER_LINK_CLASS_DATA] = {
         .name = ".data",
+        .name_length = sizeof(".data") - 1,
         .type = SHT_PROGBITS,
         .flags = SHF_WRITE | SHF_ALLOC,
         .entry_size = 0,
     },
     [BUSTER_LINK_CLASS_BSS] = {
         .name = ".bss",
+        .name_length = sizeof(".bss") - 1,
         .type = SHT_NOBITS,
         .flags = SHF_WRITE | SHF_ALLOC,
         .entry_size = 0,
@@ -1527,7 +1543,7 @@ static bool object_count_debug(ObjectBuilder* builder)
 // The length of a section of atoms' name, which a function section takes from its atom's.
 static uint64_t object_section_name_bytes(const ObjectBuilder* builder, const ObjectSection* section)
 {
-    uint64_t result = strlen(object_class_sections[section->class].name);
+    uint64_t result = object_class_sections[section->class].name_length;
     if (section->explicit_section != 0)
     {
         result = section->explicit_section->name.length;
@@ -2255,7 +2271,7 @@ static void object_fill_headers(const ObjectBuilder* builder, uint8_t* bytes)
         }
         else
         {
-            const uint64_t bytes_with_nul = strlen(object_class_sections[section->class].name) + 1;
+            const uint64_t bytes_with_nul = (uint64_t)object_class_sections[section->class].name_length + 1;
             memcpy(names + name, object_class_sections[section->class].name, bytes_with_nul);
             name += bytes_with_nul;
         }
