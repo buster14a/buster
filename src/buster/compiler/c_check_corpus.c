@@ -110,7 +110,8 @@ static void check_corpus_expression_diagnostic(CheckCorpusPath* path, const Pars
     }
     if (message == NULL)
     {
-        message = check_semantic_expression(parser, pp, &path->input, &path->stream, &path->types, report, &spell, &path->token, &path->scratch);
+        PPOutputDiagnosticNote note = { 0 };
+        message = check_semantic_expression(parser, pp, &path->input, &path->stream, &path->types, report, &spell, &path->token, &note, &path->scratch);
     }
     snprintf(path->message, sizeof(path->message), "%s", message);
     path->resource |= pp->diagnostic_collection_failed;

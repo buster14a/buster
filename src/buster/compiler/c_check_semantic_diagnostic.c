@@ -238,8 +238,10 @@ static uint32_t check_semantic_operand_spelling(const Parser* parser, const Chec
     return result;
 }
 
+// `note`, where the message has one (its message NULL where not): a const variable's "declared const here" (#147).
 static const char* check_semantic_expression(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                            const TypeTable* types, const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location, Arena* scratch)
+                                            const TypeTable* types, const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location,
+                                            PPOutputDiagnosticNote* note, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
     const uint32_t node = report->node;
@@ -250,6 +252,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
     const TypeId operand_type = operand < stream->count ? check_stream_type(stream, operand) : 0;
     const char* result = check_driver_report_message(report);
     *location = token;
+    *note = (PPOutputDiagnosticNote){ 0 };
     if (report->message == CHECK_MESSAGE_STATIC_ASSERT)
     {
         result = check_semantic_assert(parser, pp, input, report, location, scratch);
@@ -275,6 +278,54 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const bool up =op == CHECK_OP_PRE_INCREMENT || op == CHECK_OP_POST_INCREMENT;
             result = type.length != 0 ? check_warning_text(scratch, "cannot %s value of type %.*s", up ? "increment" : "decrement", (int)type.length, type.pointer) : NULL;
         }
+        else if (report->diagnostic == CHECK_DIAG_INCOMPLETE && ((op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT) || op == CHECK_OP_ADD ||
+                 op == CHECK_OP_SUBTRACT || op == CHECK_OP_ADD_ASSIGN || op == CHECK_OP_SUBTRACT_ASSIGN || op == CHECK_OP_SUBSCRIPT))
+        {
+            // clang's arithmetic on a pointer to an incomplete type (#147, err_typecheck_arithmetic_incomplete_or_sizeless_type,
+            // a subscript's err_subscript_incomplete_or_sizeless_type at its base): the pointee as written, with clang's
+            // "forward declaration" note at the tag's declaring name.
+            const uint32_t second = node < count ? graph->operand1[node] : BUSTER_CHECK_NONE;
+            const TypeId second_type = second < stream->count ? check_stream_type(stream, second) : 0;
+            const bool first_pointer = operand_type != 0 && check_action_kind(types, operand_type) == BUSTER_TYPE_KIND_POINTER;
+            const uint32_t pointer = first_pointer ? operand : second;
+            const TypeId pointer_type = first_pointer ? operand_type : second_type;
+            const TypeId pointee = pointer_type != 0 && check_action_kind(types, pointer_type) == BUSTER_TYPE_KIND_POINTER ?
+                                   type_element(types, type_unqualified(type_strip_aligned(types, pointer_type))) : 0;
+            const TypeId bare = pointee != 0 ? type_unqualified(type_strip_aligned(types, pointee)) : 0;
+            const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_VOID;
+            const bool tag = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM;
+            const String8 type = tag ? check_driver_warning_type(parser, pp, input, types, spell, scratch, pointee, check_semantic_operand_spelling(parser, input, pointer)) :
+                                       (String8){ "", 0 };
+            if (type.length != 0)
+            {
+                result = check_warning_text(scratch, op == CHECK_OP_SUBSCRIPT ? "subscript of pointer to incomplete type %.*s" :
+                                                     "arithmetic on a pointer to an incomplete type %.*s", (int)type.length, type.pointer);
+                // (A subscript's at its `[`, the opener of its node's `]`.)
+                uint32_t open = token;
+                while (op == CHECK_OP_SUBSCRIPT && open != 0 && open < parser->tokens.count &&
+                       !(parser->tokens.kinds[open] == PARSE_KIND_L_SQUARE && parser->tree.parents[open] == token))
+                {
+                    open -= 1;
+                }
+                *location = open;
+                // The tag's declaring name: its first token that declares a tag of this type.
+                const uint32_t name = types->tags.name[types->types.index[type_index(bare)]];
+                uint32_t declared = BUSTER_CHECK_NONE;
+                for (uint32_t t = 0; name != 0 && declared == BUSTER_CHECK_NONE && t < input->token_count; t += 1)
+                {
+                    declared = parser->tokens.names[t] == name && input->declarations[t] == t && input->declaration_kinds[t] == C_BINDING_TAG_KIND &&
+                               type_unqualified(input->declared_types[t]) == bare ? t : BUSTER_CHECK_NONE;
+                }
+                const String8 named = declared != BUSTER_CHECK_NONE ? check_driver_warning_type(parser, pp, input, types, spell, scratch, bare, 0) : (String8){ "", 0 };
+                if (named.length != 0)
+                {
+                    *note = (PPOutputDiagnosticNote){
+                        .token = parser->tokens.sources[declared],
+                        .message = check_warning_text(scratch, "forward declaration of %.*s", (int)named.length, named.pointer),
+                    };
+                }
+            }
+        }
         else if (report->diagnostic == CHECK_DIAG_LVALUE_REQUIRED &&
                  (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)))
         {
@@ -290,13 +341,69 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             }
             else if ((type_qualifiers(operand_type) & BUSTER_TYPE_CONST) != 0)
             {
-                const uint32_t target = graph->tokens[operand];
+                // clang's DiagnoseConstAssignment: through an array's subscripts and a record's `.` members to the variable
+                // they reach, named with its type as declared (an array's whole, its typedef kept), and its "declared const
+                // here" note at its name. A member that is const itself clang names (its declaration this checker doesn't
+                // keep), and any other lvalue's (an arrow's, a pointer's target) is the generic error.
+                uint32_t named = operand;
+                bool walked = true;
+                bool through_arrow = false;
+                while (walked && !through_arrow && named < count &&
+                       (graph->ops[named] == CHECK_OP_SUBSCRIPT || graph->ops[named] == CHECK_OP_MEMBER || graph->ops[named] == CHECK_OP_ARROW))
+                {
+                    const uint32_t base = graph->operand0[named];
+                    const TypeId base_type = base < stream->count ? check_stream_type(stream, base) : 0;
+                    if (graph->ops[named] == CHECK_OP_SUBSCRIPT)
+                    {
+                        walked = base_type != 0 && type_kind_is_array(check_action_kind(types, base_type));
+                    }
+                    else
+                    {
+                        // The field among the record's own members, by the name after the `.` or `->`: not one that is const
+                        // itself. An arrow's base is the pointer variable clang names (its pointee the const object), alone.
+                        through_arrow = graph->ops[named] == CHECK_OP_ARROW;
+                        const TypeId pointee = through_arrow && base_type != 0 && check_action_kind(types, base_type) == BUSTER_TYPE_KIND_POINTER ?
+                                               type_element(types, type_unqualified(type_strip_aligned(types, base_type))) : 0;
+                        const TypeId record = through_arrow ? (pointee != 0 ? type_unqualified(type_strip_aligned(types, pointee)) : 0) :
+                                              base_type != 0 ? type_unqualified(type_strip_aligned(types, base_type)) : 0;
+                        const uint8_t record_kind = record != 0 ? type_kind(types, record) : BUSTER_TYPE_KIND_VOID;
+                        const uint32_t field_name = graph->tokens[named] + 1 < parser->tokens.count ? parser->tokens.names[graph->tokens[named] + 1] : 0;
+                        bool plain = false;
+                        if ((record_kind == BUSTER_TYPE_KIND_STRUCT || record_kind == BUSTER_TYPE_KIND_UNION) && field_name != 0)
+                        {
+                            const uint32_t tag = types->types.index[type_index(record)];
+                            const uint32_t begin = types->tags.member_begin[tag];
+                            for (uint32_t m = begin; m < begin + types->tags.member_count[tag]; m += 1)
+                            {
+                                // (An array member's constness is its innermost element's.)
+                                TypeId field = types->members.type[m];
+                                for (uint32_t depth = 0; depth < 64 && type_kind_is_array(check_action_kind(types, field)); depth += 1)
+                                {
+                                    field = type_element(types, type_strip_aligned(types, field));
+                                }
+                                plain |= types->members.name[m] == field_name && (type_qualifiers(field) & BUSTER_TYPE_CONST) == 0;
+                            }
+                        }
+                        walked = plain;
+                    }
+                    named = walked ? base : named;
+                }
+                const uint32_t target = named < count ? graph->tokens[named] : BUSTER_CHECK_NONE;
                 const uint32_t declaration = target < input->token_count ? input->declarations[target] : BUSTER_CHECK_NONE;
-                const String8 name = check_semantic_name(parser, pp, target);
-                result = graph->ops[operand] == CHECK_OP_VALUE && declaration < input->token_count && name.length != 0 ?
-                         type.length != 0 ? check_warning_text(scratch, "cannot assign to variable '%.*s' with const-qualified type %.*s",
-                                                               (int)name.length, name.pointer, (int)type.length, type.pointer) : NULL :
-                         "read-only variable is not assignable";
+                const String8 name = target < parser->tokens.count ? check_semantic_name(parser, pp, target) : (String8){ "", 0 };
+                const bool variable = walked && named < count && graph->ops[named] == CHECK_OP_VALUE && declaration < input->token_count && name.length != 0;
+                const String8 declared = variable ? check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, named),
+                                                                              check_semantic_operand_spelling(parser, input, named)) : (String8){ "", 0 };
+                result = !variable ? "read-only variable is not assignable" :
+                         declared.length != 0 ? check_warning_text(scratch, "cannot assign to variable '%.*s' with const-qualified type %.*s",
+                                                                   (int)name.length, name.pointer, (int)declared.length, declared.pointer) : NULL;
+                if (variable && result != NULL)
+                {
+                    *note = (PPOutputDiagnosticNote){
+                        .token = parser->tokens.sources[declaration],
+                        .message = check_warning_text(scratch, "variable '%.*s' declared const here", (int)name.length, name.pointer),
+                    };
+                }
             }
         }
         else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_CONVERT && token < parser->tokens.count &&
