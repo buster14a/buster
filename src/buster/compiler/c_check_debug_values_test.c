@@ -183,8 +183,57 @@ static void check_debug_values_test_read(CheckDebugTestTally* tally, const char*
                             "a nested enum retains only its own enumerators", report);
 }
 
+// The span index's lists (#1640) against the scan of every span, their twin: random functions of spans whose tokens run
+// up and back as loops place code, with zero-length spans and address breaks, and random scopes, each list's bytes the
+// scan's.
+static void check_debug_values_test_ranges(CheckDebugTestTally* tally)
+{
+    uint64_t state = UINT64_C(0x9e3779b97f4a7c15);
+    CheckDebugValueSpan spans[96];
+    uint32_t breaks[97];
+    uint32_t segments[97];
+    uint8_t scanned[2048];
+    uint8_t indexed[2048];
+    bool same = true;
+    for (uint32_t trial = 0; same && trial < 4000; trial += 1)
+    {
+        state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+        const uint32_t count = (uint32_t)(state >> 58) + (trial % 3 == 0 ? 33 : 0);
+        uint32_t address = 0;
+        uint32_t token = 10;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+            const uint32_t draw = (uint32_t)(state >> 33);
+            address += (draw & 7) == 0 ? 1 + (draw >> 3) % 4 : 0;
+            const uint32_t length = (draw >> 5) % 4 == 0 ? 0 : 1 + (draw >> 7) % 9;
+            token = (draw >> 11) % 9 == 0 && token > 12 ? token - 1 - (draw >> 15) % (token - 10) : token + (draw >> 19) % 3;
+            spans[i] = (CheckDebugValueSpan){ .begin = address, .end = address + length, .token = token };
+            address += length;
+        }
+        const uint32_t segment_count = check_debug_value_index(spans, count, breaks, segments);
+        const CheckDebugBody body = { .spans = spans, .span_count = count };
+        for (uint32_t query = 0; same && query < 12; query += 1)
+        {
+            state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+            const uint32_t draw = (uint32_t)(state >> 30);
+            const uint32_t first = 8 + draw % (token + 4);
+            const uint32_t last = query == 0 ? UINT32_MAX - 1 : first + (draw >> 12) % (token + 4);
+            static const uint8_t expression[] = { 0x91, 0x70 };
+            const uint8_t* bytes = (query & 1) != 0 ? expression : NULL;
+            DebugWriter a = { .bytes = scanned };
+            DebugWriter b = { .bytes = indexed };
+            check_debug_value_range_scan(&body, &a, trial, first, last, bytes, bytes != NULL ? sizeof(expression) : 0);
+            check_debug_value_range_indexed(&body, breaks, segments, segment_count, &b, trial, first, last, bytes, bytes != NULL ? sizeof(expression) : 0);
+            same = a.size == b.size && memcmp(scanned, indexed, a.size) == 0;
+        }
+    }
+    check_debug_test_expect(tally, same, "the span index's range and location lists are the scan's, byte for byte", "");
+}
+
 static void check_debug_values_test(CheckDebugTestTally* tally, const char* directory, Arena* arena)
 {
+    check_debug_values_test_ranges(tally);
     char source[PATH_MAX];
     char other[PATH_MAX];
     char outputs[3][PATH_MAX];
