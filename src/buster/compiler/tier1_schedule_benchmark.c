@@ -384,7 +384,7 @@ int run_tier1_schedule_benchmark(int argc, char** argv)
         uint64_t moved;
         uint64_t missing;
         valid = tier1_schedule_bench_check(&bench, &moved, &missing);
-        printf("Tier 1 scheduling machine-record experiment: %u blocks x %u records, %zu scratch bytes, moved=%" PRIu64 ", missing GPR latency=%" PRIu64 ", after-scalar=%u ms\n",
+        printf("Tier 1 scheduling machine-record experiment: %u blocks x %u records, %zu scratch bytes, moved=%" PRIu64 ", missing latency=%" PRIu64 ", after-scalar=%u ms\n",
                bench.blocks, bench.count, sizeof(bench.graph), moved, missing, after_scalar);
         if (valid)
         {

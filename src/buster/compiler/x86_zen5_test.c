@@ -149,6 +149,13 @@ static bool x86_zen5_test_cases(void)
     valid &= x86_zen5_test_kind((X86Instruction){ .form = X86_FORM_SHL_RM64_IMM8, .rm = 2, .immediate = 63 }, X86_FORM_SHL_RM64_IMM8, X86_COST_REGISTER, "shl by 63");
     valid &= x86_zen5_test_kind((X86Instruction){ .form = X86_FORM_VPADDD_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = 3, .decorations = 4 | BUSTER_X86_DECORATION_ZEROING },
                                 X86_FORM_VPADDD_Z_Z_ZM512, X86_COST_REGISTER, "an opmask and zeroing");
+    // A merging opmask: its own kind, which a form without such a row doesn't have.
+    valid &= x86_zen5_test_kind((X86Instruction){ .form = X86_FORM_VPADDD_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = 3, .decorations = 4 }, X86_FORM_VPADDD_Z_Z_ZM512,
+                                X86_COST_MASKED, "a merging opmask");
+    valid &= x86_zen5_test_kind((X86Instruction){ .form = X86_FORM_VMOVDQU32_ZM512_Z, .reg = 1, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .decorations = 4 },
+                                X86_FORM_VMOVDQU32_ZM512_Z, X86_COST_MASKED_MEMORY, "a masked store");
+    const X86Instruction unmasked_row = { .form = X86_FORM_VADDPS_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = 3, .decorations = 4 };
+    valid &= x86_zen5_test_expect(x86_zen5_id(&unmasked_row) == 0, "a merging opmask without a masked row has no case");
     const X86Instruction unknown[] = {
         { .form = X86_FORM_NONE },
         { .form = UINT16_MAX },

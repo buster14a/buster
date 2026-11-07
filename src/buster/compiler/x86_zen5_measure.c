@@ -122,6 +122,8 @@ typedef enum X86CostSpecial
 #define BUSTER_X86_COST_OPMASKS 5
 #define BUSTER_X86_COST_OPMASK_VVVV 6
 #define BUSTER_X86_COST_OPMASK_RM 7
+// The opmask a masked case's target merges under: alternate elements (0x5555...), as its initial pattern.
+#define BUSTER_X86_COST_OPMASK_MERGE 7
 
 static const uint8_t x86_zen5_gpr_order[BUSTER_X86_COST_POOL] = {
     X86_REGISTER_RAX,
@@ -166,6 +168,8 @@ struct X86CostShape
     bool stores;
     bool lea;
     bool is4;
+    // A merging opmask (BUSTER_X86_COST_OPMASK_MERGE) on the target: its destination is a source too.
+    bool masked;
     uint8_t special;
     uint8_t fill;
     // Additive identity as the constant sources.
@@ -456,7 +460,19 @@ static void x86_zen5_shape(uint32_t form, uint32_t operands, X86CostShape* shape
     shape->destination = BUSTER_X86_COST_NO_ROLE;
     shape->second = BUSTER_X86_COST_NO_ROLE;
     const uint16_t operand[BUSTER_X86_COST_ROLES] = { description->reg, description->rm, description->vvvv };
-    shape->memory = operands != X86_COST_REGISTER && operands != X86_COST_ZERO;
+    shape->memory = operands != X86_COST_REGISTER && operands != X86_COST_ZERO && operands != X86_COST_MASKED;
+    shape->masked = operands == X86_COST_MASKED || operands == X86_COST_MASKED_MEMORY;
+    // Whether the merging opmask makes the destination a source: the effects of a masked record of distinct registers
+    // say (a vpaddd's does; a compare into an opmask and vpblendm's selection don't).
+    bool merged = false;
+    if (shape->masked && description->reg != BUSTER_X86_OPERAND_NONE && x86_zen5_file(description->reg) == X86_COST_FILE_VECTOR)
+    {
+        const X86Instruction sample = { .form = (uint16_t)form, .reg = 1, .vvvv = 2, .rm = 3, .decorations = BUSTER_X86_COST_OPMASK_MERGE };
+        uint64_t reads = 0;
+        uint64_t writes = 0;
+        x86_instructions_effects_scalar(&sample, 1, &reads, &writes);
+        merged = (reads & BUSTER_X86_RESOURCE_VECTOR(1)) != 0;
+    }
     shape->lea = effects->operation == X86_OPERATION_LEA;
     shape->is4 = description->syntax >= X86_SYNTAX_REG_VVVV_RM_IS4 && description->syntax <= X86_SYNTAX_REG_VVVV_IS4_RM_IMM;
     for (uint32_t role = 0; role < BUSTER_X86_COST_ROLES; role += 1)
@@ -467,7 +483,8 @@ static void x86_zen5_shape(uint32_t form, uint32_t operands, X86CostShape* shape
         // A register write that keeps the register's other bits (an 8- or 16-bit one, SSE's scalar ones) reads it.
         const uint32_t rest = (bits & BUSTER_X86_ROLE_REST) >> BUSTER_X86_ROLE_REST_SHIFT;
         const bool merges = (bits & BUSTER_X86_ROLE_WRITE) && !memory && (rest == BUSTER_X86_REST_MERGE || rest == BUSTER_X86_REST_MERGE_IF_REGISTER);
-        shape->access[role] = (uint8_t)((bits & (BUSTER_X86_ROLE_READ | BUSTER_X86_ROLE_WRITE)) | (merges ? BUSTER_X86_ROLE_READ : 0));
+        const bool keeps = merged && role == BUSTER_X86_ROLE_REG && (bits & BUSTER_X86_ROLE_WRITE) && !memory;
+        shape->access[role] = (uint8_t)((bits & (BUSTER_X86_ROLE_READ | BUSTER_X86_ROLE_WRITE)) | (merges || keeps ? BUSTER_X86_ROLE_READ : 0));
         if (memory)
         {
             shape->loads = (bits & BUSTER_X86_ROLE_READ) != 0 && !shape->lea;
@@ -632,6 +649,7 @@ static void x86_zen5_address(const X86CostShape* shape, X86Instruction* record, 
     switch (shape->operands)
     {
         case X86_COST_MEMORY:
+        case X86_COST_MASKED_MEMORY:
             record->mode = BUSTER_X86_MEMORY_BASE;
             record->displacement = displacement;
             break;
@@ -706,7 +724,7 @@ static X86Instruction x86_zen5_record(const X86CostShape* shape, uint32_t destin
     {
         record.immediate = BUSTER_X86_COST_VECTOR_IS4 << 4;
     }
-    record.decorations = x86_zen5_override_decorations >= 0 ? (uint8_t)x86_zen5_override_decorations : 0;
+    record.decorations = x86_zen5_override_decorations >= 0 ? (uint8_t)x86_zen5_override_decorations : shape->masked ? BUSTER_X86_COST_OPMASK_MERGE : 0;
     return record;
 }
 
@@ -2015,9 +2033,11 @@ static void x86_zen5_print_observation(const char* name, const char* experiment,
 }
 
 // Whether `measured` reproduces the table's row `entry`: the same masks, each latency within half a cycle or 10%, each
-// throughput within a 32nd of a cycle or 10%, each op count within an eighth or 5%. The pipes are reported, not
-// required: a bit near its threshold can change between processes (docs/x86-zen5.md).
-static bool x86_zen5_reproduces(const X86CostCase* entry, const X86CostRow* measured)
+// throughput within a 32nd of a cycle or 10% of this run's median or inside its passes' range (`independent`'s least
+// and greatest: kortest's and ktest's passes are 0.5 or 1.0 cycles, either way in one process), each op count within an
+// eighth or 5%. The pipes are reported, not required: a bit near its threshold can change between processes
+// (docs/x86-zen5.md).
+static bool x86_zen5_reproduces(const X86CostCase* entry, const X86CostRow* measured, const X86CostObservation* independent)
 {
     bool same = entry->measured == measured->measured && entry->derived == measured->derived && entry->absent == measured->absent;
     for (uint32_t column = 0; same && column < X86_COST_PIPES; column += 1)
@@ -2039,7 +2059,13 @@ static bool x86_zen5_reproduces(const X86CostCase* entry, const X86CostRow* meas
                 tolerance = 128 > 0.1 * table ? 128 : 0.1 * table;
                 break;
         }
-        same = table == value || (table != BUSTER_X86_COST_UNKNOWN && value != BUSTER_X86_COST_UNKNOWN && difference <= tolerance);
+        bool within = table == value || (table != BUSTER_X86_COST_UNKNOWN && value != BUSTER_X86_COST_UNKNOWN && difference <= tolerance);
+        if (column == X86_COST_THROUGHPUT && !within && table != BUSTER_X86_COST_UNKNOWN && independent->ran)
+        {
+            const double cycles = table / BUSTER_X86_COST_SCALE;
+            within = cycles >= independent->minimum * 0.9 - 1.0 / 32 && cycles <= independent->maximum * 1.1 + 1.0 / 32;
+        }
+        same = within;
     }
     return same;
 }
@@ -2138,8 +2164,8 @@ static void x86_zen5_release(X86CostProgram* programs, uint32_t count)
     }
 }
 
-// measure-x86-zen5 [--iterations N] [--passes N] [--only FORM/KIND] [--sample N] [--table] [--check] [--immediate N]
-// [--decorations N]
+// measure-x86-zen5 [--iterations N] [--passes N] [--only FORM/KIND | --sample N | --missing] [--table] [--check]
+// [--immediate N] [--decorations N]
 static int run_x86_zen5_measure(int argc, char** argv)
 {
     uint64_t iterations = 10000;
@@ -2148,6 +2174,7 @@ static int run_x86_zen5_measure(int argc, char** argv)
     const char* only = 0;
     bool table = false;
     bool check = false;
+    bool missing = false;
     bool valid = true;
     for (int i = 0; i < argc && valid; i += 1)
     {
@@ -2187,6 +2214,10 @@ static int run_x86_zen5_measure(int argc, char** argv)
         else if (strcmp(argv[i], "--check") == 0)
         {
             check = true;
+        }
+        else if (strcmp(argv[i], "--missing") == 0)
+        {
+            missing = true;
         }
         else
         {
@@ -2231,7 +2262,9 @@ static int run_x86_zen5_measure(int argc, char** argv)
     for (uint32_t c = 1; valid && c < X86_COST_CASE_COUNT; c += 1)
     {
         const X86CostCase* entry = &x86_zen5_cases[c];
-        const bool selected = only != 0 ? strcmp(only, entry->name) == 0 : (c - 1) % sample == 0;
+        // --missing: the rows that account for no column yet, the ones added with U values and zero masks.
+        const bool unmeasured = (entry->measured | entry->derived | entry->absent) == 0;
+        const bool selected = only != 0 ? strcmp(only, entry->name) == 0 : missing ? unmeasured : (c - 1) % sample == 0;
         if (selected)
         {
             matched += 1;
@@ -2270,7 +2303,7 @@ static int run_x86_zen5_measure(int argc, char** argv)
                 x86_zen5_print_row(entry->name, &rows[c]);
                 if (check)
                 {
-                    const bool same = x86_zen5_reproduces(entry, &rows[c]);
+                    const bool same = x86_zen5_reproduces(entry, &rows[c], &observations[X86_COST_INDEPENDENT]);
                     reproduced += same;
                     pipe_differences += entry->values[X86_COST_PIPES] != rows[c].values[X86_COST_PIPES];
                     if (!same)

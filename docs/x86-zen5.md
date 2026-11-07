@@ -21,21 +21,25 @@ A **case** is a form (`X86Form`) and an operand kind (`X86CostOperands`):
 | `LEA_INDEX` | LEA of `[base + index]` |
 | `LEA_SCALED` | LEA of `[base + index * 2, 4 or 8]` |
 | `LEA_THREE` | LEA of `[base + index * scale + disp]`; RBP or R13 as the base force a displacement and make `[base + index]` one |
+| `MASKED` | an EVEX record of registers merging into its destination under an opmask |
+| `MASKED_MEMORY` | an EVEX record of a memory operand (a base, no index) under a merging opmask: a masked store or load |
 
-A record whose form has no row, an index without a base, or a 32-bit address
-has no case (ID 0, every column unknown). Some things don't change a record's
-case: its immediate's value, an EVEX opmask, zeroing or rounding decoration, a
+A record whose form has no row of its kind, an index without a base, or a
+32-bit address has no case (ID 0, every column unknown): a merging opmask on a
+form measured without one is such a record. Some things don't change a record's
+case: its immediate's value, an EVEX zeroing opmask or rounding decoration, a
 segment override and a fixup mark. The immediates and decorations are measured
 (below, "What doesn't change a case"); a segment override (TLS) and a fixup
-mark are assumed alike, as the instruction's execution is the form's.
+mark are assumed alike, as the instruction's execution is the form's. A merging
+opmask does change a case, which the sweep found: it has its own kinds.
 
-`x86_zen5_rows.c` has 849 rows: 390 forms Tier 0 and Tier 1 emitted in their
-tests and in compiling SQLite's amalgamation and speedtest1 and Lua 5.4.8 (both
-tiers, the default target and `-march=znver5`), the rest of the conditional
-families (all 16 conditions of jcc, setcc and cmovcc, which a program's
-conditions choose), the vector and mask forms Tier 1's selection emits for
-x86-64-v2, -v3 and -v4 (`test-tier1-masks`), and the 57 cases of the first
-model. `x86_zen5_initialize` gives the rows that agree in every column and
+`x86_zen5_rows.c` has 893 rows: the cases of 390 forms Tier 0 and Tier 1
+emitted in their tests and in compiling SQLite's amalgamation and speedtest1 and
+Lua 5.4.8 (both tiers, the default target and `-march=znver5`), the rest of the
+conditional families (all 16 conditions of jcc, setcc and cmovcc, which a
+program's conditions choose), the vector, mask and masked forms Tier 1's
+selection emits for x86-64-v2, -v3 and -v4 (`test-tier1-masks`), and the 57
+cases of the first model. `x86_zen5_initialize` gives the rows that agree in every column and
 mask one dense ID (fewer than 256: the initialization fails past them). A
 record resolves to its ID once (`x86_zen5_id`); consumers carry the byte as a
 column (`Tier1SelectCode.cost_ids`) and look up 32 at a time
@@ -199,7 +203,28 @@ extra latency; control transfers' latencies.
 
 ## What doesn't change a case
 
-TO BE FILLED: the sweep.
+`measure-x86-zen5 --immediate N` and `--decorations N` measure a case with a
+fixture's immediate or EVEX decorations in place of its own. In each of three
+processes on the 9700X (the record below), every value gave the same row:
+
+| Case | Immediates or decorations | Row |
+| --- | --- | --- |
+| `shl r64, imm8` | 0, 1, 3, 63, 127 | latency 1, throughput 0.328, 1 op |
+| `imul r64, r/m64, imm8` | 1, 3, 127, −128 | latency 3, throughput 0.328, 1 op |
+| `add r/m64, imm8` | 1, 3, 127, −128 | latency 1, throughput 0.188, 1 op |
+| `add r/m32, imm32` | 0, 4660, 2147483647 | latency 1, throughput 0.188, 1 op |
+| `vpaddd zmm` | none; zeroing under k4 | latency 2, throughput 0.25 |
+| `vaddps zmm` | none; zeroing under k4 | latency 2, throughput 0.5 |
+| `vmovdqu8 zmm, m512` | none; zeroing under k3 | latency 4.5 (derived), throughput 0.5 |
+
+A shift by 0 doesn't write the flags, but costs a shift's cycles. Merging under
+an opmask is different: in all three processes a merging `vpaddd zmm {k4}`
+took 3 cycles from its sources where the unmasked one took 2, so a merging
+opmask has its own kinds (`MASKED`, `MASKED_MEMORY`), which a form has rows of
+where an emitter merges (Tier 0's masked `vpaddd` and stores, Tier 1's
+`vpblendm*` selections and masked compares). In those, the destination is a
+source where the semantics' effects say so (a merging `vpaddd`); a compare into
+an opmask and `vpblendm`'s selection don't read it.
 
 ## Coverage
 
@@ -225,7 +250,53 @@ zero masks to `x86_zen5_rows.c`, build, and on the 9700X run `measure-x86-zen5
 
 ## The 9700X record
 
-TO BE FILLED.
+The record, with the scripts, every process's output, the receipt and the
+sweep: [buster-performance's `x86-zen5-181-2026-11-07`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/x86-zen5-181-2026-11-07).
+The rows are one `--table` process's (CPU 2 under the host's lock, 7 passes of
+10,000 iterations, built `BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0` by clang
+23.1.1); RECORD_REPRODUCTION. Their 893 rows share 141 IDs.
+
+What the rows say, a few families (cycles; derived values in italics):
+
+| Family | Latency | Throughput | Macro-ops |
+| --- | ---: | ---: | ---: |
+| ALU on registers (`add`, `and`, `neg`, `inc`, `cmp`'s flags …) | 1 | 0.19 | 1 |
+| zero idioms (`xor r32, r32`; `pxor`, `vpxor` of a register with itself) | — | 0.14 (vector 0.17) | 1 |
+| `mov r32/r64, r` (eliminated: a chain runs at rename's rate) | 0.125 | 0.14 | 1 |
+| `mov r32, imm32`; `mov r64, imm64` | — | 0.17; 0.33 | 1 |
+| load `mov r, [m]`; with an index | 4; 5 | 0.25 | 1 |
+| `movsx` load; with an index | 5; 6 | 0.25 | 1 |
+| store (consecutive slots) | — | 0.5 | 1 |
+| read-modify-write `add [m], r` (through the memory) | 1 | 0.53 | 1 |
+| `lea` of one or two components, or scaled | 1 | 0.17 | 1 |
+| `lea [base + index * s + disp]` | 2 | 0.48 | 2 |
+| `imul r, r/m(, imm)`; `mul r64` | 3; 3 | 0.33; 0.67 | 1; 2 |
+| `div r64`; `div r32`, `idiv r32` (a 57-bit dividend by 3) | *16*; *13* | 9.3; 6 | 2 |
+| shifts (by 1, CL, imm8), `bsf`, `tzcnt`, `bextr`, `bzhi` | 1 | 0.33 | 1 |
+| `shld`, `shrd` | 2 | 1.0 | 4 to 5 |
+| `cmovcc` and `setcc` but `a`, `be` (`cmova`, `cmovbe`: 2 ops) | 1 | 0.19 | 1 |
+| `jcc` not taken; `jmp` to the next instruction | — | 0.34; 0.55 to 1.6 | 1 |
+| `call` and its `ret` | — | 4 a pair | 3 a pair |
+| `lock xadd`, `lock cmpxchg`, `xchg` with memory | 20 | 20 | 2 to 6 |
+| `mfence` | — | 82 | 6 |
+| SSE/AVX floating add, sub, compare; multiply | 2; 3 | 0.5 | 1 |
+| `divsd`; `divpd` | 13 | 4 | 1 |
+| vector integer `vpaddd` and logic; `vpmulld`; `vpermb` | 2; 3; 5 | 0.25; 0.5; 0.5 | 1 |
+| vector load (any width); `zmm` store | *4.5*; — | 0.5; 1 | 1; 2 |
+| `movq xmm, r64`; `movq r64, xmm` (half the 9-cycle round trip each) | *4.5* | 1; 0.5 | 2; 1 |
+| opmask logic (`kandw`, `kxorq` …) | 1 | 0.5 | 1 |
+| `kortest`, `ktest` (the passes are 0.5 or 1, either in one process) | — | 0.5 to 1 | 2 |
+| `vpgatherdd zmm` | 30 | 12.6 | 64 |
+| x87 `faddp`, `fmulp`; `fdivp`; `fld m80` | 6; 15; — | 1.2; 5; 4 | 1; 1; 10 |
+
+The vector loads' 4.5 cycles and every latency between register files rest on
+the even split of a round trip (above): a vector load's address chain is 11
+cycles with the `and`, the `add` and a `movq r64, xmm` in it, and an integer
+load's is 4 (measured, no bridge). Generated code doesn't change with these
+rows: the objects of `sqlite3.c`, speedtest1 and Lua's 34 files at Tier 0 and
+`--tier1`, at the default target and `-march=znver5`, are the same bytes from
+`main` and this change (Tier 0's `inc` and `dec` still cost no more than `add`
+and `sub`, and every rematerialized copy still costs no more than its reload).
 
 ## Consumers
 

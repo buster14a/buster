@@ -145,7 +145,7 @@ static __attribute__((unused)) bool tier1_rematerialization_marks(const Tier1Rem
 
 static bool tier1_rematerialize(const Tier1RematerializationInput* input, uint32_t index, uint8_t destination, uint8_t frame_base, uint8_t flags_live, Tier1Rematerialized* result);
 
-// Candidate i's model costs (tier1_rematerialization_model_costs): its copy's measured GPR latency, and its reload's,
+// Candidate i's model costs (tier1_rematerialization_model_costs): its copy's latency in the model, and its reload's,
 // each 0 where the model has none.
 static void tier1_rematerialization_model_cost(const Tier1RematerializationInput* input, uint32_t i, uint8_t frame_base, uint16_t reload, uint16_t* costs, uint16_t* reload_costs)
 {
@@ -156,7 +156,7 @@ static void tier1_rematerialization_model_cost(const Tier1RematerializationInput
     reload_costs[i] = built ? reload : 0;
 }
 
-// The Zen 5 model's costs (x86_zen5.c, #181) of each candidate's copy and of the reload it saves, as the GPR latency it
+// The Zen 5 model's costs (x86_zen5.c, #181) of each candidate's copy and of the reload it saves, as the latency it
 // measured (cycles * 256), into `costs` and `reload_costs` (count entries each, which the caller's input then borrows;
 // the input given here has neither): a copy as tier1_rematerialize emits it, into rax with the flags dead and
 // `frame_base` a stack address's base, and the reload as the model's aligned L1-hit load (`mov r64, [base]`), the
