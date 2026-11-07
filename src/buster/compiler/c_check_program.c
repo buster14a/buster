@@ -765,7 +765,10 @@ static bool check_program_runtime_effects(const CheckProgram* program, uint32_t 
 static bool check_program_runtime_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
 {
     const CheckGraph* graph = &program->input->graph;
-    const CheckValue checked_value = check_stream_value(program->stream, condition);
+    // A condition that is no constant and no query has no truth to know (check_action_truth), which its columns say
+    // without the copy of its whole value.
+    const bool candidate = graph->ops[condition] == CHECK_OP_BUILTIN_QUERY || check_stream_constant_kind(program->stream, condition) != CHECK_CONSTANT_NONE;
+    const CheckValue checked_value = candidate ? check_stream_value(program->stream, condition) : (CheckValue){ 0 };
     const CheckValue* value = &checked_value;
     const bool environment = graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
     bool runtime = false;
@@ -783,7 +786,7 @@ static bool check_program_runtime_truth(const CheckProgram* program, uint32_t no
     }
     // A source constant proves a translation-time value. Runtime floating truth conversions can still observe
     // the environment or raise an exception, including a signaling NaN whose bits are known here.
-    const bool known = available && (runtime || ((value->flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
+    const bool known = candidate && available && (runtime || ((value->flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
                                    !(environment && check_action_floating_type(program->types, value->type)))) &&
                        value->fault == CHECK_FAULT_NONE &&
                        check_action_truth(program->types, value, truth);
@@ -2364,8 +2367,10 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
         uint8_t* seen = (uint8_t*)writer->tasks;
         uint32_t* queue = writer->labels;
         const CheckGraph* graph = &program->input->graph;
-        // The second walk is the warnings': -Wreturn-type's, and -Winvalid-noreturn's, which -Wno-return-type keeps.
-        for (uint32_t pass = 0; pass < (return_warnings || (noreturn_warnings && noreturn) ? 2u : 1u); pass += 1)
+        // The first walk is the aggregate return's alone: a scalar return's lowering reads neither its falls nor its
+        // entries' kinds, so that a scalar body takes the warning's walk only. The second walk is the warnings': -Wreturn-type's,
+        // and -Winvalid-noreturn's, which -Wno-return-type keeps.
+        for (uint32_t pass = aggregate ? 0u : 1u; pass < (return_warnings || (noreturn_warnings && noreturn) ? 2u : 1u); pass += 1)
         {
             bool warning_safe = true;
             memset(seen, 0, body->count);
@@ -3865,7 +3870,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     // Source warning contracts are a single postorder reduction, reused by every body's CFG walk. They neither
     // alter emission reachability nor run on a rejected stream. Warning-disabled commands keep no extra facts.
     const uint8_t* return_facts = valid && program->status == CHECK_PROGRAM_OK && options.return_warnings && node_count != 0 ?
-                                    check_program_return_facts(program, scratch, options.return_flow_work) : NULL;
+                                    check_program_return_facts(program, scratch, options.return_flow_work, BUSTER_SCALAR_PATH(options.scalar)) : NULL;
     valid = valid && (!options.return_warnings || node_count == 0 || return_facts != NULL) && program->status == CHECK_PROGRAM_OK;
     uint32_t reference_count = 0;
     for (uint32_t b = 0; valid && b < body_count && program->status == CHECK_PROGRAM_OK; b += 1)

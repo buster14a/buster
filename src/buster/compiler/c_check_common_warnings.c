@@ -212,12 +212,37 @@ static void check_common_number(char* buffer, uint64_t capacity, __int128 value)
 
 #include "c_check_warning_number.c"
 
-static __int128 check_common_integer_value(const CheckValue* value, uint32_t width, bool is_signed)
+static __int128 check_common_integer_bits(unsigned __int128 integer, uint32_t width, bool is_signed)
 {
     const unsigned __int128 mask = check_action_mask(width);
-    const unsigned __int128 bits = value->integer & mask;
+    const unsigned __int128 bits = integer & mask;
     const bool negative = is_signed && width != 0 && ((bits >> (width - 1)) & 1) != 0;
     __int128 result = negative ? (__int128)(bits | ~mask) : (__int128)bits;
+    return result;
+}
+
+static __int128 check_common_integer_value(const CheckValue* value, uint32_t width, bool is_signed)
+{
+    return check_common_integer_bits(value->integer, width, is_signed);
+}
+
+// A node's type and integer as check_stream_value gives them, without copying its whole value: its dense value's, its
+// payload row's, or the columns' type and no integer.
+static unsigned __int128 check_common_stream_integer(const CheckStream* stream, uint32_t node, TypeId* type)
+{
+    unsigned __int128 result = 0;
+    if (stream->dense_values != NULL)
+    {
+        *type = stream->dense_values[node].type;
+        result = stream->dense_values[node].integer;
+    }
+    else
+    {
+        const uint32_t row = stream->payload_rows[node];
+        const bool payload = row != 0 && row <= stream->payload_count;
+        *type = payload ? stream->payloads[row - 1].type : stream->value_types[node];
+        result = payload ? stream->payloads[row - 1].integer : 0;
+    }
     return result;
 }
 
@@ -240,7 +265,7 @@ static bool check_common_integer(const TypeTable* types, TypeId type, uint32_t* 
 // Whether a constant integer changes value in an implicit conversion to `target`. Unsigned sources warn only when
 // their high bits are lost; a signed source warns unless the target represents its value, with clang's -1 exception
 // for an unsigned target.
-static bool check_common_conversion_changes(const TypeTable* types, TypeId source, TypeId target, const CheckValue* value, __int128* converted)
+static bool check_common_conversion_changes(const TypeTable* types, TypeId source, TypeId target, unsigned __int128 integer, __int128* converted)
 {
     uint32_t source_width = 0;
     uint32_t target_width = 0;
@@ -253,7 +278,7 @@ static bool check_common_conversion_changes(const TypeTable* types, TypeId sourc
     }
     if (check_common_integer(types, source, &source_width, &source_signed) && check_common_integer(types, target, &target_width, &target_signed))
     {
-        const __int128 original = check_common_integer_value(value, source_width, source_signed);
+        const __int128 original = check_common_integer_bits(integer, source_width, source_signed);
         const unsigned __int128 target_mask = check_action_mask(target_width);
         const unsigned __int128 bits = (unsigned __int128)original & target_mask;
         const __int128 target_value = target_signed && target_width != 0 && ((bits >> (target_width - 1)) & 1) != 0 ?
@@ -699,7 +724,7 @@ typedef struct CheckCommonFacts CheckCommonFacts;
 struct CheckCommonFacts
 {
     // Each node's parent: the last node that reads it as an operand or an argument, BUSTER_CHECK_NONE at a root.
-    uint32_t* parents;
+    const uint32_t* parents;
     // Whether another node reads a node's value: not as a comma's left operand or a void cast's operand, which drop it.
     uint8_t* used;
     // The nodes the source evaluates (check_common_evaluated).
@@ -762,50 +787,69 @@ typedef struct CheckCommonEmission
     uint32_t work_capacity;
     uint32_t work_count;
     Arena* scratch;
-    // Each token's subtree's first token (check_common_emission_subtree_start, #1350), built at the first query; null
-    // before it, and after an allocation that failed (which fails the unit), the queries then left to
-    // check_common_subtree_start.
-    uint32_t* subtree_starts;
-    bool subtree_starts_failed;
 } CheckCommonEmission;
 
-// check_common_subtree_start for the emission's queries, from a column of every token's subtree start built once
-// (#1350): a comma chain's k-th left operand is the chain before it, so the binary search's climbs cost O(k log k) a
-// comma. A subtree is a run of tokens and a node's children are in source order, so a node's run starts where its
-// first child's does when that child is before it, and at the node otherwise: one ascending pass fills the column.
+// Whether `token` is in the subtree of `root`, whose node depth is `depth`: its parent chain reaches `root` before a token
+// shallower than `root`, which a parent is never deeper than, so that the chain's tokens past it can't be `root` either.
+static bool check_common_token_below(const Parser* parser, uint32_t token, uint32_t root, uint32_t depth)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t node = token;
+    bool result = false;
+    for (uint32_t steps = 0; node < count && steps < count && parser->tree.depths[node] >= depth; steps += 1)
+    {
+        const uint32_t parent = parser->tree.parents[node];
+        result = node == root;
+        node = result || parent == node ? BUSTER_CHECK_NONE : parent;
+    }
+    return result;
+}
+
+// check_common_subtree_start for the emission's queries (a comma's operands'): a subtree is a run of tokens, so the tokens
+// of `root`'s before it are those from its start, which a search from `root` back by doubling steps brackets and a binary
+// search then finds. Each probe's climb stops at a token shallower than `root` (check_common_token_below). A comma chain's
+// k-th left operand is the chain before it (#1350), O(log k) probes, where the search from the unit's first token took
+// climbs from the whole unit's tokens, and a column of every token's start, which a few hundred queries a unit don't pay
+// for, the whole unit's.
 static uint32_t check_common_emission_subtree_start(CheckCommonEmission* emission, uint32_t root)
 {
     const Parser* parser = emission->parser;
-    const uint32_t count = parser->tokens.count;
-    if (emission->subtree_starts == NULL && !emission->subtree_starts_failed && count != 0)
+    uint32_t result = root;
+    if (root < parser->tokens.count && parser->tree.depths != NULL)
     {
-        uint32_t* first = CHECK_COMMON_PUSH_ARRAY(emission->scratch, uint32_t, count);
-        uint32_t* starts = first != NULL ? CHECK_COMMON_PUSH_ARRAY(emission->scratch, uint32_t, count) : NULL;
-        emission->subtree_starts_failed = starts == NULL;
-        // A failed allocation fails the unit, as every common warning's scratch does; the search stands in until it stops.
-        if (starts == NULL)
+        const uint32_t depth = parser->tree.depths[root];
+        uint32_t inside = root;
+        uint32_t outside = BUSTER_CHECK_NONE;
+        for (uint32_t step = 1; outside == BUSTER_CHECK_NONE && inside != 0; step = step < UINT32_MAX / 2 ? step * 2 : step)
         {
-            check_common_exhausted(emission->pp);
+            const uint32_t at = inside > step ? inside - step : 0;
+            if (check_common_token_below(parser, at, root, depth))
+            {
+                inside = at;
+            }
+            else
+            {
+                outside = at;
+            }
         }
-        if (starts != NULL)
+        while (outside != BUSTER_CHECK_NONE && inside - outside > 1)
         {
-            memset(first, 0xff, (uint64_t)count * sizeof(uint32_t));
-            for (uint32_t token = count; token-- > 0;)
+            const uint32_t middle = outside + (inside - outside) / 2;
+            if (check_common_token_below(parser, middle, root, depth))
             {
-                const uint32_t parent = parser->tree.parents[token];
-                if (parent < count && parent != token)
-                {
-                    first[parent] = token;
-                }
+                inside = middle;
             }
-            for (uint32_t token = 0; token < count; token += 1)
+            else
             {
-                starts[token] = first[token] < token ? starts[first[token]] : token;
+                outside = middle;
             }
-            emission->subtree_starts = starts;
         }
+        result = inside;
     }
-    const uint32_t result = root < count && emission->subtree_starts != NULL ? emission->subtree_starts[root] : check_common_subtree_start(parser, root);
+    else
+    {
+        result = check_common_subtree_start(parser, root);
+    }
     return result;
 }
 
@@ -832,7 +876,7 @@ static uint32_t check_common_emission_subtree_start(CheckCommonEmission* emissio
 #define BUSTER_CHECK_EMITTED_LITERAL_CONTEXT 4u
 
 // What a node's subtree holds for check_common_emit_root's walks, a bit each, in CheckCommonEmission.reach: a node whose
-// own frame or comma stages may warn (check_common_own_candidate), a division by a constant, a comparison where
+// own frame or comma stages may warn (check_common_candidate_bits), a division by a constant zero, a comparison where
 // -Wsign-compare may warn (check_common_enabled). Each counts evaluated or not: a comma's operands and a root's expression
 // run their own frames either way, and the scans test evaluation themselves. A frame of a subtree without its walk's bit
 // warns of nothing and marks emitted only nodes of such subtrees, which no other frame then reads to any effect, so the
@@ -1894,6 +1938,16 @@ static CheckCommonOps check_common_ops(const CheckOp* list, uint32_t count)
     return result;
 }
 
+// Of 16 operators `ops`, the `lanes` whose operator is in `set`, a bit each: each operator's word of the set a lane permute
+// away.
+static uint32_t check_common_op_lanes(const CheckCommonOps* set, __m512i ops, __mmask16 lanes)
+{
+    const __m512i words = _mm512_maskz_loadu_epi32((__mmask16)((1u << BUSTER_ARRAY_LENGTH(set->words)) - 1), set->words);
+    const __m512i word = _mm512_permutexvar_epi32(_mm512_srli_epi32(ops, 5), words);
+    const __m512i bit = _mm512_sllv_epi32(_mm512_set1_epi32(1), _mm512_and_si512(ops, _mm512_set1_epi32(31)));
+    return _mm512_mask_test_epi32_mask(lanes, word, bit);
+}
+
 // The scan's next node below the graph's count whose operator is in `set`, or the count: the vector path tests 16 nodes at
 // a time, each operator's word of the set a lane permute away; the scalar path, its twin, gives every node, so that its
 // caller tests each.
@@ -1904,15 +1958,8 @@ static uint32_t check_common_next_op(const CheckGraph* graph, const CheckCommonO
         const uint32_t first = scan->next;
         const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
         const uint32_t lanes = live == 16 ? 0xffffu : (1u << live) - 1;
-        uint32_t selected = lanes;
-        if (vector)
-        {
-            const __m512i words = _mm512_maskz_loadu_epi32((__mmask16)((1u << BUSTER_ARRAY_LENGTH(set->words)) - 1), set->words);
-            const __m512i ops = _mm512_maskz_loadu_epi32((__mmask16)lanes, graph->ops + first);
-            const __m512i word = _mm512_permutexvar_epi32(_mm512_srli_epi32(ops, 5), words);
-            const __m512i bit = _mm512_sllv_epi32(_mm512_set1_epi32(1), _mm512_and_si512(ops, _mm512_set1_epi32(31)));
-            selected = _mm512_mask_test_epi32_mask((__mmask16)lanes, word, bit);
-        }
+        const uint32_t selected = vector ? check_common_op_lanes(set, _mm512_maskz_loadu_epi32((__mmask16)lanes, graph->ops + first), (__mmask16)lanes) :
+                                           lanes;
         scan->base = first;
         scan->next = first + live;
         scan->pending = selected;
@@ -2411,7 +2458,7 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
                                             TypeId target, uint32_t completion, Arena* scratch)
 {
     __int128 converted = 0;
-    if (value->constant_kind == CHECK_CONSTANT_INTEGER && check_common_conversion_changes(types, value->type, target, value, &converted) &&
+    if (value->constant_kind == CHECK_CONSTANT_INTEGER && check_common_conversion_changes(types, value->type, target, value->integer, &converted) &&
         !check_common_nondecimal_literal(parser, pp, &input->graph, types, source, value, target, scratch))
     {
         const String8 source_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, value->type, 0);
@@ -2683,9 +2730,38 @@ static bool check_common_literal_contexts(const CheckGraph* graph, const Parser*
     return valid;
 }
 
-// The conversion walk handles all implicit-conversion warnings. The ordinary walk needs only self-assignment,
-// subscript and comma candidates, so a constant conversion does not force a redundant ordinary subtree walk.
-static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGraph* graph, const CheckStream* stream,
+// Whether constant `source`'s value changes in its implicit conversion to `target`: check_common_conversion_warning's test
+// of the value, before the literal's spelling and the types' names, which only a warning reads. An integer conversion to
+// an integer type at least as wide changes no value (check_common_conversion_changes: an unsigned source keeps its bits,
+// a signed one its value, and a negative one fits the target's signed half), which the types alone say, so that only a
+// narrowing conversion reads the value's row.
+static bool check_common_constant_changes(const TypeTable* types, const CheckStream* stream, uint32_t source, TypeId target)
+{
+    uint32_t source_width = 0;
+    uint32_t target_width = 0;
+    bool source_signed = false;
+    bool target_signed = false;
+    const bool widening = check_common_integer(types, check_stream_type(stream, source), &source_width, &source_signed) &&
+                          check_common_integer(types, target, &target_width, &target_signed) && target_width >= source_width;
+    bool result = false;
+    if (!widening)
+    {
+        TypeId type = 0;
+        const unsigned __int128 integer = check_common_stream_integer(stream, source, &type);
+        __int128 converted = 0;
+        result = check_common_conversion_changes(types, type, target, integer, &converted);
+    }
+    return result;
+}
+
+// The walks' candidates at `node` (BUSTER_CHECK_REACH_*), by what their tests read of the graph and the stream. The
+// conversion walk's (BUSTER_CHECK_REACH_CONVERSION), which gives every implicit conversion's warning: a constant an
+// initialization's, an assignment's, a conversion's or a call's argument's conversion may change, an integer one only where
+// its value changes (check_common_constant_changes, #1340), a floating one, or a conditional's or a comma's arms; and a truth
+// context's floating literal. The ordinary walk's (BUSTER_CHECK_REACH_TREE): a self-assignment's two names, a constant index
+// outside its array, a comma the source writes. What their tests read past them only takes warnings away, so that a node it
+// rejects can't warn, and the walks needn't visit a subtree without one.
+static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGraph* graph, const CheckStream* stream, const TypeTable* types,
                                            uint32_t node, bool self_assign)
 {
     const CheckOp op = graph->ops[node];
@@ -2699,43 +2775,70 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
         if (source < graph->count && source < stream->count)
         {
             const CheckConstantKind constant = check_stream_constant_kind(stream, source);
-            if (check_common_conversion_source(constant, check_common_conversion_arms(graph, source)))
+            const bool arms = check_common_conversion_arms(graph, source);
+            if (check_common_conversion_source(constant, arms))
             {
                 const uint32_t flags = stream->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1u : 0u].flags;
                 const bool assignment = (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0;
-                const TypeId target = check_stream_type(stream, node);
-                const bool same_integer = constant == CHECK_CONSTANT_INTEGER && !check_common_conversion_arms(graph, source) && target != 0 &&
-                                          check_stream_type(stream, source) == target;
-                conversion = assignment && !same_integer;
+                conversion = assignment && (constant != CHECK_CONSTANT_INTEGER || arms ||
+                                            check_common_constant_changes(types, stream, source, check_stream_type(stream, node)));
             }
         }
-        own |= self_assign && op == CHECK_OP_ASSIGN && left < graph->count && right < graph->count &&
-               graph->ops[left] == CHECK_OP_VALUE && graph->ops[right] == CHECK_OP_VALUE;
+        own = self_assign && op == CHECK_OP_ASSIGN && left < graph->count && right < graph->count &&
+              graph->ops[left] == CHECK_OP_VALUE && graph->ops[right] == CHECK_OP_VALUE;
     }
     else if (op == CHECK_OP_CALL && graph->argument_offsets != NULL && graph->argument_counts != NULL && stream->argument_conversions != NULL)
     {
+        // The parameter's type an integer argument converts to: a prototype's, or an unprototyped call's promoted one; the
+        // callee's type is read at the first such argument.
         const uint32_t offset = graph->argument_offsets[node];
+        bool typed = false;
+        bool prototype = false;
         for (uint32_t i = 0; !conversion && i < graph->argument_counts[node]; i += 1)
         {
             const uint32_t source = graph->argument_nodes[offset + i];
             if (source < graph->count && source < stream->count)
             {
                 const CheckConstantKind constant = check_stream_constant_kind(stream, source);
-                if (check_common_conversion_source(constant, check_common_conversion_arms(graph, source)))
+                const bool arms = check_common_conversion_arms(graph, source);
+                if (check_common_conversion_source(constant, arms))
                 {
-                    const CheckConversion conversion_edge = stream->argument_conversions[offset + i];
-                    const uint32_t flags = conversion_edge.flags;
-                    const bool assignment = (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0;
-                    const bool same_integer = constant == CHECK_CONSTANT_INTEGER && !check_common_conversion_arms(graph, source) &&
-                                              conversion_edge.type != 0 && check_stream_type(stream, source) == conversion_edge.type;
-                    conversion = assignment && !same_integer;
+                    const CheckConversion edge = stream->argument_conversions[offset + i];
+                    const bool assignment = (edge.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (edge.flags & BUSTER_CHECK_CONVERT_CAST) == 0;
+                    const bool integer = constant == CHECK_CONSTANT_INTEGER && !arms;
+                    if (assignment && integer && !typed)
+                    {
+                        const uint32_t callee = graph->operand0[node];
+                        TypeId function = callee < graph->count ? check_stream_type(stream, callee) : 0;
+                        function = function != 0 ? type_unqualified(type_strip_aligned(types, function)) : 0;
+                        if (function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_POINTER)
+                        {
+                            function = type_unqualified(type_strip_aligned(types, type_element(types, function)));
+                        }
+                        prototype = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION &&
+                                    (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
+                        typed = true;
+                    }
+                    conversion = assignment && (!integer || check_common_constant_changes(types, stream, source, prototype ? edge.type :
+                                                                                           type_default_argument_promote(types, edge.type)));
                 }
             }
         }
     }
     else if (op == CHECK_OP_SUBSCRIPT)
     {
-        own = check_common_integer_constant(stream, graph->operand1[node]);
+        const uint32_t array = graph->operand0[node];
+        const uint32_t index = graph->operand1[node];
+        const TypeId type = array < graph->count ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, array))) : 0;
+        uint32_t width = 0;
+        bool sign = false;
+        if (type != 0 && check_common_integer_constant(stream, index) && type_kind(types, type) == BUSTER_TYPE_KIND_ARRAY &&
+            types->types.extent[type_index(type)] != 0 && check_common_integer(types, check_stream_type(stream, index), &width, &sign))
+        {
+            TypeId index_type = 0;
+            const __int128 value = check_common_integer_bits(check_common_stream_integer(stream, index, &index_type), width, sign);
+            own = value < 0 || (unsigned __int128)value >= types->types.extent[type_index(type)];
+        }
     }
     else if (op == CHECK_OP_COMMA)
     {
@@ -2751,16 +2854,19 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
     return result;
 }
 
-// A node's own bits of its reach (BUSTER_CHECK_REACH_*): its own frame's candidate, a division by a constant, a comparison.
-// A plain `x = y` is a candidate for -Wself-assign alone, and a comparison's bit is -Wsign-compare's: each counts only where
-// its warning may report.
-static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* graph, const CheckStream* stream, uint32_t node,
+// A node's own bits of its reach (BUSTER_CHECK_REACH_*): its own frame's candidate, a division by a constant zero
+// (check_common_div_own's), a comparison. A plain `x = y` is a candidate for -Wself-assign alone, and a comparison's bit
+// is -Wsign-compare's: each counts only where its warning may report.
+static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node,
                                       const CheckCommonEnabled* enabled)
 {
     const CheckOp op = graph->ops[node];
-    const bool division = (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && check_common_integer_constant(stream, graph->operand1[node]);
+    const uint32_t divisor = graph->operand1[node];
+    TypeId divisor_type = 0;
+    const bool division = (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && check_common_integer_constant(stream, divisor) &&
+                          check_common_stream_integer(stream, divisor, &divisor_type) == 0;
     const bool comparison = enabled->sign_compare && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
-    const uint8_t result = (uint8_t)(check_common_candidate_bits(parser, graph, stream, node, enabled->self_assign) |
+    const uint8_t result = (uint8_t)(check_common_candidate_bits(parser, graph, stream, types, node, enabled->self_assign) |
                                      (division ? BUSTER_CHECK_REACH_DIVISION : 0u) | (comparison ? BUSTER_CHECK_REACH_SIGN : 0u));
     return result;
 }
@@ -2966,12 +3072,28 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                 }
                 next_init = initializer < initializer_count ? (uint32_t)(initializers[initializer] >> 32) : UINT32_MAX;
             }
-            const uint32_t expr = check_common_discarded(parser, graph, node);
             if (parents[node] == BUSTER_CHECK_NONE && (evaluated[node] != 0 || (emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0) &&
-                (emitted[node] & BUSTER_CHECK_EMITTED_NODE) == 0 && stream->diagnostics[node] == CHECK_DIAG_NONE &&
-                (reach[node] != 0 || (expr < graph->count && graph->ops[expr] == CHECK_OP_COMMA) || check_common_marker_candidate(graph, expr)))
+                (emitted[node] & BUSTER_CHECK_EMITTED_NODE) == 0 && stream->diagnostics[node] == CHECK_DIAG_NONE)
             {
-                check_common_emit_root(&emission, node);
+                const uint32_t expr = check_common_discarded(parser, graph, node);
+                const bool comma = expr < graph->count && graph->ops[expr] == CHECK_OP_COMMA;
+                if (reach[node] != 0 || comma)
+                {
+                    check_common_emit_root(&emission, node);
+                }
+                else if (vector && evaluated[node] != 0 && check_common_marker_candidate(graph, expr))
+                {
+                    // A root that reaches nothing: its walk's frames would find no own warning and no subtree to enter
+                    // (its reach holds its expression's own bit), so that the statement's unused-value marker alone
+                    // may warn, as the walk would run it, before the walk's marks.
+                    check_common_stmt_marker(&emission, expr);
+                    emitted[expr] |= BUSTER_CHECK_EMITTED_NODE;
+                    emitted[node] |= BUSTER_CHECK_EMITTED_NODE;
+                }
+                else if (check_common_marker_candidate(graph, expr))
+                {
+                    check_common_emit_root(&emission, node);
+                }
             }
         }
         // The plans whose first node follows every root.
@@ -4900,6 +5022,8 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
         {
             continue;
         }
+        // Each body's marks and queue in the same scratch as the last body's, cache-warm, given back after it.
+        const uint64_t mark = scratch->length;
         uint8_t* seen = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, body->count);
         uint32_t* queue = CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, body->count);
         if (seen == NULL || queue == NULL)
@@ -4952,6 +5076,7 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
                 }
             }
         }
+        arena_pop_to(scratch, mark);
     }
     return valid;
 }
@@ -5062,7 +5187,8 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
     CheckCommonRange* ranges = valid && selections != 0 && !walk ? CHECK_COMMON_PUSH_ARRAY(scratch, CheckCommonRange, selections) : NULL;
     valid &= selections == 0 || walk || ranges != NULL;
     uint32_t used = 0;
-    for (uint32_t end = ranges != NULL ? last : 0; end != 0;)
+    // Once every selection has its keyword, no token before them claims one.
+    for (uint32_t end = ranges != NULL ? last : 0; end != 0 && used < selections;)
     {
         const uint32_t first = end > 64 ? end - 64 : 0;
         const uint32_t live = end - first;
@@ -5096,6 +5222,7 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
         // The claims came in descending keyword order: the ranges in ascending order, each bit set once.
         memset(bits, 0, ((uint64_t)last + 63) / 64 * sizeof(uint64_t));
         uint32_t covered = 0;
+        uint32_t lowest = UINT32_MAX;
         for (uint32_t i = used; i-- > 0;)
         {
             const uint32_t from = ranges[i].first > covered ? ranges[i].first : covered;
@@ -5103,8 +5230,11 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
             {
                 check_common_set_bits(bits, from, ranges[i].end);
                 covered = ranges[i].end;
+                lowest = from < lowest ? from : lowest;
             }
         }
+        // The vector path gathers the bits of the roots whose tokens the ranges span alone: from the lowest range's
+        // first token to the highest's end.
         for (uint32_t first = 0; first < graph->count; first += 16)
         {
             const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
@@ -5114,7 +5244,8 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
                 const __m512i root_bytes = _mm512_maskz_loadu_epi8((__mmask64)lanes, roots + first);
                 const __m512i tokens = _mm512_maskz_loadu_epi32((__mmask16)lanes, graph->tokens + first);
                 const __mmask16 candidates = (__mmask16)_mm512_mask_test_epi8_mask((__mmask64)lanes, root_bytes, root_bytes) &
-                                             _mm512_mask_cmplt_epu32_mask((__mmask16)lanes, tokens, _mm512_set1_epi32((int)last));
+                                             _mm512_mask_cmplt_epu32_mask((__mmask16)lanes, tokens, _mm512_set1_epi32((int)covered)) &
+                                             _mm512_mask_cmpge_epu32_mask((__mmask16)lanes, tokens, _mm512_set1_epi32((int)lowest));
                 if (candidates != 0)
                 {
                     const __m512i covers = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), candidates, _mm512_srli_epi32(tokens, 5), bits, 4);
@@ -5142,6 +5273,46 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
     }
     arena_pop_to(scratch, mark);
     return valid;
+}
+
+// Whether a node discards its first operand's value: a comma's left operand, and a void cast's, statement-level or explicit.
+static bool check_common_discards(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
+{
+    const CheckOp op = graph->ops[node];
+    const TypeId result_type = op == CHECK_OP_CAST ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, node))) : 0;
+    const bool result = op == CHECK_OP_COMMA || (result_type != 0 && type_kind(types, result_type) == BUSTER_TYPE_KIND_VOID);
+    return result;
+}
+
+// The operands and arguments of `node` that its evaluation evaluates, as check_common_evaluated's reverse pass reads them:
+// an operand's or argument's bit `i`, any at 32 and past. A sizeof's or alignof's operand isn't, but a variably modified
+// type's bound; nor is a constant condition's unselected arm.
+static uint32_t check_common_operand_mask(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
+{
+    const CheckOp op = graph->ops[node];
+    uint32_t mask = UINT32_MAX;
+    if (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF)
+    {
+        mask = 0;
+        const uint32_t operand = graph->operand0[node];
+        if (operand < graph->count && (graph->ops[operand] == CHECK_OP_VLA_BOUND || graph->ops[operand] == CHECK_OP_VLA_EXTENT))
+        {
+            // A variably modified type's bound is evaluated even in sizeof.
+            mask = 1;
+        }
+    }
+    else if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
+    {
+        const uint32_t condition = graph->operand0[node];
+        const CheckValue condition_value = condition < graph->count ? check_stream_value(stream, condition) : (CheckValue){ 0 };
+        bool truth = false;
+        if (condition < graph->count && check_action_truth(types, &condition_value, &truth))
+        {
+            mask = op == CHECK_OP_CONDITIONAL ? (truth ? 3u : 5u) :
+                   ((op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth)) ? 1u : 3u;
+        }
+    }
+    return mask;
 }
 
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
@@ -5177,28 +5348,7 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
                 continue;
             }
             const CheckOp op = graph->ops[node];
-            uint32_t mask = UINT32_MAX;
-            if (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF)
-            {
-                mask = 0;
-                const uint32_t operand = graph->operand0[node];
-                if (operand < graph->count && (graph->ops[operand] == CHECK_OP_VLA_BOUND || graph->ops[operand] == CHECK_OP_VLA_EXTENT))
-                {
-                    // A variably modified type's bound is evaluated even in sizeof.
-                    mask = 1;
-                }
-            }
-            else if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
-            {
-                const uint32_t condition = graph->operand0[node];
-                const CheckValue condition_value = condition < graph->count ? check_stream_value(stream, condition) : (CheckValue){ 0 };
-                bool truth = false;
-                if (condition < graph->count && check_action_truth(types, &condition_value, &truth))
-                {
-                    mask = op == CHECK_OP_CONDITIONAL ? (truth ? 3u : 5u) :
-                           ((op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth)) ? 1u : 3u;
-                }
-            }
+            const uint32_t mask = check_common_operand_mask(graph, stream, types, node);
             const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
             {
@@ -5237,36 +5387,354 @@ static void check_common_assertion_reach(const CheckGraph* graph, const CheckStr
     }
 }
 
-// The graph's facts (CheckCommonFacts) into `facts`: each node's parent, whether its value is used, its reach and its arm
-// effect, in one pass over the nodes in graph order, so that its operands' and arguments' already hold, and then which
-// nodes are evaluated. An operand that doesn't precede its node, which the graph's validation rules out, gives it every
-// bit of reach. False where scratch can't hold them.
+// The operators whose own reach (check_common_own_reach) may have a bit: check_common_candidate_bits', a truth context's
+// (#1453), a division's and a comparison's.
+static const CheckOp check_common_reach_ops[] =
+{
+    CHECK_OP_INITIALIZE,
+    CHECK_OP_ASSIGN,
+    CHECK_OP_CONVERT,
+    CHECK_OP_CALL,
+    CHECK_OP_SUBSCRIPT,
+    CHECK_OP_COMMA,
+    CHECK_OP_NOT,
+    CHECK_OP_LOGICAL_AND,
+    CHECK_OP_LOGICAL_OR,
+    CHECK_OP_CONDITION,
+    CHECK_OP_CONDITIONAL,
+    CHECK_OP_DIVIDE,
+    CHECK_OP_REMAINDER,
+    CHECK_OP_LESS,
+    CHECK_OP_LESS_EQUAL,
+    CHECK_OP_GREATER,
+    CHECK_OP_GREATER_EQUAL,
+    CHECK_OP_EQUAL,
+    CHECK_OP_NOT_EQUAL,
+};
+
+// The operators whose arm effects check_common_arm_effect records, and those that may leave an operand unevaluated
+// (check_common_operand_mask).
+static const CheckOp check_common_arm_ops[] =
+{
+    CHECK_OP_CONDITIONAL,
+    CHECK_OP_COMMA,
+    CHECK_OP_SELECT,
+};
+static const CheckOp check_common_mask_ops[] =
+{
+    CHECK_OP_SIZEOF,
+    CHECK_OP_ALIGNOF,
+    CHECK_OP_CONDITIONAL,
+    CHECK_OP_LOGICAL_AND,
+    CHECK_OP_LOGICAL_OR,
+};
+
+// Each node's reader, the node that reads it as an operand or an argument, into `parents` (BUSTER_CHECK_NONE for a node no
+// other reads; `count` + 1 entries, the last a sink that the absent operands write). True where the graph is a tree in
+// node order, which the walks up from a node to its root need: each node's operands and arguments precede it, and no node
+// has two readers, or one reading it twice (each edge writes its child's entry, and only distinct children's entries
+// count as many as the edges). The vector path takes 16 nodes at a time: each operand slot's present children and their
+// nodes compressed to the front and written a child at a time (two edges that write one child fail the count, whatever
+// order they write in), and the arguments of the nodes whose operators have them, found from the same 16 operators; the
+// scalar path, its twin, a node at a time.
+static bool check_common_parents(const CheckGraph* graph, uint32_t* parents, bool scalar)
+{
+    (void)scalar;
+
+    const uint32_t count = graph->count;
+    memset(parents, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+    uint64_t edges = 0;
+    bool ordered = true;
+    uint32_t node = 0;
+    const bool arguments = graph->argument_offsets != NULL && graph->argument_counts != NULL;
+    // The operators with arguments, a bit each, as check_graph_has_arguments has them: a lane's word a permute away.
+    uint32_t argued[(CHECK_OP_COUNT + 31) / 32] = { 0 };
+    for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
+    {
+        argued[op >> 5] |= check_graph_has_arguments((CheckOp)op) ? 1u << (op & 31) : 0u;
+    }
+    _Static_assert(CHECK_OP_COUNT <= 512, "the operators' words fit one register");
+    const __m512i words = _mm512_maskz_loadu_epi32((__mmask16)((1u << BUSTER_ARRAY_LENGTH(argued)) - 1), argued);
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    const __m512i limit = _mm512_set1_epi32((int)count);
+    const uint32_t* slots[] = { graph->operand0, graph->operand1, graph->operand2 };
+    _Alignas(64) uint32_t packed_children[16];
+    _Alignas(64) uint32_t packed_nodes[16];
+    for (; !BUSTER_SCALAR_PATH(scalar) && count - node >= 16; node += 16)
+    {
+        const __m512i nodes = _mm512_add_epi32(_mm512_set1_epi32((int)node), lanes);
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(slots); i += 1)
+        {
+            const __m512i children = _mm512_loadu_si512(slots[i] + node);
+            const __mmask16 edge = _mm512_cmplt_epu32_mask(children, limit);
+            const uint32_t present = (uint32_t)__builtin_popcount(edge);
+            ordered &= _mm512_mask_cmplt_epu32_mask(edge, children, nodes) == edge;
+            edges += present;
+            // The edges' children and nodes packed to the front, then stored a child at a time: a scatter costs as much
+            // whatever its mask, and most slots of most nodes are absent (clang would make the stores a scatter again).
+            _mm512_store_si512(packed_children, _mm512_maskz_compress_epi32(edge, children));
+            _mm512_store_si512(packed_nodes, _mm512_maskz_compress_epi32(edge, nodes));
+#pragma clang loop vectorize(disable) interleave(disable)
+            for (uint32_t k = 0; k < present; k += 1)
+            {
+                parents[packed_children[k]] = packed_nodes[k];
+            }
+        }
+        const __m512i ops = _mm512_loadu_si512(graph->ops + node);
+        const __m512i word = _mm512_permutexvar_epi32(_mm512_srli_epi32(ops, 5), words);
+        const __m512i bit = _mm512_sllv_epi32(_mm512_set1_epi32(1), _mm512_and_si512(ops, _mm512_set1_epi32(31)));
+        for (uint32_t argued_lanes = arguments ? _mm512_test_epi32_mask(word, bit) : 0; argued_lanes != 0; argued_lanes &= argued_lanes - 1)
+        {
+            const uint32_t at = node + (uint32_t)__builtin_ctz(argued_lanes);
+            for (uint32_t a = 0; a < graph->argument_counts[at]; a += 1)
+            {
+                const uint32_t argument = graph->argument_nodes[graph->argument_offsets[at] + a];
+                const bool edge = argument < count;
+                ordered &= !edge || argument < at;
+                parents[edge ? argument : count] = at;
+                edges += edge;
+            }
+        }
+    }
+    for (; node < count; node += 1)
+    {
+        const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+        for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(operands); o += 1)
+        {
+            const bool edge = operands[o] < count;
+            ordered &= !edge || operands[o] < node;
+            parents[edge ? operands[o] : count] = node;
+            edges += edge;
+        }
+        if (arguments && check_graph_has_arguments(graph->ops[node]))
+        {
+            for (uint32_t a = 0; a < graph->argument_counts[node]; a += 1)
+            {
+                const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
+                const bool edge = argument < count;
+                ordered &= !edge || argument < node;
+                parents[edge ? argument : count] = node;
+                edges += edge;
+            }
+        }
+    }
+    uint64_t children = 0;
+    for (uint32_t at = 0; at < count; at += 1)
+    {
+        children += parents[at] != BUSTER_CHECK_NONE;
+    }
+    return ordered && children == edges;
+}
+
+// The vector path's tree (check_common_facts): each node's parent, check_common_parents' into `parents`; and with
+// `used`, whether its reader uses its value: every node with a parent but a comma's or a void cast's first operand
+// (check_common_discards), which a tree's one parent decides, its nodes found 16 at a time. True where the graph is a tree
+// in node order.
+static bool check_common_facts_tree(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t* parents, uint8_t* used)
+{
+    const uint32_t count = graph->count;
+    const bool result = check_common_parents(graph, parents, false);
+    if (result && used != NULL)
+    {
+        for (uint32_t node = 0; node < count; node += 1)
+        {
+            used[node] = parents[node] != BUSTER_CHECK_NONE;
+        }
+        static const CheckOp discarding[] = { CHECK_OP_CAST, CHECK_OP_COMMA };
+        const CheckCommonOps set = check_common_ops(discarding, BUSTER_ARRAY_LENGTH(discarding));
+        CheckCommonScan scan = { 0 };
+        for (uint32_t node = check_common_next_op(graph, &set, &scan, true); node < count; node = check_common_next_op(graph, &set, &scan, true))
+        {
+            const uint32_t operand = graph->operand0[node];
+            if (operand < count && check_common_discards(graph, stream, types, node))
+            {
+                used[operand] = 0;
+            }
+        }
+    }
+    return result;
+}
+
+// Clears the nodes from the `depth` on `stack` with every node below them (operands and arguments) that is still
+// evaluated, a worklist's walk: check_common_evaluated_tree's, which visits each node once in its tree.
+static void check_common_clear_below(const CheckGraph* graph, uint8_t* evaluated, uint32_t* stack, uint32_t depth)
+{
+    const uint32_t count = graph->count;
+    while (depth != 0)
+    {
+        const uint32_t at = stack[--depth];
+        if (evaluated[at] != 0)
+        {
+            evaluated[at] = 0;
+            const uint32_t children[] = { graph->operand0[at], graph->operand1[at], graph->operand2[at] };
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(children); i += 1)
+            {
+                if (children[i] < count)
+                {
+                    stack[depth++] = children[i];
+                }
+            }
+            if (check_graph_has_arguments(graph->ops[at]) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
+            {
+                for (uint32_t i = 0; i < graph->argument_counts[at]; i += 1)
+                {
+                    const uint32_t argument = graph->argument_nodes[graph->argument_offsets[at] + i];
+                    if (argument < count)
+                    {
+                        stack[depth++] = argument;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// check_common_evaluated's vector path, over the tree check_common_facts_tree found: a node is evaluated where its root is
+// and no node on its way there leaves its operand out (check_common_operand_mask). So every node a parent reads starts
+// evaluated, and then the roots the control and selection walks left out and the operands the masks leave out (their
+// nodes found 16 at a time) are cleared with every node below them, a worklist's walk each, which visits each node once.
+static uint8_t* check_common_evaluated_tree(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
+                                            const CheckProgram* program, const uint32_t* parents, Arena* scratch)
+{
+    const uint32_t count = graph->count;
+    uint8_t* evaluated = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
+    uint32_t* stack = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
+    uint8_t* result = stack != NULL ? evaluated : NULL;
+    if (result != NULL)
+    {
+        for (uint32_t node = 0; node < count; node += 1)
+        {
+            // (A dropped range's root, as check_common_evaluated leaves it out.)
+            evaluated[node] = parents[node] == BUSTER_CHECK_NONE &&
+                              (program == NULL || program->dropped_range_count == 0 || !check_program_token_dropped(program, graph->tokens[node]));
+        }
+        // An unreachable initializer's roots under a parent (check_common_unreachable's barriers), cleared below.
+        uint8_t* blocked = NULL;
+        if (program != NULL && program->controls != NULL && !check_common_unreachable(program, graph, evaluated, &blocked, scratch))
+        {
+            result = NULL;
+        }
+        if (!check_common_unselected_roots(graph, parser, evaluated, evaluated, 0, scratch))
+        {
+            result = NULL;
+        }
+        // A node a parent reads takes its evaluation from it, whatever the walks above marked it.
+        for (uint32_t node = 0; node < count; node += 1)
+        {
+            evaluated[node] |= parents[node] != BUSTER_CHECK_NONE;
+        }
+        CheckCommonScan roots = { 0 };
+        const CheckCommonOps masked = check_common_ops(check_common_mask_ops, BUSTER_ARRAY_LENGTH(check_common_mask_ops));
+        CheckCommonScan masks = { 0 };
+        uint32_t root = check_common_next_root(parents, count, &roots, true);
+        uint32_t node = check_common_next_op(graph, &masked, &masks, true);
+        while (root < count || node < count)
+        {
+            uint32_t depth = 0;
+            if (root < count)
+            {
+                // A root the walks cleared: marked again so that its own walk clears it with everything below it.
+                if (evaluated[root] == 0)
+                {
+                    evaluated[root] = 1;
+                    stack[depth++] = root;
+                }
+                root = check_common_next_root(parents, count, &roots, true);
+            }
+            else
+            {
+                const uint32_t mask = check_common_operand_mask(graph, stream, types, node);
+                const uint32_t slots[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+                for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(slots); i += 1)
+                {
+                    if (slots[i] < count && (mask & (1u << i)) == 0)
+                    {
+                        stack[depth++] = slots[i];
+                    }
+                }
+                node = check_common_next_op(graph, &masked, &masks, true);
+            }
+            check_common_clear_below(graph, evaluated, stack, depth);
+        }
+        // Each barrier, with every node below it: the scalar walk's evaluation never reaches them.
+        for (uint32_t node = 0; blocked != NULL && node < count; node += 1)
+        {
+            if (blocked[node] != 0)
+            {
+                stack[0] = node;
+                check_common_clear_below(graph, evaluated, stack, 1);
+            }
+        }
+    }
+    return result;
+}
+
+// The graph's facts (CheckCommonFacts) into `facts`: each node's parent, whether its value is used (where -Wuninitialized
+// reads it), its reach and its arm effect, then which nodes are evaluated. The scalar path makes them in one pass over
+// the nodes in graph order, so that its operands' and arguments' already hold; an operand that doesn't precede its node,
+// which the graph's validation rules out, gives it every bit of reach. The vector path, where the graph is a tree in that
+// order (check_common_facts_tree), visits only the nodes that may have a bit of their own reach and carries each bit up to
+// the first ancestor that has it, whose ancestors all do; computes the arm effects of the operators that have them, found
+// 16 at a time; and takes the evaluated nodes by check_common_evaluated_tree. False where scratch can't hold them.
 static bool check_common_facts(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
                                const CheckProgram* program, const CheckCommonEnabled* enabled, Arena* scratch, CheckCommonFacts* facts)
 {
-    uint32_t* parents = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, graph->count) : NULL;
-    uint8_t* used = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
-    uint8_t* reach = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
-    uint8_t* arm_effects = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    const uint32_t count = graph->count;
+    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    uint32_t* parents = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : NULL;
+    uint8_t* used = count != 0 && enabled->uninitialized ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : NULL;
+    uint8_t* reach = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
+    uint8_t* arm_effects = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
     uint8_t* evaluated = NULL;
-    if (parents != NULL && used != NULL && reach != NULL && arm_effects != NULL)
+    const bool allocated = parents != NULL && (used != NULL || !enabled->uninitialized) && reach != NULL && arm_effects != NULL;
+    const bool walk = allocated && vector && check_common_facts_tree(graph, stream, types, parents, used);
+    if (walk)
     {
-        memset(parents, 0xff, (uint64_t)graph->count * sizeof(uint32_t));
-        memset(used, 0, graph->count);
-        for (uint32_t node = 0; node < graph->count; node += 1)
+        memset(reach, 0, count);
+        // The comparisons, last in the list, only where -Wsign-compare may warn.
+        const CheckCommonOps own = check_common_ops(check_common_reach_ops, BUSTER_ARRAY_LENGTH(check_common_reach_ops) - (enabled->sign_compare ? 0u : 6u));
+        CheckCommonScan owners = { 0 };
+        for (uint32_t node = check_common_next_op(graph, &own, &owners, true); node < count; node = check_common_next_op(graph, &own, &owners, true))
+        {
+            uint8_t bits = check_common_own_reach(parser, graph, stream, types, node, enabled);
+            for (uint32_t at = node; bits != 0 && at < count; at = parents[at])
+            {
+                bits &= (uint8_t)~reach[at];
+                reach[at] |= bits;
+            }
+        }
+        check_common_assertion_reach(graph, stream, reach);
+        const CheckCommonOps arms = check_common_ops(check_common_arm_ops, BUSTER_ARRAY_LENGTH(check_common_arm_ops));
+        CheckCommonScan armed = { 0 };
+        for (uint32_t node = check_common_next_op(graph, &arms, &armed, true); node < count; node = check_common_next_op(graph, &arms, &armed, true))
+        {
+            arm_effects[node] = check_common_arm_effect(graph, stream, types, arm_effects, node);
+        }
+        evaluated = check_common_evaluated_tree(graph, stream, types, parser, program, parents, scratch);
+    }
+    else if (allocated)
+    {
+        memset(parents, 0xff, (uint64_t)count * sizeof(uint32_t));
+        if (used != NULL)
+        {
+            memset(used, 0, count);
+        }
+        for (uint32_t node = 0; node < count; node += 1)
         {
             const CheckOp op = graph->ops[node];
             // A comma's left operand and a cast to void's, statement-level or explicit, drop their operand's result.
-            const TypeId result_type = op == CHECK_OP_CAST ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, node))) : 0;
-            const bool discards = op == CHECK_OP_COMMA || (result_type != 0 && type_kind(types, result_type) == BUSTER_TYPE_KIND_VOID);
-            uint8_t bits = check_common_own_reach(parser, graph, stream, node, enabled);
+            const bool discards = used != NULL && check_common_discards(graph, stream, types, node);
+            uint8_t bits = check_common_own_reach(parser, graph, stream, types, node, enabled);
             const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
             {
-                if (operands[i] < graph->count)
+                if (operands[i] < count)
                 {
                     parents[operands[i]] = node;
-                    used[operands[i]] |= (uint8_t)!(i == 0 && discards);
+                    if (used != NULL)
+                    {
+                        used[operands[i]] |= (uint8_t)!(i == 0 && discards);
+                    }
                     bits |= (uint8_t)(operands[i] < node ? reach[operands[i]] : BUSTER_CHECK_REACH_ALL);
                 }
             }
@@ -5275,10 +5743,13 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
                 for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
                 {
                     const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
-                    if (argument < graph->count)
+                    if (argument < count)
                     {
                         parents[argument] = node;
-                        used[argument] = 1;
+                        if (used != NULL)
+                        {
+                            used[argument] = 1;
+                        }
                         bits |= (uint8_t)(argument < node ? reach[argument] : BUSTER_CHECK_REACH_ALL);
                     }
                 }
@@ -5293,7 +5764,7 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
         evaluated = check_common_evaluated(graph, stream, types, parser, program, parents, scratch);
     }
     *facts = (CheckCommonFacts){ .parents = parents, .used = used, .evaluated = evaluated, .reach = reach, .arm_effects = arm_effects };
-    const bool result = graph->count == 0 || evaluated != NULL;
+    const bool result = count == 0 || evaluated != NULL;
     return result;
 }
 
