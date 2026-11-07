@@ -1449,8 +1449,11 @@ The sections above record each step.
 - **The opt-in mode today.** It skips only unreferenced system bodies, and its plan makes `check-input` slower: 73.0 ms
   against 47.4 ms, for the same object (#1364).
 
-**What is left** is #1671's: the two walks and the declaration steps, 26 ms of the 47.3 ms with flat profiles, and
-the decision on the system declarations.
+So item 2's skip is settled by the default mode's contract, with its ceiling measured; a skip of declarations would
+belong to the opt-in mode, whose plan must first stop costing more than it saves (#1364).
+
+**Past the done-when,** #1671 tracks the stage's remaining time: the two walks and the declaration steps, 26 ms of the
+47.3 ms, with flat profiles.
 
 ## The passes after checking (#592)
 
