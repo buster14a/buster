@@ -199,8 +199,9 @@ static const char* check_semantic_assert(const Parser* parser, Preprocessor* pp,
 }
 
 // The typedef-specifier declaration an operand's type is spelled with (check_input_typedef_spelling), or 0: its object's
-// declaration's, through parentheses, dereferences and subscripts to the named object, or a member's own. Clang's type
-// keeps that sugar: `(*p)++` of a `v4si *p` prints 'v4si'.
+// declaration's, through parentheses, dereferences and subscripts to the named object. Clang's type keeps that sugar:
+// `(*p)++` of a `v4si *p` prints 'v4si'. A member's own typedef isn't found (a record's members keep no declaration), so
+// `x.f++` of a member `uu f` prints its type without it.
 static uint32_t check_semantic_operand_spelling(const Parser* parser, const CheckInput* input, uint32_t node)
 {
     const CheckGraph* graph = &input->graph;
@@ -210,9 +211,8 @@ static uint32_t check_semantic_operand_spelling(const Parser* parser, const Chec
     {
         const CheckOp op = graph->ops[at];
         const uint32_t token = graph->tokens[at];
-        const uint32_t named = op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW ? token + 1 : token;
-        const uint32_t declaration = named < input->token_count && input->declarations != NULL && parser->tokens.kinds[named] == PARSE_KIND_IDENTIFIER ?
-                                     input->declarations[named] : 0;
+        const uint32_t declaration = token < input->token_count && input->declarations != NULL && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ?
+                                     input->declarations[token] : 0;
         result = declaration != 0 && declaration < input->token_count ? check_input_typedef_spelling(input, parser, declaration) : 0;
         const bool through = declaration == 0 && (op == CHECK_OP_VALUE || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT);
         at = result == 0 && through ? graph->operand0[at] : BUSTER_CHECK_NONE;
