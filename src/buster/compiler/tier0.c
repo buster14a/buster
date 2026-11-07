@@ -3325,7 +3325,8 @@ static void tier0_define_templates(void)
     tier0_begin();
     tier0_end(BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_F80, BUSTER_TIER0_VARIANT_LAST, 0);
     // The 128-bit integers: every entry tier0_emit_int128's, as long double's are, but DISCARD and JUMP_VALUE, whose
-    // values stay in their slots. Each is its key's plain variant alone: no constant or local fuses into one.
+    // values stay in their slots. Each is its key's plain variant alone, but the shifts, which take a constant count: no
+    // other constant or local fuses into one.
     static const uint8_t int128_kinds[] = {
         BUSTER_TYPED_CONST, BUSTER_TYPED_DUP, BUSTER_TYPED_NEG, BUSTER_TYPED_NOT, BUSTER_TYPED_LOAD, BUSTER_TYPED_STORE, BUSTER_TYPED_SET,
         BUSTER_TYPED_ADD,   BUSTER_TYPED_SUB, BUSTER_TYPED_MUL, BUSTER_TYPED_AND, BUSTER_TYPED_OR,   BUSTER_TYPED_XOR,   BUSTER_TYPED_SHL,
@@ -3345,6 +3346,9 @@ static void tier0_define_templates(void)
         }
         tier0_defer(BUSTER_TYPED_CONVERT, class, BUSTER_TYPED_CLASS_I128);
         tier0_defer(BUSTER_TYPED_CONVERT, class, BUSTER_TYPED_CLASS_U128);
+        // A shift by a constant count (#1397): the count's CONST absorbed, its value the shifts' immediate.
+        tier0_defer(BUSTER_TYPED_SHL, class, BUSTER_TIER0_VARIANT_CONST);
+        tier0_defer(BUSTER_TYPED_SHR, class, BUSTER_TIER0_VARIANT_CONST);
         tier0_begin();
         tier0_end(BUSTER_TYPED_DISCARD, class, BUSTER_TIER0_VARIANT_PLAIN, 0);
         tier0_begin();
@@ -3656,6 +3660,9 @@ struct Tier0Entries
     // most masks any entry leaves or finds on it.
     uint8_t* mask_depths;
     uint32_t mask_top;
+    // The labels, a bit per entry (tier0_labels's, or tier0_vector_labels's), for emission's looks at an entry's operands'
+    // producers (tier0_int128_product); 0 where a caller of the passes has none.
+    const uint64_t* labels;
 };
 
 // A deep entry's flags (Tier0Entries.deep, tier0_select_deep's): the stacks whose values it reads from their deep slots
@@ -5769,6 +5776,16 @@ static void tier0_int128_take(Tier0Int128Plan* plan, int32_t from, uint32_t fixe
     }
 }
 
+// Whether entry i is a 128-bit shift by a constant count (#1397): the count's CONST absorbed (BUSTER_TIER0_VARIANT_CONST),
+// the value at depth d − 1 and the count function->values[i − 1], of which the shift takes the low 7 bits, as a count in
+// cl does (tier0_emit_int128's).
+static bool tier0_int128_constant_shift(const Tier0Entries* entries, uint32_t i)
+{
+    const uint32_t kind = entries->key_kinds[i];
+    return (kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR) && tier0_class_int128(entries->key_classes[i]) &&
+           entries->variants[i] == BUSTER_TIER0_VARIANT_CONST;
+}
+
 // Entry i's plan (Tier0Int128Plan), from its kind and its depth d before it:
 //   - CONST: the register at d where the low half is past a sign-extended imm32; DUP, LOAD and LOCAL: the one at d
 //     (LOAD's address is at d − 1); STORE and SET: the one at d − 1 (the address is at d − 2); STORE_LOCAL and
@@ -5776,7 +5793,7 @@ static void tier0_int128_take(Tier0Int128Plan* plan, int32_t from, uint32_t fixe
 //   - MUL: two from d − 2, none of them rax or rdx, which hold values below the operands from depths 3 and 5 on (rax is
 //     depth 0's register, rdx depth 2's);
 //   - SHL and SHR: three from d − 2, none of them rcx (depth 1's register, its count's at depth 2, holding a value below
-//     the operands from depth 4 on);
+//     the operands from depth 4 on); by a constant count (tier0_int128_constant_shift), two from d − 1, the value's;
 //   - EQ and NE: two from d − 2, the first the result's; ADD, SUB, AND, OR, XOR and the ordered compares: one from d − 2;
 //   - CONVERT to or from an integer class: the integer's register, at d − 1; NEG, NOT and CONVERT between I128 and U128:
 //     none.
@@ -5803,6 +5820,10 @@ static Tier0Int128Plan tier0_int128_plan(const Tier0Function* function, const Ti
         tier0_int128_take(&plan, depth - 2, 1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX, 2);
         plan.save_rax = depth > 2;
         plan.save_rdx = depth > 4;
+    }
+    else if (tier0_int128_constant_shift(entries, i))
+    {
+        tier0_int128_take(&plan, depth - 1, 0, 2);
     }
     else if (kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR)
     {
@@ -5848,7 +5869,7 @@ static void tier0_memory_tops(const Tier0Function* function, const Tier0Entries*
         const Tier0Int128Plan plan = tier0_int128_plan(function, entries, i);
         integer = plan.top;
         *clobbers |= kind == BUSTER_TYPED_MUL ? 1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX : 0;
-        *clobbers |= kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR ? 1u << X86_REGISTER_RCX : 0;
+        *clobbers |= (kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR) && !tier0_int128_constant_shift(entries, i) ? 1u << X86_REGISTER_RCX : 0;
         *fixed |= plan.save_rax || plan.save_rdx || plan.save_rcx;
     }
     else
@@ -5876,6 +5897,74 @@ static X86Instruction tier0_int128_half(uint32_t form, const Tier0Frame* frame, 
     X86Instruction record = tier0_memory_slot(form, frame, depth, 8 * (int32_t)half);
     record.reg = reg;
     return record;
+}
+
+// How the 128-bit value entry k makes fills its high half (#1397), as bits: BUSTER_TIER0_INT128_ZERO where the high half is
+// zero, BUSTER_TIER0_INT128_SIGN where it is the low half's sign. A CONST's (whose value is 64 bits) is zero in U128 and the
+// sign in I128, and both below 2^63; a CONVERT's from an integer class zero from an unsigned class and the sign from a
+// signed one, and both from an unsigned class narrower than 64 bits; any other entry's, neither.
+#define BUSTER_TIER0_INT128_ZERO 1u
+#define BUSTER_TIER0_INT128_SIGN 2u
+static uint32_t tier0_int128_extension(const Tier0Function* function, const Tier0Entries* entries, uint32_t k)
+{
+    const uint32_t kind = function->kinds[k];
+    const uint32_t class = function->classes[k];
+    const bool made = entries->absorbed[k] == 0 && tier0_class_int128(class);
+    uint32_t extension = 0;
+    if (made && kind == BUSTER_TYPED_CONST)
+    {
+        const bool small = (int64_t)function->values[k] >= 0;
+        extension = (class == BUSTER_TYPED_CLASS_U128 || small ? BUSTER_TIER0_INT128_ZERO : 0) | (class == BUSTER_TYPED_CLASS_I128 || small ? BUSTER_TIER0_INT128_SIGN : 0);
+    }
+    else if (made && kind == BUSTER_TYPED_CONVERT && tier0_class_integer(entries->variants[k]))
+    {
+        const uint32_t from = entries->variants[k];
+        const bool is_signed = tier0_class_signed(from);
+        extension = (is_signed ? 0 : BUSTER_TIER0_INT128_ZERO) | (is_signed || tier0_class_bytes(from) < 8 ? BUSTER_TIER0_INT128_SIGN : 0);
+    }
+    return extension;
+}
+
+// The extension both operands of the 128-bit MUL at entry i share (#1397), with which their product is their low halves'
+// whole product: one mul (BUSTER_TIER0_INT128_ZERO, chosen where both are) or one imul (BUSTER_TIER0_INT128_SIGN); 0 for
+// none, and without the labels (Tier0Entries.labels). Its last operand is entry i − 1's, with no label at i. Its first, the
+// value at depth d − 2, is the last entry before that whose integer depth after it is d − 1, looked for within
+// BUSTER_TIER0_INT128_REACH entries back, where every entry after it keeps the depth at d − 1 or above and none is a label,
+// so that no other way into them brings another value, nor does any entry after it write that value again. It reads the
+// entries' effects rather than their depths, which a deep function's columns hold as its deep entries' windows
+// (tier0_select_deep), so that the choice is the same wherever emission and counting make it.
+#define BUSTER_TIER0_INT128_REACH 32
+static uint32_t tier0_int128_product(const Tier0Function* function, const Tier0Entries* entries, uint32_t i)
+{
+    const uint64_t* labels = entries->labels;
+    uint32_t extension = labels != 0 && i >= 2 && !tier0_label(labels, i) ? tier0_int128_extension(function, entries, i - 1) : 0;
+    uint32_t first = UINT32_MAX;
+    bool open = extension != 0;
+    // The integer depth after entry k, less the depth before entry i.
+    int32_t after = 0;
+    uint32_t k = i;
+    while (k > 0 && open && first == UINT32_MAX && i - k < BUSTER_TIER0_INT128_REACH)
+    {
+        k -= 1;
+        const int32_t raw = entries->integer_effects[k];
+        const bool call = function->kinds[k] == BUSTER_TYPED_CALL || function->kinds[k] == BUSTER_TYPED_TAIL_CALL;
+        const int32_t before = after - (raw - (call && raw > 1 ? 256 : 0));
+        if (k + 1 < i && tier0_label(labels, k + 1))
+        {
+            open = false;
+        }
+        else if (after == -1 && entries->absorbed[k] == 0)
+        {
+            first = k;
+        }
+        else
+        {
+            open = before >= -1 && after >= -1;
+        }
+        after = before;
+    }
+    extension &= first != UINT32_MAX ? tier0_int128_extension(function, entries, first) : 0;
+    return (extension & BUSTER_TIER0_INT128_ZERO) != 0 ? BUSTER_TIER0_INT128_ZERO : extension;
 }
 
 // A red zone temporary below rsp as a memory operand of `form` (tier0_temporary's place), with `reg`.
@@ -6939,11 +7028,16 @@ static uint32_t tier0_count_x87(const Tier0Entries* entries, uint32_t i)
 //   - ADD, SUB, AND, OR, XOR: each half of the last operand through s0 into the first's, in place, the high halves with
 //     the carry (adc, sbb), which mov leaves alone;
 //   - MUL: the cross products' low halves (imul, into s0 and s1) summed, the low halves' whole product (mul, into rdx and
-//     rax), its high half plus the sum, into slot d − 2; rax and rdx saved in the fixed slots where they hold values;
+//     rax), its high half plus the sum, into slot d − 2; or where both operands' high halves extend their low ones alike
+//     (tier0_int128_product), the low halves' product alone, by mul or imul; rax and rdx saved in the fixed slots where
+//     they hold values;
 //   - SHL and SHR: the value's halves into s0 (low) and s1 (high), shifted by cl as halves (shld or shrd, then shl, shr or
 //     sar), then for a count of 64 or more (test cl, 64) the halves moved up or down and the vacated one filled from s2
 //     (zero, or for a signed SHR the sign, sar 63, which neither shift by cl changes), by cmovne; the count moved into
-//     rcx first, and rcx saved in a fixed slot where it holds a value; the shifts by cl take the count's low 6 bits;
+//     rcx first, and rcx saved in a fixed slot where it holds a value; the shifts by cl take the count's low 6 bits. By a
+//     constant count k (tier0_int128_constant_shift, its low 7 bits), the value in slot d − 1: nothing for 0; below 64,
+//     the halves through s0 and s1 shifted by k as immediates; from 64 on, the half that moves through s0, shifted by
+//     k − 64 into the other, and the vacated one filled (zero, or the sign: sar 63);
 //   - EQ and NE: the halves' differences (xor) ORed into s0, the result's register at d − 2, then sete or setne;
 //   - LT and GE: the first operand less the last as a cmp of the low halves and an sbb of the high ones, into s0, then
 //     setl or setge (setb or setae for U128); GT and LE: LT and GE with the operands swapped;
@@ -7045,14 +7139,23 @@ static void tier0_emit_int128(const Tier0Function* function, const Tier0Entries*
         {
             tier0_spill(writer, frame, X86_REGISTER_RDX, frame->fixed_area + 8, false);
         }
-        tier0_put(writer, tier0_int128_half(X86_FORM_MOV_R64_RM64, frame, depth - 2, 1, s0));
-        tier0_put(writer, tier0_int128_half(X86_FORM_IMUL_R64_RM64, frame, depth - 1, 0, s0));
-        tier0_put(writer, tier0_int128_half(X86_FORM_MOV_R64_RM64, frame, depth - 1, 1, s1));
-        tier0_put(writer, tier0_int128_half(X86_FORM_IMUL_R64_RM64, frame, depth - 2, 0, s1));
-        tier0_put(writer, tier0_instruction(X86_FORM_ADD_R64_RM64, s0, s1, direct, 0, 0));
-        tier0_put(writer, tier0_int128_half(X86_FORM_MOV_R64_RM64, frame, depth - 2, 0, X86_REGISTER_RAX));
-        tier0_put(writer, tier0_memory_slot(X86_FORM_MUL_RM64, frame, depth - 1, 0));
-        tier0_put(writer, tier0_instruction(X86_FORM_ADD_R64_RM64, X86_REGISTER_RDX, s0, direct, 0, 0));
+        const uint32_t product = tier0_int128_product(function, entries, i);
+        if (product != 0)
+        {
+            tier0_put(writer, tier0_int128_half(X86_FORM_MOV_R64_RM64, frame, depth - 2, 0, X86_REGISTER_RAX));
+            tier0_put(writer, tier0_memory_slot(product == BUSTER_TIER0_INT128_ZERO ? X86_FORM_MUL_RM64 : X86_FORM_IMUL_RM64, frame, depth - 1, 0));
+        }
+        else
+        {
+            tier0_put(writer, tier0_int128_half(X86_FORM_MOV_R64_RM64, frame, depth - 2, 1, s0));
+            tier0_put(writer, tier0_int128_half(X86_FORM_IMUL_R64_RM64, frame, depth - 1, 0, s0));
+            tier0_put(writer, tier0_int128_half(X86_FORM_MOV_R64_RM64, frame, depth - 1, 1, s1));
+            tier0_put(writer, tier0_int128_half(X86_FORM_IMUL_R64_RM64, frame, depth - 2, 0, s1));
+            tier0_put(writer, tier0_instruction(X86_FORM_ADD_R64_RM64, s0, s1, direct, 0, 0));
+            tier0_put(writer, tier0_int128_half(X86_FORM_MOV_R64_RM64, frame, depth - 2, 0, X86_REGISTER_RAX));
+            tier0_put(writer, tier0_memory_slot(X86_FORM_MUL_RM64, frame, depth - 1, 0));
+            tier0_put(writer, tier0_instruction(X86_FORM_ADD_R64_RM64, X86_REGISTER_RDX, s0, direct, 0, 0));
+        }
         tier0_put(writer, tier0_int128_half(X86_FORM_MOV_RM64_R64, frame, depth - 2, 0, X86_REGISTER_RAX));
         tier0_put(writer, tier0_int128_half(X86_FORM_MOV_RM64_R64, frame, depth - 2, 1, X86_REGISTER_RDX));
         if (plan.save_rax)
@@ -7062,6 +7165,43 @@ static void tier0_emit_int128(const Tier0Function* function, const Tier0Entries*
         if (plan.save_rdx)
         {
             tier0_spill(writer, frame, X86_REGISTER_RDX, frame->fixed_area + 8, true);
+        }
+    }
+    else if (tier0_int128_constant_shift(entries, i))
+    {
+        const uint32_t shift = (uint32_t)function->values[i - 1] & 127;
+        const bool right = kind == BUSTER_TYPED_SHR;
+        const bool arithmetic = right && class == BUSTER_TYPED_CLASS_I128;
+        const uint32_t by = !right ? X86_FORM_SHL_RM64_IMM8 : arithmetic ? X86_FORM_SAR_RM64_IMM8 : X86_FORM_SHR_RM64_IMM8;
+        if (shift != 0 && shift < 64)
+        {
+            tier0_put(writer, tier0_int128_half(X86_FORM_MOV_R64_RM64, frame, depth - 1, 0, s0));
+            tier0_put(writer, tier0_int128_half(X86_FORM_MOV_R64_RM64, frame, depth - 1, 1, s1));
+            tier0_put(writer, right ? tier0_instruction(X86_FORM_SHRD_RM64_R64_IMM8, s1, s0, direct, 0, (int32_t)shift)
+                                    : tier0_instruction(X86_FORM_SHLD_RM64_R64_IMM8, s0, s1, direct, 0, (int32_t)shift));
+            tier0_put(writer, tier0_instruction(by, 0, right ? s1 : s0, direct, 0, (int32_t)shift));
+            tier0_put(writer, tier0_int128_half(X86_FORM_MOV_RM64_R64, frame, depth - 1, 0, s0));
+            tier0_put(writer, tier0_int128_half(X86_FORM_MOV_RM64_R64, frame, depth - 1, 1, s1));
+        }
+        else if (shift >= 64)
+        {
+            // The half that moves, into the other, then the vacated one filled.
+            const uint32_t moved = right ? 1 : 0;
+            tier0_put(writer, tier0_int128_half(X86_FORM_MOV_R64_RM64, frame, depth - 1, moved, s0));
+            if (shift != 64)
+            {
+                tier0_put(writer, tier0_instruction(by, 0, s0, direct, 0, (int32_t)(shift - 64)));
+            }
+            tier0_put(writer, tier0_int128_half(X86_FORM_MOV_RM64_R64, frame, depth - 1, 1 - moved, s0));
+            if (arithmetic)
+            {
+                tier0_put(writer, tier0_instruction(X86_FORM_SAR_RM64_IMM8, 0, s0, direct, 0, 63));
+                tier0_put(writer, tier0_int128_half(X86_FORM_MOV_RM64_R64, frame, depth - 1, moved, s0));
+            }
+            else
+            {
+                tier0_put(writer, tier0_memory_slot(X86_FORM_MOV_RM64_IMM32, frame, depth - 1, 8 * (int32_t)moved));
+            }
         }
     }
     else if (kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR)
@@ -7208,7 +7348,13 @@ static uint32_t tier0_count_int128(const Tier0Function* function, const Tier0Ent
     }
     else if (kind == BUSTER_TYPED_MUL)
     {
-        count = 10 + 2 * ((plan.save_rax ? 1u : 0u) + (plan.save_rdx ? 1u : 0u));
+        count = (tier0_int128_product(function, entries, i) != 0 ? 4 : 10) + 2 * ((plan.save_rax ? 1u : 0u) + (plan.save_rdx ? 1u : 0u));
+    }
+    else if (tier0_int128_constant_shift(entries, i))
+    {
+        const uint32_t shift = (uint32_t)function->values[i - 1] & 127;
+        const bool arithmetic = kind == BUSTER_TYPED_SHR && class == BUSTER_TYPED_CLASS_I128;
+        count = shift == 0 ? 0 : shift < 64 ? 6 : 2 + (shift != 64 ? 1u : 0u) + (arithmetic ? 2u : 1u);
     }
     else if (kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR)
     {
@@ -9651,8 +9797,8 @@ static void tier0_memory_uses(const Tier0Function* function, const Tier0Entries*
     }
     else
     {
-        // Its first operand (of its class, of the entry before it's or an address), its last (the entry before it's),
-        // and DUP's, the top of its class's stack.
+        // Its first operand (of its class, of the entry before it's or an address), its last (the entry before it's, but
+        // a shift's absorbed constant count), and DUP's, the top of its class's stack.
         const uint8_t class = function->classes[i];
         const uint8_t operand = i > 0 ? function->classes[i - 1] : BUSTER_TYPED_CLASS_VOID;
         const Tier0Shape shape = tier0_shapes[kind];
@@ -9662,7 +9808,7 @@ static void tier0_memory_uses(const Tier0Function* function, const Tier0Entries*
                                                                            : BUSTER_TYPED_CLASS_VOID;
         const uint32_t classes[3] = {
             first,
-            shape.last == BUSTER_TIER0_STACK_OPERAND ? operand : BUSTER_TYPED_CLASS_VOID,
+            shape.last == BUSTER_TIER0_STACK_OPERAND && !tier0_int128_constant_shift(entries, i) ? operand : BUSTER_TYPED_CLASS_VOID,
             kind == BUSTER_TYPED_DUP ? class : BUSTER_TYPED_CLASS_VOID,
         };
         for (uint32_t k = 0; k < 3; k += 1)
@@ -10386,6 +10532,7 @@ static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t c
     entries->deep_floating_depths = 0;
     entries->mask_depths = 0;
     entries->mask_top = 0;
+    entries->labels = 0;
     return entries->words != 0 && entries->key_kinds != 0 && entries->key_classes != 0 && entries->variants != 0 && entries->absorbed != 0 && entries->integer_effects != 0 &&
            entries->floating_effects != 0 && entries->depths != 0 && entries->floating_depths != 0 && entries->templates != 0 && entries->lengths != 0 &&
            entries->positions != 0;
@@ -10732,6 +10879,7 @@ static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* outp
     {
         memset(labels, 0, ((uint64_t)count / 64 + 2) * sizeof(uint64_t));
         tier0_labels(function, labels);
+        entries.labels = labels;
         tier0_fuse_scalar(function, labels, &entries);
         if (function->vectors)
         {
@@ -13412,6 +13560,7 @@ static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
     if (error == TIER0_OK)
     {
         tier0_vector_labels(function, bits.labels);
+        entries.labels = bits.labels;
         tier0_vector_values(function, &bits);
         tier0_vector_fuse(function, &bits, &entries);
         if (function->vectors)
