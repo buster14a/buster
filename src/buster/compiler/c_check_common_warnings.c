@@ -2748,6 +2748,48 @@ static uint32_t check_common_next_unevaluated(const uint8_t* evaluated, uint32_t
     return result;
 }
 
+// One brace initializer's literal conversions (check_common_initializer_roots' plan `index`), its parts in reverse
+// initializer order, each part's target conversion, then its nested ones, then the part's own root walk.
+static void check_common_initializer_conversions(CheckCommonEmission* emission, const CheckProgram* program, uint32_t index)
+{
+    const Parser* parser = emission->parser;
+    Preprocessor* pp = emission->pp;
+    const CheckInput* input = emission->input;
+    const CheckStream* stream = emission->stream;
+    const CheckGraph* graph = &input->graph;
+    const uint8_t* evaluated = emission->evaluated;
+    const CheckInitializer* plan = program->initializers->plans + index;
+    const uint32_t declaration = program->initializers->declaration_tokens[index];
+    const uint32_t end = check_common_sparse_get(input->initializer_ends, declaration);
+    const uint32_t completion = end < parser->tokens.count ? check_common_function_boundary(parser, end) : parser->tokens.count;
+    for (uint32_t p = plan->count; p != 0 && !pp->fatal; p -= 1)
+    {
+        const CheckInitPart* part = plan->parts + p - 1;
+        const uint32_t root = part->node;
+        if (part->kind == CHECK_INIT_VALUE && root < graph->count && stream->diagnostics[root] == CHECK_DIAG_NONE &&
+            (evaluated == NULL || evaluated[root] != 0 || (emission->emitted[root] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0))
+        {
+            // Range initializers have one conversion per selected element, even when every write uses
+            // the same source node. The graph's expression is traversed once; its conversions remain distinct.
+            if (check_common_initializer_literal(parser, input, stream, emission->types, part))
+            {
+                const CheckValue value = check_stream_value(stream, root);
+                check_common_conversion_warning_at(parser, pp, input, stream, emission->types, emission->spell, root, &value, part->conversion.type,
+                                                   completion, evaluated == NULL || evaluated[root] != 0, emission->scratch);
+            }
+            // A plan part can also have a graph parent, such as its declaration's discard wrapper.
+            // Its nested conversions still belong immediately after this part's target conversion;
+            // the conversion visit bit prevents the later parent walk from reporting them again.
+            check_common_emit_push(emission, root, BUSTER_CHECK_EMIT_CONVERSIONS);
+            check_common_emit_run(emission);
+            if (emission->parents[root] == BUSTER_CHECK_NONE && (emission->emitted[root] & BUSTER_CHECK_EMITTED_NODE) == 0)
+            {
+                check_common_emit_root(emission, root);
+            }
+        }
+    }
+}
+
 static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                         TypeTable* types, CheckWarningSpelling* spell, const CheckProgram* program, const CheckCommonFacts* facts, Arena* scratch)
 {
@@ -2832,59 +2874,35 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
         // Expression roots in graph order: each evaluated expression emits its subtree's deferred warnings
         // where clang's traversal puts them — the diagnostics' shared publication slot keeps this order.
+        // An initializer's plan (its key's first node) emits before the first root at or after that node, as main's walk of
+        // the roots goes on unchanged between them: a unit with none tests one bound per root.
         uint32_t initializer = 0;
+        uint32_t next_init = initializer_count != 0 ? (uint32_t)(initializers[0] >> 32) : UINT32_MAX;
         CheckCommonScan roots = { 0 };
-        uint32_t root_node = check_common_next_root(parents, graph->count, &roots, vector);
-        while ((root_node < graph->count || initializer < initializer_count) && !pp->fatal)
+        for (uint32_t node = check_common_next_root(parents, graph->count, &roots, vector); node < graph->count && !pp->fatal;
+             node = check_common_next_root(parents, graph->count, &roots, vector))
         {
-            const uint32_t next_init = initializer < initializer_count ? (uint32_t)(initializers[initializer] >> 32) : graph->count;
-            const uint32_t node = root_node < next_init ? root_node : next_init;
-            while (initializer < initializer_count && (initializers[initializer] >> 32) == node && !pp->fatal)
+            if (next_init <= node)
             {
-                const uint32_t index = (uint32_t)initializers[initializer++];
-                const CheckInitializer* plan = program->initializers->plans + index;
-                const uint32_t declaration = program->initializers->declaration_tokens[index];
-                const uint32_t end = check_common_sparse_get(input->initializer_ends, declaration);
-                const uint32_t completion = end < parser->tokens.count ? check_common_function_boundary(parser, end) : parser->tokens.count;
-                for (uint32_t p = plan->count; p != 0 && !pp->fatal; p -= 1)
+                while (initializer < initializer_count && (uint32_t)(initializers[initializer] >> 32) <= node && !pp->fatal)
                 {
-                    const CheckInitPart* part = plan->parts + p - 1;
-                    const uint32_t root = part->node;
-                    if (part->kind == CHECK_INIT_VALUE && root < graph->count && stream->diagnostics[root] == CHECK_DIAG_NONE &&
-                        (evaluated == NULL || evaluated[root] != 0 || (emitted[root] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0))
-                    {
-                        // Range initializers have one conversion per selected element, even when every write uses
-                        // the same source node. The graph's expression is traversed once; its conversions remain distinct.
-                        if (check_common_initializer_literal(parser, input, stream, types, part))
-                        {
-                            const CheckValue value = check_stream_value(stream, root);
-                            check_common_conversion_warning_at(parser, pp, input, stream, types, spell, root, &value, part->conversion.type, completion,
-                                                               evaluated == NULL || evaluated[root] != 0, scratch);
-                        }
-                        // A plan part can also have a graph parent, such as its declaration's discard wrapper.
-                        // Its nested conversions still belong immediately after this part's target conversion;
-                        // the conversion visit bit prevents the later parent walk from reporting them again.
-                        check_common_emit_push(&emission, root, BUSTER_CHECK_EMIT_CONVERSIONS);
-                        check_common_emit_run(&emission);
-                        if (parents[root] == BUSTER_CHECK_NONE && (emitted[root] & BUSTER_CHECK_EMITTED_NODE) == 0)
-                        {
-                            check_common_emit_root(&emission, root);
-                        }
-                    }
+                    check_common_initializer_conversions(&emission, program, (uint32_t)initializers[initializer]);
+                    initializer += 1;
                 }
+                next_init = initializer < initializer_count ? (uint32_t)(initializers[initializer] >> 32) : UINT32_MAX;
             }
-            const uint32_t expr = node == root_node ? check_common_discarded(parser, graph, node) : BUSTER_CHECK_NONE;
-            if (stream->diagnostics[node] == CHECK_DIAG_NONE &&
-                (evaluated[node] != 0 || (emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0) &&
-                node == root_node && parents[node] == BUSTER_CHECK_NONE && (emitted[node] & BUSTER_CHECK_EMITTED_NODE) == 0 &&
+            const uint32_t expr = check_common_discarded(parser, graph, node);
+            if (parents[node] == BUSTER_CHECK_NONE && (evaluated[node] != 0 || (emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0) &&
+                (emitted[node] & BUSTER_CHECK_EMITTED_NODE) == 0 && stream->diagnostics[node] == CHECK_DIAG_NONE &&
                 (reach[node] != 0 || (expr < graph->count && graph->ops[expr] == CHECK_OP_COMMA) || check_common_marker_candidate(graph, expr)))
             {
                 check_common_emit_root(&emission, node);
             }
-            if (node == root_node)
-            {
-                root_node = check_common_next_root(parents, graph->count, &roots, vector);
-            }
+        }
+        // The plans whose first node follows every root.
+        for (; initializer < initializer_count && !pp->fatal; initializer += 1)
+        {
+            check_common_initializer_conversions(&emission, program, (uint32_t)initializers[initializer]);
         }
         // Anything a root walk did not reach still reports its own warning at its own place — through the
         // own frame, so a conditional's arms still emit ahead of it.
