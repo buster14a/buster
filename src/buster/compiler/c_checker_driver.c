@@ -1614,8 +1614,11 @@ static const char* check_driver_conversion_words(const Parser* parser, Preproces
 
 // An initializer's subobject whose conversion failed (#147, CheckInitDiagnostic.failed_source): clang's words of it as an
 // initialization (check_driver_conversion_words), at the subobject's expression (`token`), or at the declarator
-// (`declaration`) where it is the whole initializer of no braces, the declared type then spelled with its typedef. NULL
-// where it is none of those (the generic "invalid initializer" stays).
+// (`declaration`) where it is the whole initializer of no braces, the declared type then spelled with its typedef. A
+// record's or an array's whole initializer of no braces that failed with no conversion of its own (`source`
+// BUSTER_CHECK_NONE) is clang's too where its value is no record of the type: the record's initialization from the value,
+// or an array's "array initializer must be an initializer list". NULL where it is none of those (the generic "invalid
+// initializer" stays).
 static const char* check_driver_initializer_conversion(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                                        const TypeTable* types, TypeId target, uint32_t source, uint32_t declaration, uint32_t token,
                                                        uint32_t* located, Arena* scratch)
@@ -1624,9 +1627,36 @@ static const char* check_driver_initializer_conversion(const Parser* parser, Pre
     const bool declared = declaration < input->token_count;
     const bool whole = declared && token < parser->tokens.count && check_sparse_get(input->initializer_begins, declaration) == token &&
                        parser->tokens.kinds[token] != PARSE_KIND_L_BRACE;
+    if (source == BUSTER_CHECK_NONE && whole && input->token_nodes != NULL)
+    {
+        // The whole initializer's value: its last token's outermost node, as check_init_node takes it.
+        const uint32_t end = check_sparse_get(input->initializer_ends, declaration);
+        for (uint32_t at = token; at < end && at < input->token_count; at += 1)
+        {
+            const uint32_t node = input->token_nodes[at];
+            source = node < stream->count && (source == BUSTER_CHECK_NONE || node > source) ? node : source;
+        }
+        target = input->declared_types[declaration];
+        const uint8_t kind = type_kind(types, type_strip_aligned(types, target));
+        const bool aggregate = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || type_kind_is_array(kind);
+        const TypeId value = source < stream->count ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, source))) : 0;
+        // A string literal's array initialized from it is the walk's own (its sizes), and a record of the type its copy.
+        const bool own = value == type_unqualified(type_strip_aligned(types, target)) || (type_kind_is_array(kind) && value != 0 && type_kind_is_array(type_kind(types, value)));
+        source = aggregate && !own ? source : BUSTER_CHECK_NONE;
+    }
     uint32_t spelling = 0;
     const TypeId spelled = whole ? check_input_object_spelling(types, input, parser, declaration, input->declared_types[declaration], target, &spelling) : target;
-    const char* result = check_driver_conversion_words(parser, pp, input, stream, types, &spell, source, spelled, spelling, 0, scratch);
+    const TypeId bare = type_strip_aligned(types, target);
+    const bool array = type_kind_is_array(type_kind(types, bare));
+    // An array's (clang's FK_ArrayNeedsInitList and its string literal kinds): the literal its element takes named, a
+    // character type's a string, wchar_t's, char16_t's and char32_t's (int, unsigned short and unsigned int here) a wide one.
+    const TypeId element = array ? type_unqualified(type_strip_aligned(types, type_element(types, bare))) : 0;
+    const bool narrow = element == BUSTER_TYPE_CHAR || element == BUSTER_TYPE_SCHAR || element == BUSTER_TYPE_UCHAR;
+    const bool wide = element == BUSTER_TYPE_INT || element == BUSTER_TYPE_USHORT || element == BUSTER_TYPE_UINT;
+    const char* result = source >= stream->count ? NULL :
+                         !array ? check_driver_conversion_words(parser, pp, input, stream, types, &spell, source, spelled, spelling, 0, scratch) :
+                         narrow ? "array initializer must be an initializer list or string literal" :
+                         wide ? "array initializer must be an initializer list or wide string literal" : "array initializer must be an initializer list";
     *located = whole ? declaration : token;
     return result;
 }
@@ -4882,7 +4912,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         {
                             // A subobject's failed conversion is clang's words of it (#147), at its place.
                             uint32_t place = earlier.token;
-                            const char* conversion = earlier.status == CHECK_INIT_INVALID && earlier.failed_source != 0 ?
+                            const char* conversion = earlier.status == CHECK_INIT_INVALID ?
                                 check_driver_initializer_conversion(checking, checking_pp, &input, &stream, &types, earlier.failed_type, earlier.failed_source - 1,
                                                                     earlier.failed_declaration, earlier.token, &place, output_arena) : NULL;
                             const char* message = conversion != NULL ? conversion : earlier.status == CHECK_INIT_MEMBER ?
