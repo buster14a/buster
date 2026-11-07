@@ -110,6 +110,17 @@ requirements. [Command index](README.md).
   and GNU range initialization, including preservation and removal of marks.
   Each body has at most one warned dereference because Clang's delayed warning
   order for multiple accesses is unstable across invocations.
+  `c_check_return_flow.c` supplies source return-warning facts for checked graphs. Ordinary direct calls no longer
+  suppress a function's `-Wreturn-type` warning; a proven direct `noreturn` call or terminating builtin ends only its
+  own warning-flow edge. Short circuit, conditional and unevaluated operands retain their execution rules, and
+  emission reachability is unchanged. Indirect calls (including GNU `noreturn` pointer/typedef contracts), overloads,
+  analyzer annotations, semantic queries, conditional classifier contracts and library-policy contracts remain
+  conservative until their retained facts are available here (#1393 remains open). Indirect calls in automatic
+  initializer value parts share that conservative boundary, including ordinary pointers whose Clang warning is
+  currently suppressed here; GNU noreturn pointer/typedef initializers need it until callable-type facts are retained.
+  `c_check_return_call_driver_test.c` exercises direct-call fall-off,
+  path-local termination, initializer/comma operands, warning flags and those conservative boundaries through the
+  ordinary, scalar and deferred readers against Clang, with independent warning counts.
   `c_check_data.c` and `c_check_data_input.c` turn selected static scalar definitions into real
   Link atoms/fixups; their tests compare emitted ELF bytes with Clang objects.
   `benchmark-checker --shape wide|chain` measures synthetic graph checking,

@@ -461,10 +461,8 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
 
 static bool check_input_spelling(CheckInputReader* reader, uint32_t token, const uint8_t** bytes, uint32_t* length);
 
-static String8 check_input_attribute_name(CheckInputReader* reader, uint32_t name)
+static String8 check_input_attribute_spelling(const InternTable* table, uint32_t name)
 {
-    // (A reader of no preprocessor, a unit test's, has no names.)
-    const InternTable* table = reader->pp != NULL ? reader->pp->table : NULL;
     String8 result = { 0 };
     if (table != NULL && name != 0 && name < table->count)
     {
@@ -482,6 +480,13 @@ static String8 check_input_attribute_name(CheckInputReader* reader, uint32_t nam
         }
     }
     return result;
+}
+
+static String8 check_input_attribute_name(CheckInputReader* reader, uint32_t name)
+{
+    // A reader of no preprocessor, a unit test's, has no names.
+    const InternTable* table = reader->pp != NULL ? reader->pp->table : NULL;
+    return check_input_attribute_spelling(table, name);
 }
 
 static bool check_input_attribute_equal(String8 text, const char* expected)
