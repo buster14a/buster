@@ -1030,6 +1030,65 @@ alone at 287.2 MB against main's 293.7 MB, with 396 more faults. Its observed
 medians were 138.7 against 139.9 ms, from three unpaired runs each, which
 establish no difference in time.
 
+### The reader's sparse output in base pages (#628)
+
+A map of each push's resident pages at the three peaks, with huge pages and
+with base pages (`BUSTER_HUGE_PAGES=1` and `=0`, the peak map above, on the
+VM), finds about 30 MB of 2 MB pages that their pushes touch in part, in all
+three. Most belong to columns with room for a value a token or a node, whose
+end is in a huge page they only start (the graph's node columns, the
+preprocessor's token columns and its file's windows); those need their counts
+before they are pushed. But two of the reader's outputs are written at few
+places, far apart, and held to the end:
+- **the sparse columns' directories and pool** (`check_sparse_reserve_wide`):
+  a directory entry for each 16 tokens of 14 columns, written where a column
+  has an entry, and a block for each written entry's 16, from the pool's start;
+- **the graph's leaf rows** (`leaf_payloads`): room for a row a leaf, of which
+  `sqlite3.c`'s 80 take 7.5 KB.
+
+The C driver now gives them an arena of base pages for each unit
+(`check_driver_unit`'s `sparse_arena`, which `check_input_compile` and
+`check_input_deferred_compile` pass on as `sparse_output`; the graph's rows
+through `check_graph_initialize_rows`). Every other reader keeps them in its
+output arena, as before. With huge pages, every peak is 6.0 MB lower: on the
+VM, at the reader's end 277.3 → 271.3 MB, at `check-declarations`' end
+279.9 → 273.9 MB, and at the backend's 278.0 → 272.0 MB (on #1574's tree).
+On main `faef1f98` against the change, three runs each, which agree within
+16 KiB, every object the same bytes:
+
+| pages | measure | main | sparse output in base pages |
+| --- | --- | ---: | ---: |
+| huge (`BUSTER_HUGE_PAGES=1`) | peak RSS | 287,848 KiB | 281,776 KiB |
+| | minor faults | 6,083 | 7,658 |
+| base (the VM's default) | peak RSS | 222,480 KiB | 222,420 KiB |
+
+They take 6.2 MB of base pages, 1,575 faults, where they touched 12.3 MB of
+huge pages.
+
+After it, on #1574's tree (the VM, huge pages), the three peaks are 271.3 MB
+at the reader's end, 273.9 MB at `check-declarations`' end (274.0 at
+`static-data`'s) and 272.0 MB in the backend, so that a change lowers the
+compile's peak only by what it takes off all three, or off the highest down to
+the next. Two changes that took memory off some of them didn't, and aren't in:
+- **The rare columns in base pages** for a reading in source order
+  (`check_input_sparse_arena`, as a large unit's deferred reading has them):
+  the reader's end falls 17.7 MB, to 253.6 MB, for 6,800 more faults in
+  `check-input` and the same system time on the VM; the peak is
+  `static-data`'s, as before.
+- **The stream's conversions in 16 bytes a node** (its first two operands'),
+  with the third operand's and the stored value's, 667 and 3,818 of 323,557
+  nodes, in two wide sparse columns: the column falls from 10.1 to 5.1 MB, but
+  the sparse pool's room, a block for each directory entry, starts a 2 MB page
+  for 0.5 MB of blocks, and the output arena's later pushes start other 2 MB
+  pages: the peak fell 0.2 MB, from 272.8 to 272.6 MB, with or without the rare
+  columns' change.
+
+What would lower all three is in each one's huge pages that their pushes touch
+in part, as above: the graph's node columns (about 8 MB, a node a token of
+room, 42% of it used), the preprocessor's token columns (5.6 MB) and its file's
+windows (5.6 MB). Each needs its count, or a bound close to it, before it is
+pushed.
+
 ## The checker's graph and program passes (#530)
 
 **Measured against `main` on the 9700X.** Medians of 15 interleaved

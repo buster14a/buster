@@ -3985,6 +3985,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     bool driver_fatal = false;
     Arena type_arena = { 0 };
     Arena index_arena = { 0 };
+    Arena sparse_arena = { 0 };
     const bool scalar = command->scalar;
     const bool verify = command->verify;
     const bool dump = command->dump;
@@ -4151,6 +4152,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             const bool deferring = deferred != NULL && lanes != NULL && lanes->flow != NULL && !prefix_only && selected == NULL;
             const uint32_t deferred_lanes = deferring ? check_driver_deferred_lanes(lanes) : 1;
             CheckDriverDeferred grants = { .lanes = lanes };
+            // What the reader writes at few places, in base pages (check_input_run): the sparse columns' directories and
+            // pool, and the graph's leaf rows. In the huge pages of `arena`, sqlite3.c's took 6 MB of 2 MB pages that they
+            // touched in part, from the reader's end through the backend (#628). Where it can't be reserved, `arena`.
+            sparse_arena = arena_reserve_small(UINT64_C(1) << 36, UINT64_C(1) << 36);
+            Arena* const sparse_output = sparse_arena.base != NULL ? &sparse_arena : NULL;
             bool input_valid = false;
             if (deferred_lanes > 1)
             {
@@ -4162,12 +4168,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 };
                 deferred->flow = &flow;
                 deferred->every_lane = lanes->every_lane;
-                input_valid = check_input_deferred_compile(deferred, &input, checking, checking_pp, &types, arena, scratch, deferred_lanes);
+                input_valid = check_input_deferred_compile(deferred, &input, checking, checking_pp, &types, arena, scratch, sparse_output, deferred_lanes);
                 deferred->flow = NULL;
             }
             else
             {
-                input_valid = check_input_compile(&input, checking, checking_pp, &types, arena, scratch, !prefix_only,
+                input_valid = check_input_compile(&input, checking, checking_pp, &types, arena, scratch, sparse_output, !prefix_only,
                                                   repairing ? repair.original_end : checking->tokens.count, selected);
             }
             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
@@ -4597,6 +4603,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         pp_release(pp);
         arena_release(&index_arena);
         arena_release(&type_arena);
+        arena_release(&sparse_arena);
     }
     return result;
 }

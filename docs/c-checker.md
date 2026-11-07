@@ -853,7 +853,9 @@ events, including parameter reactivation, rather than distinct source tokens.
 The independent scalar resolver has zero candidate-walk/fallback counters.
 
 `check_graph_initialize` allocates all standard graph columns from an arena and
-sets the logical count to zero. `check_graph_add` appends one node if capacity,
+sets the logical count to zero; `check_graph_initialize_rows` takes the leaf
+rows from a second arena, which the C driver's reader keeps in base pages with
+the sparse columns' pool (`check_input_run`'s `sparse_output`, #628). `check_graph_add` appends one node if capacity,
 operation and earlier-operand checks permit it; otherwise it returns
 `BUSTER_CHECK_NONE` without incrementing the count. Initialization rolls back
 its allocations if it fails. Both node and argument capacities are bounded by

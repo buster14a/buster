@@ -197,6 +197,7 @@ static __attribute__((noinline)) void check_test_stream_columns(CheckTest* test)
 static const char check_test_fresh_output_source[] =
     "typedef struct pair { int a; int b; } pair;\n"
     "static int counter;\n"
+    "static double ratio = 1.5;\n"
     "int tentative;\n"
     "int tentative;\n"
     "_Thread_local int per_thread = 3;\n"
@@ -211,7 +212,7 @@ static const char check_test_fresh_output_source[] =
     "    for (int i = 0; i < n; i += 1) { total += p[i].a + p[i].b + table[i % 5]; }\n"
     "    switch (n) { case 1: total += 1; break; case 2 ... 4: total -= 1; break; default: break; }\n"
     "    if (total > 100) goto done;\n"
-    "    total += twice(counter) + per_thread + (int)sizeof(buffer) + (pair){ 1, 2 }.b;\n"
+    "    total += twice(counter) + per_thread + (int)sizeof(buffer) + (pair){ 1, 2 }.b + (int)(ratio * 0.5);\n"
     "done:\n"
     "    return total + named;\n"
     "}\n"
@@ -234,13 +235,51 @@ static bool check_test_fresh_columns_equal(const CheckInput* input, const CheckI
                  (input->asm_ids == NULL || memcmp(input->asm_ids, other->asm_ids, slots * sizeof(uint32_t)) == 0) &&
                  input->graph.capacity == other->graph.capacity &&
                  memcmp(input->graph.warning_suppressed, other->graph.warning_suppressed, input->graph.capacity) == 0;
+    const CheckSparseColumn sparse[][2] = {
+        { input->initializer_nodes, other->initializer_nodes },
+        { input->initializer_begins, other->initializer_begins },
+        { input->initializer_ends, other->initializer_ends },
+        { input->evaluation_nodes, other->evaluation_nodes },
+        { input->body_declarations, other->body_declarations },
+        { input->declaration_bodies, other->declaration_bodies },
+        { input->parameters, other->parameters },
+        { input->parameter_next, other->parameter_next },
+        { input->control_owners, other->control_owners },
+        { input->label_targets, other->label_targets },
+        { input->case_ranges, other->case_ranges },
+        { input->string_ids, other->string_ids },
+    };
     for (uint32_t token = 0; equal && token <= count; token += 1)
     {
         const CheckInputAttributes* a = check_input_attributes_at(input, token);
         const CheckInputAttributes* b = check_input_attributes_at(other, token);
         equal = (a == NULL) == (b == NULL) && (a == NULL || a->count == b->count);
+        for (uint32_t c = 0; equal && c < BUSTER_ARRAY_LENGTH(sparse); c += 1)
+        {
+            equal = check_sparse_get(sparse[c][0], token) == check_sparse_get(sparse[c][1], token);
+        }
+    }
+    // The graph's leaves, whole, wherever each holds its rows.
+    const CheckGraph* graph = &input->graph;
+    equal = equal && graph->count == other->graph.count && graph->leaf_count == other->graph.leaf_count &&
+            graph->leaf_payload_count == other->graph.leaf_payload_count;
+    for (uint32_t node = 0; equal && node < graph->count; node += 1)
+    {
+        if (graph->ops[node] == CHECK_OP_VALUE)
+        {
+            const CheckValue a = check_graph_leaf_value(graph, node);
+            const CheckValue b = check_graph_leaf_value(&other->graph, node);
+            equal = memcmp(&a, &b, sizeof(a)) == 0;
+        }
     }
     return equal;
+}
+
+// Whether `pointer` is in what `arena` has pushed.
+static bool check_test_in_arena(const Arena* arena, const void* pointer)
+{
+    const uintptr_t at = (uintptr_t)pointer;
+    return arena->base != NULL && at >= (uintptr_t)arena->base && at < (uintptr_t)arena->base + arena->length;
 }
 
 static __attribute__((noinline)) void check_test_fresh_output(CheckTest* test)
@@ -254,50 +293,77 @@ static __attribute__((noinline)) void check_test_fresh_output(CheckTest* test)
                        pp_run_source(&pp, "fresh-output.c", (const uint8_t*)check_test_fresh_output_source, sizeof(check_test_fresh_output_source) - 1) &&
                        parse_translation_unit(&parser, &pp);
     check_test_expect(test, ready, "fresh output: source setup");
+    // Four layouts of the reader's output: in a fresh arena; in one whose pages a pattern fills where the columns go
+    // (something pushed, written and popped before); and in a fresh arena with its sparse output in an arena of its own
+    // (check_input_run's `sparse_output`, as the C driver's reader has it, #628), fresh or patterned.
+    enum { LAYOUTS = 4 };
     for (uint32_t path = 0; ready && path < 2; path += 1)
     {
         parser.options.scalar = path == 0;
-        CheckInput inputs[2];
-        CheckStream streams[2];
-        CheckTestTypes types[2] = { 0 };
-        Arena arenas[2] = { arena_reserve(UINT64_C(1) << 28), arena_reserve(UINT64_C(1) << 28) };
-        Arena outputs[2] = { arena_reserve(UINT64_C(1) << 26), arena_reserve(UINT64_C(1) << 26) };
+        CheckInput inputs[LAYOUTS];
+        CheckStream streams[LAYOUTS];
+        CheckTestTypes types[LAYOUTS] = { 0 };
+        Arena arenas[LAYOUTS];
+        Arena sparse[LAYOUTS];
+        Arena outputs[LAYOUTS];
         Arena scratch = arena_reserve(UINT64_C(1) << 28);
-        bool checked[2] = { false, false };
-        bool untouched[2] = { false, false };
-        for (uint32_t layout = 0; layout < 2; layout += 1)
+        bool checked[LAYOUTS] = { false };
+        bool untouched[LAYOUTS] = { false };
+        bool sparse_untouched[LAYOUTS] = { false };
+        for (uint32_t layout = 0; layout < LAYOUTS; layout += 1)
         {
-            // Layout 1's pages hold a pattern where the columns go: something pushed, written and popped before.
-            uint8_t* used = layout == 1 ? arena_push(&arenas[1], UINT64_C(48) << 20, 64) : NULL;
+            arenas[layout] = arena_reserve(UINT64_C(1) << 28);
+            outputs[layout] = arena_reserve(UINT64_C(1) << 26);
+            sparse[layout] = layout >= 2 ? arena_reserve_small(UINT64_C(1) << 28, UINT64_C(1) << 28) : (Arena){ 0 };
+            Arena* const patterned = layout == 1 ? &arenas[1] : layout == 3 ? &sparse[3] : NULL;
+            uint8_t* used = patterned != NULL ? arena_push(patterned, UINT64_C(48) << 20, 64) : NULL;
             if (used != NULL)
             {
                 memset(used, 0xa5, UINT64_C(48) << 20);
-                arena_pop_to(&arenas[1], 0);
+                arena_pop_to(patterned, 0);
             }
             untouched[layout] = arena_untouched(&arenas[layout]);
+            sparse_untouched[layout] = layout >= 2 && arena_untouched(&sparse[layout]);
             checked[layout] = check_test_types_open(&types[layout]) &&
-                              check_input_compile(&inputs[layout], &parser, &pp, &types[layout].table, &arenas[layout], &scratch, true, parser.tokens.count, NULL) &&
+                              check_input_compile(&inputs[layout], &parser, &pp, &types[layout].table, &arenas[layout], &scratch,
+                                                  layout >= 2 ? &sparse[layout] : NULL, true, parser.tokens.count, NULL) &&
                               check_graph_run(&types[layout].table, &inputs[layout].graph, &outputs[layout], &scratch, &(const CheckOptions){ .scalar = path == 0 },
                                               &streams[layout]);
         }
+        const char* const name = path == 0 ? "scalar" : "vector";
         char description[160];
-        snprintf(description, sizeof(description), "fresh output: %s path, a fresh arena is untouched and a reused one isn't", path == 0 ? "scalar" : "vector");
-        check_test_expect(test, untouched[0] && !untouched[1], description);
-        snprintf(description, sizeof(description), "fresh output: %s path, both readers check the source", path == 0 ? "scalar" : "vector");
-        check_test_expect(test, checked[0] && checked[1] && streams[0].report_count == 0, description);
-        if (checked[0] && checked[1])
+        snprintf(description, sizeof(description), "fresh output: %s path, a fresh arena is untouched and a reused one isn't", name);
+        check_test_expect(test, untouched[0] && !untouched[1] && untouched[2] && untouched[3] && sparse_untouched[2] && !sparse_untouched[3], description);
+        snprintf(description, sizeof(description), "fresh output: %s path, every reader checks the source", name);
+        check_test_expect(test, checked[0] && checked[1] && checked[2] && checked[3] && streams[0].report_count == 0 && inputs[0].graph.leaf_payload_count != 0,
+                          description);
+        for (uint32_t layout = 2; layout < LAYOUTS; layout += 1)
         {
-            snprintf(description, sizeof(description), "fresh output: %s path, the columns without clearing are the cleared ones", path == 0 ? "scalar" : "vector");
-            check_test_expect(test, inputs[0].token_count == inputs[1].token_count && check_test_fresh_columns_equal(&inputs[0], &inputs[1], inputs[0].token_count),
+            snprintf(description, sizeof(description), "fresh output: %s path, layout %u's sparse pool and leaf rows are in its sparse arena", name, layout);
+            check_test_expect(test, checked[layout] && check_test_in_arena(&sparse[layout], inputs[layout].sparse_pool->blocks) &&
+                              check_test_in_arena(&sparse[layout], inputs[layout].attributes.directory) &&
+                              check_test_in_arena(&sparse[layout], inputs[layout].graph.leaf_payloads) &&
+                              !check_test_in_arena(&arenas[layout], inputs[layout].graph.leaf_payloads),
                               description);
-            snprintf(description, sizeof(description), "fresh output: %s path, the typed streams are the same", path == 0 ? "scalar" : "vector");
-            check_test_expect(test, check_test_stream_equal(&streams[0], &streams[1], inputs[0].graph.argument_count), description);
         }
-        for (uint32_t layout = 0; layout < 2; layout += 1)
+        for (uint32_t layout = 1; checked[0] && layout < LAYOUTS; layout += 1)
+        {
+            if (checked[layout])
+            {
+                snprintf(description, sizeof(description), "fresh output: %s path, layout %u's columns are layout 0's", name, layout);
+                check_test_expect(test, inputs[0].token_count == inputs[layout].token_count &&
+                                  check_test_fresh_columns_equal(&inputs[0], &inputs[layout], inputs[0].token_count),
+                                  description);
+                snprintf(description, sizeof(description), "fresh output: %s path, layout %u's typed stream is layout 0's", name, layout);
+                check_test_expect(test, check_test_stream_equal(&streams[0], &streams[layout], inputs[0].graph.argument_count), description);
+            }
+        }
+        for (uint32_t layout = 0; layout < LAYOUTS; layout += 1)
         {
             check_test_types_close(&types[layout]);
             arena_release(&arenas[layout]);
             arena_release(&outputs[layout]);
+            arena_release(&sparse[layout]);
         }
         arena_release(&scratch);
     }
