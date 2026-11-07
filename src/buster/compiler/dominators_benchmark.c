@@ -605,6 +605,16 @@ int run_dominator_benchmark(int argc, char** argv)
                 .blocks = 2049,
                 .shape = 4,
             },
+            {
+                .name = "ladder",
+                .blocks = 8192,
+                .shape = 6,
+            },
+            {
+                .name = "nested-ifs",
+                .blocks = 8192,
+                .shape = 7,
+            },
         };
         const uint32_t outputs[] = {
             0,

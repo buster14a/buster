@@ -16,7 +16,7 @@
 #include <unistd.h>
 
 #define BUSTER_DOMINATOR_TEST_BYTES (256ull << 20)
-#define BUSTER_DOMINATOR_TEST_SHAPES 6
+#define BUSTER_DOMINATOR_TEST_SHAPES 8
 
 typedef struct DominatorTestEdge DominatorTestEdge;
 struct DominatorTestEdge
@@ -182,6 +182,25 @@ static bool dominator_test_generate(Arena* arena, uint32_t count, uint32_t shape
                 edges[edge_count] = (DominatorTestEdge){
                     .source = block,
                     .target = block - 1,
+                };
+                edge_count += 1;
+            }
+            // #1352's goto ladder: the first half's tests each jump to their label in the fall-through second half.
+            // Every label's idom is entry, while its test sits as deep as the ladder.
+            if (shape == 6 && block < count / 2)
+            {
+                edges[edge_count] = (DominatorTestEdge){
+                    .source = block,
+                    .target = count / 2 + block,
+                };
+                edge_count += 1;
+            }
+            // Nested ifs: each condition in the first half also jumps to its own join, the joins in reverse order.
+            if (shape == 7 && block < count / 2)
+            {
+                edges[edge_count] = (DominatorTestEdge){
+                    .source = block,
+                    .target = count - 1 - block,
                 };
                 edge_count += 1;
             }
@@ -525,9 +544,12 @@ static void dominator_test_limits(DominatorTestTally* tally, Arena* memory, Aren
         dominator_test_expect(tally, status == DOMINATOR_OK && result.path == DOMINATOR_SCALAR && result.matrix_peak_bytes == 0 && result.frontiers == 0 && result.loop_bodies == 0, "automatic linear-memory fallback");
         arena_pop_to(memory, start);
         options = dominators_options();
+        status = dominators_analyze(memory, scratch, &cfg, options, &result);
+        dominator_test_expect(tally, status == DOMINATOR_OK && result.path == DOMINATOR_SCALAR && result.loop_count != 0 && result.loop_path == DOMINATOR_VECTOR, "AUTO solves by SEMI-NCA and keeps vector loops that fit");
+        arena_pop_to(memory, start);
         options.max_matrix_bytes = 17 * 64 + 16 * 64;
         status = dominators_analyze(memory, scratch, &cfg, options, &result);
-        dominator_test_expect(tally, status == DOMINATOR_OK && result.path == DOMINATOR_VECTOR && result.loop_path == DOMINATOR_SCALAR, "loop scratch independently falls back within budget");
+        dominator_test_expect(tally, status == DOMINATOR_OK && result.path == DOMINATOR_SCALAR && result.loop_path == DOMINATOR_SCALAR, "loop scratch independently falls back within budget");
         arena_pop_to(memory, start);
         uint32_t* reverse = (uint32_t*)cfg.predecessors;
         const uint32_t first = reverse[0];
