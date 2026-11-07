@@ -155,6 +155,60 @@ static void check_test_driver_logical_unused(CheckTest* test, const char* clang,
             .options = { "-Wno-unused-value" },
         },
         {
+            .name = "logical discard ordinary library calls accept discard",
+            .source = "typedef __SIZE_TYPE__ size_t;int printf(const char*,...);void*memcpy(void*,const void*,size_t);"
+                      "void*memmove(void*,const void*,size_t);void*memset(void*,int,size_t);void*malloc(size_t);"
+                      "void*calloc(size_t,size_t);void*realloc(void*,size_t);int snprintf(char*,size_t,const char*,...);"
+                      "int strcmp(const char*,const char*);size_t strlen(const char*);char*strdup(const char*);\n"
+                      "void f(int a,char*d,const char*s,size_t n){a&&printf(\"%s\",s);a&&memcpy(d,s,n);a&&memmove(d,s,n);"
+                      "a&&memset(d,0,n);a&&malloc(n);a&&calloc(n,1);a&&realloc(d,n);a&&snprintf(d,n,\"%s\",s);"
+                      "a&&strcmp(d,s);a&&strlen(s);a&&strdup(s);}\n",
+        },
+        {
+            .name = "logical discard implicit builtin contracts retain warnings",
+            .source = "int abs(int);long labs(long);long long llabs(long long);double fabs(double);double floor(double);"
+                      "int isalpha(int);int toupper(int);\n"
+                      "void f(int a,double x){a&&abs(a);a&&labs(a);a&&llabs(a);a&&fabs(x);a&&floor(x);a&&isalpha(a);a&&toupper(a);}\n",
+            .warnings = 7,
+        },
+        {
+            .name = "logical discard disabling builtins drops implicit contracts",
+            .source = "int abs(int);long labs(long);long long llabs(long long);double fabs(double);double floor(double);"
+                      "int isalpha(int);int toupper(int);\n"
+                      "void f(int a,double x){a&&abs(a);a&&labs(a);a&&llabs(a);a&&fabs(x);a&&floor(x);a&&isalpha(a);a&&toupper(a);}\n",
+            .options = { "-fno-builtin" },
+        },
+        {
+            .name = "logical discard per-name builtin disabling retains other contracts",
+            .source = "int abs(int);long labs(long);void f(int a){a&&abs(a);a&&labs(a);}\n",
+            .options = { "-fno-builtin-abs" },
+            .warnings = 1,
+        },
+        {
+            .name = "logical discard freestanding declarations have no implicit contracts",
+            .source = "int abs(int);int isalpha(int);void f(int a){a&&abs(a);a&&isalpha(a);}\n",
+            .options = { "-ffreestanding" },
+        },
+        {
+            .name = "logical discard internal library spellings remain ordinary functions",
+            .source = "static int abs(int a){return a;}static int isalpha(int a){return a;}void f(int a){a&&abs(a);a&&isalpha(a);}\n",
+        },
+        {
+            .name = "logical discard explicit library contracts remain effective",
+            .source = "typedef __SIZE_TYPE__ size_t;void*malloc(size_t)__attribute__((warn_unused_result));"
+                      "int printf(const char*,...)__attribute__((pure));\n"
+                      "void f(int a,size_t n){a&&malloc(n);a&&printf(\"%d\",a);}\n",
+            .warnings = 2,
+        },
+        {
+            .name = "logical discard explicit contracts survive builtin disabling",
+            .source = "typedef __SIZE_TYPE__ size_t;void*malloc(size_t)__attribute__((warn_unused_result));"
+                      "int printf(const char*,...)__attribute__((pure));\n"
+                      "void f(int a,size_t n){a&&malloc(n);a&&printf(\"%d\",a);}\n",
+            .options = { "-fno-builtin" },
+            .warnings = 2,
+        },
+        {
             .name = "logical discard ordinary calls retain their policy when freestanding",
             .source = "int work(int);void f(int a){a&&work(a);}\n",
             .options = { "-ffreestanding" },

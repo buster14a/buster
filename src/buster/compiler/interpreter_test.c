@@ -346,6 +346,18 @@ static void interpreter_test_memory(InterpreterTestTally* tally, Arena* scratch)
     };
     InterpreterResult result = interpreter_test_run(&function, scratch, 0);
     interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 77, "pointer writes initialize aliased locals");
+    // A seq_cst store can initialize undefined bytes. Its native xchg must not make the typed operation read them.
+    values[2] = BUSTER_TYPED_ACCESS_ATOMIC | BUSTER_TYPED_FENCE_SEQ_CST;
+    result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 77, "a seq_cst SET initializes undefined bytes with memory checks enabled");
+    kinds[2] = BUSTER_TYPED_STORE;
+    kinds[3] = BUSTER_TYPED_RETURN;
+    function.count = 4;
+    result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 77, "a seq_cst STORE returns its desired value without reading undefined bytes");
+    kinds[2] = BUSTER_TYPED_SET;
+    kinds[3] = BUSTER_TYPED_LOCAL;
+    values[2] = 0;
     function.kinds = kinds + 3;
     function.classes = classes + 3;
     function.values = values + 3;

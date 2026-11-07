@@ -1610,12 +1610,39 @@ array and clang declares it, an `extern` one too, which clang's optimized code
 stores into with aligned SSE moves (`check_data_declared_alignment`, #978);
 compound literals and string literals keep their types' alignment.
 
+Identical live string literals share one storage atom per translation unit
+(#1474), in both code-generation tiers. `c_check_string_pool.c` groups selected
+literal records by exact array type, requested alignment and decoded byte length
+and contents, including embedded and trailing NULs. Concatenation and alternate
+escape spellings therefore share storage when they produce the same object.
+Each occurrence keeps its existing object identity and symbol, defined at offset
+zero in the shared atom; code references and static pointer relocations retain
+their original symbols and byte addends. Pooling happens after reachability
+selection, so an unreferenced earlier occurrence cannot own a live literal's
+storage. Named arrays, including const arrays initialized by a literal, and
+predefined function/source-name arrays keep separate atoms. There is no suffix
+merging or cross-unit pool in this producer.
+
+The pool reuses the batched string hash and scalar/vector radix sorter. Equal
+hashes require full-key equality; mixed-key collisions use an iterative merge
+sort, with the earliest equal record as the canonical one. Thus collision runs
+need at most O(n log n) key comparisons and linear scratch, rather than pairwise
+search. A shared metadata validator rejects invalid type, size, alignment and
+symbol descriptors before the pool reads payload bytes. Planning copies each
+unique literal once, and publication capacity counts unique atoms and bytes;
+failed calls retain the existing transaction rollback guarantees.
+
 The emitter consumes checked aggregate initializer plans, including brace
 elision, designated/range stores, bit-fields, compatible string copies and
 selected union members. It handles integer and bit-precise storage,
 binary32/binary64 and complex components, x87 components with deterministic
 padding, and pointers. Objects use RODATA, DATA_RELRO, DATA, BSS, TDATA or TBSS
-as appropriate; retained string candidates use STRINGS. Symbolic pointers emit
+as appropriate. Only ordinary single-terminated byte literals use STRINGS
+(`SHF_MERGE | SHF_STRINGS` in ELF). Wide literals, embedded-NUL literals and
+predefined arrays use RODATA: an external linker must not split a complete
+embedded-NUL object into independently mergeable substrings or merge an
+identity-bearing array. Identical embedded-NUL and wide literals still share
+the compiler's canonical atom. Symbolic pointers emit
 ABS64 fixups with signed byte addends; absolute pointer values remain bytes.
 External targets may remain unresolved. A referenced internal function needs
 its real code atom: standalone data inspection reports that limitation, while
@@ -4060,8 +4087,13 @@ unused logical result. The rule is syntactic even for a short-circuited operand.
 Accepted `pure`, `const`, and `warn_unused_result` function contracts retain
 the logical warning and inherit per kind through compatible source-visible
 redeclarations, without changing earlier uses or leaking block declarations.
-Indirect calls, calls resolved through overload tables, builtin-specific discard contracts and tagged
-return contracts remain outside this logical-warning slice. A unit containing
+Plain library calls without discard contracts follow ordinary calls; implicit
+const/pure contracts such as `abs` and `isalpha` retain warnings. Disabling a
+builtin removes only its implicit contract, while explicit source contracts
+still apply. Internal-linkage library spellings remain ordinary functions.
+Indirect calls, calls resolved through overload tables, option-sensitive
+floating builtin contracts and tagged return contracts remain outside this
+logical-warning slice. A unit containing
 an accepted `warn_unused_result` typedef conservatively keeps the existing
 logical-call warnings: canonical result types do not retain the typedef and
 `typeof` provenance needed to rule out such contracts safely.
@@ -4095,17 +4127,53 @@ and check that file-spelled candidates and suppressed warnings do not replay his
 not an unused-but-set statement write. The `-Wswitch` definition is the one its
 selector's tag type names, so a fixed underlying type and a shadowing tag in
 another scope resolve correctly. The return-flow walk runs for non-aggregate
-functions only where `-Wreturn-type` is enabled.
+functions only where `-Wreturn-type` is enabled, and for them takes only the
+warning's walk: the first walk is an aggregate return's alone, whose lowering
+reads its result (#1340). The walk's per-node facts, whether an expression
+guaranteedly stops or may not return (`check_program_return_facts`), come from
+its calls, miscellaneous and x86 builtins and queries: the vector path
+(`check_program_return_sparse`) tests each node's operands' and arguments'
+facts, a byte each, and computes only a source's (found 16 operators at a time)
+or a node's with an operand that has facts; the scalar path, its twin and
+oracle, computes every node's (`test-checker` compares the two on every program
+fixture). The `analyzer_noreturn` scan takes the attributes column's tokens,
+and each callee name's answer from clang's builtin table is looked up once.
 
-The graph's passes share one pass in graph order, `check_common_facts`, which
-gives each node its parent, whether another node uses its value, whether it is
-evaluated, a conditional's or comma's arm effect, a separate logical-discard
-fact in the same byte, and its reach: a bit each for
-whether its subtree holds a node whose own warning may fire, a division by a
-constant, or a comparison (#1340). The expression walk starts only at a root that
-reaches something or whose discarded expression may get the statement's
-unused-value warning, and enters only the subtrees that hold its walk's bit;
-every warning keeps its order. The default-ignored warnings' work runs only
+The graph's passes share their facts, `check_common_facts`, which give each
+node its parent, whether another node uses its value, whether it is evaluated,
+a conditional's or comma's arm effect, a separate logical-discard fact in the
+same byte, and its reach: a bit each for whether
+its subtree holds a node whose own warning may fire, a division by a constant
+zero, or a comparison (#1340). A node's own bit counts only where its tests can
+warn (`check_common_own_candidate`): a constant whose value an initialization's,
+an assignment's, a conversion's or a call's argument's conversion changes (the
+types alone rule out a widening conversion, before the value's row is read), a
+self-assignment's names, a constant index outside its array, a source comma.
+What its warning tests past them only takes warnings away. The scalar path
+makes the facts in one pass in graph order and the evaluated nodes by a pass
+from the roots down. The vector path works on the graph's tree
+(`check_common_parents`: each node's reader, 16 nodes at a time, each operand
+slot's present children compressed to the front and written a child at a time,
+since a scatter costs as much whatever its mask and most slots are absent; a
+tree where every operand and argument precedes its node and no node has two
+readers, which counting the distinct children against the edges tells, and
+otherwise the scalar path). It visits only the nodes whose operators may have a
+bit of their own, 16 at a time, and carries each bit up to the first ancestor
+that has it; computes the arm effects of the operators that have them; and
+takes the evaluated nodes as everything with a parent, then clears, with all
+below them, the roots the control and selection walks left out and the
+operands a `sizeof` or a constant condition leaves out. A root that reaches
+nothing runs its statement's unused-value marker alone, without the walk's
+frames, which would find nothing else. The comma markers' subtree starts come
+from a search back from the operand by doubling steps, then halving, each
+probe's climb stopping at a token shallower than the operand
+(`check_common_emission_subtree_start`), rather than from a column of every
+token's start. `test-checker-driver` checks the parents by both paths and the
+starts against their definitions on random graphs and trees whose columns end
+at `PROT_NONE` pages (`c_check_common_tree_test.c`).
+The expression walk starts only at a root that reaches something or whose
+discarded expression may get the statement's unused-value warning, and enters
+only the subtrees that hold its walk's bit; every warning keeps its order. The default-ignored warnings' work runs only
 where the command line or a source pragma may enable them: the comparison bit
 for `-Wsign-compare`, a plain `x = y` for `-Wself-assign`, and the
 `-Wuninitialized` pass for it and `-Wunused-but-set-parameter`, as Clang skips
@@ -6621,6 +6689,19 @@ arguments against the function. The checker now gives these as clang does.
   (that declaration at or before its definition), and the lowering gives it
   `no_caller_saved_registers`' set of every register (`check_lower_preserve`,
   LLVM's `CSR_64_AllRegs` of `x86_intrcc`) and its 1 or 2 parameters' kind.
+
+  x86's `force_align_arg_pointer` (`CHECK_ATTRIBUTE_FORCE_ALIGN_ARG_POINTER`,
+  #1447) is clang's `handleForceAlignArgPointerAttr`'s: a function's, with
+  no arguments ("takes no arguments" otherwise). It ignores the attribute
+  without a word on a function pointer (a variable's, a parameter's, a
+  member's) and on a typedef of a function's type or of a pointer to one,
+  and with "only applies to functions" on anything else
+  (`check_input_subject_handlers`' row). A redeclaration inherits it; one
+  after the definition drops it with "attribute declaration must precede
+  definition". `CheckProgram.object_realign` holds each function's first
+  declaration with it, and `check_program_realign(program, b)` says whether
+  body `b` realigns its stack (`Tier0Function.realign_stack`,
+  `docs/tier0.md`'s realigned frames: 16 bytes' at least).
   A variadic routine, which clang compiles, is refused by name ("unsupported:
   variadic interrupt service routines"), as are `__builtin_eh_return`,
   `__builtin_setjmp` and musttail calls in one, as in any preserving frame.
