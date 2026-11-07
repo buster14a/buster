@@ -2358,14 +2358,25 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
 
 // A printf-family call's format string: its name decides the format argument, and a literal's bytes decide each
 // conversion's expected type.
-static uint32_t check_common_format_index(String8 name)
+// Only infer a plain library name's format where the unit keeps it a builtin. Explicit __builtin_ spellings
+// remain builtins under the same options; dprintf, absent from the builtin catalog, needs an explicit attribute.
+static uint32_t check_common_format_index(String8 name, const PPOptions* options)
 {
+    const bool explicit_builtin = name.length > 10 && memcmp(name.pointer, "__builtin_", 10) == 0;
+    if (explicit_builtin)
+    {
+        name.pointer += 10;
+        name.length -= 10;
+    }
     uint32_t result = UINT32_MAX;
     if (name.length == 6 && memcmp(name.pointer, "printf", 6) == 0) result = 0;
     else if (name.length == 7 && memcmp(name.pointer, "fprintf", 7) == 0) result = 1;
     else if (name.length == 7 && memcmp(name.pointer, "sprintf", 7) == 0) result = 1;
     else if (name.length == 8 && memcmp(name.pointer, "snprintf", 8) == 0) result = 2;
-    else if (name.length == 7 && memcmp(name.pointer, "dprintf", 7) == 0) result = 1;
+    if (result != UINT32_MAX && !explicit_builtin && !pp_library_builtin(options, (const uint8_t*)name.pointer, (uint32_t)name.length))
+    {
+        result = UINT32_MAX;
+    }
     return result;
 }
 
@@ -2838,17 +2849,28 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
 {
     const CheckGraph* graph = &input->graph;
     const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
-    static const CheckOp calls[] = { CHECK_OP_CALL };
+    static const CheckOp calls[] = { CHECK_OP_CALL, CHECK_OP_BUILTIN_X86 };
     const CheckCommonOps set = check_common_ops(calls, BUSTER_ARRAY_LENGTH(calls));
     CheckCommonScan scan = { 0 };
     for (uint32_t node = check_common_next_op(graph, &set, &scan, vector); node < graph->count; node = check_common_next_op(graph, &set, &scan, vector))
     {
-        if (graph->ops[node] != CHECK_OP_CALL || stream->diagnostics[node] != CHECK_DIAG_NONE)
+        const bool intrinsic = graph->ops[node] == CHECK_OP_BUILTIN_X86;
+        if ((graph->ops[node] != CHECK_OP_CALL && !intrinsic) || stream->diagnostics[node] != CHECK_DIAG_NONE)
         {
             continue;
         }
-        const uint32_t callee = graph->operand0[node];
-        const uint32_t callee_token = callee < graph->count ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+        const uint32_t callee = !intrinsic ? graph->operand0[node] : BUSTER_CHECK_NONE;
+        uint32_t callee_token = callee < graph->count ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+        if (intrinsic)
+        {
+            // Explicit library builtins keep their source call receipt through deferred merging too. The graph
+            // checks their prototype through BUILTIN_X86, not through an ordinary CALL node.
+            const uint32_t closing = graph->tokens[node];
+            const uint32_t id = input->intrinsic_ids != NULL && closing < input->token_count ? input->intrinsic_ids[closing] : 0;
+            const CheckInputIntrinsicCall* call = input->intrinsic_calls != NULL && id != 0 && id <= input->intrinsic_call_count ?
+                                                  input->intrinsic_calls + id - 1 : NULL;
+            callee_token = call != NULL && call->closing == closing ? call->keyword : BUSTER_CHECK_NONE;
+        }
         if (callee_token >= parser->tokens.count || parser->tokens.kinds[callee_token] != PARSE_KIND_IDENTIFIER)
         {
             continue;
@@ -2856,7 +2878,11 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
         const uint32_t name_id = parser->tokens.names[callee_token];
         const String8 name = { .pointer = (char*)intern_bytes(pp->table, name_id), .length = intern_length(pp->table, name_id) };
         const uint32_t callee_object = callee < graph->count ? check_stream_object(stream, callee) : 0;
-        const uint32_t definition = program != NULL && callee_object != 0 && callee_object <= program->object_count ?
+        // A source use reads its visible declaration snapshot, not a later declaration of the same object.
+        const uint32_t visible = input->declarations != NULL && callee_token < input->token_count ?
+                                 input->declarations[callee_token] : BUSTER_CHECK_NONE;
+        const uint32_t definition = visible < input->token_count ? visible :
+                                    program != NULL && callee_object != 0 && callee_object <= program->object_count ?
                                     program->object_declarations[callee_object] : BUSTER_CHECK_NONE;
         // A spelled printf-family name only applies where the callee resolves to a function declaration
         // or stays undeclared: a local object — a function pointer named `printf` — can shadow the
@@ -2864,7 +2890,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
         const bool function_callee = callee_object == 0 ||
                                      (definition < input->token_count && input->declaration_kinds != NULL &&
                                       input->declaration_kinds[definition] == C_BINDING_FUNCTION);
-        uint32_t format_index = function_callee ? check_common_format_index(name) : UINT32_MAX;
+        uint32_t format_index = function_callee ? check_common_format_index(name, &pp->options) : UINT32_MAX;
         uint32_t first_argument = format_index != UINT32_MAX ? format_index + 1 : UINT32_MAX;
         if (format_index == UINT32_MAX && definition < input->token_count)
         {

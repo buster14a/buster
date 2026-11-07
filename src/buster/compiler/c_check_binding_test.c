@@ -834,6 +834,8 @@ static void check_test_binding_compatibility_capacity(CheckTest* test)
                 }
                 const TypeAnswer compatible = type_compatible(&types.table, function, function);
                 check_input_bind(&reader, 1, 2);
+                check_test_expect(test, !check_sparse_wide_present(input.attributes) && input.sparse_pool == NULL,
+                                  "binding compatibility retains absent optional attribute storage");
                 const bool released = internal.arena->length == internal.length;
                 internal.arena->capacity = capacity;
                 scratch_end(internal);
@@ -909,6 +911,8 @@ static void check_test_binding_attribute_scope(CheckTest* test)
                 .scope_ends = scope_ends,
             };
             check_input_bind(&reader, 1, 2);
+            check_test_expect(test, !check_sparse_wide_present(input.attributes) && input.sparse_pool == NULL,
+                              "delayed attribute scope retains absent optional attribute storage");
             check_test_expect(test, !input.resource && input.report_count == 0 && objects[1] == objects[0],
                               "delayed attribute scope retains the linked declaration's entity");
             check_test_expect(test, check_input_declaration_visible(&reader, 1, 2) &&

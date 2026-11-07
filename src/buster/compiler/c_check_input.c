@@ -8087,6 +8087,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             if (kind == C_BINDING_FUNCTION)
             {
                 check_input_noderef_redeclaration(reader, token, previous);
+                check_input_format_inherit(reader, token, previous);
             }
             check_input_naked_inherit(reader, token, previous);
             const TypeId composite = library_redeclaration && compatible == TYPE_ANSWER_NO ? reader->declared_types[token] :
@@ -8158,6 +8159,19 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 if (kind == C_BINDING_FUNCTION && reader->output->function_flags != NULL)
                 {
                     reader->output->function_flags[token] |= reader->output->function_flags[previous] & (CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION | CHECK_INPUT_FUNCTION_NORETURN);
+                }
+                if (kind == C_BINDING_FUNCTION && reader->scope_count == 0)
+                {
+                    // Without a visible predecessor, Clang finds the first block extern, not a later
+                    // expired block redeclaration. Its canonical object is the first declaration's token + 1.
+                    const uint32_t first = reader->objects[previous];
+                    const bool first_valid = first != 0 && first <= reader->parser->tokens.count &&
+                                             reader->declaration_kinds[first - 1] == C_BINDING_FUNCTION && reader->objects[first - 1] == first;
+                    const uint32_t format_previous = linked_visible ? previous : first_valid ? first - 1 : BUSTER_CHECK_NONE;
+                    if (format_previous < reader->parser->tokens.count && check_input_declaration_visible(reader, format_previous, point))
+                    {
+                        check_input_format_inherit(reader, token, format_previous);
+                    }
                 }
                 check_input_naked_inherit(reader, token, previous);
                 if (library_redeclaration && compatible == TYPE_ANSWER_NO)

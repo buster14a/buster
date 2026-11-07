@@ -6,6 +6,26 @@ requirements. [Command index](README.md).
 
 ## Module overview
 
+Plain printf-family format inference follows the library builtin eligibility
+policy (#1390): `-ffreestanding`, `-fno-builtin` and exact
+`-fno-builtin-NAME` exclusions disable the name's inferred contract;
+`-fbuiltin` follows the existing last-option policy. Explicit `__builtin_`
+spellings and retained `format(printf, ...)` attributes remain checked.
+`dprintf` has no builtin catalog row and requires an explicit format attribute.
+Bare compatible function redeclarations inherit their visible predecessor's
+format records without mutating published metadata; binding-only readers with
+no optional attribute column retain its absence. Each call reads the
+declaration visible there, so later or closed-block annotations do not leak.
+A first block-scope extern remains discoverable by a later file declaration;
+a block redeclaration of an existing outer declaration keeps its scope end.
+Without a visible predecessor, the canonical first declaration supplies that
+contract even when a later block redeclaration has expired.
+Explicit library builtins use their retained intrinsic source-call receipt,
+including after deferred-body merging.
+The original default-warning fixtures cover those boundaries, redeclarations,
+embedded NULs, complete Clang diagnostics, warning promotion/suppression and
+scalar/vector object twins at one and three requested lanes.
+
 Multi-declarator declarations reuse compressed ancestor paths (#1378):
 `check_program_plans` finds initializer statements in a private parent copy
 borrowed from its existing `seen` scratch column, then clears it before object
