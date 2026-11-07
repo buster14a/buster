@@ -1872,6 +1872,40 @@ lane in node order. Against this change it was no faster:
 
 The gathers had overlapped with the flush's other work, so the change keeps them. The record holds both A/Bs.
 
+## The return flow's library-noreturn answers by name (#1709)
+
+**What cost.** The return-warning facts (`c_check_return_flow.c`) leave a direct call to a known, non-noreturn
+function unknown when its name is a catalogue entry with the `r` attribute (`abort`, `exit`, `longjmp`…), whose
+noreturn depends on builtin policy rather than the declaration's flag. Main searched the catalogue by name for every
+such call: in `-c sqlite3.c`, 13,142 searches of about 2,200 distinct names. `builtin_intrinsic_lookup` was 1.00% of
+the compile's cycles, all of it from `check_program_return_call`.
+
+**Now.** Only 16 of the catalogue's 3,775 entries carry `r`. `check_program_return_facts` interns their spellings
+once (`intern_find`) and marks their ids in a byte per identifier (`check_program_return_library_names`); a call reads
+its name's byte. The answer depends on the interned name alone, so the facts are the same.
+- **The twin.** The search (`check_program_return_library_search`) stays: it answers when the scratch arena has no
+  room for the bytes, and `test-checker` compares the bytes with it over every catalogue name, near misses and the
+  predefined names.
+- **The table's drift.** The same test checks that the table of 16 names is exactly the catalogue's `r` entries, in
+  its order, so a regenerated catalogue that changes the set fails there.
+- **A first step, kept in the record.** Memoizing each name's search still made 2,182 searches, and the A/B gained
+  0.78%.
+
+**Measured on the 9700X.** Main `829eb71a` against `56143cc3`, in 8 interleaved rounds, then `measure-compile` each
+way. Every run held the lock on its own. [The record](https://github.com/buster14a/buster-performance/tree/7e65d1a31fa2d399d5c92c98f2e5ee53e97765f6/docs/measurements/check-program-1709-return-library-2026-11-07) keeps the receipts, the three builds' profiles and the
+probe.
+
+| measure | main | head | difference |
+| --- | ---: | ---: | ---: |
+| wall time | 118.620 ms | 117.420 ms | −1.01%, lower in 8 of 8 rounds |
+| user cycles | 576.707 M | 569.578 M | −1.24% |
+| user instructions | 1,279.591 M | 1,272.399 M | −0.56% |
+| `check-program` | 24.625 ms | 23.601 ms | −1.02 ms |
+
+`builtin_intrinsic_lookup` is gone from the profile. The frozen corpus's objects are the same bytes, and sqlite
+3.50.4's `-c -g -Wall -Wextra` objects and diagnostics are the same bytes as main's on the vector path and with
+`--scalar`.
+
 ## The passes after checking (#592)
 
 #641 removes more token-domain work from the same handoffs. Initializer plans keep only their ascending
