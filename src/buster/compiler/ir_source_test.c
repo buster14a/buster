@@ -325,6 +325,9 @@ struct IrSourceTotals
     uint64_t dataflow_failed;
     uint64_t dataflow_checks;
     uint64_t dataflow_benchmark_failed;
+    // Forms whose use lists both twins built (#1634), and forms where they disagreed.
+    uint64_t uses_forms;
+    uint64_t uses_failed;
 };
 
 static const char* const ir_source_errors[IR_ERROR_UNSUPPORTED + 1] = {
@@ -342,6 +345,21 @@ static const char* const ir_source_errors[IR_ERROR_UNSUPPORTED + 1] = {
     "io",
     "unsupported",
 };
+
+// #1634: both use-list twins on one of a source function's verified forms, which must agree use for use.
+static bool ir_source_uses_twins(const IrFunction* function, Arena* arena, Arena* scratch)
+{
+    const uint64_t mark = arena->length;
+    IrUses vector = { 0 };
+    IrUses scalar = { 0 };
+    const IrError vector_error = ir_uses_validated(function, arena, scratch, &vector);
+    const IrError scalar_error = ir_uses_validated_scalar(function, arena, scratch, &scalar);
+    const bool same = vector_error == IR_OK && scalar_error == IR_OK && vector.use_count == scalar.use_count && vector.value_count == scalar.value_count &&
+                      memcmp(vector.offsets, scalar.offsets, ((uint64_t)vector.value_count + 1) * sizeof(uint32_t)) == 0 &&
+                      (vector.use_count == 0 || memcmp(vector.uses, scalar.uses, (uint64_t)vector.use_count * sizeof(IrUse)) == 0);
+    arena_pop_to(arena, mark);
+    return same;
+}
 
 // Lowers, compares and promotes each of `file`'s functions, adding to `totals`, and prints the file's line and a line
 // per function that fails. `print` names a function to print the IR of, or is null.
@@ -448,7 +466,19 @@ static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, co
                 dataflow_valid = dataflow_valid && measured;
             }
         }
-        failures += !promotes || !text_valid || !dominators_valid || !dataflow_valid;
+        bool uses_valid = true;
+        for (uint32_t form = 0; agree && form < (promotes ? 3u : 1u); form += 1)
+        {
+            const bool same = ir_source_uses_twins(forms[form], text_output, scratch);
+            totals->uses_forms += 1;
+            totals->uses_failed += !same;
+            uses_valid = uses_valid && same;
+            if (!same)
+            {
+                printf("ir-source: file=%s function=%s form=%s uses_failed\n", name, source->name, form_names[form]);
+            }
+        }
+        failures += !promotes || !text_valid || !dominators_valid || !dataflow_valid || !uses_valid;
         if (!promotes)
         {
             const IrCheck first = vector_check.error != IR_OK ? vector_check : scalar_check.error != IR_OK ? scalar_check : promotion.error != IR_OK ? promotion : promotion_twin;
@@ -645,11 +675,12 @@ static int run_ir_source_tests(int count, char** arguments)
         printf("ir-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failed=%" PRIu64 " functions=%" PRIu64 " entries=%" PRIu64 " tokens=%" PRIu64
                " instructions=%" PRIu64 " bytes=%" PRIu64 " (%.2f per token) promoted_instructions=%" PRIu64 " promoted_bytes=%" PRIu64
                " refused=%" PRIu64 " disagreed=%" PRIu64 " unpromoted=%" PRIu64 " simd_promoted=%" PRIu64 " text_forms=%" PRIu64 " text_failed=%" PRIu64
-               " dataflow_forms=%" PRIu64 " dataflow_failed=%" PRIu64 " dataflow_checks=%" PRIu64 " dataflow_benchmark_failed=%" PRIu64 "\n",
+               " dataflow_forms=%" PRIu64 " dataflow_failed=%" PRIu64 " dataflow_checks=%" PRIu64 " dataflow_benchmark_failed=%" PRIu64
+               " uses_forms=%" PRIu64 " uses_failed=%" PRIu64 "\n",
                totals.files, totals.left_out, totals.failed_files, totals.functions, totals.entries, totals.tokens, totals.instructions, totals.bytes,
                totals.tokens != 0 ? (double)totals.bytes / (double)totals.tokens : 0.0, totals.promoted_instructions, totals.promoted_bytes, totals.refused,
                totals.disagreed, totals.unpromoted, totals.simd_promoted, totals.text_forms, totals.text_failed, totals.dataflow_forms,
-               totals.dataflow_failed, totals.dataflow_checks, totals.dataflow_benchmark_failed);
+               totals.dataflow_failed, totals.dataflow_checks, totals.dataflow_benchmark_failed, totals.uses_forms, totals.uses_failed);
     }
     else
     {
@@ -657,7 +688,7 @@ static int run_ir_source_tests(int count, char** arguments)
     }
     bool passed = valid && exhausted && text_oracle && dominator_oracle && dataflow_oracle && (!simd || (totals.simd_promoted != 0 && totals.left_out == 0)) &&
                   totals.text_failed == 0 && totals.failed_files == 0 && totals.refused == 0 && totals.disagreed == 0 && totals.unpromoted == 0 &&
-                  totals.dataflow_failed == 0 && totals.dataflow_benchmark_failed == 0 && (dataflow_self_test || totals.functions != 0) &&
+                  totals.dataflow_failed == 0 && totals.dataflow_benchmark_failed == 0 && totals.uses_failed == 0 && (dataflow_self_test || totals.functions != 0) &&
                   (!benchmark_dataflow || totals.left_out == 0);
     if (dominators)
     {
