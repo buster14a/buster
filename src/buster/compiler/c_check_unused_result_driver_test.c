@@ -146,6 +146,19 @@ static const CheckDriverDefaultWarningFixture check_driver_unused_result_fixture
         .warnings = 18,
     },
     {
+        // A statement expression in sizeof's operand is unevaluated: its calls' results are clang's to drop quietly.
+        .name = "ignored results in an unevaluated statement expression",
+        .source = "__attribute__((const)) int c(int);\n"
+                  "__attribute__((warn_unused_result)) int w(int);\n"
+                  "void f(int n) {\n"
+                  "  (void)sizeof(({ c(n); w(n); 1; }));\n"
+                  "  int a[n];\n"
+                  "  (void)sizeof(a[c(n)]);\n"
+                  "  ({ c(n); 1; });\n"
+                  "}\n",
+        .warnings = 2,
+    },
+    {
         .name = "ignored results of library functions without builtins",
         .source = "int abs(int);\n"
                   "double rint(double);\n"

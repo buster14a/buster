@@ -4101,10 +4101,13 @@ call). The marks are found once a unit, from the tokens that have attributes:
 a function's by its first declaration, each redeclaration's in source order,
 so that a call reads those up to the declaration its lookup finds; a call then
 tests one bit of its callee's first declaration and one byte of its name.
-Left: a discarded call in an unreachable comma or conditional, one in a
-statement expression in sizeof's operand, which clang's unevaluated context
-quiets, and the "expanded from macro" note clang gives a call a macro's argument
-writes (as for every warning at a macro argument here).
+A statement expression in an unevaluated operand drops them, as clang does
+(`check_common_report_discarded`). The functions stay out of line, as does
+the discarded selection's marker: inlined into the emission's loops they cost
+sqlite3.c's `-fsyntax-only` instructions even where no call warns. Left: a
+discarded call in an unreachable comma or conditional, and the "expanded from
+macro" note clang gives a call a macro's argument writes (as for every warning
+at a macro argument here).
 `-Warray-bounds` reports a direct array object, including a nested subscript
 such as `b[1][5]` at `b`, treats a zero extent as unknown, and leaves
 struct-member arrays to a full bounds analysis. `-Wunused-function` reports a

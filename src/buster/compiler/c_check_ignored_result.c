@@ -449,7 +449,7 @@ static __attribute__((noinline)) void check_common_ignored_report(CheckCommonEmi
     }
     if (text != NULL)
     {
-        check_common_report(parser, pp, emission->input, found->token, id, false, text, NULL, 0, emission->scratch);
+        check_common_report_discarded(parser, pp, emission->input, found->token, id, text, NULL, 0, emission->scratch);
     }
 }
 
