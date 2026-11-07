@@ -184,7 +184,9 @@ typedef enum IrOp
 // operations (#1374, from TZCNT on) take one operand, an I32 or an I64 of their result's type, as their x86 instructions
 // give them: tzcnt's and lzcnt's counts of trailing and leading zero bits, the width for 0; bsf's index of the lowest set
 // bit and bsr's of the highest, unspecified for 0 (the interpreter gives the width), which only a producer whose 0 is
-// undefined or masked takes; popcnt's count of set bits; and bswap's bytes reversed.
+// undefined or masked takes; popcnt's count of set bits; and bswap's bytes reversed. The signed overflows (#1385, from
+// SADDO on) take two operands of their result's type, an I32 or an I64, and give 1 where a + b, a - b or a * b leaves its
+// signed range and 0 where it doesn't, as x86's add, sub (cmp) and imul set OF: a signed overflow builtin's flag.
 #define BUSTER_IR_INTRINSIC_MULHU 0u
 #define BUSTER_IR_INTRINSIC_PDEP 1u
 #define BUSTER_IR_INTRINSIC_PEXT 2u
@@ -197,7 +199,10 @@ typedef enum IrOp
 #define BUSTER_IR_INTRINSIC_BSR 9u
 #define BUSTER_IR_INTRINSIC_POPCNT 10u
 #define BUSTER_IR_INTRINSIC_BSWAP 11u
-#define BUSTER_IR_INTRINSIC_COUNT 12u
+#define BUSTER_IR_INTRINSIC_SADDO 12u
+#define BUSTER_IR_INTRINSIC_SSUBO 13u
+#define BUSTER_IR_INTRINSIC_SMULO 14u
+#define BUSTER_IR_INTRINSIC_COUNT 15u
 
 // ICMP EQ/NE accept pointers too; the other integer predicates require integer operands. FCMP uses EQ through GE:
 // ordered comparisons, except NE, which is true for unordered inputs, as in C.
@@ -598,6 +603,9 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "bsr",
     "popcnt",
     "bswap",
+    "saddo",
+    "ssubo",
+    "smulo",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -915,6 +923,19 @@ static uint64_t ir_intrinsic_bits(uint32_t operation, uint32_t bits, uint64_t a)
         default: break;
     }
     return result;
+}
+
+// A signed overflow's value (#1385, BUSTER_IR_INTRINSIC_SADDO to BUSTER_IR_INTRINSIC_SMULO) of `a` and `b`'s low `bits`, 32
+// or 64, as signed integers, which the interpreters of the IR and of the typed stream share: 1 where the exact sum,
+// difference or product leaves the range of `bits`, else 0.
+static uint64_t ir_intrinsic_overflow(uint32_t operation, uint32_t bits, uint64_t a, uint64_t b)
+{
+    const uint32_t shift = 64 - bits;
+    const int64_t x = (int64_t)(a << shift) >> shift;
+    const int64_t y = (int64_t)(b << shift) >> shift;
+    const __int128 exact = operation == BUSTER_IR_INTRINSIC_SADDO ? (__int128)x + y : operation == BUSTER_IR_INTRINSIC_SSUBO ? (__int128)x - y : (__int128)x * y;
+    const __int128 limit = (__int128)1 << (bits - 1);
+    return exact < -limit || exact >= limit ? 1 : 0;
 }
 
 // A splat copies bits, never evaluates a floating value. The independent lane model writes every lane and keeps
@@ -1396,7 +1417,7 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 {
                     valid = ir_vector_type(type) && ir_splat_scalar_type(ta) && b == BUSTER_IR_NONE;
                 }
-                else if (c >= BUSTER_IR_INTRINSIC_TZCNT && c < BUSTER_IR_INTRINSIC_COUNT)
+                else if (c >= BUSTER_IR_INTRINSIC_TZCNT && c <= BUSTER_IR_INTRINSIC_BSWAP)
                 {
                     valid = (type == IR_I32 || type == IR_I64) && ta == type && b == BUSTER_IR_NONE;
                 }
@@ -1406,7 +1427,8 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 }
                 else
                 {
-                    valid = (type == IR_I32 || type == IR_I64) && ta == type && f->type[b] == type && c < BUSTER_IR_INTRINSIC_SPLAT &&
+                    valid = (type == IR_I32 || type == IR_I64) && ta == type && f->type[b] == type &&
+                            (c < BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_SADDO && c < BUSTER_IR_INTRINSIC_COUNT)) &&
                             (c != BUSTER_IR_INTRINSIC_MULHU || type == IR_I64);
                 }
             } break;

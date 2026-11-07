@@ -174,10 +174,13 @@ table. The kinds are:
   direct forms").
 - An integer class's `LOAD`, `STORE` and `SET` (#1059) take `value` 0 for an ordinary access, or
   `BUSTER_TYPED_ACCESS_ATOMIC` with a C memory order for an atomic one: a single naturally aligned access of the class's
-  bytes, whose code is an ordinary access's (atomic on x86-64, whose total store order gives a load's and a release
-  store's orders); a seq_cst store's fence is the `FENCE` of seq_cst its producer writes after it. Tier 0 doesn't read
-  the marker, whose code is the same either way; `ir_lower` translates it to the IR's atomic access and refuses another
-  shape.
+  bytes. Loads and relaxed/release stores use ordinary accesses (atomic on x86-64, whose total store order gives their
+  orders). A seq_cst `STORE` or `SET` selects the `ATOMIC` variant, one width-matched memory `xchg` without a trailing
+  `mfence` (#1396). The old value is discarded; `STORE` preserves its desired result through a scratch copy. These
+  variants take their operands on the stack, so an exchange never overwrites a live local's home. Scalar and vector
+  fusion select them alike, including the deep-stack path where the preserving scratch crosses the register table's
+  limit. `ir_lower` keeps the semantic store as an atomic IR `store`, with no read of an uninitialized object's old
+  bytes, and refuses another marker shape. A standalone seq_cst `FENCE` still emits `mfence`.
 - `ATOMIC_RMW` (#1059), an atomic read/modify/write, pops an address (U64) and an operand of an integer `class` and
   pushes the object's old value of `class`: `value` its operation (`BUSTER_TYPED_RMW_ADD` for an addition, an exchange
   without it) and a C memory order, any of the six. Tier 0 defers it and emits `xchg` (an exchange) or `lock xadd` (an
@@ -859,7 +862,11 @@ aggregate parameter that keeps its incoming bytes rather than living in the fram
 changes nothing) and every call's area. The vector path's twin, `tier0_frame_alignment_vector`, reads the objects'
 alignments 16 locals at a time, under the mask of the locals with sizes, and the calls' 4 at a time, each one's byte
 of the 16 an `AbiCall` takes. Past 16 bytes, the frame is realigned to it (`Tier0Frame.alignment_log2`, at most 2^30,
-the objects' limit):
+the objects' limit). A function with x86's `force_align_arg_pointer` (#1447, `Tier0Function.realign_stack`, LLVM's
+`stackrealign`) is realigned to 16 bytes at least, whatever its objects need, since its caller (an interrupt handler,
+code of another ABI) may have left rsp misaligned: its objects are then aligned whatever rsp was, and its incoming
+stack arguments stay rbp's. ir_lower refuses such a function, so that Tier 1 falls back to Tier 0's frame. The
+realigned frame:
 
 - **The prologue:** rbp pushed and pointed at the push, as a frame pointer's; the callee-saved pushes; the reservation
   (`sub rsp, size`); then `and rsp, -alignment` (imm8 to 128 bytes, imm32 past it). Rounding after the reservation

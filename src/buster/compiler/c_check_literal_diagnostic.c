@@ -713,7 +713,8 @@ static uint32_t check_literal_evaluated_escape(const uint8_t* bytes, uint32_t es
         }
         else if (c == 'x' && !delimited && (at == end || !check_literal_is_hex_digit(bytes[at])))
         {
-            failed = true;
+            // An error that leaves the escapes after it their range errors (clang's literal parser returns from it
+            // without HadError).
             check_literal_escape_append(output, count, CHECK_ESCAPE_DIAGNOSTIC_HEX_DIGITS, escape, 0, 0);
         }
         else

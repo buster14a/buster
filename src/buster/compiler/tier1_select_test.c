@@ -535,11 +535,30 @@ static void tier1_select_test_node(IrFunction* function, uint32_t i, uint8_t op,
 // An intrinsic of BMI (#141) of operands of `bits` bits, as the instructions' pseudocode has it, independently of the IR's
 // interpreter: pdep and pext through the mask's set bits from its lowest, bzhi and bextr by the bits of the control's
 // bytes they keep; the bit operations (#1374) bit by bit and byte by byte, bsf's and bsr's of 0 the width, as the
-// others' (which the fixtures' operands never are).
+// others' (which the fixtures' operands never are); the signed overflows (#1385) by the host compiler's builtins on the
+// width's signed integers.
 static uint64_t tier1_select_test_intrinsic(uint32_t operation, uint32_t bits, uint64_t a, uint64_t b)
 {
     uint64_t result = 0;
-    if (operation >= BUSTER_IR_INTRINSIC_TZCNT && operation <= BUSTER_IR_INTRINSIC_BSR)
+    if (operation >= BUSTER_IR_INTRINSIC_SADDO && operation <= BUSTER_IR_INTRINSIC_SMULO && bits == 32)
+    {
+        int32_t sum = 0;
+        const int32_t x = (int32_t)(uint32_t)a;
+        const int32_t y = (int32_t)(uint32_t)b;
+        result = operation == BUSTER_IR_INTRINSIC_SADDO   ? __builtin_add_overflow(x, y, &sum)
+                 : operation == BUSTER_IR_INTRINSIC_SSUBO ? __builtin_sub_overflow(x, y, &sum)
+                                                          : __builtin_mul_overflow(x, y, &sum);
+    }
+    else if (operation >= BUSTER_IR_INTRINSIC_SADDO && operation <= BUSTER_IR_INTRINSIC_SMULO)
+    {
+        int64_t sum = 0;
+        const int64_t x = (int64_t)a;
+        const int64_t y = (int64_t)b;
+        result = operation == BUSTER_IR_INTRINSIC_SADDO   ? __builtin_add_overflow(x, y, &sum)
+                 : operation == BUSTER_IR_INTRINSIC_SSUBO ? __builtin_sub_overflow(x, y, &sum)
+                                                          : __builtin_mul_overflow(x, y, &sum);
+    }
+    else if (operation >= BUSTER_IR_INTRINSIC_TZCNT && operation <= BUSTER_IR_INTRINSIC_BSR)
     {
         const bool trailing = operation == BUSTER_IR_INTRINSIC_TZCNT || operation == BUSTER_IR_INTRINSIC_BSF;
         uint32_t zeros = 0;
@@ -1158,6 +1177,60 @@ static void tier1_select_test_intrinsics(Tier1SelectTest* test)
             }
         }
     }
+    // The signed overflows (#1385), of both widths: of the parameters in both orders, of one and the other masked small, and
+    // of one masked value twice, into a destination apart and into either operand's register, run by both covers against
+    // the host compiler's builtins; their forms are x86-64's baseline's.
+    static const uint8_t overflows[] = { BUSTER_IR_INTRINSIC_SADDO, BUSTER_IR_INTRINSIC_SSUBO, BUSTER_IR_INTRINSIC_SMULO };
+    static const uint8_t overflow_destinations[] = { X86_REGISTER_RAX, X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RCX };
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(overflows); k += 1)
+    {
+        for (uint32_t width = 4; width <= 8; width += 4)
+        {
+            for (uint32_t shape = 0; shape < 4; shape += 1)
+            {
+                for (uint32_t d = 0; d < BUSTER_ARRAY_LENGTH(overflow_destinations); d += 1)
+                {
+                    // Shape 0 takes (a, b), 1 (b, a), 2 (a, b & 0x3f3f) and 3 (b & 0x3f3f, b & 0x3f3f).
+                    const uint8_t type = width == 4 ? IR_I32 : IR_I64;
+                    const IrSizes sizes = {
+                        .instruction_count = 6,
+                        .block_count = 1,
+                        .constant_count = 1,
+                        .parameter_count = 2,
+                    };
+                    IrFunction function;
+                    const IrError created = ir_create(&input, &sizes, &function);
+                    tier1_select_test_expect(test, created == IR_OK, "create overflow intrinsic IR fixture");
+                    if (created == IR_OK)
+                    {
+                        function.block_offsets[1] = 6;
+                        function.result_type = type;
+                        function.parameter_types[0] = type;
+                        function.parameter_types[1] = type;
+                        function.constants[0].low = 0x3f3f;
+                        uint8_t registers[6] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RCX, X86_REGISTER_RCX, overflow_destinations[d], X86_REGISTER_RAX };
+                        tier1_select_test_node(&function, 0, IR_PARAM, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                        tier1_select_test_node(&function, 1, IR_PARAM, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                        tier1_select_test_node(&function, 2, IR_CONST, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                        tier1_select_test_node(&function, 3, IR_AND, type, 1, 2, BUSTER_IR_NONE);
+                        const uint32_t left = shape == 1 ? 1 : shape == 3 ? 3 : 0;
+                        const uint32_t right = shape == 0 ? 1 : shape == 1 ? 0 : 3;
+                        tier1_select_test_node(&function, 4, IR_INTRINSIC, type, left, right, overflows[k]);
+                        tier1_select_test_node(&function, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                        const bool verified = ir_verify_scalar(&function, &scratch, 0).error == IR_OK && ir_verify(&function, &scratch, 0).error == IR_OK;
+                        tier1_select_test_expect(test, verified, "overflow intrinsic IR fixture verifies by both paths");
+                        tier1_select_test_plan_execute(test, &function, registers, &output, &scratch);
+                        Tier1SelectPlan plan;
+                        uint32_t node = 0;
+                        const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, false, &plan, &node);
+                        tier1_select_test_expect(test, planned == TIER1_SELECT_OK && plan.patterns[4].rule == TIER1_RULE_INTRINSIC, "an overflow intrinsic is its rule's");
+                        arena_pop_to(&output, 0);
+                    }
+                    arena_pop_to(&input, 0);
+                }
+            }
+        }
+    }
     test->manifest = manifest;
     memcpy(test->emitted_records, emitted_records, sizeof(emitted_records));
     memcpy(test->unknown_costs, unknown_costs, sizeof(unknown_costs));
@@ -1487,6 +1560,107 @@ static void tier1_select_test_load_barriers(Tier1SelectTest* test)
             }
         }
         arena_pop_to(&input, 0);
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
+// #1396: every store width at relaxed, release and seq_cst, with its address direct or folded, returns the still-live
+// desired parameter. Guard bytes distinguish the access's width from its register's, and xchg must destroy only r11.
+static void tier1_select_test_atomic_stores(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(1u << 20);
+    Arena scratch = arena_reserve(1u << 20);
+    static const uint8_t types[] = { IR_I8, IR_I16, IR_I32, IR_I64 };
+    static const uint8_t orders[] = { 0, 3, BUSTER_IR_FENCE_SEQ_CST };
+    static const uint32_t exchanges[] = { X86_FORM_XCHG_RM8_R8, X86_FORM_XCHG_RM16_R16, X86_FORM_XCHG_RM32_R32, X86_FORM_XCHG_RM64_R64 };
+    for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(types); t += 1)
+    {
+        for (uint32_t order = 0; order < BUSTER_ARRAY_LENGTH(orders); order += 1)
+        {
+            for (uint32_t folded = 0; folded < 2; folded += 1)
+            {
+                const uint8_t type = types[t];
+                const bool narrow = type != IR_I64;
+                const bool sequential = orders[order] == BUSTER_IR_FENCE_SEQ_CST;
+                const uint32_t store = 3 + folded;
+                const uint32_t count = store + 2 + narrow;
+                const IrSizes sizes = { .instruction_count = count, .block_count = 1, .parameter_count = 3, .address_count = folded };
+                IrFunction function;
+                const bool created = ir_create(&input, &sizes, &function) == IR_OK;
+                tier1_select_test_expect(test, created, "create atomic store fixture");
+                if (created)
+                {
+                    function.result_type = IR_I64;
+                    function.block_offsets[1] = count;
+                    function.parameter_types[0] = IR_PTR;
+                    function.parameter_types[1] = type;
+                    function.parameter_types[2] = IR_I64;
+                    tier1_select_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 1, IR_PARAM, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 2, IR_PARAM, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    if (folded != 0)
+                    {
+                        function.addresses[0] = (IrAddress){ .offset = 8, .scale = 1 };
+                        tier1_select_test_node(&function, 3, IR_ADDRESS, IR_PTR, 0, BUSTER_IR_NONE, 0);
+                    }
+                    tier1_select_test_node(&function, store, IR_STORE, IR_VOID, folded != 0 ? 3 : 0, 1, BUSTER_IR_NONE);
+                    function.flags[store] = (uint8_t)(BUSTER_IR_ATOMIC | orders[order] << BUSTER_IR_ORDER_SHIFT);
+                    function.alignment_log2[store] = (uint8_t)t;
+                    if (narrow)
+                    {
+                        tier1_select_test_node(&function, store + 1, IR_ZEXT, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    }
+                    tier1_select_test_node(&function, count - 1, IR_RET, IR_VOID, narrow ? store + 1 : 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    uint8_t registers[8] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RDX, X86_REGISTER_R8, X86_REGISTER_RAX, X86_REGISTER_RAX, X86_REGISTER_RAX };
+                    for (uint32_t path = 0; path < 2; path += 1)
+                    {
+                        Tier1SelectPlan plan;
+                        uint32_t failed = 0;
+                        const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, path == 0, &plan, &failed);
+                        const uint8_t rule = folded != 0 ? TIER1_RULE_STORE_ADDRESS : TIER1_RULE_STORE;
+                        tier1_select_test_expect(test, planned == TIER1_SELECT_OK && plan.patterns[store].rule == rule &&
+                                                           (plan.patterns[store].operation == X86_OPERATION_XCHG) == sequential,
+                                                  "only a seq_cst store selects xchg, including its folded address");
+                        Tier1SelectCode code;
+                        const Tier1SelectError emitted = planned == TIER1_SELECT_OK ? tier1_select_emit(&plan, registers, test->allowed, &output, &code, &failed) : planned;
+                        tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "an atomic store emits");
+                        uint32_t exchanged = 0;
+                        uint32_t fences = 0;
+                        bool exact = true;
+                        for (uint32_t r = 0; emitted == TIER1_SELECT_OK && r < code.count; r += 1)
+                        {
+                            const X86Instruction record = code.records[r];
+                            fences += record.form == X86_FORM_MFENCE;
+                            if (record.form >= X86_FORM_XCHG_RM8_R8 && record.form <= X86_FORM_XCHG_RM64_R64)
+                            {
+                                exchanged += 1;
+                                exact &= record.form == exchanges[t] && (record.mode & BUSTER_X86_MODE_MEMORY) != 0 && record.reg == BUSTER_TIER1_SELECT_SCRATCH;
+                            }
+                        }
+                        tier1_select_test_expect(test, emitted == TIER1_SELECT_OK && exact && exchanged == (uint32_t)sequential && fences == 0,
+                                                  "a seq_cst store exchanges its exact width through the scratch, without mfence; weaker stores do neither");
+                        if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
+                        {
+                            uint64_t actual_memory[3] = { UINT64_C(0xa5a5a5a5a5a5a5a5), UINT64_C(0xfedcba98f0f1f2f3), UINT64_C(0x5a5a5a5a5a5a5a5a) };
+                            uint64_t expected_memory[3];
+                            memcpy(expected_memory, actual_memory, sizeof(actual_memory));
+                            // The raw selector consumer receives canonical I8/I16 parameters; the production CFG
+                            // consumer establishes them with entry MOVZX. Keep I32's upper bits to exercise its ZEXT.
+                            const uint64_t desired = UINT64_C(0x8182838485868788) & (type == IR_I8 ? UINT8_MAX : type == IR_I16 ? UINT16_MAX : UINT64_MAX);
+                            const uint64_t expected = tier1_select_test_interpret(&function, (uintptr_t)&expected_memory[1 - folded], desired, 0);
+                            const uint64_t actual = tier1_select_test_call(test, (uintptr_t)&actual_memory[1 - folded], desired, 0);
+                            tier1_select_test_expect(test, expected == actual && memcmp(actual_memory, expected_memory, sizeof(actual_memory)) == 0,
+                                                      "an atomic store preserves its live desired value and writes only its object's bytes");
+                        }
+                        arena_pop_to(&output, 0);
+                    }
+                }
+                arena_pop_to(&input, 0);
+            }
+        }
     }
     arena_release(&scratch);
     arena_release(&output);
@@ -5070,6 +5244,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_memory_plans(&test);
             tier1_select_test_barrier_scan(&test);
             tier1_select_test_load_barriers(&test);
+            tier1_select_test_atomic_stores(&test);
             tier1_select_test_atomic_rmw_widths(&test);
             tier1_select_test_atomic_cas(&test);
             tier1_select_test_errors(&test);

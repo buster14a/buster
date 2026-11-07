@@ -1763,6 +1763,10 @@ static void check_test_driver_unevaluated_strings(CheckTest* test, const char* c
         { "const char *a = \"\\x100\";\n", "-std=gnu17", NULL },
         { "const char *a = \"\\777\";\n", "-std=gnu17", NULL },
         { "const char *a = \"\\x\";\n", "-std=gnu17", NULL },
+        // A \x without digits is an error that leaves the next escapes' range errors, through a concatenation too.
+        { "const char *a = \"\\x\" \"\\x100\";\n", "-std=gnu17", NULL },
+        { "const char *a = \"\\x\\x{100}\";\n", "-std=gnu17", NULL },
+        { "const char *a = \"\\x\" \"\\o{400}\";\n", "-std=gnu17", NULL },
         { "const unsigned short *a = u\"\\x10000\";\n", "-std=gnu17", NULL },
         { "const unsigned short *a = u\"\\xFFFF\\777\";\n", "-std=gnu17", NULL },
         { "const int *a = L\"\\x123456789\";\n", "-std=gnu17", NULL },
