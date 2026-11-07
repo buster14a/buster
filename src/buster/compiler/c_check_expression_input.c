@@ -1067,7 +1067,7 @@ static inline __attribute__((always_inline)) bool check_input_expression_binary(
 // initializer (CheckInput.initializer_nodes) and takes its token's query type and, in a static initializer, the value
 // context, as the walk's action gives it; or a braced initializer's values, passed on as a list. An INITIALIZE of more
 // values or none is the walk's, which refuses it.
-static bool check_input_expression_initialize(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
+static __attribute__((noinline)) bool check_input_expression_initialize(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
 {
     const bool listed = reader->initializers[token] == 2;
     const bool acted = listed || values.count == 1;
@@ -1094,7 +1094,7 @@ static bool check_input_expression_initialize(CheckInputReader* reader, CheckInp
 }
 
 // A conditional operator of three values, or of two with the middle one omitted (x ?: y), whose first is both.
-static bool check_input_expression_ternary(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
+static __attribute__((noinline)) bool check_input_expression_ternary(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
 {
     const bool acted = values.count == 3 || values.count == 2;
     if (acted)
@@ -1144,7 +1144,7 @@ static bool check_input_expression_fixed(CheckInputReader* reader, CheckInputBat
 
 // A string literal operand: a VALUE node of its string's object (check_input_string, which makes the object the first time
 // a string is met), or nothing where it has none; in a unit with overload tables, its token's head is its leaf's, none.
-static bool check_input_expression_string(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token)
+static __attribute__((noinline)) bool check_input_expression_string(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token)
 {
     const CheckInitString* string = check_input_string(reader, token);
     if (string != 0)
@@ -1174,7 +1174,7 @@ static bool check_input_expression_string(CheckInputReader* reader, CheckInputBa
 // A return statement: its one value converted to the function's return type (a CONVERT node, the token's node but no value
 // of an operand's), or without one a report where the function's type isn't void, but in a system header, as clang
 // warns (-Wreturn-mismatch). A return outside a function's body, or of more values, is the walk's.
-static bool check_input_expression_return(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
+static __attribute__((noinline)) bool check_input_expression_return(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
 {
     const TypeId type = reader->return_types[token];
     const bool acted = type != 0 && values.count <= 1;
@@ -1272,7 +1272,7 @@ static bool check_input_expression_condition(CheckInputReader* reader, CheckInpu
 // (check_input_library_call, #148); and in a unit with overload tables, a call whose callee's token names an overload set
 // recorded with the set's head (CheckGraph.overload_calls), in node order as the walk records them. A K&R unit's calls are
 // the walk's, and so are a builtin's and an intrinsic's, by their class (check_input_expression_fold).
-static bool check_input_expression_call(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
+static __attribute__((noinline)) bool check_input_expression_call(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
 {
     CheckInput* input = reader->output;
     const bool acted = values.count != 0 && input->kr_parameter_count == 0;
