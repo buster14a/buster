@@ -27,7 +27,13 @@ requirements. [Command index](README.md).
   them natively against clang -O0's build, and the classic ones (`ctz` to
   `bswap64`, #1374: one instruction each by the target, the guide's "The bit
   builtins' instructions") at `x86-64`, `x86-64-v2`, `x86-64-v3` and `znver5`,
-  checking that their rows are the target's forms. The overflow builtins
+  checking that their rows are the target's forms. The generic/C23 bit counts,
+  `clrsb*` and `bswapg` reuse those rows (#1652), with narrow-width corrections
+  and defined zero/fallback results, including 65–128-bit operands split into
+  limbs. The same checker target matrix checks their rows and boundary values;
+  `test-checker-driver`'s Tier 1 fixture checks narrow and wide forms at the
+  first three targets, and `tests/ir-source/bit-builtins.c` checks the IR
+  lowering under command-line and per-function targets. The overflow builtins
   (#1385, the guide's "The overflow builtins' instructions") are signed longs'
   rows of the operation and `seto` and the other classes' cheapest recipes:
   `test-builtin-lowering` runs every recipe natively against clang's builtins,
@@ -62,7 +68,13 @@ requirements. [Command index](README.md).
   or nothing, the IR's `fence`, with no helper; `--helper-report` prints each
   family's direct forms and helper calls in the lowered code, and `test-checker-driver` runs a
   store-buffering litmus by both tiers (the guide's "Helper contracts and
-  direct forms"). `--helper-forms=LIST` (the families of a direct form by
+  direct forms"). Seq_cst stores keep marked `SET`/IR `store` semantics and
+  emit memory `xchg` in both tiers and the native fallback helper (#1396);
+  relaxed/release inline stores remain `mov`, and standalone seq_cst fences
+  remain `mfence`. `tests/ir-source/atomic-stores.c` checks assignment results
+  and initializing stores through both interpreters and strict Tier 1, with
+  separate interpreter unit checks of undefined-byte semantics.
+  `--helper-forms=LIST` (the families of a direct form by
   `--helper-report`'s names, `fence`, `atomic-access`, `atomic-rmw` and `asm`,
   or `all`) gives each of their operations its helper's call, the paired
   measurements' other arm; `measure-helpers [--sqlite DIR --speedtest DIR]

@@ -450,9 +450,10 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     const uint32_t interrupt = code != 0 ? code->frame_interrupt : 0;
     const uint32_t stepped = interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE ? 1 : 0;
     const uint32_t epilogue = open ? 0 : teardown + stepped + 1;
-    // A realigned frame has a frame pointer, past 16 bytes' alignment and within an and's immediate, and its base is r15,
-    // one of its pushes.
-    const bool realigned = alignment_log2 == 0 ? !base : pointer && alignment_log2 > 4 && alignment_log2 <= 31 && (!base || (saved & (1u << BUSTER_TIER0_SAVED_R15)) != 0);
+    // A realigned frame has a frame pointer, 16 bytes' alignment at least (past them for its objects, or 16 bytes' for a
+    // force_align_arg_pointer function's, #1447, Tier0Function.realign_stack) and within an and's immediate, and its base
+    // is r15, one of its pushes.
+    const bool realigned = alignment_log2 == 0 ? !base : pointer && alignment_log2 >= 4 && alignment_log2 <= 31 && (!base || (saved & (1u << BUSTER_TIER0_SAVED_R15)) != 0);
     // Without final offsets, each transition's position is its record boundary (the record after it's index), as
     // tier0_frame_events anchors them before branch sizing: `size` is then the record count.
     if (code == 0 || output == 0 || code->error != TIER0_OK || code->records == 0 || code->count == 0 || saved >= 64 || (eh && (!pointer || open)) ||

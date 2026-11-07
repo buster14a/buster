@@ -3,7 +3,7 @@
 //
 // #1059's atomic loads and stores in the IR: every width and order, GNU's _n and C11's, a pointer's, and an implicit
 // _Atomic object's, each aligned and of a constant order and so taken directly (the typed stream's marked LOAD and SET,
-// and a seq_cst store's FENCE; the IR's atomic load and store, and its fence) rather than by a helper's call, which the
+// and the IR's atomic load and store) rather than by a helper's call, which the
 // IR's interpreter has no code for. Its read/modify/writes likewise: exchanges and additions returning the old value or
 // the new one, GNU's, __sync's and C11's, a test-and-set, a pointer's exchange, and an implicit _Atomic object's
 // increments, decrements and compound additions (the typed stream's ATOMIC_RMW; the IR's rmw); and compare-exchanges

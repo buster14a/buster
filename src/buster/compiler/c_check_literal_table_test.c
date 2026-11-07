@@ -5,6 +5,10 @@
 // then execute representative objects against Clang. Guarded syntax tails and failing output reservations check the
 // producer contract separately. This file follows c_check_program_test.c's source/native helpers.
 
+#if __has_feature(memory_sanitizer)
+#include <sanitizer/msan_interface.h>
+#endif
+
 static bool check_test_literal_table_source(char* source, uint64_t capacity, const char* type, uint32_t count, uint32_t form, bool sized)
 {
     int used = snprintf(source, capacity, "#define V 13\n%s table[", type);
@@ -477,10 +481,37 @@ static void check_test_literal_table_contract(CheckTest* test, const char* eleme
                 uint32_t members = 0;
                 uint8_t* bytes = mapping + page - table->part.byte_count;
                 memset(bytes, 0, table->part.byte_count);
-                const bool same = check_literal_table_record(&types.table, record, &first, &members) &&
-                                  check_literal_table_records_fill(&reader, begin + 1, end - 1, 33 * members, first, members,
-                                                                   type_size(&types.table, record), bytes) &&
-                                  memcmp(bytes, table->part.bytes, table->part.byte_count) == 0;
+                const bool layout = check_literal_table_record(&types.table, record, &first, &members);
+#if __has_feature(memory_sanitizer)
+                // Mark only the member bytes as poisoned: the initial zeroes in record padding are
+                // intentional, but each member must be published by the batch writer.
+                if (layout)
+                {
+                    const uint64_t record_size = type_size(&types.table, record);
+                    for (uint32_t element = 0; element < 33; element += 1)
+                    {
+                        for (uint32_t m = 0; m < members; m += 1)
+                        {
+                            uint32_t width = 0;
+                            bool is_signed = false;
+                            const TypeId member = types.table.members.type[first + m];
+                            if (check_action_integer_type(&types.table, member, &width, &is_signed))
+                            {
+                                const uint64_t offset = types.table.members.offset[first + m] / 8;
+                                __msan_poison(bytes + (uint64_t)element * record_size + offset, width / 8);
+                            }
+                        }
+                    }
+                }
+#endif
+                const bool filled = layout && check_literal_table_records_fill(&reader, begin + 1, end - 1, 33 * members, first, members,
+                                                                                type_size(&types.table, record), bytes);
+#if __has_feature(memory_sanitizer)
+                const bool initialized = filled && __msan_test_shadow(bytes, table->part.byte_count) == -1;
+#else
+                const bool initialized = filled;
+#endif
+                const bool same = initialized && memcmp(bytes, table->part.bytes, table->part.byte_count) == 0;
                 check_test_expect(test, same && scratch.length == 0, "scalar/vector record batches preserve mixed member widths within guarded output");
             }
             for (uint32_t width = 8; !records && width <= 64; width *= 2)

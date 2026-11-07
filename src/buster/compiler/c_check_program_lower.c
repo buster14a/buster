@@ -6245,10 +6245,8 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
 }
 
 // A direct atomic load or store (#1059, check_program_direct_access's `marker`): the pointer's operand, for a store the
-// value's, converted to the object's value type, then the typed stream's LOAD or SET of the value type's class with the
-// marker, and after a seq_cst store the FENCE of seq_cst its order needs on x86-64 (a total store order's store buffer
-// must drain before a later load); its constant order evaluated for nothing, as a direct fence's. The tasks run in
-// reverse.
+// value's, converted to the object's value type, then the typed stream's LOAD or SET with the marker. The backend
+// implements a seq_cst SET with memory xchg, so its producer adds no separate fence. The tasks run in reverse.
 static void check_lower_atomic_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint32_t marker)
 {
     const CheckProgram* program = writer->program;
@@ -6261,10 +6259,6 @@ static void check_lower_atomic_direct(CheckLowerWriter* writer, uint32_t node, c
     if (store)
     {
         const TypeId checked = stream->argument_conversions[first + 1].type;
-        if ((marker & BUSTER_TYPED_FENCE_ORDER) == BUSTER_TYPED_FENCE_SEQ_CST)
-        {
-            check_lower_instruction(writer, BUSTER_TYPED_FENCE, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_FENCE_SEQ_CST);
-        }
         check_lower_instruction(writer, BUSTER_TYPED_SET, class, marker);
         check_lower_convert(writer, checked, effect->value_type);
         check_lower_operand(writer, node, 1 + 3, false, checked);
@@ -7599,6 +7593,44 @@ static bool check_lower_builtin_between(const TypeTable* types, TypeId type)
     return check_action_integer_type(types, type, &width, &sign) && width > 64 && width < 128;
 }
 
+// One primitive shared by the classic bit builtins and the generic/C23 recipes: CLZ, CTZ, POPCOUNT or BSWAP64 chooses
+// the instruction, while the supplied operand class chooses its 32- or 64-bit form. The caller has checked POPCNT's
+// feature and handles zero and any narrower source width outside the row, so the IR recognizes the same pure intrinsic.
+static uint32_t check_lower_bits_operation(CheckLowerWriter* writer, CBuiltinId operation, uint8_t operand, uint8_t result)
+{
+    const bool wide = tier0_class_bytes(operand) == 8;
+    const uint64_t features = writer->target.features;
+    const uint8_t r = BUSTER_TIER0_ROLE_INTEGER_RESULT;
+    const uint8_t i0 = BUSTER_TIER0_ROLE_INTEGER(0);
+    Tier0Operation row;
+    memset(&row, 0, sizeof(row));
+    if (operation == CBUILTIN_BSWAP64)
+    {
+        row.records[0] = check_vector_lower_record(wide ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32, r, 0, i0);
+        row.records[1] = check_vector_lower_record(wide ? X86_FORM_BSWAP_R64 : X86_FORM_BSWAP_R32, 0, 0, r);
+        row.record_count = 2;
+    }
+    else
+    {
+        const bool lzcnt = (features & BUSTER_X86_FEATURE(LZCNT)) != 0;
+        const bool tzcnt = (features & BUSTER_X86_FEATURE(BMI)) != 0;
+        const uint32_t form = operation == CBUILTIN_CLZ ?
+                                  (lzcnt ? (wide ? X86_FORM_LZCNT_R64_RM64 : X86_FORM_LZCNT_R32_RM32) : (wide ? X86_FORM_BSR_R64_RM64 : X86_FORM_BSR_R32_RM32)) :
+                              operation == CBUILTIN_CTZ ?
+                                  (tzcnt ? (wide ? X86_FORM_TZCNT_R64_RM64 : X86_FORM_TZCNT_R32_RM32) : (wide ? X86_FORM_BSF_R64_RM64 : X86_FORM_BSF_R32_RM32)) :
+                                  (wide ? X86_FORM_POPCNT_R64_RM64 : X86_FORM_POPCNT_R32_RM32);
+        row.records[0] = check_vector_lower_record(form, r, 0, i0);
+        row.record_count = 1;
+    }
+    row.operand_count = 1;
+    row.operand_classes[0] = operand;
+    row.result_class = result;
+    const uint32_t index = check_lower_operation_add(writer, &row);
+    // X86 entries use this Tier 0 consumer even when all their operands are integers.
+    writer->vectors = true;
+    return index;
+}
+
 // The classic bit builtins (#1374, __builtin_bswap16 to __builtin_ffsll) as an X86 row of the instruction that computes
 // each, as clang -O0's code does, in place of c_builtin_lower.c's recipe, which stays for popcount and parity at a target
 // without POPCNT. The row takes the operand at its parameter's class, of 32 or 64 bits (bswap16's zero-extended to 32),
@@ -7635,30 +7667,8 @@ static bool check_lower_bits_row(CheckLowerWriter* writer, uint32_t node)
         const uint8_t result = swap ? (wide ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_U32) : BUSTER_TYPED_CLASS_I32;
         const uint8_t operand = id == CBUILTIN_BSWAP16 ? BUSTER_TYPED_CLASS_U32 : class;
         const uint8_t value = swap ? expected : BUSTER_TYPED_CLASS_I32;
-        const uint8_t r = BUSTER_TIER0_ROLE_INTEGER_RESULT;
-        const uint8_t i0 = BUSTER_TIER0_ROLE_INTEGER(0);
-        Tier0Operation row;
-        memset(&row, 0, sizeof(row));
-        if (swap)
-        {
-            row.records[0] = check_vector_lower_record(wide ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32, r, 0, i0);
-            row.records[1] = check_vector_lower_record(wide ? X86_FORM_BSWAP_R64 : X86_FORM_BSWAP_R32, 0, 0, r);
-            row.record_count = 2;
-        }
-        else
-        {
-            const bool lzcnt = (features & BUSTER_X86_FEATURE(LZCNT)) != 0;
-            const bool tzcnt = (features & BUSTER_X86_FEATURE(BMI)) != 0;
-            const uint32_t form = leading  ? (lzcnt ? (wide ? X86_FORM_LZCNT_R64_RM64 : X86_FORM_LZCNT_R32_RM32) : (wide ? X86_FORM_BSR_R64_RM64 : X86_FORM_BSR_R32_RM32)) :
-                                  trailing ? (tzcnt ? (wide ? X86_FORM_TZCNT_R64_RM64 : X86_FORM_TZCNT_R32_RM32) : (wide ? X86_FORM_BSF_R64_RM64 : X86_FORM_BSF_R32_RM32)) :
-                                             (wide ? X86_FORM_POPCNT_R64_RM64 : X86_FORM_POPCNT_R32_RM32);
-            row.records[0] = check_vector_lower_record(form, r, 0, i0);
-            row.record_count = 1;
-        }
-        row.operand_count = 1;
-        row.operand_classes[0] = operand;
-        row.result_class = result;
-        const uint32_t index = check_lower_operation_add(writer, &row);
+        const CBuiltinId operation = swap ? CBUILTIN_BSWAP64 : leading ? CBUILTIN_CLZ : trailing ? CBUILTIN_CTZ : CBUILTIN_POPCOUNT;
+        const uint32_t index = check_lower_bits_operation(writer, operation, operand, result);
         const uint32_t local = ffs ? check_lower_temporary(writer, class) : BUSTER_CHECK_NONE;
         // The tasks run in the reverse of their pushes: the call's value at its own class, after the row's consumers.
         const uint8_t call = check_lower_value_class(writer, check_stream_type(program->stream, node));
@@ -7701,8 +7711,6 @@ static bool check_lower_bits_row(CheckLowerWriter* writer, uint32_t node)
             check_lower_instruction(writer, BUSTER_TYPED_STORE_LOCAL, class, local);
         }
         check_lower_operand(writer, node, 0, false, parameter);
-        // An X86 entry makes the function one with vectors (Tier0Function.vectors), whatever its values' classes.
-        writer->vectors = true;
     }
     return lowered;
 }
@@ -9128,6 +9136,70 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     }
 }
 
+// Supply only the primitive and machine widths this generic bit recipe needs. A wide count uses a 64-bit low limb
+// and the high limb's narrowest machine width; a wide byte swap reverses both complete 64-bit limbs before joining them.
+// The recipe keeps argument evaluation, masking and zero/fallback selection, and emits these rows by both append twins.
+static void check_lower_miscellaneous_bits(CheckLowerWriter* writer, CBuiltinMiscLowerCall* call)
+{
+    const CBuiltinId id = cbuiltin_stdc_generic(call->id);
+    const uint32_t width = cbuiltin_bits_width(call->argument_types[0]);
+    const uint64_t features = writer->target.features;
+    CBuiltinId operation = CBUILTIN_NONE;
+    switch (id)
+    {
+        case CBUILTIN_CLRSB:
+        case CBUILTIN_CLRSBL:
+        case CBUILTIN_CLRSBLL:
+        case CBUILTIN_CLZS:
+        case CBUILTIN_CLZG:
+        case CBUILTIN_STDC_LEADING_ZEROS:
+        case CBUILTIN_STDC_LEADING_ONES:
+        case CBUILTIN_STDC_FIRST_LEADING_ZERO:
+        case CBUILTIN_STDC_FIRST_LEADING_ONE:
+        case CBUILTIN_STDC_BIT_WIDTH:
+        case CBUILTIN_STDC_BIT_FLOOR:
+        case CBUILTIN_STDC_BIT_CEIL:
+            operation = CBUILTIN_CLZ;
+            call->bit_rows.zero_counts = (features & BUSTER_X86_FEATURE(LZCNT)) != 0;
+            break;
+        case CBUILTIN_CTZS:
+        case CBUILTIN_CTZG:
+        case CBUILTIN_STDC_TRAILING_ZEROS:
+        case CBUILTIN_STDC_TRAILING_ONES:
+        case CBUILTIN_STDC_FIRST_TRAILING_ZERO:
+        case CBUILTIN_STDC_FIRST_TRAILING_ONE:
+            operation = CBUILTIN_CTZ;
+            call->bit_rows.zero_counts = (features & BUSTER_X86_FEATURE(BMI)) != 0;
+            break;
+        case CBUILTIN_POPCOUNTG:
+        case CBUILTIN_STDC_COUNT_ONES:
+        case CBUILTIN_STDC_COUNT_ZEROS:
+        case CBUILTIN_STDC_HAS_SINGLE_BIT:
+            operation = (features & BUSTER_X86_FEATURE(POPCNT)) != 0 ? CBUILTIN_POPCOUNT : CBUILTIN_NONE;
+            break;
+        case CBUILTIN_BSWAPG:
+            operation = width >= 16 ? CBUILTIN_BSWAP64 : CBUILTIN_NONE;
+            break;
+        default: break;
+    }
+    if (operation != CBUILTIN_NONE)
+    {
+        uint32_t widths = 1u << (width > 32);
+        if (width > 64 && operation != CBUILTIN_BSWAP64)
+        {
+            widths |= 1u << (width - 64 > 32);
+        }
+        for (uint32_t wide = 0; wide < 2; wide += 1)
+        {
+            if ((widths & (1u << wide)) != 0)
+            {
+                const uint8_t class = wide != 0 ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_U32;
+                call->bit_rows.indices[wide] = check_lower_bits_operation(writer, operation, class, class) + 1;
+            }
+        }
+    }
+}
+
 static void check_lower_miscellaneous_emit(CheckLowerWriter* writer, CheckLowerTask task)
 {
     CBuiltinLowerBuffer buffer = {
@@ -9137,6 +9209,10 @@ static void check_lower_miscellaneous_emit(CheckLowerWriter* writer, CheckLowerT
         .local_capacity = writer->local_capacity < BUSTER_TIER0_MAX_LOCALS ? writer->local_capacity : BUSTER_TIER0_MAX_LOCALS,
     };
     CBuiltinMiscLowerCall call = writer->miscellaneous[task.node];
+    if (cbuiltin_bits(call.id))
+    {
+        check_lower_miscellaneous_bits(writer, &call);
+    }
     // clear_padding's stores, of its object's type (check_lower_padding), which its preparation found within the limits.
     uint64_t padding[BUSTER_CHECK_LOWER_PADDING_ENTRIES];
     if (call.id == CBUILTIN_CLEAR_PADDING)
@@ -15138,6 +15214,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             check_lower_preserve(types, type, writer->target.features, handler, function);
         }
         function->interrupt = handler ? (uint8_t)function->parameter_count : 0;
+        // x86's force_align_arg_pointer (#1447, CheckProgram.object_realign): a realigned frame, whatever its objects need.
+        function->realign_stack = !bare && check_program_realign(program, b);
         if (tier0_preserving(function) && (writer->tails || writer->eh_return || writer->returns_twice))
         {
             const bool every = type_function_abi_kind(types, type) == TYPE_FUNCTION_ABI_NO_CALLER_SAVED;
