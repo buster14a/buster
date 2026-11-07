@@ -116,6 +116,7 @@ struct CheckDebugValues
     uint32_t* span_segments;
     uint32_t* span_tree;
     uint32_t span_leaves;
+    uint32_t span_segment_count;
     uint32_t span_body;
 };
 
@@ -407,9 +408,10 @@ static uint32_t check_debug_value_leaves(uint32_t segments)
 // A function's spans' index (#1640): `breaks[i]`, the first span past i that doesn't begin where the one before it ends
 // (or the count); `segments`, the starts of the maximal runs of non-decreasing tokens, then the count; and `tree`, the
 // runs' smallest and largest tokens in an implicit binary tree of `leaves` leaves (its nodes' minima, then their maxima),
-// so that a scope reaches only the runs its tokens overlap. Code runs in source order but around loops, whose runs are
-// each a loop's own. Returns the leaves.
-static uint32_t check_debug_value_index(const CheckDebugValueSpan* spans, uint32_t count, uint32_t* breaks, uint32_t* segments, uint32_t* tree)
+// so that a scope reaches only the runs its tokens overlap. Code runs in source order but around loops and branches placed
+// apart, each a run of its own. Returns the leaves, and the runs in `segment_count`.
+static uint32_t check_debug_value_index(const CheckDebugValueSpan* spans, uint32_t count, uint32_t* breaks, uint32_t* segments, uint32_t* tree,
+                                        uint32_t* runs)
 {
     uint32_t segment_count = 0;
     for (uint32_t i = count; i-- > 0;)
@@ -424,6 +426,7 @@ static uint32_t check_debug_value_index(const CheckDebugValueSpan* spans, uint32
         }
     }
     segments[segment_count] = count;
+    *runs = segment_count;
     const uint32_t leaves = check_debug_value_leaves(segment_count);
     uint32_t* minima = tree;
     uint32_t* maxima = tree + 2 * (uint64_t)leaves;
@@ -441,22 +444,57 @@ static uint32_t check_debug_value_index(const CheckDebugValueSpan* spans, uint32
     return leaves;
 }
 
+// A list's pair in progress (check_debug_value_range_scan's begin and end) and the index after its last kept span.
+typedef struct CheckDebugValueWalk CheckDebugValueWalk;
+struct CheckDebugValueWalk
+{
+    DebugWriter* out;
+    const uint8_t* expression;
+    uint32_t bytes;
+    uint32_t begin;
+    uint32_t end;
+    uint32_t after;
+};
+
+// The kept spans [start, stop), in the scan's state machine: spans outside the scope before them end the pair, and so does
+// each address break among them, which `breaks` reaches without visiting the spans between.
+static void check_debug_value_walk(CheckDebugValueWalk* walk, const CheckDebugValueSpan* spans, const uint32_t* breaks, uint32_t start, uint32_t stop)
+{
+    if (start != walk->after && walk->begin < walk->end)
+    {
+        check_debug_value_pair(walk->out, walk->begin, walk->end, walk->expression, walk->bytes);
+        walk->begin = walk->end;
+    }
+    for (uint32_t i = start; i < stop;)
+    {
+        if (walk->begin < walk->end && spans[i].begin != walk->end)
+        {
+            check_debug_value_pair(walk->out, walk->begin, walk->end, walk->expression, walk->bytes);
+            walk->begin = walk->end;
+        }
+        walk->begin = walk->begin == walk->end ? spans[i].begin : walk->begin;
+        const uint32_t run = breaks[i] < stop ? breaks[i] : stop;
+        walk->end = spans[run - 1].end;
+        i = run;
+    }
+    walk->after = stop;
+}
+
 // check_debug_value_range_scan's list from the spans' index (#1640): the token tree gives the runs the scope's tokens
-// overlap, in span order, each run holds the scope's spans as one range, found by two binary searches, and each range is
-// walked from address break to address break. The scan's state machine is kept whole: a span outside the scope between
-// two kept ones ends their pair, as a break in the addresses does, and a pair that covers no bytes is dropped. So the
-// bytes are the scan's, in time for the runs the scope overlaps and its pairs rather than for every span.
-static void check_debug_value_range_indexed(const CheckDebugBody* source, const uint32_t* breaks, const uint32_t* segments, const uint32_t* tree, uint32_t leaves,
-                                            DebugWriter* out, uint32_t body, uint32_t first, uint32_t last, const uint8_t* expression, uint32_t bytes)
+// overlap, in span order. A node whose runs' tokens all lie in the scope keeps all its spans, one range of indices taken
+// whole; a leaf's run holds the scope's spans as one range, found by two binary searches. Each range is walked from address
+// break to address break, in the scan's state machine (check_debug_value_walk), so the bytes are the scan's, in time for
+// the tree's nodes the scope's bounds cut through and its pairs rather than for every span.
+static void check_debug_value_range_indexed(const CheckDebugBody* source, const uint32_t* breaks, const uint32_t* segments, uint32_t segment_count,
+                                            const uint32_t* tree, uint32_t leaves, DebugWriter* out, uint32_t body, uint32_t first, uint32_t last,
+                                            const uint8_t* expression, uint32_t bytes)
 {
     const CheckDebugValueSpan* spans = source->spans;
     const uint32_t* minima = tree;
     const uint32_t* maxima = tree + 2 * (uint64_t)leaves;
     debug_integer(out, 1, 1); // DW_RLE/DW_LLE_base_addressx
     debug_uleb(out, body);
-    uint32_t begin = 0;
-    uint32_t end = 0;
-    uint32_t after = 0;
+    CheckDebugValueWalk walk = { .out = out, .expression = expression, .bytes = bytes };
     // The tree's nodes left to visit, left first: a node and its right sibling's at most at each of its 32 levels.
     uint32_t stack[66];
     uint32_t depth = source->span_count != 0 ? 1 : 0;
@@ -468,56 +506,47 @@ static void check_debug_value_range_indexed(const CheckDebugBody* source, const 
         {
             continue;
         }
-        if (node < leaves)
+        // The node's leaves: its level's share of them, from its place in the level.
+        const uint32_t level = 31 - (uint32_t)__builtin_clz(node);
+        const uint32_t width = leaves >> level;
+        const uint32_t leaf = node * width - leaves;
+        if (minima[node] >= first && maxima[node] <= last)
+        {
+            const uint32_t end_leaf = leaf + width < segment_count ? leaf + width : segment_count;
+            check_debug_value_walk(&walk, spans, breaks, segments[leaf], segments[end_leaf]);
+        }
+        else if (node < leaves)
         {
             stack[depth++] = 2 * node + 1;
             stack[depth++] = 2 * node;
-            continue;
         }
-        const uint32_t segment = node - leaves;
-        uint32_t low = segments[segment];
-        uint32_t high = segments[segment + 1];
-        while (low < high)
+        else
         {
-            const uint32_t middle = low + (high - low) / 2;
-            low = spans[middle].token < first ? middle + 1 : low;
-            high = spans[middle].token < first ? high : middle;
-        }
-        const uint32_t start = low;
-        high = segments[segment + 1];
-        while (low < high)
-        {
-            const uint32_t middle = low + (high - low) / 2;
-            low = spans[middle].token <= last ? middle + 1 : low;
-            high = spans[middle].token <= last ? high : middle;
-        }
-        const uint32_t stop = low;
-        if (start < stop)
-        {
-            // Spans outside the scope before this range end the pair.
-            if (start != after && begin < end)
+            uint32_t low = segments[leaf];
+            uint32_t high = segments[leaf + 1];
+            while (low < high)
             {
-                check_debug_value_pair(out, begin, end, expression, bytes);
-                begin = end;
+                const uint32_t middle = low + (high - low) / 2;
+                low = spans[middle].token < first ? middle + 1 : low;
+                high = spans[middle].token < first ? high : middle;
             }
-            for (uint32_t i = start; i < stop;)
+            const uint32_t start = low;
+            high = segments[leaf + 1];
+            while (low < high)
             {
-                if (begin < end && spans[i].begin != end)
-                {
-                    check_debug_value_pair(out, begin, end, expression, bytes);
-                    begin = end;
-                }
-                begin = begin == end ? spans[i].begin : begin;
-                const uint32_t run = breaks[i] < stop ? breaks[i] : stop;
-                end = spans[run - 1].end;
-                i = run;
+                const uint32_t middle = low + (high - low) / 2;
+                low = spans[middle].token <= last ? middle + 1 : low;
+                high = spans[middle].token <= last ? high : middle;
             }
-            after = stop;
+            if (start < low)
+            {
+                check_debug_value_walk(&walk, spans, breaks, start, low);
+            }
         }
     }
-    if (begin < end)
+    if (walk.begin < walk.end)
     {
-        check_debug_value_pair(out, begin, end, expression, bytes);
+        check_debug_value_pair(out, walk.begin, walk.end, expression, bytes);
     }
     debug_integer(out, 0, 1);
 }
@@ -529,12 +558,13 @@ static void check_debug_value_range(CheckDebugValues* values, uint32_t body, uin
     if (values->span_breaks != NULL && values->span_body != body)
     {
         values->span_body = body;
-        values->span_leaves = check_debug_value_index(source->spans, source->span_count, values->span_breaks, values->span_segments, values->span_tree);
+        values->span_leaves = check_debug_value_index(source->spans, source->span_count, values->span_breaks, values->span_segments, values->span_tree,
+                                                      &values->span_segment_count);
     }
     if (values->span_breaks != NULL)
     {
-        check_debug_value_range_indexed(source, values->span_breaks, values->span_segments, values->span_tree, values->span_leaves, out, body, first, last,
-                                        expression, bytes);
+        check_debug_value_range_indexed(source, values->span_breaks, values->span_segments, values->span_segment_count, values->span_tree, values->span_leaves,
+                                        out, body, first, last, expression, bytes);
     }
     else
     {
