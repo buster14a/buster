@@ -94,6 +94,8 @@ static bool check_request_known_option(const char* spelling)
         "-mabi=",
         "-mapx-features=",
         "-mno-apx-features=",
+        // patchable_function_entry's NOPs for every function (#1447, predefines_patchable): both tiers' code takes them.
+        "-fpatchable-function-entry=",
     };
     // Exact compatibility controls: existing inactive/default behavior, permissions not obligations to optimize,
     // and presentation or C-inapplicable controls. No generic -fno-/-mno- or diagnostics-family escape hatch.

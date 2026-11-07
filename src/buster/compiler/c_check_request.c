@@ -477,6 +477,11 @@ static CheckProgramOptions check_request_program_options(const Preprocessor* pp,
     unit.predefines = &pp->options.predefines;
     unit.frame_pointer = predefines_frame_pointer(&pp->options.predefines);
     unit.probe_stack = predefines_stack_clash(&pp->options.predefines);
+    // -fpatchable-function-entry's NOPs (#1447), which predefines_finish_options checked: every function's without the
+    // attribute, and the section of every entry whose attribute names none.
+    const char* section = 0;
+    predefines_patchable(&pp->options.predefines, &unit.patchable_count, &unit.patchable_offset, &section);
+    unit.patchable_section = section != 0 ? (String8){ .pointer = (char*)section, .length = strlen(section) } : (String8){ 0 };
     return unit;
 }
 

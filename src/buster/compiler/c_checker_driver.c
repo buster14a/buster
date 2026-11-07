@@ -465,6 +465,10 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_SOURCE_EQUAL: snprintf(text, capacity, "expected '=' after %.*s", (int)literal.length, literal.pointer); break;
         case CHECK_ARGUMENT_UNEXPECTED_SEMI: snprintf(text, capacity, "unexpected ';' before ')'"); break;
         case CHECK_ARGUMENT_OBJC_VARIABLES: snprintf(text, capacity, "'%s' attribute only applies to variables", parsed); break;
+        case CHECK_ARGUMENT_BETWEEN: snprintf(text, capacity, "'%s' attribute requires integer constant between 0 and %" PRIu64 " inclusive", parsed, value); break;
+        case CHECK_ARGUMENT_PATCHABLE_SECTION:
+            snprintf(text, capacity, "section argument to 'patchable_function_entry' attribute is not valid for this target: section must not be empty");
+            break;
         case CHECK_ARGUMENT_SOURCE_STRING:
             snprintf(text, capacity, "expected string literal for %s in 'external_source_symbol' attribute",
                      number == 0 ? "language name" : number == 1 ? "source container name" : "USR");
@@ -3153,14 +3157,17 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
     bool valid = link_check(&code->link) == LINK_ERROR_NONE && object_prepare(&units, &code->link, 1, scratch) && object_map_symbols(&symbols, &code->link, scratch);
     // The jump tables' symbols and their labels' (CheckProgramLowered.case_symbol_base) are the lowering's
     // temporaries, as clang's .LJTI and .LBB labels are the assembler's: the object leaves them out, and its
-    // relocations name their sections' symbols instead (ObjectOptions.temporary_symbols).
+    // relocations name their sections' symbols instead (ObjectOptions.temporary_symbols). So are the patchable function
+    // entries' labels (#1447, CheckProgramCode.patchable_symbol_base), as clang's .Ltmp ones.
     const uint32_t switch_symbols = code->lowered.table_count + code->lowered.case_symbol_count;
-    uint8_t* temporary = valid && (switch_symbols != 0 || code->unit_temporary_count != 0) ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, code->link.symbols.count) : 0;
-    valid = valid && ((switch_symbols == 0 && code->unit_temporary_count == 0) || temporary != 0);
+    const bool temporaries = switch_symbols != 0 || code->unit_temporary_count != 0 || code->patchable_count != 0;
+    uint8_t* temporary = valid && temporaries ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, code->link.symbols.count) : 0;
+    valid = valid && (!temporaries || temporary != 0);
     if (temporary != 0)
     {
         memset(temporary, 0, code->link.symbols.count);
         memset(temporary + code->lowered.case_symbol_base, 1, switch_symbols);
+        memset(temporary + code->patchable_symbol_base, 1, code->patchable_count);
         for (uint32_t s = 0; s < code->unit_temporary_count; s += 1)
         {
             temporary[code->unit_temporary[s]] = 1;

@@ -4029,6 +4029,25 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             ":\"=a\"(r):\"r\"(f):\"rbx\",\"rcx\",\"rdx\",\"rsi\",\"rdi\",\"r8\",\"r9\",\"r10\",\"r11\",\"memory\",\"cc\");return r;}"
             "int tested(int n){return (int)(misaligned(leaf)+misaligned(calls)*1000+misaligned(vla)*100000+leaf()+calls()+vla())+n;}",
             "force-align-arg-pointer", clang);
+        // patchable_function_entry (#1447, check_program_emit_patchable): each function's NOP sled, its first M bytes one-byte
+        // NOPs before its symbol and the rest the longest NOPs at its entry (one of 15 bytes and the rest past 15), hashed
+        // through the function's address; a redeclaration's count, a 0 that makes none, and a call of each, whose code
+        // comes after its sled, against clang's build.
+        check_test_program_source(test,
+            "__attribute__((patchable_function_entry(3))) static int a(int x){return x+1;}"
+            "__attribute__((patchable_function_entry(5,2))) static int b(int x){return x*2;}"
+            "__attribute__((patchable_function_entry(15,15))) static int c(int x){return x-3;}"
+            "__attribute__((patchable_function_entry(26,7))) static int d(int x){int v[4]={x,1,2,3};return v[x&3]^9;}"
+            "__attribute__((patchable_function_entry(1))) static int e(int x);"
+            "__attribute__((patchable_function_entry(2))) static int e(int x);"
+            "static int e(int x){return x+5;}"
+            "__attribute__((patchable_function_entry(0))) static int z(int x){return x+6;}"
+            "static unsigned sled(const unsigned char*p,unsigned m,unsigned count){unsigned h=count;p-=m;"
+            "for(unsigned i=0;i<count;i++)h=h*31+p[i];return h;}"
+            "int tested(int n){unsigned h=sled((const unsigned char*)a,0,3)^sled((const unsigned char*)b,2,5)*3^"
+            "sled((const unsigned char*)c,15,15)*5^sled((const unsigned char*)d,7,26)*7^sled((const unsigned char*)e,0,2)*11;"
+            "return (int)(h&0xffff)+a(n)+b(n)+c(n)+d(n)+e(n)+z(n);}",
+            "patchable-function-entry", clang);
         // Variable-length arrays aligned past 16 bytes (their storage rounded up within a larger allocation), beside a fixed
         // object aligned to 128 (a realigned frame with a base, r15, since the arrays move rsp), across calls with stack
         // arguments whose outgoing area the allocations keep aligned.
