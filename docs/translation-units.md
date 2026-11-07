@@ -212,6 +212,108 @@ rounds:
   against 76.42, 1,656.7 against 1,661.3 and 862.6 against 865.0. Their peaks
   are main's, from 0.6 MB below to 2.9 MB above.
 
+#### Against #763's build
+
+#777's "Done when" compares the commands of #763's record with #763. Its
+record's figures can't stand for #763 any more: on the same host, #763's
+merge (`3ba1621f`), built from its commit, now takes 3 to 6% more by one
+lane than its record says (Lua's link 80.45 ms against 76.1, synth's
+1,632.7 against 1,546.6, musl's 645.1 against 625.5), and 1 to 12% more by
+8 lanes. The comparison of 2026-11-03 with those figures included that drift.
+So #763's build runs beside main's instead, in the same `time-runs`, on the
+9700X's CPUs 0 to 7. Main is `ec5f0f6b` (2026-11-06), and the units' files
+are main's at `f4272a46` too ([the record](https://github.com/buster14a/buster-performance/tree/44159e57007309273eef6561123cab71e9aede05/docs/measurements/units-recheck-777-2026-11-06)).
+
+- **A few large units.** `sqlite3.c shell.c` by one command, in two rounds
+  of 31 runs:
+  - with `-c`, 138.55 and 138.24 ms, against 138.79 and 138.36 for its two
+    processes at once;
+  - linked, 142.86 and 142.93 ms, against 146.55 and 146.40 with mold's link
+    of the processes' objects, and 155.77 and 155.63 with `cc`'s.
+
+  Each process's status and outputs are checked, as in the control above.
+  Every object is its unit's alone. The one command's peak is 359 MiB, and
+  the larger process's is 338 MiB.
+- **#763's commands** (musl's are the 1,006 units of #763's record), medians
+  of 21 (Lua's) and 7 runs, with their `wait4` peaks in MiB:
+
+  | ms (MiB) | main | #763 | main against #763 |
+  | --- | ---: | ---: | ---: |
+  | Lua, linked, 8 lanes | 33.20 (207) | 34.61 (213) | -4.1% |
+  | synth, linked, 8 lanes | 484.1 (547) | 545.6 (530) | -11.3% |
+  | musl, `-c`, 8 lanes | 148.5 (239) | 235.8 (249) | -37.0% |
+  | Lua, 1 lane | 98.74 (61) | 80.45 (74) | +22.7% |
+  | synth, 1 lane | 1,780.8 (318) | 1,632.7 (327) | +9.1% |
+  | musl, 1 lane | 689.1 (142) | 645.1 (154) | +6.8% |
+
+- **By one lane, each unit's compile is what grew, not the units' path.**
+  The same units, compiled one process each, one after another on CPU 2, are
+  faster at main than at #763 (`-c`: Lua 168.9 ms against 188.7, synth 2,957
+  against 3,598, musl 1,579 against 2,587). A process now starts with 0.8
+  million instructions rather than 12.6 (a tiny unit's `-c`). Without that
+  start, the processes' compiles retire more instructions than #763's:
+  - Lua: 0.36 billion more, where its one command retires 0.33 billion more;
+  - synth: 1.87 billion more, against 1.94;
+  - musl: 1.99 billion more, against 1.27.
+
+  The processes' `--time-stages`, summed over the units, put the growth in
+  two stages, with Tier 0 third on synth's (+29 ms):
+  - `check-input`: +12, +31 and +31 ms (#1489);
+  - `check-program`: +11, +69 and +54 ms. That is #1049's common warnings,
+    #1340.
+
+  Each one command's objects are its processes' bytes, at both commits.
+- **The units' path's own cost was the scratch's split huge page.** With
+  `-w`, which skips the common warnings, synth by one lane still took 6.2%
+  more user cycles at main than at #763 for 1.2% more instructions, and 16%
+  more page faults. A unit's checker gave back its scratch's pages, so the
+  lane's next unit faulted them in again; the huge page at the peak, split
+  by that discard, came back a base page at a time ("Memory" below). With a
+  lane's discard in whole huge pages (`559ca5f6`, whose code this is), on
+  the 9700X, against main and #763:
+
+  | ms (MiB) | the change | main | #763 |
+  | --- | ---: | ---: | ---: |
+  | synth, 8 lanes | 481.1 (556) | 491.9 (551) | 548.1 (530) |
+  | synth, 1 lane | 1,725.1 (321) | 1,803.3 (321) | 1,634.9 (327) |
+  | Lua, 8 lanes | 34.21 (218) | 33.84 (209) | 35.86 (212) |
+  | Lua, 1 lane | 99.11 (65) | 99.68 (63) | 81.32 (74) |
+  | musl, 8 lanes | 146.1 (242) | 147.1 (240) | 232.3 (248) |
+  | musl, 1 lane | 688.5 (145) | 691.7 (145) | 641.2 (154) |
+
+  - Synth's link took 575,099 faults by one lane against main's 704,539:
+    4.3% less time by one lane and 2.2% less by 8.
+  - Lua's and musl's links run as main's: Lua's 8 lanes are within their
+    runs' spread (33.1 to 59.0 ms, and main's 32.9 to 50.0). In an
+    experiment's build of main that switches between the forms, the whole
+    huge pages took 29.28 ms against 30.40.
+  - The cost is the huge page each lane keeps, at most 2 MB: the peaks by
+    8 lanes are 1.7 (musl), 4.8 (synth) and 8.4 MiB (Lua) above main's.
+  - The few large units run as main's, since neither has a unit left when
+    it reaches the checker. With `-c` the one command takes 136.6 and
+    136.9 ms against main's 137.9 and 137.7, and the processes' 137.7 and
+    137.4. Linked, 142.2 and 142.0 against 142.2 and 142.6, and mold's
+    145.3 and 145.3.
+  - Every object and executable is main's.
+- **Synth's peak by 8 lanes** is 551 MiB at main in a second run, 549 with
+  the board disabled (`BUSTER_TEST_NO_UNITS_BOARD`), and 528 at #763. The
+  board accounts for 2.5 MiB of it, and its executable is the same bytes
+  without the board.
+
+Against "Done when", then:
+- the few large units' item holds;
+- by 8 lanes, #763's commands are faster than #763's;
+- by one lane they are slower, by each unit's compile, which #1340 and
+  #1489 own;
+- every object and executable is one lane's (`test-check-units` passed at
+  main and at the change).
+
+The change adds the huge page each lane keeps to the peaks by 8 lanes: 8.4
+MiB to Lua's, which then is 5.8 MiB above #763's where main's was below it,
+4.8 to synth's and 1.7 to musl's, which stays below #763's. Synth's was
+already about 20 MiB above #763's at main, for a reason the record doesn't
+find.
+
 ## What the units share
 
 Each lane keeps an intern table and a file cache (#150's `FileCache`) that the
@@ -342,6 +444,25 @@ So a units lane does five things:
   test option, overwrites them with a pattern between units (`arena_poison`),
   and `test-check-units` requires every object and executable it makes so to
   be the one each unit makes alone.
+
+  The checker's last pass gives the scratch's pages past its columns back to
+  the kernel (`arena_discard`, #628), which lowers one unit's peak. It stops
+  at the peak's page, inside a huge page, which the kernel then splits into
+  base pages: the rest of it, which no push wrote, stays resident, and in a
+  lane the next unit's parse and reader faulted the freed part in again a base
+  page at a time, unit after unit. So a unit whose lane has another to compile
+  gives its pages back in whole huge pages (#777, `arena_discard_huge`): when
+  a unit of the run is still to be taken (`check_units_discard_huge`, from the
+  units the lanes have taken, `CheckUnitsRun.started`), its checker frees them
+  to the last huge page boundary at or below the peak
+  (`CheckProgramOptions.discard_huge`), which the next unit takes again in a
+  fault each, and keeps the huge page that holds the peak, at most 2 MB a
+  lane. Freeing that one whole too made each unit take a fresh huge page,
+  which the kernel clears: synth's link by 8 lanes took 4.3% longer than
+  main's discard (the record's "Freeing the peak's huge page whole"). A unit
+  with none left after it, and a command of one file, discard as before.
+  `--shared-parts` reports how many units gave their pages back in whole huge
+  pages.
 - **It pools the arenas its units release** (`arena_pool`, which only the
   units' lanes set): `arena_release` frees an arena's pages with
   `MADV_DONTNEED`, which takes the address space's lock for reading and leaves
@@ -859,14 +980,17 @@ driver as a process, in a directory of its own:
 - **A few large units** (#777): a unit of 800 functions beside a small one's
   `main`, with `-c` by 8 lanes and `--shared-parts` (a test option: a sharing
   emission pauses after each part it takes itself, and the command reports how
-  many parts the other lanes took and how many lanes left their memory to the
-  exit), each object its own alone, the six lanes without a unit having taken
-  parts of the large one's and one lane alone leaving its memory to the exit;
-  again without the board (`BUSTER_TEST_NO_UNITS_BOARD`, a test hook that
-  stands for its allocation failing), with no part shared and still one lane
-  alone leaving its memory; and linked, where no lane leaves it, by
-  `--lanes` 1, by 8 and by the scalar path on 8, the same bytes, a program
-  whose sum is the test's.
+  many parts the other lanes took, how many lanes left their memory to the
+  exit and how many units gave back their scratch's pages in whole huge
+  pages), each object its own alone, the six lanes without a unit having taken
+  parts of the large one's, one lane alone leaving its memory to the exit and
+  every unit giving back its scratch's pages as alone; again without the board
+  (`BUSTER_TEST_NO_UNITS_BOARD`, a test hook that stands for its allocation
+  failing), with no part shared and still one lane alone leaving its memory;
+  with `-c` by one lane, each object its own alone and the large unit, taken
+  first, alone giving its pages back in whole huge pages, for the small one;
+  and linked, where no lane leaves its memory, by `--lanes` 1, by 8 and by the
+  scalar path on 8, the same bytes, a program whose sum is the test's.
 - **The merge on lanes against its twin**, by `--lanes` 1 (the twin), 2 and 8
   and by the scalar path: four units that define three names twice, refused
   with the same standard error, which names the first duplicate in the units'

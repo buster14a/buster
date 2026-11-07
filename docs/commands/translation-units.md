@@ -33,7 +33,13 @@ unit of less than 1 MB of source start with 16 MB of base pages
 which every reservation took for writing, were what limited the lanes.
 `--poison-arenas`, a test option, overwrites what a unit left in its lane's
 three arenas (`arena_poison`), so that a compile that read a byte it didn't
-write would show. The lanes' units are held to the memory (#1109,
+write would show. A unit whose lane has another unit to take gives back its
+scratch's pages past the checker's columns in whole huge pages, keeping the
+one that holds the peak rather than splitting it into base pages that the
+next unit faults in one by one (`check_units_discard_huge`,
+`CheckProgramOptions.discard_huge`, `arena_discard_huge`, #777), and
+`--shared-parts` reports how many did. The lanes' units are held to the
+memory (#1109,
 `CheckUnitsMemory`): once preprocessed, a unit takes an estimate of its peak
 (`check_units_estimate`: 600 bytes a token and 48 MB) from seven eighths of
 what the process may take when the run starts (`MemAvailable`, or the free
@@ -100,7 +106,9 @@ without symbols, into the same bytes); a few large units (#777: a unit of 800
 functions beside a small one, whose lanes without units take its functions'
 parts, `--shared-parts`' report, into objects their own alone and executables
 one lane's, and whose `-c` leaves one lane's memory to the exit, with the board
-and without it, `BUSTER_TEST_NO_UNITS_BOARD`); every reservation of two units' `-c` failed in turn, each run
+and without it, `BUSTER_TEST_NO_UNITS_BOARD`, every unit giving back its
+scratch's pages as alone by 8 lanes, and by one the large unit giving them
+back in whole huge pages); every reservation of two units' `-c` failed in turn, each run
 reported and its memory released (a lane's partial setup among them); the
 jobserver's tokens held while the link writes; lanes that don't start; and
 `benchmark-check-units` by `--lanes` 1 and 2, and its refusals of counts it
