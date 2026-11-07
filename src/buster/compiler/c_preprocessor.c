@@ -22331,6 +22331,19 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
 
 static bool pp_option_takes_value(const char* argument);
 
+// A failed run's -o output removed, as clang removes it: a regular file, or a symbolic link (the link alone, not what it
+// names); never a device, a FIFO or a socket, which the run never wrote. So `-E bad.c -o /dev/null` leaves /dev/null
+// alone, which run as root it would otherwise delete (#1622).
+static void pp_driver_remove_output(const char* output)
+{
+    struct stat status;
+    const bool removable = lstat(output, &status) == 0 && (S_ISREG(status.st_mode) || S_ISLNK(status.st_mode));
+    if (removable)
+    {
+        unlink(output);
+    }
+}
+
 // Verbose output describes the integrated stages rather than inventing external cc1/as/ld subprocesses. It goes to
 // stderr, so preprocessing, macro queries, dependency rules and generated stdout remain machine-readable.
 static void pp_driver_verbose(const PPOptions* options, const char* input)
@@ -22431,10 +22444,10 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
                 bool printed = true;
                 const bool file_output = output != NULL && strcmp(output, "-") != 0;
                 // Do not create or truncate -o until preprocessing succeeded. A failure removes a previous file,
-                // as clang and gcc do, instead of leaving the truncated output.
+                // as clang and gcc do, instead of leaving the truncated output (pp_driver_remove_output).
                 if (!preprocessed && file_output)
                 {
-                    unlink(output);
+                    pp_driver_remove_output(output);
                 }
                 if (preprocessed && !options.dependencies.only)
                 {
@@ -22452,7 +22465,7 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
                 const bool prepared = preprocessed && printed && pp_dependencies(&pp, input, output, &arena, dependencies + unit, stderr);
                 if (!prepared && file_output)
                 {
-                    unlink(output);
+                    pp_driver_remove_output(output);
                 }
                 result = prepared ? result : 1;
                 pp_diagnostic_summary(&pp);

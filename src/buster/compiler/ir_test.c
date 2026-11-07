@@ -86,6 +86,27 @@ static bool ir_test_simple(Arena* arena, IrFunction* function)
     return ok;
 }
 
+// #1634: the use-list twins build the same lists, offset for offset and use for use, or fail alike.
+static void ir_test_uses_twins(IrTestTally* tally, const IrFunction* function, Arena* memory, Arena* scratch)
+{
+    const uint64_t mark = memory->length;
+    const uint64_t scratch_mark = scratch->length;
+    IrUses vector = { 0 };
+    IrUses scalar = { 0 };
+    const IrError vector_error = ir_uses_validated(function, memory, scratch, &vector);
+    const IrError scalar_error = ir_uses_validated_scalar(function, memory, scratch, &scalar);
+    bool same = vector_error == scalar_error;
+    if (same && vector_error == IR_OK)
+    {
+        // arena_bytes is left out: it counts the alignment before each build, and the second starts after the first.
+        same = vector.value_count == scalar.value_count && vector.use_count == scalar.use_count &&
+               memcmp(vector.offsets, scalar.offsets, ((uint64_t)vector.value_count + 1) * sizeof(uint32_t)) == 0 &&
+               (vector.use_count == 0 || memcmp(vector.uses, scalar.uses, (uint64_t)vector.use_count * sizeof(IrUse)) == 0);
+    }
+    ir_test_expect(tally, same && scratch->length == scratch_mark, "the use-list twins disagreed or retained scratch");
+    arena_pop_to(memory, mark);
+}
+
 static void ir_test_printer(IrTestTally* tally, const IrFunction* function, Arena* memory, Arena* scratch)
 {
     FILE* first = tmpfile();
@@ -123,6 +144,7 @@ static void ir_test_printer(IrTestTally* tally, const IrFunction* function, Aren
         ir_test_expect(tally, scratch->length == scratch_mark, "printing or derived-array rebuild retained scratch");
     }
     ir_test_expect(tally, ok, "stable printer failed or changed after rebuilding CFG and uses");
+    ir_test_uses_twins(tally, function, memory, scratch);
     if (first != 0)
     {
         fclose(first);
@@ -1461,6 +1483,13 @@ static void ir_test_allocations(IrTestTally* tally, Arena* memory, Arena* scratc
             {
                 ir_test_expect(tally, small.length == 13 && memcmp(saved_uses, &uses, sizeof(uses)) == 0, "use-list allocation failure changed output or arena");
             }
+            // The scalar twin needs the same memory, so it fails at the same capacities (#1634).
+            const uint64_t built_length = small.length;
+            small.length = 13;
+            IrUses twin;
+            memset(&twin, 0x5a, sizeof(twin));
+            const IrError twin_error = ir_uses_validated_scalar(&function, &small, scratch, &twin);
+            ir_test_expect(tally, twin_error == use_error && small.length == built_length && scratch->length == scratch_mark, "the use-list twins failed at different capacities");
         }
     }
     arena_pop_to(memory, mark);
@@ -1543,6 +1572,7 @@ static void ir_test_guards(IrTestTally* tally, Arena* memory, Arena* scratch)
                     0
                 };
                 ir_test_expect(tally, ir_build_cfg(&function, memory, scratch, &cfg) == IR_OK && ir_build_uses(&function, memory, scratch, &uses) == IR_OK, "derived arrays failed on guarded tails");
+                ir_test_uses_twins(tally, &function, memory, scratch);
                 if (count >= 3)
                 {
                     const uint32_t id = count - 2;
@@ -1940,6 +1970,11 @@ static void ir_test_dominance_generated(IrTestTally* tally, Arena* memory, Arena
             const bool scalar_valid = scalar.error == expected.error && scalar.instruction == expected.instruction && scalar.detail == expected.detail && scalar.dominance_checked == (expected.error == IR_OK && dominance != 0);
             ir_test_expect(tally, vector_valid, "vector dominance check disagreed with the oracle on a generated function");
             ir_test_expect(tally, scalar_valid, "scalar dominance check disagreed with the oracle on a generated function");
+            // A dominance error leaves the function's rows valid, which is all the use lists read (#1634).
+            if (vector.error == IR_OK || vector.error == IR_ERROR_DOMINANCE)
+            {
+                ir_test_uses_twins(tally, &function, memory, scratch);
+            }
         }
         arena_pop_to(memory, mark);
     }
@@ -2120,6 +2155,7 @@ static void ir_test_operand_order(IrTestTally* tally, Arena* memory, Arena* scra
             operands += expected;
         }
         ir_test_expect(tally, operands == 38, "operand order fixture didn't reach every operand");
+        ir_test_uses_twins(tally, &function, memory, scratch);
     }
     arena_pop_to(memory, mark);
 }

@@ -631,6 +631,39 @@ static void cc_compat_fifo_source(CCCompatibilityTest* test)
     unlink(fifo);
 }
 
+// A failed -E run removes its -o output as clang does (#1622): a regular file, and a symbolic link but not the file it
+// names; never a FIFO (or a device: /dev/null, which run as root it would delete). A FIFO the fixture owns shows it
+// unprivileged, and the run never opens it.
+static void cc_compat_failed_output_kinds(CCCompatibilityTest* test)
+{
+    static const char* const outputs[] = { "kept.fifo", "old.i", "link.i" };
+    char path[PATH_MAX];
+    char target[PATH_MAX];
+    snprintf(target, sizeof(target), "%s/target.i", test->directory);
+    const bool written = cc_compat_write(test, "boom.c", "#error boom\n") && cc_compat_write(test, "old.i", "previous output\n") &&
+                         cc_compat_write(test, "target.i", "link target\n");
+    snprintf(path, sizeof(path), "%s/kept.fifo", test->directory);
+    const bool fifo = written && mkfifo(path, 0600) == 0;
+    snprintf(path, sizeof(path), "%s/link.i", test->directory);
+    const bool linked = fifo && symlink(target, path) == 0;
+    for (uint32_t k = 0; k < sizeof(outputs) / sizeof(outputs[0]); k += 1)
+    {
+        const char* const args[] = { "-E", "boom.c", "-o", outputs[k], NULL };
+        CCCompatibilityRun run = linked ? cc_compat_run(test, test->compiler, NULL, args) : (CCCompatibilityRun){ .status = -1 };
+        snprintf(path, sizeof(path), "%s/%s", test->directory, outputs[k]);
+        struct stat status;
+        const bool present = lstat(path, &status) == 0;
+        const bool kept = k == 0 ? present && S_ISFIFO(status.st_mode) : !present;
+        cc_compat_expect(test, linked && run.status == 1 && kept,
+                         k == 0 ? "failed -E keeps a FIFO output" : k == 1 ? "failed -E removes a regular output" : "failed -E removes a symlinked output's link");
+        cc_compat_release(&run);
+        unlink(path);
+    }
+    struct stat status;
+    cc_compat_expect(test, linked && stat(target, &status) == 0 && S_ISREG(status.st_mode), "failed -E keeps a symlinked output's target");
+    unlink(target);
+}
+
 // /dev/fd/N is the process's own pipe. The write end is closed before the compiler runs, so read() reaches EOF.
 static void cc_compat_pipe_source(CCCompatibilityTest* test)
 {
@@ -964,6 +997,7 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
         cc_compat_release(&stdin_device);
         cc_compat_fifo_source(&test);
         cc_compat_pipe_source(&test);
+        cc_compat_failed_output_kinds(&test);
         const char* modes[] = { "-pie", "-static", "-static-pie" };
         for (uint32_t m = 0; m < 3; m += 1)
         {
