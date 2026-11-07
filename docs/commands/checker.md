@@ -180,6 +180,23 @@ unused-warning fixtures also check exact scope-completion tokens.
   scalar-result controls, for clauses, macros and source policy through default and scalar modes and a requested
   deferred-option route. These single-file syntax-only commands are capped at one lane and use the ordinary-reader
   fallback; they do not establish admitted deferred-reader coverage.
+  A GNU statement expression in the expression operand of `sizeof`, `_Alignof`, `__alignof__` or `typeof` is
+  unevaluated (#147). Its statements are graph roots of their own, outside the operand's evaluation facts.
+  Clang drops its unused-result, unused-comparison, comma-operand, `void *`-cast, self-assignment, division,
+  bounds, sign-comparison and constant-conversion warnings there. `check_common_unevaluated` reads the token's
+  parser context from `-Wvoid-ptr-dereference`'s `check_warning_graph_void_context`, only when one of these
+  warnings is about to be published. An array declarator's bound is constant-evaluated to clang, which keeps
+  its unused-result warnings. So does a bound in the operand's type name or in a declaration inside the
+  statement expression. A `sizeof` of a variable-array expression evaluates its operand after all.
+  The contexts' memo is pushed at a unit's first such warning, so a unit without one pays nothing. Six
+  original default-warning fixtures compare complete output with Clang, among them the evaluated and bound
+  controls and a value that decays from a variable array. Still separate: `-Wuninitialized` reads and writes
+  in such a statement expression, which need the evaluation facts themselves; the input reader's
+  `-Wshift-count-overflow` there; clang's runtime-warning drop in every array bound; a variable-array
+  `sizeof`'s comma operands, which clang warns of when it evaluates them; `-Wunevaluated-expression`, which
+  isn't implemented; and three forms the checker refuses: a statement expression in a variable-array
+  `sizeof`'s operand, `sizeof ({ ... })` (whose `(` is the statement expression's own), and a statement
+  expression as `_Generic`'s controlling expression.
   `c_check_return_flow.c` supplies source return-warning facts for checked graphs. Ordinary direct calls no longer
   suppress a function's `-Wreturn-type` warning; a proven direct `noreturn` call or terminating builtin ends only its
   own warning-flow edge. Short circuit, conditional and unevaluated operands retain their execution rules, and
