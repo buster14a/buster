@@ -1362,6 +1362,31 @@ static bool check_input_fallthrough_within(const Parser* parser, uint32_t token,
     return at == root;
 }
 
+// The first token of statement `item`'s subtree. A subtree is a run of tokens, so its first is its last (the reader's
+// `ends`) less its length (`subtree_sizes`, by postorder position) plus one: one load each (#1357), where stepping back
+// a token at a time, each step a climb to `item`, cost a switch's fallthroughs time quadratic in its statements. A reader
+// without the traversal's columns steps back.
+static uint32_t check_input_fallthrough_first(const CheckInputReader* reader, uint32_t item)
+{
+    const Parser* parser = reader->parser;
+    const bool columns = reader->ends != NULL && reader->subtree_sizes != NULL && reader->postorder_positions != NULL && item < parser->tokens.count;
+    const uint32_t size = columns ? reader->subtree_sizes[reader->postorder_positions[item]] : 0;
+    const uint32_t end = columns ? reader->ends[item] : 0;
+    uint32_t first = item;
+    if (size != 0 && size - 1 <= end && end + 1 - size <= item)
+    {
+        first = end + 1 - size;
+    }
+    else
+    {
+        while (first > 0 && check_input_fallthrough_within(parser, first - 1, item))
+        {
+            first -= 1;
+        }
+    }
+    return first;
+}
+
 // What a statement that runs after a fallthrough is (check_input_fallthrough_item): a switch's case or default label
 // (`PLACED`), one without a statement (`EMPTY`: a null statement, an empty compound, a plain label on one), or any other.
 #define BUSTER_CHECK_FALLTHROUGH_OTHER 0u
@@ -1400,11 +1425,7 @@ static uint32_t check_input_fallthrough_statement(const CheckInputReader* reader
         // A declaration that declares no variable, which clang's CFG doesn't add (CFGBuilder::VisitDeclSubExpr, #1126's
         // review): a typedef but of a variably modified type, a tag's, a function's, an enumerator's, a static assertion
         // or a local label's (`__label__`). A variable's declaration, any statement's: other.
-        uint32_t first = item;
-        while (first > 0 && check_input_fallthrough_within(parser, first - 1, item))
-        {
-            first -= 1;
-        }
+        const uint32_t first = check_input_fallthrough_first(reader, item);
         const uint8_t first_kind = parser->tokens.kinds[first];
         bool declares = first_kind == PARSE_KIND_STATIC_ASSERT || first_kind == PARSE_KIND_LABEL;
         bool runs = false;
@@ -1531,16 +1552,6 @@ static uint32_t check_input_fallthrough_spelling(const CheckInputReader* reader,
     return length;
 }
 
-// The first token of statement `item`'s subtree.
-static uint32_t check_input_fallthrough_first(const Parser* parser, uint32_t item)
-{
-    uint32_t first = item;
-    while (first > 0 && check_input_fallthrough_within(parser, first - 1, item))
-    {
-        first -= 1;
-    }
-    return first;
-}
 
 // The statement a plain label or a case or default label (`item`, its colon) labels: its child after it, or none.
 static uint32_t check_input_fallthrough_labeled(const CheckInputReader* reader, uint32_t item)
@@ -1725,7 +1736,7 @@ static bool check_input_fallthrough_breaks(CheckInputReader* reader, uint32_t bo
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
     bool breaks = false;
-    uint32_t token = body < count ? check_input_fallthrough_first(parser, body) : count;
+    uint32_t token = body < count ? check_input_fallthrough_first(reader, body) : count;
     while (token < count && !breaks && (token <= body || check_input_fallthrough_inside(parser, token, body)))
     {
         bool own = parser->tokens.kinds[token] == PARSE_KIND_BREAK;
@@ -1941,7 +1952,7 @@ static bool check_input_fallthrough_leaves(CheckInputReader* reader, uint32_t it
     {
         const uint32_t node = pending[--pending_count];
         const uint8_t role = parser->tree.roles[node];
-        const uint32_t first = check_input_fallthrough_first(parser, node);
+        const uint32_t first = check_input_fallthrough_first(reader, node);
         const uint8_t first_kind = parser->tokens.kinds[first];
         const uint32_t keyword = role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR ? reader->first_child[node] : BUSTER_CHECK_NONE;
         const uint8_t keyword_kind = keyword < count ? parser->tokens.kinds[keyword] : 0;
@@ -2124,7 +2135,7 @@ static bool check_input_fallthrough_straight(CheckInputReader* reader, uint32_t 
 {
     const Parser* parser = reader->parser;
     bool straight = item < parser->tokens.count && (parser->tokens.kinds[item] == PARSE_KIND_SEMI || parser->tree.roles[item] == PARSE_ROLE_CLOSE_BLOCK);
-    for (uint32_t at = straight ? check_input_fallthrough_first(parser, item) : item; straight && at <= item; at += 1)
+    for (uint32_t at = straight ? check_input_fallthrough_first(reader, item) : item; straight && at <= item; at += 1)
     {
         const uint8_t kind = parser->tokens.kinds[at];
         const uint8_t role = parser->tree.roles[at];
@@ -2295,15 +2306,10 @@ static bool check_input_fallthrough_placed(const CheckInputReader* reader, uint3
 // (check_input_fallthrough_dead), where its block doesn't reach one (check_input_fallthrough_flows).
 static void check_input_fallthrough_misplaced(CheckInputReader* reader, uint32_t token)
 {
-    const Parser* parser = reader->parser;
     if (!(check_input_fallthrough_dead(reader, token) ? check_input_fallthrough_flows(reader, token) : check_input_fallthrough_placed(reader, token)))
     {
         // clang's analysis of the function's CFG reports it at the statement's first token.
-        uint32_t first = token;
-        while (first > 0 && check_input_fallthrough_within(parser, first - 1, token))
-        {
-            first -= 1;
-        }
+        const uint32_t first = check_input_fallthrough_first(reader, token);
         check_input_report(reader, first, CHECK_INPUT_FALLTHROUGH_PLACEMENT);
     }
 }
