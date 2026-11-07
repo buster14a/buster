@@ -42,7 +42,7 @@ struct CheckProgramSelection
 
 // The roots a declaration's `attributes` make its definition: used (but not retain, which keeps the section of a
 // definition that is emitted without making it one: clang 23 emits no unreferenced static with retain alone, #147),
-// constructor and destructor.
+// x86's interrupt (whose handler adds an implicit used, #147), constructor and destructor.
 static uint32_t check_program_attribute_roots(const CheckInputAttributes* attributes, bool function, bool* gnu_inline)
 {
     uint32_t flags = 0;
@@ -51,7 +51,7 @@ static uint32_t check_program_attribute_roots(const CheckInputAttributes* attrib
         const CheckInputAttribute* attribute = attributes->records + i;
         if (!attribute->ignored)
         {
-            flags |= attribute->kind == CHECK_ATTRIBUTE_USED ? BUSTER_C_LOWERING_USED : 0;
+            flags |= attribute->kind == CHECK_ATTRIBUTE_USED || (attribute->kind == CHECK_ATTRIBUTE_INTERRUPT && !attribute->subject_ignored) ? BUSTER_C_LOWERING_USED : 0;
             flags |= function && attribute->kind == CHECK_ATTRIBUTE_CONSTRUCTOR ? BUSTER_C_LOWERING_CONSTRUCTOR : 0;
             flags |= function && attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR ? BUSTER_C_LOWERING_DESTRUCTOR : 0;
             *gnu_inline |= attribute->kind == CHECK_ATTRIBUTE_GNU_INLINE;
@@ -61,8 +61,9 @@ static uint32_t check_program_attribute_roots(const CheckInputAttributes* attrib
 }
 
 // Whether a declaration's `attributes` make clang emit its function where the unit defines it rather than when its
-// emission first refers to it (ASTContext::DeclMustBeEmitted): used, constructor or destructor, but not retain, which
-// keeps a function that is emitted without making it one (CheckProgram.body_eager).
+// emission first refers to it (ASTContext::DeclMustBeEmitted): used (x86's interrupt's implicit one too, #147),
+// constructor or destructor, but not retain, which keeps a function that is emitted without making it one
+// (CheckProgram.body_eager).
 static bool check_program_attribute_eager(const CheckInputAttributes* attributes)
 {
     bool eager = false;
@@ -70,7 +71,8 @@ static bool check_program_attribute_eager(const CheckInputAttributes* attributes
     {
         const CheckInputAttribute* attribute = attributes->records + i;
         eager |= !attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_USED || attribute->kind == CHECK_ATTRIBUTE_CONSTRUCTOR ||
-                                         attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR);
+                                         attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR ||
+                                         (attribute->kind == CHECK_ATTRIBUTE_INTERRUPT && !attribute->subject_ignored));
     }
     return eager;
 }

@@ -14406,6 +14406,12 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             // GNU's function multiversioning: a version's symbol and the resolver's ifunc that calls reach.
             check_lower_unsupported(writer, "functions of several target versions (target_clones, or target attributes of other strings)");
         }
+        else if (check_program_interrupt(program, b))
+        {
+            // x86's interrupt service routine (#147, CheckProgram.object_interrupt): its frame, which saves every register
+            // it touches and returns with iretq past the CPU's frame and error code, isn't Tier 0's yet.
+            check_lower_unsupported(writer, "interrupt service routines");
+        }
         else if (convention != NULL)
         {
             check_lower_unsupported(writer, convention);

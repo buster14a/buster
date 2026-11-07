@@ -88,7 +88,9 @@ static bool check_input_unused_suppressed(const CheckInput* input, uint32_t toke
     for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
     {
         const uint32_t attribute = attributes->records[i].kind;
-        marked = marked || attribute == CHECK_ATTRIBUTE_UNUSED || attribute == CHECK_ATTRIBUTE_USED;
+        // x86's interrupt that its subject takes is clang's implicit used too (#147, handleAnyX86InterruptAttr).
+        const bool interrupt = attribute == CHECK_ATTRIBUTE_INTERRUPT && !attributes->records[i].ignored && !attributes->records[i].subject_ignored;
+        marked = marked || attribute == CHECK_ATTRIBUTE_UNUSED || attribute == CHECK_ATTRIBUTE_USED || interrupt;
     }
     const bool result = kind != C_BINDING_OBJECT && kind != C_BINDING_FUNCTION ? true : marked;
     return result;

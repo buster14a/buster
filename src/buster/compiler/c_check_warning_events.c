@@ -74,6 +74,7 @@ enum
     CHECK_WARNING_ID_REDEFINE_EXTNAME = 82,
     CHECK_WARNING_ID_THREAD_SAFETY_ATTRIBUTES = 83,
     CHECK_WARNING_ID_NODEREF = 84,
+    CHECK_WARNING_ID_EXCESSIVE_REGSAVE = 85,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -251,6 +252,10 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_NODEREF_PLACEMENT,
     CHECK_WARNING_EVENT_NODEREF_DEREFERENCE,
     CHECK_WARNING_EVENT_NODEREF_CONVERSION,
+    // A call in an interrupt service routine (payload.data 0) or a no_caller_saved_registers function (1) of a callee
+    // without no_caller_saved_registers (#147, check_input_interrupt_calls: -Wexcessive-regsave), at the callee, with a
+    // CHECK_WARNING_NOTE_DECLARED_HERE at a named callee's declaration.
+    CHECK_WARNING_EVENT_EXCESSIVE_REGSAVE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -275,6 +280,8 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_SPAN_REASON,
     CHECK_WARNING_NOTE_UNAVAILABLE_HERE,
     CHECK_WARNING_NOTE_NODEREF_DECLARATION,
+    // "'f' declared here" (clang's note_entity_declared_at), payload.name the entity's name.
+    CHECK_WARNING_NOTE_DECLARED_HERE,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 
@@ -299,6 +306,9 @@ typedef enum CheckWarningCompletion
 #define BUSTER_CHECK_WARNING_SYMBOL_PRAGMA 0x04u
 // CHECK_WARNING_EVENT_PRAGMA's payload.data indexes CheckInputMsPragmas only with this discriminator.
 #define BUSTER_CHECK_WARNING_MS_PRAGMA 0x08u
+// A CHECK_WARNING_EVENT_LATE_ATTRIBUTE of an implicit attribute, which clang gives no location (#147: interrupt's used
+// after a definition), its token the attribute's that made it, for its policy's place.
+#define BUSTER_CHECK_WARNING_UNLOCATED 0x10u
 #define BUSTER_CHECK_WARNING_NO_SOURCE UINT32_MAX
 // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's payload.data bit of a C23 attribute's spelling, past its scope's identifier.
 #define BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE 0x80000000u
@@ -384,8 +394,9 @@ static bool check_warning_flags_valid(uint32_t kind, uint32_t flags)
 {
     const uint32_t histories = BUSTER_CHECK_WARNING_SYMBOL_PRAGMA | BUSTER_CHECK_WARNING_MS_PRAGMA;
     const uint32_t payload = flags & histories;
-    return (flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED | histories)) == 0 &&
-           (payload == 0 || kind == CHECK_WARNING_EVENT_PRAGMA) && payload != histories;
+    return (flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED | histories | BUSTER_CHECK_WARNING_UNLOCATED)) == 0 &&
+           (payload == 0 || kind == CHECK_WARNING_EVENT_PRAGMA) && payload != histories &&
+           ((flags & BUSTER_CHECK_WARNING_UNLOCATED) == 0 || kind == CHECK_WARNING_EVENT_LATE_ATTRIBUTE);
 }
 
 static uint32_t check_warning_capacity(uint32_t capacity, uint32_t needed)

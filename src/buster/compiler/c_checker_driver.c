@@ -200,6 +200,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_INLINE_NOT_FUNCTION: result = "'inline' can only appear on functions"; break;
         case CHECK_INPUT_NORETURN_NOT_FUNCTION: result = "'_Noreturn' can only appear on functions"; break;
         case CHECK_INPUT_MS_STRUCT_ALIGNMENT: result = "ms_struct bit-field storage with non-power-of-two size is not supported"; break;
+        case CHECK_INPUT_INTERRUPT_HANDLER: result = "x86-64 'interrupt' attribute only applies to functions that have a 'void' return type"; break;
+        case CHECK_INPUT_INTERRUPT_CALLED: result = "interrupt service routine cannot be called directly"; break;
     }
     return result;
 }
@@ -452,6 +454,21 @@ static const char* check_driver_musttail_message(const Parser* parser, const Pre
     return text;
 }
 
+// x86's interrupt's errors (#147, clang's err_anyx86_interrupt_attribute on x86-64), by which of the handler's rules the
+// declaration breaks (CHECK_INPUT_INTERRUPT_HANDLER's detail, check_input_interrupt_handler).
+static const char* check_driver_interrupt_message(uint32_t detail)
+{
+    static const char* const messages[] =
+    {
+        "x86-64 'interrupt' attribute only applies to functions that have a 'void' return type",
+        "x86-64 'interrupt' attribute only applies to functions that have only a pointer parameter optionally followed by an integer parameter",
+        "x86-64 'interrupt' attribute only applies to functions that have a pointer as the first parameter",
+        "x86-64 'interrupt' attribute only applies to functions that have a 'unsigned long' type as the second parameter",
+    };
+    const uint32_t rule = detail & ~BUSTER_CHECK_INTERRUPT_UNLOCATED;
+    return messages[rule < BUSTER_ARRAY_LENGTH(messages) ? rule : 0];
+}
+
 static const char* check_driver_input_report_message(const CheckInput* input, const CheckInputReport* report)
 {
     const CheckInputLoopDiagnostic* loop = input->loop_diagnostic;
@@ -462,6 +479,7 @@ static const char* check_driver_input_report_message(const CheckInput* input, co
     return loop != NULL && report->pragma == loop->pragma && report->token == loop->position ? loop->text :
            section != NULL ? section->text.pointer : optimize != NULL ? optimize->text.pointer : fp != NULL ? check_input_fp_error_message(fp->error) :
            layout != NULL ? "this pragma cannot appear in struct declaration" :
+           report->message == CHECK_INPUT_INTERRUPT_HANDLER ? check_driver_interrupt_message(report->detail) :
            report->message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (report->detail & 0xffu) == CHECK_ARGUMENT_ALIGNMENT_POWER ?
            check_driver_alignment_power : check_driver_input_message(report->message);
 }
@@ -1764,6 +1782,11 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                             "%s%.*s%s is unavailable%s%.*s", used_quote, (int)used_text.length, used_text.pointer, used_quote,
                                                             message.length != 0 ? ": " : "", (int)message.length, message.pointer);
                             }
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_INTERRUPT_HANDLER && (input->reports[index].detail & BUSTER_CHECK_INTERRUPT_UNLOCATED) != 0)
+                        {
+                            // x86's interrupt where clang finds no place for its error (#147, check_input_interrupt_handler).
+                            pp_diagnose_unlocated_notes(pp, PP_SEVERITY_ERROR, publication, NULL, 0, "%s", message);
                         }
                         else if (phase == 0 && kind >= CHECK_INPUT_AVAILABILITY_PLATFORM && kind <= CHECK_INPUT_AVAILABILITY_REPEATED && token < count)
                         {

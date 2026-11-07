@@ -1021,6 +1021,20 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 7, 8))) void pp_
     va_end(arguments);
 }
 
+// A diagnostic at no source location, as clang gives one at an invalid SourceLocation (no file:line:column, no macro
+// history), with its notes, published where `position` sorts it among the semantic ones (#147: an interrupt attribute's
+// errors where clang finds no place in the declaration, the warning of its implicit used after a definition).
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_diagnose_unlocated_notes(Preprocessor* pp, PPSeverity severity, uint32_t position,
+                                                                                                     const PPOutputDiagnosticNote* notes, uint32_t note_count,
+                                                                                                     const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    pp_history_ensure(pp);
+    pp_diagnose_source_location(pp, severity, 0, 0, position, PP_DIAGNOSTIC_SEMANTIC, notes, note_count, format, arguments);
+    va_end(arguments);
+}
+
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 8, 9))) void pp_diagnose_output_notes_phase(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t position, PPDiagnosticPhase phase,
                                                                                                         const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, ...)
 {
