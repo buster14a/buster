@@ -51,7 +51,29 @@ static bool check_program_return_unknowns(const CheckProgram* program, Arena* sc
     return ready;
 }
 
-static uint8_t check_program_return_call(const CheckProgram* program, uint32_t node, const uint32_t* unknowns)
+// A library builtin's 'r' attribute depends on the declaration's interned name alone. `names`, when present, holds
+// one byte per id of program->identifiers: 0 before the first lookup of that name, otherwise its result plus one, so
+// each name is searched in the catalogue once however many calls reach it (#1709). NULL searches every time.
+static uint8_t check_program_return_library(const CheckProgram* program, uint32_t name, uint8_t* names)
+{
+    const uint8_t cached = names != NULL ? names[name] : 0;
+    uint8_t result = cached != 0 ? (uint8_t)(cached - 1) : 0;
+    if (cached == 0)
+    {
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)intern_bytes(program->identifiers, name), intern_length(program->identifiers, name));
+        // Library noreturn depends on builtin options and named typedef visibility. Those policies are not the
+        // declaration's FUNCTION_NORETURN bit, so preserve conservative handling rather than guess from its name.
+        const bool unknown = info != NULL && memchr(info->attributes, 'r', info->attributes_length) != NULL;
+        result = unknown ? BUSTER_CHECK_RETURN_UNKNOWN : 0;
+    }
+    if (names != NULL)
+    {
+        names[name] = (uint8_t)(result + 1);
+    }
+    return result;
+}
+
+static uint8_t check_program_return_call(const CheckProgram* program, uint32_t node, const uint32_t* unknowns, uint8_t* names)
 {
     const CheckInput* input = program->input;
     const CheckStream* stream = program->stream;
@@ -70,11 +92,7 @@ static uint8_t check_program_return_call(const CheckProgram* program, uint32_t n
     else if (known && program->identifiers != NULL)
     {
         const uint32_t name = program->parser->tokens.names[declaration];
-        const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)intern_bytes(program->identifiers, name), intern_length(program->identifiers, name));
-        // Library noreturn depends on builtin options and named typedef visibility. Those policies are not the
-        // declaration's FUNCTION_NORETURN bit, so preserve conservative handling rather than guess from its name.
-        const bool unknown = info != NULL && memchr(info->attributes, 'r', info->attributes_length) != NULL;
-        result = unknown ? BUSTER_CHECK_RETURN_UNKNOWN : 0;
+        result = check_program_return_library(program, name, name < program->identifiers->count ? names : NULL);
     }
     return result;
 }
@@ -94,6 +112,13 @@ static uint8_t* check_program_return_facts(CheckProgram* program, Arena* scratch
     uint8_t* facts = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
     uint32_t* unknowns = NULL;
     const bool ready = (count == 0 || facts != NULL) && check_program_return_unknowns(program, scratch, &unknowns);
+    // The names' memo is an optimisation only: without its bytes every call searches the catalogue, as before.
+    const uint32_t name_count = ready && count != 0 && program->identifiers != NULL ? program->identifiers->count : 0;
+    uint8_t* names = name_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, name_count) : NULL;
+    if (names != NULL)
+    {
+        memset(names, 0, name_count);
+    }
     if (!ready)
     {
         check_program_fail(program, CHECK_PROGRAM_RESOURCE, 0);
@@ -102,7 +127,7 @@ static uint8_t* check_program_return_facts(CheckProgram* program, Arena* scratch
     for (uint32_t node = 0; ready && node < count; node += 1)
     {
         const CheckOp op = graph->ops[node];
-        uint8_t result = op == CHECK_OP_CALL ? check_program_return_call(program, node, unknowns) :
+        uint8_t result = op == CHECK_OP_CALL ? check_program_return_call(program, node, unknowns, names) :
                          op == CHECK_OP_BUILTIN_QUERY ? BUSTER_CHECK_RETURN_UNKNOWN : 0;
         if (work != NULL)
         {

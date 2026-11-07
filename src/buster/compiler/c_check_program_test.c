@@ -3041,7 +3041,7 @@ static void check_test_program_return_marks(CheckTest* test)
         const CheckStream stream = { .dense_values = values };
         const CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input,
                                        .stream = &stream, .object_count = 2 };
-        check_test_expect(test, check_program_return_call(&program, 1, NULL) == BUSTER_CHECK_RETURN_UNKNOWN,
+        check_test_expect(test, check_program_return_call(&program, 1, NULL, NULL) == BUSTER_CHECK_RETURN_UNKNOWN,
                           "a call without optional source declaration bindings remains conservative");
     }
 
