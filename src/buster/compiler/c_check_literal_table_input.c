@@ -246,6 +246,9 @@ static bool check_literal_table_batch(CheckInputReader* reader, const uint32_t* 
 #else
     const bool scalar_store = reader->parser->options.scalar;
 #endif
+#if __has_feature(memory_sanitizer)
+#pragma clang loop vectorize(disable) interleave(disable)
+#endif
     for (uint32_t lane = 0; valid && scalar_store && lane < count; lane += 1)
     {
         memcpy(destination + (uint64_t)lane * (width / 8), values + lane, width / 8);
