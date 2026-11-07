@@ -917,11 +917,19 @@ static void tier1_code_certificate_store(Tier1EmitTest* test, bool vector)
     const bool dominated = valid && tier1_terminal_dominance(test, &function, vector, &dominance);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
-    const Tier1EmitOptions options = { .vector = vector, .certify = true };
-    Tier1EmitResult emitted;
+    const Tier1SelectError selection = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+    const bool planned = selection == TIER1_SELECT_OK;
+    tier1_emit_test_expect(test, planned, "the code certificate's seq_cst store fixture selects");
+    Tier1EmitDiagnostic diagnostic = {0};
+    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .certify = true, .diagnostic = &diagnostic };
+    Tier1EmitResult emitted = {0};
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
+    if (!certified)
+    {
+        fprintf(stderr, "tier1-emit: seq_cst store certificate: path=%s selection=%u emission=%u cause=%u detail=%u node=%u checked=%u reason=%u\n",
+                vector ? "vector" : "scalar", (unsigned)selection, (unsigned)error, (unsigned)diagnostic.cause, diagnostic.error, node, emitted.code_checked, emitted.code_reason);
+    }
     tier1_emit_test_expect(test, certified, "a seq_cst store that keeps its desired SSA value passes the emitted-code certificate");
     uint32_t mutations = 0;
     for (uint32_t r = 1; certified && r < emitted.code.count; r += 1)
