@@ -100,6 +100,11 @@ requirements. [Command index](README.md).
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
   `--requests` selects #1057's request tests (`c_check_request_test.c`) and the source benchmarks' preparation tests.
+  `c_check_self_assign_driver_test.c` checks #1391's macro self-assignment boundary. The warning is suppressed
+  when the assignment operator or either variable-name use comes from a macro body or substituted argument;
+  macro-produced parentheses or declarations alone do not suppress an ordinary source assignment. Original
+  fixtures compare independent counts, severity and complete diagnostic lines with Clang through default,
+  scalar and deferred reader routes, including warning flags and source diagnostic pragmas.
   `c_check_noderef_driver_test.c`, in the attribute-effects driver section,
   compares original GNU `noderef` placement, propagation, conversion,
   address-cancellation and unevaluated-expression fixtures with pinned Clang
