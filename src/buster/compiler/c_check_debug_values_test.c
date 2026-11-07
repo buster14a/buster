@@ -192,6 +192,7 @@ static void check_debug_values_test_ranges(CheckDebugTestTally* tally)
     CheckDebugValueSpan spans[96];
     uint32_t breaks[97];
     uint32_t segments[97];
+    uint32_t tree[4 * 128];
     uint8_t scanned[2048];
     uint8_t indexed[2048];
     bool same = true;
@@ -211,7 +212,7 @@ static void check_debug_values_test_ranges(CheckDebugTestTally* tally)
             spans[i] = (CheckDebugValueSpan){ .begin = address, .end = address + length, .token = token };
             address += length;
         }
-        const uint32_t segment_count = check_debug_value_index(spans, count, breaks, segments);
+        const uint32_t leaves = check_debug_value_index(spans, count, breaks, segments, tree);
         const CheckDebugBody body = { .spans = spans, .span_count = count };
         for (uint32_t query = 0; same && query < 12; query += 1)
         {
@@ -224,7 +225,7 @@ static void check_debug_values_test_ranges(CheckDebugTestTally* tally)
             DebugWriter a = { .bytes = scanned };
             DebugWriter b = { .bytes = indexed };
             check_debug_value_range_scan(&body, &a, trial, first, last, bytes, bytes != NULL ? sizeof(expression) : 0);
-            check_debug_value_range_indexed(&body, breaks, segments, segment_count, &b, trial, first, last, bytes, bytes != NULL ? sizeof(expression) : 0);
+            check_debug_value_range_indexed(&body, breaks, segments, tree, leaves, &b, trial, first, last, bytes, bytes != NULL ? sizeof(expression) : 0);
             same = a.size == b.size && memcmp(scanned, indexed, a.size) == 0;
         }
     }
