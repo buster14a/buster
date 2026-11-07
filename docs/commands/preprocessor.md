@@ -65,6 +65,13 @@ requirements. [Command index](README.md).
   calls `pp_history_ensure` first. `check_input_system_tokens` judges system
   headers' tokens from runs the main loop keeps (`pp_system_levels`, "System
   levels"), with the history's judgment (`pp_system_levels_history`) as twin.
+  The checker's driver gives the files' token columns back after the run
+  (`pp_release_file_columns`), and a replay prepares the files again;
+  `pp_test_deferred_history` replays after that release. `-Wempty-body` places
+  a lone invocation from the file's bytes (`pp_output_invocation_place`),
+  which `test-preprocessor` checks against the history's place in every file
+  it compiles (`pp_test_invocation_places`) and in a fixture
+  (`pp_test_history_invocation_places`).
   `c_preprocessor_history_test.c` is part of `test-preprocessor`, including its
   Clang diagnostic comparisons. `benchmark-preprocessor --history-cost`
   compares recording it with deferring it and reports retained and temporary

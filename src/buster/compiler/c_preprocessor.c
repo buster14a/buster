@@ -1832,6 +1832,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
 
 static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_history_ensure(Preprocessor* pp);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_release_file_columns(Preprocessor* pp, bool poison);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_location_in_main_file(const Preprocessor* pp, uint32_t location);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnose_eval_method_use(Preprocessor* pp, uint32_t use, uint32_t position, uint32_t pragma_source);
 
@@ -19426,6 +19427,88 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_history_ensure(Preprocessor* pp)
     return pp->history != 0;
 }
 
+// A file's prepared token columns forgotten (pp_release_file_columns): the kinds, starts, values and leading-space
+// words, which are in the columns' arenas, and with `whole`, a cache record's, everything else preparing gives it, so
+// that preparing it again (file_cache_prepare) starts from a record as the cache made it.
+static void pp_forget_prepared(PPFileData* data, bool whole)
+{
+    data->kinds = NULL;
+    data->starts = NULL;
+    data->values = NULL;
+    data->space = NULL;
+    data->prepared = false;
+    if (whole)
+    {
+        data->token_count = 0;
+        data->raw_errors = NULL;
+        data->raw_error_count = 0;
+        data->directive_count = 0;
+        data->directive_hash = NULL;
+        data->directive_end = NULL;
+        data->directive_kind = NULL;
+        data->directive_next = NULL;
+        data->note_count = 0;
+        data->note_directives = NULL;
+        data->note_kinds = NULL;
+        data->guard = 0;
+        data->unterminated_comment = 0;
+        data->unterminated_comment_starts_line = false;
+        data->guard_opener = 0;
+        data->line_pages = NULL;
+    }
+}
+
+// Once a unit has run, its files' token columns have no reader left: the parser, the checker and the diagnostics read
+// the output, the ranges and the files' bytes and line tables. A unit with a file cache of its own gives the columns'
+// pages back to the kernel (the kinds, starts and values, 9 bytes a token, and the leading-space words: 11.5 MB of
+// sqlite3.c's, which stayed to the backend's peak, #628) and marks its records unprepared, so that a replay of the unit
+// for its history (pp_history_ensure), which enters the files through the same cache, prepares each again. A unit whose
+// replay has run keeps them, as the replay's files read them; and a cache that units share (PPOptions.files) keeps them
+// for the units after this one. With `poison` (the driver's --poison-arenas), the pages stay mapped but unreadable, and
+// the columns' next pushes go past them, so that any reader left faults.
+BUSTER_PREPROCESSOR_ENTRY void pp_release_file_columns(Preprocessor* pp, bool poison)
+{
+    if (pp->owns_cache && pp->history_replay == NULL)
+    {
+        FileCache* cache = pp->cache;
+        for (uint32_t r = 0; r < cache->record_count; r += 1)
+        {
+            pp_forget_prepared(&cache->records[r], true);
+        }
+        for (uint32_t d = 0; d < pp->data_count; d += 1)
+        {
+            if (pp->datas[d].record != BUSTER_PP_NONE)
+            {
+                pp_forget_prepared(&pp->datas[d], false);
+            }
+        }
+        for (uint32_t lane = 0; lane < BUSTER_LANE_MAX_COUNT; lane += 1)
+        {
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cache->lanes[lane].columns); i += 1)
+            {
+                Arena* columns = &cache->lanes[lane].columns[i];
+                if (poison && columns->base != NULL && columns->mapping_bytes != 0 && columns->peak != 0)
+                {
+                    // Whole pages from the arena's start, which is a page's, to its peak's; the arena is then never pooled
+                    // (arena_release unmaps an arena whose writable extent it doesn't know).
+                    const uint64_t end = (columns->peak + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uint64_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+                    if (mprotect(columns->base, end, PROT_NONE) == 0)
+                    {
+                        columns->length = end;
+                        columns->peak = end;
+                        columns->unaccounted = true;
+                    }
+                }
+                else
+                {
+                    arena_pop_to(columns, 0);
+                    arena_discard(columns);
+                }
+            }
+        }
+    }
+}
+
 // A source expansion may have no output token (#if), so its retained location/origin is the diagnostic source.
 // Group its lexical error with the active pragma's own source history. The caller supplies the final boundary
 // after preceding captured pragmas and that pragma's retained `fp` output token, including for macro _Pragma.
@@ -19700,6 +19783,83 @@ static __attribute__((unused)) uint32_t pp_output_expansion_begin(const Preproce
 static __attribute__((unused)) uint32_t pp_output_expansion_end(const Preprocessor* pp, uint32_t token, uint32_t origin)
 {
     return pp_output_expansion_boundary(pp, token, origin, true);
+}
+
+// How far pp_output_invocation_place looks: the output tokens on either side of the one asked about, and the file's
+// bytes between the file tokens it finds.
+#define BUSTER_PP_INVOCATION_TOKENS 256u
+#define BUSTER_PP_INVOCATION_BYTES 2048u
+
+// Whether the identifier at `bytes` is spelled plainly (no line splice, no trigraph, no UCN) and isn't an operator the
+// preprocessor reads in text, _Pragma or __pragma: pp_output_invocation_place's name and the identifiers among its
+// arguments.
+static bool pp_plain_name(const uint8_t* bytes, uint32_t length)
+{
+    bool result = (length != 7 || memcmp(bytes, "_Pragma", 7) != 0) && (length != 8 || memcmp(bytes, "__pragma", 8) != 0);
+    for (uint32_t i = 0; result && i < length; i += 1)
+    {
+        result = bytes[i] != '\\' && bytes[i] != '?';
+    }
+    return result;
+}
+
+// pp_output_expansion_begin's place for output token `token`, without the expansion history, where the file alone
+// says it: the token comes from a macro, and between the file tokens the output has before and after the expansion
+// it is in, the file has one invocation, a plainly spelled name and at most one parenthesized argument list, with no
+// directive and no other token. All the output between those file tokens is then that invocation's, and its place is
+// the name's, as clang's getExpansionLoc gives it. Returns 0 where the file can't say so, for the history to answer:
+// -Wempty-body's indentation check asks this first (#628: on sqlite3.c, an `assert` after a `for (...);` made the
+// check replay the whole unit for its history).
+static __attribute__((unused)) uint32_t pp_output_invocation_place(const Preprocessor* pp, uint32_t token)
+{
+    uint32_t result = 0;
+    const PPTokens* output = &pp->output;
+    const bool from_macro = token < output->count && output->locations != NULL && (output->flags[token] & BUSTER_PP_FROM_MACRO) != 0;
+    uint32_t before = token;
+    uint32_t after = token;
+    while (from_macro && before > 0 && token - before < BUSTER_PP_INVOCATION_TOKENS && (output->flags[before] & BUSTER_PP_FROM_MACRO) != 0)
+    {
+        before -= 1;
+    }
+    while (from_macro && after < output->count && after - token < BUSTER_PP_INVOCATION_TOKENS && (output->flags[after] & BUSTER_PP_FROM_MACRO) != 0)
+    {
+        after += 1;
+    }
+    const bool bounded = from_macro && !pp_dollar_punctuation(&pp->options) && (output->flags[before] & BUSTER_PP_FROM_MACRO) == 0 && after < output->count &&
+                         (output->flags[after] & BUSTER_PP_FROM_MACRO) == 0;
+    const uint32_t first = bounded ? output->locations[before] : 0;
+    const uint32_t last = bounded ? output->locations[after] : 0;
+    const uint32_t range = first != 0 ? pp_find_range(pp, first) : BUSTER_PP_NONE;
+    const PPRange* place = range != BUSTER_PP_NONE ? &pp->ranges[range] : NULL;
+    const bool spanned = place != NULL && place->file != BUSTER_PP_NONE && last > first && last - place->base < place->length && last - first <= BUSTER_PP_INVOCATION_BYTES;
+    if (spanned)
+    {
+        // The file's tokens from the one before to the one after, which the lexer stops before: the bytes end there.
+        uint8_t kinds[BUSTER_PP_INVOCATION_BYTES + BUSTER_C_TOKENIZER_OUTPUT_SLACK];
+        uint32_t starts[BUSTER_PP_INVOCATION_BYTES + BUSTER_C_TOKENIZER_OUTPUT_SLACK];
+        uint32_t ends[BUSTER_PP_INVOCATION_BYTES + BUSTER_C_TOKENIZER_OUTPUT_SLACK];
+        uint64_t resume = 0;
+        const uint32_t begin = first - place->base;
+        const uint32_t end = last - place->base;
+        const uint64_t count = c_tokenize_scalar_range(place->bytes, end, begin, false, end, kinds, starts, ends, 0, pp->refine_flags, &resume);
+        // The token before, a name, and nothing or a parenthesized list that ends where the token after starts.
+        bool shaped = count >= 2 && starts[0] == begin && (kinds[1] & ~BUSTER_C_TOKEN_START_OF_LINE) == C_TOKEN_RAW_IDENTIFIER &&
+                      pp_plain_name(place->bytes + starts[1], ends[1] - starts[1]) &&
+                      (count == 2 || (kinds[2] & ~BUSTER_C_TOKEN_START_OF_LINE) == C_TOKEN_L_PAREN);
+        uint32_t depth = 0;
+        for (uint64_t i = 2; shaped && i < count; i += 1)
+        {
+            const uint8_t kind = kinds[i] & ~BUSTER_C_TOKEN_START_OF_LINE;
+            depth += kind == C_TOKEN_L_PAREN;
+            shaped = (kind != C_TOKEN_R_PAREN || depth != 0) && (kind != C_TOKEN_HASH || (kinds[i] & BUSTER_C_TOKEN_START_OF_LINE) == 0) &&
+                     (kind != C_TOKEN_RAW_IDENTIFIER || pp_plain_name(place->bytes + starts[i], ends[i] - starts[i])) && kind != C_TOKEN_UNKNOWN;
+            depth -= kind == C_TOKEN_R_PAREN;
+            // The list closes at the last token.
+            shaped = shaped && (depth != 0) == (i + 1 < count);
+        }
+        result = shaped ? place->base + starts[1] : 0;
+    }
+    return result;
 }
 
 // The deferred first run has no expansion graph. Its exact source-level runs already record where its current

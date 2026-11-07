@@ -611,6 +611,12 @@ static bool pp_test_deferred_history(const PPOptions* options, const char* path,
         printf("%s: with its history deferred, a run counts different statistics\n", label);
         result = false;
     }
+    // A compile gives its files' token columns back after the run (pp_release_file_columns): the replay that records the
+    // deferred history then prepares the files again, and must give the same history.
+    if (ready[1])
+    {
+        pp_release_file_columns(&runs[1], false);
+    }
     const uint32_t count = runs[0].output.count;
     uint32_t probe = count;
     for (uint32_t i = 0; result && probe == count && i < count; i += 1)
@@ -720,6 +726,29 @@ static bool pp_test_system_levels(const Preprocessor* a, const Preprocessor* b, 
     return result;
 }
 
+// pp_output_invocation_place, the file's own place of an output token's invocation, against its twin by the expansion
+// history (pp_output_expansion_begin), on run `a`, which has its history: at the first and last token of each run of
+// tokens a macro made, where the file places one, the history must place it there too. Returns whether they agree.
+static bool pp_test_invocation_places(const Preprocessor* a, const char* label)
+{
+    bool result = true;
+    const PPTokens* output = &a->output;
+    for (uint32_t t = 0; result && t < output->count; t += 1)
+    {
+        const bool made = (output->flags[t] & BUSTER_PP_FROM_MACRO) != 0;
+        const bool edge = made && (t == 0 || t + 1 == output->count || (output->flags[t - 1] & BUSTER_PP_FROM_MACRO) == 0 ||
+                                   (output->flags[t + 1] & BUSTER_PP_FROM_MACRO) == 0);
+        const uint32_t place = edge ? pp_output_invocation_place(a, t) : 0;
+        const uint32_t twin = place != 0 ? pp_output_expansion_begin(a, t, pp_history_at(a, t)) : 0;
+        if (place != twin)
+        {
+            printf("%s: output token %u's invocation is at %u by the file and at %u by the history\n", label, t, place, twin);
+            result = false;
+        }
+    }
+    return result;
+}
+
 // Both kernels again as a compile runs them, without the expansion starts that -E's line markers need: the main loop
 // takes some direct paths only then (pp_expand_file_direct, pp_emit_simple), so the streams, the expansion history and
 // the statistics (but the timing ones) must agree in this configuration too, and the vectorized run's with its history
@@ -759,7 +788,7 @@ static bool pp_test_compile_kernels(const PPOptions* options, const char* path, 
         printf("%s: the vectorized and scalar kernels count different statistics\n", label);
         result = false;
     }
-    result = result && pp_test_system_levels(&runs[0], &runs[1], label);
+    result = result && pp_test_system_levels(&runs[0], &runs[1], label) && pp_test_invocation_places(&runs[0], label);
     for (uint32_t k = 0; k < 2; k += 1)
     {
         if (ready[k])

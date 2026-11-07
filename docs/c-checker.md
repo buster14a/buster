@@ -3961,7 +3961,9 @@ return it. `-Wempty-body` leaves an `if` that has an
 invocations' columns, including an argument-first or nested expansion (#1339).
 Only an enabled candidate whose position comes from a macro requests deferred
 expansion history; file-spelled positions and units without empty-body candidates keep
-that history deferred. The driver tests compare quiet, indented and same-line
+that history deferred. A macro's position that the file alone gives, one
+invocation between two file tokens (`pp_output_invocation_place`), keeps it
+deferred too; `--scalar` asks the history, its twin (#628). The driver tests compare quiet, indented and same-line
 body, object, argument, nested and pasted macro cases with Clang on both paths,
 and check that file-spelled candidates and suppressed warnings do not replay history.
 `-Wparentheses` covers a `for` condition as well as an `if`,
