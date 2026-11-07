@@ -1358,6 +1358,73 @@ static bool check_test_tier1_quoted(char* out, size_t size, const char* path)
     return true;
 }
 
+// --tier1-schedule (#172): the rematerialization fixture, its loops' loads, stores, multiplications and flags, compiled by
+// each path with each scheduling variant. --verify (always the builds') checks every scheduled block against the scalar
+// reference (tier1_schedule_verify after allocation, ir_schedule_verify before selection); each executable must print
+// clang's build's output, and the report must say records or instructions moved, which a dropped option would not. The
+// postallocation variant only permutes records, so its record count is the plain build's.
+static void check_test_driver_tier1_schedule(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/tier1-schedule.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-schedule-clang", directory);
+    const bool written = parse_test_write(source, check_test_tier1_remat_source, sizeof(check_test_tier1_remat_source) - 1);
+    char* clang_arguments[] = { (char*)clang, "-O0", "-o", reference, source, NULL };
+    char* clang_text = NULL;
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &clang_text) == 0;
+    free(clang_text);
+    char expected[256] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the scheduling fixture runs");
+    static const char* const variants[3] = { NULL, "--tier1-schedule=post", "--tier1-schedule=pre" };
+    for (uint32_t path = 0; ran && path < 2; path += 1)
+    {
+        uint64_t records[3] = { 0 };
+        uint64_t moved[3] = { 0 };
+        for (uint32_t v = 0; v < 3; v += 1)
+        {
+            char output[512];
+            snprintf(output, sizeof(output), "%s/tier1-schedule-%u-%u", directory, path, v);
+            char* arguments[12] = { (char*)executable, "--tier1", "--tier1-report", "--verify" };
+            uint32_t count = 4;
+            if (variants[v] != NULL)
+            {
+                arguments[count++] = (char*)variants[v];
+            }
+            if (path != 0)
+            {
+                arguments[count++] = "--scalar";
+            }
+            arguments[count++] = "-o";
+            arguments[count++] = output;
+            arguments[count++] = source;
+            arguments[count] = NULL;
+            char* text = NULL;
+            const int status = check_test_driver_spawn(arguments, &text);
+            const bool reported = check_test_tier1_field(text, "records", &records[v]) && check_test_tier1_field(text, "schedule_moved", &moved[v]);
+            uint64_t internal = 1;
+            const bool clean = check_test_tier1_field(text, "internal_failures", &internal) && internal == 0;
+            if (status != 0 && text != NULL)
+            {
+                fprintf(stderr, "%s", text);
+            }
+            free(text);
+            check_test_expect(test, status == 0 && reported && clean, "each scheduling variant compiles the fixture, every block passing its reference");
+            char actual[256] = { 0 };
+            check_test_expect(test, status == 0 && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "each scheduling variant's executable prints clang's build's output");
+            unlink(output);
+        }
+        check_test_expect(test, moved[0] == 0 && moved[1] != 0 && moved[2] != 0, "both variants reach Tier 1 and move its code, none without the option");
+        check_test_expect(test, records[1] == records[0], "the postallocation variant permutes records alone");
+        printf("  Tier 1's scheduling, %s path: %" PRIu64 " records, %" PRIu64 " moved after allocation, %" PRIu64 " IR instructions moved before (%" PRIu64 " records)\n",
+               path == 0 ? "vector" : "scalar", records[0], moved[1], moved[2], records[2]);
+    }
+    unlink(source);
+    unlink(reference);
+}
+
 // --tier1-gvn (#866): the rematerialization fixture compiled with #866's congruence solver before promotion, by each
 // path, against the same fixture compiled without it. Its function is still Tier 1's and its executable still prints
 // clang's build's output, so the solver's merged values reach Tier 1's code without changing what the program does; and

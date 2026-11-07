@@ -6,9 +6,23 @@ requirements. [Command index](README.md).
 
 ## Module overview
 
-- `tier1_schedule.c` provides an opt-in postallocation machine-record scheduler.
-  `test-tier1-schedule` checks scalar/vector ordering, barriers and model coverage;
-  `benchmark-tier1-schedule` measures scheduling plus encoding and a synthetic
-  generated loop. [The scheduling guide](../../docs/tier1-scheduling.md) records the
-  API and the source-corpus evidence still needed for #172/#181. Use the shared
-  9700X lock for each build/test/measurement and CPU 2 for timing.
+- `--tier1-schedule=none|post|pre` (with `--tier1`) schedules Tier 1's code
+  block by block: `post` after allocation, on each block's machine records
+  (`tier1_schedule.c`, applied by `c_check_tier1_schedule.c`), and `pre` before
+  selection, on each block's IR instructions (`ir_schedule.c`). Both are
+  measurement options, off by default; `--tier1-report`'s `schedule_blocks` and
+  `schedule_moved` count what they did, and `--verify` checks every scheduled
+  block against its scalar reference. [The scheduling guide](../../docs/tier1-scheduling.md)
+  has the contracts, the 9700X's measurements and #172's decision.
+- `test-tier1-schedule [--seed N]` checks the postallocation scheduler's
+  scalar/vector twins, dependencies, barriers, flags and the verifier;
+  `benchmark-tier1-schedule` times scheduling plus encoding and a synthetic
+  generated loop. `test-checker-driver`'s scheduling fixture compiles a program
+  by both paths with each variant under `--verify` and runs it against clang's
+  build. Use the shared 9700X lock for each build, test and measurement, and
+  CPU 2 for timing.
+- The measurement: `measure-tier1-programs ... --variant --tier1-schedule=post
+  --variant --tier1-schedule=pre` ([the tier1 guide](tier1.md)) for speedtest1's
+  and Lua's run time, and `measure-compile --variant --tier1-schedule=post --
+  ARGUMENT...` ([the compile-time guide](compile-time.md)) for what each variant
+  adds to a compile.

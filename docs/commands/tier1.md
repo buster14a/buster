@@ -60,7 +60,7 @@ requirements. [Command index](README.md).
   for supported inputs and the complete C-source acceptance still pending.
 - `measure-tier1-programs --clang PATH [--tcc PATH] --sqlite DIR --speedtest DIR
   --lua DIR --scripts DIR [--runs N] [--warmups N] [--directory DIR] [--keep]
-  [--uncounted]` (`tier1_programs_measure.c`, #138 and #1189) builds the
+  [--uncounted] [--variant OPTION]...` (`tier1_programs_measure.c`, #138 and #1189) builds the
   programs Tier 1 is measured by against clang -O2: speedtest1 (DIR/sqlite3.c,
   DIR/speedtest1.c, #136's flags and options) and Lua 5.4.8's interpreter (its
   33 sources) running the five scripts of the `cc3387f` record. Each is built
@@ -88,7 +88,10 @@ requirements. [Command index](README.md).
   than `cc`, and each run's counters are its own rather than `perf stat`'s of
   one run per build. `correctness.tests` checks its dispatch on every run: an
   incomplete command prints its usage, and one without its inputs fails its
-  first build.
+  first build. Each `--variant` (four at most) adds a build of `--tier1`'s
+  with OPTION after its options, named `--tier1 OPTION`, checked and timed as
+  every build is, with its medians against `--tier1`'s in the table (#172's
+  `--variant --tier1-schedule=post`: [the scheduling guide](../tier1-scheduling.md)).
 - `measure-tier1-rows --clang PATH [--base COMPILER] [--src DIR] [--lexer
   FILE]... [--march ARCH] [--rounds N] [--passes N] [--runs N] [--warmups N]
   [--directory DIR] [--keep] [--uncounted]` (`tier1_rows_measure.c`, #1283)
