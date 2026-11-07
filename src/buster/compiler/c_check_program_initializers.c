@@ -6,6 +6,8 @@
 // runtime expressions and address relocations keep their ordered lowering. memcpy consumes the exact checked bytes.
 
 #define BUSTER_CHECK_LOWER_INIT_UNROLLED 128u
+// Zeros past this many bytes are cleared by a call of memset (check_lower_fill), store by store up to it.
+#define BUSTER_CHECK_LOWER_FILL_UNROLLED 128u
 
 typedef struct CheckLowerInitPool CheckLowerInitPool;
 struct CheckLowerInitPool
@@ -210,10 +212,21 @@ static bool check_lower_init_pools(CheckLowerInitializers* pools, const CheckPro
         }
     }
     uint64_t capacity = 0;
+    uint64_t clears = 0;
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
         const CheckInitializer* plan = program->initializers->plans + i;
-        selected[i] = plan->object_size > BUSTER_CHECK_LOWER_INIT_UNROLLED && check_lower_init_selected(program, i, selected);
+        const bool large = plan->object_size > BUSTER_CHECK_LOWER_INIT_UNROLLED || plan->object_size > BUSTER_CHECK_LOWER_FILL_UNROLLED;
+        const bool wanted = large && check_lower_init_selected(program, i, selected);
+        selected[i] = wanted && plan->object_size > BUSTER_CHECK_LOWER_INIT_UNROLLED;
+        // The memset calls check_lower_fill may make for the plan's zeros: its object's, whole or past a prefix, and its
+        // parts'. A volatile object makes none (check_lower_init_selected leaves it out, and check_lower_init_library).
+        const bool clearing = wanted && plan->object_size > BUSTER_CHECK_LOWER_FILL_UNROLLED;
+        clears += clearing;
+        for (uint32_t p = 0; clearing && p < plan->count; p += 1)
+        {
+            clears += plan->parts[p].kind == CHECK_INIT_CLEAR && plan->parts[p].bit_width == 0 && plan->parts[p].byte_count > BUSTER_CHECK_LOWER_FILL_UNROLLED;
+        }
         prefixes[i] = selected[i] ? check_lower_init_prefix(program, plan) : 0;
         if (prefixes[i] != 0 && check_lower_init_volatile(plan->type, type_facts, type_count))
         {
@@ -264,6 +277,9 @@ static bool check_lower_init_pools(CheckLowerInitializers* pools, const CheckPro
     {
         pools->first[count] = pools->count;
     }
+    // Each clear's call and its three arguments, past the per-node bounds.
+    pools->extra_calls += clears;
+    pools->extra_arguments += clears * 3;
     arena_pop_to(scratch, mark);
     return valid && check_lower_dump_prepare(pools, program, output, scratch);
 }

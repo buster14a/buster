@@ -11,7 +11,8 @@
 // search.
 // Scripts may name shared libraries by absolute path, relative path or -l. Other scripts and archives remain refused,
 // except the already-imported libgcc.a, identified by device/inode rather than its spelling: Debian's libgcc_s.so
-// GROUP names it after libgcc_s.so.1. A different archive selected by -L must not silently disappear.
+// GROUP names it after libgcc_s.so.1. That archive is whichever imported archive is named libgcc.a, not necessarily
+// archives[0]. A different archive selected by -L must not silently disappear.
 
 static bool runtime_libraries_in_directory(String8 directory, String8 name, bool exact, bool static_only, char* path, bool* archive)
 {
@@ -112,14 +113,27 @@ static RuntimeError runtime_libraries_script_path(const Runtime* runtime, const 
     return result;
 }
 
+// The final path component is libgcc.a. A longer name that merely ends in those bytes is not that archive.
+static bool runtime_libraries_libgcc_name(String8 path)
+{
+    const uint64_t length = path.length;
+    const bool named = path.pointer != 0 && length >= 8 && memcmp(path.pointer + (length - 8), "libgcc.a", 8) == 0;
+    return named && (length == 8 || path.pointer[length - 9] == '/');
+}
+
 static bool runtime_libraries_selected_libgcc(const Runtime* runtime, const char* path)
 {
-    struct stat selected;
     struct stat input;
-    const String8 gcc = runtime->archive_count != 0 ? runtime->archives[0].path : (String8){ 0 };
-    const bool same = gcc.pointer != 0 && gcc.length != 0 && stat(gcc.pointer, &selected) == 0 && stat(path, &input) == 0 &&
-                      S_ISREG(selected.st_mode) && S_ISREG(input.st_mode) && selected.st_dev == input.st_dev && selected.st_ino == input.st_ino;
-    return same;
+    bool same = stat(path, &input) == 0 && S_ISREG(input.st_mode);
+    bool found = false;
+    for (uint32_t a = 0; same && !found && a < runtime->archive_count; a += 1)
+    {
+        const String8 gcc = runtime->archives[a].path;
+        struct stat selected;
+        found = runtime_libraries_libgcc_name(gcc) && gcc.pointer != 0 && stat(gcc.pointer, &selected) == 0 && S_ISREG(selected.st_mode) &&
+                selected.st_dev == input.st_dev && selected.st_ino == input.st_ino;
+    }
+    return same && found;
 }
 
 static RuntimeError runtime_libraries_script(RuntimeLibraries* libraries, const Runtime* runtime, const char* path, String8 bytes,

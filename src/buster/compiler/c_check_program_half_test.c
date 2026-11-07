@@ -31,6 +31,23 @@ static const char check_test_half_helpers[] =
 
 static const char* const check_test_half_programs[][2] = {
     {
+        // Required constants round every operation; the same literal runtime chains retain the target's excess
+        // precision. Compare static bytes and executable values with Clang for every half-program target.
+        "half-constant-arithmetic",
+        "static _Float16 ch=((_Float16)2048+(_Float16)1)-(_Float16)2048;"
+        "static __bf16 cb=((__bf16)256+(__bf16)1)-(__bf16)256;"
+        "static _Float16 dh=(_Float16)1/(_Float16)3;static __bf16 db=(__bf16)1/(__bf16)3;"
+        "static _Float16 nh=(_Float16)__builtin_inf()+(_Float16)-__builtin_inf();"
+        "static __bf16 nb=(__bf16)__builtin_inf()+(__bf16)-__builtin_inf();"
+        "int tested(int n){unsigned h=2166136261u;"
+        "_Float16 rh=((_Float16)2048+(_Float16)1)-(_Float16)2048;"
+        "__bf16 rb=((__bf16)256+(__bf16)1)-(__bf16)256;"
+        "if(ch!=0||cb!=0||dh!=(_Float16)0x1.554p-2||db!=(__bf16)0x1.56p-2)return 1;"
+        "unsigned short hnan=__builtin_bit_cast(unsigned short,nh),bnan=__builtin_bit_cast(unsigned short,nb);"
+        "if(hnan!=0x7e00u||bnan!=0x7fc0u)return 2;"
+        "FOLD(ch);FOLD(cb);FOLD(dh);FOLD(db);FOLD(rh);FOLD(rb);FOLD(hnan);FOLD(bnan);return (int)h;}",
+    },
+    {
         // Excess precision's chains (each rounds once, where it ends) and native arithmetic's (each operation rounds):
         // a product past 65504 that a quotient brings back, mixed int, float and double operands, compares, truth,
         // compound assignments, increments past 2048 (where 1 rounds away), ?:, the comma and statement values.

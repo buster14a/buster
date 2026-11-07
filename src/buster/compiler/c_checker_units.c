@@ -2541,9 +2541,11 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             check_lower_runtime_names_initialize();
         }
+        // A baked executable starts with the semantics tables built (baked.h, #590), and x86_semantics_initialize rebuilds
+        // them unconditionally, writing the baked pages: only an executable that isn't baked runs it (#1571).
         if (ready && command->mixed_inputs)
         {
-            ready = x86_encoder_initialize() && x86_semantics_initialize();
+            ready = x86_encoder_initialize() && (x86_semantics_initialized || x86_semantics_initialize());
         }
         if (ready && emitting && command->unwind_tables && !unwind_ready)
         {

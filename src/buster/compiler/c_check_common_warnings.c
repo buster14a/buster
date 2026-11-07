@@ -666,7 +666,52 @@ typedef struct CheckCommonEmission
     uint32_t work_capacity;
     uint32_t work_count;
     Arena* scratch;
+    // Each token's subtree's first token (check_common_emission_subtree_start, #1350), built at the first query; null
+    // before it, and after an allocation that failed (which fails the unit), the queries then left to
+    // check_common_subtree_start.
+    uint32_t* subtree_starts;
+    bool subtree_starts_failed;
 } CheckCommonEmission;
+
+// check_common_subtree_start for the emission's queries, from a column of every token's subtree start built once
+// (#1350): a comma chain's k-th left operand is the chain before it, so the binary search's climbs cost O(k log k) a
+// comma. A subtree is a run of tokens and a node's children are in source order, so a node's run starts where its
+// first child's does when that child is before it, and at the node otherwise: one ascending pass fills the column.
+static uint32_t check_common_emission_subtree_start(CheckCommonEmission* emission, uint32_t root)
+{
+    const Parser* parser = emission->parser;
+    const uint32_t count = parser->tokens.count;
+    if (emission->subtree_starts == NULL && !emission->subtree_starts_failed && count != 0)
+    {
+        uint32_t* first = CHECK_COMMON_PUSH_ARRAY(emission->scratch, uint32_t, count);
+        uint32_t* starts = first != NULL ? CHECK_COMMON_PUSH_ARRAY(emission->scratch, uint32_t, count) : NULL;
+        emission->subtree_starts_failed = starts == NULL;
+        // A failed allocation fails the unit, as every common warning's scratch does; the search stands in until it stops.
+        if (starts == NULL)
+        {
+            check_common_exhausted(emission->pp);
+        }
+        if (starts != NULL)
+        {
+            memset(first, 0xff, (uint64_t)count * sizeof(uint32_t));
+            for (uint32_t token = count; token-- > 0;)
+            {
+                const uint32_t parent = parser->tree.parents[token];
+                if (parent < count && parent != token)
+                {
+                    first[parent] = token;
+                }
+            }
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                starts[token] = first[token] < token ? starts[first[token]] : token;
+            }
+            emission->subtree_starts = starts;
+        }
+    }
+    const uint32_t result = root < count && emission->subtree_starts != NULL ? emission->subtree_starts[root] : check_common_subtree_start(parser, root);
+    return result;
+}
 
 // The worklist frame kinds.
 #define BUSTER_CHECK_EMIT_TREE 0u
@@ -1139,7 +1184,7 @@ static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t no
         }
         left = up;
     }
-    const uint32_t left_start = check_common_subtree_start(parser, left);
+    const uint32_t left_start = check_common_emission_subtree_start(emission, left);
     const uint32_t left_result = check_common_result_root(graph, left_node);
     const bool left_effect = left_node < graph->count ?
                              (graph->ops[left_node] == CHECK_OP_CONDITIONAL ? check_common_arm_at(emission, left_node) :
@@ -1245,7 +1290,7 @@ static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node)
         }
         const uint32_t right_result = check_common_result_root(graph, right_node);
         const uint32_t right = right_result < graph->count && graph->tokens[right_result] < count ? graph->tokens[right_result] : comma + 1;
-        const uint32_t right_start = right < count ? check_common_subtree_start(parser, right) : right;
+        const uint32_t right_start = right < count ? check_common_emission_subtree_start(emission, right) : right;
         const bool right_cast = right < count && parser->tree.roles[right] == PARSE_ROLE_CLOSE_CAST;
         const bool right_void = right_cast && check_common_void_cast(parser, pp, input, stream, types, right);
         const bool right_zero = check_common_literal_zero(parser, stream, graph, zero_node);
@@ -3504,10 +3549,94 @@ static bool check_common_enum_value(const CheckInput* input, const Parser* parse
 
 // -Wswitch: an enum selector and case labels that name every handled enumerator, with no default. A case whose
 // expression is not a single enumerator name leaves the answer to a full constant evaluator.
+// The unit-wide indexes the enum switches read (#1348), built at the first one: the program's cases sorted by owner
+// (stable, so each switch's cases keep the program's order) and each enumerator token's first retained value. A switch
+// then finds its cases by a binary search and an enumerator's value by one load, not a scan of the unit's.
+typedef struct CheckCommonSwitchIndex CheckCommonSwitchIndex;
+struct CheckCommonSwitchIndex
+{
+    uint32_t* case_owners;
+    uint32_t* case_order;
+    uint32_t* enum_values;
+    bool built;
+};
+
+static void check_common_switch_index(CheckCommonSwitchIndex* index, const Parser* parser, Preprocessor* pp, const CheckInput* input,
+                                      const CheckProgram* program, Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    index->built = true;
+    const uint32_t cases = program != NULL ? program->case_count : 0;
+    uint32_t* owners = cases != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, cases) : NULL;
+    uint32_t* order = owners != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, cases) : NULL;
+    uint32_t* owners_out = order != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, cases) : NULL;
+    uint32_t* order_out = owners_out != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, cases) : NULL;
+    uint32_t* digits = order_out != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, 2049) : NULL;
+    // A failed allocation fails the unit, as every common warning's scratch does; the scans stand in until it stops.
+    if (cases != 0 && digits == NULL)
+    {
+        check_common_exhausted(pp);
+    }
+    if (digits != NULL)
+    {
+        for (uint32_t c = 0; c < cases; c += 1)
+        {
+            owners[c] = program->cases[c].owner;
+            order[c] = c;
+        }
+        // An LSD radix sort, 11 bits a pass: each pass is stable, so equal owners keep the program's order.
+        for (uint32_t shift = 0; shift < 33; shift += 11)
+        {
+            memset(digits, 0, 2049 * sizeof(uint32_t));
+            for (uint32_t c = 0; c < cases; c += 1)
+            {
+                digits[((owners[c] >> shift) & 0x7ff) + 1] += 1;
+            }
+            for (uint32_t d = 1; d < 2049; d += 1)
+            {
+                digits[d] += digits[d - 1];
+            }
+            for (uint32_t c = 0; c < cases; c += 1)
+            {
+                const uint32_t at = digits[(owners[c] >> shift) & 0x7ff]++;
+                owners_out[at] = owners[c];
+                order_out[at] = order[c];
+            }
+            uint32_t* swap = owners;
+            owners = owners_out;
+            owners_out = swap;
+            swap = order;
+            order = order_out;
+            order_out = swap;
+        }
+        index->case_owners = owners;
+        index->case_order = order;
+    }
+    uint32_t* values = input->enum_values != NULL && count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
+    if (input->enum_values != NULL && count != 0 && values == NULL)
+    {
+        check_common_exhausted(pp);
+    }
+    if (values != NULL)
+    {
+        memset(values, 0xff, (uint64_t)count * sizeof(uint32_t));
+        for (uint32_t i = input->enum_value_count; i-- > 0;)
+        {
+            const uint32_t token = input->enum_values[i].token;
+            if (token < count)
+            {
+                values[token] = i;
+            }
+        }
+        index->enum_values = values;
+    }
+}
+
 static void check_common_switches(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                   TypeTable* types, CheckWarningSpelling* spell, const CheckProgram* program, Arena* scratch)
 {
     const uint32_t count = parser->tokens.count;
+    CheckCommonSwitchIndex index = { 0 };
     const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
     static const uint8_t roles[] = { PARSE_ROLE_LEAF_RIGHT };
     CheckCommonScan scan = { 0 };
@@ -3543,6 +3672,10 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         {
             continue;
         }
+        if (!index.built)
+        {
+            check_common_switch_index(&index, parser, pp, input, program, scratch);
+        }
         const uint32_t body = closer + 1 < count ? closer + 1 : count;
         const uint32_t body_end = body < count && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE ? check_common_parent(parser, body) : count;
         bool has_default = false;
@@ -3553,7 +3686,22 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         const uint32_t case_bound = body_end > body ? body_end - body : 0;
         uint32_t* found = case_bound != 0 && program != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, case_bound) : NULL;
         uint32_t found_count = 0;
-        if (found != NULL)
+        if (found != NULL && index.case_owners != NULL)
+        {
+            uint32_t low = 0;
+            uint32_t high = program->case_count;
+            while (low < high)
+            {
+                const uint32_t middle = low + (high - low) / 2;
+                low = index.case_owners[middle] < closer ? middle + 1 : low;
+                high = index.case_owners[middle] < closer ? high : middle;
+            }
+            for (uint32_t k = low; k < program->case_count && index.case_owners[k] == closer && found_count < case_bound; k += 1)
+            {
+                found[found_count++] = index.case_order[k];
+            }
+        }
+        else if (found != NULL)
         {
             for (uint32_t c = 0; c < program->case_count; c += 1)
             {
@@ -3634,7 +3782,9 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
             {
                 const uint32_t name = parser->tokens.names[at];
                 unsigned __int128 value = 0;
-                values_known = check_common_enum_value(input, parser, enum_open, enum_close, name, &value);
+                const uint32_t retained = index.enum_values != NULL ? index.enum_values[at] : BUSTER_CHECK_NONE;
+                values_known = index.enum_values != NULL ? retained != BUSTER_CHECK_NONE : check_common_enum_value(input, parser, enum_open, enum_close, name, &value);
+                value = retained != BUSTER_CHECK_NONE ? input->enum_values[retained].value : value;
                 TypeId value_type = input->declared_types[at];
                 value_type = value_type != 0 ? type_unqualified(type_strip_aligned(types, value_type)) : 0;
                 if (value_type != 0 && types->types.kind[type_index(value_type)] == BUSTER_TYPE_KIND_ENUM)
@@ -3770,12 +3920,17 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         {
             uint32_t* missing = CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, enum_count);
             unsigned __int128* missing_values = missing != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, unsigned __int128, enum_count) : NULL;
-            if (missing == NULL || missing_values == NULL)
+            uint32_t* order = missing_values != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, enum_count) : NULL;
+            uint32_t* merged = order != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, enum_count) : NULL;
+            if (merged == NULL)
             {
                 check_common_exhausted(pp);
             }
-            values_known = missing != NULL && missing_values != NULL;
-            uint32_t missing_count = 0;
+            values_known = merged != NULL;
+            // The uncovered enumerators in declaration order, then stably merge-sorted by value (#1348): each run of
+            // equal values lists its first-declared enumerator once, the list the value-deduplicated insertion it
+            // replaces built, already in value order.
+            uint32_t uncovered = 0;
             for (uint32_t e = 0; values_known && e < enum_count; e += 1)
             {
                 bool covered = false;
@@ -3786,30 +3941,39 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
                     const unsigned __int128 hi_key = item->range ? check_program_case_order(program, item, true) : lo_key;
                     covered = all_case_keys[e] >= lo_key && all_case_keys[e] <= hi_key;
                 }
-                for (uint32_t m = 0; !covered && m < missing_count && !covered; m += 1)
-                {
-                    covered = all_keys[e] == missing_values[m];
-                }
                 if (!covered)
+                {
+                    order[uncovered++] = e;
+                }
+            }
+            for (uint32_t width = 1; values_known && width < uncovered; width *= 2)
+            {
+                for (uint32_t low = 0; low < uncovered; low += 2 * width)
+                {
+                    const uint32_t middle = low + width < uncovered ? low + width : uncovered;
+                    const uint32_t high = middle + width < uncovered ? middle + width : uncovered;
+                    uint32_t left = low;
+                    uint32_t right = middle;
+                    for (uint32_t k = low; k < high; k += 1)
+                    {
+                        const bool take_left = left < middle && (right >= high || all_keys[order[left]] <= all_keys[order[right]]);
+                        merged[k] = take_left ? order[left++] : order[right++];
+                    }
+                }
+                uint32_t* swap = order;
+                order = merged;
+                merged = swap;
+            }
+            uint32_t missing_count = 0;
+            for (uint32_t k = 0; values_known && k < uncovered; k += 1)
+            {
+                const uint32_t e = order[k];
+                if (missing_count == 0 || missing_values[missing_count - 1] != all_keys[e])
                 {
                     missing[missing_count] = all_names[e];
                     missing_values[missing_count] = all_keys[e];
                     missing_count += 1;
                 }
-            }
-            for (uint32_t i = 1; i < missing_count; i += 1)
-            {
-                const uint32_t name = missing[i];
-                const unsigned __int128 value = missing_values[i];
-                uint32_t j = i;
-                while (j > 0 && missing_values[j - 1] > value)
-                {
-                    missing[j] = missing[j - 1];
-                    missing_values[j] = missing_values[j - 1];
-                    j -= 1;
-                }
-                missing[j] = name;
-                missing_values[j] = value;
             }
             char* list = values_known && missing_count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, char, 512) : NULL;
             if (values_known && missing_count != 0 && list == NULL)

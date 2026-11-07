@@ -1510,7 +1510,8 @@ jobs:
         # #1050's measure: sqlite3.c's -c by the base and by this tree, each over four placements of its checker unit
         # (./build.sh shifts) from two fresh copies apiece, with the base's executables again as the comparison's floor
         # (main-again); then each build's stages, counters (with store-to-load forwarding's failures) and checker
-        # functions' samples. The objects must be the same bytes.
+        # functions' samples. Where this tree changes what -c writes (the lowering's code, #1376), the step says so and
+        # gives both objects' sizes, and the comparison includes that work.
         if: github.event_name == 'pull_request' && needs.changes.outputs.checker != 'false'
         timeout-minutes: 6
         env:
@@ -1537,7 +1538,10 @@ jobs:
           taskset -c 0-7 ./build.sh shifts --config Release "$ab/head" main_unit_checker.c "${shifts[@]}"
           "$ab/main/compiler-0" "${options[@]}" -o "$ab/main.o"
           "$ab/head/compiler-0" "${options[@]}" -o "$ab/head.o"
-          cmp "$ab/main.o" "$ab/head.o"
+          if ! cmp -s "$ab/main.o" "$ab/head.o"; then
+              echo "== the objects differ: this tree changes sqlite3.c's code"
+              size "$ab/main.o" "$ab/head.o"
+          fi
           builds=()
           for build in main:main head:head main-again:main; do
               for shift in "${shifts[@]}"; do

@@ -1338,7 +1338,7 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
 
 // __builtin_call_with_static_chain (#148): calls whose callees read the chain in r10 through naked functions (direct,
 // indirect, of an aggregate result, a floating one, variadic, past six arguments, in a loop, a musttail return's, which
-// clang's code makes an ordinary call; its callee, chain and arguments evaluated in that order), built by both paths at
+// clang's code makes an ordinary call; its callee, chain and argument each evaluated once, without a fixed order), built by both paths at
 // Tier 0 and Tier 1 (--tier1 --verify, whose certificate checks each call's sequence), each the output of clang -O0's
 // build of the same program.
 static void check_test_driver_static_chain(CheckTest* test, const char* clang, const char* executable, const char* directory)
@@ -1351,10 +1351,10 @@ static void check_test_driver_static_chain(CheckTest* test, const char* clang, c
                                   "__attribute__((naked, noinline)) double chain_double(double x) { __asm__(\"cvtsi2sdq %r10, %xmm1\\n\\taddsd %xmm1, %xmm0\\n\\tret\"); }\n"
                                   "__attribute__((naked, noinline)) struct S chain_struct(void) { __asm__(\"movq %rdi, %rax\\n\\tmovq %r10, (%rdi)\\n\\tmovq $2, 8(%rdi)\\n\\tmovq $3, 16(%rdi)\\n\\tret\"); }\n"
                                   "__attribute__((naked, noinline)) long chain_variadic(int n, ...) { __asm__(\"movq %r10, %rax\\n\\taddq %rsi, %rax\\n\\tret\"); }\n"
-                                  "static int order[8]; static int at;\n"
-                                  "static long (*pick(long (*f)(long)))(long) { order[at++] = 1; return f; }\n"
-                                  "static char* chain_of(char* p) { order[at++] = 2; return p; }\n"
-                                  "static long arg(long x) { order[at++] = 3; return x; }\n"
+                                  "static int evaluated[3];\n"
+                                  "static long (*pick(long (*f)(long)))(long) { evaluated[0] += 1; return f; }\n"
+                                  "static char* chain_of(char* p) { evaluated[1] += 1; return p; }\n"
+                                  "static long arg(long x) { evaluated[2] += 1; return x; }\n"
                                   "static char buffer[64];\n"
                                   "static void target(void) {}\n"
                                   "__attribute__((noinline)) long t_direct(char* p) { return __builtin_call_with_static_chain(read_chain(), p); }\n"
@@ -1379,10 +1379,10 @@ static void check_test_driver_static_chain(CheckTest* test, const char* clang, c
                                   "    long (*volatile f)(long) = chain_plus;\n"
                                   "    long (*g)(int, ...) = chain_variadic;\n"
                                   "    long q = __builtin_call_with_static_chain(pick(f)(arg(k)), chain_of((char*)40));\n"
-                                  "    printf(\"%ld %d%d%d %ld\\n\", q, order[0], order[1], order[2], __builtin_call_with_static_chain(g(1, 5L), (char*)6));\n"
+                                  "    printf(\"%ld %d%d%d %ld\\n\", q, evaluated[0], evaluated[1], evaluated[2], __builtin_call_with_static_chain(g(1, 5L), (char*)6));\n"
                                   "    printf(\"%ld %ld %ld %ld %ld\\n\", t_direct((char*)9), t_plus(5, (char*)100), t_swap((char*)100, 5), t_sum((char*)1000), t_indirect(chain_plus, (char*)40, k));\n"
                                   "    printf(\"%ld %ld %ld %ld %ld\\n\", t_indirect_r10((char*)40, chain_plus, k), t_variadic((char*)12), t_variadic_indirect(chain_variadic, (char*)6), t_loop((char*)10, 4), t_tail(5, (char*)300));\n"
-                                  "    return 0;\n"
+                                  "    return evaluated[0] != 1 || evaluated[1] != 1 || evaluated[2] != 1;\n"
                                   "}\n";
     char source[256];
     char outputs[5][256];
@@ -4715,49 +4715,141 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     free(text);
     text = NULL;
     // BUSTER_HUGE_PAGES (#1109, arena_page_policy), each case with this process's own setting, which the child inherits,
-    // as the system's or off: "0" turns transparent huge pages off for the process; "1" leaves them as the system has
-    // them, even where the process that started it had them off; without it, they are off on a virtual machine (CPUID's
-    // hypervisor bit), which the child must decide itself, and elsewhere as the process that started it had them.
+    // as the system's or off, and with the busy test's answer forced (BUSTER_TEST_HOST_BUSY, #672): "0" turns transparent
+    // huge pages off for the process; "1" leaves them as the system has them, even where the process that started it had
+    // them off; without it, they are off on a virtual machine (CPUID's hypervisor bit), which the child must decide
+    // itself, and elsewhere as the process that started it had them, but on a busy host, with them on, its arenas alone
+    // take base pages ("busy").
     const char* pages_saved = getenv("BUSTER_HUGE_PAGES");
     char* pages_copy = pages_saved != NULL ? strdup(pages_saved) : NULL;
+    const char* busy_saved = getenv("BUSTER_TEST_HOST_BUSY");
+    char* busy_copy = busy_saved != NULL ? strdup(busy_saved) : NULL;
     const int pages_own = prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0);
     uint32_t eax = 0;
     uint32_t ebx = 0;
     uint32_t ecx = 0;
     uint32_t edx = 0;
     const bool virtual_machine = __get_cpuid(1, &eax, &ebx, &ecx, &edx) != 0 && (ecx & (1u << 31)) != 0;
-    // Each case: the variable's value (null for none), this process's setting, and whether the child's are off.
+    // Each case: the variable's value (null for none), this process's setting, whether the host is busy, and the child's
+    // report.
     const struct
     {
         const char* setting;
         int inherited;
-        bool off;
+        const char* busy;
+        const char* report;
     } pages_cases[] = {
-        { "0", 0, true },
-        { "1", 1, false },
-        { NULL, 0, virtual_machine },
-        { NULL, 1, true },
+        { "0", 0, "0", "off" },
+        { "1", 1, "0", "system" },
+        { NULL, 0, "0", virtual_machine ? "off" : "system" },
+        { NULL, 1, "0", "off" },
+        { "0", 0, "1", "off" },
+        { "1", 0, "1", "system" },
+        { NULL, 0, "1", virtual_machine ? "off" : "busy" },
+        { NULL, 1, "1", "off" },
     };
-    bool paged = made && (pages_saved == NULL || pages_copy != NULL) && pages_own >= 0;
+    bool paged = made && (pages_saved == NULL || pages_copy != NULL) && (busy_saved == NULL || busy_copy != NULL) && pages_own >= 0;
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(pages_cases); c += 1)
     {
-        paged = paged && prctl(PR_SET_THP_DISABLE, pages_cases[c].inherited, 0, 0, 0) == 0 &&
+        paged = paged && prctl(PR_SET_THP_DISABLE, pages_cases[c].inherited, 0, 0, 0) == 0 && setenv("BUSTER_TEST_HOST_BUSY", pages_cases[c].busy, 1) == 0 &&
                 (pages_cases[c].setting != NULL ? setenv("BUSTER_HUGE_PAGES", pages_cases[c].setting, 1) : unsetenv("BUSTER_HUGE_PAGES")) == 0;
         const int pages_status = paged ? check_test_driver_spawn(syntax, &text) : -1;
-        const char* expected = pages_cases[c].off ? "\ntime-process\thuge-pages\toff\n" : "\ntime-process\thuge-pages\tsystem\n";
+        char expected[64];
+        snprintf(expected, sizeof(expected), "\ntime-process\thuge-pages\t%s\n", pages_cases[c].report);
         paged = pages_status == 0 && text != NULL && strstr(text, expected) != NULL;
+        if (!paged)
+        {
+            printf("  huge pages, case %u: status %d, expected%s", c, pages_status, expected);
+        }
         free(text);
         text = NULL;
     }
+    // A busy host's decision is the arenas' alone: a program that the compiler starts, as time-runs times one, has huge
+    // pages as the compiler's parent had them (#1561's review), where the virtual machine's rule turns them off for the
+    // compiler and what it starts. The program reads its own setting (/proc/self/status' THP_enabled).
+    char thp_path[256];
+    char thp_script[400];
+    snprintf(thp_path, sizeof(thp_path), "%s/time_stages_thp.txt", directory);
+    snprintf(thp_script, sizeof(thp_script), "grep THP_enabled /proc/self/status > '%s'", thp_path);
+    char* const timed_child[] = { compiler, "time-runs", "--runs", "1", "--executable", "/bin/sh", "--list", "-c", thp_script, NULL };
+    unlink(thp_path);
+    paged = paged && prctl(PR_SET_THP_DISABLE, 0, 0, 0, 0) == 0 && setenv("BUSTER_TEST_HOST_BUSY", "1", 1) == 0 && unsetenv("BUSTER_HUGE_PAGES") == 0;
+    const int child_status = paged ? check_test_driver_spawn_stream(timed_child, &text, true) : -1;
+    free(text);
+    text = NULL;
+    char thp_text[64] = { 0 };
+    FILE* thp_file = child_status == 0 ? fopen(thp_path, "r") : NULL;
+    const size_t thp_length = thp_file != NULL ? fread(thp_text, 1, sizeof(thp_text) - 1, thp_file) : 0;
+    if (thp_file != NULL)
+    {
+        fclose(thp_file);
+    }
+    const char* thp_expected = virtual_machine ? "THP_enabled:\t0\n" : "THP_enabled:\t1\n";
+    const bool inherited_right = thp_length != 0 && strcmp(thp_text, thp_expected) == 0;
+    if (!inherited_right)
+    {
+        printf("  huge pages: the program time-runs started (status %d) reported \"%s\", where %s was expected\n", child_status, thp_text, thp_expected);
+    }
+    paged = paged && child_status == 0 && inherited_right;
+    unlink(thp_path);
+    // So does a program interpret-c runs in the compiler's own process (#1561's review): it reads its THP_enabled as a
+    // program its parent started would, but where BUSTER_HUGE_PAGES or the virtual machine's rule decides.
+    static const char thp_program[] = "#include <stdio.h>\n"
+                                      "#include <string.h>\n"
+                                      "int main(void)\n"
+                                      "{\n"
+                                      "    FILE* file = fopen(\"/proc/self/status\", \"r\");\n"
+                                      "    char line[256];\n"
+                                      "    int found = 0;\n"
+                                      "    while (file != 0 && fgets(line, sizeof(line), file) != 0)\n"
+                                      "    {\n"
+                                      "        if (strncmp(line, \"THP_enabled:\", 12) == 0)\n"
+                                      "        {\n"
+                                      "            fputs(line, stdout);\n"
+                                      "            found = 1;\n"
+                                      "        }\n"
+                                      "    }\n"
+                                      "    if (file != 0)\n"
+                                      "    {\n"
+                                      "        fclose(file);\n"
+                                      "    }\n"
+                                      "    return found ? 0 : 1;\n"
+                                      "}\n";
+    char thp_source[256];
+    snprintf(thp_source, sizeof(thp_source), "%s/time_stages_thp.c", directory);
+    char* const interpreted[] = { compiler, "interpret-c", thp_source, NULL };
+    const bool thp_written = parse_test_write(thp_source, thp_program, sizeof(thp_program) - 1);
+    // The variable unset, then "1", with the busy test forced and the parent's huge pages on.
+    const char* interpreted_settings[] = { NULL, "1" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(interpreted_settings); i += 1)
+    {
+        paged = paged && thp_written &&
+                (interpreted_settings[i] != NULL ? setenv("BUSTER_HUGE_PAGES", interpreted_settings[i], 1) : unsetenv("BUSTER_HUGE_PAGES")) == 0;
+        const int interpreted_status = paged ? check_test_driver_spawn_stream(interpreted, &text, true) : -1;
+        const char* interpreted_expected = virtual_machine && interpreted_settings[i] == NULL ? "THP_enabled:\t0\n" : "THP_enabled:\t1\n";
+        const bool interpreted_right = interpreted_status == 0 && text != NULL && strstr(text, interpreted_expected) != NULL;
+        if (!interpreted_right)
+        {
+            printf("  huge pages: interpret-c's program, BUSTER_HUGE_PAGES %s (status %d), printed \"%s\", where %s was expected\n",
+                   interpreted_settings[i] != NULL ? interpreted_settings[i] : "unset", interpreted_status, text != NULL ? text : "", interpreted_expected);
+        }
+        paged = paged && interpreted_right;
+        free(text);
+        text = NULL;
+    }
+    unlink(thp_source);
     paged = (pages_own < 0 || prctl(PR_SET_THP_DISABLE, pages_own, 0, 0, 0) == 0) && paged;
     paged = (pages_copy != NULL ? setenv("BUSTER_HUGE_PAGES", pages_copy, 1) == 0 : unsetenv("BUSTER_HUGE_PAGES") == 0) && paged;
+    paged = (busy_copy != NULL ? setenv("BUSTER_TEST_HOST_BUSY", busy_copy, 1) == 0 : unsetenv("BUSTER_TEST_HOST_BUSY") == 0) && paged;
     free(pages_copy);
+    free(busy_copy);
     printf("  huge pages: %s\n", virtual_machine ? "a virtual machine (CPUID's hypervisor bit): off without BUSTER_HUGE_PAGES, by the child's own test" :
-                                                   "not a virtual machine: as the parent had them without BUSTER_HUGE_PAGES");
+                                                   "not a virtual machine: as the parent had them without BUSTER_HUGE_PAGES, the arenas' alone off on a busy host");
     check_test_expect(test, paged, virtual_machine ? "BUSTER_HUGE_PAGES=0 turns huge pages off for the process, 1 leaves them as the system has them, and "
-                                                     "on this virtual machine they are off without it" :
+                                                     "on this virtual machine they are off without it, for the programs it starts or interprets too" :
                                                      "BUSTER_HUGE_PAGES=0 turns huge pages off for the process, 1 leaves them as the system has them, and "
-                                                     "on this machine, not virtual, they are as the process's parent had them without it");
+                                                     "on this machine, not virtual, they are as the process's parent had them without it; a busy host turns "
+                                                     "them off for the arenas alone, not for the programs the compiler starts or interprets");
     // measure-compile on the same source, with this compiler as its reference, and with a reference that fails.
     char* const measured[] = { compiler, "measure-compile", "--runs", "2", "--directory", (char*)directory, "--reference", compiler, "--", "-c", source, NULL };
     char* const failed[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference", "/bin/false", "--", "-c", source, NULL };
@@ -6381,6 +6473,7 @@ static void check_test_driver_declspec_literals(CheckTest* test, const char* cla
 #include "c_check_label_attribute_driver_test.c"
 #include "c_check_resume_driver_test.c"
 #include "c_check_empty_declaration_driver_test.c"
+#include "c_check_block_attribute_driver_test.c"
 #include "c_check_resume_corpus_test.c"
 #include "c_check_kr_recovery_driver_test.c"
 #include "c_check_lane_attribute_driver_test.c"
@@ -8012,6 +8105,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_resumed_declarations(&test, clang, executable, directory);
             check_test_driver_empty_declarations(&test, clang, executable, directory);
+            check_test_driver_block_attributes(&test, clang, executable, directory);
             check_test_corpus_resumed_declarations(&test, clang, directory);
             check_test_driver_kr_recovery(&test, clang, executable, directory);
         }
@@ -8153,6 +8247,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_conventions(&test, clang, executable, directory);
+                check_test_driver_preserving_frames(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
