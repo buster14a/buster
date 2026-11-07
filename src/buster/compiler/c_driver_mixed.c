@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Mixed-input commands (#1120): the unit scheduler keeps C and assembly objects in memory, then the ordinary foreign
-// resolver consumes them beside files and archives in argv order. Pure-C commands retain their direct link path.
+// resolver consumes them beside files and archives in argv order. C-only links without selected named archives retain
+// their direct link path, including the DSO version checks and runtime snapshot.
 
 static int check_driver_assembly(const CheckDriverCommand* command, const PPOptions* preprocessing, CheckUnitsUnit* unit,
                                  CheckUnitsLane* lane, FILE* errors)
@@ -75,7 +76,11 @@ static bool check_driver_mixed_link(const CheckDriverCommand* command, const Che
     const uint64_t capacity = (uint64_t)libraries->argument_count + RUNTIME_OBJECTS + BUSTER_RUNTIME_ARCHIVES + 2;
     ForeignArgument* arguments = BUSTER_ARENA_PUSH_ARRAY(&run.arena, ForeignArgument, capacity);
     const uint32_t defaults = (uint32_t)BUSTER_ARRAY_LENGTH(runtime_library_directories);
-    String8* directories = BUSTER_ARENA_PUSH_ARRAY(&run.arena, String8, (uint64_t)libraries->directory_count + defaults + 1);
+    String8* directories = BUSTER_ARENA_PUSH_ARRAY(&run.arena, String8, (uint64_t)libraries->directory_count + defaults + 2);
+    char native_lib64[BUSTER_RUNTIME_PATH_BYTES];
+    const int native_length = runtime.gcc_directory.length != 0 ? snprintf(native_lib64, sizeof(native_lib64), "%.*s/../../../../lib64",
+                                                                         (int)runtime.gcc_directory.length, runtime.gcc_directory.pointer) : 0;
+    const bool native_directory = runtime.gcc_directory.length != 0 && native_length > 0 && (uint64_t)native_length < sizeof(native_lib64);
     String8* undefined = BUSTER_ARENA_PUSH_ARRAY(&run.arena, String8, 1);
     run.succeeded = discovered == RUNTIME_ERROR_NONE && arguments != NULL && directories != NULL && undefined != NULL && run.names.base != NULL;
     if (discovered != RUNTIME_ERROR_NONE)
@@ -127,9 +132,14 @@ static bool check_driver_mixed_link(const CheckDriverCommand* command, const Che
         }
         memcpy(directories, libraries->directories, (uint64_t)libraries->directory_count * sizeof(*directories));
         directories[libraries->directory_count] = runtime.gcc_directory;
+        const uint32_t system_begin = libraries->directory_count + 1 + native_directory;
+        if (native_directory)
+        {
+            directories[libraries->directory_count + 1] = (String8){ .pointer = native_lib64, .length = (uint64_t)native_length };
+        }
         for (uint32_t i = 0; i < defaults; i += 1)
         {
-            directories[libraries->directory_count + 1 + i] = foreign_string(runtime_library_directories[i]);
+            directories[system_begin + i] = foreign_string(runtime_library_directories[i]);
         }
         undefined[0] = libraries->linker.entry.pointer != NULL ? libraries->linker.entry : foreign_string("_start");
         run.driver = (ForeignDriver){
@@ -137,7 +147,7 @@ static bool check_driver_mixed_link(const CheckDriverCommand* command, const Che
                 .arguments = arguments,
                 .argument_count = used,
                 .directories = directories,
-                .directory_count = libraries->directory_count + defaults + 1,
+                .directory_count = system_begin + defaults,
                 .undefined = undefined,
                 .undefined_count = 1,
             },
@@ -174,3 +184,4 @@ static bool check_driver_mixed_link(const CheckDriverCommand* command, const Che
     runtime_release(&runtime);
     return result;
 }
+

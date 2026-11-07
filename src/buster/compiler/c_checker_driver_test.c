@@ -364,11 +364,11 @@ static bool check_test_driver_needed(const char* path, char* names, uint64_t cap
     return valid;
 }
 
-// The direct path's -l libraries, through the production command (#145): a program that calls libm's functions, takes
+// The driver's -l libraries, through the production command (#145): a program that calls libm's functions, takes
 // one's address and reads libm's signgam (data, through its GOT slot), linked with -lm by both paths into the same bytes,
 // that runs and prints what this executable's own libm computes, needing libm.so.6 before libc.so.6; one that calls
-// none, with -lm, needing libc.so.6 alone; and the refusals, each named: no -lm, a library no directory has, and an
-// archive with members.
+// none, with -lm, needing libc.so.6 alone; and the refusals, each named: no -lm and a library no directory has.
+// An archive containing only its empty symbol index adds nothing and links the plain program (#1470).
 static void check_test_driver_libraries(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] = "#include <math.h>\n#include <stdio.h>\ndouble (*pick)(double) = cos;\n"
@@ -436,7 +436,6 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
     } const refusals[] = {
         { "no -lm", "undefined reference to 'cos'", { (char*)executable, "-o", outputs[0], source, NULL } },
         { "a library nowhere", "cannot find -lbuster_nowhere", { (char*)executable, "-o", outputs[0], source, "-lm", "-lbuster_nowhere", NULL } },
-        { "an archive with members", "unsupported: static libraries", { (char*)executable, "-o", outputs[0], source, "-L", (char*)directory, "-lbuster_members", NULL } },
     };
     for (uint32_t r = 0; written && r < BUSTER_ARRAY_LENGTH(refusals); r += 1)
     {
@@ -444,6 +443,19 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
         check_test_expect(test, status == 1 && text != NULL && strstr(text, refusals[r].message) != NULL, refusals[r].name);
         free(text);
     }
+    char* const indexed_arguments[] = { (char*)executable, "-o", outputs[0], plain_source, "-L", (char*)directory, "-lbuster_members", NULL };
+    const int indexed_status = written ? check_test_driver_spawn(indexed_arguments, &text) : -1;
+    if (written)
+    {
+        free(text);
+    }
+    check_test_expect(test, indexed_status == 0, "an archive containing only its empty symbol index links");
+    memset(captured, 0, sizeof(captured));
+    output = indexed_status == 0 ? popen(outputs[0], "r") : NULL;
+    const size_t indexed_got = output != NULL ? fread(captured, 1, sizeof(captured) - 1, output) : 0;
+    const int indexed_closed = output != NULL ? pclose(output) : -1;
+    check_test_expect(test, indexed_closed == 0 && indexed_got == sizeof("plain\n") - 1 && memcmp(captured, "plain\n", indexed_got) == 0,
+                      "the indexed-archive link replaces the math executable and runs the plain program");
     unlink(source);
     unlink(plain_source);
     unlink(archive_path);
