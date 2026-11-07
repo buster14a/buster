@@ -92,6 +92,9 @@
 #include <sys/wait.h>
 #include <sys/statfs.h>
 #include <sys/syscall.h>
+#if __has_feature(memory_sanitizer)
+#include <sanitizer/msan_interface.h>
+#endif
 #include "host_isa.h"
 #include "c_dependency_driver.c"
 #include "c_builtin_catalog.c"
@@ -4461,21 +4464,40 @@ static uint32_t* file_cache_grow_names(FileCache* cache, uint32_t* names, uint32
     return result;
 }
 
+// The generic libc syscall entry does not run MSan's getdents64 post-write hook. Only the returned record span is
+// initialized by this boundary: do not clear or unpoison the requested capacity, EOF/error output, or an unread tail.
+static long file_cache_read_directory(int fd, uint8_t* buffer, uint32_t capacity)
+{
+    const long got = syscall(SYS_getdents64, fd, buffer, capacity);
+#if __has_feature(memory_sanitizer)
+    if (got > 0 && (uint64_t)got <= capacity)
+    {
+        __msan_unpoison(buffer, (size_t)got);
+    }
+#endif
+    return got;
+}
+
 // Adds the names of `got` bytes of getdents64's records to a listing's table (file_cache_grow_names), `*count` of them
-// so far in `*slots`. False if a name has a byte past ASCII, which the listing can't answer for, or the table can't grow.
+// so far in `*slots`. False for an incomplete/unterminated record, a name past ASCII, or a table that can't grow.
 static bool file_cache_list_names(FileCache* cache, const uint8_t* buffer, long got, uint32_t** names, uint32_t* slots, uint32_t* count)
 {
-    bool result = true;
+    bool result = got >= 0;
     // Each record (struct linux_dirent64): an 8-byte inode, an 8-byte offset, its 2-byte length, a type byte, and the
     // NUL-terminated name.
     for (long offset = 0; result && offset < got;)
     {
-        uint16_t record;
-        memcpy(&record, buffer + offset + 16, sizeof(record));
-        const bool whole = record > 19 && offset + record <= got;
-        const uint8_t* name = buffer + offset + 19;
-        const uint32_t length = whole ? (uint32_t)strnlen((const char*)name, (uint64_t)record - 19) : 0;
-        result = length != 0 && length <= BUSTER_FILE_CACHE_NAME_MAX;
+        const long remaining = got - offset;
+        uint16_t record = 0;
+        if (remaining >= 20)
+        {
+            memcpy(&record, buffer + offset + 16, sizeof(record));
+        }
+        const bool whole = record > 19 && record <= remaining;
+        const uint8_t* name = whole ? buffer + offset + 19 : NULL;
+        const uint32_t capacity = whole ? (uint32_t)record - 19 : 0;
+        const uint32_t length = whole ? (uint32_t)strnlen((const char*)name, capacity) : 0;
+        result = length != 0 && length < capacity && length <= BUSTER_FILE_CACHE_NAME_MAX;
         for (uint32_t i = 0; result && i < length; i += 1)
         {
             result = name[i] < 0x80;
@@ -4493,8 +4515,8 @@ static bool file_cache_list_names(FileCache* cache, const uint8_t* buffer, long 
             }
             *count += table[slot] == 0;
             table[slot] = key;
+            offset += record;
         }
-        offset += record;
     }
     return result;
 }
@@ -4518,9 +4540,9 @@ static void file_cache_list_directory(FileCache* cache, FileCacheDirectory* dire
     // On the stack, whose pages a lookup's callers have touched, rather than in an arena's fresh ones.
     uint8_t buffer[BUSTER_FILE_CACHE_LISTING_BUFFER] __attribute__((aligned(8)));
     const bool first = !directory->deferred;
-    long got = fd >= 0 ? syscall(SYS_getdents64, fd, buffer, first ? BUSTER_FILE_CACHE_SMALL_LISTING : BUSTER_FILE_CACHE_LISTING_BUFFER) : -1;
+    const long got = fd >= 0 ? file_cache_read_directory(fd, buffer, first ? BUSTER_FILE_CACHE_SMALL_LISTING : BUSTER_FILE_CACHE_LISTING_BUFFER) : -1;
     const bool full = first && got > (long)(BUSTER_FILE_CACHE_SMALL_LISTING - BUSTER_FILE_CACHE_RECORD_MAX);
-    const long end = first && got > 0 && !full ? syscall(SYS_getdents64, fd, buffer + BUSTER_FILE_CACHE_SMALL_LISTING, BUSTER_FILE_CACHE_SMALL_LISTING) : 0;
+    const long end = first && got > 0 && !full ? file_cache_read_directory(fd, buffer + BUSTER_FILE_CACHE_SMALL_LISTING, BUSTER_FILE_CACHE_SMALL_LISTING) : 0;
     const bool more = full || end > 0;
     struct statfs system;
     const bool exact = !more && got >= 0 && end == 0 && fstatfs(fd, &system) == 0 && file_cache_exact_names((uint64_t)system.f_type);
@@ -4532,7 +4554,7 @@ static void file_cache_list_directory(FileCache* cache, FileCacheDirectory* dire
     while (chunk > 0)
     {
         const bool added = file_cache_list_names(cache, buffer, chunk, &names, &slots, &count);
-        chunk = !added ? -1 : first ? 0 : syscall(SYS_getdents64, fd, buffer, BUSTER_FILE_CACHE_LISTING_BUFFER);
+        chunk = !added ? -1 : first ? 0 : file_cache_read_directory(fd, buffer, BUSTER_FILE_CACHE_LISTING_BUFFER);
     }
     if (fd >= 0)
     {

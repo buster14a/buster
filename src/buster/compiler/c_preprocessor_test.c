@@ -3376,6 +3376,8 @@ static bool pp_test_same_lookups(const Preprocessor* a, const Preprocessor* b)
     return result;
 }
 
+#include "c_preprocessor_directory_read_test.c"
+
 // A directory's listing (FileCacheDirectory, #653). After BUSTER_FILE_CACHE_LISTING_MISSES failed probes in a search
 // directory, the cache reads its names once. A path whose first component the listing doesn't have then gets ENOENT
 // without an open. Every search finds what it finds with listings off, the oracle: a cache whose listing_misses is 0
@@ -8715,6 +8717,7 @@ static bool pp_test_sections(PPTestDeal* deal, const char* directory, bool with_
     passed &= PP_TEST_SECTION(deal, 1, pp_test_embed_text(fuzz->seed));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_embed_lookups(directory, with_clang));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_lookup_accounting(directory));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_directory_reads(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_directory_listings(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_final_copy_accounting());
     passed &= PP_TEST_SECTION(deal, 1, pp_test_trailing_splices());

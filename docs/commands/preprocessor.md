@@ -139,6 +139,10 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   `.` and `..`, a name past ASCII or past `NAME_MAX`), a cache another unit shares, a directory with a name past
   ASCII never listed, one of 64 names put off by its first look and listed at its 256th, and every path, file and
   error the same as with listings off;
+  the directory-read boundary (`pp_test_directory_reads`, #1604): exact returned-byte MSan shadow, untouched
+  guards and unread tails, short reads, EOF and failed calls, plus guarded malformed/truncated records. The generic
+  raw `getdents64` syscall wrapper unpoisons only a positive returned range; no listing semantic or EMFILE-policy
+  change is implied by that instrumentation boundary;
   the named UCNs' places (`pp_test_named_ucns`): each error at its UCN's backslash, by both kernels, and with
   `--clang` where clang's `-pedantic` warning that a named UCN is its extension is, or for a name no character has
   its error, three columns before it (clang reads one past an identifier's first character silently); one in an
