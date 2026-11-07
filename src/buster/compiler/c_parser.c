@@ -13042,22 +13042,21 @@ static bool parse_tree_columns_reserve(Parser* parser, ParseTree* tree)
     return parse_columns(parser, 5, BUSTER_ARRAY_LENGTH(columns), entries, sizes, columns);
 }
 
-// Whether token `t` is a number where a C23 attribute's identifier goes: before `::` (the two colons of one `::` token, a
-// scope's), right after `[[`, or after a comma. The last is only a candidate: the sparse history/context walk below
-// proves that it is an attribute's name, rather than an expression or an attribute argument.
+// Whether token `t` is a number where a C23 attribute's identifier goes: right after `[[`, or after a comma. The last is
+// only a candidate: the sparse history/context walk below proves that it is an attribute's name, rather than an
+// expression or an attribute argument. A scope's place is one of these: a number before `::` elsewhere, in a GNU list
+// (`__attribute__((__clang__::x))`), stays a number, where clang's GNU list ends with "expected ')'" (#147).
 // `attributes`: whether a `[[` comes before `t` in the unit, without which a comma at `t` is no attribute list's.
 BUSTER_INLINE bool parse_clang_scope_place(const ParseTokens* tokens, uint32_t t, bool attributes)
 {
-    const bool scope = tokens->kinds[t + 1] == PARSE_KIND_COLON && tokens->kinds[t + 2] == PARSE_KIND_COLON &&
-                       (tokens->flags[t + 2] & BUSTER_PARSE_COLONCOLON_SECOND) != 0;
     const bool name = tokens->kinds[(int64_t)t - 1] == PARSE_KIND_L_SQUARE && tokens->kinds[(int64_t)t - 2] == PARSE_KIND_L_SQUARE;
     const bool comma = attributes && tokens->kinds[(int64_t)t - 1] == PARSE_KIND_COMMA;
-    return tokens->kinds[t] == PARSE_KIND_NUMBER && (tokens->flags[t] & BUSTER_PP_FROM_MACRO) != 0 && (scope || name || comma);
+    return tokens->kinds[t] == PARSE_KIND_NUMBER && (tokens->flags[t] & BUSTER_PP_FROM_MACRO) != 0 && (name || comma);
 }
 
 // clang's reading of `__clang__`'s expansion where a C23 attribute's identifier goes (#147, clang's
 // TryParseCXX11AttributeIdentifier): a number the macro's own expansion made, outside any other macro's and its arguments,
-// before `::`, right after `[[`, or after a comma in that list, is `_Clang`, with clang's warning, which the checker gives it (it knows such a token by
+// right after `[[` or after a comma in that list, is `_Clang`, with clang's warning, which the checker gives it (it knows such a token by
 // its source, a number). The token becomes that identifier before the names' meanings are sized. The places are found 64
 // tokens at a time, as masks of the kinds around each token (the columns' padding covers the edges), and each one's
 // expansion is looked up, the history recorded first where it was deferred; the scalar path tests each token, the twin.
@@ -13088,17 +13087,11 @@ static bool parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
         {
             const __mmask64 live = _bzhi_u64(~UINT64_C(0), length);
             const __m512i kinds = _mm512_loadu_si512(tokens->kinds + first);
-            const __m512i after = _mm512_loadu_si512(tokens->kinds + first + 1);
-            const __m512i second = _mm512_loadu_si512(tokens->kinds + first + 2);
             const __m512i before = _mm512_loadu_si512(tokens->kinds + (int64_t)first - 1);
             const __m512i earlier = _mm512_loadu_si512(tokens->kinds + (int64_t)first - 2);
-            const __m512i flags = _mm512_loadu_si512(tokens->flags + first + 2);
             const __m512i own_flags = _mm512_loadu_si512(tokens->flags + first);
             const __mmask64 number = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_NUMBER)) &
                                      _mm512_test_epi8_mask(own_flags, _mm512_set1_epi8(BUSTER_PP_FROM_MACRO));
-            const __mmask64 scope = _mm512_cmpeq_epi8_mask(after, _mm512_set1_epi8(PARSE_KIND_COLON)) &
-                                    _mm512_cmpeq_epi8_mask(second, _mm512_set1_epi8(PARSE_KIND_COLON)) &
-                                    _mm512_test_epi8_mask(flags, _mm512_set1_epi8((char)BUSTER_PARSE_COLONCOLON_SECOND));
             const __mmask64 name = _mm512_cmpeq_epi8_mask(before, _mm512_set1_epi8(PARSE_KIND_L_SQUARE)) &
                                    _mm512_cmpeq_epi8_mask(earlier, _mm512_set1_epi8(PARSE_KIND_L_SQUARE));
             const __mmask64 comma = _mm512_cmpeq_epi8_mask(before, _mm512_set1_epi8(PARSE_KIND_COMMA));
@@ -13106,7 +13099,7 @@ static bool parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
             const __mmask64 opened = live & name;
             const uint64_t past = attributes ? ~UINT64_C(0) : opened != 0 ? ~((UINT64_C(1) << _tzcnt_u64(opened)) - 1) : 0;
             attributes |= opened != 0;
-            places = live & number & (scope | name | (comma & past));
+            places = live & number & (name | (comma & past));
         }
         else
 #endif
