@@ -4466,21 +4466,39 @@ static __attribute__((noinline)) void check_lower_quad_conversion(CheckLowerWrit
 // type (a real one's value converted, a _BitInt's past 128 bits from its address), the result computed
 // (check_lower_quad_compute) and stored back: copied into a __float128 destination, whose address is the expression's
 // value, and so into a _BitInt one past 128 bits once converted into a frame object of its own; or converted to a real
-// one's type and stored, which STORE leaves.
+// one's type and stored, which STORE leaves. An increment's or a decrement's value is a __float128 one (#147), as clang
+// -O0's __addtf3 or __subtf3 of 1.0 is; a postfix one's expression is a copy of the object before it.
 static void check_lower_quad_update_emit(CheckLowerWriter* writer, uint32_t node, uint64_t locals)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const CheckOp op = graph->ops[node];
-    const CheckOp computed = op == CHECK_OP_ADD_ASSIGN ? CHECK_OP_ADD : op == CHECK_OP_SUBTRACT_ASSIGN ? CHECK_OP_SUBTRACT :
+    const bool increment = op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT;
+    const bool postfix = op == CHECK_OP_POST_INCREMENT || op == CHECK_OP_POST_DECREMENT;
+    const CheckOp computed = op == CHECK_OP_ADD_ASSIGN || op == CHECK_OP_PRE_INCREMENT || op == CHECK_OP_POST_INCREMENT ? CHECK_OP_ADD :
+                             op == CHECK_OP_SUBTRACT_ASSIGN || op == CHECK_OP_PRE_DECREMENT || op == CHECK_OP_POST_DECREMENT ? CHECK_OP_SUBTRACT :
                              op == CHECK_OP_MULTIPLY_ASSIGN ? CHECK_OP_MULTIPLY : CHECK_OP_DIVIDE;
     const TypeId stored = check_stream_type(stream, graph->operand0[node]);
     const TypeId calculated = stream->conversions[node].operands[0].type;
     const bool stored_quad = check_lower_quad(writer, stored);
     const CheckLowerLimbs stored_limbs = check_lower_limbs(writer, stored);
-    const uint32_t value = (uint32_t)locals;
+    uint32_t value = (uint32_t)locals;
     const uint32_t destination = (uint32_t)(locals >> 32);
+    if (increment)
+    {
+        const CheckValue one = { .floating = 1.0L };
+        value = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        check_lower_quad_constant(writer, &one);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, value);
+    }
+    const uint32_t old = postfix && stored_quad ? check_lower_quad_object(writer) : BUSTER_CHECK_NONE;
+    if (old != BUSTER_CHECK_NONE)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, old);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+        check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, 16);
+    }
     const uint32_t current = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
     const uint32_t result = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
     check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
@@ -4502,7 +4520,14 @@ static void check_lower_quad_update_emit(CheckLowerWriter* writer, uint32_t node
     if (stored_quad)
     {
         check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, 16);
-        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+        if (old != BUSTER_CHECK_NONE)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, old);
+        }
+        else
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+        }
     }
     else if (stored_limbs.count != 0)
     {
@@ -7223,9 +7248,12 @@ static void check_lower_complex_update(CheckLowerWriter* writer, uint32_t node)
     // are scalars, not __float128's or a complex of aggregate parts.
     const bool complex_increment = increment && check_lower_complex(writer, calculated) && !check_lower_complex_parts(writer, calculated) &&
                                    !check_lower_quad(writer, calculated) && check_lower_complex(writer, check_stream_type(program->stream, graph->operand0[node]));
-    if (!limbs && !complex_increment && op != CHECK_OP_ADD_ASSIGN && op != CHECK_OP_SUBTRACT_ASSIGN && op != CHECK_OP_MULTIPLY_ASSIGN && op != CHECK_OP_DIVIDE_ASSIGN)
+    // A __float128's (#147, check_lower_quad_update_emit): one added or subtracted with libgcc's __addtf3 or __subtf3.
+    const bool quad_increment = increment && check_lower_quad(writer, calculated);
+    if (!limbs && !complex_increment && !quad_increment && op != CHECK_OP_ADD_ASSIGN && op != CHECK_OP_SUBTRACT_ASSIGN && op != CHECK_OP_MULTIPLY_ASSIGN &&
+        op != CHECK_OP_DIVIDE_ASSIGN)
     {
-        check_lower_unsupported(writer, check_lower_quad(writer, calculated) ? "increments of __float128 values" : "increments of complex values");
+        check_lower_unsupported(writer, "increments of complex values");
     }
     else
     {
