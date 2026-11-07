@@ -1914,6 +1914,14 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         {
             snprintf(description, sizeof(description), "%s: %s static data and token bodies are what the dense passes made", name, path == 0 ? "scalar" : "vector");
             check_test_expect(test, check_test_program_sparse(&program, &data, &input, &stream, &initializers, &types.table, path == 0, &output, &scratch), description);
+            // The return facts' vector path visits only the nodes that can have facts (check_program_return_sparse): every
+            // node's must be what the scalar path, which visits each, gives it.
+            const uint64_t facts_mark = scratch.length;
+            const uint8_t* exact = check_program_return_facts(&program, &scratch, NULL, true);
+            const uint8_t* sparse = check_program_return_facts(&program, &scratch, NULL, false);
+            snprintf(description, sizeof(description), "%s: the return facts' vector path gives every node the scalar path's facts", name);
+            check_test_expect(test, input.graph.count == 0 || (exact != NULL && sparse != NULL && memcmp(exact, sparse, input.graph.count) == 0), description);
+            arena_pop_to(&scratch, facts_mark);
         }
         // A program that includes the system's headers lowers what its roots reach, as -c does: their other functions
         // (MMX's, whose builtins no row takes) are no part of it.
@@ -2992,10 +3000,13 @@ static void check_test_program_return_marks(CheckTest* test)
                                             .argument_offsets = offsets, .argument_counts = counts, .argument_nodes = arguments } };
         const CheckStream stream = { .misc = &misc, .misc_count = 1, .queries = &query, .query_count = 1 };
         CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input, .stream = &stream };
-        const uint8_t* query_facts = check_program_return_facts(&program, &scratch, NULL);
-        check_test_expect(test, query_facts != NULL && query_facts[0] == BUSTER_CHECK_RETURN_STOPS &&
-                               query_facts[1] == BUSTER_CHECK_RETURN_UNKNOWN,
-                          "an evaluated query operand never promotes its conservative warning contract to a guaranteed stop");
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            const uint8_t* query_facts = check_program_return_facts(&program, &scratch, NULL, path == 0);
+            check_test_expect(test, query_facts != NULL && query_facts[0] == BUSTER_CHECK_RETURN_STOPS &&
+                                   query_facts[1] == BUSTER_CHECK_RETURN_UNKNOWN,
+                              "an evaluated query operand never promotes its conservative warning contract to a guaranteed stop");
+        }
     }
     if (ready)
     {
@@ -3012,7 +3023,7 @@ static void check_test_program_return_marks(CheckTest* test)
         const CheckStream stream = { .dense_values = values };
         const CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input,
                                        .stream = &stream, .object_count = 2 };
-        check_test_expect(test, check_program_return_call(&program, 1, NULL) == BUSTER_CHECK_RETURN_UNKNOWN,
+        check_test_expect(test, check_program_return_call(&program, 1, NULL, NULL) == BUSTER_CHECK_RETURN_UNKNOWN,
                           "a call without optional source declaration bindings remains conservative");
     }
 
