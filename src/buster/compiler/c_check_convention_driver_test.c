@@ -264,6 +264,7 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "long every_aligned(long a, long b);\n"
         "long every_var(long n, ...);\n"
         "void every_observe(long a, long b);\n"
+        "long every_cdecl(long a, long b);\n"
         "extern int depth_seen;\n"
         "int main(void)\n"
         "{\n"
@@ -300,6 +301,8 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "    unwound_kept = every_set;\n"
         "    bad |= check(\"every_observe\", (void*)every_observe, every_set, EVERY_VECTORS, EVERY_WIDTH, EVERY_MASKS, 40, 2, &r) || recovered(\"every_observe\", every_set);\n"
         "    bad |= every_var(3, 10L, 20L, 12L) != 42 || every_double(2.0, 3.0) != 7.0;\n"
+        "    // cdecl before the bit, which is still its type (#1639's review).\n"
+        "    bad |= check(\"every_cdecl\", (void*)every_cdecl, every_set & ~1u, EVERY_VECTORS, EVERY_WIDTH, EVERY_MASKS, 40, 2, &r) || r != 42;\n"
         "    Pair p = most_pair(5, 3);\n"
         "    bad |= p.a != 8 || p.b != 2 || all_double(2.0, 3.0) != 7.0;\n"
         "    printf(bad ? \"FAILED\\n\" : \"ok\\n\");\n"
@@ -333,7 +336,8 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "__attribute__((no_caller_saved_registers, sysv_abi)) double every_double(double a, double b) { return a * b + 1.0; }\n"
         "__attribute__((no_caller_saved_registers)) long every_aligned(long a, long b) { _Alignas(64) char x[64]; __builtin_memset(x, (int)a, 64); printf(\"\"); return x[63] + b; }\n"
         "__attribute__((no_caller_saved_registers)) long every_var(long n, ...) { va_list ap; va_start(ap, n); long s = 0; for (long i = 0; i < n; i++) s += va_arg(ap, long); va_end(ap); return s; }\n"
-        "__attribute__((no_caller_saved_registers)) void every_observe(long a, long b) { (void)a; (void)b; observe(); }\n";
+        "__attribute__((no_caller_saved_registers)) void every_observe(long a, long b) { (void)a; (void)b; observe(); }\n"
+        "__attribute__((cdecl, no_caller_saved_registers)) long every_cdecl(long a, long b) { char buf[64]; __builtin_snprintf(buf, sizeof buf, \"%f\", 2.5); return a + b; }\n";
     static const struct
     {
         const char* name;

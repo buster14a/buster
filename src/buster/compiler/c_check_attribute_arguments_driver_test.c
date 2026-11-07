@@ -1463,6 +1463,22 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
         "__attribute__((stdcall(1))) void f(void);\n",
         "void f(void) __attribute__((pcs(\"aapcs\", 1))) {}\n",
         "int x __attribute__((ms_abi(1), unused));\n",
+        // no_caller_saved_registers with System V's convention, in either order and every place, is the bit's type, which
+        // the assertions see where the diagnostics can't (#1639's review).
+        "typedef void N(void) __attribute__((no_caller_saved_registers));\n__attribute__((cdecl, no_caller_saved_registers)) void f(void);\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(f), N), \"cdecl first\");\n",
+        "typedef void N(void) __attribute__((no_caller_saved_registers));\n__attribute__((sysv_abi)) __attribute__((no_caller_saved_registers)) void f(void);\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(f), N), \"sysv_abi first, two lists\");\n",
+        "typedef void N(void) __attribute__((no_caller_saved_registers));\n__attribute__((no_caller_saved_registers, sysv_abi)) void f(void);\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(f), N), \"bit first\");\n",
+        "typedef void N(void) __attribute__((no_caller_saved_registers));\n__attribute__((cdecl)) void f(void) __attribute__((no_caller_saved_registers));\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(f), N), \"prefix and suffix\");\n",
+        "typedef void N(void) __attribute__((no_caller_saved_registers));\n__attribute__((cdecl, no_caller_saved_registers)) void (*p)(void);\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(p), N*), \"a pointer\");\n",
+        "typedef void N(void) __attribute__((no_caller_saved_registers));\ntypedef void F(void) __attribute__((sysv_abi, no_caller_saved_registers));\n"
+        "_Static_assert(__builtin_types_compatible_p(F, N), \"a typedef\");\n",
+        "typedef void N(void) __attribute__((no_caller_saved_registers));\n__attribute__((cdecl, no_caller_saved_registers)) void f(void);\n"
+        "_Static_assert(!__builtin_types_compatible_p(__typeof__(f), void (void)), \"not System V's alone\");\n",
         // no_caller_saved_registers (#147): a System V function's type, with System V's convention too, through typedefs,
         // pointers and variadic functions; nothing on a tag, and the function types' warning on another subject.
         "__attribute__((no_caller_saved_registers)) int v;\n",
