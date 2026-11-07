@@ -112,6 +112,47 @@ static bool check_input_parameter_marks(const CheckInput* input, const Parser* p
     return valid;
 }
 
+// Nearest statement terminator, or scope-closing brace, including `token` itself (#1378). `parents` is a private copy
+// of the parser's count entries, used for this predicate alone, or NULL for an uncached walk. With a copy, compress
+// each walked path to its answer: a comma chain
+// shared by many declarators is visited once, without a new retained token column. Missing parents and cycles compress
+// to NONE too. The parser's original parents remain immutable, including when another consumer asks a different role.
+// `work` counts uncached parent steps only. Callers copy once those steps reach the unit's count, so cheap queries
+// don't pay a token-wide copy or allocation. Before that switch at most twice count steps have been walked.
+static uint32_t check_input_cached_ancestor(const Parser* parser, uint32_t token, uint32_t* parents, bool scope, uint64_t* work)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint8_t* roles = parser->tree.roles;
+    const uint32_t* links = parents != NULL ? parents : parser->tree.parents;
+    uint32_t ancestor = token;
+    uint32_t steps = 0;
+    bool found = false;
+    while (ancestor < count && steps < count)
+    {
+        const uint8_t role = roles[ancestor];
+        found = scope ? role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_COMPOUND_BODY :
+                        role == PARSE_ROLE_TERMINATOR;
+        if (found)
+        {
+            break;
+        }
+        ancestor = links[ancestor];
+        steps += 1;
+    }
+    const uint32_t result = found ? ancestor : BUSTER_CHECK_NONE;
+    if (parents == NULL && work != NULL)
+    {
+        *work += steps;
+    }
+    for (uint32_t at = token, walked = 0; parents != NULL && at < count && at != result && walked < count; walked += 1)
+    {
+        const uint32_t next = parents[at];
+        parents[at] = result;
+        at = next;
+    }
+    return result;
+}
+
 // -Wunused-variable, -Wunused-function and -Wunused-parameter facts, from the resolved binding events: a declaration
 // no use names. The declaration's own body decides the completion, as clang reports it after the function.
 static void check_input_unused_events(CheckInputReader* reader, const uint8_t* used, const uint8_t* used_tokens, const uint8_t* parameters,
@@ -121,6 +162,8 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
     const Parser* parser = reader->parser;
     const CBindings* events = &reader->bindings;
     const uint32_t count = parser->tokens.count;
+    uint32_t* scope_parents = NULL;
+    uint64_t scope_work = 0;
     uint32_t* chain_first = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count);
     uint32_t* chain_definition = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count);
     // A declaration inherits an earlier declaration's unused/used mark, as clang's redeclarations do: an attribute on
@@ -189,21 +232,20 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
             // declaration could still have used it; sorting there keeps declaration order.
             uint32_t closing = BUSTER_CHECK_NONE;
             const bool scoped = !file_scope && kind != C_BINDING_FUNCTION;
-            for (uint32_t ancestor = token, steps = 0; scoped && ancestor < count && steps < count; steps += 1)
+            if (scoped && scope_parents == NULL && scope_work >= count)
             {
-                const uint32_t parent = parser->tree.parents[ancestor];
-                if (parent == BUSTER_CHECK_NONE || parent >= count || parent == ancestor)
+                scope_parents = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, count);
+                valid = scope_parents != NULL;
+                if (valid)
                 {
-                    break;
+                    memcpy(scope_parents, parser->tree.parents, (uint64_t)count * sizeof(uint32_t));
                 }
-                ancestor = parent;
-                const uint8_t ancestor_role = parser->tree.roles[ancestor];
-                if (ancestor_role == PARSE_ROLE_CLOSE_BLOCK || ancestor_role == PARSE_ROLE_CLOSE_BODY ||
-                    ancestor_role == PARSE_ROLE_CLOSE_COMPOUND_BODY)
-                {
-                    closing = ancestor;
-                    break;
-                }
+            }
+            if (scoped && valid)
+            {
+                // Strict ancestors here: a declaration never completes its own scope.
+                const uint32_t parent = parser->tree.parents[token];
+                closing = parent != token ? check_input_cached_ancestor(parser, parent, scope_parents, true, &scope_work) : BUSTER_CHECK_NONE;
             }
             const CheckWarningEvent warning = {
                 .id = id,
@@ -215,7 +257,7 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
                 .completion = closing < count ? closing : BUSTER_CHECK_NONE,
                 .payload = { .name = parser->tokens.names[token] },
             };
-            if (!check_input_warning_event(reader, &warning, NULL, 0))
+            if (!valid || !check_input_warning_event(reader, &warning, NULL, 0))
             {
                 output->resource = true;
             }
@@ -522,3 +564,4 @@ static bool check_input_bindings(CheckInputReader* reader, CheckInputBindingMode
     const bool parser = selected == CHECK_INPUT_BINDINGS_PARSER_STACKS || selected == CHECK_INPUT_BINDINGS_PARSER_BATCH;
     return parser ? check_input_binding_parser(reader, selected == CHECK_INPUT_BINDINGS_PARSER_STACKS) : check_input_binding_events(reader, selected);
 }
+

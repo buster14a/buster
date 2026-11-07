@@ -124,7 +124,9 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
     }
     memset(planned, 0, (uint64_t)words * sizeof(uint64_t));
     CheckProgram program = { .input = &input, .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
-    const bool compound = check_program_plans(&program, parser, given, plan_first, planned, next);
+    uint32_t parents[BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+    parents[count] = poison;
+    const bool compound = check_program_plans(&program, parser, given, plan_first, planned, next, parents);
     // The oracle: each plan's statement, or a compound literal's mark, or none.
     uint32_t statements[BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
     bool expected_compound = false;
@@ -179,11 +181,75 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
         }
         same &= link == BUSTER_CHECK_NONE;
     }
-    same &= plan_first[count] == poison && plan_next[plans] == poison;
+    same &= plan_first[count] == poison && plan_next[plans] == poison && parents[count] == poison;
     check_test_expect(test, same && compound == expected_compound && program.status == expected_status && program.token == expected_token,
                       listed ? "check_program's plans link each statement's initializers in order and mark exactly those statements"
                              : "check_program's plans write and mark nothing for a unit without initializer plans");
     arena_release(&sparse);
+}
+
+// The cache is earned by accumulated work, not by a single initializer. One and two long walks end before the next
+// query could activate it; the third crosses that boundary. Poison distinguishes no-copy from a copied parent column.
+static void check_test_program_plan_cache(CheckTest* test)
+{
+    enum { count = 257, plans = 65, words = (count + 64) / 64 };
+    uint32_t parents[count];
+    uint8_t roles[count];
+    uint8_t declaration_bits[count] = { 0 };
+    uint32_t initializer_begins[count];
+    uint32_t declarations[plans];
+    for (uint32_t token = 0; token < count; token += 1)
+    {
+        parents[token] = token + 1;
+        roles[token] = token + 1 == count ? PARSE_ROLE_TERMINATOR : PARSE_ROLE_SEPARATOR;
+        initializer_begins[token] = token + 1;
+    }
+    for (uint32_t i = 0; i < plans; i += 1)
+    {
+        declarations[i] = i;
+    }
+    Parser parser = { 0 };
+    parser.tokens.count = count;
+    parser.tree.parents = parents;
+    parser.tree.roles = roles;
+    Arena arena = arena_reserve(UINT64_C(1) << 20);
+    CheckInput input = { .token_count = count, .declaration_bits = declaration_bits };
+    input.initializer_begins = check_sparse_from_values(&arena, initializer_begins, count);
+    const uint32_t sizes[] = { 1, 2, 3, plans };
+    for (uint32_t variant = 0; variant < BUSTER_ARRAY_LENGTH(sizes); variant += 1)
+    {
+        const uint32_t size = sizes[variant];
+        uint32_t cached[count + 1];
+        uint32_t first[count + 1];
+        uint32_t next[plans + 1];
+        uint64_t planned[words] = { 0 };
+        for (uint32_t token = 0; token <= count; token += 1)
+        {
+            cached[token] = 0xa5a5a5a5u;
+            first[token] = 0xa5a5a5a5u;
+        }
+        for (uint32_t i = 0; i <= plans; i += 1)
+        {
+            next[i] = 0xa5a5a5a5u;
+        }
+        const CheckInitializers initializers = { .declaration_tokens = declarations, .count = size, .token_count = count };
+        CheckProgram program = { .input = &input, .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
+        const bool compound = check_program_plans(&program, &parser, &initializers, first, planned, next, cached);
+        bool same = check_sparse_present(input.initializer_begins) && !compound && program.status == CHECK_PROGRAM_OK && first[count - 1] == 0;
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            same &= parents[token] == token + 1 && (size > 2 || cached[token] == 0xa5a5a5a5u);
+            same &= check_program_bit(planned, token) == (token + 1 == count);
+        }
+        for (uint32_t i = 0; i < size; i += 1)
+        {
+            same &= next[i] == (i + 1 < size ? i + 1 : BUSTER_CHECK_NONE);
+        }
+        same &= size <= 2 || cached[0] == count - 1;
+        check_test_expect(test, same && cached[count] == 0xa5a5a5a5u && next[plans] == 0xa5a5a5a5u,
+                          "initializer ancestry leaves cheap scratch untouched and activates compression only after its raw-walk budget");
+    }
+    arena_release(&arena);
 }
 
 // #530's scans in check_program against their exact twins, their `scalar` paths: at every count to 129 tokens, each column
@@ -194,6 +260,7 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
 // check_test_program_declaring); and at 64 and 128 tokens, the cases' marks, against a test of each token.
 static void check_test_program_scans(CheckTest* test)
 {
+    check_test_program_plan_cache(test);
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     uint8_t* mappings[BUSTER_CHECK_TEST_SCAN_COLUMNS] = { 0 };
     bool ready = page >= (BUSTER_CHECK_TEST_SCAN_TOKENS + 1) * sizeof(uint32_t);
@@ -3266,6 +3333,34 @@ static void check_test_program_array_alignment(CheckTest* test, const char* clan
         "arrays-of-16-bytes-aligned-to-16", clang);
 }
 
+static void check_test_program_many_declarators(CheckTest* test, const char* clang)
+{
+    char source[32768];
+    uint32_t length = 0;
+    bool valid = true;
+    for (uint32_t kind = 0; valid && kind < 2; kind += 1)
+    {
+        const int prefix = snprintf(source + length, sizeof(source) - length, "%s", kind == 0 ? "static int " : "int tested(int n){int ");
+        valid = prefix > 0 && (uint32_t)prefix < sizeof(source) - length;
+        length += valid ? (uint32_t)prefix : 0;
+        for (uint32_t i = 0; valid && i < 257; i += 1)
+        {
+            const int written = snprintf(source + length, sizeof(source) - length, "%s%c%u=%s%u", i != 0 ? "," : "", kind == 0 ? 'g' : 'a', i,
+                                         kind == 0 ? "" : "n+", i);
+            valid = written > 0 && (uint32_t)written < sizeof(source) - length;
+            length += valid ? (uint32_t)written : 0;
+        }
+        const int suffix = valid ? snprintf(source + length, sizeof(source) - length, "%s", kind == 0 ? ";" : ";return a0+a128+a256+g0+g128+g256;}") : -1;
+        valid = suffix > 0 && (uint32_t)suffix < sizeof(source) - length;
+        length += valid ? (uint32_t)suffix : 0;
+    }
+    check_test_expect(test, valid, "257 file-scope and local declarators fit the generated source buffer");
+    if (valid)
+    {
+        check_test_program_source(test, source, "many-declarators", clang);
+    }
+}
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
     if (check_test_takes())
@@ -3371,6 +3466,14 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_addressed(test);
         check_test_program_lifetime_planning(test);
         check_test_program_scans(test);
+        check_test_program_many_declarators(test, clang);
+        check_test_program_source(test,
+            "struct S{int x;};static int a=2,b=3,c=4;"
+            "int tested(int n){int x=n,y=x+1,z=y+2;int r=x+y+z;"
+            "{struct S p=(struct S){x},q={y};int i=p.x,j=q.x;r+=i+j;}"
+            "for(int i=0,j=2;i<3;i++,j++){int u=i,v=j;r+=u+v;}"
+            "int s=({int i=n+3,j=i+2;i+j;}),t=s+1;return r+s+t+a+b+c;}",
+            "multi-declarator-plan-scopes", clang);
         check_test_program_resolve_labels(test);
         check_test_program_bodies(test, clang);
         // C89's implicit int in the runtime program harness (#1121): the declarations' types and qualifiers decide what

@@ -2945,21 +2945,28 @@ static bool check_program_runtime_object(const CheckInput* input, const TypeTabl
 // statement's first entry is written, and its bit set in `planned`, at its first plan, and no other entry of plan_first is
 // (#877). A compound literal's plan joins no statement's list; true when one of a runtime object does.
 static bool check_program_plans(CheckProgram* program, const Parser* parser, const CheckInitializers* initializers, uint32_t* plan_first, uint64_t* planned,
-                                uint32_t* plan_next)
+                                uint32_t* plan_next, uint32_t* parents)
 {
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
     bool compound_initializers = false;
+    uint64_t work = 0;
+    bool cached = false;
     for (uint32_t i = initializers != 0 ? initializers->count : 0; i-- > 0;)
     {
         const uint32_t declaration = initializers->declaration_tokens[i];
         const bool compound = declaration < count && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND);
         uint32_t token = declaration < count && check_sparse_get(input->initializer_begins, declaration) != 0 ? check_sparse_get(input->initializer_begins, declaration) - 1 : BUSTER_CHECK_NONE;
-        uint32_t steps = 0;
-        while (!compound && token < count && steps < count && parser->tree.roles[token] != PARSE_ROLE_TERMINATOR)
+        if (!compound)
         {
-            token = parser->tree.parents[token];
-            steps += 1;
+            if (!cached && count != 0 && work >= count)
+            {
+                // Only copy after the uncached walks paid a token-wide pass. The caller lends not-yet-live `seen`
+                // scratch, cleared before its later uses: no extra retained column or copy for cheap queries (#1378).
+                memcpy(parents, parser->tree.parents, (uint64_t)count * sizeof(uint32_t));
+                cached = true;
+            }
+            token = check_input_cached_ancestor(parser, token, cached ? parents : NULL, false, &work);
         }
         if (compound)
         {
@@ -2968,7 +2975,7 @@ static bool check_program_plans(CheckProgram* program, const Parser* parser, con
             plan_next[i] = BUSTER_CHECK_NONE;
             compound_initializers |= !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC);
         }
-        else if (token < count && steps < count)
+        else if (token < count)
         {
             if (!check_program_bit(planned, token))
             {
@@ -3603,7 +3610,6 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             program->lifetime_first = lifetime_first;
             program->lifetime_next = lifetime_next;
         }
-        memset(seen, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(nodes, 0, ((uint64_t)node_count + 1) * sizeof(uint32_t));
         if (options.return_flow_work != NULL)
         {
@@ -3634,7 +3640,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             node_next[node] = token_first[token];
             token_first[token] = node;
         }
-        const bool compound_initializers = check_program_plans(program, parser, options.initializers, plan_first, planned, plan_next);
+        const bool compound_initializers = check_program_plans(program, parser, options.initializers, plan_first, planned, plan_next, seen);
+        memset(seen, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         if (compound_initializers && program->status == CHECK_PROGRAM_OK)
         {
             program->compound_initializers = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, options.initializers->count);
