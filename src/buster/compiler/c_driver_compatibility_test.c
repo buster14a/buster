@@ -338,6 +338,8 @@ static bool cc_compat_elf(CCCompatibilityTest* test, const char* name, uint16_t 
     return result && found == interpreter;
 }
 
+#include "c_driver_response_test.c"
+
 static void cc_compat_cleanup(CCCompatibilityTest* test)
 {
     // The fixture owns only these flat subdirectories. No shell, recursive traversal or caller-provided path.
@@ -535,6 +537,13 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
         unlink(mode_depfile);
         const char* const mmd[] = { "-MMD", "-MFjoined.d", "-c", "a.c", "-o", "out/a.o", NULL };
         cc_compat_oracle(&test, "-MMD with joined -MF", NULL, mmd, "joined.d");
+        const char* const phony_arguments[] = { "-MMD", "-MP", "-MF", "out/phony.d", "-c", "a.c", "-o", "out/phony.o", NULL };
+        CCCompatibilityRun phony_depfile = cc_compat_run(&test, test.compiler, NULL, phony_arguments);
+        char* phony_rule = cc_compat_read(&test, "out/phony.d");
+        cc_compat_expect(&test, phony_depfile.status == 0 && phony_rule != NULL && strcmp(phony_rule, "out/phony.o: a.c h.h\nh.h:\n") == 0,
+                         "-MP phony rules have Clang's exact spacing");
+        free(phony_rule);
+        cc_compat_release(&phony_depfile);
         cc_compat_long_depfiles(&test);
 #if !defined(BUSTER_DRIVER_COMPAT_STANDALONE) && !defined(BUSTER_DRIVER_MIXED_STANDALONE)
         cc_compat_publication_failure(&test);
@@ -943,6 +952,7 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
             fprintf(stderr, "  .i _Pragma diagnostics: %s\n", pragma_run.errors != NULL ? pragma_run.errors : "(missing)");
         }
         cc_compat_release(&pragma_run);
+        cc_compat_response_files(&test);
         cc_compat_cleanup(&test);
     }
     printf("CC compatibility: %u checks, %u failures\n", test.checks, test.failures);

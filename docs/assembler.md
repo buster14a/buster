@@ -28,7 +28,9 @@ linker, write its executable and run it.
 
 `compiler -c input.s -o output.o` is an alias for `assemble`. Without `-o`,
 the output is the input's basename with `.o` in the current directory. The
-input is read to its end, so a pipe or `/dev/stdin` works too.
+input is read to its end, so a pipe or `/dev/stdin` works too. Regular-file
+storage starts at the file's size; streams and files that grow extend their
+arena buffer in place. Input no longer has a 64 MiB ceiling (#1368).
 Default input syntax is AT&T; `--intel` selects Intel without register
 prefixes. `.intel_syntax noprefix` and `.att_syntax prefix` switch syntax in
 the source. The `prefix`/`noprefix` arguments control register spelling.
@@ -57,9 +59,10 @@ GCC and Clang, a paste that doesn't form one token leaves both tokens without
 an error, so `$ ## x` gives `$` and the expanded `x`, and `% ## x` a register.
 Literals remain opaque. Includes, conditionals, function macros, stringizing and token
 pasting use the existing engine; C preprocessing keeps its existing behavior.
-The adapter uses both existing vector/scalar kernels and printers. A bounded
-in-memory stream carries line markers to assembly diagnostics; no subprocess
-or temporary source file is used. `compiler -E -x assembler-with-cpp input.S`
+The adapter uses both existing vector/scalar kernels and printers. A growing
+in-memory stream writes their chunks directly into the caller's arena and
+carries line markers to assembly diagnostics; no subprocess, second source
+copy or temporary source file is used. `compiler -E -x assembler-with-cpp input.S`
 also exposes this preprocessing mode.
 
 ## Supported input
@@ -560,8 +563,15 @@ symbol, whether a binding or `.size` directive gave it, which the C checker
 applies to a program symbol the name maps to. The source, index
 and output arena must remain alive while the result is consumed. Initialize
 the caller-owned `X86MatchIndex` and encoder once. Failure restores the caller's
-arena position and clears the output link. Sources are bounded to 64 MiB,
-sections to 256 MiB, and expression stacks to 128 entries.
+arena position and clears the output link. The source-offset implementation
+limit is `UINT32_MAX - 4` bytes (four token lookahead records); the token-count
+limit is `(1u << 30) - 4`, so the doubled power-of-two symbol table fits its
+32-bit slot count. These bounds are checked before narrowing or sizing the
+corresponding tables. Available arena memory can refuse a smaller input.
+Sections remain bounded to 256 MiB and expression stacks to 128 entries.
+`test-assembler` covers a 65 MiB source through both lexer paths and the
+printer's growing stream, small/expanding/exact-fit pipes, allocation rollback,
+a sparse file beyond the offset limit, and the token-count admission bound.
 
 The section adapter in `assembler_sections.c` hands `object_build` optional
 `ObjectOptions.atom_sections` indexed by AtomId and `temporary_symbols` indexed
@@ -1130,8 +1140,9 @@ must remain in the shared-interface inventory.
 | Statements/expressions → shared `x86_match` → fragments/records | Symbols and relative expressions retain identity/addends. Public input rejects unsupported forms and validates records before trusted encoding. |
 | Fragments/labels/alignment → GNU-order layout → encoding/Link | Variable fragment counts and final offsets; branches promote in GNU as's pass order, alignment is recalculated. `asm_object` passes the shared Link to object preparation/building. |
 
-The public source is bounded (64 MiB limit); the driver can read streams and
-keeps its own terminator, while reusable `asm_assemble` takes a counted slice.
+The public source is bounded by its 32-bit offsets and four token lookahead
+records (`UINT32_MAX - 4` bytes); the driver can read streams and keeps its own
+terminator, while reusable `asm_assemble` takes a counted slice.
 Caller arenas own tokens, fragments, symbols, emitted bytes and Link, and must
 outlive object construction. Logical counts, allocated capacities and section
 size limits (256 MiB) are distinct. Internal vector operations remain bounded;

@@ -419,9 +419,10 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     const bool open = code != 0 && code->frame_open;
     // A probed prologue's reservation and realignment (#177, Tier0Code.frame_probe): their records' counts, Tier 0's.
     const bool probe = code != 0 && code->frame_probe;
+    const bool moves = code != 0 && code->frame_moves;
     const uint32_t frame_size = code != 0 ? code->frame_size : 0;
-    const bool probed = tier0_probes_reservation(probe, frame_size, alignment_log2, pointer);
-    const uint32_t reservation = tier0_reservation_records(probe, frame_size, alignment_log2, pointer);
+    const bool probed = tier0_probes_reservation(probe, frame_size, alignment_log2, moves);
+    const uint32_t reservation = tier0_reservation_records(probe, frame_size, alignment_log2, moves);
     // An eh_return function's (Tier0Code.frame_eh_return, #148): rdx and rax pushed after the others, no transitions (its
     // emission's rows describe their saves, emitted_from_tier0), which its epilogue steps over, and its tails
     // __builtin_eh_return's, which pop them first and set rsp from rcx before the jump through r11, or musttail calls',

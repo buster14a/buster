@@ -167,7 +167,7 @@ static void ir_interpreter_test_numbers(IrInterpreterTestTally* tally, Arena* me
             function.block_offsets[1] = 4;
             ir_interpreter_test_instruction(&function, 0, IR_CONST, test.source, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
             ir_interpreter_test_instruction(&function, 1, IR_CONST, test.source, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            const uint8_t operands = ir_operand_table[test.op];
+            const uint8_t operands = ir_operand_table[test.op] | (test.op == IR_INTRINSIC ? 2 : 0);
             const uint32_t b = (operands & 2) != 0 ? 1 : BUSTER_IR_NONE;
             const uint32_t c = test.op == IR_ICMP || test.op == IR_FCMP || test.op == IR_INTRINSIC ? test.predicate : BUSTER_IR_NONE;
             ir_interpreter_test_instruction(&function, 2, test.op, test.type, 0, b, c);
@@ -414,6 +414,80 @@ static void ir_interpreter_test_calls(IrInterpreterTestTally* tally, Arena* memo
         ir_interpreter_test_run(tally, &program, 77, &argument, 1, 0, execution, INTERPRETER_SYMBOL, (InterpreterValue){ 0 }, "unresolved symbol address rejected");
         caller.a[1] = 10;
         ir_interpreter_test_run(tally, &program, 77, &argument, 1, 0, execution, INTERPRETER_OK, argument, "successful execution after fault unwinds all frames");
+    }
+    arena_pop_to(memory, mark);
+}
+
+static uint64_t ir_interpreter_test_native_callback_spy(uint64_t value, uint64_t* calls)
+{
+    *calls += 1;
+    return value;
+}
+
+static void ir_interpreter_test_native_callbacks(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
+{
+    const uint64_t mark = memory->length;
+    IrFunction caller = { 0 };
+    IrFunction callback = { 0 };
+    const IrSizes sizes = {
+        .instruction_count = 5,
+        .block_count = 1,
+        .extra_count = 2,
+        .call_count = 1,
+        .call_type_count = 2,
+    };
+    const IrSizes callback_sizes = { .instruction_count = 1, .block_count = 1 };
+    const bool created = ir_create(memory, &sizes, &caller) == IR_OK && ir_create(memory, &callback_sizes, &callback) == IR_OK;
+    ir_interpreter_test_expect(tally, created, "native callback fixture allocation");
+    if (created)
+    {
+        caller.result_type = IR_I64;
+        caller.block_offsets[1] = 5;
+        caller.extra[0] = 1;
+        caller.extra[1] = 2;
+        caller.call_types[0] = IR_PTR;
+        caller.call_types[1] = IR_PTR;
+        caller.calls[0] = (IrCall){ .argument_count = 2, .parameter_count = 2, .result_type = IR_I64 };
+        ir_interpreter_test_instruction(&caller, 0, IR_SYMBOL_ADDR, IR_PTR, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&caller, 1, IR_SYMBOL_ADDR, IR_PTR, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&caller, 2, IR_SYMBOL_ADDR, IR_PTR, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&caller, 3, IR_CALL, IR_I64, 3, 0, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&caller, 4, IR_RET, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        callback.block_offsets[1] = 1;
+        callback.result_type = IR_VOID;
+        ir_interpreter_test_instruction(&callback, 0, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const IrInterpreterFunction functions[] = {
+            { .symbol = 1, .function = &caller },
+            { .symbol = 2, .function = &callback },
+            { .symbol = 5, .function = &callback },
+        };
+        uint64_t calls = 0;
+        const InterpreterNativeBinding native = { .symbol = 3, .address = (void*)ir_interpreter_test_native_callback_spy };
+        const InterpreterBinding binding = { .symbol = 4, .bytes = (uint8_t*)&calls, .size = sizeof(calls), .writable = true };
+        const IrInterpreterProgram program = {
+            .functions = functions,
+            .function_count = BUSTER_ARRAY_LENGTH(functions),
+            .bindings = &binding,
+            .binding_count = 1,
+            .natives = &native,
+            .native_count = 1,
+        };
+        const SymbolId symbols[] = { 2, 5, 4, 3 };
+        for (uint32_t indirect = 0; indirect < 2; indirect += 1)
+        {
+            caller.op[3] = indirect != 0 ? IR_CALL_INDIRECT : IR_CALL;
+            caller.a[3] = indirect != 0 ? 0 : 3;
+            for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(symbols); a += 1)
+            {
+                caller.a[1] = symbols[a];
+                calls = 0;
+                const bool refused = a < 2;
+                const uint64_t expected = a == 2 ? (uintptr_t)&calls : (uintptr_t)native.address;
+                ir_interpreter_test_run(tally, &program, 1, 0, 0, 0, execution, refused ? INTERPRETER_NATIVE : INTERPRETER_OK,
+                                        (InterpreterValue){ .low = expected }, "IR native scalar callback tokens and aliases are refused, ordinary data and native pointers accepted");
+                ir_interpreter_test_expect(tally, calls == (uint64_t)!refused, "IR callback refusal precedes host entry");
+            }
+        }
     }
     arena_pop_to(memory, mark);
 }
@@ -964,6 +1038,7 @@ static __attribute__((unused)) int run_ir_interpreter_tests(int argc, char** arg
             ir_interpreter_test_control(&tally, &memory, &execution);
             ir_interpreter_test_dominance(&tally, &memory, &execution);
             ir_interpreter_test_calls(&tally, &memory, &execution);
+            ir_interpreter_test_native_callbacks(&tally, &memory, &execution);
             ir_interpreter_test_records(&tally, &memory, &execution);
             ir_interpreter_test_variadic(&tally, &memory, &execution);
             ir_interpreter_test_aligned(&tally, &memory, &execution);

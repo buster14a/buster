@@ -123,7 +123,7 @@ column comparisons deterministic.
 | `param` | `a` indexes `parameter_types` |
 | Unary / conversion | `a` is the source value |
 | Binary arithmetic | `a,b` are values; result/operand types agree |
-| `intrinsic` | `a,b` of the result's type, `i32` or `i64`; `c` the operation (`BUSTER_IR_INTRINSIC_*`, printed after the operands as a comparison's predicate is), each a pure operation the optimizer doesn't fold (#141): `mulhu`, an `i64`'s alone, the high 64 bits of their unsigned 128-bit product, which Tier 1's split of the 128-bit integers makes ([the Tier 1 guide](tier1.md)'s "The 128-bit integers"); and the x86 builtins' bit manipulations, as BMI's instructions give them, `a` the source: `pdep` and `pext` (`a`'s low bits deposited at mask `b`'s set bits, or its bits there packed into the low ones), `bzhi` (`a` with its bits from `b`'s low byte up cleared, none past the width) and `bextr` (`a`'s bits from `b`'s low byte up, as many as its second byte says, zeros past the width), which the typed stream's rows of BMI2 and BMI1 lower to ([the SIMD IR guide](ir-simd.md)'s "Scalar x86 builtins") |
+| `intrinsic` | `c` the operation (`BUSTER_IR_INTRINSIC_*`, printed after the operands). Binary scalar kinds use `a,b` of the result's type, `i32` or `i64`: `mulhu` (an `i64`'s high unsigned product), `pdep`, `pext`, `bzhi` and `bextr` with BMI semantics. Unary `splat` uses scalar `a` (`i8`, `i16`, `i32`, `i64`, `f32` or `f64`), absent `b` and a vector result, repeating the scalar's raw bits. All kinds have zero flags; see [Intrinsics](#intrinsics-141) and [scalar splats](ir-simd.md#scalar-splats-1450). |
 | Shifts | `a` matches the result; `b` has an integer type |
 | `icmp`, `fcmp` | `a,b` are equally typed; `c` is `IrPredicate`; result is `i1` |
 | `select` | `a:i1`, `b,c` match the result type |
@@ -544,19 +544,28 @@ against clang.
 ### Intrinsics (#141)
 
 `intrinsic` keeps its operation in `c` (`BUSTER_IR_INTRINSIC_*`): `mulhu`,
-`pdep`, `pext`, `bzhi` and `bextr`, one opcode since the opcode tables'
+`pdep`, `pext`, `bzhi`, `bextr` and the unary scalar `splat`, one opcode since the opcode tables'
 byte-permute register holds 64 and was full, the 128-bit integers' `mulhu`
 before it the opcode's. The text names the operation after the operands, as a
 comparison's predicate (`%2 = intrinsic.i64 %0, %1 pdep`). Both verifiers check
-it by its own rule (`IR_RULE_INTRINSIC`, which the vector path checks with the
-others rather than deferring it): both operands of the result's type, `i32` or
-`i64`, an operation below the count, and `mulhu` an `i64`'s alone. The
-interpreter evaluates each as the instruction's pseudocode has it; the
-optimizer's passes neither fold it nor number its values, nor move it out of a
-loop; dead code removes an unused one. The typed stream's BMI rows lower to it
+it by its own rule (`IR_RULE_INTRINSIC`, deferred by the batch verifier): the
+five scalar kinds require both operands of the result's type, `i32` or `i64`,
+and `mulhu` an `i64`'s alone. `splat` requires one scalar `a` (`i8`, `i16`, `i32`,
+`i64`, `f32` or `f64`), absent `b`, a vector result and zero flags. Its scalar
+type gives the lane width and its raw bits are repeated unchanged, including
+NaN payloads and signed zero (`%7 = intrinsic.v8i32 %3 splat`). The opcode's
+operand metadata makes `b` optional; the semantic rule makes it mandatory for
+the five binary kinds. The shared interpreter evaluates the scalar kinds as
+their instruction pseudocode specifies and the splat as a bit copy. SCCP,
+GVN and LICM can fold, reuse or move splats under their ordinary rules; the
+five scalar kinds retain their previous optimization boundary. Dead code
+removes an unused intrinsic. The typed stream's BMI rows lower to it
 ([the SIMD IR guide](ir-simd.md)'s "Scalar x86 builtins"), and Tier 1 selects
-`mulhu` as `mul` and the others as their VEX instructions ([the selection
-guide](tier1-selection.md)). `tests/ir/intrinsics.ir` reads each operation of
+`mulhu` as `mul` and the other scalar kinds as their VEX instructions ([the selection
+guide](tier1-selection.md)). Exact single-record producer splats also lower to
+it; their target checks and native bit-copy expansion are documented in
+[SIMD IR](ir-simd.md#scalar-splats-1450). `tests/ir/splats.ir` reads every scalar
+type and vector width back. `tests/ir/intrinsics.ir` reads each scalar operation of
 both widths back, `test-ir-parse` refuses an unnamed or unknown operation, an
 `i32`'s `mulhu`, an `i16`'s and mixed operand types, `test-ir-interpreter` checks
 each against values a Zen 5's instructions give (an index, a start or a length
@@ -629,9 +638,9 @@ These are bits, not floats, and the existing types keep them exact:
 
 - the lowering gives them no floating operation: only a row reads one, and the
   IR's own vector decoders take 16, 32 and 64 bytes alone;
-- SCCP and dead code elimination have no floating arithmetic to fold them by;
-  their constants are bit patterns, a signaling NaN's among them, and GVN numbers
-  no floating operation but `fneg`, which they never have;
+- SCCP and dead code elimination fold no scalar floating arithmetic, and these
+  carriers are scalars: their constants are bit patterns, a signaling NaN's among
+  them, and GVN numbers no floating operation but `fneg`, which they never have;
 - Tier 1's moves of `f32` and `f64` are bit moves ([the selection
   guide](tier1-selection.md)'s "Machine rows"). Each row operand is zero-extended
   into its role, as Tier 0's reloads leave it, which the rows rely on. The
@@ -665,8 +674,10 @@ floating environment and termination.
 - **Constant propagation and dead code** (`ir_optimize.c`). Loads, stores,
   calls, fences, `rmw`s, branches, returns and `unreachable` are unconditional
   roots (`ir_optimize_roots`), never dropped or folded. The floating operations
-  are roots too, and nothing folds them: the pass has no floating arithmetic, so
-  a `FENV_ACCESS` region's rounding and exception flags stay the code's.
+  are roots too. SCCP folds no scalar floating arithmetic, and folds a vector's
+  floating lanes only where every rounding, FTZ and DAZ gives the same bits
+  (#1450), keeping the operation's row for its flags. So a `FENV_ACCESS` region's
+  rounding and exception flags stay the code's.
 - **GVN and LICM** take allow-lists of pure operations (`ir_gvn_classify`'s and
   `ir_licm_classify`'s tables). Neither numbers nor moves a load, a store, a call,
   a fence, an `rmw` or a floating operation other than `fneg`, so a new operation

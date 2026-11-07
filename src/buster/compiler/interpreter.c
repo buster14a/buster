@@ -987,6 +987,30 @@ static uint64_t interpreter_typed_function_address(const InterpreterProgram* pro
     return program->function_addresses != 0 ? program->function_addresses[function] : (uint64_t)(uintptr_t)&program->functions[function];
 }
 
+// The host cannot call opaque interpreted-function tokens. Refuse scalar token arguments before entering it,
+// including a native which only registers a callback for later (atexit/signal). Pointer-width integers share the
+// stream's pointer representation, so a matching integer is conservatively refused too. Aggregate payloads and
+// arbitrary memory reachable from a native argument have no pointer provenance in this oracle.
+static bool interpreter_typed_native_arguments(const InterpreterProgram* program, const Tier0Function* caller, uint32_t first, const InterpreterValue* arguments, uint32_t count)
+{
+    bool valid = true;
+    const uint32_t function_count = program->function_count;
+    for (uint32_t a = 0; valid && a < count; a += 1)
+    {
+        const uint32_t class = caller->argument_classes[first + a];
+        const uint32_t size = caller->argument_sizes != 0 ? caller->argument_sizes[first + a] : 0;
+        if (size == 0 && (class == BUSTER_TYPED_CLASS_U64 || class == BUSTER_TYPED_CLASS_I64))
+        {
+            const uint64_t address = arguments[a].low;
+            for (uint32_t f = 0; valid && f < function_count; f += 1)
+            {
+                valid = address != interpreter_typed_function_address(program, f);
+            }
+        }
+    }
+    return valid;
+}
+
 // Interpreted function addresses are opaque tokens naming stable caller-owned function rows. Native functions
 // retain their host address. Neither kind is registered as readable data, and GLOBAL/STORE still require data.
 static bool interpreter_typed_symbol_address(const InterpreterProgram* program, SymbolId symbol, uint64_t* address)
@@ -1777,7 +1801,8 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
                     .chain = chain_value,
                 };
                 InterpreterValue returned = { 0 };
-                if (binding == 0 || !interpreter_typed_native(&request, function, (uint32_t)value, first, destination, result_size, &returned))
+                if (binding == 0 || !interpreter_typed_native_arguments(program, function, first, stack + argument_base, count) ||
+                    !interpreter_typed_native(&request, function, (uint32_t)value, first, destination, result_size, &returned))
                 {
                     result->status = binding == 0 ? INTERPRETER_SYMBOL : INTERPRETER_NATIVE;
                 }

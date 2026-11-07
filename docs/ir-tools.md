@@ -424,6 +424,19 @@ result parts and the vector registers' count were each checked by mutation.
 Inline assembly, threads and signals are outside this oracle's scope. Program
 callbacks from libc into interpreted functions and setjmp/longjmp are not an
 implemented host boundary.
+Both interpreter fronts refuse a native call with a scalar pointer or
+pointer-width integer argument equal to an interpreted-function token, including
+aliases, before entering the host. This returns `INTERPRETER_NATIVE`, so the
+reported `qsort`, `atexit` and `signal` callbacks fail cleanly instead of executing
+or retaining a non-code address (#1469). Direct and indirect native calls use
+the same check; interpreted indirect calls still resolve their tokens normally.
+The boundary is conservative: pointer-width integers and pointers share a
+representation, so an integer with exactly a token's bits is refused as well.
+It does not inspect aggregate payloads or arbitrary memory reachable through
+native arguments for hidden function pointers; those callbacks remain outside
+the supported boundary. The native-spy fixtures check refusal before any host
+entry without invoking or registering callbacks, and source execution controls
+exercise the three library calls in isolated children.
 
 ## Metamorphic IR testing
 

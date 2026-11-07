@@ -295,12 +295,15 @@ the x87's registers, and the convention's rarer aggregate shapes (#141): a
 part in a stack slot, a high or low eightbyte alone, an aggregate in a vector
 register whole, and an aggregate it ignores. So do the IR's vectors (#141, the
 selection guide's "Vectors"), within a function and passed or returned by value,
-which the lowering makes aggregates in a vector register whole. Still refused: a
+which the lowering makes aggregates in a vector register whole. Calls whose
+register parts exceed the red zone's 14 eightbyte staging slots reserve one
+frame object for the largest call (#1450), addressed through the stable frame
+base even in a dynamic frame. Four or more 32-byte vector arguments therefore
+work on both v3 and v4 policies; the checker driver's overflow-staging fixture
+cross-links them with clang under `--verify`. Still refused: a
 vector result LLVM demotes to a hidden pointer, naked functions, whose bodies
 are assembly Tier 0 copies as written, an address whose offset alone is past 32
-bits, and a call whose aggregates' parts in registers other than 64-byte
-vectors take more than the red zone's 14 staging slots (four 32-byte vectors,
-for one). The IR's switches and selects of floating
+bits. The IR's switches and selects of floating
 values are refused too, but the C driver's lowering makes neither: a `switch`
 comes as compares or a jump table, which Tier 1 takes, and `?:` as branches.
 Vectors of elements other than 32-bit integers (floats, doubles, 8-, 16- and

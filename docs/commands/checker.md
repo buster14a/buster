@@ -86,6 +86,9 @@ requirements. [Command index](README.md).
   `c_check_program_half_test.c`), run against clang -O0's code where the host has their features.
   Byte funnel shifts of 16-byte vectors require XOP: these tests compile/link everywhere and execute only where
   XOP is present; `test-x86-intrinsics` also checks their emitted expressions against Clang, including `_mm_rot_epi8`.
+  Required constant evaluation folds `_Float16` and `__bf16` arithmetic in the source format after each operation
+  (#1497); runtime half-precision chains retain their target's excess-precision behavior. The constant-source and
+  floating-action fixtures cover that distinction, ties, subnormals and negative zero.
   `--program-library` selects the library builtins' tables, constant folds and programs alone
   (`c_check_program_library_test.c`).
   `--transitions` selects the memoized transitions' fixtures, classes, static words and table limits alone (`c_check_transitions_test.c`).

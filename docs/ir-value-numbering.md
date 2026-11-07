@@ -69,7 +69,8 @@ The partition is the same either way; only class labels differ.
 Eight contiguous `uint64_t` key columns feed two eight-lane hash groups per
 16-instruction batch. Every column has its exact logical length, partial
 loads/stores are masked, and zero length performs no column access. Phi tails
-are hashed separately. `ir_gvn_partition_group` interns those already materialized
+and the upper six words of vector constants are hashed separately.
+`ir_gvn_partition_group` interns those already materialized
 keys in a bounded scratch hash table. A folded hash selects a bucket; the
 original full-key and predecessor-ordered phi comparison establishes equality.
 The analysis owns these columns in scratch. They are not persistent IR fields.
@@ -132,6 +133,16 @@ depending on it are excluded, including copies, to avoid strengthening the
 unspecified-value contract. Unreachable copy cycles are never followed as
 aliases and are removed with their blocks.
 
+SIMD functions are admitted (#1450). The same keys include each operation's
+lane flags and each `vcmp` predicate. `vconst` identity covers all 64 canonical
+payload bytes, including collision comparisons; identical constants at
+different table indices can merge, while different upper lanes cannot.
+Integer lane operations, masks, `vselect` and exact-bit scalar splats are pure.
+Floating lane arithmetic/comparisons retain the environment-sensitive exclusion.
+Tests exercise duplicate payloads, differences confined to the last word,
+forced hash collisions, different lane widths and retained floating effects,
+with shared-interpreter execution on both transformation paths.
+
 Substitution rebuilds private operand columns and each variable side-table
 slice before compaction. This matters because valid input slices can overlap
 and have different metadata roles. Constants, address/slot metadata and call
@@ -189,10 +200,11 @@ the monotone congruence solver. No source implementation was imported.
 
 ## Performance acceptance
 
-The grouping change targets #866's repeated full comparison sorts. It does not
-claim that the partition solver now beats the weaker scalar algorithm, that
-all acyclic work is eliminated, or that the default C compilation path gets
-faster. Use `benchmark-ir-optimize-passes --pass gvn --instructions 4096
+#946's grouping change targeted #866's repeated full comparison sorts. It did
+not claim that the partition solver beat the weaker scalar algorithm or that
+acyclic work was eliminated; the acyclic numbering ("The acyclic numbering on
+the 9700X" below) does both on these inputs. Neither claims that the default C
+compilation path gets faster. Use `benchmark-ir-optimize-passes --pass gvn --instructions 4096
 --samples 21` for the existing whole-public-stage fixture, including preparation
 and rewriting, and `benchmark-ir-source --only gvn` (or `gvn-scalar`) for
 source-derived IR. `benchmark-ir-source` runs both GVN paths once on every
@@ -240,8 +252,55 @@ source-GVN benchmark; the adapter is part of this change, not of the measured
 pass. Raw logs, commands and the placement script are in [the measurement
 record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/gvn-866-2026-10-31).
 
-The Tier 1 pipeline still does not feed C source through GVN, so no
-compile-time, emitted-code or default C-driver effect is claimed here. Those
+### The acyclic numbering on the 9700X
+
+Main at `ec5f0f6b` against the same commit with the acyclic numbering
+(`52003046`, merged by #1560): both built with `BUSTER_DEBUG_INFO=0` and Clang
+23.1.1, pinned to CPU 2, each process under the shared lock by itself. The
+synthetic fixture ran three processes per tree and code placement (the same
+`./build.sh shifts` placements as above), alternating which tree went first;
+its 21-sample medians changed by:
+
+| Shape (instructions) | Path | Placement 0 | Placement 256 | Placement 1,024 |
+| --- | --- | ---: | ---: | ---: |
+| `small-dag` (36) | vector | −16.4% | −15.8% | −15.1% |
+| `large-dag` (4,100) | vector | −22.8% | −23.0% | −22.6% |
+| `cyclic-phi` (15) | vector | +0.3% | +0.2% | +3.4% |
+| `small-dag` (36) | scalar (control) | +0.2% | +1.3% | +3.2% |
+| `large-dag` (4,100) | scalar (control) | +0.8% | −1.6% | +1.0% |
+| `cyclic-phi` (15) | scalar (control) | +1.1% | −0.2% | +3.1% |
+
+`large-dag`'s vector medians went from 342,084, 338,839 and 343,789 ns to
+264,055, 261,021 and 266,256 ns, against a scalar twin of 288,181 to 293,921 ns
+in both trees. The vector path's time over its twin's went from 1.15–1.19 to
+0.90–0.92 on `large-dag` and from 1.09–1.11 to 0.91–0.93 on `small-dag`. On
+`cyclic-phi` it stays 1.02–1.03: eight of its fifteen values reach its
+recurrences, so the refinement still runs, and its changes stay within the
+scalar control's. Every process removed 1,024 values from `large-dag` and 8
+from `small-dag`, and the vector path 4 from `cyclic-phi` against its twin's 0.
+
+On the frozen `sqlite3.c`, `benchmark-ir-source` with all its variants in
+each process, three processes per tree, alternating:
+
+| Variant, per typed entry | Main | Acyclic numbering | Change |
+| --- | ---: | ---: | ---: |
+| `gvn` time | 316.69 ns | 193.72 ns | −38.8% |
+| `gvn` cycles | 1,754.0 | 1,073.2 | −38.8% |
+| `gvn` instructions | 5,577.1 | 3,525.5 | −36.8% |
+| `gvn-scalar` time (control) | 198.79 ns | 199.16 ns | +0.2% |
+
+The processes' medians agreed within 0.2%. The vector path now takes 0.97 of
+its twin's time, where it took 1.59. Both trees removed 94,314 instructions
+(the corpus's lowering has changed since #946's record, which counted 94,358).
+Main's vector path ran 15,002 refinement rounds and 3,717,064 key
+comparisons; with the numbering all 599,254 instructions are numbered
+acyclic, in no round, with 241,031 key comparisons and no collision-budget
+completion. The scalar twin executes 0.6% more instructions per entry
+(3,660.6 to 3,680.7): it allocates and zeroes the new scratch columns too, so
+that `scratch_bytes` doesn't depend on the path.
+
+The Tier 1 pipeline still does not feed C source through GVN by default, so no
+default C-driver or emitted-code effect is claimed here. Those
 remain #139's integration work. The source-derived rows qualify the pass on
 real IR; the synthetic rows measure the whole public stage.
 
@@ -267,4 +326,3 @@ default therefore waits for a variant that accounts for allocation cost; the
 option stays as the reproducible measurement, and [the measurement
 record](https://github.com/buster14a/buster-performance/tree/126886e46a23f095709bffb36c3c57aaafac35b3/docs/measurements/gvn-866-tier1-2026-11-01)
 has the commands, the host and the raw logs.
-

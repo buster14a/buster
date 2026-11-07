@@ -1,0 +1,28 @@
+function (i8, i16, i32, i64, f32, f64) -> void {
+b0:
+  %0 = param.i8 0
+  %1 = param.i16 1
+  %2 = param.i32 2
+  %3 = param.i64 3
+  %4 = param.f32 4
+  %5 = param.f64 5
+  %6 = intrinsic.v4i32 %0 splat
+  %7 = intrinsic.v4i32 %1 splat
+  %8 = intrinsic.v4i32 %2 splat
+  %9 = intrinsic.v4i32 %3 splat
+  %10 = intrinsic.v4i32 %4 splat
+  %11 = intrinsic.v4i32 %5 splat
+  %12 = intrinsic.v8i32 %0 splat
+  %13 = intrinsic.v8i32 %1 splat
+  %14 = intrinsic.v8i32 %2 splat
+  %15 = intrinsic.v8i32 %3 splat
+  %16 = intrinsic.v8i32 %4 splat
+  %17 = intrinsic.v8i32 %5 splat
+  %18 = intrinsic.v16i32 %0 splat
+  %19 = intrinsic.v16i32 %1 splat
+  %20 = intrinsic.v16i32 %2 splat
+  %21 = intrinsic.v16i32 %3 splat
+  %22 = intrinsic.v16i32 %4 splat
+  %23 = intrinsic.v16i32 %5 splat
+  %24 = ret.void
+}

@@ -17,11 +17,21 @@ out of an inner loop may subsequently move through the outer preheader.
 Candidate operations are total, pure computations: integer wrapping
 arithmetic and bit operations, comparisons, selects, exact conversions,
 floating sign negation, constants, parameters and address calculations.
-Division, remainder and shifts are excluded even when individual instances
+Division, remainder and scalar shifts are excluded even when individual instances
 might be provably safe. Loads, stores, calls, phis, `undef`, numeric floating
 operations and floating comparisons are excluded. Taint follows uses from
 every `undef`, so moving a calculation cannot fix a choice that was previously
 unspecified on each iteration. There is no memory-alias assumption.
+
+SIMD functions are admitted (#1450), including vector constants, integer lane
+arithmetic/comparisons, bitwise operations, lane selects, masks and exact-bit
+scalar splats. Packed variable shifts are total for every count and may move;
+scalar shifts keep their existing exclusion. Floating lane arithmetic and
+comparisons remain in their original blocks, as do memory operations and
+undef-tainted vector values. The shared rewriter preserves wide constants and
+lane flags. A loop fixture checks the complete dependency chain on both paths,
+its interpreted result, and the unmoved floating effects; an undef variant
+checks that the chain stays in place.
 
 For one loop, a value is initially available if its current definition lies
 outside the loop and dominates the preheader. A candidate becomes invariant

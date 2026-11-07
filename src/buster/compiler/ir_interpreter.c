@@ -77,6 +77,23 @@ static uint32_t ir_interpreter_find_function(const IrInterpreterProgram* program
     return result;
 }
 
+// IR pointer and pointer-width integer arguments can carry interpreted-function tokens. Neither is host code;
+// refuse them before the host can invoke or retain one as a callback. This is deliberately the same conservative
+// scalar boundary as the typed front, not a provenance check of aggregates or memory reachable through pointers.
+static bool ir_interpreter_native_arguments(const IrInterpreterProgram* program, const uint16_t* types, const InterpreterValue* arguments, const IrPassed* places, uint32_t count)
+{
+    bool valid = true;
+    for (uint32_t a = 0; valid && a < count; a += 1)
+    {
+        const uint16_t type = types[a];
+        if ((places == 0 || places[a].size == 0) && (type == IR_PTR || type == IR_I64))
+        {
+            valid = ir_interpreter_find_function(program, 0, arguments[a].low, true) == UINT32_MAX;
+        }
+    }
+    return valid;
+}
+
 static const InterpreterNativeBinding* ir_interpreter_find_native(const IrInterpreterProgram* program, SymbolId symbol, uint64_t address, bool indirect)
 {
     const InterpreterNativeBinding* result = 0;
@@ -948,7 +965,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
             bool defined = true;
             // The operand table describes value operands, not metadata. Select and phi consume only their chosen
             // incoming value; dead undef alternatives remain legal. COPY can carry undef until a semantic use.
-            uint8_t operands = ir_operand_table[op];
+            uint8_t operands = (uint8_t)ir_value_mask(function, i);
             if (op == IR_RET && a != BUSTER_IR_NONE)
             {
                 operands = 1;
@@ -1261,7 +1278,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                             .result_size = result_size,
                             .chain = chain,
                         };
-                        const bool invoked = interpreter_native_invoke(&request, &value);
+                        const bool invoked = ir_interpreter_native_arguments(program, types, passed, request.passed, call.argument_count) && interpreter_native_invoke(&request, &value);
                         if (!invoked)
                         {
                             result.status = INTERPRETER_NATIVE;
