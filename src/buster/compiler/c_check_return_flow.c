@@ -51,7 +51,62 @@ static bool check_program_return_unknowns(const CheckProgram* program, Arena* sc
     return ready;
 }
 
-static uint8_t check_program_return_call(const CheckProgram* program, uint32_t node, const uint32_t* unknowns)
+// Library noreturn depends on builtin options and named typedef visibility. Those policies are not the declaration's
+// FUNCTION_NORETURN bit, so a call to a declaration named as a catalogue entry with the 'r' attribute stays unknown
+// rather than guessed from its name. The answer depends on the interned name alone (#1709).
+// The scalar answer, and the twin of the table below: a search of the catalogue by name.
+static uint8_t check_program_return_library_search(const InternTable* identifiers, uint32_t name)
+{
+    const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)intern_bytes(identifiers, name), intern_length(identifiers, name));
+    const bool unknown = info != NULL && memchr(info->attributes, 'r', info->attributes_length) != NULL;
+    return unknown ? BUSTER_CHECK_RETURN_UNKNOWN : 0;
+}
+
+// The catalogue's entries with the 'r' attribute, in its order. test-checker's return marks check that these are all
+// of them, so a regenerated catalogue that changes the set fails there.
+static const BuiltinIntrinsicName check_program_return_library_entries[] =
+{
+#define BUSTER_CHECK_RETURN_NAME(n) { n, sizeof(n) - 1 },
+    BUSTER_CHECK_RETURN_NAME("_Exit")
+    BUSTER_CHECK_RETURN_NAME("__builtin_abort")
+    BUSTER_CHECK_RETURN_NAME("__builtin_eh_return")
+    BUSTER_CHECK_RETURN_NAME("__builtin_longjmp")
+    BUSTER_CHECK_RETURN_NAME("__builtin_trap")
+    BUSTER_CHECK_RETURN_NAME("__builtin_unreachable")
+    BUSTER_CHECK_RETURN_NAME("__builtin_verbose_trap")
+    BUSTER_CHECK_RETURN_NAME("__fastfail")
+    BUSTER_CHECK_RETURN_NAME("__int2c")
+    BUSTER_CHECK_RETURN_NAME("__ud2")
+    BUSTER_CHECK_RETURN_NAME("_exit")
+    BUSTER_CHECK_RETURN_NAME("_longjmp")
+    BUSTER_CHECK_RETURN_NAME("abort")
+    BUSTER_CHECK_RETURN_NAME("exit")
+    BUSTER_CHECK_RETURN_NAME("longjmp")
+    BUSTER_CHECK_RETURN_NAME("siglongjmp")
+#undef BUSTER_CHECK_RETURN_NAME
+};
+
+// One byte per id of `identifiers`: BUSTER_CHECK_RETURN_UNKNOWN at the ids that spell an entry above, zero elsewhere,
+// so a call reads its answer instead of searching the catalogue. NULL if the scratch arena has no room; the calls then
+// search, with the same answers.
+static uint8_t* check_program_return_library_names(const InternTable* identifiers, Arena* scratch)
+{
+    const uint32_t count = identifiers != NULL ? identifiers->count : 0;
+    uint8_t* names = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
+    if (names != NULL)
+    {
+        memset(names, 0, count);
+        for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(check_program_return_library_entries); e += 1)
+        {
+            const BuiltinIntrinsicName* entry = check_program_return_library_entries + e;
+            const IdentId name = intern_find(identifiers, (const uint8_t*)entry->name, entry->length);
+            names[name] = name != 0 && name < count ? BUSTER_CHECK_RETURN_UNKNOWN : names[name];
+        }
+    }
+    return names;
+}
+
+static uint8_t check_program_return_call(const CheckProgram* program, uint32_t node, const uint32_t* unknowns, const uint8_t* names)
 {
     const CheckInput* input = program->input;
     const CheckStream* stream = program->stream;
@@ -70,11 +125,7 @@ static uint8_t check_program_return_call(const CheckProgram* program, uint32_t n
     else if (known && program->identifiers != NULL)
     {
         const uint32_t name = program->parser->tokens.names[declaration];
-        const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)intern_bytes(program->identifiers, name), intern_length(program->identifiers, name));
-        // Library noreturn depends on builtin options and named typedef visibility. Those policies are not the
-        // declaration's FUNCTION_NORETURN bit, so preserve conservative handling rather than guess from its name.
-        const bool unknown = info != NULL && memchr(info->attributes, 'r', info->attributes_length) != NULL;
-        result = unknown ? BUSTER_CHECK_RETURN_UNKNOWN : 0;
+        result = names != NULL && name < program->identifiers->count ? names[name] : check_program_return_library_search(program->identifiers, name);
     }
     return result;
 }
@@ -99,10 +150,12 @@ static uint8_t* check_program_return_facts(CheckProgram* program, Arena* scratch
         check_program_fail(program, CHECK_PROGRAM_RESOURCE, 0);
         facts = NULL;
     }
+    // The names' answers are an optimisation only: without them every call searches the catalogue, as before.
+    const uint8_t* names = ready && count != 0 ? check_program_return_library_names(program->identifiers, scratch) : NULL;
     for (uint32_t node = 0; ready && node < count; node += 1)
     {
         const CheckOp op = graph->ops[node];
-        uint8_t result = op == CHECK_OP_CALL ? check_program_return_call(program, node, unknowns) :
+        uint8_t result = op == CHECK_OP_CALL ? check_program_return_call(program, node, unknowns, names) :
                          op == CHECK_OP_BUILTIN_QUERY ? BUSTER_CHECK_RETURN_UNKNOWN : 0;
         if (work != NULL)
         {
