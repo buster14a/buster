@@ -41,7 +41,9 @@ static __attribute__((noinline)) void check_test_deprecated_marked(CheckTest* te
         uint64_t selected = 0;
         for (uint32_t density = 0; ready && density < 3; density += 1)
         {
-            for (uint32_t object_mode = 0; object_mode < 2; object_mode += 1)
+            // Mode 0 and 1, without objects and with; modes 2 and 3 the same with few keys marked, as a unit's deprecated
+            // declarations are, where the marked keys' filter skips most 16 identifiers (#529).
+            for (uint32_t object_mode = 0; object_mode < 4; object_mode += 1)
             {
                 for (uint32_t round = 0; round < 66 + BUSTER_ARRAY_LENGTH(extra_counts); round += 1)
                 {
@@ -59,7 +61,8 @@ static __attribute__((noinline)) void check_test_deprecated_marked(CheckTest* te
                         const uint32_t first_objects[] = { 0, 1, count, count + 1, UINT32_MAX, UINT32_C(0x80000001), count / 2 + 1, i * 11 % count + 1 };
                         declarations[i] = declared[i % BUSTER_ARRAY_LENGTH(declared)];
                         objects[i] = first_objects[i % BUSTER_ARRAY_LENGTH(first_objects)];
-                        marks[i] = i % 4 == 0 ? UINT32_C(0x80000000) : i % 4 == 1 ? 0 : i % 4 == 2 ? 1 : UINT32_MAX;
+                        marks[i] = object_mode >= 2 ? (i % 97 == 5 ? i + 1 : 0) :
+                                   i % 4 == 0 ? UINT32_C(0x80000000) : i % 4 == 1 ? 0 : i % 4 == 2 ? 1 : UINT32_MAX;
                     }
                     words[-1] = prefix;
                     words[word_count] = suffix;
@@ -68,7 +71,7 @@ static __attribute__((noinline)) void check_test_deprecated_marked(CheckTest* te
                     parser.tokens.count = count;
                     parser.tokens.kinds = kinds;
                     CheckInput input = { .declarations = declarations };
-                    CheckInputReader reader = { .parser = &parser, .output = &input, .objects = object_mode != 0 ? objects : NULL };
+                    CheckInputReader reader = { .parser = &parser, .output = &input, .objects = object_mode % 2 != 0 ? objects : NULL };
                     check_input_deprecated_marked(&reader, marks, words);
                     bool equal = words[-1] == prefix && words[word_count] == suffix;
                     for (uint32_t word = 0; word < word_count; word += 1)
@@ -82,7 +85,7 @@ static __attribute__((noinline)) void check_test_deprecated_marked(CheckTest* te
                             if (kinds[token] == PARSE_KIND_IDENTIFIER && declarations[token] < count)
                             {
                                 uint32_t key = declarations[token];
-                                if (object_mode != 0)
+                                if (object_mode % 2 != 0)
                                 {
                                     const uint32_t object = objects[key];
                                     if (object != 0 && object - 1 < count)
@@ -108,7 +111,7 @@ static __attribute__((noinline)) void check_test_deprecated_marked(CheckTest* te
                 }
             }
         }
-        check_test_expect(test, cases == 456 && differences == 0 && selected != 0,
+        check_test_expect(test, cases == 912 && differences == 0 && selected != 0,
                           "deprecated mark bitmaps match independent key routing, guarded tails and unused high bits");
         for (uint32_t i = 0; i < COLUMNS; i += 1)
         {
