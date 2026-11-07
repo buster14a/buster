@@ -1321,6 +1321,61 @@ static void check_lanes_test_scratch(CheckLanesTestTally* tally, const char* dir
            (unsigned long long)largest, (unsigned long long)columns);
 }
 
+// Lane 0's columns kept from one emission to the next (#442): the squeezes' program emitted three times on lanes of one,
+// by each path, the lanes settled after each as check_driver_object settles a units' lane's (check_program_lanes_settle):
+// each emission makes the first one's code, in the first lanes' scratch the first one reserved, which each settle keeps
+// with no lane's arenas in use; then check_program_lanes_release releases it.
+static void check_lanes_test_settle(CheckLanesTestTally* tally, const char* directory)
+{
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    char path[PATH_MAX];
+    char detail[256];
+    snprintf(path, sizeof(path), "%s/squeeze.c", directory);
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        CheckLanesTestUnit unit;
+        check_lanes_test_compile(&unit, &pp, &parser, &identifiers, path, scalar != 0);
+        check_lanes_test_expect(tally, unit.ready, "compile the squeezes' program for lane 0's kept columns", path);
+        Arena output = arena_reserve(UINT64_C(1) << 32);
+        Arena bytes = arena_reserve(UINT64_C(1) << 32);
+        Arena scratch = arena_reserve(UINT64_C(1) << 34);
+        CheckProgramLanes lanes = { .lanes = 1 };
+        const bool ready = unit.ready && output.base != 0 && bytes.base != 0 && scratch.base != 0;
+        const uint8_t* first_columns = 0;
+        uint64_t first_code = 0;
+        uint32_t kept = 0;
+        for (uint32_t emission = 0; ready && emission < 3; emission += 1)
+        {
+            CheckProgramCode code = { 0 };
+            const bool emitted = check_program_emit_lanes(&code, &unit.selected.program, &parser, &identifiers, unit.selected.data.capacity, scalar != 0, &output,
+                                                          &bytes, &scratch, NULL, NULL, false, true, &lanes);
+            const uint8_t* columns = lanes.arenas[0].scratch.base;
+            first_columns = emission == 0 ? columns : first_columns;
+            first_code = emission == 0 ? code.code_bytes : first_code;
+            check_program_lanes_settle(&lanes);
+            kept += emitted && columns != 0 && columns == first_columns && code.code_bytes == first_code && lanes.arenas_used == 0 &&
+                    lanes.arenas[0].scratch.base == columns;
+            arena_pop_to(&output, 0);
+            arena_pop_to(&bytes, 0);
+            arena_pop_to(&scratch, 0);
+        }
+        snprintf(detail, sizeof(detail), "%s path: %u of 3 emissions kept the first one's columns and made its %llu bytes of code", scalar != 0 ? "scalar" : "vector",
+                 kept, (unsigned long long)first_code);
+        check_lanes_test_expect(tally, kept == 3, "lanes settled after each emission keep lane 0's columns for the next, which makes the same code", detail);
+        check_program_lanes_release(&lanes);
+        check_lanes_test_expect(tally, lanes.arenas[0].scratch.base == 0, "releasing the settled lanes releases lane 0's columns", detail);
+        arena_release(&scratch);
+        arena_release(&bytes);
+        arena_release(&output);
+        check_lanes_test_close(&unit);
+        parse_release(&parser);
+        pp_release(&pp);
+        intern_release(&identifiers);
+    }
+}
+
 // The lane rule (see the file's comment): a generated program's lanes by default, with room for 8.
 static void check_lanes_test_rule(CheckLanesTestTally* tally, const char* directory)
 {
@@ -2879,6 +2934,7 @@ static int run_check_lanes_tests(int argc, char** argv)
             check_lanes_test_unstarted(&tally, directory);
             check_lanes_test_address_space(&tally, directory);
             check_lanes_test_scratch(&tally, directory);
+            check_lanes_test_settle(&tally, directory);
             check_lanes_test_rule(&tally, directory);
             check_lanes_test_driver(&tally, executable, directory, programs, id_order);
             check_lanes_test_driver_failing(&tally, executable, directory, id_order);

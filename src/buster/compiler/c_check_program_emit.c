@@ -691,7 +691,8 @@ static void check_program_lanes_use(CheckProgramLanes* lanes, uint32_t count)
     }
 }
 
-// Releases the lanes' arenas: after the caller is done with the last emission's link.
+// Releases the lanes' arenas: after the caller is done with the last emission's link. Lane 0's writer's columns too, which
+// a settle (check_program_lanes_settle) kept past the lanes it marked unused.
 static void check_program_lanes_release(CheckProgramLanes* lanes)
 {
     for (uint32_t lane = 0; lanes != NULL && lane < lanes->arenas_used; lane += 1)
@@ -703,9 +704,28 @@ static void check_program_lanes_release(CheckProgramLanes* lanes)
     }
     if (lanes != NULL)
     {
+        arena_release(&lanes->arenas[0].scratch);
         lanes->arenas_used = 0;
     }
 }
+
+// check_program_lanes_release but for lane 0's writer's columns (the first lanes' scratch), which the next emission with
+// these lanes takes while it has their room, as it does within a CheckProgramLanes' life: a units' lane's, from one unit
+// to the next (c_checker_units.c, #442), as the lane keeps its own arenas. No emission reads a column's bytes before it
+// writes them, so the pages stay as the last one left them.
+static void check_program_lanes_settle(CheckProgramLanes* lanes)
+{
+    const Arena columns = lanes->arenas[0].scratch;
+    lanes->arenas[0].scratch = (Arena){ 0 };
+    check_program_lanes_release(lanes);
+    lanes->arenas[0].scratch = columns;
+}
+
+// Lane 0's writer's columns without lanes (check_program_emit's): the calling thread's, reserved for the room they take
+// and kept while it has that room, as a CheckProgramLanes keeps its first lane's scratch, so that an emission after the
+// thread's first maps, protects and faults in none of their pages again (#442). Never released: the thread's largest
+// unit's columns, of which only the pages its bodies touched are resident.
+static _Thread_local Arena check_program_thread_columns;
 
 // A body's code, as its lane made it (check_program_emit_code): its bytes, encoded after branch sizing; each marked
 // instruction's end (x86_encode's fixup ends) and each label's offset (or UINT32_MAX for a record past the code), and a
@@ -2473,6 +2493,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         valid = unwind_initialize();
         result->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_BACKEND;
     }
+    // The runtime functions' names' lengths and hashes, which the lowering's preparation looks up (#442), where they
+    // aren't baked: a lowering that finds them unmade measures and hashes the names itself.
+    if (valid && !check_lower_runtime_names_ready)
+    {
+        check_lower_runtime_names_initialize();
+    }
     check_clock_mark(stage_clock, CHECK_STAGE_BACKEND_SETUP);
     CheckLowerShared shared;
     const bool lowering = valid;
@@ -2500,14 +2526,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         access[shared.provisional_runtimes + CHECK_LOWER_RUNTIME_MEMCPY] = BUSTER_TIER0_ACCESS_GOT;
     }
     // Lane 0's writer's columns (CheckEmitRun.columns), in an arena of base pages reserved for the room they take
-    // (check_lower_writer_bytes): the lanes' first arenas' scratch, kept while it has the room and otherwise reserved
-    // again, or without lanes an arena of this emission's own; none without bodies, whose writer never begins. Where that
-    // address space can't be reserved (RLIMIT_AS, or overcommit refused), they go in the caller's scratch, as before
-    // #531, if it has their room: the calling thread runs the bodies when the lanes can't, and then needs no address space
-    // past the caller's arenas.
-    Arena own_columns = { 0 };
+    // (check_lower_writer_bytes): the lanes' first arenas' scratch, or without lanes the calling thread's
+    // (check_program_thread_columns), each kept while it has the room and otherwise reserved again; none without bodies,
+    // whose writer never begins. Where that address space can't be reserved (RLIMIT_AS, or overcommit refused), they go
+    // in the caller's scratch, as before #531, if it has their room: the calling thread runs the bodies when the lanes
+    // can't, and then needs no address space past the caller's arenas.
     check_program_lanes_use(lanes, 1);
-    Arena* reserved = lanes != NULL ? &lanes->arenas[0].scratch : &own_columns;
+    Arena* reserved = lanes != NULL ? &lanes->arenas[0].scratch : &check_program_thread_columns;
     const uint64_t column_bytes = valid && count != 0 ? check_lower_writer_bytes(&shared, rows != NULL) : 0;
     if (column_bytes > reserved->capacity)
     {
@@ -4082,7 +4107,6 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
     }
     arena_pop_to(scratch, temporary);
-    arena_release(&own_columns);
     if (timing)
     {
         lanes->merge_ns = check_program_lanes_now() - lanes_end;
