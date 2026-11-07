@@ -486,7 +486,9 @@ static uint32_t check_literal_unevaluated_ucn(const uint8_t* bytes, uint32_t esc
             invalid |= !closed && !hex;
             overflow |= hex && (value & 0xF0000000u) != 0;
             value = hex && (value & 0xF0000000u) == 0 ? value << 4 | (check_literal_is_digit(digit) ? (uint32_t)(digit - '0') : (uint32_t)((digit | 32u) - 'a' + 10)) : value;
-            digits += (!closed && !hex) || (hex && !overflow) ? 1 : 0;
+            // (A delimited one's bad digits count, so `\u{g}` isn't empty; a plain one's terminator isn't a digit: `\u123g` is
+            // incomplete.)
+            digits += (delimited && !closed && !hex) || (hex && !overflow) ? 1 : 0;
             // A plain name's first other byte ends it; a delimited one reads on to its brace.
             reading = !closed && (hex || delimited);
             at += reading || closed ? 1 : 0;
