@@ -964,7 +964,9 @@ static bool object_count_sections(ObjectBuilder* builder, Arena* scratch)
     {
         const uint32_t begin = units->atom_begin[key + class] - unit_begin;
         const uint32_t end = units->atom_begin[key + class + 1] - unit_begin;
-        uint32_t groups = 1;
+        // A class without atoms has no sections, which its groups' pass would only confirm: with descriptors, as every -c
+        // compile's (check_program_sections), most of a small unit's classes (#1629).
+        uint32_t groups = begin != end ? 1 : 0;
         for (uint32_t i = begin; result && builder->options.atom_sections != 0 && i < end; i += 1)
         {
             const AtomId atom = units->atoms[unit_begin + i];
@@ -972,7 +974,7 @@ static bool object_count_sections(ObjectBuilder* builder, Arena* scratch)
             const bool grouped = builder->link->groups.count != 0 && builder->link->groups.atom_groups[atom] != 0;
             result = object_section_valid(descriptor, class) && ((descriptor->flags & SHF_GROUP) == 0 || grouped);
         }
-        if (result && described)
+        if (result && described && begin != end)
         {
             memory = object_group_atoms(builder, class, units->atoms + unit_begin, begin, end, order, firsts, descriptors, section_groups, &groups, scratch);
             result = memory;

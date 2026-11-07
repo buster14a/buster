@@ -600,6 +600,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_optimize.c"
 // #141: Tier 1's 128-bit integers as pairs of 64-bit halves, before the optimizer.
 #include "buster/compiler/ir_wide.c"
+// #1624: Tier 1's vectors wider than the target's registers as its widest vectors' pieces, before the optimizer.
+#include "buster/compiler/ir_vector_split.c"
 #include "buster/compiler/ir_rebuild.c"
 #include "buster/compiler/ir_reduce.c"
 #include "buster/compiler/ir_reduce_oracle.c"

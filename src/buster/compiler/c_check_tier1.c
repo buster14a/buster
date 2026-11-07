@@ -14,8 +14,11 @@
 
 #include "ir_optimize_verified.c"
 #include "ir_wide.c"
+#include "ir_vector_split.c"
 #include "ir_truth.c"
+#include "tier1_schedule_ir.c"
 #include "c_check_tier1_inline.c"
+#include "c_check_tier1_schedule.c"
 
 _Static_assert(BUSTER_TIER1_ACCESS_DIRECT == BUSTER_TIER0_ACCESS_DIRECT && BUSTER_TIER1_ACCESS_GOT == BUSTER_TIER0_ACCESS_GOT && BUSTER_TIER1_ACCESS_LOCAL_EXEC == BUSTER_TIER0_ACCESS_LOCAL_EXEC &&
                    BUSTER_TIER1_ACCESS_INITIAL_EXEC == BUSTER_TIER0_ACCESS_INITIAL_EXEC,
@@ -73,7 +76,8 @@ static CheckTier1Outcome check_tier1_failure(CheckTier1Stage stage, CheckTier1Ca
                        error == TIER1_EMIT_MEMORY || error == TIER1_EMIT_LIMIT ? CHECK_TIER1_RESOURCE_FAILURE : category;
             break;
         case CHECK_TIER1_CAUSE_ARENA:
-            category = error == BUSTER_CHECK_TIER1_ARENA_RESERVE || error == BUSTER_CHECK_TIER1_ARENA_OUTPUT ? CHECK_TIER1_RESOURCE_FAILURE : category;
+            category = error == BUSTER_CHECK_TIER1_ARENA_RESERVE || error == BUSTER_CHECK_TIER1_ARENA_OUTPUT || error == BUSTER_CHECK_TIER1_ARENA_SCHEDULE ?
+                           CHECK_TIER1_RESOURCE_FAILURE : category;
             break;
         case CHECK_TIER1_CAUSE_LIVENESS:
             category = error == TIER1_LIVENESS_UNSUPPORTED ? CHECK_TIER1_UNSUPPORTED :
@@ -280,8 +284,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     IrFunction lowered = { 0 };
     if (stage == CHECK_TIER1_COMPILED)
     {
-        const IrCheck check = scalar ? ir_lower_typed_target_scalar(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered) :
-                                       ir_lower_typed_target(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered);
+        // A vector wider than the target moves whole is taken, and split below (#1624).
+        const IrCheck check = ir_lower_typed_target_pieces(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered, scalar);
         outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
         stage = outcome.stage;
@@ -335,6 +339,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     // The 128-bit integers' halves (#141, ir_wide.c), which the optimizer then takes: a function without any is the
     // promoted one itself, borrowed.
     IrWideResult wide = { 0 };
+    uint32_t pre_blocks = 0;
+    uint32_t pre_moved = 0;
     if (stage == CHECK_TIER1_COMPILED)
     {
         const IrCheck check = scalar ? ir_wide_split_scalar(&promoted, &lane->steps[6], scratch, &wide) : ir_wide_split(&promoted, &lane->steps[6], scratch, &wide);
@@ -342,12 +348,43 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
     }
+    // The vectors wider than the target moves whole, as its widest vectors' pieces (#1624, ir_vector_split.c), in the same
+    // step's arena, after the halves: a function without any is the halves' (or the promoted one) itself, borrowed.
+    if (stage == CHECK_TIER1_COMPILED)
+    {
+        IrVectorSplitResult pieces = { 0 };
+        const uint32_t piece = ir_typed_vector_piece(target->features);
+        const IrCheck check = scalar ? ir_vector_split_scalar(&wide.function, piece, &lane->steps[6], scratch, &pieces) : ir_vector_split(&wide.function, piece, &lane->steps[6], scratch, &pieces);
+        outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+        outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
+        stage = outcome.stage;
+        wide.function = stage == CHECK_TIER1_COMPILED ? pieces.function : wide.function;
+    }
     if (stage == CHECK_TIER1_COMPILED)
     {
         // The lane owns these columns, including the borrowed promoted columns when no wide split was needed.
         // No later consumer reads their old operands and no analysis revision has been published. Simplify before
         // optimizer preparation builds uses, then let its DCE and final SSA verification consume the new operands.
         ir_truth_simplify(&wide.function, scalar);
+    }
+    // --tier1-schedule=pre (#172): each block's instructions reordered on the same owned columns, before the optimizer's
+    // final verification, which then covers the new order. No room for the pass's scratch is a resource failure.
+    if (stage == CHECK_TIER1_COMPILED && lane->schedule == BUSTER_CHECK_TIER1_SCHEDULE_PRE)
+    {
+        // With --verify, the original columns and the permutation, which the scalar reference checks.
+        const uint64_t mark = scratch->length;
+        Tier1ScheduleIrOriginal original = { 0 };
+        uint32_t* order = certify ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)wide.function.instruction_count + 1) : 0;
+        uint32_t* place = certify ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)wide.function.instruction_count + 1) : 0;
+        const bool copied = !certify || (order != 0 && place != 0 && tier1_schedule_ir_copy(&wide.function, scratch, &original));
+        Tier1ScheduleIrStats schedule_stats = { 0 };
+        IrError error = copied ? tier1_schedule_ir_function(&wide.function, scratch, order, &schedule_stats) : IR_ERROR_MEMORY;
+        error = error == IR_OK && certify && !tier1_schedule_ir_verify(&original, &wide.function, order, place) ? IR_ERROR_STRUCTURE : error;
+        arena_pop_to(scratch, mark);
+        outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, error, BUSTER_IR_NONE, 0, NULL);
+        stage = outcome.stage;
+        pre_blocks = schedule_stats.segments;
+        pre_moved = schedule_stats.moved;
     }
     IrOptimizeResult optimized = { 0 };
     IrVerifiedRevision revision = { 0 };
@@ -497,6 +534,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .machine_rows = emitted.machine_rows,
             .row_moves = emitted.row_moves,
             .inlined_calls = inlined_calls,
+            .schedule_blocks = pre_blocks,
+            .schedule_moved = pre_moved,
         };
         if (emitted.frame_event_count != 0)
         {
@@ -504,6 +543,31 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         }
         uint32_t epilogue = selected->count;
         const bool published = check_tier1_frame(&emitted, selected->count, &epilogue);
+        // --tier1-schedule=post (#172): each block's records reordered, within the cuts the code's columns and events
+        // make; the body's start and the epilogue's are cuts with or without -g, so that -g doesn't change the code.
+        CheckTier1ScheduleResult scheduled = { .verified = true, .ready = true };
+        if (lane->schedule == BUSTER_CHECK_TIER1_SCHEDULE_POST)
+        {
+            const uint32_t anchors[2] = { emitted.body_record, epilogue };
+            const CheckTier1ScheduleCode schedule = {
+                .records = records,
+                .count = selected->count,
+                .branches = branches,
+                .targets = targets,
+                .branch_count = selected->branch_count,
+                .references = references,
+                .reference_count = emitted.reference_count,
+                .labels = labels,
+                .label_count = emitted.label_count,
+                .frames = frames,
+                .frame_count = emitted.frame_event_count,
+                .anchors = anchors,
+                .anchor_count = 2,
+            };
+            scheduled = check_tier1_schedule_code(scratch, &schedule, !scalar, certify);
+            counts->schedule_blocks = scheduled.blocks;
+            counts->schedule_moved = scheduled.moved;
+        }
         if (sources)
         {
             source_records[0] = emitted.body_record;
@@ -533,8 +597,11 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         const bool framed = emitted.frame_event_count != 0;
         counts->open_frames = framed && !closed;
         counts->return_tails = !framed ? 0 : closed ? emitted.exit_count - 1 : emitted.exit_count;
-        outcome = check_tier1_step(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_PUBLICATION,
-                                   published ? 0 : BUSTER_CHECK_TIER1_FRAME_PUBLICATION, BUSTER_IR_NONE, 0, fault);
+        outcome = !scheduled.ready ? check_tier1_failure(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_SCHEDULE, BUSTER_IR_NONE, 0) :
+                                     check_tier1_step(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_PUBLICATION,
+                                                      !published            ? BUSTER_CHECK_TIER1_FRAME_PUBLICATION :
+                                                      !scheduled.verified ? BUSTER_CHECK_TIER1_SCHEDULE : 0,
+                                                      BUSTER_IR_NONE, 0, fault);
         if (outcome.category != CHECK_TIER1_SUCCESS)
         {
             arena_pop_to(output, mark);
@@ -630,8 +697,10 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
     }
     fprintf(stream, "\trecords=%" PRIu64 "\tspill_stores=%" PRIu64 "\tspill_loads=%" PRIu64 "\tcall_stores=%" PRIu64 "\tcall_loads=%" PRIu64 "\trematerializations=%" PRIu64
                     "\tdropped_definitions=%" PRIu64 "\tedge_moves=%" PRIu64 "\tspill_slots=%" PRIu64 "\tframe_bytes=%" PRIu64 "\topen_frames=%" PRIu64
-                    "\treturn_tails=%" PRIu64 "\tred_zones=%" PRIu64 "\tcode_certified=%" PRIu64 "\tcode_uncertified=%" PRIu64 "\tmachine_rows=%" PRIu64 "\trow_moves=%" PRIu64 "\tinlined=%" PRIu64 "\n",
+                    "\treturn_tails=%" PRIu64 "\tred_zones=%" PRIu64 "\tcode_certified=%" PRIu64 "\tcode_uncertified=%" PRIu64 "\tmachine_rows=%" PRIu64 "\trow_moves=%" PRIu64 "\tinlined=%" PRIu64
+                    "\tschedule_blocks=%" PRIu64 "\tschedule_moved=%" PRIu64 "\n",
             report->records, report->spill_stores, report->spill_loads, report->call_stores, report->call_loads, report->rematerializations,
             report->dropped_definitions, report->edge_moves, report->spill_slots, report->frame_bytes, report->open_frames, report->return_tails, report->red_zones,
-            report->code_certified, report->code_uncertified, report->machine_rows, report->row_moves, report->inlined_calls);
+            report->code_certified, report->code_uncertified, report->machine_rows, report->row_moves, report->inlined_calls, report->schedule_blocks,
+            report->schedule_moved);
 }

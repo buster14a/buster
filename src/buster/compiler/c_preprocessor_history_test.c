@@ -361,6 +361,64 @@ static bool pp_test_history_lifetimes(const char* directory)
     return result;
 }
 
+// pp_output_invocation_place, the file's own place of an output token's invocation, which -Wempty-body's indentation
+// check asks before the history (#628): at the first token of each run of tokens a macro made, it must be the history's
+// place (pp_output_expansion_begin) wherever it has one, and have one for a lone invocation: a name, with or without a
+// list, nested in its arguments or rescanned into another, but none where two invocations (an empty one first among
+// them) or a directive share the run. Returns whether all of that holds.
+static bool pp_test_history_invocation_places(const char* directory)
+{
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/history-places.c", directory);
+    const char* source = "#define assert(e) ((void)0)\n#define CHECK(e) do { (void)(e); } while (0)\n#define EMPTY\n#define OBJ (1)\n"
+                         "#define WRAP(x) CHECK(x)\n#define CALL WRAP\n#define SEMI ;\n"
+                         "int f(int n)\n{\n    int i = 0;\n    for (i = 0; i < n; i++);\n    assert(i == n);\n"
+                         "    for (;;);\n      CHECK(n);\n    EMPTY assert(n);\n    WRAP((n, (1)));\n    CALL (n);\n    i = OBJ;\n"
+                         "    assert(n\n#if 1\n        > 0\n#endif\n    );\n    i = 1 SEMI assert(i);\n"
+                         "    _Pragma(\"GCC diagnostic push\") i = OBJ;\n    i = OBJ /* a comment */ + OBJ;\n    return i;\n}\n";
+    // By the history's place: the invocations the file places (each at least once), and those it leaves to the history.
+    static const char* const placed[] = { "assert(i == n)", "CHECK(n)", "WRAP((n, (1)))", "CALL (n)", "OBJ;", "OBJ /*" };
+    static const char* const unplaced[] = { "assert(n);", "assert(n\n#if", "SEMI assert(i)" };
+    bool result = pp_test_write_file(path, source);
+    static Preprocessor run;
+    static InternTable table;
+    const PPOptions options = {
+        .language =
+        {
+            .standard = 2017,
+            .gnu = true,
+        },
+        .semantic_pragmas = true,
+    };
+    result = result && pp_test_run(&run, &table, &options, path);
+    uint32_t found[BUSTER_ARRAY_LENGTH(placed) + BUSTER_ARRAY_LENGTH(unplaced)] = { 0 };
+    for (uint32_t t = 0; result && t < run.output.count; t += 1)
+    {
+        const bool first = (run.output.flags[t] & BUSTER_PP_FROM_MACRO) != 0 && (t == 0 || (run.output.flags[t - 1] & BUSTER_PP_FROM_MACRO) == 0);
+        const uint32_t place = first ? pp_output_invocation_place(&run, t) : 0;
+        const uint32_t twin = first ? pp_output_expansion_begin(&run, t, pp_history_at(&run, t)) : 0;
+        const uint8_t* bytes = twin != 0 ? pp_location_bytes(&run, twin) : NULL;
+        result = place == 0 || place == twin;
+        for (uint32_t k = 0; result && bytes != NULL && k < BUSTER_ARRAY_LENGTH(placed) + BUSTER_ARRAY_LENGTH(unplaced); k += 1)
+        {
+            const bool left = k >= BUSTER_ARRAY_LENGTH(placed);
+            const char* text = left ? unplaced[k - BUSTER_ARRAY_LENGTH(placed)] : placed[k];
+            const bool match = memcmp(bytes, text, strlen(text)) == 0;
+            result = !match || (place != 0) != left;
+            found[k] += match;
+        }
+    }
+    for (uint32_t k = 0; result && k < BUSTER_ARRAY_LENGTH(found); k += 1)
+    {
+        result = found[k] != 0;
+    }
+    pp_release(&run);
+    intern_release(&table);
+    unlink(path);
+    printf("history invocation places: %s (lone invocations placed by the file as by the history, the others left to it)\n", result ? "pass" : "FAIL");
+    return result;
+}
+
 // Exceed every initial history slice, including all three temporary columns. Repeated arguments also read earlier
 // origins after their owning buffer moves, and stringification must retain its source records after that buffer dies.
 static bool pp_test_history_growth(const char* directory, bool with_clang)
@@ -1129,9 +1187,10 @@ static bool pp_test_history(const char* directory, bool with_clang)
     const bool runs = pp_test_history_runs();
     const bool copies = pp_test_history_copies();
     const bool lifetimes = pp_test_history_lifetimes(directory);
+    const bool places = pp_test_history_invocation_places(directory);
     const bool growth = pp_test_history_growth(directory, with_clang);
     const bool diagnostic_buffer = pp_test_diagnostic_buffer();
     const bool publication = pp_test_history_publication();
     const bool collection = pp_test_diagnostic_collection();
-    return runs && copies && lifetimes && growth && diagnostic_buffer && publication && collection && failures == 0;
+    return runs && copies && lifetimes && places && growth && diagnostic_buffer && publication && collection && failures == 0;
 }

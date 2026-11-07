@@ -126,7 +126,9 @@ static void check_test_function_abi_oracle(CheckTest* test, TypeTable* table, co
         "preserve_most",
         "preserve_all",
         "preserve_none",
+        "no_caller_saved_registers",
     };
+    _Static_assert(sizeof(names) / sizeof(names[0]) == TYPE_FUNCTION_ABI_COUNT, "a spelling for each function ABI");
     char directory[] = "/tmp/buster-check-function-abi-XXXXXX";
     bool ready = mkdtemp(directory) != 0;
     enum { COUNT = TYPE_FUNCTION_ABI_COUNT * 2 + 1 };

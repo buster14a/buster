@@ -68,6 +68,10 @@ struct CheckInputValues
 
 // The values of `token`'s children, chained as the walk's action chains them: each child's chain after the one before
 // it, through value_next, and their counts added (CheckInputReader.value_counts).
+// Its branches stay: a branch-free splice (each child's last value and count taken by selects, the link stored into a
+// local where there was no chain yet) made the walk's actions 0.37 ms slower in `-c sqlite3.c` on the 9700X (10.39 ms
+// against 10.02 ms, `measure-compile --time-stages`), though those branches are 0.57% of the compile's misses (#529,
+// #1646).
 static inline CheckInputValues check_input_expression_values(CheckInputReader* reader, uint32_t token)
 {
     CheckInputValues values = { .first = BUSTER_CHECK_NONE, .last = BUSTER_CHECK_NONE, .count = 0 };

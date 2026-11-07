@@ -467,6 +467,21 @@ half at 8, so that calls and the arms of `?:` need nothing of their own for it.
   (a 128-bit operand is in its slot), and whether rax and rdx (`MUL`) or rcx (a shift) are saved in the fixed slots,
   which they are where a value below the operands holds them. Both selections' tops and the emitter read it, so that the
   paths can't drift apart.
+- **Two shapes take shorter code** (#1397):
+  - **A shift by a constant count** absorbs the count's `CONST` (`BUSTER_TIER0_VARIANT_CONST`, deferred: both fusions
+    take it, the vector one from the property rows the slot gives) and takes the count's low 7 bits, as a count in `cl`
+    does: nothing for 0, `shld` or `shrd` and `shl`, `shr` or `sar` by the immediate below 64, and from 64 on the half that
+    moves shifted by the count less 64 into the other, the vacated one zero or the sign (`sar 63`). No `cl`, `test` or
+    `cmov`, and no rcx saved (`tier0_int128_constant_shift`).
+  - **A product of extended operands**, whose two operands' producers are both a `CONST` or a `CONVERT` from an integer
+    class and fill their high halves alike (zero, or the low half's sign: `tier0_int128_extension`), is the low halves'
+    whole product alone, one `mul` (both zero-extended) or one `imul` (both sign-extended), as `(u128)a * b`, the
+    multiply-high of wyhash, XXH3 and `fastrange`, is. The last operand's producer is the entry before the `MUL`; the
+    first's is found by a walk back over the entries' effects, at most `BUSTER_TIER0_INT128_REACH` (32) entries, where no
+    label is between them (`Tier0Entries.labels`) and the depth stays above the first operand's
+    (`tier0_int128_product`). The plan is the same as for any `MUL`, so that selection's tops don't depend on it; the
+    emitter and the measuring both decide it, from the effects rather than the depth columns, which a deep function's
+    deep entries rewrite. A `SHR` of the product by 64 is then a half moved and a zero stored.
 - **The front end's, not Tier 0's,** as clang's code has them: division and remainder (libgcc's `__divti3`,
   `__udivti3`, `__modti3` and `__umodti3`), conversions to and from the floating classes (`__floattidf`, `__fixdfti`
   and the rest), and calls. An argument of the classes is a 16-byte object passed by its address (`argument_sizes` 16),
@@ -1014,6 +1029,60 @@ index, vvvv or immediate.
   - a backtrace from a callee.
 
   They run on x86-64, with probes, frame pointers and `-g`, and on x86-64-v3, where `preserve_all` keeps whole YMMs.
+
+### Interrupt service routines (#147)
+
+`Tier0Function.interrupt` makes a function an x86 interrupt service routine: clang's `interrupt` attribute, LLVM's
+`x86_intrcc`. `BUSTER_TIER0_INTERRUPT_HANDLER` is one without an error code. `_ERROR_CODE` is one whose exception
+pushes an error code. The processor enters it with the interrupted code's rip, cs, rflags, rsp and ss on the stack, and
+the error code below them. There is no call's return address. So:
+
+- **The frame** is a preserving frame of every register: the general ones, r11 too, and the vector and mask registers
+  `no_caller_saved_registers` keeps. It saves the interrupted code's registers, and has a frame pointer.
+- **The entry** (`tier0_emit_interrupt`), after the saves and the reservation, clears the direction flag (`cld`), since
+  the interrupted code's may be set. It then gives the parameters where their System V locations say they arrive:
+  - the processor's frame's address in rdi (`lea rdi, [rbp + 8]`, or `[rbp + 16]` past an error code);
+  - the error code in rsi (`mov rsi, [rbp + 8]`).
+
+  Both registers were saved, so the ordinary parameter moves take them from there.
+- **An error code's frame** is entered 8 bytes off a call's alignment. Its reservation makes them up
+  (`tier0_layout_frame`), and its epilogue adds 8 to rsp over the error code before returning.
+- **The return** is `iretq`.
+- **No red zone.** A nested interrupt's frame would land below rsp, so the routine's red zone temporaries
+  (`tier0_temporary`, `tier0_red_zone`) are the frame's top 128 bytes, right below the pushes and the preserve block,
+  from rbp. Neither a realignment nor an allocation moves them, and no other place reaches them.
+- **Its result is void, and it takes no variadic arguments.** `tier0_preserve_valid` refuses any other metadata on both
+  compile paths.
+
+**The unwind tables** (`Tier0Code.frame_interrupt`):
+
+- The fixed reader takes the epilogue's `iretq`, after the add where there is one, as the end.
+- Without an error code, the interrupted rip is where a return address would be, so the rows are a preserving frame's.
+- With one, the CFA is 8 bytes further up (`emitted_tier0_interrupt_rows`):
+  - every CFA rule gains 8 and every slot loses 8;
+  - the entry's CFA is rsp + 16, and after the add it is rsp + 8 again for the `iretq`;
+  - so an unwinder finds the interrupted rip at CFA - 8, where LLVM's frames leave the error code's slot.
+- The verifier starts such a frame with rsp 16 below the CFA (`EmittedCode.entry_error_code`), and takes `iretq` as a
+  return. `cld` is a semantics row that writes DF.
+
+**Tests:**
+
+- `test-emitted-code` (`emitted_test_tier0_interrupt`) compiles both kinds by both paths:
+  - every register's set (ZMMs and the masks, or whole YMMs);
+  - objects of each size and alignment, probed and not.
+
+  Each must clear DF, give its parameters and end in `iretq`. Its rules must be complete and proved, its mutants
+  refuted, and its changed block moves refused.
+- `test-tier0` refuses metadata of an unknown kind, of a frame that keeps nothing, and of other parameters.
+- `test-checker-driver`'s `check_test_driver_interrupt_handlers` runs both paths' handlers, built with `--verify`, in
+  user mode, as the processor would. A probe clang builds:
+  1. loads every register, zmm0 to zmm31 and k0 to k7 with AVX-512;
+  2. sets the direction flag;
+  3. pushes an interrupt's frame, with an error code for the second kind;
+  4. jumps to the handler, whose `iretq` returns to it at the same privilege level.
+
+  Every register must come back, and the direction flag set again. The handlers record the frame's rip, rsp and cs, the
+  error code, and a cleared direction flag. They also make calls, use floating point, realign their frame and allocate.
 
 ## Symbols outside the image
 
@@ -1592,7 +1661,10 @@ Before the programs, checks of their own:
     the depths where `MUL` saves rax and rdx and a shift rcx, against the check's own stack machine over the stream. A
     program counts toward the coverage only once both paths compiled it, it ran and every output matched, and then only
     the entries the stack machine ran: those must reach, for each class apart (their signed and unsigned code differs),
-    every kind, every conversion to and from it, each of the saves and both arms of a `?:`, in bitmaps of their own.
+    every kind, every conversion to and from it, each of the saves (the rcx save only by a variable count), shifts by
+    constant counts below 64 and from 64 on, products of extended operands by `mul` and by `imul` (#1397: the operands'
+    producers followed on a model of the stack, cleared at every label, within Tier 0's reach) and both arms of a `?:`,
+    in bitmaps of their own.
 
   Every function must compile: an error of both paths alike fails the check, but a depth refusal in a random program
   (`TIER0_ERROR_DEPTH`, past the deep slots since #780), which is counted.

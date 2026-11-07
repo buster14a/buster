@@ -165,6 +165,12 @@ need. It is a measurement option, off by default, and the measurement says to
 keep it off: its class representatives lengthen live ranges that Tier 1's
 allocation pays for in moves and spills.
 
+`--tier1-schedule=post` and `--tier1-schedule=pre` schedule Tier 1's code block
+by block, after allocation on its machine records or before selection on its IR
+(#172). They are measurement options too, off by default; [the scheduling
+guide](tier1-scheduling.md) has their contracts and the 9700X's measurement of
+what they save and cost.
+
 The figures are from two hosts, `BUSTER_DEBUG_INFO=0`, Clang 23, one pinned
 CPU: a Ryzen 9 7940HS (Zen 4) and the approved Ryzen 7 9700X (Zen 5) under its
 shared lock. The source is a local `sqlite3.c` of 2,604 functions (2,155 of them
@@ -315,10 +321,12 @@ their lanes where C's operators make them (#141, [the SIMD IR guide](ir-simd.md)
 ([the IR guide](ir.md)'s "Machine rows"),
 which Tier 1 places as Tier 0 does ([the selection guide](tier1-selection.md)'s
 "Machine rows"); a vector of 4 or 8 bytes (an SSE carrier, #1280: the operand of
-`_mm256_cvtepu8_epi32`, MMX's `__m64`) is an f32 or f64 there. Functions with
-what the IR doesn't represent stop before Tier 1, at the lowering to the IR: a 32-
-or 64-byte vector or an SSE carrier at a target without AVX (#775), and a 64-byte
-vector without AVX512F; at a target without AVX a 16-byte vector is Tier 1's by
+`_mm256_cvtepu8_epi32`, MMX's `__m64`) is an f32 or f64 there. A 32- or 64-byte
+vector at a target whose registers are narrower (x86-64's and x86-64-v2's 16 bytes,
+an AVX target's 32) is split into the target's widest vectors before the optimizer
+(#1624, "The vectors wider than the target's registers" below); an SSE carrier at
+a target without AVX (#775) still stops before Tier 1, at the lowering to the IR;
+at a target without AVX a 16-byte vector is Tier 1's by
 legacy SSE's forms (#141, [the selection guide](tier1-selection.md)'s "At targets
 without AVX"). At a
 target with AVX but without AVX512VL, such as x86-64-v3, Tier 1 takes 16- and
@@ -369,6 +377,42 @@ fixtures, the latter on the IR's interpreter before and after inlining, SROA and
 promotion; `test-checker-driver`'s inlining fixture builds a program of
 intrinsics, a struct helper and a noinline function by each path, with and
 without inlining, against clang -O0's.
+
+### The vectors wider than the target's registers
+
+At a target whose widest vector register is narrower than a function's vectors
+(x86-64's and x86-64-v2's xmm for 32- and 64-byte ones, AVX's ymm for 64-byte
+ones), the driver's lowering takes them (`ir_lower_typed_target_pieces`, #1624)
+and `ir_vector_split.c` splits each into the target's widest vectors
+(`ir_typed_vector_piece`) after SSA promotion, beside the 128-bit integers'
+halves (the driver's `wide` stage), so that the optimizer, selection, both
+allocations and their certificates see vectors the target has registers for. The
+typed stream carries such a vector through its transports alone: Tier 0 refuses
+a row wider than its target's vectors and computes C's operators on them in
+pieces, so a wide vector's IR is constants, loads and stores (of objects,
+through addresses, and of the expression stack's slots, which promotion makes
+phis), copies and phis. Each becomes its pieces' instructions in its place: a
+constant's bytes, an access per piece at its offset (the access's alignment, at
+most a piece's), a phi per piece. Any other instruction of a wide vector (an
+operation, a comparison, a select, a call's argument or result, a row's operand)
+or an atomic access refuses the function, which Tier 0 then compiles, as before.
+A vector passed by value is an object already; one returned in registers comes
+back split across xmm0 and xmm1, xmm0 to xmm3 or ymm0 and ymm1 (#1193), which
+selection, both consumers and the code's certificate now take as up to four
+result parts (`tier1_select_result_parts`, staged in the red zone one after
+another on the way out).
+
+Measured by `--tier1 --tier1-refusals --verify` of the compiler's own units,
+whose scalar host's emulations of AVX2's and AVX-512's intrinsics
+(`host_scalar_vectors.h`) take and return these vectors: at main `cf38957a`,
+`main_unit_frontend.c` refused 249 functions at x86-64 and x86-64-v2 and 244 at
+x86-64-v3, every one for its wide vectors, and now refuses none, its 2,177
+functions' code certified at x86-64 (1,928 at main, uncertified 59 either way);
+`main_unit_backend.c` refused 233 at x86-64 and now refuses 25, none for a wide
+vector (the same 25 it refuses at znver5). `test-tier1-wide` takes hand-written
+wide vector IR through the split at both piece widths and natively at x86-64's,
+and `test-checker-driver`'s wide vectors' unit runs against clang -O0 at
+x86-64, x86-64-v2 and x86-64-v3 by both paths.
 
 ### The 128-bit integers
 

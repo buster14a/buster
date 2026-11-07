@@ -1423,7 +1423,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     // An aggregate result in registers (#789): each part's bytes into the result object at its offset, exactly (the object
     // may be no larger than the aggregate), a general register's by tier1_emit_store_part and an xmm one's by movss or movsd,
     // or through the scratch register for any other size.
-    Tier1SelectPart returned[2];
+    Tier1SelectPart returned[BUSTER_TIER1_SELECT_RESULT_PARTS];
     const uint32_t returned_count = parts_returned ? tier1_select_result_parts(abi->call.result, abi->result_size, returned) : 0;
     // In the x87's registers (#141): st0's 10 bytes into the first part's 16, then st1's into the second's.
     const uint32_t x87_parts = parts_returned ? tier1_select_x87_parts(abi->call.result, abi->result_size) : 0;

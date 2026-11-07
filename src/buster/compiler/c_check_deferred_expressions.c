@@ -120,7 +120,7 @@ static void check_deferred_control_lane(void* argument)
 // order. The complete-unit indirect-jump check waits for every label target; errors use full diagnostic recovery.
 static bool check_deferred_controls(CheckDeferred* deferred, CheckInputReader* reader)
 {
-    const uint32_t lanes = check_deferred_rule(deferred, deferred->body_tokens, deferred->body_count, deferred->largest_body, deferred->second_body, deferred->lane_tokens);
+    const uint32_t lanes = check_deferred_post_lanes(deferred);
     const bool used = !deferred->unsupported && lanes > 1 && reader->output->report_count == 0 && !reader->output->resource && reader->fallthrough_count == 0;
     if (used)
     {
@@ -224,7 +224,7 @@ static void check_deferred_binding_lane(void* argument)
 // unused-declaration analysis still runs after all answers, since an external declaration can be used by any body.
 static bool check_deferred_binding_answers(CheckDeferred* deferred, CheckInputReader* reader, const uint32_t* resolved)
 {
-    const uint32_t lanes = check_deferred_rule(deferred, deferred->body_tokens, deferred->body_count, deferred->largest_body, deferred->second_body, deferred->lane_tokens);
+    const uint32_t lanes = check_deferred_post_lanes(deferred);
     bool used = !deferred->unsupported && lanes > 1 && reader->output->report_count == 0 && !reader->output->resource;
     const CBindings* bindings = &reader->bindings;
     for (uint32_t b = 0; used && b < deferred->body_count; b += 1)
@@ -294,7 +294,7 @@ static void check_deferred_context_lane(void* argument)
 
 static bool check_deferred_constant_contexts(CheckDeferred* deferred, CheckInputReader* reader)
 {
-    const uint32_t lanes = check_deferred_rule(deferred, deferred->body_tokens, deferred->body_count, deferred->largest_body, deferred->second_body, deferred->lane_tokens);
+    const uint32_t lanes = check_deferred_post_lanes(deferred);
     bool used = !deferred->unsupported && lanes > 1 && reader->output->report_count == 0 && !reader->output->resource;
     if (used)
     {
@@ -698,7 +698,7 @@ static bool check_deferred_expressions(CheckDeferred* deferred, CheckInputReader
     CheckInput* input = reader->output;
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
-    const uint32_t lanes = check_deferred_rule(deferred, deferred->body_tokens, deferred->body_count, deferred->largest_body, deferred->second_body, deferred->lane_tokens);
+    const uint32_t lanes = check_deferred_post_lanes(deferred);
     bool used = !deferred->unsupported && lanes > 1 && input->report_count == 0 && !input->resource && input->graph.count == 0 &&
                 input->diagnostic_limits == NULL && input->deferred_tokens == NULL && reader->expression_limit == count &&
                 !reader->pp->options.expression_numbering && !reader->pp->options.expression_timing;

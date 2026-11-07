@@ -208,6 +208,10 @@ typedef uint32_t TypeId;
 
 // Semantic function identity on the supported x86-64 target. This is not a claim that code generation implements
 // every convention. The ordinary constructor and explicit sysv_abi/cdecl have the same default identity.
+// no_caller_saved_registers is clang's function type bit (FunctionType::ExtInfo's NoCallerSavedRegs), beside the
+// convention there; here it is the last of the three bits' values, a System V function's whose callee keeps every
+// register (#147), so that it takes no flag the table hasn't: with another convention than System V's, which clang
+// takes, it is refused by name (check_input_attribute_conventions).
 typedef enum TypeFunctionABI
 {
     TYPE_FUNCTION_ABI_SYSV,
@@ -217,9 +221,11 @@ typedef enum TypeFunctionABI
     TYPE_FUNCTION_ABI_PRESERVE_MOST,
     TYPE_FUNCTION_ABI_PRESERVE_ALL,
     TYPE_FUNCTION_ABI_PRESERVE_NONE,
+    TYPE_FUNCTION_ABI_NO_CALLER_SAVED,
     TYPE_FUNCTION_ABI_COUNT,
     TYPE_FUNCTION_ABI_INVALID = 255,
 } TypeFunctionABI;
+_Static_assert(TYPE_FUNCTION_ABI_COUNT <= (BUSTER_TYPE_FUNCTION_ABI_MASK >> BUSTER_TYPE_FUNCTION_ABI_SHIFT) + 1, "a function's ABI fits its flags' bits");
 
 // A member's flags.
 #define BUSTER_TYPE_MEMBER_PACKED 0x01
@@ -6152,6 +6158,7 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
             "preserve_most",
             "preserve_all",
             "preserve_none",
+            "no_caller_saved_registers",
         };
         const TypeFunctionABI abi = type_function_abi_kind(table, frame.type);
         if ((uint32_t)abi < sizeof(spellings) / sizeof(spellings[0]))

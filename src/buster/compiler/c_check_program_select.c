@@ -42,7 +42,7 @@ struct CheckProgramSelection
 
 // The roots a declaration's `attributes` make its definition: used (but not retain, which keeps the section of a
 // definition that is emitted without making it one: clang 23 emits no unreferenced static with retain alone, #147),
-// constructor and destructor.
+// x86's interrupt (whose handler adds an implicit used, #147), constructor and destructor.
 static uint32_t check_program_attribute_roots(const CheckInputAttributes* attributes, bool function, bool* gnu_inline)
 {
     uint32_t flags = 0;
@@ -51,7 +51,7 @@ static uint32_t check_program_attribute_roots(const CheckInputAttributes* attrib
         const CheckInputAttribute* attribute = attributes->records + i;
         if (!attribute->ignored)
         {
-            flags |= attribute->kind == CHECK_ATTRIBUTE_USED ? BUSTER_C_LOWERING_USED : 0;
+            flags |= attribute->kind == CHECK_ATTRIBUTE_USED || (attribute->kind == CHECK_ATTRIBUTE_INTERRUPT && !attribute->subject_ignored) ? BUSTER_C_LOWERING_USED : 0;
             flags |= function && attribute->kind == CHECK_ATTRIBUTE_CONSTRUCTOR ? BUSTER_C_LOWERING_CONSTRUCTOR : 0;
             flags |= function && attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR ? BUSTER_C_LOWERING_DESTRUCTOR : 0;
             *gnu_inline |= attribute->kind == CHECK_ATTRIBUTE_GNU_INLINE;
@@ -61,8 +61,9 @@ static uint32_t check_program_attribute_roots(const CheckInputAttributes* attrib
 }
 
 // Whether a declaration's `attributes` make clang emit its function where the unit defines it rather than when its
-// emission first refers to it (ASTContext::DeclMustBeEmitted): used, constructor or destructor, but not retain, which
-// keeps a function that is emitted without making it one (CheckProgram.body_eager).
+// emission first refers to it (ASTContext::DeclMustBeEmitted): used (x86's interrupt's implicit one too, #147),
+// constructor or destructor, but not retain, which keeps a function that is emitted without making it one
+// (CheckProgram.body_eager).
 static bool check_program_attribute_eager(const CheckInputAttributes* attributes)
 {
     bool eager = false;
@@ -70,7 +71,8 @@ static bool check_program_attribute_eager(const CheckInputAttributes* attributes
     {
         const CheckInputAttribute* attribute = attributes->records + i;
         eager |= !attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_USED || attribute->kind == CHECK_ATTRIBUTE_CONSTRUCTOR ||
-                                         attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR);
+                                         attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR ||
+                                         (attribute->kind == CHECK_ATTRIBUTE_INTERRUPT && !attribute->subject_ignored));
     }
     return eager;
 }
@@ -320,6 +322,49 @@ static uint32_t check_program_token_body(const CheckProgram* program, uint32_t t
     return body;
 }
 
+// check_program_token_body for tokens asked mostly in increasing order, as the definitions' are (in token order): from the
+// bodies counted for the last token asked (`last`, its token and how many bodies open at or before it), forward, so that
+// a loop's asks take the bodies once rather than a search each (#1629: 2,000 block-scope statics' bodies, 11 steps each);
+// a token before the last one asked searches, as check_program_token_body does.
+typedef struct CheckProgramBodyCursor CheckProgramBodyCursor;
+struct CheckProgramBodyCursor
+{
+    uint32_t token;
+    uint32_t opened;
+};
+
+static uint32_t check_program_token_body_next(const CheckProgram* program, uint32_t token, CheckProgramBodyCursor* last)
+{
+    uint32_t opened = 0;
+    if (token >= last->token)
+    {
+        opened = last->opened;
+        while (opened < program->body_count && program->bodies[opened].opening <= token)
+        {
+            opened += 1;
+        }
+    }
+    else
+    {
+        uint32_t high = program->body_count;
+        while (opened < high)
+        {
+            const uint32_t middle = opened + (high - opened) / 2;
+            if (program->bodies[middle].opening <= token)
+            {
+                opened = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+    }
+    *last = (CheckProgramBodyCursor){ .token = token, .opened = opened };
+    const uint32_t body = opened != 0 && token <= program->parser->tree.parents[program->bodies[opened - 1].opening] ? opened : 0;
+    return body;
+}
+
 // Whether `token` is in one of the ranges the program's writer left out (CheckProgram.dropped_ranges, in token order and
 // apart): the last to start at or before it, if it ends at or after it.
 static bool check_program_token_dropped(const CheckProgram* program, uint32_t token)
@@ -358,6 +403,32 @@ static bool check_program_token_emitted(const CheckProgram* program, uint32_t to
         steps += 1;
     }
     return emitted;
+}
+
+// Each of the data's declared objects' index among them (CheckDataPrepared.declared_objects), written at the object in
+// `declared_at`, which has room for `objects`, from the last to the first, so that a repeated object keeps its first
+// index, as check_data_declared_index finds it. Only those entries are written: check_program_declared_at checks what it
+// reads, so no pass clears the object-sized column (#877's way). Each definition then finds its object's place in one
+// load, where the search took a dependent load a step, 12 for 4,000 static objects (#1629).
+static void check_program_declared_fill(const CheckDataPrepared* data, uint32_t objects, uint32_t* declared_at)
+{
+    for (uint32_t i = data->declared_count; i != 0; i -= 1)
+    {
+        const uint32_t object = data->declared_objects[i - 1];
+        if (object < objects)
+        {
+            declared_at[object] = i - 1;
+        }
+    }
+}
+
+// Where `object`, below the column's `objects`, is among the data's declared objects, or declared_count where it isn't one:
+// check_data_declared_index's answer, from check_program_declared_fill's column, whose other entries hold whatever they
+// held, which the check of the declared object at the place read turns down.
+static uint32_t check_program_declared_at(const CheckDataPrepared* data, const uint32_t* declared_at, uint32_t object)
+{
+    const uint32_t place = declared_at[object];
+    return place < data->declared_count && data->declared_objects[place] == object ? place : data->declared_count;
 }
 
 // Whether the program's bodies are in token order and apart, as check_program_token_body needs them.
@@ -485,11 +556,13 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
     uint32_t* sources = body_map != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)reference_capacity + 1) : 0;
     uint32_t* targets = sources != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)reference_capacity + 1) : 0;
     uint32_t* kinds = targets != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)reference_capacity + 1) : 0;
+    // Each static object's place among the data's declared ones, at the object (check_program_declared_at).
+    uint32_t* declared_at = kinds != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, objects) : 0;
     if (valid)
     {
         candidate.status = CHECK_PROGRAM_RESOURCE;
     }
-    valid &= kinds != 0;
+    valid &= declared_at != 0;
     uint32_t edges = 0;
     uint32_t body_references = 0;
     uint32_t data_references = 0;
@@ -500,6 +573,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
         memset(roots, 0, ((uint64_t)data->declared_count + 1) * sizeof(uint32_t));
         memset(inline_rules, 1, (uint64_t)data->declared_count + 1);
         memset(needed, 0, objects);
+        check_program_declared_fill(data, objects, declared_at);
         memset(body_selected, 0, (uint64_t)full->body_count + 1);
         memset(data_selected, 0, (uint64_t)data->count + 1);
         memset(body_map, 0xff, ((uint64_t)full->body_count + 1) * sizeof(uint32_t));
@@ -555,8 +629,8 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             valid = object != 0 && object < objects;
             if (valid)
             {
-                // The definition's object among the static objects, or past them (check_data_declared_index).
-                const uint32_t declared = check_data_declared_index(data, object);
+                // The definition's object among the static objects, or past them (check_data_declared_index's answer).
+                const uint32_t declared = check_program_declared_at(data, declared_at, object);
                 uint32_t flags = (function ? BUSTER_C_LOWERING_FUNCTION : BUSTER_C_LOWERING_OBJECT) | roots[declared];
                 // An object made only for what references it (CheckDataObject.optional: a constant CFString's record, #148).
                 flags |= !function && data->objects[raw - full->body_count].optional ? BUSTER_C_LOWERING_OPTIONAL : 0;
@@ -634,6 +708,8 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             }
         }
         candidate.status = valid ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_INVALID;
+        // The block-scope statics' bodies, asked in the definitions' token order (check_program_token_body_next).
+        CheckProgramBodyCursor static_bodies = { 0 };
         for (uint32_t definition = 0; valid && definition < definitions; definition += 1)
         {
             const uint32_t raw = (uint32_t)order[definition];
@@ -668,7 +744,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             const uint32_t body = declaration < input->token_count && check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE &&
                                   check_input_linkage(input->declaration_bits, declaration) == 0 &&
                                   !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) && check_program_token_emitted(full, declaration) ?
-                                  check_program_token_body(full, declaration) : 0;
+                                  check_program_token_body_next(full, declaration, &static_bodies) : 0;
             if (valid && body != 0)
             {
                 const uint32_t source = object_definitions[full->bodies[body - 1].object];

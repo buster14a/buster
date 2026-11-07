@@ -250,7 +250,22 @@ typedef enum CheckInputMessage
     // parser's error of the attribute before it too: `value` its `(` plus one (bit 32 where that one takes no arguments),
     // `attribute` its name (check_input_attribute_standard_previous).
     CHECK_INPUT_UNEVALUATED_ESCAPE,
+    // x86's interrupt (#147): a declaration its handler refuses (check_input_interrupt_handler, `detail` which of its four
+    // rules, BUSTER_CHECK_INTERRUPT_UNLOCATED where clang gives the error no place), and a direct call of an interrupt
+    // service routine, at its callee (check_input_interrupt_calls).
+    CHECK_INPUT_INTERRUPT_HANDLER,
+    CHECK_INPUT_INTERRUPT_CALLED,
 } CheckInputMessage;
+
+// CHECK_INPUT_INTERRUPT_HANDLER's details: the rule x86's handler finds broken (its result isn't void; it hasn't one or two
+// parameters; its first isn't a pointer; its second isn't an unsigned 64-bit integer), and whether clang's error has no
+// place (an invalid SourceLocation: the result's or a parameter's of a declaration whose function type isn't written
+// as one there).
+#define BUSTER_CHECK_INTERRUPT_RESULT 0u
+#define BUSTER_CHECK_INTERRUPT_COUNT 1u
+#define BUSTER_CHECK_INTERRUPT_POINTER 2u
+#define BUSTER_CHECK_INTERRUPT_CODE 3u
+#define BUSTER_CHECK_INTERRUPT_UNLOCATED 0x100u
 
 static const char* const check_input_messages[] =
 {
@@ -379,6 +394,8 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_FP_EVAL_USE] = "'__FLT_EVAL_METHOD__' cannot be expanded inside a scope containing '#pragma clang fp eval_method'",
     [CHECK_INPUT_FP_EVAL_TYPE] = "type is set according to the default eval method for the translation unit",
     [CHECK_INPUT_UNEVALUATED_ESCAPE] = "invalid escape sequence in an unevaluated string literal",
+    [CHECK_INPUT_INTERRUPT_HANDLER] = "x86-64 'interrupt' attribute only applies to functions that have a 'void' return type",
+    [CHECK_INPUT_INTERRUPT_CALLED] = "interrupt service routine cannot be called directly",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -794,6 +811,9 @@ struct CheckInput
     CheckInputMusttail* musttails;
     uint32_t musttail_count;
     uint32_t musttail_capacity;
+    // Whether the unit read x86's interrupt or no_caller_saved_registers (#147): only then are its calls looked through
+    // after checking, for the direct calls of interrupt service routines and -Wexcessive-regsave (check_input_interrupt_calls).
+    bool interrupt_calls;
     CheckInputAsm* asm_statements;
     uint32_t asm_count;
     uint32_t asm_capacity;
@@ -1626,6 +1646,12 @@ struct CheckInputReader
     // The last complete declarator's lifetimebound attribute on a parameter of its own function declarator, where that
     // function returns void (#147), or BUSTER_CHECK_NONE.
     uint32_t declarator_lifetimebound;
+    // The last complete declarator's own function declarator's `(`, or BUSTER_CHECK_NONE (#147); and, while a function's
+    // declaration's attributes meet their subjects, its declaration's (an identifier list's for a K&R definition), where
+    // its interrupt attribute's errors are (check_input_interrupt_handler), BUSTER_CHECK_NONE otherwise.
+    uint32_t declarator_function_list;
+    uint32_t subject_function_list;
+    bool subject_identifier_list;
     uint32_t* activate;
     uint32_t* activation_next;
     // Each token's tests by its syntax alone (BUSTER_CHECK_SYNTAX_*), from check_input_count_tokens' pass: the walk
@@ -4056,10 +4082,10 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
                 attribute->specifier_applied = base != 0;
                 specifier_abi_applied |= attribute->specifier_applied;
             }
-            if (!attribute->ignored && !attribute->specifier_ignored && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION &&
-                !attribute->specifier_applied && attribute->value != CHECK_CALL_IGNORED_X86_32 && attributes->calling_convention == CHECK_CALL_DEFAULT)
+            // (The first convention asked for, but no_caller_saved_registers with System V's: check_input_convention_merge.)
+            if (!attribute->ignored && !attribute->specifier_ignored && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !attribute->specifier_applied)
             {
-                attributes->calling_convention = (CheckInputCallingConvention)attribute->value;
+                attributes->calling_convention = check_input_convention_merge(attributes->calling_convention, (CheckInputCallingConvention)attribute->value);
             }
         }
         valid &= base != 0;
@@ -5188,7 +5214,8 @@ static void check_input_attribute_type_warnings(CheckInputReader* reader, CheckI
                 check_input_attribute_function_type_warning(reader, attribute, base, type, name, split, completion);
             }
             else if (placed && applies && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->value == CHECK_CALL_IGNORED_X86_32 &&
-                !check_input_attribute_kernel(reader, attribute) && list->error == CHECK_ATTRIBUTE_ERROR_NONE && check_input_attribute_pcs_valid(reader, attribute))
+                     attribute->convention_count == BUSTER_CHECK_COUNT_NONE && !check_input_attribute_kernel(reader, attribute) &&
+                     list->error == CHECK_ATTRIBUTE_ERROR_NONE && check_input_attribute_pcs_valid(reader, attribute))
             {
                 check_input_attribute_unsupported_at(reader, attribute, completion);
             }
@@ -5910,6 +5937,7 @@ static inline __attribute__((always_inline)) TypeId check_input_declarator_end(C
     const CheckDeclaratorPart* own = complete && run->function_part != BUSTER_CHECK_NONE ? run->parts + run->function_part : NULL;
     reader->declarator_lifetimebound = own != NULL && own->lifetimebound != 0 && type_kind(reader->types, run->result) == BUSTER_TYPE_KIND_FUNCTION &&
                                        type_kind(reader->types, type_return(reader->types, run->result)) == BUSTER_TYPE_KIND_VOID ? own->lifetimebound - 1 : BUSTER_CHECK_NONE;
+    reader->declarator_function_list = own != NULL ? own->token : BUSTER_CHECK_NONE;
     const bool captured = own == NULL || check_input_capture_names(reader, own);
     bool object_sizes = true;
     if (own != NULL && own->object_size)
@@ -6592,6 +6620,7 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
         *names = BUSTER_CHECK_NONE;
         reader->declarator_attributes = 0;
         reader->declarator_lifetimebound = BUSTER_CHECK_NONE;
+        reader->declarator_function_list = BUSTER_CHECK_NONE;
         reader->declarator_declarations = BUSTER_CHECK_NONE;
         reader->declarator_abi_origin = 0;
         reader->declarator_noderef = NULL;
@@ -7438,6 +7467,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         TypeId type = check_input_declarator(reader, base, &i, count, &name, &parameters);
         reader->declarator_overloadable = false;
         const uint32_t parameter_declarations = reader->declarator_declarations;
+        // The declared function's own list, where its interrupt attribute's errors are (#147), before a K&R definition's
+        // declarations read declarators of their own.
+        const uint32_t function_list = reader->declarator_function_list;
+        const bool identifier_list = reader->declarator_identifier_list;
         CheckInputAttributes* attributes = check_input_merge_attributes(reader, common_attributes, reader->declarator_attributes);
         valid &= (common_attributes == 0 && reader->declarator_attributes == 0) || attributes != 0;
         uint8_t abi_origin = reader->declarator_abi_origin;
@@ -7686,7 +7719,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 check_input_attribute_gcc_position(reader, reader->declarator_attributes);
             }
             valid = valid && check_input_thread_names(reader, attributes, function ? parameters : BUSTER_CHECK_NONE, NULL, 0, NULL, 0);
+            reader->subject_function_list = function && !is_typedef ? function_list : BUSTER_CHECK_NONE;
+            reader->subject_identifier_list = identifier_list;
             valid = valid && check_input_attribute_subjects(reader, attributes, subjects, type, check_input_attribute_begin(parser, declaration_group, count), name);
+            reader->subject_function_list = BUSTER_CHECK_NONE;
             valid = valid && check_input_attribute_definition(reader, attributes, subject);
             // clang's lifetimebound on a parameter of a function that returns void (#147, checkLifetimeBoundAttr), at the
             // attribute: of a function's declaration alone.

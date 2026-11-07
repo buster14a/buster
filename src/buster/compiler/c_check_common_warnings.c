@@ -1799,8 +1799,11 @@ static uint32_t check_common_expansion_point(const Parser* parser, Preprocessor*
             if (pp->output.flags[source] & BUSTER_PP_FROM_MACRO)
             {
                 // Only a candidate that needs a macro's invocation asks for the deferred history. Ordinary file
-                // tokens keep their positions without replaying the unit, even when another token expands a macro.
-                location = pp_history_ensure(pp) ? pp_output_expansion_begin(pp, source, pp_history_at(pp, source)) : 0;
+                // tokens keep their positions without replaying the unit, even when another token expands a macro;
+                // and a token whose invocation the file alone places (pp_output_invocation_place: one invocation
+                // between two file tokens) takes that place, but by --scalar, whose history is the twin (#628).
+                const uint32_t place = BUSTER_SCALAR_PATH(parser->options.scalar) ? 0 : pp_output_invocation_place(pp, source);
+                location = place != 0 ? place : pp_history_ensure(pp) ? pp_output_expansion_begin(pp, source, pp_history_at(pp, source)) : 0;
             }
             const uint32_t range = pp_find_range(pp, location);
             const char* file = NULL;
