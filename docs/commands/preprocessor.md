@@ -144,6 +144,9 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   `.` and `..`, a name past ASCII or past `NAME_MAX`), a cache another unit shares, a directory with a name past
   ASCII never listed, one of 64 names put off by its first look and listed at its 256th, and every path, file and
   error the same as with listings off;
+  with no descriptor left after a listing (`pp_test_listing_descriptors`), a ruled-out name's ENOENT and the next
+  directory's EMFILE, reported there, against the first directory's EMFILE without listings, and the answers a unit
+  sharing the cache then gets;
   the directory-read boundary (`pp_test_directory_reads`, #1604): exact returned-byte MSan shadow, untouched
   guards and unread tails, short reads, EOF and failed calls, plus guarded malformed/truncated records. The generic
   raw `getdents64` syscall wrapper unpoisons only a positive returned range; no listing semantic or EMFILE-policy
