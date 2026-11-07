@@ -430,3 +430,173 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
     unlink(callee_path);
     unlink(object);
 }
+
+// Tier 0's interrupt service routines (#147, Tier0Function.interrupt), by each path, run in user mode as the processor would:
+// a probe clang builds loads every register, zmm0 to zmm31 and k0 to k7 with AVX-512 (whole YMMs with AVX, XMMs
+// without), sets the direction flag, pushes an interrupt's frame (ss, rsp, rflags, cs and its own resume address, and an
+// error code for the second kind) and jumps to the handler, whose iretq returns to it at the same privilege level; it then
+// reads every register back. Every register must come back, rsp too, the direction flag set again as the frame had it;
+// and the handlers record what they saw: the frame's rip, rsp and cs, the error code, and a cleared direction flag. The
+// handlers make calls (whose callees keep nothing for them), use vectors and floating point, and realign their frame. Both
+// paths' code, with --verify, on x86-64 (with probes, frame pointers and -g too), x86-64-v3 where the host has AVX2 and
+// x86-64-v4 where it has AVX-512.
+static void check_test_driver_interrupt_handlers(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char harness[] =
+        "#include <stdint.h>\n"
+        "#include <stdio.h>\n"
+        "#include <string.h>\n"
+        "typedef struct State { uint64_t in[16]; uint64_t out[16]; uint8_t vin[32][64]; uint8_t vout[32][64]; uint64_t kin[8]; uint64_t kout[8]; void* fn; uint64_t sp; uint64_t flags; } State;\n"
+        "_Static_assert(__builtin_offsetof(State, vin) == 256 && __builtin_offsetof(State, vout) == 2304 && __builtin_offsetof(State, kin) == 4352 && __builtin_offsetof(State, kout) == 4416 && __builtin_offsetof(State, fn) == 4480 && __builtin_offsetof(State, sp) == 4488 && __builtin_offsetof(State, flags) == 4496, \"layout\");\n"
+        "#define LOW \"0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\"\n"
+        "#define ALL LOW \",16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31\"\n"
+        "#if defined(__AVX512F__)\n"
+        "#define LOAD \".irp n,\" ALL \"\\nvmovdqu64 256+64*\\\\n(%rax), %zmm\\\\n\\n.endr\\n.irp n,0,1,2,3,4,5,6,7\\nkmovq 4352+8*\\\\n(%rax), %k\\\\n\\n.endr\\n\"\n"
+        "#define STORE \".irp n,\" ALL \"\\nvmovdqu64 %zmm\\\\n, 2304+64*\\\\n(%rax)\\n.endr\\n.irp n,0,1,2,3,4,5,6,7\\nkmovq %k\\\\n, 4416+8*\\\\n(%rax)\\n.endr\\nvzeroupper\\n\"\n"
+        "#define WIDTH 64\n"
+        "#define VECTORS 0xffffffffu\n"
+        "#define MASKS 0xffu\n"
+        "#elif defined(__AVX__)\n"
+        "#define LOAD \".irp n,\" LOW \"\\nvmovdqu 256+64*\\\\n(%rax), %ymm\\\\n\\n.endr\\n\"\n"
+        "#define STORE \".irp n,\" LOW \"\\nvmovdqu %ymm\\\\n, 2304+64*\\\\n(%rax)\\n.endr\\nvzeroupper\\n\"\n"
+        "#define WIDTH 32\n"
+        "#define VECTORS 0xffffu\n"
+        "#define MASKS 0u\n"
+        "#else\n"
+        "#define LOAD \".irp n,\" LOW \"\\nmovdqu 256+64*\\\\n(%rax), %xmm\\\\n\\n.endr\\n\"\n"
+        "#define STORE \".irp n,\" LOW \"\\nmovdqu %xmm\\\\n, 2304+64*\\\\n(%rax)\\n.endr\\n\"\n"
+        "#define WIDTH 16\n"
+        "#define VECTORS 0xffffu\n"
+        "#define MASKS 0u\n"
+        "#endif\n"
+        "// iprobe(state) and iprobe_error(state): every register from state (but rsp; r11 the handler, state->fn), the\n"
+        "// direction flag set, then an interrupt's frame (and the error code 0x5a5a) and a jump to the handler, whose iretq comes\n"
+        "// back to the resume label after the call that pushed it; then every register into state, and rflags.\n"
+        "#define PROBE(name, error) \\\n"
+        "    \".text\\n.globl \" name \"\\n.type \" name \",@function\\n\" name \":\\n\" \\\n"
+        "    \"push %rbx\\npush %rbp\\npush %r12\\npush %r13\\npush %r14\\npush %r15\\npush %rdi\\nmov %rdi, %rax\\n\" LOAD \\\n"
+        "    \"mov %rsp, 4488(%rax)\\nmov 8(%rax), %rcx\\nmov 16(%rax), %rdx\\nmov 24(%rax), %rbx\\nmov 40(%rax), %rbp\\nmov 48(%rax), %rsi\\nmov 56(%rax), %rdi\\n\" \\\n"
+        "    \"mov 64(%rax), %r8\\nmov 72(%rax), %r9\\nmov 80(%rax), %r10\\nmov 96(%rax), %r12\\nmov 104(%rax), %r13\\nmov 112(%rax), %r14\\nmov 120(%rax), %r15\\n\" \\\n"
+        "    \"mov 4480(%rax), %r11\\nmov (%rax), %rax\\nstd\\n\" \\\n"
+        "    \"pushq $0\\nmov %ss, (%rsp)\\npush %rsp\\naddq $8, (%rsp)\\npushfq\\npushq $0\\nmov %cs, (%rsp)\\ncall 2f\\n\" \\\n"
+        "    \"push %rax\\npushfq\\ncld\\nmov 16(%rsp), %rax\\npop 4496(%rax)\\npop 128(%rax)\\n\" \\\n"
+        "    \"mov %rcx, 136(%rax)\\nmov %rdx, 144(%rax)\\nmov %rbx, 152(%rax)\\nmov %rsp, 160(%rax)\\nmov %rbp, 168(%rax)\\nmov %rsi, 176(%rax)\\nmov %rdi, 184(%rax)\\n\" \\\n"
+        "    \"mov %r8, 192(%rax)\\nmov %r9, 200(%rax)\\nmov %r10, 208(%rax)\\nmov %r11, 216(%rax)\\nmov %r12, 224(%rax)\\nmov %r13, 232(%rax)\\nmov %r14, 240(%rax)\\nmov %r15, 248(%rax)\\n\" \\\n"
+        "    STORE \"add $8, %rsp\\npop %r15\\npop %r14\\npop %r13\\npop %r12\\npop %rbp\\npop %rbx\\nret\\n2:\\n\" error \"jmp *%r11\\n\"\n"
+        "void iprobe(State* s);\n"
+        "void iprobe_error(State* s);\n"
+        "__asm__(PROBE(\"iprobe\", \"\") PROBE(\"iprobe_error\", \"pushq $0x5a5a\\n\"));\n"
+        "static const char* names[16] = { \"rax\", \"rcx\", \"rdx\", \"rbx\", \"rsp\", \"rbp\", \"rsi\", \"rdi\", \"r8\", \"r9\", \"r10\", \"r11\", \"r12\", \"r13\", \"r14\", \"r15\" };\n"
+        "typedef struct Seen { uint64_t rip, cs, rsp, error, flags; int calls; } Seen;\n"
+        "extern volatile Seen seen;\n"
+        "void handler(void*);\n"
+        "void handler_error(void*, unsigned long);\n"
+        "void handler_calls(void*);\n"
+        "void handler_aligned(void*);\n"
+        "void handler_vla(void*, unsigned long);\n"
+        "static int raise_one(const char* what, void* fn, int error, int expected)\n"
+        "{\n"
+        "    State s;\n"
+        "    memset(&s, 0, sizeof(s));\n"
+        "    for (uint32_t r = 0; r < 16; r += 1) { s.in[r] = 0x1111111111111111ull * (r + 1) ^ 0x0123456789abcdefull; }\n"
+        "    for (uint32_t v = 0; v < 32; v += 1) { for (uint32_t k = 0; k < 64; k += 1) { s.vin[v][k] = (uint8_t)(v * 37 + k * 11 + 5); } }\n"
+        "    for (uint32_t k = 0; k < 8; k += 1) { s.kin[k] = 0x0f1e2d3c4b5a6978ull * (k + 3); }\n"
+        "    s.fn = fn;\n"
+        "    memset((void*)&seen, 0, sizeof(seen));\n"
+        "    if (error) { iprobe_error(&s); } else { iprobe(&s); }\n"
+        "    int bad = s.out[4] != s.sp || (s.flags >> 10 & 1) != 1 || seen.calls != 1 || seen.rsp != s.sp || seen.cs == 0 || (seen.flags >> 10 & 1) != 0 ||\n"
+        "              (error && seen.error != 0x5a5a) || seen.rip == 0;\n"
+        "    if (bad) { printf(\"%s: frame or flags (rsp %llx/%llx, seen rsp %llx, calls %d, error %llx, flags %llx/%llx)\\n\", what, (unsigned long long)s.out[4], (unsigned long long)s.sp, (unsigned long long)seen.rsp, seen.calls, (unsigned long long)seen.error, (unsigned long long)s.flags, (unsigned long long)seen.flags); }\n"
+        "    for (uint32_t r = 0; r < 16; r += 1)\n"
+        "    {\n"
+        "        const uint64_t given = r == 11 ? (uint64_t)fn : s.in[r];\n"
+        "        if (r != 4 && s.out[r] != given) { printf(\"%s: %s changed\\n\", what, names[r]); bad = 1; }\n"
+        "    }\n"
+        "    for (uint32_t v = 0; v < 32; v += 1)\n"
+        "    {\n"
+        "        if ((VECTORS >> v & 1) && memcmp(s.vin[v], s.vout[v], WIDTH) != 0) { printf(\"%s: vector register %u changed\\n\", what, v); bad = 1; }\n"
+        "    }\n"
+        "    for (uint32_t k = 0; k < 8; k += 1)\n"
+        "    {\n"
+        "        if ((MASKS >> k & 1) && s.kout[k] != s.kin[k]) { printf(\"%s: k%u changed\\n\", what, k); bad = 1; }\n"
+        "    }\n"
+        "    if (expected >= 0 && (int)seen.rip != expected) { printf(\"%s: computed %d, not %d\\n\", what, (int)seen.rip, expected); bad = 1; }\n"
+        "    return bad;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int bad = 0;\n"
+        "    bad |= raise_one(\"handler\", (void*)handler, 0, -1);\n"
+        "    bad |= raise_one(\"handler_error\", (void*)handler_error, 1, -1);\n"
+        "    bad |= raise_one(\"handler_calls\", (void*)handler_calls, 0, 5);\n"
+        "    bad |= raise_one(\"handler_aligned\", (void*)handler_aligned, 0, 3);\n"
+        "    bad |= raise_one(\"handler_vla\", (void*)handler_vla, 1, 0x5a);\n"
+        "    printf(bad ? \"FAILED\\n\" : \"ok\\n\");\n"
+        "    return bad;\n"
+        "}\n";
+    static const char handlers[] =
+        "#include <stdint.h>\n"
+        "typedef struct Frame { uint64_t rip, cs, flags, rsp, ss; } Frame;\n"
+        "typedef struct Seen { uint64_t rip, cs, rsp, error, flags; int calls; } Seen;\n"
+        "volatile Seen seen;\n"
+        "int snprintf(char*, unsigned long, const char*, ...);\n"
+        "static void record(Frame* f, unsigned long error) { seen.flags = __builtin_ia32_readeflags_u64(); seen.rip = f->rip; seen.cs = f->cs; seen.rsp = f->rsp; seen.error = error; seen.calls += 1; }\n"
+        "__attribute__((interrupt)) void handler(Frame* f) { record(f, 0); }\n"
+        "__attribute__((interrupt)) void handler_error(Frame* f, unsigned long e) { record(f, e); }\n"
+        "__attribute__((interrupt)) void handler_calls(Frame* f) { record(f, 0); char buf[32]; snprintf(buf, sizeof buf, \"%.1f\", 2.5); double d = 2.0; seen.rip = (uint64_t)(d * (buf[0] - '0') + 1.0); }\n"
+        "__attribute__((interrupt)) void handler_aligned(Frame* f) { record(f, 0); _Alignas(64) char x[64]; __builtin_memset(x, 3, 64); seen.rip = (uint64_t)x[63]; }\n"
+        "__attribute__((interrupt)) void handler_vla(Frame* f, unsigned long e) { record(f, e); char x[e & 0xff]; __builtin_memset(x, (int)(e & 0xff), sizeof x); seen.rip = (uint64_t)(unsigned char)x[(e & 0xff) - 1]; }\n";
+    char harness_path[512];
+    char handler_path[512];
+    char object[512];
+    char linked[512];
+    snprintf(harness_path, sizeof(harness_path), "%s/interrupt-harness.c", directory);
+    snprintf(handler_path, sizeof(handler_path), "%s/interrupt-handlers.c", directory);
+    snprintf(object, sizeof(object), "%s/interrupt.o", directory);
+    snprintf(linked, sizeof(linked), "%s/interrupt", directory);
+    const bool written = parse_test_write(harness_path, harness, sizeof(harness) - 1) && parse_test_write(handler_path, handlers, sizeof(handlers) - 1);
+    check_test_expect(test, written, "interrupt handlers: fixtures written");
+    static const char* const configurations[][4] = {
+        { "-march=x86-64", NULL, NULL, NULL },
+        { "-march=x86-64", "-fstack-clash-protection", "-fno-omit-frame-pointer", "-g" },
+        { "-march=x86-64-v3", NULL, NULL, NULL },
+        { "-march=x86-64-v4", NULL, NULL, NULL },
+    };
+    for (uint32_t c = 0; written && c < BUSTER_ARRAY_LENGTH(configurations); c += 1)
+    {
+        const bool runs = c < 2 || (c == 2 && __builtin_cpu_supports("avx2")) ||
+                          (c == 3 && __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw") && __builtin_cpu_supports("avx512dq") &&
+                           __builtin_cpu_supports("avx512vl"));
+        for (uint32_t p = 0; runs && p < 2; p += 1)
+        {
+            char* text = NULL;
+            char* arguments[] = { (char*)executable, "--verify", "-std=gnu17", "-w", (char*)configurations[c][0], "-c", handler_path, "-o", object, NULL, NULL, NULL, NULL, NULL };
+            uint32_t at = 9;
+            for (uint32_t k = 1; k < 4 && configurations[c][k] != NULL; k += 1)
+            {
+                arguments[at++] = (char*)configurations[c][k];
+            }
+            arguments[at] = p == 1 ? "--scalar" : NULL;
+            const int status = check_test_driver_spawn(arguments, &text);
+            char description[2048];
+            snprintf(description, sizeof(description), "interrupt handlers: %s%s by the %s path compile (status %d: %s)", configurations[c][0],
+                     configurations[c][1] != NULL ? " with probes, frame pointers and -g" : "", p == 1 ? "scalar" : "vector", status, text != NULL ? text : "");
+            check_test_expect(test, status == 0, description);
+            free(text);
+            text = NULL;
+            char* link[] = { (char*)clang, (char*)configurations[c][0], "-O0", "-w", harness_path, object, "-o", linked, NULL };
+            const bool built = status == 0 && check_test_driver_spawn(link, &text) == 0;
+            free(text);
+            char ran[4096] = { 0 };
+            const bool running = built && check_test_driver_capture(linked, ran, sizeof(ran));
+            snprintf(description, sizeof(description), "interrupt handlers: %s%s by the %s path return to the interrupted code with every register: %s",
+                     configurations[c][0], configurations[c][1] != NULL ? " with probes, frame pointers and -g" : "", p == 1 ? "scalar" : "vector",
+                     running ? ran : "(nothing ran)");
+            check_test_expect(test, running && strcmp(ran, "ok\n") == 0, description);
+            unlink(object);
+            unlink(linked);
+        }
+    }
+    unlink(harness_path);
+    unlink(handler_path);
+}

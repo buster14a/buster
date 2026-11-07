@@ -1015,6 +1015,60 @@ index, vvvv or immediate.
 
   They run on x86-64, with probes, frame pointers and `-g`, and on x86-64-v3, where `preserve_all` keeps whole YMMs.
 
+### Interrupt service routines (#147)
+
+`Tier0Function.interrupt` makes a function an x86 interrupt service routine: clang's `interrupt` attribute, LLVM's
+`x86_intrcc`. `BUSTER_TIER0_INTERRUPT_HANDLER` is one without an error code. `_ERROR_CODE` is one whose exception
+pushes an error code. The processor enters it with the interrupted code's rip, cs, rflags, rsp and ss on the stack, and
+the error code below them. There is no call's return address. So:
+
+- **The frame** is a preserving frame of every register: the general ones, r11 too, and the vector and mask registers
+  `no_caller_saved_registers` keeps. It saves the interrupted code's registers, and has a frame pointer.
+- **The entry** (`tier0_emit_interrupt`), after the saves and the reservation, clears the direction flag (`cld`), since
+  the interrupted code's may be set. It then gives the parameters where their System V locations say they arrive:
+  - the processor's frame's address in rdi (`lea rdi, [rbp + 8]`, or `[rbp + 16]` past an error code);
+  - the error code in rsi (`mov rsi, [rbp + 8]`).
+
+  Both registers were saved, so the ordinary parameter moves take them from there.
+- **An error code's frame** is entered 8 bytes off a call's alignment. Its reservation makes them up
+  (`tier0_layout_frame`), and its epilogue adds 8 to rsp over the error code before returning.
+- **The return** is `iretq`.
+- **No red zone.** A nested interrupt's frame would land below rsp, so the routine's red zone temporaries
+  (`tier0_temporary`, `tier0_red_zone`) are the frame's top 128 bytes, right below the pushes and the preserve block,
+  from rbp. Neither a realignment nor an allocation moves them, and no other place reaches them.
+- **Its result is void, and it takes no variadic arguments.** `tier0_preserve_valid` refuses any other metadata on both
+  compile paths.
+
+**The unwind tables** (`Tier0Code.frame_interrupt`):
+
+- The fixed reader takes the epilogue's `iretq`, after the add where there is one, as the end.
+- Without an error code, the interrupted rip is where a return address would be, so the rows are a preserving frame's.
+- With one, the CFA is 8 bytes further up (`emitted_tier0_interrupt_rows`):
+  - every CFA rule gains 8 and every slot loses 8;
+  - the entry's CFA is rsp + 16, and after the add it is rsp + 8 again for the `iretq`;
+  - so an unwinder finds the interrupted rip at CFA - 8, where LLVM's frames leave the error code's slot.
+- The verifier starts such a frame with rsp 16 below the CFA (`EmittedCode.entry_error_code`), and takes `iretq` as a
+  return. `cld` is a semantics row that writes DF.
+
+**Tests:**
+
+- `test-emitted-code` (`emitted_test_tier0_interrupt`) compiles both kinds by both paths:
+  - every register's set (ZMMs and the masks, or whole YMMs);
+  - objects of each size and alignment, probed and not.
+
+  Each must clear DF, give its parameters and end in `iretq`. Its rules must be complete and proved, its mutants
+  refuted, and its changed block moves refused.
+- `test-tier0` refuses metadata of an unknown kind, of a frame that keeps nothing, and of other parameters.
+- `test-checker-driver`'s `check_test_driver_interrupt_handlers` runs both paths' handlers, built with `--verify`, in
+  user mode, as the processor would. A probe clang builds:
+  1. loads every register, zmm0 to zmm31 and k0 to k7 with AVX-512;
+  2. sets the direction flag;
+  3. pushes an interrupt's frame, with an error code for the second kind;
+  4. jumps to the handler, whose `iretq` returns to it at the same privilege level.
+
+  Every register must come back, and the direction flag set again. The handlers record the frame's rip, rsp and cs, the
+  error code, and a cleared direction flag. They also make calls, use floating point, realign their frame and allocate.
+
 ## Symbols outside the image
 
 `GLOBAL`, `GLOBAL_ADDRESS`, `STORE_GLOBAL` and `SET_GLOBAL` name a symbol, and `Tier0Function.symbol_access` says how the
