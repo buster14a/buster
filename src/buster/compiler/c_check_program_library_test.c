@@ -530,8 +530,9 @@ static __attribute__((noinline)) void check_test_library_programs(CheckTest* tes
         "library-folds-in-code", clang);
     // An unrelated overload set puts ordinary declarations through overload selection too (#1234). Each plain
     // fold still lowers without a call, including the original strlen case, on both checker and lowering paths.
+    // Keep the overload definitions private: the paired oracle renames ordinary global identifiers, not mangled names.
     check_test_program_source(test,
-        "int ov(int x) __attribute__((overloadable)){return x;}double ov(double x) __attribute__((overloadable)){return x;}"
+        "static int ov(int x) __attribute__((overloadable)){return x;}static double ov(double x) __attribute__((overloadable)){return x;}"
         "unsigned long strlen(const char*);int strcmp(const char*,const char*);int strncmp(const char*,const char*,unsigned long);"
         "int memcmp(const void*,const void*,unsigned long);int bcmp(const void*,const void*,unsigned long);"
         "unsigned long wcslen(const int*);int wcscmp(const int*,const int*);int wcsncmp(const int*,const int*,unsigned long);int wmemcmp(const int*,const int*,unsigned long);"
@@ -539,12 +540,12 @@ static __attribute__((noinline)) void check_test_library_programs(CheckTest* tes
         "+bcmp(\"ab\",\"ad\",2)*11+(int)wcslen(L\"xyz\")*13+wcscmp(L\"a\",L\"c\")*17+wcsncmp(L\"abc\",L\"abz\",3)*19+wmemcmp(L\"ab\",L\"ad\",2)*23;}",
         "library-folds-beside-overloads", clang);
     check_test_program_source(test,
-        "unsigned long strlen(const char*);unsigned long strlen(int x) __attribute__((overloadable)){return 100+(x&7);}"
+        "unsigned long strlen(const char*);static unsigned long strlen(int x) __attribute__((overloadable)){return 100+(x&7);}"
         "int tested(int n){return (int)strlen(\"abcd\")+(int)strlen(n);}",
         "library-folds-selected-ordinary", clang);
     check_test_program_source(test,
-        "int calls;unsigned long strlen(const char*s) __attribute__((overloadable)){calls++;return 30+(unsigned char)s[0];}"
-        "unsigned long strlen(int x) __attribute__((overloadable)){calls+=3;return x&7;}"
+        "static int calls;static unsigned long strlen(const char*s) __attribute__((overloadable)){calls++;return 30+(unsigned char)s[0];}"
+        "static unsigned long strlen(int x) __attribute__((overloadable)){calls+=3;return x&7;}"
         "int tested(int n){calls=0;unsigned long a=strlen(\"abcd\"),b=strlen(n);return (int)(a+10*b)+1000*calls;}",
         "library-overloads-remain-calls", clang);
     check_test_program_source(test,
