@@ -20,6 +20,116 @@ struct CheckDriverDefaultWarningFixture
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        .name = "one parenthesized comparison does not hide the other warning",
+        .source = "int f(int a,int b,int c,int d){return ((a<b) & c<d)+(a==b ^ (c!=d));}\n",
+        .warnings = 2,
+        .notes = 4,
+    },
+    {
+        .name = "parenthesized eager chain leaves outer precedence visible",
+        .source = "int f(int a,int b,int c,int d,int e,int g){return (a<b & c<d) ^ e<g;}\n",
+        .warnings = 1,
+        .notes = 2,
+    },
+    {
+        .name = "constant initializer comparison pairs",
+        .source = "int a=1<2 & 3<4; static int b=1==2 ^ 3!=4; int f(void){return a+b;}\n",
+    },
+    {
+        .name = "constant initializer single comparisons",
+        .source = "int a=1<2 & 3; static int b=1 ^ 2!=3; int f(void){return a+b;}\n",
+        .warnings = 2,
+        .notes = 4,
+    },
+    {
+        .name = "enum comparison pairs",
+        .source = "enum E{A=1<2 & 3<4,B=1==2 ^ 3!=4};int f(void){return A+B;}\n",
+    },
+    {
+        .name = "enum single comparisons",
+        .source = "enum E{A=1<2 & 3,B=1 ^ 2!=3};int f(void){return A+B;}\n",
+        .warnings = 2,
+        .notes = 4,
+    },
+    {
+        .name = "unevaluated comparison pairs",
+        .source = "unsigned long f(int a,int b,int c,int d){return sizeof(a<b & c<d);}\n",
+    },
+    {
+        .name = "unevaluated single comparison",
+        .source = "unsigned long f(int a,int b,int c){return sizeof(a<b & c);}\n",
+        .warnings = 1,
+        .notes = 2,
+    },
+    {
+        .name = "unselected generic comparison pair",
+        .source = "int f(int a,int b,int c,int d){return _Generic(0,int:1,default:a<b ^ c<d);}\n",
+    },
+    {
+        .name = "unselected generic single comparison",
+        .source = "int f(int a,int b,int c){return _Generic(0,int:1,default:a<b ^ c);}\n",
+        .warnings = 1,
+        .notes = 2,
+    },
+    {
+        .name = "two relational operands of each bitwise operator",
+        .source = "int f(int a,int b,int c,int d){return (a<b & c<d)+(a>b | c>d)+(a<=b ^ c>=d);}\n",
+    },
+    {
+        .name = "two equality operands of each bitwise operator",
+        .source = "int f(int a,int b,int c,int d){return (a==b & c!=d)+(a!=b | c==d)+(a==b ^ c!=d);}\n",
+    },
+    {
+        .name = "mixed equality and relational operands",
+        .source = "int f(int a,int b,int c,int d){return (a==b & c<d)+(a>=b | c!=d)+(a!=b ^ c<=d);}\n",
+    },
+    {
+        .name = "eager chains of three comparisons",
+        .source = "int f(int a,int b,int c,int d,int e,int g){return (a<b ^ c<d ^ e<g)+(a==b & c==d & e==g)+(a!=b | c!=d | e!=g);}\n",
+    },
+    {
+        .name = "mixed eager bitwise chains",
+        .source = "int f(int a,int b,int c,int d,int e,int g){return (a<b & c<d ^ e<g)+(a==b ^ c==d | e==g);}\n",
+    },
+    {
+        .name = "bare bitwise operand suppresses comparison precedence",
+        .source = "int f(int a,int b,int c,int d){return (a&b ^ c<d)+(a<b | c^d);}\n",
+    },
+    {
+        .name = "parenthesized comparisons are explicit",
+        .source = "int f(int a,int b,int c,int d){return ((a<b) & (c<d))+((a==b)^c)+(a|(b!=c));}\n",
+    },
+    {
+        .name = "relational left operand still warns once per operator",
+        .source = "int f(int a,int b,int c){return (a<b & c)+(a<=b | c)+(a>b ^ c);}\n",
+        .warnings = 3,
+        .notes = 6,
+    },
+    {
+        .name = "relational right operand still warns once per operator",
+        .source = "int f(int a,int b,int c){return (a & b>=c)+(a | b<c)+(a ^ b<=c);}\n",
+        .warnings = 3,
+        .notes = 6,
+    },
+    {
+        .name = "equality left operand still warns once per operator",
+        .source = "int f(int a,int b,int c){return (a==b & c)+(a!=b | c)+(a==b ^ c);}\n",
+        .warnings = 3,
+        .notes = 6,
+    },
+    {
+        .name = "equality right operand still warns once per operator",
+        .source = "int f(int a,int b,int c){return (a & b!=c)+(a | b==c)+(a ^ b!=c);}\n",
+        .warnings = 3,
+        .notes = 6,
+    },
+    {
+        .name = "parenthesized bitwise operand does not suppress warning",
+        .source = "int f(int a,int b,int c,int d){return ((a&b) ^ c<d)+(a<b | (c^d));}\n",
+        .warnings = 2,
+        .notes = 4,
+    },
+    {
         .name = "nondecimal literal conversion bit patterns and lossy controls",
         .source = "#define X 0xe2\n"
                   "signed char take(signed char x) { return x; }\n"

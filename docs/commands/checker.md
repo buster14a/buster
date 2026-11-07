@@ -139,6 +139,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   and GNU range initialization, including preservation and removal of marks.
   Each body has at most one warned dereference because Clang's delayed warning
   order for multiple accesses is unstable across invocations.
+  Bitwise/comparison `-Wparentheses` diagnostics distinguish a single bare comparison from eager logical
+  comparison pairs and unparenthesized bitwise chains (#1390). Parenthesized operands retain their explicit
+  grouping. Original default-warning fixtures compare complete diagnostics and independent counts against
+  pinned Clang through scalar/vector and one/three-lane readers, including warning promotion and suppression.
   `c_check_return_flow.c` supplies source return-warning facts for checked graphs. Ordinary direct calls no longer
   suppress a function's `-Wreturn-type` warning; a proven direct `noreturn` call or terminating builtin ends only its
   own warning-flow edge. Short circuit, conditional and unevaluated operands retain their execution rules, and
