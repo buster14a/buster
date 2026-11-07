@@ -129,6 +129,13 @@ unused-warning fixtures also check exact scope-completion tokens.
   macro-produced parentheses or declarations alone do not suppress an ordinary source assignment. Original
   fixtures compare independent counts, severity and complete diagnostic lines with Clang through default,
   scalar and deferred reader routes, including warning flags and source diagnostic pragmas.
+  `-Wsign-compare` retains the original unsignedness of both operands before narrow integer promotion (#1391).
+  An `unsigned char` or `unsigned short` promoted to `int` cannot become negative; signed casts, arithmetic
+  results and genuine signed operands keep their existing diagnostics. `c_check_sign_compare_driver_test.c`
+  compares independent counts, severity and complete Clang diagnostic lines through default/scalar compilation
+  and a deferred route that requires two admitted reader lanes. Run `test-checker-driver --sign-compare-only`
+  with `--executable build/compiler` under a two-CPU grant; the shared correctness inventory
+  supplies that grant. This is a type-local fix; general expression ranges and bitfield ranges remain separate.
   `c_check_noderef_driver_test.c`, in the attribute-effects driver section,
   compares original GNU `noderef` placement, propagation, conversion,
   address-cancellation and unevaluated-expression fixtures with pinned Clang
