@@ -1110,6 +1110,59 @@ equal bodies of 16,645 and of 24,965 tokens read on one lane, and one of 9,989
 beside fifteen of 993 on 3 lanes. That best counts readings no gate on the
 bodies' lanes can choose, such as 4 lanes without the rounds.
 
+### What the remaining gap costs (#447)
+
+That gap is in `check_input_deferred`'s readings: the benchmark's and the
+corpus tests'. The C driver reads a unit's bodies apart only with
+`--deferred-bodies`, which is off by default, and then only where the rule
+gives `BUSTER_CHECK_DEFERRED_COMPILE_LANES` (4) or more. Otherwise it reads the
+unit in source order, decided before the top level's walk.
+[The record](https://github.com/buster14a/buster-performance/tree/1fe2905c04859fe508debb3b63ec38da9aa42126/docs/measurements/deferred-gap-447-2026-11-07)
+surveys the rule's lanes on the 9700X at main `25a3fdb1d`, on 8 permitted lanes:
+
+| Units | Count | No bodies | 1 lane | 2 | 3 | 4 or more |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| musl `src` | 1,524 | 25 | 1,496 | 1 | 1 | 0 |
+| c-testsuite single-exec | 220 | 0 | 220 | 0 | 0 | 0 |
+| `sqlite3.c` | 1 | 0 | 0 | 0 | 0 | 1 (8 lanes) |
+| synthetic | 38 | 0 | 13 | 7 | 6 | 12 |
+
+So the driver reads every musl and c-testsuite unit in source order, which on
+every one #1644's record measured is faster than the deferred reader on
+any lane count: one lane costs 12 to 614% more than source order, and no lane
+count saves more than 8.0% of one lane's time. It reads `sqlite3.c` on 8 lanes,
+16.50% faster than source order, where the best fixed count reads 16.33%
+faster. Against the best of source order and every measured lane count, two
+synthetic units are clear gaps: one body of 19,973 tokens beside one of 14,981
+or 9,989 and fifteen of 993, which the rule gives 4 lanes, where source order is
+4.6 and 3.3% faster.
+
+On the mid-sized units, the rule's measure doesn't tell the units 2 lanes pay
+on from those they lose on. Its excess over a lane's tokens is 0.24 to 0.78 on
+musl `regex/regexec.c`, `stdio/vfprintf.c`, `thread/pthread_create.c`,
+`malloc/mallocng/malloc.c` and `00204.c`, which 2 lanes read 1.2 to 3.4%
+faster than one, and 0.21 to 0.76 on `math/fmal.c`, `lgamma_r.c`, `j0.c`,
+`exp2l.c` and `crypt/crypt_des.c`, which they read 1.4 to 3.3% slower. What
+differs is time, not tokens:
+
+- A body token takes 12.5 to 28 ns to walk on one lane, and the merge's pass
+  2.2 to 3.9 ns per token of the unit. The first group's walks take 67 to 124
+  µs, with a pass of 30 to 53 µs; the second's take 35 to 53 µs, with a pass of
+  14 to 16 µs.
+- A woken lane walks a body token 1.4 to 1.8 times slower than the first,
+  whose CPU alone has the performance governor (see "How long to wait before
+  sleeping" in `object-writer-and-linker.md`).
+
+A least-squares fit of the change 2 lanes make, from what the rule counts, gets
+its sign wrong on 8 of 33 real units, `00204.c`, `malloc.c` and
+`pthread_create.c` among them. The same fit from each unit's measured walks and
+pass gets it wrong on 3, none of them those. Closing the gap would take an
+estimate of the bodies' walk time before the walks, such as per-kind weights
+summed over the bodies' tokens, which would be another pass over them.
+buster-performance#81's fit of such weights generalized worse than token count.
+The rule stays as it is: in the driver's readings, only the two dominant-body
+units above are behind.
+
 ### The merge's serial work (#697)
 
 On eight lanes on `sqlite3.c`, the merge took 7.3 of the reading's 73.5
