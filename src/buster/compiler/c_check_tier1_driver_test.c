@@ -1331,6 +1331,80 @@ static void check_test_driver_tier1_rematerialization(CheckTest* test, const cha
     unlink(reference);
 }
 
+// #1395: the same target must produce the same object regardless of the compiler host's kernel path. The address
+// sum and load-add loop exposed the former maximal-munch/costed split; multiplication by 3/5/9 and by a power of two
+// retain #1217's already established costs. Unsigned arithmetic keeps every oracle input defined.
+static const char check_test_tier1_reproducible_source[] =
+    "#include <stdio.h>\n"
+    "__attribute__((noinline)) unsigned long m3(unsigned long x) { return x * 3; }\n"
+    "__attribute__((noinline)) unsigned long m5(unsigned long x) { return x * 5; }\n"
+    "__attribute__((noinline)) unsigned long m9(unsigned long x) { return x * 9; }\n"
+    "__attribute__((noinline)) unsigned long m4(unsigned long x) { return x * 4; }\n"
+    "__attribute__((noinline)) unsigned m3i(unsigned x) { return x * 3; }\n"
+    "__attribute__((noinline)) unsigned long address_sum(unsigned long x, unsigned long y) { return x + y * 4 + 8; }\n"
+    "__attribute__((noinline)) unsigned long chain(unsigned long x) { return (x * 3) * 3; }\n"
+    "__attribute__((noinline)) unsigned long load_add(unsigned long x, const unsigned long* p) { return x + *p; }\n"
+    "__attribute__((noinline)) unsigned long two_loads(const unsigned long* p) { return p[0] + p[1]; }\n"
+    "__attribute__((noinline)) unsigned long loop(const unsigned long* p, unsigned n)\n"
+    "{ unsigned long s = 1; for (unsigned i = 0; i < n; i += 1) s = (s * 3) * 3 + p[i]; return s; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned long p[] = {0, 1, ~0ul, 0x8000000000000000ul, 0x123456789abcdeful};\n"
+    "    unsigned long s = loop(p, 0) ^ loop(p, 5) ^ two_loads(p + 2);\n"
+    "    for (unsigned i = 0; i < 5; i += 1)\n"
+    "    {\n"
+    "        unsigned long x = p[i];\n"
+    "        s += m3(x) ^ m5(x) ^ m9(x) ^ m4(x) ^ m3i((unsigned)x);\n"
+    "        s ^= address_sum(x, p[4 - i]) + chain(x) + load_add(x, p + i);\n"
+    "    }\n"
+    "    printf(\"%lx\\n\", s);\n"
+    "    return 0;\n"
+    "}\n";
+
+static void check_test_driver_tier1_reproducible(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/tier1-reproducible.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-reproducible-clang", directory);
+    const bool written = parse_test_write(source, check_test_tier1_reproducible_source, sizeof(check_test_tier1_reproducible_source) - 1);
+    char* oracle[] = { (char*)clang, "-O0", "-march=x86-64", "-o", reference, source, NULL };
+    char* diagnostics = NULL;
+    const bool referenced = written && check_test_driver_spawn(oracle, &diagnostics) == 0;
+    free(diagnostics);
+    char expected[256] = {0};
+    const bool ready = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ready, "the independent C oracle runs the host-reproducibility fixture");
+    for (uint32_t remat = 0; ready && remat < 2; remat += 1)
+    {
+        char objects[2][512];
+        bool compiled[2] = {false};
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char linked[512];
+            snprintf(objects[path], sizeof(objects[path]), "%s/tier1-reproducible-%u-%u.o", directory, remat, path);
+            snprintf(linked, sizeof(linked), "%s/tier1-reproducible-%u-%u", directory, remat, path);
+            CheckTestTier1Build build;
+            compiled[path] = check_test_tier1_build(executable, source, "", objects[path], remat != 0, path != 0, true, false, "-march=x86-64", &build);
+            check_test_expect(test, compiled[path], "both host paths compile every reproducibility fixture function through Tier 1");
+            char* link[] = { (char*)clang, "-o", linked, objects[path], NULL };
+            char* text = NULL;
+            const bool built = compiled[path] && check_test_driver_spawn(link, &text) == 0;
+            free(text);
+            char actual[256] = {0};
+            check_test_expect(test, built && check_test_driver_capture(linked, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "each reproducibility object executes like the independent C oracle");
+            unlink(linked);
+        }
+        check_test_expect(test, compiled[0] && compiled[1] && check_test_driver_same_files(objects[0], objects[1]),
+                          "Tier 1 emits byte-identical scalar/vector objects for the same baseline target, with either rematerialization mode");
+        unlink(objects[0]);
+        unlink(objects[1]);
+    }
+    unlink(source);
+    unlink(reference);
+}
+
 // `path` as sh reads it between single quotes: each ' closes, escapes and reopens its quote. False if it doesn't fit.
 static bool check_test_tier1_quoted(char* out, size_t size, const char* path)
 {

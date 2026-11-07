@@ -8,12 +8,16 @@ requirements. [Command index](README.md).
 
 - Tier 1 selection publishes effective uses for `tier1_liveness.c`; the native
   consumer connects required locations, allocation, frames and spill/remat
-  records. Its vector path covers the integer core by bottom-up rewriting over
+  records. Both host paths cover the integer core by bottom-up rewriting over
   state tables `tier1_select_initialize` compiles from a grammar of the
-  candidates' patterns (`tier1_select_burs.c`, baked; labeled 16 nodes a depth
-  level), maximal munch its scalar twin and its fallback; `test-tier1-select`
-  checks the tables and the kernels' twins, which `test-tier1-pipeline` and
-  `benchmark-tier1-select-source` check on every function they plan. Bounded
+  candidates' patterns (`tier1_select_burs.c`, baked). Vector labeling takes
+  16 nodes of a depth level; the independent scalar kernels use the same costs
+  and tie-breaks. Maximal munch remains the grammar's fallback and a separate
+  test reference. `test-tier1-select` checks identical plans and records;
+  `test-tier1-pipeline` checks the kernel twins and complete plans on every
+  function, and `benchmark-tier1-select-source` checks the kernels before timing.
+  `test-checker-driver` requires byte-identical Tier 1 scalar/vector objects for
+  the #1395 regressions at the same target, with either rematerialization mode. Bounded
   direct scalar calls preserve live caller registers and publish symbolic CALL
   references. Byte/word memory and integer conversions
   use canonical 32-bit storage; terminal chains retain explicit traps or empty
