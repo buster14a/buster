@@ -4540,6 +4540,7 @@ typedef struct CheckUnitsKept CheckUnitsKept;
 static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock, bool release);
 static void check_units_admit(struct CheckUnitsLane* lane, uint32_t tokens);
 static bool check_units_discard_huge(struct CheckUnitsLane* lane);
+static bool check_units_unit_left(const struct CheckUnitsLane* lane);
 
 // A unit's deferred bodies' lanes in the command's flow (#151, CheckDeferredFlow): the emission's lanes (`lanes`), whose
 // worker budget's slots the bodies take under a lease of their own, and whether giving them back failed.
@@ -4645,6 +4646,21 @@ static void check_driver_deferred_give_back(void* context)
 // If `fatal` is nonnull, retain the publication's fatal state before releasing the preprocessor: a multi-unit caller
 // uses that state to publish the canonical prefix, independently of which lane finishes first.
 // Returns the command's exit status: 0 for a unit without errors whose outputs were written.
+// The bytes a token of the scratch that check-expressions, check-declarations, static-data and check_program push
+// before check_program gives its pages back (#628): about 64 MB of sqlite3.c's 716,157 tokens. The discard after the
+// reader keeps that many past the scratch's length, which they then find resident rather than fault in again, cleared.
+#define BUSTER_CHECK_DRIVER_SCRATCH_REUSE 96
+
+// Gives the kernel back the scratch's pages past `kept` bytes from its start (arena_discard_past, #628): those of a pass
+// whose pushes are over, which the passes after it, pushing fewer, would otherwise hold through the compile's peak. A
+// lane of several units with another to compile (check_units_unit_left) gives them back in whole huge pages, as
+// check_program does (CheckProgramOptions.discard_huge, #777): the huge page a discard frees part of is split, and the
+// next unit would fault it in a base page at a time.
+static void check_driver_discard_scratch(Arena* scratch, CheckProgramLanes* lanes, uint64_t kept)
+{
+    arena_discard_past(scratch, kept, lanes != NULL && lanes->units_lane != NULL && check_units_unit_left(lanes->units_lane));
+}
+
 static int check_driver_unit(const CheckDriverCommand* command, const PPOptions* options, const char* path, InternTable* identifiers, Preprocessor* pp,
                              Parser* parser, Arena* arena, Arena* scratch, Arena* output_arena, CheckProgramLanes* lanes, CheckClock* stage_clock,
                              uint64_t* pp_ticks, FILE* errors, CheckUnitsKept* kept, bool release, DependencyOutput* dependency, Arena* dependency_arena,
@@ -4843,6 +4859,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                                   repairing ? repair.original_end : checking->tokens.count, selected);
             }
             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
+            // The parse's and the reader's pages of the scratch, 82 MB of sqlite3.c's, which check-expressions and
+            // check-declarations would otherwise hold to static-data's end (check_driver_discard_scratch, #628), but for
+            // what they and check_program push into it again (BUSTER_CHECK_DRIVER_SCRATCH_REUSE).
+            check_driver_discard_scratch(scratch, lanes, scratch->length + BUSTER_CHECK_DRIVER_SCRATCH_REUSE * (uint64_t)checking->tokens.count);
             if (stage_clock != NULL && deferring)
             {
                 stage_clock->deferred = true;

@@ -1326,6 +1326,65 @@ put `lower.statements` at 7.264 ms and 7.298 against the base's 6.909, every
 round above every base round: the push's added lookups and the copy cost more
 than the shorter chain saved.
 
+## The statement sweep over evaluated nodes (#1048)
+
+#1235's statement sweep (`cf254b58`) took only statements whose every node had
+one of the plainest shapes. It walked each statement it refused before the
+tasks lowered it. Commit `83f2cad3` on the branch `opencode/1048-lowering`
+tried the full version: every expression statement, branch, plain return and
+scalar local's one-value initializer on the vector path, with the nodes it
+can't take left to the tasks in place.
+
+1. **From the root down.** Each evaluated node, found by a bitset of distances
+   below the root, writes its own entries and its conversion's into a slot. It
+   gives its operands their contexts, targets and ancestors' calls.
+2. **From the lowest node up.** The slots are copied in node order. A task node
+   (`&&`, `||`, `?:`, an update, a bit-field's or an aggregate's access, a
+   builtin, among others) has its expression task drained in its place. Each
+   call's row goes where the tasks' preorder puts it.
+
+It was exact. `test-lowering-sweep` lowered every function the same as the
+tasks: 79.75% of `sqlite3.c`'s evaluated nodes swept, 72.79% of Lua's 34
+units' and 84.82% of c-testsuite's subset's. `sqlite3.c`'s object matched
+`--scalar`'s. It was slower, though. On the 9700X, seven interleaved rounds of
+one build ran three variants:
+
+- **The tasks**, as on main.
+- **The sweep.**
+- **The walk**: the sweep's first pass with each node's rules replaced by its
+  op, its type's class and its first two operands marked. It discards the
+  result, and the tasks then lower every statement.
+
+Medians in ms, ranges in brackets
+([the record](https://github.com/buster14a/buster-performance/tree/9fce968596150cc884dd311880238185ba162a21/docs/measurements/lowering-sweep-1048-2026-11-07)):
+
+| row | the tasks | the sweep | the walk |
+| --- | ---: | ---: | ---: |
+| `lower` | 10.611 [10.468 to 10.775] | 12.185 [12.132 to 12.330] | 12.157 |
+| `lower.statements` | 6.943 [6.846 to 7.032] | 8.516 [8.452 to 8.600] | 8.460 |
+
+`test-lowering-sweep --passes 25`'s warm lowerings agreed: the sweep took 1.147
+to 1.150 times the tasks' time, in three runs.
+
+The walk alone cost about 1.5 ms. The sweep's row is that walk plus the rules
+for 80% of the nodes, the second pass and the tasks for the rest. That comes to
+about 7 ms, as much as the tasks' whole loop, push, pop and dispatch included.
+IBS op sampling on this session's Zen 4 laptop agreed: both designs dispatch
+about 400 to 450 macro-ops per evaluated node. So the tasks' loop spends its
+time on the expansion's rules, the chain of loads and tests that decides each
+node's entries, not on reaching the node. A different order of visiting the
+nodes can't take `lower.statements` near Tier 0's time. These changes took
+the sweep from 1.30 to between 1.11 and 1.18 times the tasks' time on the
+laptop, never below 1:
+
+- a bitset in place of 64-byte loads of the byte states just stored;
+- each slot's kinds and classes stored and read as whole words;
+- no per-statement copy of the writer's columns;
+- a copy of the slots alone for a statement without calls or task nodes;
+- every common op's case inline.
+
+So no compile takes the sweep; its code stays in the branch's history.
+
 ## Computing with transport vectors (#137)
 
 Tier 0's VECTOR class holds vectors of 4, 8, 16, 32 and 64 bytes. The others,

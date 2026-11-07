@@ -4574,6 +4574,30 @@ tokens it may act at, and tests there only what may make it act. On SQLite
   the reader's arena of rare columns. It skips the tokens it doesn't act
   at, whose first values, `NONE`, the pass writes, and tests the sparse
   columns only of the tokens that have an entry.
+- **The rare columns' pages** (#628): the token columns of the reader's
+  arena of rare columns (the specifier jobs, the declarations' bases,
+  storage, flags and ABIs, the builtins and the rest of
+  `BUSTER_CHECK_SPARSE_COLUMNS`) are written at few tokens and read at most:
+  the classes above load the specifier finishes and the builtins at every
+  token, and each declaration reads its first token's. A reading in source
+  order keeps a bit per 64 bytes of them (`CheckInputReader.rare_marks`,
+  `BUSTER_CHECK_RARE_GRANULE_SHIFT`), which every write's claim sets
+  (`check_input_rare_claim`), and its vector path's hot reads give 0 for
+  bytes with no bit without touching their page: a scalar read reads the
+  column's first entry instead and clears it, and a vector load reads a static
+  line of zeros, by masks rather than branches, which the marks, alternating,
+  would mispredict (`check_input_rare_mask`, `BUSTER_CHECK_RARE`,
+  `check_input_rare_line`). A vector load masked to no lanes would give the
+  zeros too, but at a page nothing had touched it took the 9700X 174 TSC
+  ticks, against 35 at a written page, every time (`docs/compile-time.md`'s
+  "The rare columns read only where written").
+  So the columns are base pages that only their writes
+  fault in: of `sqlite3.c`'s 6,673 pages the walks write 688, which in huge
+  pages, spread over the columns, had taken 20 MB at the reader's end. The
+  scalar path, the twin, reads every entry, and counts the 64 bytes with a
+  byte other than 0 and no bit in `CheckInput.visit_misses`
+  (`check_input_rare_verify`), which a small fixture's columns, sharing a
+  page, would hide in a page's bit.
 - **Deferred bodies** (#113) need no marks of their own: each starts at an
   `OPEN_BODY`, which the walk tests, and the walk jumps over the body from
   there. Lanes share the column, each writing only its own body's tokens.
