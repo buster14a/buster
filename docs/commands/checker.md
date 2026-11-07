@@ -15,6 +15,12 @@ spellings and retained `format(printf, ...)` attributes remain checked.
 Bare compatible function redeclarations inherit their visible predecessor's
 format records without mutating published metadata; each call reads the
 declaration visible there, so later or closed-block annotations do not leak.
+A first block-scope extern remains discoverable by a later file declaration;
+a block redeclaration of an existing outer declaration keeps its scope end.
+Without a visible predecessor, the canonical first declaration supplies that
+contract even when a later block redeclaration has expired.
+Explicit library builtins use their retained intrinsic source-call receipt,
+including after deferred-body merging.
 The original default-warning fixtures cover those boundaries, redeclarations,
 embedded NULs, complete Clang diagnostics, warning promotion/suppression and
 scalar/vector object twins at one and three requested lanes.

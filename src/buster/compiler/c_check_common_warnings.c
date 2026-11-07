@@ -2847,17 +2847,28 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
 {
     const CheckGraph* graph = &input->graph;
     const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
-    static const CheckOp calls[] = { CHECK_OP_CALL };
+    static const CheckOp calls[] = { CHECK_OP_CALL, CHECK_OP_BUILTIN_X86 };
     const CheckCommonOps set = check_common_ops(calls, BUSTER_ARRAY_LENGTH(calls));
     CheckCommonScan scan = { 0 };
     for (uint32_t node = check_common_next_op(graph, &set, &scan, vector); node < graph->count; node = check_common_next_op(graph, &set, &scan, vector))
     {
-        if (graph->ops[node] != CHECK_OP_CALL || stream->diagnostics[node] != CHECK_DIAG_NONE)
+        const bool intrinsic = graph->ops[node] == CHECK_OP_BUILTIN_X86;
+        if ((graph->ops[node] != CHECK_OP_CALL && !intrinsic) || stream->diagnostics[node] != CHECK_DIAG_NONE)
         {
             continue;
         }
-        const uint32_t callee = graph->operand0[node];
-        const uint32_t callee_token = callee < graph->count ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+        const uint32_t callee = !intrinsic ? graph->operand0[node] : BUSTER_CHECK_NONE;
+        uint32_t callee_token = callee < graph->count ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+        if (intrinsic)
+        {
+            // Explicit library builtins keep their source call receipt through deferred merging too. The graph
+            // checks their prototype through BUILTIN_X86, not through an ordinary CALL node.
+            const uint32_t closing = graph->tokens[node];
+            const uint32_t id = input->intrinsic_ids != NULL && closing < input->token_count ? input->intrinsic_ids[closing] : 0;
+            const CheckInputIntrinsicCall* call = input->intrinsic_calls != NULL && id != 0 && id <= input->intrinsic_call_count ?
+                                                  input->intrinsic_calls + id - 1 : NULL;
+            callee_token = call != NULL && call->closing == closing ? call->keyword : BUSTER_CHECK_NONE;
+        }
         if (callee_token >= parser->tokens.count || parser->tokens.kinds[callee_token] != PARSE_KIND_IDENTIFIER)
         {
             continue;

@@ -36,6 +36,51 @@ static const char check_driver_format_attributed_source[] =
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        .name = "first block annotation survives its own later bare declaration",
+        .source = "void declare(void){extern int printf(const char*,...)__attribute__((format(printf,1,2)));"
+                  "extern int printf(const char*,...);}\nint printf(const char*,...);\n"
+                  "void call(void){printf(\"%d\",\"str\");}\n",
+        .options = { "-fno-builtin" },
+        .warnings = 1,
+    },
+    {
+        .name = "first bare block extern does not export a later block annotation",
+        .source = "void declare(void){extern int printf(const char*,...);"
+                  "extern int printf(const char*,...)__attribute__((format(printf,1,2)));"
+                  "extern int printf(const char*,...);}\nint printf(const char*,...);\n"
+                  "void call(void){printf(\"%d\",\"str\");}\n",
+        .options = { "-fno-builtin" },
+    },
+    {
+        .name = "all supported explicit format builtins keep their source argument indexes",
+        .source = "typedef struct _IO_FILE FILE;\nvoid f(FILE*p,char*b){"
+                  "__builtin_printf(\"%d\",\"str\");__builtin_fprintf(p,\"%d\",\"str\");"
+                  "__builtin_sprintf(b,\"%d\",\"str\");__builtin_snprintf(b,16,\"%d\",\"str\");"
+                  "__builtin_snprintf(b,16,\"%s.mo\\0\",\"x\");}\n",
+        .options = { "-ffreestanding", "-fno-builtin" },
+        .warnings = 5,
+    },
+    {
+        .name = "explicit format receipts follow interleaved unrelated intrinsic calls",
+        .source = "void f(const char*s){(void)__builtin_strlen(s);__builtin_printf(\"%d\",\"str\");(void)__builtin_strlen(s);}\n",
+        .options = { "-fno-builtin" },
+        .warnings = 1,
+    },
+    {
+        .name = "first block extern format contract reaches the first file declaration",
+        .source = "void declare(void){extern int printf(const char*,...)__attribute__((format(printf,1,2)));}\n"
+                  "int printf(const char*,...);\nvoid call(void){printf(\"%d\",\"str\");}\n",
+        .options = { "-fno-builtin" },
+        .warnings = 1,
+    },
+    {
+        .name = "later file declaration does not import a nested outer redeclaration annotation",
+        .source = "int printf(const char*,...);\n"
+                  "void declare(void){extern int printf(const char*,...)__attribute__((format(printf,1,2)));}\n"
+                  "int printf(const char*,...);\nvoid call(void){printf(\"%d\",\"str\");}\n",
+        .options = { "-fno-builtin" },
+    },
+    {
         .name = "middle format annotation survives a final bare declaration",
         .source = "int printf(const char*,...);\nint printf(const char*,...)__attribute__((format(printf,1,2)));\n"
                   "int printf(const char*,...);\nvoid f(void){printf(\"%d\",\"str\");}\n",
