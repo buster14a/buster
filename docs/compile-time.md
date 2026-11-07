@@ -155,7 +155,9 @@ Each upper bound is the time the item would save if its cost went to zero.
      `check_input_expressions`, `check_input_resolve_range` and `check_input_run`'s
      own pre-passes.
    - Upper bound: about 70 ms of user time.
-   - Follow-up: [#529](https://github.com/buster14a/buster/issues/529).
+   - Follow-up: [#529](https://github.com/buster14a/buster/issues/529), which
+     closed with the stage at 47.3 ms ("#529's outcome" below);
+     [#1671](https://github.com/buster14a/buster/issues/1671) carries the rest.
      [#113](https://github.com/buster14a/buster/issues/113)'s deferred bodies
      are its multicore route.
 2. **Memory first touched**, 728 MB of peak RSS.
@@ -1412,6 +1414,46 @@ from 0.73% to 0.27%.
 
 The walks and the steps are flat profiles, so what is left of them needs a change to the walks themselves. Trimming
 another pass around them won't reach it.
+
+### #529's outcome (7 November)
+
+**Done when.** #529 asked for the 9700X step to show the stage's time down, with the objects unchanged, and for
+this file to record it.
+
+| 9700X step, `-c sqlite3.c` | `check-input` | span |
+| --- | ---: | ---: |
+| at the filing (`1677a3b`) | 81.2 ms | 189.2 ms |
+| at its close (#1646's PR job, run 42371769735) | 47.3 ms | 126.6 ms |
+
+Every change on the way kept the objects the same bytes. The close's step compares them with `cmp`, and its log is in
+[the outcome record](https://github.com/buster14a/buster-performance/tree/cf5e1d1023573ad61ba91c707fc3a0e53177fe33/docs/measurements/check-input-529-outcome-2026-11-07).
+The sections above record each step.
+
+**The issue's work items:**
+1. **Profile the stage.** Each section above starts from a 9700X profile by function and line.
+2. **Separate the per-token work from the per-declaration and per-expression work:**
+   - **The full-token pre-passes** are folded: #568's single counting pass, then #1563's vector passes.
+   - **The expression graph's construction** is data-parallel (#1038, closed by #1478).
+   - **Skipping the system-header declarations nothing uses** was measured and not taken. See below.
+3. **The multicore route** is #113's deferred bodies on lanes, outside this issue.
+
+**The system headers' declarations.** Measured on the 9700X, each run under its own hold of the lock:
+- **The unit.** `sqlite3.c`'s system-header lines are about 6.4% of its preprocessed tokens.
+- **The ceiling.** Compiled alone as a unit, those lines cost the reader 3.85 ms, against 0.018 ms for an empty unit and
+  46.4 ms for the whole preprocessed unit. So a skip could take at most 3.8 ms, 8.1% of the stage.
+- **The declarations.** The unit's own lines name 114 of the 2,683 system declarations.
+- **Why the default mode doesn't skip them.** Skipping would stop the reader diagnosing those declarations: a malformed
+  system header's errors, and the constructs it refuses there. The default mode checks every declaration as clang does
+  ("Every body is parsed and checked by default" in [the checker's design](c-checker.md)), and #155 allows a skip only
+  behind `-flazy-system-headers`.
+- **The opt-in mode today.** It skips only unreferenced system bodies, and its plan makes `check-input` slower: 73.0 ms
+  against 47.4 ms, for the same object (#1364).
+
+So item 2's skip is settled by the default mode's contract, with its ceiling measured; a skip of declarations would
+belong to the opt-in mode, whose plan must first stop costing more than it saves (#1364).
+
+**Past the done-when,** #1671 tracks the stage's remaining time: the two walks and the declaration steps, 26 ms of the
+47.3 ms, with flat profiles.
 
 ## The passes after checking (#592)
 
