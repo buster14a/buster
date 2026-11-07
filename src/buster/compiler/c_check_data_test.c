@@ -1117,7 +1117,7 @@ static void check_data_test_retained_payloads(CheckTest* test, TypeTable* types)
                         BUSTER_LINK_CLASS_DATA,
                         BUSTER_LINK_CLASS_BSS,
                         BUSTER_LINK_CLASS_RODATA,
-                        BUSTER_LINK_CLASS_STRINGS,
+                        BUSTER_LINK_CLASS_RODATA,
                         BUSTER_LINK_CLASS_DATA,
                         BUSTER_LINK_CLASS_TDATA,
                         BUSTER_LINK_CLASS_RODATA,
@@ -2115,6 +2115,7 @@ static void check_data_test_overwrite_oracle(CheckTest* test, TypeTable* types)
     }
 }
 #include "c_check_data_bit_field_test.c"
+#include "c_check_string_pool_test.c"
 
 static __attribute__((noinline)) void check_test_data(CheckTest* test, TypeTable* types, const char* clang)
 {
@@ -2137,6 +2138,7 @@ static __attribute__((noinline)) void check_test_data(CheckTest* test, TypeTable
     check_data_test_dense_cache(test, types);
     check_data_test_direct_writes(test, types);
     check_data_test_overwrite_oracle(test, types);
+    check_test_string_pool(test, types);
 }
 
 #endif

@@ -1603,6 +1603,107 @@ static void tier1_select_test_load_barriers(Tier1SelectTest* test)
     arena_release(&input);
 }
 
+// #1396: every store width at relaxed, release and seq_cst, with its address direct or folded, returns the still-live
+// desired parameter. Guard bytes distinguish the access's width from its register's, and xchg must destroy only r11.
+static void tier1_select_test_atomic_stores(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(1u << 20);
+    Arena scratch = arena_reserve(1u << 20);
+    static const uint8_t types[] = { IR_I8, IR_I16, IR_I32, IR_I64 };
+    static const uint8_t orders[] = { 0, 3, BUSTER_IR_FENCE_SEQ_CST };
+    static const uint32_t exchanges[] = { X86_FORM_XCHG_RM8_R8, X86_FORM_XCHG_RM16_R16, X86_FORM_XCHG_RM32_R32, X86_FORM_XCHG_RM64_R64 };
+    for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(types); t += 1)
+    {
+        for (uint32_t order = 0; order < BUSTER_ARRAY_LENGTH(orders); order += 1)
+        {
+            for (uint32_t folded = 0; folded < 2; folded += 1)
+            {
+                const uint8_t type = types[t];
+                const bool narrow = type != IR_I64;
+                const bool sequential = orders[order] == BUSTER_IR_FENCE_SEQ_CST;
+                const uint32_t store = 3 + folded;
+                const uint32_t count = store + 2 + narrow;
+                const IrSizes sizes = { .instruction_count = count, .block_count = 1, .parameter_count = 3, .address_count = folded };
+                IrFunction function;
+                const bool created = ir_create(&input, &sizes, &function) == IR_OK;
+                tier1_select_test_expect(test, created, "create atomic store fixture");
+                if (created)
+                {
+                    function.result_type = IR_I64;
+                    function.block_offsets[1] = count;
+                    function.parameter_types[0] = IR_PTR;
+                    function.parameter_types[1] = type;
+                    function.parameter_types[2] = IR_I64;
+                    tier1_select_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 1, IR_PARAM, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 2, IR_PARAM, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    if (folded != 0)
+                    {
+                        function.addresses[0] = (IrAddress){ .offset = 8, .scale = 1 };
+                        tier1_select_test_node(&function, 3, IR_ADDRESS, IR_PTR, 0, BUSTER_IR_NONE, 0);
+                    }
+                    tier1_select_test_node(&function, store, IR_STORE, IR_VOID, folded != 0 ? 3 : 0, 1, BUSTER_IR_NONE);
+                    function.flags[store] = (uint8_t)(BUSTER_IR_ATOMIC | orders[order] << BUSTER_IR_ORDER_SHIFT);
+                    function.alignment_log2[store] = (uint8_t)t;
+                    if (narrow)
+                    {
+                        tier1_select_test_node(&function, store + 1, IR_ZEXT, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    }
+                    tier1_select_test_node(&function, count - 1, IR_RET, IR_VOID, narrow ? store + 1 : 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    uint8_t registers[8] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RDX, X86_REGISTER_R8, X86_REGISTER_RAX, X86_REGISTER_RAX, X86_REGISTER_RAX };
+                    for (uint32_t path = 0; path < 2; path += 1)
+                    {
+                        Tier1SelectPlan plan;
+                        uint32_t failed = 0;
+                        const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, path == 0, &plan, &failed);
+                        const uint8_t rule = folded != 0 ? TIER1_RULE_STORE_ADDRESS : TIER1_RULE_STORE;
+                        tier1_select_test_expect(test, planned == TIER1_SELECT_OK && plan.patterns[store].rule == rule &&
+                                                           (plan.patterns[store].operation == X86_OPERATION_XCHG) == sequential,
+                                                  "only a seq_cst store selects xchg, including its folded address");
+                        Tier1SelectCode code;
+                        const Tier1SelectError emitted = planned == TIER1_SELECT_OK ? tier1_select_emit(&plan, registers, test->allowed, &output, &code, &failed) : planned;
+                        tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "an atomic store emits");
+                        uint32_t exchanged = 0;
+                        uint32_t fences = 0;
+                        bool exact = true;
+                        for (uint32_t r = 0; emitted == TIER1_SELECT_OK && r < code.count; r += 1)
+                        {
+                            const X86Instruction record = code.records[r];
+                            fences += record.form == X86_FORM_MFENCE;
+                            if (record.form >= X86_FORM_XCHG_RM8_R8 && record.form <= X86_FORM_XCHG_RM64_R64)
+                            {
+                                exchanged += 1;
+                                exact &= record.form == exchanges[t] && (record.mode & BUSTER_X86_MODE_MEMORY) != 0 && record.reg == BUSTER_TIER1_SELECT_SCRATCH;
+                            }
+                        }
+                        tier1_select_test_expect(test, emitted == TIER1_SELECT_OK && exact && exchanged == (uint32_t)sequential && fences == 0,
+                                                  "a seq_cst store exchanges its exact width through the scratch, without mfence; weaker stores do neither");
+                        if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
+                        {
+                            uint64_t actual_memory[3] = { UINT64_C(0xa5a5a5a5a5a5a5a5), UINT64_C(0xfedcba98f0f1f2f3), UINT64_C(0x5a5a5a5a5a5a5a5a) };
+                            uint64_t expected_memory[3];
+                            memcpy(expected_memory, actual_memory, sizeof(actual_memory));
+                            // The raw selector consumer receives canonical I8/I16 parameters; the production CFG
+                            // consumer establishes them with entry MOVZX. Keep I32's upper bits to exercise its ZEXT.
+                            const uint64_t desired = UINT64_C(0x8182838485868788) & (type == IR_I8 ? UINT8_MAX : type == IR_I16 ? UINT16_MAX : UINT64_MAX);
+                            const uint64_t expected = tier1_select_test_interpret(&function, (uintptr_t)&expected_memory[1 - folded], desired, 0);
+                            const uint64_t actual = tier1_select_test_call(test, (uintptr_t)&actual_memory[1 - folded], desired, 0);
+                            tier1_select_test_expect(test, expected == actual && memcmp(actual_memory, expected_memory, sizeof(actual_memory)) == 0,
+                                                      "an atomic store preserves its live desired value and writes only its object's bytes");
+                        }
+                        arena_pop_to(&output, 0);
+                    }
+                }
+                arena_pop_to(&input, 0);
+            }
+        }
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
 // #1059's atomic read/modify/writes of every width, an exchange and an addition, selected by both paths and run on a
 // word of guard bytes: the result and the memory the original IR's, so that a byte's or a short's xchg or lock xadd
 // writes its object's bytes alone, never its 32-bit register's.
@@ -5184,6 +5285,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_memory_plans(&test);
             tier1_select_test_barrier_scan(&test);
             tier1_select_test_load_barriers(&test);
+            tier1_select_test_atomic_stores(&test);
             tier1_select_test_atomic_rmw_widths(&test);
             tier1_select_test_atomic_cas(&test);
             tier1_select_test_errors(&test);

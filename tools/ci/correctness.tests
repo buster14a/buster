@@ -744,10 +744,14 @@ rm -rf "$errors" "$directory"
 # promotions and the text's round trip keep, and which the program's run in the IR's three forms passes through.
 "$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/fences.c
 "$BUSTER_COMPILER" test-ssa-source --clang clang tests/ir-source/fences.c
-# Each aligned atomic load and store of a constant order is the typed stream's marked LOAD or SET (and a seq_cst
-# store's FENCE) and the IR's atomic access, which promotion leaves in memory and the run passes through alike.
+# Each aligned atomic load and store of a constant order is the typed stream's marked LOAD or SET and the IR's atomic
+# access, which promotion leaves in memory and the run passes through alike. Seq_cst stores become xchg at emission.
 "$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/atomics.c
 "$BUSTER_COMPILER" test-ssa-source --clang clang tests/ir-source/atomics.c
+# #1396: initializing stores and assignment results, with the desired value live past xchg, through both interpreters
+# and both native Tier 1 paths. Unit tests also keep undefined-byte checking enabled for the initializing stores.
+"$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/atomic-stores.c
+"$BUSTER_COMPILER" test-ssa-source --typed --tier1 --clang clang tests/ir-source/atomic-stores.c
 # The verifier refuses an atomic access aligned below its size; the long's store and load, lowered and promoted,
 # print their natural alignment.
 test "$("$BUSTER_COMPILER" test-ir-source --print published tests/ir-source/atomics.c | grep -c 'align=8 atomic')" -eq 4

@@ -3031,6 +3031,7 @@ static void check_test_driver_tier1_bmi(CheckTest* test, const char* clang, cons
 // The classic bit builtins' fixture (#1374, check_lower_bits_row): every one of them alone, a chain of them whose values
 // stay live across each other, and a loop that iterates a word's set bits by ctz, each count's IR intrinsic (bsf, bsr,
 // tzcnt, lzcnt, popcnt, bswap) by the target's form, on the other unit's (clang -O2's) operands, never 0 for ctz and clz.
+// The generic/C23 recipes (#1652) also take zero, negative fallback results, narrow and wide _BitInts and one-zero limbs.
 static const char check_test_tier1_bits_header[] =
     "unsigned b_bswap16(unsigned short x);\n"
     "unsigned b_bswap32(unsigned x);\n"
@@ -3049,7 +3050,10 @@ static const char check_test_tier1_bits_header[] =
     "int b_ffsl(long x);\n"
     "int b_ffsll(long long x);\n"
     "unsigned long b_chain(unsigned long a, unsigned b);\n"
-    "unsigned long b_bits(unsigned long a);\n";
+    "unsigned long b_bits(unsigned long a);\n"
+    "unsigned long b_generic(unsigned long a, int f);\n"
+    "unsigned long b_stdc(unsigned long a);\n"
+    "unsigned long b_generic_wide(unsigned long low, unsigned long high, int f);\n";
 
 static const char check_test_tier1_bits_source[] =
     "#include \"tier1-bits.h\"\n"
@@ -3085,6 +3089,49 @@ static const char check_test_tier1_bits_source[] =
     "        sum = sum * 67 + (unsigned long)__builtin_ctzl(m) + (unsigned long)__builtin_popcountl(m) * 131;\n"
     "    }\n"
     "    return sum;\n"
+    "}\n"
+    "unsigned long b_generic(unsigned long a, int f)\n"
+    "{\n"
+    "    unsigned char c = a; unsigned short s = a; unsigned u = a; _Bool b = a & 1;\n"
+    "    unsigned _BitInt(37) w = a;\n"
+    "    unsigned long h = __builtin_popcountg(c) + __builtin_popcountg(s) + __builtin_popcountg(u) + __builtin_popcountg(a);\n"
+    "    h = h * 31 + (unsigned)__builtin_clzg(c, f) + (unsigned)__builtin_ctzg(s, f);\n"
+    "    h = h * 31 + (unsigned)__builtin_clzg(u, f) + (unsigned)__builtin_ctzg(a, f);\n"
+    "    h = h * 31 + __builtin_popcountg(w) + (unsigned)__builtin_clzg(w, f) + (unsigned)__builtin_ctzg(w, f);\n"
+    "    h = h * 31 + __builtin_popcountg(b) + (unsigned)__builtin_clzg(b, f) + (unsigned)__builtin_ctzg(b, f);\n"
+    "    h = h * 31 + __builtin_clrsb((int)u) + __builtin_clrsbl((long)a) + __builtin_clrsbll((long long)a);\n"
+    "    if (s) h = h * 31 + __builtin_clzs(s) + __builtin_ctzs(s);\n"
+    "    h = h * 31 + __builtin_bswapg(s) + __builtin_bswapg(u) + __builtin_bswapg(a);\n"
+    "    return h + (long)__builtin_bswapg((_BitInt(48))a);\n"
+    "}\n"
+    "#define STDC(x) h=h*31+__builtin_stdc_leading_zeros(x)+__builtin_stdc_leading_ones(x);"
+    "h=h*31+__builtin_stdc_trailing_zeros(x)+__builtin_stdc_trailing_ones(x);"
+    "h=h*31+__builtin_stdc_first_leading_zero(x)+__builtin_stdc_first_leading_one(x);"
+    "h=h*31+__builtin_stdc_first_trailing_zero(x)+__builtin_stdc_first_trailing_one(x);"
+    "h=h*31+__builtin_stdc_count_ones(x)+__builtin_stdc_count_zeros(x)+__builtin_stdc_has_single_bit(x);"
+    "h=h*31+__builtin_stdc_bit_width(x)+(unsigned long)__builtin_stdc_bit_floor(x);"
+    "h=h*31+(unsigned long)__builtin_stdc_bit_ceil(x)\n"
+    "unsigned long b_stdc(unsigned long a)\n"
+    "{\n"
+    "    unsigned char c=a; unsigned short s=a; unsigned u=a; unsigned _BitInt(5) x=a; unsigned _BitInt(31) y=a; unsigned _BitInt(33) z=a;\n"
+    "    unsigned long h=0; STDC(c); STDC(s); STDC(u); STDC(a); STDC(x); STDC(y); STDC(z);\n"
+    "    return h;\n"
+    "}\n"
+    "unsigned long b_generic_wide(unsigned long low, unsigned long high, int f)\n"
+    "{\n"
+    "    unsigned __int128 u=((unsigned __int128)high<<64)|low;\n"
+    "    unsigned _BitInt(65) a=u; unsigned _BitInt(96) b=u; unsigned _BitInt(127) c=u;\n"
+    "    unsigned long h=__builtin_popcountg(u)+__builtin_popcountg(a)+__builtin_popcountg(b)+__builtin_popcountg(c);\n"
+    "    h=h*31+(unsigned)__builtin_clzg(u,f)+(unsigned)__builtin_ctzg(u,f);\n"
+    "    h=h*31+(unsigned)__builtin_clzg(a,f)+(unsigned)__builtin_ctzg(a,f);\n"
+    "    h=h*31+(unsigned)__builtin_clzg(b,f)+(unsigned)__builtin_ctzg(b,f);\n"
+    "    h=h*31+(unsigned)__builtin_clzg(c,f)+(unsigned)__builtin_ctzg(c,f);\n"
+    "    STDC(a); STDC(b); STDC(c); STDC(u);\n"
+    "    unsigned __int128 swap=__builtin_bswapg(u); h=h*31+(unsigned long)swap+(unsigned long)(swap>>64);\n"
+    "    swap=(unsigned __int128)__builtin_bswapg((unsigned _BitInt(80))u); h=h*31+(unsigned long)swap+(unsigned long)(swap>>64);\n"
+    "    swap=__builtin_stdc_bit_floor(u); h=h*31+(unsigned long)swap+(unsigned long)(swap>>64);\n"
+    "    swap=__builtin_stdc_bit_ceil(u); h=h*31+(unsigned long)swap+(unsigned long)(swap>>64);\n"
+    "    return h;\n"
     "}\n";
 
 static const char check_test_tier1_bits_other_source[] =
@@ -3105,6 +3152,10 @@ static const char check_test_tier1_bits_other_source[] =
     "        hash = hash * 31 + (unsigned)(b_popcount((unsigned)a) + b_popcountl(a) + b_parity((unsigned)a) + b_parityll(a));\n"
     "        hash = hash * 31 + (unsigned)(b_ffs((int)a) + b_ffsl((long)a) + b_ffsll((long long)a) + b_ffs(0) + b_ffsl((long)(a << 40)));\n"
     "        hash = hash * 31 + b_chain(a, (unsigned)(a >> 17)) + b_bits(a);\n"
+    "        int f = (i & 1) ? (-2147483647 - 1) : 2147483647;\n"
+    "        hash = hash * 31 + b_generic(a, f) + b_generic(0, f) + b_stdc(a) + b_stdc(0);\n"
+    "        hash = hash * 31 + b_generic_wide(a, 0, f) + b_generic_wide(0, a, f) + b_generic_wide(a, ~a, f);\n"
+    "        if (i == 0) hash = hash * 31 + b_generic_wide(0, 0, f);\n"
     "        if (i < 2) printf(\"%llx %x %d %d %lx %lx\\n\", a, b_bswap32((unsigned)a), b_ctzl(n), b_clzl(n), b_chain(a, (unsigned)a), b_bits(a));\n"
     "    }\n"
     "    printf(\"%llx\\n\", hash);\n"
@@ -3123,7 +3174,7 @@ static void check_test_driver_tier1_bits(CheckTest* test, const char* clang, con
         const bool parsed = x86_target_parse(level, (uint32_t)strlen(level), &target);
         const bool host = parsed && (x86_target_native().features & target.features) == target.features;
         check_test_expect(test, parsed, "the bit builtins' fixture's target");
-        check_test_driver_tier1_units(test, clang, executable, directory, "tier1-bits", "classic bit builtins'", check_test_tier1_bits_header, check_test_tier1_bits_source,
+        check_test_driver_tier1_units(test, clang, executable, directory, "tier1-bits", "classic and generic bit builtins'", check_test_tier1_bits_header, check_test_tier1_bits_source,
                                       check_test_tier1_bits_other_source, marches[t], host, 0);
     }
 }

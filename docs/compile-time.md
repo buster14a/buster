@@ -1872,6 +1872,73 @@ lane in node order. Against this change it was no faster:
 
 The gathers had overlapped with the flush's other work, so the change keeps them. The record holds both A/Bs.
 
+## The return flow's library-noreturn answers by name (#1709)
+
+**What cost.** The return-warning facts (`c_check_return_flow.c`) leave a direct call to a known, non-noreturn
+function unknown when its name is a catalogue entry with the `r` attribute (`abort`, `exit`, `longjmp`…), whose
+noreturn depends on builtin policy rather than the declaration's flag. Main searched the catalogue by name for every
+such call: in `-c sqlite3.c`, 13,142 searches of about 2,200 distinct names. `builtin_intrinsic_lookup` was 1.00% of
+the compile's cycles, all of it from `check_program_return_call`.
+
+**Now.** Only 16 of the catalogue's 3,775 entries carry `r`. `check_program_return_facts` interns their spellings
+once (`intern_find`) and marks their ids in a byte per identifier (`check_program_return_library_names`); a call reads
+its name's byte. The answer depends on the interned name alone, so the facts are the same.
+- **The twin.** The search (`check_program_return_library_search`) stays: it answers when the scratch arena has no
+  room for the bytes, and `test-checker` compares the bytes with it over every catalogue name, near misses and the
+  predefined names.
+- **The table's drift.** The same test checks that the table of 16 names is exactly the catalogue's `r` entries, in
+  its order, so a regenerated catalogue that changes the set fails there.
+- **A first step, kept in the record.** Memoizing each name's search still made 2,182 searches, and the A/B gained
+  0.78%.
+
+**Measured on the 9700X.** Main `829eb71a` against `56143cc3`, in 8 interleaved rounds, then `measure-compile` each
+way. Every run held the lock on its own. [The record](https://github.com/buster14a/buster-performance/tree/7e65d1a31fa2d399d5c92c98f2e5ee53e97765f6/docs/measurements/check-program-1709-return-library-2026-11-07) keeps the receipts, the three builds' profiles and the
+probe.
+
+| measure | main | head | difference |
+| --- | ---: | ---: | ---: |
+| wall time | 118.620 ms | 117.420 ms | −1.01%, lower in 8 of 8 rounds |
+| user cycles | 576.707 M | 569.578 M | −1.24% |
+| user instructions | 1,279.591 M | 1,272.399 M | −0.56% |
+| `check-program` | 24.625 ms | 23.601 ms | −1.02 ms |
+
+`builtin_intrinsic_lookup` is gone from the profile. The frozen corpus's objects are the same bytes, and sqlite
+3.50.4's `-c -g -Wall -Wextra` objects and diagnostics are the same bytes as main's on the vector path and with
+`--scalar`.
+
+## What remains of check-input (#1671)
+
+After #1692 and #1694, `check-input` is 43.15 ms on `-c sqlite3.c` (main `829eb71a`, the 9700X). A study found no
+remaining part worth more than about 0.3 ms by local changes.
+[The record](https://github.com/buster14a/buster-performance/tree/72bc1dd97d260c9b7e04ddaffcde4ad72a0eae71/docs/measurements/check-input-1671-remaining-2026-11-07)
+keeps the profiles, the probes and the A/Bs below.
+
+**Where its time is,** in shares of the compile's cycles:
+
+| part | share | profile |
+| --- | ---: | --- |
+| the coded walk | about 6% | its loop's spills, the flush's recording, the value splice and the dispatch, each 0.7–0.8% |
+| the walk in source order's own lines | 4.3% | no line above 0.27% |
+| the declaration steps | about 4.9% | flat |
+
+**What was ruled out, by measurement:**
+- **The declaration steps in vector passes.** The file-scope declarations hold 70% of the steps' time, and each is
+  distinct. Their per-parameter bookkeeping is branching and binding calls; its stores are about 0.04 ms in all.
+- **Caching the specifiers.** 96.5% of `check_input_specifiers`' 42,308 calls repeat an earlier call's tokens, but
+  they are one or two tokens long, and each still writes its tokens' ignored marks. The bound is about 0.3 ms.
+- **The expressions' graph built by passes.** #1038's numbering alone takes 3.21 ms for 323,623 nodes, as much as the
+  class actions it would replace, before any column is written.
+- **The coded walk's rare class actions out of line.** The instructions were identical: clang already kept them out of
+  line.
+- **The walk's label marks computed ahead.**
+  - Gathered a line at a time, they cost +0.28% cycles: the gathers sat on the walk's path.
+  - Made before the walk without gathers, they removed 5.5 M instructions and no cycles: the per-visit tests were cheap
+    and well predicted.
+  - So batching the plain names' visits, 17% of the walk's time, wasn't tried.
+
+**Outside check-input.** check-program's `check_program_return_call` looks every direct call's callee up in the builtin
+catalogue by name: 13,142 binary searches on `sqlite3.c`, 0.95% of the compile.
+
 ## The passes after checking (#592)
 
 #641 removes more token-domain work from the same handoffs. Initializer plans keep only their ascending
