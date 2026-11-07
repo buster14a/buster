@@ -1094,7 +1094,6 @@ static inline void check_graph_update_leaf(CheckGraph* graph, uint32_t node, con
 #include "c_check_builtin_graph_metadata.c"
 
 static bool check_graph_initialize(CheckGraph* graph, Arena* arena, uint32_t capacity, uint32_t argument_capacity);
-static bool check_graph_initialize_rows(CheckGraph* graph, Arena* arena, Arena* rows, uint32_t capacity, uint32_t argument_capacity);
 static uint32_t check_graph_add(CheckGraph* graph, CheckOp op, uint32_t token, uint32_t operand0, uint32_t operand1, uint32_t operand2);
 static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* output, Arena* scratch, const CheckOptions* options, CheckStream* stream);
 
@@ -1111,13 +1110,9 @@ static void* check_graph_column(Arena* arena, uint64_t count, uint64_t element_b
 
 #define BUSTER_CHECK_GRAPH_COLUMN(arena, Type, count) ((Type*)check_graph_column((arena), (count), sizeof(Type), _Alignof(Type)))
 
-// A graph's columns in `arena`, but its leaf rows in `rows`: room for a row a leaf, of which the leaves with more than a
-// record take the first few. The C driver's reader gives them an arena of base pages (check_input_run), where in huge pages
-// their first row cleared a 2 MB page for sqlite3.c's 80 rows, 7.5 KB (#628).
-static bool check_graph_initialize_rows(CheckGraph* graph, Arena* arena, Arena* rows, uint32_t capacity, uint32_t argument_capacity)
+static bool check_graph_initialize(CheckGraph* graph, Arena* arena, uint32_t capacity, uint32_t argument_capacity)
 {
     const uint64_t start = arena->length;
-    const uint64_t rows_start = rows->length;
     *graph = (CheckGraph){ 0 };
     bool result = capacity <= (1u << 30) && argument_capacity <= (1u << 30);
     if (result && capacity != 0)
@@ -1131,7 +1126,7 @@ static bool check_graph_initialize_rows(CheckGraph* graph, Arena* arena, Arena* 
         graph->operand2 = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
         graph->leaf_records = BUSTER_CHECK_GRAPH_COLUMN(arena, CheckGraphLeaf, capacity);
         // Room for a row a leaf, of which the leaves with more than a record take the first few: only those take memory.
-        graph->leaf_payloads = BUSTER_CHECK_GRAPH_COLUMN(rows, CheckValue, capacity);
+        graph->leaf_payloads = BUSTER_CHECK_GRAPH_COLUMN(arena, CheckValue, capacity);
         graph->leaf_payload_capacity = capacity;
         graph->leaf_slots = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
         graph->types = BUSTER_CHECK_GRAPH_COLUMN(arena, TypeId, capacity);
@@ -1154,15 +1149,9 @@ static bool check_graph_initialize_rows(CheckGraph* graph, Arena* arena, Arena* 
     else
     {
         arena_pop_to(arena, start);
-        arena_pop_to(rows, rows_start);
         *graph = (CheckGraph){ 0 };
     }
     return result;
-}
-
-static bool check_graph_initialize(CheckGraph* graph, Arena* arena, uint32_t capacity, uint32_t argument_capacity)
-{
-    return check_graph_initialize_rows(graph, arena, arena, capacity, argument_capacity);
 }
 
 // A node of `op` at `token` with operands operand0 to operand2, each NONE or an earlier node, and its columns' defaults: a

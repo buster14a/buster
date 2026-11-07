@@ -11201,8 +11201,8 @@ static void check_input_target_table(TypeTable* types, const Preprocessor* pp)
 }
 
 static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
-                            Arena* sparse_output, bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens,
-                            CheckInputBindingMode binding_mode, CheckDeferred* deferred, bool environment, bool literal_tables, bool fresh_output)
+                            bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode,
+                            CheckDeferred* deferred, bool environment, bool literal_tables, bool fresh_output)
 {
     // The output columns whose empty value is zero need no clearing where `arena`'s bytes past its length are as the kernel
     // mapped them (arena_untouched), which a caller that knows no copy of the arena pushed past its length says with
@@ -11210,12 +11210,6 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     // most of sqlite3.c's byte columns, takes no memory, its pages the kernel's zero page wherever a later pass reads them.
     // Everything pushed below comes after its length, and the reader pops nothing of the arena before it clears them.
     const bool output_zero = fresh_output && arena_untouched(arena);
-    // The output the reader writes at few places, which a caller can keep in base pages (`sparse_output`, the C driver's:
-    // check_driver_unit), else in `arena`: the sparse columns' directories and pool, and the graph's leaf rows. Each has room
-    // for a value a token or a leaf, of which it writes few, far apart: in the huge pages of `arena`, sqlite3.c's took 6 MB
-    // of 2 MB pages that they touched in part, from the reader's end through the backend (#628).
-    Arena* const sparse_out = sparse_output != NULL ? sparse_output : arena;
-    const bool sparse_zero = fresh_output && arena_untouched(sparse_out);
     *input = (CheckInput){ .implicit_function_diagnostic = pp->options.implicit_function_diagnostic != 0 ? pp->options.implicit_function_diagnostic :
                                                         pp->options.language.standard >= 1999 ? 3 : 1,
                          .implicit_library_diagnostic = pp->options.implicit_library_diagnostic != 0 ? pp->options.implicit_library_diagnostic :
@@ -11380,8 +11374,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     CheckSparseColumn sparse_columns[12] = { 0 };
     CheckSparseWide wide_columns[2] = { 0 };
     const bool noderef = intern_find(pp->table, (const uint8_t*)"noderef", 7) != 0 || intern_find(pp->table, (const uint8_t*)"__noderef__", 11) != 0;
-    valid = valid && check_sparse_reserve_wide(sparse_out, &input->sparse_pool, sparse_columns, BUSTER_ARRAY_LENGTH(sparse_columns), wide_columns,
-                                               noderef ? 2 : 1, count, sparse_zero, deferred != 0);
+    valid = valid && check_sparse_reserve_wide(arena, &input->sparse_pool, sparse_columns, BUSTER_ARRAY_LENGTH(sparse_columns), wide_columns, noderef ? 2 : 1, count, output_zero, deferred != 0);
     input->attributes = wide_columns[0];
     input->noderef_types = wide_columns[1];
     input->initializer_nodes = sparse_columns[0];
@@ -11417,7 +11410,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     uint8_t* recorded_pure = valid ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
     uint8_t* warning_suppressed = recorded_pure != NULL ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
     valid &= warning_suppressed != NULL;
-    valid &= check_graph_initialize_rows(&input->graph, arena, sparse_out, (uint32_t)graph_capacity, count + 1);
+    valid &= check_graph_initialize(&input->graph, arena, (uint32_t)graph_capacity, count + 1);
     input->graph.recorded_pure = valid ? recorded_pure : NULL;
     input->graph.extensions = check_input_expression_extensions(parser);
     input->graph.const_values = &input->const_values;
@@ -12027,13 +12020,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
 
 static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, NULL, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false);
 }
 
 // Exact source oracle for the compact literal-table producer: retain ordinary per-expression checking/planning.
 static __attribute__((unused)) bool check_input_tables_reference(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, NULL, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, false, false);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, false, false);
 }
 
 // check_input with another binding handoff (#336), for the tests and benchmark-checker-bindings: every mode must
@@ -12041,7 +12034,7 @@ static __attribute__((unused)) bool check_input_tables_reference(CheckInput* inp
 static __attribute__((unused)) bool check_input_bindings_mode(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types,
                                                               Arena* arena, Arena* scratch, CheckInputBindingMode binding_mode)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, NULL, true, parser->tokens.count, 0, binding_mode, 0, true, true, false);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, binding_mode, 0, true, true, false);
 }
 
 // The selection owner validates nonoverlapping complete [OPEN_BODY, CLOSE_BODY + 1) masks. All source syntax,
@@ -12050,25 +12043,24 @@ static __attribute__((unused)) bool check_input_bindings_mode(CheckInput* input,
 static __attribute__((unused)) bool check_input_selected(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types,
                                                        Arena* arena, Arena* scratch, const uint8_t* deferred_tokens)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, NULL, true, parser->tokens.count, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false);
 }
 
 // A complete syntactic prefix may still acquire later tentative definitions. This entry point is only for
 // selecting an earlier semantic diagnostic when the full parser has already rejected the translation unit.
 static bool check_input_prefix(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, NULL, false, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false);
+    return check_input_run(input, parser, pp, types, arena, scratch, false, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false);
 }
 
 // The C driver's reader (run_check_command): check_input, check_input_prefix, check_input_fragment or check_input_selected
 // by its arguments, without #113's environment, which nothing in a compile reads: publishing it copied the unit's
-// binding events and built their index for nothing (#572). Its sparse output in `sparse_output` where it isn't null
-// (check_input_run).
+// binding events and built their index for nothing (#572).
 static bool check_input_compile(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
-                                Arena* sparse_output, bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens)
+                                bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, sparse_output, complete_translation_unit, original_end, deferred_tokens,
-                           CHECK_INPUT_BINDINGS_DEFAULT, 0, false, true, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, complete_translation_unit, original_end, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0,
+                           false, true, true);
 }
 
 // Diagnostic repairs append synthetic closing tokens. Labels may still occur after the retained fragment in
@@ -12076,5 +12068,5 @@ static bool check_input_compile(CheckInput* input, const Parser* parser, Preproc
 static __attribute__((unused)) bool check_input_fragment(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                                  uint32_t original_end)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, NULL, false, original_end, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false);
+    return check_input_run(input, parser, pp, types, arena, scratch, false, original_end, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false);
 }

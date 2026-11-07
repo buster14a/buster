@@ -2774,14 +2774,13 @@ static bool check_deferred_sections(const Parser* parser, const Preprocessor* pp
 }
 
 // check_input_deferred and check_input_deferred_compile: with `compile`, the C driver's reading (check_input_compile's),
-// which publishes no environment and takes `arena` as fresh where it is (CheckInput's `fresh_output`), with its sparse
-// output in `sparse_output` where that isn't null; and a unit for source order is checked by that reading too.
+// which publishes no environment and takes `arena` as fresh where it is (CheckInput's `fresh_output`); and a unit for
+// source order is checked by that reading too.
 static bool check_input_deferred_run(CheckDeferred* deferred, CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena,
-                                     Arena* scratch, Arena* sparse_output, uint32_t lanes, CheckInputBindingMode binding_mode, bool compile)
+                                     Arena* scratch, uint32_t lanes, CheckInputBindingMode binding_mode, bool compile)
 {
     const uint32_t count = parser->tokens.count;
     const uint64_t arena_mark = arena->length;
-    const uint64_t sparse_mark = sparse_output != NULL ? sparse_output->length : 0;
     const CheckDeferredFlow* flow = deferred->flow;
     const bool every_lane = deferred->every_lane;
     // The target's facts on the caller's table (plain char's signedness, cx16's 16-byte atomics), which the merge fills and
@@ -2923,8 +2922,7 @@ static bool check_input_deferred_run(CheckDeferred* deferred, CheckInput* input,
     // check_deferred_bodies ends the top level's span, which starts here.
     deferred->top_ns = valid && deferred->timing ? check_deferred_now() : 0;
     deferred->top.changes = valid ? &deferred->top_changes : 0;
-    bool checked = valid && check_input_run(input, parser, pp, &deferred->top, arena, scratch, sparse_output, true, count, mask, binding_mode, deferred, !compile, true,
-                                            compile);
+    bool checked = valid && check_input_run(input, parser, pp, &deferred->top, arena, scratch, true, count, mask, binding_mode, deferred, !compile, true, compile);
     deferred->top.changes = 0;
     check_deferred_give_back(deferred);
     deferred->unsupported |= !valid;
@@ -2936,11 +2934,7 @@ static bool check_input_deferred_run(CheckDeferred* deferred, CheckInput* input,
         const bool reset = type_view_reset(types, empty);
         types->last_error = empty_error;
         arena_pop_to(arena, arena_mark);
-        if (sparse_output != NULL)
-        {
-            arena_pop_to(sparse_output, sparse_mark);
-        }
-        checked = reset && (compile ? check_input_compile(input, parser, pp, types, arena, scratch, sparse_output, true, count, 0) :
+        checked = reset && (compile ? check_input_compile(input, parser, pp, types, arena, scratch, true, count, 0) :
                                       check_input_bindings_mode(input, parser, pp, types, arena, scratch, binding_mode));
         input->resource |= !reset;
     }
@@ -2955,14 +2949,13 @@ static bool check_input_deferred_run(CheckDeferred* deferred, CheckInput* input,
 static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena,
                                  Arena* scratch, uint32_t lanes, CheckInputBindingMode binding_mode)
 {
-    return check_input_deferred_run(deferred, input, parser, pp, types, arena, scratch, NULL, lanes, binding_mode, false);
+    return check_input_deferred_run(deferred, input, parser, pp, types, arena, scratch, lanes, binding_mode, false);
 }
 
-// The C driver's reading of a whole unit with its bodies read apart (#151): check_input_compile's result, with its sparse
-// output in `sparse_output`, on up to `lanes` lanes, which are the rounds of the state's flow where it has one
-// (CheckDeferred.flow).
+// The C driver's reading of a whole unit with its bodies read apart (#151): check_input_compile's result, on up to `lanes`
+// lanes, which are the rounds of the state's flow where it has one (CheckDeferred.flow).
 static __attribute__((unused)) bool check_input_deferred_compile(CheckDeferred* deferred, CheckInput* input, const Parser* parser, Preprocessor* pp,
-                                                                 TypeTable* types, Arena* arena, Arena* scratch, Arena* sparse_output, uint32_t lanes)
+                                                                 TypeTable* types, Arena* arena, Arena* scratch, uint32_t lanes)
 {
-    return check_input_deferred_run(deferred, input, parser, pp, types, arena, scratch, sparse_output, lanes, CHECK_INPUT_BINDINGS_DEFAULT, true);
+    return check_input_deferred_run(deferred, input, parser, pp, types, arena, scratch, lanes, CHECK_INPUT_BINDINGS_DEFAULT, true);
 }
