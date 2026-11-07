@@ -24,3 +24,31 @@ requirements. [Command index](README.md).
   allocates #732's SIMD functions as lowered, their masks in the opmask class.
   The allocation guide's "Allocation over a CFG (#140)" and "The opmask class
   (#179)" have the contract and what is pending.
+
+## Edge validation and emission indexing (#1356)
+
+`tier1_cfg_input_valid` checks both complete offset arrays before any edge-array
+access, transposes successor edges into the predecessor ranges, and consumes
+each source exactly once per target. Both rows may be unsorted; duplicates in
+either view and mismatched views are rejected. This is O(blocks + edges), with
+two block-sized and one edge-sized temporary uint32_t columns; validation
+restores scratch on success and failure. The caller's predecessor ordering and
+its phi operand association remain unchanged.
+
+`tier1_cfg_single_predecessor_edges` takes a validated, immutable input and
+writes a disjoint `block_count`-entry column owned by the emitter's scratch.
+Each entry is the sole incoming edge's successor-CSR index, or `NONE` for a
+block with zero or several predecessors. One edge sweep builds it, and
+`tier1_emit_cfg_records` reads it when placing successor-entry moves. The
+column survives until record emission finishes and is then reclaimed with the
+emitter's scratch; allocation failure keeps the existing emission failure path.
+
+`test-tier1-cfg` includes unordered rows, duplicate/missing edges, invalid
+indices and intermediate offsets, self edges, empty edge arrays, and a
+16,384-way dispatch and join. Existing allocation fixtures cover phi moves,
+critical edges, loops and all register classes through both allocation paths.
+These source changes remove the three degree-squared searches from #1356;
+the whole Tier 1 pipeline has other costs. Locked 9700X scaling measurements
+on the issue's switch and label-table inputs remain necessary before claiming
+its wall-time acceptance or a measured speedup.
+
