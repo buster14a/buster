@@ -3,7 +3,7 @@
 //
 // A failed assignment conversion's error by the driver against clang (#147, #1447), whole diagnostic output on both paths:
 // clang's DiagnoseAssignmentResult words of an initializer's (at its declarator, or at a braced subobject's value), an
-// assignment's (at its ), a return's (at its expression) and an argument's (at the argument, with its parameter's note)
+// assignment's (at its `=`), a return's (at its expression) and an argument's (at the argument, with its parameter's note)
 // conversion, by its kind (integer and pointer, -Wint-conversion; pointers, -Wincompatible-pointer-types; function
 // pointers; an incompatible type), with the types as written and clang's fix-it words; a record's and an array's whole
 // initializer of the wrong value; and a static object's second, non-constant error. Include after
@@ -19,6 +19,10 @@ static void check_test_driver_conversion_errors(CheckTest* test, const char* cla
     };
     static const CheckConversionUnit units[] = {
         { "void f(void) { int *p = 0; int x = p; }\n", "-std=c17" },
+        { "void f(int *p) { static long x = { p }; }\n", "-std=gnu17" },
+        { "int *p; long x = { p };\n", "-std=gnu17" },
+        { "int *p; int x = { (long)p };\n", "-std=gnu17" },
+        { "long x = { (int *)5 };\n", "-std=gnu17" },
         { "void f(void) { static int a; int x = &a; }\n", "-std=c17" },
         { "void f(void) { int i = 0; int *q = i; }\n", "-std=c17" },
         { "void f(void) { int **pp = 0; int *q = pp; }\n", "-std=c17" },
