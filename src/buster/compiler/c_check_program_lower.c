@@ -243,6 +243,25 @@ static BUSTER_BAKED_UNIT uint64_t check_lower_runtime_hashes[CHECK_LOWER_RUNTIME
 static BUSTER_BAKED_UNIT uint8_t check_lower_runtime_lengths[CHECK_LOWER_RUNTIMES];
 static BUSTER_BAKED_UNIT bool check_lower_runtime_names_ready;
 
+// The first runtime function from `from` on whose name a unit's lowering looks up: each one's before the library's, and
+// of the library's those whose bits `called` has (the x86 builtins' calls); CHECK_LOWER_RUNTIMES past the last. The
+// library's are found a word of bits at a time.
+static uint32_t check_lower_runtime_called_next(const uint64_t* called, uint32_t from)
+{
+    uint32_t next = from;
+    if (from >= CHECK_LOWER_RUNTIME_LIBRARY)
+    {
+        next = CHECK_LOWER_RUNTIMES;
+        for (uint32_t word = from >> 6; next == CHECK_LOWER_RUNTIMES && word < (CHECK_LOWER_RUNTIMES + 63) / 64; word += 1)
+        {
+            const uint64_t bits = called[word] & (word == from >> 6 ? ~UINT64_C(0) << (from & 63) : ~UINT64_C(0));
+            next = bits != 0 ? word * 64 + (uint32_t)__builtin_ctzll(bits) : next;
+        }
+        next = next < CHECK_LOWER_RUNTIMES ? next : CHECK_LOWER_RUNTIMES;
+    }
+    return next;
+}
+
 // Makes check_lower_runtime_hashes and check_lower_runtime_lengths, once: before any lane may read them.
 static bool check_lower_runtime_names_initialize(void)
 {
@@ -14013,20 +14032,21 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         uint16_t spelled_runtimes[CHECK_LOWER_RUNTIMES];
         uint32_t spelled = 0;
         // The names' lengths and hashes, made once (check_lower_runtime_names_ready), so that a unit's lookups are its
-        // table's probes alone.
+        // table's probes alone: every runtime function's before the library's, then the library functions the x86 builtins
+        // call, from the set bits of `called` (#1629: the test of each of the library's 394 entries in turn took as long
+        // as the probes of a unit that calls none).
         const bool hashed = check_lower_runtime_names_ready;
-        for (uint32_t r = CHECK_LOWER_RUNTIME_ERRNO + 1; program->parser != NULL && program->identifiers != NULL && r < CHECK_LOWER_RUNTIMES; r += 1)
+        const bool spelling = program->parser != NULL && program->identifiers != NULL;
+        for (uint32_t r = CHECK_LOWER_RUNTIME_ERRNO + 1; spelling && r < CHECK_LOWER_RUNTIMES;)
         {
-            if (r < CHECK_LOWER_RUNTIME_LIBRARY || (called[r >> 6] & (UINT64_C(1) << (r & 63))) != 0)
-            {
-                const uint8_t* name = (const uint8_t*)check_lower_runtime_names[r];
-                const uint32_t length = hashed ? check_lower_runtime_lengths[r] : (uint32_t)strlen((const char*)name);
-                const uint64_t hash = hashed ? check_lower_runtime_hashes[r] : intern_hash_bytes(name, length);
-                const IdentId identifier = intern_find_hashed(program->identifiers, name, length, hash);
-                identifiers[spelled] = identifier;
-                spelled_runtimes[spelled] = (uint16_t)r;
-                spelled += identifier != 0;
-            }
+            const uint8_t* name = (const uint8_t*)check_lower_runtime_names[r];
+            const uint32_t length = hashed ? check_lower_runtime_lengths[r] : (uint32_t)strlen((const char*)name);
+            const uint64_t hash = hashed ? check_lower_runtime_hashes[r] : intern_hash_bytes(name, length);
+            const IdentId identifier = intern_find_hashed(program->identifiers, name, length, hash);
+            identifiers[spelled] = identifier;
+            spelled_runtimes[spelled] = (uint16_t)r;
+            spelled += identifier != 0;
+            r = check_lower_runtime_called_next(called, r + 1);
         }
         // On the vector path, the runtimes' declarations are found in the locals' first pass below, which loads the same
         // declaring tokens' columns (#1048: 0.02 ms of sqlite3.c's preparation on the 9700X); the scalar path's own pass
