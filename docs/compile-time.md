@@ -168,9 +168,11 @@ Each upper bound is the time the item would save if its cost went to zero.
      kernel clearing pages.
    - Upper bound: about 30 ms, with the cache misses of sparse columns besides.
    - Follow-up: [#528](https://github.com/buster14a/buster/issues/528), which
-     took 115 MB of it and 17% of the kernel's cycles, #570 46 MB more and
-     [#572](https://github.com/buster14a/buster/issues/572) 121 MB more
-     ("Memory first touched", below).
+     took 115 MB of it and 17% of the kernel's cycles, #570 46 MB more,
+     [#572](https://github.com/buster14a/buster/issues/572) 121 MB more and
+     [#628](https://github.com/buster14a/buster/issues/628) 150 MB more, to
+     240 MB, with 23% fewer kernel cycles ("Memory first touched", below);
+     [#1701](https://github.com/buster14a/buster/issues/1701) has what is left.
 3. **The checker's graph and program passes**, 35.7 ms (18.9%):
    `check-expressions` 20.0 ms and `check-program` 15.7 ms, with no system
    time.
@@ -439,7 +441,7 @@ below, has what #628 changed since (the stream's values among it, now columns):
 
 Not at the peak, the reader's own arena's 61 MB of huge pages are still most of
 `check-input`'s system time. [#628](https://github.com/buster14a/buster/issues/628)
-follows up on these.
+followed up on these: "#628's outcome", below, has where it left them.
 
 ### The binding table, the fresh output and the stream's columns (#628)
 
@@ -1312,6 +1314,59 @@ The peak falls 8.8 MB, to the reader's end. The time and the kernel's cycles
 are the same, within the rounds' spread: the release only gives the pages back
 earlier than the exit would, and the backend faults in nothing it wouldn't
 have.
+
+### #628's outcome
+
+[#628](https://github.com/buster14a/buster/issues/628) started from #617's
+393 MB. Its changes, each in a section above:
+- the binding table in the reader's base pages, no fills over a fresh output
+  arena, and the stream's values as columns and payload rows (#1022);
+- the parse's tail, the graph's columns, the rare columns' pages, the sparse
+  marks and `check_program`'s discard of the scratch (#1076);
+- the twelve sparse output columns (#1166), and #1167's attributes column and
+  declaration bits;
+- the graph's leaves as records and payload rows (#1562);
+- the expansion history's replay run only past a unit's first `[[`, and its
+  output given back once compared (#1574; #1584 records three changes measured
+  and not taken);
+- the parser's scratch without the benchmark's traversal arrays, and no
+  assembly IDs without an assembly statement (this section's opening);
+- the files' token columns given back after the run, and `-Wempty-body`'s
+  invocation place without the replay (#1647);
+- the scratch given back after the reader past what the next stages push again,
+  and the rare columns in base pages, read only where written (#1684);
+- the preprocessor's output given back before the backend (#1695).
+
+As #518's step measures them, on the 9700X (`measure-compile --runs 11`
+against tcc, then `perf stat -r 11` of the compiler, CPU 2), main `2a852f20`,
+#617's merge, against main `94e166ec`, #1695's, each run under its own grant
+of the lock, in the order base, main, main, base
+([the record](https://github.com/buster14a/buster-performance/tree/e835986b41c233f2667060745926ed126159eb95/docs/measurements/step-628-2026-11-07)):
+
+| measure | `2a852f20` | `94e166ec` |
+| --- | ---: | ---: |
+| peak RSS | 390,188 / 390,172 KiB | 239,844 / 239,840 KiB |
+| wall, `measure-compile`'s median | 135.157 / 134.956 ms | 119.813 / 119.710 ms |
+| system time, its median | 16.484 / 19.608 ms | 13.257 / 17.038 ms |
+| kernel cycles | 107.68 / 108.15 M | 82.99 / 82.33 M |
+| user cycles | 639.98 / 640.54 M | 576.76 / 577.24 M |
+| minor faults | 2,220 / 2,221 | 6,760 / 6,760 |
+
+Each cell gives both of a tree's rounds. The peak is 38.5% lower and the
+kernel's cycles 23%, and the system time, which `getrusage` gives coarsely, is
+lower in each order. The faults are the base pages', which fault 4 KiB at a
+time where a huge page was cleared whole.
+
+Every peak in the compile is now within a few megabytes of the others: the
+reader's end, `static-data`'s end and the backend's end (the map in "The
+preprocessor's output before the backend"). What they all hold is what is
+left: the reader's scratch columns, about 88 MB at its end, the graph with room
+for a node a token, of which `sqlite3.c` uses 42%, the parser's columns, which
+the selection and the lowering read, and the reader's output. Two options
+still add their own: with `-Wall -Wextra`, the history's replay for the
+warnings adds 26 MB in `check-program` (the VM: 269 MB against 237 MB), and
+with `-g`, the debug rows and line table 26 MB in the backend (268 MB).
+[#1701](https://github.com/buster14a/buster/issues/1701) has them.
 
 ## The checker's graph and program passes (#530)
 
