@@ -1,4 +1,4 @@
-name: PR 1313 native qualification
+name: PR 1313 gated-walk audit
 on:
   push:
     branches: [qualify/1313-codex]
@@ -6,7 +6,7 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: buster-fast-9700x-1313-codex-measure
+  group: buster-fast-9700x-1313-codex-audit
   cancel-in-progress: false
 jobs:
   proof:
@@ -29,133 +29,54 @@ jobs:
             sleep 15
           done
           exit 1
-  measure:
+  audit:
     needs: proof
     runs-on: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          ref: eb40d4a401d4dc696df0ea7e5ba3e09d7fe7cc1a
-          persist-credentials: false
-      - name: Stage the same official toolchain for all roles
-        run: bash tools/ci/setup-benchpress.sh
-      - name: Build pinned roles and measure under the runner hook lock
+      - name: Verify zero new-walk execution and an active positive control
         shell: bash
         run: |
           set -euo pipefail
           export LC_ALL=C
-          test "$(uname -s)" = Linux
-          grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
-          cat /var/lib/buster-9700x/owner
           root="$HOME/buster-fast-bench/1313-codex-01a1b5d1"
-          out="$RUNNER_TEMP/1313-evidence-$GITHUB_RUN_ID"
-          mkdir -p "$root" "$out" "$root/measure"
-          trap 'status=$?; if [ "$status" -ne 0 ]; then printf "FAILED_STATUS=%s\n" "$status"; for file in "$out"/*.err "$out"/*.stat; do if [ -f "$file" ]; then printf "FILE %s\n" "$file"; tail -n12 "$file"; fi; done; fi' EXIT
-          if [ ! -d "$root/repo/.git" ]; then
-            git clone --no-checkout https://github.com/buster14a/buster.git "$root/repo"
-          fi
-          git -C "$root/repo" fetch --no-tags origin 25a3fdb1d76ed4f440e8b4e99e10722a0f1304a7 5929d0e2e2ab5a179313c082811b59a3ccdd0e0d eb40d4a401d4dc696df0ea7e5ba3e09d7fe7cc1a
-          if [ ! -e "$root/base/.git" ]; then git -C "$root/repo" worktree add --detach "$root/base" 25a3fdb1d76ed4f440e8b4e99e10722a0f1304a7; fi
-          if [ ! -e "$root/pr/.git" ]; then
-            git -C "$root/repo" worktree add --detach "$root/pr" 25a3fdb1d76ed4f440e8b4e99e10722a0f1304a7
-            git -C "$root/pr" -c user.name='Codex qualification' -c user.email='codex@openai.com' merge --no-commit 5929d0e2e2ab5a179313c082811b59a3ccdd0e0d
-          fi
-          if [ ! -e "$root/isolated/.git" ]; then git -C "$root/repo" worktree add --detach "$root/isolated" eb40d4a401d4dc696df0ea7e5ba3e09d7fe7cc1a; fi
-          test "$(git -C "$root/base" write-tree)" = 3be16b2d1910c27040f0db6350576bbb29b2d5f6
-          test "$(git -C "$root/pr" write-tree)" = 668c2e7b486d17b346594f209c3cc189aa8945af
-          test "$(git -C "$root/isolated" write-tree)" = a8f009a1e65c8bb92f68efe37fc0c453a609da06
+          out="$RUNNER_TEMP/1313-audit-$GITHUB_RUN_ID"
+          binary="$root/isolated/build/compiler"
+          mkdir -p "$out"
+          cat /var/lib/buster-9700x/owner
+          printf '%s  %s\n' 28c93a9852941ab12e47c6b88cb896df77de80062ba86b1b1a419f4c924d226e "$binary" | sha256sum --check
+          nm --defined-only "$binary" > "$out/symbols.txt"
+          mapfile -t symbols < <(awk '$2 ~ /^[tT]$/ && $3 ~ /^check_target_feature_(columns|start|emission_prepare|label_roots|named_roots)$/ {print $3}' "$out/symbols.txt")
+          test "${#symbols[@]}" -gt 0
+          printf 'WALK_SYMBOL=%s\n' "${symbols[@]}"
           {
-            uname -a
-            clang --version
-            cmake --version | head -n1
-            ninja --version
-            perf --version
-            printf 'main=25a3fdb1d76ed4f440e8b4e99e10722a0f1304a7\npr=5929d0e2e2ab5a179313c082811b59a3ccdd0e0d\ncandidate=eb40d4a401d4dc696df0ea7e5ba3e09d7fe7cc1a\n'
-            for role in base pr isolated; do
-              printf '%s tree=' "$role"
-              git -C "$root/$role" write-tree
+            printf 'set pagination off\nset confirm off\nset debuginfod enabled off\nset $walk_hits = 0\n'
+            for symbol in "${symbols[@]}"; do
+              printf 'break %s\ncommands\nsilent\nset $walk_hits = $walk_hits + 1\ncontinue\nend\n' "$symbol"
             done
-          } | tee "$out/identity.txt"
-          for role in base pr isolated; do
-            (cd "$root/$role" && BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh) > "$out/build-$role.log" 2>&1
-            tail -n8 "$out/build-$role.log"
-            sha256sum "$root/$role/build/compiler" | tee -a "$out/binaries.sha256"
-            object=$(find "$root/$role/build/cmake" -path "*/Release/*" -name main_unit_checker.c.o -print -quit)
-            test -f "$object"
-            objcopy --dump-section ".rodata.str1.1=$out/$role-checker-strings" "$object" /dev/null
-            sha256sum "$out/$role-checker-strings" | tee -a "$out/checker-strings.sha256"
-            readelf -WS "$root/$role/build/compiler" > "$out/sections-$role.txt"
-          done
-          if cmp -s "$out/base-checker-strings" "$out/isolated-checker-strings"; then printf "CHECKER_STRING_POOLS_IDENTICAL\n"; else printf "CHECKER_STRING_POOLS_DIFFER\n"; fi
+            printf 'run\nprintf "WALK_HITS=%%u\\n", $walk_hits\nquit\n'
+          } > "$out/audit.gdb"
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
           sqlite="$corpus/sqlite/sqlite3.c"
-          printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite" | sha256sum --check | tee "$out/input.txt"
-          sha256sum "$corpus/provenance/gnu17-pinned-predefines.txt" | tee "$out/predefines.sha256"
-          cd "$root/measure"
           options=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$corpus/sqlite" "$sqlite")
-          printf '%q ' ./compiler -c "${options[@]}" -o sqlite3.o > "$out/argv.txt"
-          printf '\n' >> "$out/argv.txt"
-          sample()
-          {
-            local role="$1" mode="$2" number="$3"
-            local target=sqlite3.o
-            local flag=-c
-            if [ "$mode" = syntax ]; then flag=-fsyntax-only; target=syntax.out; fi
-            if [ "$mode" = preprocess ]; then flag=-E; target=preprocess.out; fi
-            cp "$root/$role/build/compiler" compiler
-            cmp "$root/$role/build/compiler" compiler
-            taskset -c 2 ./compiler "$flag" "${options[@]}" -o "$target" > "$out/warm-$role-$mode-$number.out" 2> "$out/warm-$role-$mode-$number.err"
-            taskset -c 2 perf stat -x, -e instructions:u -o "$out/$role-$mode-$number.stat" -- ./compiler "$flag" "${options[@]}" -o "$target" > "$out/$role-$mode-$number.out" 2> "$out/$role-$mode-$number.err"
-            awk -F, '$3=="instructions:u" {if ($1 !~ /^[0-9]+$/ || $5+0 != 100) exit 1; found=1; print $1} END {if (!found) exit 1}' "$out/$role-$mode-$number.stat" > "$out/count"
-            printf '%s,%s,%s,%s\n' "$role" "$mode" "$number" "$(cat "$out/count")" | tee -a "$out/counts.csv"
-            cat "$out/$role-$mode-$number.stat"
-            if [ "$mode" != syntax ]; then
-              sha256sum "$target" | tee -a "$out/output-$mode.sha256"
-            fi
-            cmp "$root/$role/build/compiler" compiler
-          }
-          for number in aa1 aa2 aa3 aa4; do sample base compile "$number"; done
-          for number in 1 2 3 4 5 6 7; do
-            if ((number % 2)); then roles=(base pr isolated); else roles=(isolated pr base); fi
-            for role in "${roles[@]}"; do sample "$role" compile "$number"; done
-          done
-          for mode in syntax preprocess; do
-            for number in 1 2 3; do
-              if ((number % 2)); then roles=(base pr isolated); else roles=(isolated pr base); fi
-              for role in "${roles[@]}"; do sample "$role" "$mode" "$number"; done
-            done
-          done
-          for mode in compile preprocess; do
-            test "$(cut -d ' ' -f1 "$out/output-$mode.sha256" | sort -u | wc -l)" = 1
-          done
-          sha256sum -c "$out/binaries.sha256"
-          cat "$out/counts.csv"
-          printf 'ALL_OBJECTS_IDENTICAL\n'
+          cd "$root/measure"
+          gdb -q --batch -x "$out/audit.gdb" --args "$binary" -c "${options[@]}" -o proof-sqlite.o > "$out/sqlite-gdb.log" 2>&1
+          cat "$out/sqlite-gdb.log"
+          grep -qx 'WALK_HITS=0' "$out/sqlite-gdb.log"
+          printf '%s  %s\n' 191eae04d79d452b48af6f49907eefb8dac4709f935f49fc2ae63a6a7fe4cb33 proof-sqlite.o | sha256sum --check
+          cat > feature-proof.c <<'C'
+          static inline __attribute__((always_inline, target("avx2"))) int h(int x) { return x + 1; }
+          int f(int x) { switch (0) { if (h(1)) { case 0: x = h(2); break; } case 1: x = h(3); } return x; }
+          C
+          gdb -q --batch -x "$out/audit.gdb" --args "$binary" -std=gnu17 -march=x86-64 -c feature-proof.c -o feature-proof.o > "$out/positive-gdb.log" 2>&1
+          cat "$out/positive-gdb.log"
+          grep -Eq '^WALK_HITS=[1-9][0-9]*$' "$out/positive-gdb.log"
+          sha256sum "$binary"
+          printf 'COLD_WALK_ZERO_WITH_POSITIVE_CONTROL\n'
           
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: pr1313-qualification
-          path: ${{ runner.temp }}/1313-evidence-${{ github.run_id }}/
+          name: pr1313-gated-walk-audit
+          path: ${{ runner.temp }}/1313-audit-${{ github.run_id }}/
           if-no-files-found: error
-          retention-days: 14
-  inspect:
-    runs-on: ubuntu-26.04
-    timeout-minutes: 3
-    steps:
-      - name: Inspect the previous diagnostic receipts
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh api repos/buster14a/buster/actions/artifacts/13574266846/zip > diagnostic.zip
-          unzip -q diagnostic.zip -d diagnostic
-          cat diagnostic/warm-base-compile-aa1.err
-          tr '\000' '\n' < diagnostic/base-checker-strings | LC_ALL=C sort > base.strings
-          tr '\000' '\n' < diagnostic/isolated-checker-strings | LC_ALL=C sort > isolated.strings
-          printf 'REMOVED_STRINGS\n'
-          LC_ALL=C comm -23 base.strings isolated.strings | sed -n '1,50p'
-          printf 'ADDED_STRINGS\n'
-          LC_ALL=C comm -13 base.strings isolated.strings | sed -n '1,50p'
