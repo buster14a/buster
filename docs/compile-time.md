@@ -1030,6 +1030,51 @@ alone at 287.2 MB against main's 293.7 MB, with 396 more faults. Its observed
 medians were 138.7 against 139.9 ms, from three unpaired runs each, which
 establish no difference in time.
 
+### Partly used huge pages, and three changes not taken (#628)
+
+A map of each push's resident pages at the three peaks of `-c sqlite3.c`, with
+huge pages and with base pages (`BUSTER_HUGE_PAGES=1` and `=0`, the peak map
+above, on the VM), finds about 30 MB of 2 MB pages that their pushes touch in
+part, in all three. On #1574's tree (the VM, huge pages) the peaks are within
+3 MB of each other: 277.3 MB at the reader's end, 279.9 MB at
+`check-declarations`' end and 278.0 MB in the backend. A change lowers the
+compile's peak only by what it takes off all three, or off the highest down to
+the next. Three changes were measured and aren't in:
+- **The reader's sparse output in base pages.** The sparse columns' directories
+  and pool (`check_sparse_reserve_wide`) and the graph's leaf rows
+  (`leaf_payloads`), each with room for a value a token or a leaf, of which the
+  reader writes few, went to an arena of base pages that the C driver reserved
+  for each unit (#1584's first commit, `b6708929`).
+  - **The VM.** Every peak was 6.0 MB lower on #1574's tree, and on main
+    `faef1f98` the peak was 281,776 KiB against 287,848, for 1,575 more faults.
+    The leaf rows alone changed nothing: the pool's pages are the 6 MB, and its
+    faults.
+  - **The 9700X.** Main `faef1f98` against the change (`dd32e723`): 7
+    interleaved rounds, each compile under its own grant of the lock, with every
+    object the same bytes. The peak was 288,328 KiB against 290,936, only
+    2.6 MB lower. The task clock was 137.11 ms against 136.31, slower in each
+    of the 7 rounds, with the same user instructions, 1,522 more faults and 1%
+    more kernel cycles; `check-input` took 0.94 ms more
+    ([the record](https://github.com/buster14a/buster-performance/tree/7626df3211c5cde011c00cb818af2698e6976b57/docs/measurements/sparse-output-628-2026-11-07)).
+- **The rare columns in base pages**, for a reading in source order
+  (`check_input_sparse_arena`, as a large unit's deferred reading has them).
+  The reader's end fell 17.7 MB on the VM, for 6,800 more faults in
+  `check-input` and the same system time there. `static-data`'s end stayed the
+  peak.
+- **The stream's conversions in 16 bytes a node** (its first two operands'),
+  with the third operand's and the stored value's (667 and 3,818 of 323,557
+  nodes) in two wide sparse columns. The column fell from 10.1 to 5.1 MB. But
+  the sparse pool's room, a block for each directory entry, starts a 2 MB page
+  for 0.5 MB of blocks, and the output arena's later pushes start other 2 MB
+  pages. The peak fell 0.2 MB.
+
+What would lower all three is in the huge pages that columns of unknown length
+touch in part: the graph's node columns (about 8 MB, a node a token of room,
+42% of it used), the preprocessor's token columns (5.6 MB) and its file's
+windows (5.6 MB). Each needs its count, or a bound close to it, before it is
+pushed, so that its columns can sit side by side. Base pages for them trade
+faults for the memory, as the sparse output's did.
+
 ## The checker's graph and program passes (#530)
 
 **Measured against `main` on the 9700X.** Medians of 15 interleaved

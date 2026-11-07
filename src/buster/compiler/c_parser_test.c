@@ -3999,11 +3999,16 @@ static uint32_t parse_test_diagnostic_places(void)
 // such a comma asks for it, as an attribute list's comma may be one.
 static uint32_t parse_test_clang_places_history(void)
 {
+    // Each source and whether its history stays deferred: a macro's number after a comma is a place only past the unit's
+    // first `[[`, as the vector path's mask has it within a block of 64 tokens and the scalar path's flag at each token.
     static const char* const sources[] =
     {
         "#define N 1\n#define M 2\nint f(int, int);\nint g(void) { return f(M, N) + f(2, N); }\n",
         "#define N 1\n[[deprecated]] int a;\nint f(int, int);\nint g(void) { return f(2, N); }\n",
+        "#define N 1\nint f(int, int);\nint g(void) { return f(2, N); }\n[[deprecated]] int a;\n",
+        "#define N 1\nint f(int, int);\nint g(void) { return f(2, N); }\n[[deprecated]] int a;\nint h(void) { return f(3, N); }\n",
     };
+    static const bool deferred_sources[] = { true, false, true, false };
     uint32_t failures = 0;
     for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sources); s += 1)
     {
@@ -4027,7 +4032,7 @@ static uint32_t parse_test_clang_places_history(void)
             const bool ready = intern_initialize(&table) && pp_initialize(&pp, &options, &table) && parse_initialize(&parser, &parse_options, options.language) &&
                                pp_run_source(&pp, "places.c", (const uint8_t*)sources[s], strlen(sources[s])) && pp.history_deferred &&
                                parse_translation_unit(&parser, &pp);
-            const bool deferred = s == 0;
+            const bool deferred = deferred_sources[s];
             const bool passed = ready && pp.history_deferred == deferred && (pp.history_replay == NULL) == deferred;
             if (!passed)
             {
