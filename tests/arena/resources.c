@@ -434,7 +434,7 @@ static bool memory_data_bound(rlim_t bytes)
 // Runs a command under `limit` (RLIMIT_AS), `data` (RLIMIT_DATA) and refusal `refused` (memory_refuse; 0 for none),
 // which must succeed unless it refuses every reservation or commit (1 and 2), in which case it must fail with a fatal
 // byte-count diagnostic.
-static bool memory_command(char* const* arguments, const char* log, rlim_t limit, rlim_t data, uint32_t refused)
+static int memory_run(char* const* arguments, const char* log, rlim_t limit, rlim_t data, uint32_t refused)
 {
     const pid_t child = fork();
     if (child == 0)
@@ -453,8 +453,35 @@ static bool memory_command(char* const* arguments, const char* log, rlim_t limit
         }
         _exit(127);
     }
+    int status = 0;
+    pid_t waited = -1;
+    do
+    {
+        waited = child > 0 ? waitpid(child, &status, 0) : -1;
+    } while (waited < 0 && errno == EINTR);
+    return waited == child && child > 0 && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+// Prints a failed command's first lines of output.
+static void memory_report(char* const* arguments, const char* log)
+{
+    fprintf(stderr, "failed memory command: %s %s; log: %s\n", arguments[0], arguments[1] != 0 ? arguments[1] : "", log);
+    FILE* stream = fopen(log, "r");
+    char line[512];
+    for (uint32_t i = 0; stream != 0 && i < 16 && fgets(line, sizeof(line), stream) != 0; i += 1)
+    {
+        fputs(line, stderr);
+    }
+    if (stream != 0)
+    {
+        fclose(stream);
+    }
+}
+
+static bool memory_command(char* const* arguments, const char* log, rlim_t limit, rlim_t data, uint32_t refused)
+{
     const bool fails = refused == 1 || refused == 2;
-    bool valid = memory_wait(child, fails ? 1 : 0);
+    bool valid = memory_run(arguments, log, limit, data, refused) == (fails ? 1 : 0);
     if (fails)
     {
         char text[4096] = { 0 };
@@ -468,19 +495,22 @@ static bool memory_command(char* const* arguments, const char* log, rlim_t limit
     }
     if (!valid)
     {
-        fprintf(stderr, "failed memory command: %s %s; log: %s\n", arguments[0], arguments[1] != 0 ? arguments[1] : "", log);
-        FILE* stream = fopen(log, "r");
-        char line[512];
-        for (uint32_t i = 0; stream != 0 && i < 16 && fgets(line, sizeof(line), stream) != 0; i += 1)
-        {
-            fputs(line, stderr);
-        }
-        if (stream != 0)
-        {
-            fclose(stream);
-        }
+        memory_report(arguments, log);
     }
     return valid;
+}
+
+// Whether the log file holds `text`, in its first 64 KB.
+static bool memory_log_has(const char* log, const char* text)
+{
+    char buffer[65536] = { 0 };
+    FILE* stream = fopen(log, "r");
+    if (stream != 0)
+    {
+        fread(buffer, 1, sizeof(buffer) - 1, stream);
+        fclose(stream);
+    }
+    return strstr(buffer, text) != 0;
 }
 
 // #1521: a unit of about 540,000 tokens (100,000 declarations and a function of 30,000 statements), compiled to an
@@ -488,6 +518,9 @@ static bool memory_command(char* const* arguments, const char* log, rlim_t limit
 // RLIMIT_DATA, and with --strict under strict overcommit's headroom. The tables' refused commit used to switch the
 // thread to compact reservations, after which every arena held 64 MB and the unit failed as "can't reserve type table"
 // or "checker input capacity exhausted"; now the tables take their compact shape and the other arenas keep theirs.
+// Without --strict, the same unit also runs where the address space refuses the tables' mapping (memory_refuse's
+// layout refusal), which does switch the thread to compact reservations: it compiles, or fails saying that its
+// arenas held 64 MiB each, rather than with a capacity error alone.
 static bool memory_large_unit(char* compiler, const char* directory, bool strict)
 {
     char source[PATH_MAX];
@@ -513,7 +546,18 @@ static bool memory_large_unit(char* compiler, const char* directory, bool strict
         valid = fclose(file) == 0 && valid;
     }
     char* arguments[] = { compiler, "-O0", "-c", source, "-o", output, 0 };
-    return valid && memory_command(arguments, log, RLIM_INFINITY, strict ? RLIM_INFINITY : UINT64_C(4) << 30, 0);
+    valid = valid && memory_command(arguments, log, RLIM_INFINITY, strict ? RLIM_INFINITY : UINT64_C(4) << 30, 0);
+    if (valid && !strict)
+    {
+        snprintf(log, sizeof(log), "%s/large-layout.log", directory);
+        const int status = memory_run(arguments, log, RLIM_INFINITY, RLIM_INFINITY, 3);
+        valid = status == 0 || (status == 1 && memory_log_has(log, "note: memory reservations were limited to 64 MiB each"));
+        if (!valid)
+        {
+            memory_report(arguments, log);
+        }
+    }
+    return valid;
 }
 
 static bool memory_commands(char* compiler, const char* directory, bool valgrind, bool strict)

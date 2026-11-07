@@ -236,10 +236,15 @@ result. It also compiles a unit of about 540,000 tokens (100,000 declarations
 and a function of 30,000 statements) to an object under a 4 GiB `RLIMIT_DATA`,
 or with `--strict` under strict overcommit's headroom (#1521): commit charge
 below the preprocessor's full tables, which it must take in with their compact
-shape while the unit's other arenas keep their capacities. Each command is also refused by child-only seccomp rules for inaccessible
-reservations and writable commits, with a fatal byte-count diagnostic and without
-usage text. The loader is allowed to map its ELF segments and make RELRO read-only;
-the test does not assume that a small fixed address-space limit must always fail.
+shape while the unit's other arenas keep their capacities. Each command is
+also refused by child-only seccomp rules for inaccessible reservations and
+writable commits, with a fatal byte-count diagnostic and without usage text.
+The large unit runs once more where the address space refuses the
+preprocessor's tables' mapping, which switches the thread to compact
+reservations: it must compile, or fail with the note that its arenas held
+64 MiB each. The loader is allowed to map its ELF
+segments and make RELRO read-only; the test does not assume that a small fixed
+address-space limit must always fail.
 
 The baseline unsanitized hosted CI job runs those commands under 2 GiB,
 separately under Callgrind, and without `RLIMIT_AS` under strict overcommit with
