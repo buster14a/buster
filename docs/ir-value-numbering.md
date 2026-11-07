@@ -299,6 +299,29 @@ completion. The scalar twin executes 0.6% more instructions per entry
 (3,660.6 to 3,680.7): it allocates and zeroes the new scratch columns too, so
 that `scratch_bytes` doesn't depend on the path.
 
+Under `--tier1-gvn` ("Tier 1's measurement" below), `-c` of the same frozen
+`sqlite3.c` with the C driver's options timed as `ab --rounds 3` over both
+trees, each round `time-runs --runs 5`:
+
+| Compile, median of the rounds' medians | Main | Acyclic numbering | Change |
+| --- | ---: | ---: | ---: |
+| `--tier1` (control) | 455.95 ms | 455.29 ms | −0.1% |
+| `--tier1 --tier1-gvn` | 583.06 ms | 529.36 ms | −9.2% |
+
+What the option adds to the compile went from 127.1 ms (+27.9%) to 74.1 ms
+(+16.3%), and from 2,034 million instructions to 1,201 million. The two trees'
+objects are byte-identical, as the unchanged partition requires.
+
+A profile of the `gvn` variant's process gives the acyclic numbering
+(`ir_gvn_number`, `ir_gvn_visit`, `ir_gvn_payload`) about 6% of the samples.
+The IR verifier and its derived arrays take about 54%. `ir_optimize_prepare`
+checks the input's rows three times (in `ir_verify`, in `ir_build_cfg`, and
+in `ir_verify` again inside `ir_build_uses`), which every optimizer pass pays.
+A free numbering would therefore save at most that 6%, which is why it stays a
+scalar chain. [The measurement record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/gvn-866-acyclic-2026-11-06)
+has the scripts, the raw logs and a disclosed invalid first attempt at the
+Tier 1 step (driver options it refused).
+
 The Tier 1 pipeline still does not feed C source through GVN by default, so no
 default C-driver or emitted-code effect is claimed here. Those
 remain #139's integration work. The source-derived rows qualify the pass on
@@ -325,4 +348,8 @@ is the merge, not dead values, that costs. Routing C source through GVN by
 default therefore waits for a variant that accounts for allocation cost; the
 option stays as the reproducible measurement, and [the measurement
 record](https://github.com/buster14a/buster-performance/tree/126886e46a23f095709bffb36c3c57aaafac35b3/docs/measurements/gvn-866-tier1-2026-11-01)
-has the commands, the host and the raw logs.
+has the commands, the host and the raw logs. The acyclic numbering ("The
+acyclic numbering on the 9700X" above) later cut the option's added compile
+time on the frozen file from 127.1 to 74.1 ms with byte-identical objects. It
+changes what the option costs, not what it emits, so the reason to keep it off
+stands.

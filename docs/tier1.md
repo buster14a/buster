@@ -191,7 +191,9 @@ instructions +40%, 2.5 times the spill traffic), and the pipeline's cleanup
 after it does not recover the regression (205,229 against 205,269
 instructions, 0.02%), so the cost is the merge rather than dead values. Tier 1
 therefore doesn't route C source through GVN until a variant accounts for
-allocation cost. [The measurement record](https://github.com/buster14a/buster-performance/tree/126886e46a23f095709bffb36c3c57aaafac35b3/docs/measurements/gvn-866-tier1-2026-11-01)
+allocation cost. #866's acyclic numbering later cut what the option adds to
+`-c` of the frozen `sqlite3.c` from 127.1 to 74.1 ms on the 9700X, with
+byte-identical objects, so the reason to keep it off stands. [The measurement record](https://github.com/buster14a/buster-performance/tree/126886e46a23f095709bffb36c3c57aaafac35b3/docs/measurements/gvn-866-tier1-2026-11-01)
 has the commands, the host and the raw logs; [the value-numbering
 guide](ir-value-numbering.md) has the rest of the figures.
 
