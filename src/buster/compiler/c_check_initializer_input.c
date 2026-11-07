@@ -281,9 +281,8 @@ struct CheckInitDiagnostic
 // reports next, at the initializer (#147): an object's value read, or an object's address converted to an integer
 // narrower than a pointer (an absolute address, `(int *)5`'s, stays a constant). Another failed conversion, of a record or a
 // floating value, is the initializer's only error.
-static bool check_init_converted_nonconstant(const CheckInput* input, const CheckStream* stream, const TypeTable* types, TypeId target, uint32_t initialize)
+static bool check_init_value_nonconstant(const CheckStream* stream, const TypeTable* types, TypeId target, uint32_t source)
 {
-    const uint32_t source = input->graph.operand0[initialize];
     const bool known = source < stream->count && stream->diagnostics[source] == CHECK_DIAG_NONE;
     const CheckValue value = known ? check_stream_value(stream, source) : (CheckValue){ 0 };
     const uint8_t to = check_action_kind(types, type_conversion_operand(types, target));
@@ -295,6 +294,12 @@ static bool check_init_converted_nonconstant(const CheckInput* input, const Chec
     const bool read = value.category == CHECK_LVALUE && !designator;
     const bool narrowed = to == BUSTER_TYPE_KIND_INTEGER && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && type_size(types, target) < 8;
     return converted && (read || !check_value_static_initializer(&value, false) || narrowed);
+}
+
+// check_init_value_nonconstant of a scalar initializer's INITIALIZE `initialize`, its value its operand.
+static bool check_init_converted_nonconstant(const CheckInput* input, const CheckStream* stream, const TypeTable* types, TypeId target, uint32_t initialize)
+{
+    return check_init_value_nonconstant(stream, types, target, input->graph.operand0[initialize]);
 }
 
 // Diagnose complete roots before before_token (exclusive). A report elsewhere in the unit no longer cuts the

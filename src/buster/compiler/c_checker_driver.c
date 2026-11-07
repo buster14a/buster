@@ -4825,8 +4825,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     // The reader's reports after checking are unavailable members' uses (check_input_member_uses, #147).
                     const bool expression_valid = input_valid && stream.report_count == 0 && input.report_count == 0;
                     const bool musttails_checked = !expression_valid || repairing || check_musttail_run(&musttails, &input, checking, &stream, &types, output_arena, scratch);
-                    CheckDriverDiagnostic fallback[4] = { 0 };
-                    CheckDriverDiagnostic* pushed = BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverDiagnostic, 4 + (uint64_t)musttails.count);
+                    CheckDriverDiagnostic fallback[5] = { 0 };
+                    CheckDriverDiagnostic* pushed = BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverDiagnostic, 5 + (uint64_t)musttails.count);
                     CheckDriverDiagnostic* additional = pushed != NULL ? pushed : fallback;
                     uint32_t additional_count = 0;
                     if (pushed == NULL || !musttails_checked)
@@ -4921,6 +4921,15 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             place = conversion != NULL ? place : earlier.token;
                             additional[additional_count++] = (CheckDriverDiagnostic){ place,
                                 message != NULL ? message : "initializer checking capacity exhausted", place, earlier.completion };
+                            // A static object's braced subobject whose conversion clang warns of and makes, where its value is
+                            // then no constant: clang's second error at it (check_init_value_nonconstant, #147).
+                            if (conversion != NULL && earlier.failed_source != 0 && earlier.failed_declaration < input.token_count &&
+                                check_input_bit(input.declaration_bits, earlier.failed_declaration, BUSTER_CHECK_BITS_STATIC) != 0 &&
+                                check_init_value_nonconstant(&stream, &types, earlier.failed_type, earlier.failed_source - 1))
+                            {
+                                additional[additional_count++] = (CheckDriverDiagnostic){ place, check_driver_initializer_message(CHECK_INIT_NON_CONSTANT), place,
+                                                                                          earlier.completion };
+                            }
                         }
                         if (diagnosed)
                         {
