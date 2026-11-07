@@ -249,8 +249,11 @@ static uint8_t check_common_ignored_builtin(CheckCommonIgnored* ignored, const P
         result = ignored->builtins[name];
         if (result == 0)
         {
+            // The catalog's negative filter answers most names (a unit's own functions') without its search.
             const InternSpan span = pp->table->spans[name];
-            const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)pp->table->records + span.offset, span.length);
+            const BuiltinIntrinsicName spelled = { (const char*)pp->table->records + span.offset, span.length };
+            const BuiltinIntrinsicInfo* info = builtin_intrinsic_filter_candidates(&spelled, 1, pp->options.scalar) != 0 ?
+                                               builtin_intrinsic_lookup(spelled.name, spelled.length) : NULL;
             result = BUSTER_CHECK_IGNORED_KNOWN;
             bool argument = false;
             for (uint32_t i = 0; info != NULL && i < info->attributes_length; i += 1)
@@ -318,25 +321,31 @@ static bool check_common_ignored_of(CheckCommonEmission* emission, uint32_t node
     const bool call = op == CHECK_OP_CALL;
     const bool builtin = !call && op < CHECK_OP_COUNT && check_common_ignored_op(op);
     const TypeTable* types = emission->types;
-    const TypeId type = ignored != NULL && (call || builtin) ? check_stream_type(emission->stream, node) : 0;
-    const bool valued = type != 0 && type_kind(types, type_unqualified(type_strip_aligned(types, type))) != BUSTER_TYPE_KIND_VOID;
     *out = (CheckCommonIgnoredResult){ .token = BUSTER_CHECK_NONE, .type_name = BUSTER_CHECK_NONE };
+    // A function's name, its declaration as the call's lookup finds it, and its first declaration; an indirect call has
+    // no name, and warns of its return type's alone.
+    const uint32_t callee = call ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    const uint32_t name = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+    const uint32_t declaration = name < count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ?
+                                 input->declarations[name] : BUSTER_CHECK_NONE;
+    const bool function = declaration < count && input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+    const uint32_t object = function && input->objects != NULL ? input->objects[declaration] : 0;
+    const uint32_t key = object != 0 && object - 1 < count ? object - 1 : declaration;
+    // A call of an unmarked function whose name is no builtin's, in a unit of no marked return type, is most calls: one bit
+    // and one byte decide it, before its type is read.
+    const bool marked = function && ignored != NULL && ignored->keys != NULL && (ignored->keys[key / 64] & (UINT64_C(1) << (key % 64))) != 0;
+    const uint8_t table = function && ignored != NULL ? check_common_ignored_builtin(ignored, emission->pp, parser->tokens.names[name]) : 0u;
+    const bool candidate = ignored != NULL && (builtin || marked || (table & (BUSTER_CHECK_IGNORED_CONST | BUSTER_CHECK_IGNORED_PURE)) != 0 ||
+                                               (call && (ignored->tag_count != 0 || ignored->typedefs)));
+    const TypeId type = candidate ? check_stream_type(emission->stream, node) : 0;
+    const bool valued = type != 0 && type_kind(types, type_unqualified(type_strip_aligned(types, type))) != BUSTER_TYPE_KIND_VOID;
     if (valued && call)
     {
-        // A function's name, its declaration as the call's lookup finds it, and its first declaration.
-        const uint32_t callee = graph->operand0[node];
-        const uint32_t name = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
-        const uint32_t declaration = name < count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ?
-                                     input->declarations[name] : BUSTER_CHECK_NONE;
-        const bool function = declaration < count && input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
-        const uint32_t object = function && input->objects != NULL ? input->objects[declaration] : 0;
-        const uint32_t key = object != 0 && object - 1 < count ? object - 1 : declaration;
         if (function)
         {
             out->kinds = check_common_ignored_marks(ignored, key, declaration, &out->result) & (BUSTER_CHECK_IGNORED_CONST | BUSTER_CHECK_IGNORED_PURE);
             // A library function's row of the builtin table is its declaration's where the unit keeps it a builtin and
             // declares it with external linkage (a static one is the unit's own).
-            const uint8_t table = check_common_ignored_builtin(ignored, emission->pp, parser->tokens.names[name]);
             const InternSpan span = emission->pp->table->spans[parser->tokens.names[name]];
             const bool library = (table & BUSTER_CHECK_IGNORED_LIBRARY) == 0 ||
                                  (check_input_linkage(input->declaration_bits, declaration) == 2 &&
