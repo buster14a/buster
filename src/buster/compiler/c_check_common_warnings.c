@@ -630,6 +630,24 @@ struct CheckCommonShiftWarnings
     uint32_t detached_count;
 };
 
+// Detached static-selection arms have no CFG block in Clang, so their queued runtime count diagnostics are still
+// published. These sparse edges are for that diagnostic traversal alone; actual evaluation keeps its own graph.
+typedef struct CheckCommonShiftExtra CheckCommonShiftExtra;
+struct CheckCommonShiftExtra
+{
+    uint32_t root;
+    uint32_t selection;
+    bool visited;
+};
+
+typedef struct CheckCommonShiftExtras CheckCommonShiftExtras;
+struct CheckCommonShiftExtras
+{
+    CheckCommonShiftExtra* records;
+    uint64_t* root_order;
+    uint32_t count;
+};
+
 // Detach only the saved runtime count groups. Their order in the queue is their token order, so one forward scan
 // removes them without searching once per warning. Required-constant diagnostics and every other family stay put.
 static void check_common_shift_detach(Preprocessor* pp, CheckCommonShiftWarnings* shifts)
@@ -762,6 +780,7 @@ typedef struct CheckCommonEmission
     TypeTable* types;
     CheckWarningSpelling* spell;
     CheckCommonShiftWarnings* shifts;
+    CheckCommonShiftExtras* shift_extras;
     const uint8_t* evaluated;
     const uint32_t* parents;
     uint8_t* emitted;
@@ -840,6 +859,9 @@ static uint32_t check_common_emission_subtree_start(CheckCommonEmission* emissio
 #define BUSTER_CHECK_EMIT_ARITHMETIC_OWN 9u
 #define BUSTER_CHECK_EMIT_SIGN_SCAN 10u
 #define BUSTER_CHECK_EMIT_SIGN_OWN 11u
+#define BUSTER_CHECK_EMIT_SHIFT_SCAN 12u
+#define BUSTER_CHECK_EMIT_SHIFT_OWN 13u
+#define BUSTER_CHECK_EMIT_DETACHED_SCAN 14u
 
 // What a node's subtree holds for check_common_emit_root's walks, a bit each, in CheckCommonEmission.reach: a node whose
 // own frame or comma stages may warn (check_common_own_candidate), a division or shift by a constant, a comparison where
@@ -850,7 +872,9 @@ static uint32_t check_common_emission_subtree_start(CheckCommonEmission* emissio
 #define BUSTER_CHECK_REACH_TREE 0x01u
 #define BUSTER_CHECK_REACH_ARITHMETIC 0x02u
 #define BUSTER_CHECK_REACH_SIGN 0x04u
-#define BUSTER_CHECK_REACH_ALL 0x07u
+#define BUSTER_CHECK_REACH_SHIFT 0x08u
+#define BUSTER_CHECK_REACH_DETACHED 0x10u
+#define BUSTER_CHECK_REACH_ALL 0x1fu
 
 static void check_common_emit_push(CheckCommonEmission* emission, uint32_t node, uint8_t kind);
 static void check_common_emit_run(CheckCommonEmission* emission);
@@ -942,23 +966,98 @@ static void check_common_emit_reach(CheckCommonEmission* emission, uint32_t node
     }
 }
 
+static uint32_t check_common_shift_extra_first(const CheckCommonShiftExtras* extras, uint32_t selection)
+{
+    uint32_t first = 0;
+    uint32_t last = extras != NULL ? extras->count : 0;
+    while (first < last)
+    {
+        const uint32_t middle = first + (last - first) / 2;
+        const bool before = extras->records[middle].selection < selection;
+        first = before ? middle + 1 : first;
+        last = before ? last : middle;
+    }
+    return first;
+}
+
+static const CheckCommonShiftExtra* check_common_shift_extra_root(const CheckCommonShiftExtras* extras, uint32_t root)
+{
+    uint32_t first = 0;
+    uint32_t last = extras != NULL ? extras->count : 0;
+    const uint32_t count = last;
+    while (first < last)
+    {
+        const uint32_t middle = first + (last - first) / 2;
+        const bool before = (extras->root_order[middle] >> 32) < root;
+        first = before ? middle + 1 : first;
+        last = before ? last : middle;
+    }
+    const CheckCommonShiftExtra* result = first < count && (extras->root_order[first] >> 32) == root ?
+                                         extras->records + (uint32_t)extras->root_order[first] : NULL;
+    return result;
+}
+
 // A node's operand and argument children pushed in reverse so they pop in the order the subtree walks
 // read them: operands left to right, then the call's arguments.
 static void check_common_emit_kids(CheckCommonEmission* emission, uint32_t node, uint32_t slots, uint8_t kind)
 {
     const CheckGraph* graph = &emission->input->graph;
     const uint8_t bit = kind == BUSTER_CHECK_EMIT_ARITHMETIC_SCAN ? BUSTER_CHECK_REACH_ARITHMETIC :
+                        kind == BUSTER_CHECK_EMIT_SHIFT_SCAN ? BUSTER_CHECK_REACH_SHIFT | BUSTER_CHECK_REACH_DETACHED :
+                        kind == BUSTER_CHECK_EMIT_DETACHED_SCAN ? BUSTER_CHECK_REACH_DETACHED :
                         kind == BUSTER_CHECK_EMIT_SIGN_SCAN ? BUSTER_CHECK_REACH_SIGN : BUSTER_CHECK_REACH_TREE;
-    if (check_graph_has_arguments(graph->ops[node]) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
+    const bool counts = kind == BUSTER_CHECK_EMIT_ARITHMETIC_SCAN || kind == BUSTER_CHECK_EMIT_SHIFT_SCAN || kind == BUSTER_CHECK_EMIT_DETACHED_SCAN;
+    CheckCommonShiftExtras* extras = emission->shift_extras;
+    const uint32_t first = counts && graph->ops[node] == CHECK_OP_SELECT ? check_common_shift_extra_first(extras, node) :
+                           extras != NULL ? extras->count : 0;
+    const bool selection = extras != NULL && first < extras->count && extras->records[first].selection == node;
+    if (selection)
     {
-        for (uint32_t i = graph->argument_counts[node]; i-- > 0;)
+        uint32_t end = first;
+        while (end < extras->count && extras->records[end].selection == node)
         {
-            check_common_emit_reach(emission, graph->argument_nodes[graph->argument_offsets[node] + i], kind, bit);
+            end += 1;
+        }
+        // Children precede parents in source order. Merge the selected operand with the detached arms, pushing
+        // them backwards, so a warning in either kind of arm keeps its position among the other arithmetic visits.
+        uint32_t selected = graph->operand0[node];
+        while (end != first || selected < graph->count)
+        {
+            if (selected < graph->count && (end == first || selected > extras->records[end - 1].root))
+            {
+                check_common_emit_reach(emission, selected, kind, bit);
+                selected = BUSTER_CHECK_NONE;
+            }
+            else
+            {
+                CheckCommonShiftExtra* extra = extras->records + --end;
+                if (!extra->visited)
+                {
+                    extra->visited = true;
+                    check_common_emit_reach(emission, extra->root, BUSTER_CHECK_EMIT_SHIFT_SCAN,
+                                            BUSTER_CHECK_REACH_SHIFT | BUSTER_CHECK_REACH_DETACHED);
+                }
+            }
         }
     }
-    for (uint32_t i = slots; i-- > 0;)
+    else
     {
-        check_common_emit_reach(emission, i == 0 ? graph->operand0[node] : i == 1 ? graph->operand1[node] : graph->operand2[node], kind, bit);
+        if (check_graph_has_arguments(graph->ops[node]) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
+        {
+            for (uint32_t i = graph->argument_counts[node]; i-- > 0;)
+            {
+                check_common_emit_reach(emission, graph->argument_nodes[graph->argument_offsets[node] + i], kind, bit);
+            }
+        }
+        for (uint32_t i = slots; i-- > 0;)
+        {
+            // GNU's omitted-middle conditional reads its condition once, although both graph slots name it.
+            const bool repeated = counts && graph->ops[node] == CHECK_OP_CONDITIONAL && i == 1 && graph->operand1[node] == graph->operand0[node];
+            if (!repeated)
+            {
+                check_common_emit_reach(emission, i == 0 ? graph->operand0[node] : i == 1 ? graph->operand1[node] : graph->operand2[node], kind, bit);
+            }
+        }
     }
 }
 
@@ -970,6 +1069,35 @@ static bool check_common_shift_op(CheckOp op)
     const bool result = op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT ||
                         op == CHECK_OP_SHIFT_LEFT_ASSIGN || op == CHECK_OP_SHIFT_RIGHT_ASSIGN;
     return result;
+}
+
+static uint32_t check_common_shift_warning(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
+{
+    const uint32_t left = graph->operand0[node];
+    const uint32_t right = graph->operand1[node];
+    uint32_t warning = 0;
+    if (left < graph->count && check_common_integer_constant(stream, right))
+    {
+        const CheckValue count = check_stream_value(stream, right);
+        const CheckOp op = graph->ops[node];
+        const bool compound = op == CHECK_OP_SHIFT_LEFT_ASSIGN || op == CHECK_OP_SHIFT_RIGHT_ASSIGN;
+        const TypeId left_type = compound ? type_conversion_operand(types, check_stream_type(stream, left)) :
+                                           stream->conversions[node].operands[0].type;
+        uint32_t left_width = 0;
+        uint32_t right_width = 0;
+        bool left_signed = false;
+        bool right_signed = false;
+        if (check_value_evaluated_constant(&count) && check_common_integer(types, left_type, &left_width, &left_signed) &&
+            check_common_integer(types, count.type, &right_width, &right_signed))
+        {
+            // Integer promotion preserves the right operand's mathematical value. Mask its own width before
+            // testing its sign and magnitude, so an unsigned 128-bit count never narrows to a signed host value.
+            const unsigned __int128 bits = count.integer & check_action_mask(right_width);
+            const bool negative = right_signed && ((bits >> (right_width - 1)) & 1) != 0;
+            warning = negative ? CHECK_WARNING_SHIFT_COUNT_NEGATIVE : bits >= left_width ? CHECK_WARNING_SHIFT_COUNT_OVERFLOW : 0;
+        }
+    }
+    return warning;
 }
 
 // Runtime shift counts do not need a constant left operand (#1394). Use the checked operand conversion for an
@@ -993,30 +1121,14 @@ static void check_common_shift_count(CheckCommonEmission* emission, uint32_t nod
     if (!replayed && !ice && ((retained | suppressed) & counts) == 0 && left < graph->count && right < graph->count &&
         !check_common_integer_constant(stream, left) && check_common_integer_constant(stream, right))
     {
-        const CheckValue count = check_stream_value(stream, right);
-        const CheckOp op = graph->ops[node];
-        const bool compound = op == CHECK_OP_SHIFT_LEFT_ASSIGN || op == CHECK_OP_SHIFT_RIGHT_ASSIGN;
-        const TypeId left_type = compound ? type_conversion_operand(emission->types, check_stream_type(stream, left)) :
-                                           stream->conversions[node].operands[0].type;
-        uint32_t left_width = 0;
-        uint32_t right_width = 0;
-        bool left_signed = false;
-        bool right_signed = false;
-        if (check_value_evaluated_constant(&count) &&
-            check_common_integer(emission->types, left_type, &left_width, &left_signed) &&
-            check_common_integer(emission->types, count.type, &right_width, &right_signed))
+        const uint32_t warning = check_common_shift_warning(graph, stream, emission->types, node);
+        if (warning != 0)
         {
-            // Integer promotion preserves the right operand's mathematical value. Mask its own width before
-            // testing its sign and magnitude, so an unsigned 128-bit count never narrows to a signed host value.
-            const unsigned __int128 bits = count.integer & check_action_mask(right_width);
-            const bool negative = right_signed && ((bits >> (right_width - 1)) & 1) != 0;
-            if (negative || bits >= left_width)
-            {
-                check_common_report_deferred(emission->parser, emission->pp, emission->input, token,
-                                             negative ? CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE : CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW,
-                                             false, negative ? "shift count is negative" : "shift count >= width of type",
-                                             NULL, 0, emission->scratch);
-            }
+            const bool negative = warning == CHECK_WARNING_SHIFT_COUNT_NEGATIVE;
+            check_common_report_deferred(emission->parser, emission->pp, emission->input, token,
+                                         negative ? CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE : CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW,
+                                         false, negative ? "shift count is negative" : "shift count >= width of type",
+                                         NULL, 0, emission->scratch);
         }
     }
 }
@@ -1678,12 +1790,36 @@ static void check_common_emit_run(CheckCommonEmission* emission)
                                            kind == BUSTER_CHECK_EMIT_ARITHMETIC_SCAN ? BUSTER_CHECK_EMIT_ARITHMETIC_OWN : BUSTER_CHECK_EMIT_SIGN_OWN);
                     check_common_emit_kids(emission, node, 3, kind);
                 }
+                else if (node < graph->count && kind == BUSTER_CHECK_EMIT_ARITHMETIC_SCAN &&
+                         (emission->reach[node] & BUSTER_CHECK_REACH_DETACHED) != 0)
+                {
+                    check_common_emit_kids(emission, node, 3, BUSTER_CHECK_EMIT_DETACHED_SCAN);
+                }
                 break;
             case BUSTER_CHECK_EMIT_ARITHMETIC_OWN:
                 check_common_arithmetic_own(emission, node);
                 break;
             case BUSTER_CHECK_EMIT_SIGN_OWN:
                 check_common_sign_own(emission, node);
+                break;
+            case BUSTER_CHECK_EMIT_SHIFT_SCAN:
+                if (node < graph->count)
+                {
+                    check_common_emit_push(emission, node, BUSTER_CHECK_EMIT_SHIFT_OWN);
+                    check_common_emit_kids(emission, node, 3, kind);
+                }
+                break;
+            case BUSTER_CHECK_EMIT_SHIFT_OWN:
+                if (check_common_shift_op(graph->ops[node]))
+                {
+                    check_common_shift_count(emission, node);
+                }
+                break;
+            case BUSTER_CHECK_EMIT_DETACHED_SCAN:
+                if (node < graph->count && (emission->reach[node] & BUSTER_CHECK_REACH_DETACHED) != 0)
+                {
+                    check_common_emit_kids(emission, node, 3, kind);
+                }
                 break;
         }
     }
@@ -2409,11 +2545,13 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
                                       const CheckCommonEnabled* enabled)
 {
     const CheckOp op = graph->ops[node];
-    const bool arithmetic = (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER || check_common_shift_op(op)) &&
+    const bool shift = check_common_shift_op(op) && check_common_integer_constant(stream, graph->operand1[node]);
+    const bool arithmetic = (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER || shift) &&
                             check_common_integer_constant(stream, graph->operand1[node]);
     const bool comparison = enabled->sign_compare && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
     const uint8_t result = (uint8_t)((check_common_own_candidate(parser, graph, stream, node, enabled->self_assign) ? BUSTER_CHECK_REACH_TREE : 0u) |
-                                     (arithmetic ? BUSTER_CHECK_REACH_ARITHMETIC : 0u) | (comparison ? BUSTER_CHECK_REACH_SIGN : 0u));
+                                     (arithmetic ? BUSTER_CHECK_REACH_ARITHMETIC : 0u) | (comparison ? BUSTER_CHECK_REACH_SIGN : 0u) |
+                                     (shift ? BUSTER_CHECK_REACH_SHIFT : 0u));
     return result;
 }
 
@@ -2455,13 +2593,132 @@ static uint32_t check_common_next_reach(const uint8_t* reach, uint32_t count, ui
     return result;
 }
 
+// The static selection enclosing a detached root. The source parser retains that edge even though the evaluated
+// graph retains only the chosen operand. Earlier statements inside a selected GNU statement-expression are also
+// disconnected: their source subtree still belongs to the chosen arm, so keep walking for a genuinely unselected owner.
+static uint32_t check_common_shift_selection(const Parser* parser, const CheckInput* input, uint32_t root)
+{
+    const CheckGraph* graph = &input->graph;
+    uint32_t selection = graph->count;
+    uint32_t token = graph->tokens[root];
+    for (uint32_t steps = 0; token < parser->tokens.count && steps < parser->tokens.count; steps += 1)
+    {
+        const uint32_t parent = parser->tree.parents[token];
+        if (parent == token || parent >= parser->tokens.count)
+        {
+            break;
+        }
+        token = parent;
+        const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+        if (node < graph->count && node != root && graph->ops[node] == CHECK_OP_SELECT)
+        {
+            const uint32_t chosen = graph->operand0[node];
+            const bool in_chosen = chosen < graph->count && check_common_token_descendant(parser, graph->tokens[root], graph->tokens[chosen]);
+            if (!in_chosen)
+            {
+                selection = node;
+                break;
+            }
+        }
+    }
+    return selection;
+}
+
+// Shift diagnostics in unselected _Generic/choose arms have no CFG block in Clang. Prepare sparse source edges for
+// them only when an unevaluated count can warn. Reuse the existing static-selection root classification, then sort
+// roots by their enclosing selection. A second key order supports root ownership queries without a dense column.
+// Propagating the detached bit in graph order makes a skipped ordinary subtree traversable for these edges alone.
+static bool check_common_shift_extras(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                      const CheckCommonFacts* facts, CheckCommonShiftExtras* extras, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    static const CheckOp shifts[] = { CHECK_OP_SHIFT_LEFT, CHECK_OP_SHIFT_RIGHT, CHECK_OP_SHIFT_LEFT_ASSIGN, CHECK_OP_SHIFT_RIGHT_ASSIGN };
+    const CheckCommonOps set = check_common_ops(shifts, BUSTER_ARRAY_LENGTH(shifts));
+    CheckCommonScan scan = { 0 };
+    bool needed = false;
+    for (uint32_t node = check_common_next_op(graph, &set, &scan, vector); !needed && node < graph->count;
+         node = check_common_next_op(graph, &set, &scan, vector))
+    {
+        const uint32_t suppressed = graph->warning_suppressed != NULL ? graph->warning_suppressed[node] : 0;
+        needed = check_common_shift_op(graph->ops[node]) && facts->evaluated[node] == 0 &&
+                 (suppressed & (CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW)) == 0 &&
+                 check_common_shift_warning(graph, stream, types, node) != 0;
+    }
+    bool valid = true;
+    if (needed)
+    {
+        const uint8_t* unselected = check_common_unselected(graph, parser, scratch);
+        valid = unselected != NULL;
+        uint32_t count = 0;
+        CheckCommonScan roots = { 0 };
+        for (uint32_t node = valid ? check_common_next_root(facts->parents, graph->count, &roots, vector) : graph->count;
+             node < graph->count; node = check_common_next_root(facts->parents, graph->count, &roots, vector))
+        {
+            count += facts->parents[node] == BUSTER_CHECK_NONE && unselected[node] != 0;
+        }
+        uint64_t* keys = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, count) : NULL;
+        uint64_t* temporary = keys != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, count) : NULL;
+        CheckCommonShiftExtra* records = temporary != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, CheckCommonShiftExtra, count) : NULL;
+        valid &= count == 0 || records != NULL;
+        if (valid && count != 0)
+        {
+            roots = (CheckCommonScan){ 0 };
+            uint32_t used = 0;
+            for (uint32_t node = check_common_next_root(facts->parents, graph->count, &roots, vector); node < graph->count;
+                 node = check_common_next_root(facts->parents, graph->count, &roots, vector))
+            {
+                if (facts->parents[node] == BUSTER_CHECK_NONE && unselected[node] != 0)
+                {
+                    const uint32_t selection = check_common_shift_selection(parser, input, node);
+                    if (selection < graph->count)
+                    {
+                        keys[used++] = (uint64_t)selection << 32 | node;
+                    }
+                }
+            }
+            count = used;
+            const uint32_t varying = UINT32_MAX >> __builtin_clz(graph->count);
+            const uint64_t* ordered = c_bindings_sort(keys, temporary, count, vector, varying);
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const uint32_t root = (uint32_t)ordered[i];
+                records[i] = (CheckCommonShiftExtra){ .root = root, .selection = (uint32_t)(ordered[i] >> 32) };
+                keys[i] = (uint64_t)root << 32 | i;
+            }
+            extras->records = records;
+            extras->root_order = c_bindings_sort(keys, temporary, count, vector, varying);
+            extras->count = count;
+            uint32_t extra = 0;
+            for (uint32_t node = 0; node < graph->count; node += 1)
+            {
+                while (extra < count && records[extra].selection == node)
+                {
+                    const uint32_t root = records[extra++].root;
+                    if ((facts->reach[root] & (BUSTER_CHECK_REACH_SHIFT | BUSTER_CHECK_REACH_DETACHED)) != 0)
+                    {
+                        facts->reach[node] |= BUSTER_CHECK_REACH_ARITHMETIC | BUSTER_CHECK_REACH_DETACHED;
+                    }
+                }
+                const uint32_t parent = facts->parents[node];
+                if (parent < graph->count && (facts->reach[node] & BUSTER_CHECK_REACH_DETACHED) != 0)
+                {
+                    facts->reach[parent] |= BUSTER_CHECK_REACH_ARITHMETIC | BUSTER_CHECK_REACH_DETACHED;
+                }
+            }
+        }
+    }
+    return valid;
+}
+
 static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                         TypeTable* types, CheckWarningSpelling* spell, const CheckCommonFacts* facts,
                                         CheckCommonShiftWarnings* shifts, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
-    // Arithmetic and subscript warnings apply only to evaluated operands (facts->evaluated): sizeof and alignof operands,
-    // unselected constant ternary arms, short-circuited sides and _Generic's other arms never run. Each node's parent
+    // Division and subscript warnings apply only to evaluated operands (facts->evaluated): sizeof and alignof operands,
+    // unselected constant ternary arms, short-circuited sides and _Generic's other arms never run. Shift counts also
+    // visit detached static-selection arms through their separate diagnostic edges. Each node's parent
     // (facts->parents) is a subscript's use context: an `&a[i]` spine relaxes the bound to allow one past the end, an
     // explicit `(void)` cast discards the lvalue unchecked, and any other operand inside an address-of's subtree — a
     // nested index — is unchecked as well.
@@ -2481,7 +2738,13 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
     {
         check_common_exhausted(pp);
     }
-    if (ready && work_nodes != NULL && work_kinds != NULL)
+    CheckCommonShiftExtras shift_extras = { 0 };
+    const bool extras_ready = ready && check_common_shift_extras(parser, input, stream, types, facts, &shift_extras, scratch);
+    if (ready && !extras_ready)
+    {
+        check_common_exhausted(pp);
+    }
+    if (extras_ready && work_nodes != NULL && work_kinds != NULL)
     {
         check_common_shift_detach(pp, shifts);
         memset(emitted, 0, graph->count);
@@ -2494,6 +2757,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             .types = types,
             .spell = spell,
             .shifts = shifts,
+            .shift_extras = &shift_extras,
             .evaluated = facts->evaluated,
             .parents = facts->parents,
             .emitted = emitted,
@@ -2514,11 +2778,20 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
              node = check_common_next_root(facts->parents, graph->count, &roots, vector))
         {
             const uint32_t expr = check_common_discarded(parser, graph, node);
+            const CheckCommonShiftExtra* extra = check_common_shift_extra_root(&shift_extras, node);
             if (facts->parents[node] == BUSTER_CHECK_NONE && facts->evaluated[node] != 0 && stream->diagnostics[node] == CHECK_DIAG_NONE &&
                 emitted[node] == 0 &&
                 (reach[node] != 0 || (expr < graph->count && graph->ops[expr] == CHECK_OP_COMMA) || check_common_marker_candidate(graph, expr)))
             {
                 check_common_emit_root(&emission, node);
+            }
+            else if (facts->parents[node] == BUSTER_CHECK_NONE && stream->diagnostics[node] == CHECK_DIAG_NONE &&
+                     extra == NULL)
+            {
+                // A dead ordinary owner still supplies a source position for its detached arms. Enter only their
+                // sparse edges, so their warnings precede later live operands without reviving ordinary dead code.
+                check_common_emit_reach(&emission, node, BUSTER_CHECK_EMIT_DETACHED_SCAN, BUSTER_CHECK_REACH_DETACHED);
+                check_common_emit_run(&emission);
             }
         }
         // Anything a root walk did not reach still reports its own warning at its own place — through the

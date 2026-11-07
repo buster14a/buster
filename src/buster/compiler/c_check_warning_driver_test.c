@@ -718,8 +718,16 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
                 const bool oracle_ready = (oracle == 0 || oracle == 1) && expected != NULL;
                 char description[256];
                 snprintf(description, sizeof(description), "%s policy=%u mode=%u: independent Clang oracle", fixture->name, policy, mode);
-                check_test_expect(test, oracle_ready && (policy != 0 || (oracle == (fixture->errors != 0) && counts.warnings == fixture->warnings &&
-                                       counts.errors == fixture->errors && counts.notes == fixture->notes)), description);
+                const bool oracle_matches = oracle_ready && (policy != 0 || (oracle == (fixture->errors != 0) && counts.warnings == fixture->warnings &&
+                                             counts.errors == fixture->errors && counts.notes == fixture->notes));
+                if (policy == 0 && !oracle_matches)
+                {
+                    fprintf(stderr, "warning fixture oracle mismatch: %s mode=%u\nexpected status=%d warnings=%u errors=%u notes=%u; "
+                                    "actual status=%d warnings=%u errors=%u notes=%u\n%s\n",
+                            fixture->name, mode, fixture->errors != 0, fixture->warnings, fixture->errors, fixture->notes,
+                            oracle, counts.warnings, counts.errors, counts.notes, expected != NULL ? expected : "(no diagnostic output)");
+                }
+                check_test_expect(test, oracle_matches, description);
                 for (uint32_t lane = 0; oracle_ready && lane < BUSTER_ARRAY_LENGTH(lanes); lane += 1)
                 {
                     for (uint32_t scalar = 0; scalar < 2; scalar += 1)
@@ -744,6 +752,11 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
                                                   strstr(actual != NULL ? actual : "", policy == 1 ? "error: " : "warning: ") : NULL;
                         const bool diagnostics_match = expected_text != NULL ? actual_text != NULL && strcmp(actual_text, expected_text) == 0 :
                                                        actual != NULL && strcmp(actual, expected) == 0;
+                        if (lane == 0 && scalar == 0 && (status != oracle || !diagnostics_match))
+                        {
+                            fprintf(stderr, "warning fixture diagnostics mismatch: %s policy=%u mode=%u\nexpected status=%d:\n%s\nactual status=%d:\n%s\n",
+                                    fixture->name, policy, mode, oracle, expected, status, actual != NULL ? actual : "(no diagnostic output)");
+                        }
                         check_test_expect(test, status == oracle && diagnostics_match, description);
                         if (preserve)
                         {

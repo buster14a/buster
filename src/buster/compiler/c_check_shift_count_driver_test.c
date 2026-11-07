@@ -125,14 +125,169 @@ static const CheckDriverDefaultWarningFixture check_driver_shift_count_fixtures[
         .errors = 1,
     },
     {
-        .name = "unevaluated queries and generic operands do not diagnose runtime counts",
-        .source = "unsigned long a(int x){return sizeof(x<<32)+_Alignof(__typeof__(x>>-1));}"
-                  "int b(int x){return _Generic(x<<32,int:7,default:x>>-1);}\n",
+        .name = "sizeof operands do not diagnose runtime shift counts",
+        .source = "unsigned long f(int x){return sizeof(x<<32);}\n",
     },
     {
-        .name = "unselected conditional logical and choose operands remain quiet",
-        .source = "int a(int x){return 0?(x<<32):x;}int b(int x){return 0&&(x>>-1);}"
-                  "int c(int x){return 1||(x<<40);}int d(int x){return __builtin_choose_expr(1,x,x<<32);}\n",
+        .name = "typeof and alignof operands do not diagnose runtime shift counts",
+        .source = "unsigned long f(int x){return _Alignof(__typeof__(x>>-1));}\n",
+    },
+    {
+        .name = "generic controlling expressions do not diagnose runtime shift counts",
+        .source = "int f(int x){return _Generic(x<<32,int:7,default:0);}\n",
+    },
+    {
+        .name = "unselected generic arms retain queued shift-count diagnostics",
+        .source = "int f(int x){return _Generic(x,int:7,default:x>>-1);}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "a selected generic arm before an unselected arm keeps diagnostic order",
+        .source = "int f(int x){return _Generic(x,int:x<<32,default:x>>-1);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "a retained constant diagnostic in an unselected generic arm precedes the selected arm",
+        .source = "int f(int x){return _Generic(x,default:1>>-1,int:x<<32);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "an unreachable generic selection still diagnoses its detached arm",
+        .source = "int f(int x){if(0)return _Generic(x,int:x<<32,default:x>>-1);return x;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "logical and inside a detached generic arm retains its queued count warning",
+        .source = "int f(int x){return _Generic(x,int:x,default:0&&(x>>-1));}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "logical or inside a detached generic arm retains its queued count warning",
+        .source = "int f(int x){return _Generic(x,int:x,default:1||(x<<32));}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "an ordinary conditional inside a detached generic arm retains its queued count warning",
+        .source = "int f(int x){return _Generic(x,int:x,default:0?(x<<32):x);}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "sizeof suppresses counts inside and around detached generic arms",
+        .source = "int a(int x){return _Generic(x,int:x,default:sizeof(x<<32));}"
+                  "unsigned long b(int x){return sizeof(_Generic(x,int:x<<32,default:x>>-1));}\n",
+    },
+    {
+        .name = "typeof suppresses counts inside and around detached generic arms",
+        .source = "int a(int x){return _Generic(x,int:x,default:_Alignof(__typeof__(x>>-1)));}"
+                  "unsigned long b(int x){return _Alignof(__typeof__(_Generic(x,int:x<<32,default:x>>-1)));}\n",
+    },
+    {
+        .name = "a detached arm precedes a later statement's count diagnostic",
+        .source = "int f(int x){if(0)x=_Generic(x,int:0,default:x<<32);return x>>-1;}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "a detached arm under a conditional precedes the next operand's count diagnostic",
+        .source = "int f(int x){return (0?_Generic(x,int:0,default:x<<32):0)+(x>>-1);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "unselected ordinary conditional arms do not diagnose runtime shift counts",
+        .source = "int f(int x){return 0?(x<<32):x;}\n",
+    },
+    {
+        .name = "short-circuited logical operands do not diagnose runtime shift counts",
+        .source = "int a(int x){return 0&&(x>>-1);}int b(int x){return 1||(x<<40);}\n",
+    },
+    {
+        .name = "unselected choose arms retain queued shift-count diagnostics",
+        .source = "int f(int x){return __builtin_choose_expr(1,x,x<<32);}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "a selected choose arm before an unselected arm keeps diagnostic order",
+        .source = "int f(int x){return __builtin_choose_expr(1,x<<32,x>>-1);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "a selected choose arm after an unselected arm keeps diagnostic order",
+        .source = "int f(int x){return __builtin_choose_expr(0,x>>-1,x<<32);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "an unreachable choose selection still diagnoses its detached arm",
+        .source = "int f(int x){if(0)return __builtin_choose_expr(1,x<<32,x>>-1);return x;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "logical and inside a detached choose arm retains its queued count warning",
+        .source = "int f(int x){return __builtin_choose_expr(1,x,0&&(x>>-1));}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "logical or inside a detached choose arm retains its queued count warning",
+        .source = "int f(int x){return __builtin_choose_expr(1,x,1||(x<<32));}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "an ordinary conditional inside a detached choose arm retains its queued count warning",
+        .source = "int f(int x){return __builtin_choose_expr(1,x,0?(x<<32):x);}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "sizeof suppresses counts inside and around detached choose arms",
+        .source = "int a(int x){return __builtin_choose_expr(1,x,sizeof(x<<32));}"
+                  "unsigned long b(int x){return sizeof(__builtin_choose_expr(1,x<<32,x>>-1));}\n",
+    },
+    {
+        .name = "typeof suppresses counts inside and around detached choose arms",
+        .source = "int a(int x){return __builtin_choose_expr(1,x,_Alignof(__typeof__(x>>-1)));}"
+                  "unsigned long b(int x){return _Alignof(__typeof__(__builtin_choose_expr(1,x<<32,x>>-1)));}\n",
+    },
+    {
+        .name = "generic controllers suppress counts throughout nested static selections",
+        .source = "int a(int x){return _Generic(_Generic(x,int:x<<32,default:x>>-1),int:0,default:0);}"
+                  "int b(int x){return _Generic(__builtin_choose_expr(1,x<<32,x>>-1),int:0,default:0);}\n",
+    },
+    {
+        .name = "generic controllers nested inside detached arms still suppress counts",
+        .source = "int a(int x){return _Generic(x,int:x,default:_Generic(x<<32,int:0,default:0));}"
+                  "int b(int x){return __builtin_choose_expr(1,x,_Generic(x>>-1,int:0,default:0));}\n",
+    },
+    {
+        .name = "static assertions suppress count diagnostics in detached static-selection arms",
+        .source = "void f(int x){_Static_assert(_Generic(x,int:1,default:x<<32),\"generic\");"
+                  "_Static_assert(__builtin_choose_expr(1,1,x>>-1),\"choose\");}\n",
+    },
+    {
+        .name = "case values suppress count diagnostics in detached static-selection arms",
+        .source = "int f(int x){switch(x){case _Generic(x,int:0,default:x<<32):return 1;"
+                  "case __builtin_choose_expr(1,1,x>>-1):return 2;}return 0;}\n",
+    },
+    {
+        .name = "a file-scope constexpr initializer suppresses detached count diagnostics",
+        .source = "extern int x;constexpr int y=_Generic(x,int:0,default:x<<32);\n",
+        .c23 = true,
+    },
+    {
+        .name = "a local constexpr initializer retains detached count diagnostics",
+        .source = "int f(int x){constexpr int y=_Generic(x,int:0,default:x>>-1);return y;}\n",
+        .warnings = 1,
+        .c23 = true,
+    },
+    {
+        .name = "an omitted-middle conditional diagnoses its shared condition once",
+        .source = "int f(int x,int y){return (x<<32)?:y;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "an omitted-middle conditional in a detached arm diagnoses its shared condition once",
+        .source = "int f(int x){return _Generic(x,int:0,default:(x<<32)?:0);}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "a selected statement expression retains its dead shift's suppression",
+        .source = "int f(int x){return _Generic(x,int:({if(0)(void)(x<<32);0;}),default:0);}\n",
     },
     {
         .name = "selected conditional operands still diagnose their counts",

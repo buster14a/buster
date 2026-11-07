@@ -182,8 +182,17 @@ unused-warning fixtures also check exact scope-completion tokens.
   fallback; they do not establish admitted deferred-reader coverage.
   Runtime `-Wshift-count-negative` and `-Wshift-count-overflow` warnings inspect an independently constant count
   even when the left operand is not constant (#1394). The ordinary shift uses the promoted left type's value width;
-  compound shifts use the original lvalue type, matching Clang. The existing evaluated-expression walk excludes
-  unselected and unreachable operands. Retained runtime constant-fold warnings join that walk without being
+  compound shifts use the original lvalue's underlying integer type, including atomic operands, matching Clang.
+  Ordinary unselected conditional arms, short-circuited logical operands and unreachable statements suppress these
+  warnings. Unselected `_Generic` associations and `__builtin_choose_expr` arms instead retain Clang's queued count
+  diagnostics: those detached expressions have no CFG block, even under an unreachable statement or with an ordinary
+  conditional or logical operand nested inside them. Lexical `sizeof`, `typeof` and `_Generic` controlling-expression
+  contexts suppress count warnings before queueing, including inside or around those detached arms (#1722).
+  Required-constant contexts such as `_Static_assert` and case values suppress their detached-arm count warnings too.
+  File-scope C23 `constexpr` initializers also suppress those warnings; function-local `constexpr` initializers retain them.
+  The count traversal preserves source order across selected and detached arms and neighboring expressions or
+  statements, and visits an omitted-middle conditional's shared condition once. Other warning families retain
+  their existing evaluated-expression rules. Retained runtime constant-fold warnings join the count traversal without being
   rendered or counted twice, preserving their order with new runtime warnings and discarded expressions;
   required-constant warnings and groups collected before a failed program keep their original publication.
   `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both
