@@ -101,11 +101,9 @@ static void ir_verified_test_case(IrOptimizeTest* test, const IrFunction* input,
     ir_optimize_test_expect(test, after.error == IR_OK, "verified handoff: fixture accepted");
     if (before.error == IR_OK && after.error == IR_OK)
     {
-        const bool explicit_scalar = path == BUSTER_IR_OPTIMIZE_SCALAR || (path == BUSTER_IR_OPTIMIZE_AUTO && scalar_override);
-        (void)explicit_scalar;
-        const DominatorPath expected_path = actual.function.block_count == 0 || BUSTER_SCALAR_PATH(explicit_scalar) ? DOMINATOR_SCALAR : DOMINATOR_VECTOR;
-        ir_optimize_test_expect(test, analysis.dominators.path == expected_path,
-                                "verified handoff: final dominance follows caller policy, not pass heuristic");
+        // Dominator AUTO and the explicit scalar controls alike solve the final dominance by SEMI-NCA (#1352).
+        ir_optimize_test_expect(test, analysis.dominators.path == DOMINATOR_SCALAR,
+                                "verified handoff: final dominance solved by SEMI-NCA, whatever the pass heuristic");
         ir_optimize_test_expect(test, ir_optimize_test_equal(&expected.function, &actual.function), "verified handoff: unchanged optimized IR");
         ir_optimize_test_expect(test, expected.folded == actual.folded && expected.removed_blocks == actual.removed_blocks &&
                                 expected.removed_instructions == actual.removed_instructions && expected.sccp_visits == actual.sccp_visits &&
@@ -315,9 +313,8 @@ static void ir_verified_test_dominator_policy(IrOptimizeTest* test, Arena* input
             ir_optimize_test_expect(test, check.error == IR_OK, "dominator policy: preparation accepted");
             if (check.error == IR_OK)
             {
-                const DominatorPath expected = BUSTER_SCALAR_PATH(explicit_scalar != 0) ? DOMINATOR_SCALAR : DOMINATOR_VECTOR;
-                ir_optimize_test_expect(test, work.scalar && work.dominators.path == expected,
-                                        "dominator policy: scalar passes do not force scalar dominance");
+                ir_optimize_test_expect(test, work.scalar && work.dominators.path == DOMINATOR_SCALAR,
+                                        "dominator policy: AUTO and explicit scalar dominance both solve by SEMI-NCA");
                 // Independently known diamond: entry dominates every block, neither arm dominates the join.
                 const uint32_t join = function.block_count - 1;
                 ir_optimize_test_expect(test, dominators_dominates(&work.dominators, 0, join) &&
