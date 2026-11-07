@@ -51,6 +51,7 @@ jobs:
           root="$HOME/buster-fast-bench/1313-codex-01a1b5d1"
           out="$RUNNER_TEMP/1313-evidence-$GITHUB_RUN_ID"
           mkdir -p "$root" "$out" "$root/measure"
+          trap 'status=$?; if [ "$status" -ne 0 ]; then printf "FAILED_STATUS=%s\n" "$status"; for file in "$out"/*.err "$out"/*.stat; do if [ -f "$file" ]; then printf "FILE %s\n" "$file"; tail -n12 "$file"; fi; done; fi' EXIT
           if [ ! -d "$root/repo/.git" ]; then
             git clone --no-checkout https://github.com/buster14a/buster.git "$root/repo"
           fi
@@ -92,7 +93,7 @@ jobs:
           printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite" | sha256sum --check | tee "$out/input.txt"
           sha256sum "$corpus/provenance/gnu17-pinned-predefines.txt" | tee "$out/predefines.sha256"
           cd "$root/measure"
-          options=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$corpus/sqlite" "$sqlite")
+          options=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$corpus/sqlite" "$sqlite")
           printf '%q ' ./compiler -c "${options[@]}" -o sqlite3.o > "$out/argv.txt"
           printf '\n' >> "$out/argv.txt"
           sample()
@@ -139,3 +140,22 @@ jobs:
           path: ${{ runner.temp }}/1313-evidence-${{ github.run_id }}/
           if-no-files-found: error
           retention-days: 14
+  inspect:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 3
+    steps:
+      - name: Inspect the previous diagnostic receipts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api repos/buster14a/buster/actions/artifacts/13574266846/zip > diagnostic.zip
+          unzip -q diagnostic.zip -d diagnostic
+          cat diagnostic/warm-base-compile-aa1.err
+          tr '\000' '\n' < diagnostic/base-checker-strings | LC_ALL=C sort > base.strings
+          tr '\000' '\n' < diagnostic/isolated-checker-strings | LC_ALL=C sort > isolated.strings
+          printf 'REMOVED_STRINGS\n'
+          LC_ALL=C comm -23 base.strings isolated.strings | sed -n '1,50p'
+          printf 'ADDED_STRINGS\n'
+          LC_ALL=C comm -13 base.strings isolated.strings | sed -n '1,50p'
