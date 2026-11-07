@@ -170,6 +170,48 @@ the contract, publication guarantees and the remaining compatibility limits,
 and `test-checker-driver`'s `c_driver_compatibility_test.c` exercises real
 executable invocations against Clang and GNU Make.
 
+## Warning option names
+
+Unknown warning names produce the default-on `-Wunknown-warning-option`
+diagnostic in preprocessing and C compilation (#1467). The complete ordered
+command line determines its severity before any name is reported. `-w`,
+`-Wno-everything`, `-Wno-unknown-warning-option`, group re-enabling, global and
+group-specific `-Werror`/`-Wno-error` and fatal-error controls apply to this
+diagnostic. A source pragma cannot suppress a command-line warning. Diagnostics
+participate in the existing counters, error limit, summary and deferred-history
+replay; promoted errors prevent object and dependency publication.
+
+`c_preprocessor_warning_options.c` keeps the driver spellings separate from
+the frozen `__has_warning` group catalog. It recognizes positive valued options
+such as `-Wlarger-than=42`, its legacy `-Wlarger-than-42` spelling,
+`-Wframe-larger-than=4096`, `-Wlarge-by-value-copy=4096`, `-Wundef-prefix=PREFIX`
+and module-header controls. It also retains the legacy implicit-declaration
+and `nonportable-cfstrings` spellings. An arbitrary `=VALUE` suffix is not
+discarded: unknown names and unsupported spellings of known groups still warn.
+Option operands and filenames after `--` are not warning options.
+
+Recognizing a warning name does not implement its consumer or its parameter
+semantics; known but unimplemented warnings remain #1365's work. `-Wa,`,
+`-Wp,` and `-Wl,` are classified as driver transports and do not become warning
+names. This change adds no assembler or preprocessor forwarding. Optional
+spelling suggestions are omitted because the existing catalog does not record
+which Clang groups have diagnostics, which its suggestion search requires.
+
+The original `c_driver_warning_options_test.c` cases run through
+`test-checker-driver`'s real CC compatibility harness. They compare independent
+expected diagnostic names, counts, severities and complete text with Clang
+(omitting only its optional spelling hint), on `-E` and `-fsyntax-only` through
+both kernels. They exercise policy ordering with the typo before and after the
+controls, valid aliases and narrow lookalikes, long and repeated names,
+transport/operand boundaries, and preserved objects and depfiles on promoted
+errors. The behavioral references are LLVM revision
+`7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`,
+[`Warnings.cpp`](https://github.com/llvm/llvm-project/blob/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/clang/lib/Basic/Warnings.cpp),
+[`Diagnostic.cpp`](https://github.com/llvm/llvm-project/blob/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/clang/lib/Basic/Diagnostic.cpp),
+[`Options.td`](https://github.com/llvm/llvm-project/blob/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/clang/include/clang/Options/Options.td)
+and `CompilerInvocation.cpp`'s `addDiagnosticArgs`; no upstream implementation
+or fixture is imported.
+
 ## Response files
 
 Source commands expand `@file` before information probes and selection of

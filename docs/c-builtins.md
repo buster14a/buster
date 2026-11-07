@@ -108,7 +108,10 @@ or `popcnt` are unavailable. Execution fixtures must cover both selectors. The
 source producer takes each of these instructions where the function's target has
 it, and `bsf`, `bsr` and `bswap` at every level (#1374,
 [the integration guide](c-builtins-integration.md)'s "The bit builtins'
-instructions").
+instructions"). The overflow builtins are the operation and `seto` for
+signed 64-bit operands of one class, and otherwise one 64-bit operation, the
+operation's carry or one 128-bit product where the operands allow (#1385, its
+"The overflow builtins' instructions").
 
 The normal `__has_builtin` mode consults the shared capability inventory in
 `c_builtin_catalog.c`; its integer entries currently advertise folding only.

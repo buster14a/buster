@@ -1610,12 +1610,39 @@ array and clang declares it, an `extern` one too, which clang's optimized code
 stores into with aligned SSE moves (`check_data_declared_alignment`, #978);
 compound literals and string literals keep their types' alignment.
 
+Identical live string literals share one storage atom per translation unit
+(#1474), in both code-generation tiers. `c_check_string_pool.c` groups selected
+literal records by exact array type, requested alignment and decoded byte length
+and contents, including embedded and trailing NULs. Concatenation and alternate
+escape spellings therefore share storage when they produce the same object.
+Each occurrence keeps its existing object identity and symbol, defined at offset
+zero in the shared atom; code references and static pointer relocations retain
+their original symbols and byte addends. Pooling happens after reachability
+selection, so an unreferenced earlier occurrence cannot own a live literal's
+storage. Named arrays, including const arrays initialized by a literal, and
+predefined function/source-name arrays keep separate atoms. There is no suffix
+merging or cross-unit pool in this producer.
+
+The pool reuses the batched string hash and scalar/vector radix sorter. Equal
+hashes require full-key equality; mixed-key collisions use an iterative merge
+sort, with the earliest equal record as the canonical one. Thus collision runs
+need at most O(n log n) key comparisons and linear scratch, rather than pairwise
+search. A shared metadata validator rejects invalid type, size, alignment and
+symbol descriptors before the pool reads payload bytes. Planning copies each
+unique literal once, and publication capacity counts unique atoms and bytes;
+failed calls retain the existing transaction rollback guarantees.
+
 The emitter consumes checked aggregate initializer plans, including brace
 elision, designated/range stores, bit-fields, compatible string copies and
 selected union members. It handles integer and bit-precise storage,
 binary32/binary64 and complex components, x87 components with deterministic
 padding, and pointers. Objects use RODATA, DATA_RELRO, DATA, BSS, TDATA or TBSS
-as appropriate; retained string candidates use STRINGS. Symbolic pointers emit
+as appropriate. Only ordinary single-terminated byte literals use STRINGS
+(`SHF_MERGE | SHF_STRINGS` in ELF). Wide literals, embedded-NUL literals and
+predefined arrays use RODATA: an external linker must not split a complete
+embedded-NUL object into independently mergeable substrings or merge an
+identity-bearing array. Identical embedded-NUL and wide literals still share
+the compiler's canonical atom. Symbolic pointers emit
 ABS64 fixups with signed byte addends; absolute pointer values remain bytes.
 External targets may remain unresolved. A referenced internal function needs
 its real code atom: standalone data inspection reports that limitation, while
@@ -3061,9 +3088,11 @@ What the lowering covers past scalars (#145's programs):
   (`check_lower_quad_constant` writes a folded constant's bits), and after the
   operand where it has (`check_lower_aggregate_zero`).
   The checker folds no `__float128` constant (`check_action_float_supported`):
-  a static one with an initializer is refused as not constant, an increment by
-  name ("increments of __float128 values"), and the `q` suffix's literals as
-  invalid. `test-checker`'s `float128` program, against clang -O0's build of
+  a static one with an initializer is refused as not constant, and the `q`
+  suffix's literals as invalid. An increment or a decrement (#147) is
+  `__addtf3`'s or `__subtf3`'s of a constant 1.0, as clang -O0's is
+  (`check_lower_quad_update_emit`, a postfix one's value a copy of the object
+  before it). `test-checker`'s `float128` program, against clang -O0's build of
   it, has each of them, clean under clang's UBSan on every input.
 - **Complex values of aggregate parts (#137).** `_Complex __float128`, and
   the complex `_BitInt`s past 128 bits that the usual arithmetic conversions
@@ -6598,6 +6627,19 @@ arguments against the function. The checker now gives these as clang does.
   (that declaration at or before its definition), and the lowering gives it
   `no_caller_saved_registers`' set of every register (`check_lower_preserve`,
   LLVM's `CSR_64_AllRegs` of `x86_intrcc`) and its 1 or 2 parameters' kind.
+
+  x86's `force_align_arg_pointer` (`CHECK_ATTRIBUTE_FORCE_ALIGN_ARG_POINTER`,
+  #1447) is clang's `handleForceAlignArgPointerAttr`'s: a function's, with
+  no arguments ("takes no arguments" otherwise). It ignores the attribute
+  without a word on a function pointer (a variable's, a parameter's, a
+  member's) and on a typedef of a function's type or of a pointer to one,
+  and with "only applies to functions" on anything else
+  (`check_input_subject_handlers`' row). A redeclaration inherits it; one
+  after the definition drops it with "attribute declaration must precede
+  definition". `CheckProgram.object_realign` holds each function's first
+  declaration with it, and `check_program_realign(program, b)` says whether
+  body `b` realigns its stack (`Tier0Function.realign_stack`,
+  `docs/tier0.md`'s realigned frames: 16 bytes' at least).
   A variadic routine, which clang compiles, is refused by name ("unsupported:
   variadic interrupt service routines"), as are `__builtin_eh_return`,
   `__builtin_setjmp` and musttail calls in one, as in any preserving frame.
@@ -7043,8 +7085,8 @@ arguments against the function. The checker now gives these as clang does.
   or a complex type is stepped: a complex one's real part by one, as C2y's and
   clang's are (`check_lower_complex_update_emit`, a postfix one's value a copy
   of the object before it; a complex of aggregate parts, past 128 bits, stays
-  "increments of complex values" in lowering, as a `__float128`'s increment
-  is "increments of __float128 values"). Any other is "cannot increment value of type
+  "increments of complex values" in lowering; a `__float128` is stepped with
+  `__addtf3` or `__subtf3`, `check_lower_quad_update_emit`). Any other is "cannot increment value of type
   T" (or "decrement"), an array's and a const record's too; a vector's, a
   record's and a function's are among them. T is the operand's type with its
   qualifiers, an `_Atomic` one's value type, spelled with the typedef its
@@ -7069,9 +7111,20 @@ arguments against the function. The checker now gives these as clang does.
   kept, through inner dereferences to the object they name; its top-level
   qualifiers dropped), in dead code too, and before an error the expression
   then has (`(*p)++`). Not right after a unary `&` (`&*p`; `&(*p)` warns, as
-  clang's IsAfterAmp is the token's), nor in sizeof's or alignof's operand
-  (`check_warning_graph_void_dereferences`, one reverse pass marking the
-  queries' operands, only in a unit that has such a dereference).
+  clang's IsAfterAmp is the token's), nor where clang's parser is in an
+  unevaluated context (`check_warning_graph_void_context`, a climb up the
+  parse tree from the `*`, each token's context found once, only in a unit
+  that has such a dereference): a sizeof's or alignof's operand, with its
+  unselected `_Generic` associations and `__builtin_choose_expr` operands and
+  its statement expressions, and a `_Generic`'s controlling expression. An
+  array declarator's bound is evaluated again, in a sizeof's type name too
+  (`sizeof(char (*)[(*p, n)])` warns). A sizeof whose operand is an
+  expression of variable array type evaluates it after all (clang's
+  `TransformToPotentiallyEvaluated`): it warns there, and twice in a bound
+  inside it. Still quiet, as the graph doesn't have them: dereferences the
+  constant evaluator reads alone (`__builtin_offsetof`'s designators,
+  `__builtin_types_compatible_p`'s type names) and a `typeof`'s operand,
+  which clang evaluates again when its type is variably modified.
 - **Indirection through a null pointer** (`-Wnull-dereference`, #1447, clang's
   `CheckForNullPointerDereference`): "indirection of non-volatile null pointer
   will be deleted, not trap" with its note "consider using __builtin_trap() or

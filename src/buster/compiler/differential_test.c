@@ -67,7 +67,9 @@ static void differential_test_processes(DifferentialTests* tests, const char* di
         DifferentialArguments arguments = {0};
         differential_add(&arguments, fixture);
         differential_add(&arguments, switches[i]);
-        const DifferentialProcess result = differential_process(directory, labels[i], &arguments, 100, 256, 256, 4096);
+        // An instrumented child may not finish startup in 100 ms on a busy hosted runner. The deliberate hang still
+        // reaches its deadline; the other cases must reach their tree/flood assertions before the watchdog fires.
+        const DifferentialProcess result = differential_process(directory, labels[i], &arguments, 1000, 256, 256, 4096);
         differential_test_check(tests, result.kind == kinds[i], labels[i]);
         differential_test_check(tests, result.cleanup_complete, "subreaper reaped complete process tree");
         differential_test_check(tests, result.elapsed_ms < 2000, "process deadline bounded");

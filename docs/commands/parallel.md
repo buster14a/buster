@@ -149,7 +149,7 @@ command holds one CPU, or the `[N CPUs]` its heading declares:
   parts, each a command of its own that the runner packs beside the others
   (`--part K/N`): test-checker-driver as 4 (the list's longest, 197 s on a hosted
   runner and 48 s on the 9700X, whose start late in the list ended the step),
-  test-checker as 4 (141 s on a hosted runner, holding 2 CPUs while it kept 1.03
+  test-checker as 8 (141 s on a hosted runner, holding 2 CPUs while it kept 1.03
   busy) and test-preprocessor's checks without files as 4, dealt by their
   weights (`pp_test_sections`). The parts together run each check once, with
   the whole command's random samples: test-checker starts each unit's numbers

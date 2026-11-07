@@ -162,6 +162,23 @@ static void ir_interpreter_test_numbers(IrInterpreterTestTally* tally, Arena* me
         { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_C(0x8000000100000001), 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_POPCNT, { 3, 0 }, INTERPRETER_OK, "popcnt of a long" },
         { IR_INTRINSIC, IR_I32, IR_I32, { 0x12345678, 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_BSWAP, { 0x78563412, 0 }, INTERPRETER_OK, "bswap of an int" },
         { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_C(0x0102030405060708), 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_BSWAP, { UINT64_C(0x0807060504030201), 0 }, INTERPRETER_OK, "bswap of a long" },
+        // The signed overflows (#1385), of two operands: 1 exactly where the exact result leaves the type's signed range.
+        { IR_INTRINSIC, IR_I64, IR_I64, { INT64_MAX, 0 }, { 1, 0 }, BUSTER_IR_INTRINSIC_SADDO, { 1, 0 }, INTERPRETER_OK, "saddo past a long's maximum" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { INT64_MAX, 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_SADDO, { 0, 0 }, INTERPRETER_OK, "saddo at a long's maximum" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { (uint64_t)INT64_MIN, 0 }, { UINT64_MAX, 0 }, BUSTER_IR_INTRINSIC_SADDO, { 1, 0 }, INTERPRETER_OK, "saddo below a long's minimum" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_MAX, 0 }, { UINT64_MAX, 0 }, BUSTER_IR_INTRINSIC_SADDO, { 0, 0 }, INTERPRETER_OK, "saddo of -1 and -1, whose unsigned sum carries" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { INT32_MAX, 0 }, { 1, 0 }, BUSTER_IR_INTRINSIC_SADDO, { 1, 0 }, INTERPRETER_OK, "saddo past an int's maximum" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0x7fffffff, 0 }, { 0xffffffff, 0 }, BUSTER_IR_INTRINSIC_SADDO, { 0, 0 }, INTERPRETER_OK, "saddo of an int's maximum and -1" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { 0, 0 }, { (uint64_t)INT64_MIN, 0 }, BUSTER_IR_INTRINSIC_SSUBO, { 1, 0 }, INTERPRETER_OK, "ssubo of a long's minimum from 0" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_MAX, 0 }, { (uint64_t)INT64_MIN, 0 }, BUSTER_IR_INTRINSIC_SSUBO, { 0, 0 }, INTERPRETER_OK, "ssubo of a long's minimum from -1" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { (uint64_t)INT64_MIN, 0 }, { 1, 0 }, BUSTER_IR_INTRINSIC_SSUBO, { 1, 0 }, INTERPRETER_OK, "ssubo below a long's minimum" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0x80000000, 0 }, { 0, 0 }, BUSTER_IR_INTRINSIC_SSUBO, { 0, 0 }, INTERPRETER_OK, "ssubo of 0 from an int's minimum" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { 3037000499, 0 }, { 3037000499, 0 }, BUSTER_IR_INTRINSIC_SMULO, { 0, 0 }, INTERPRETER_OK, "smulo below the square root of 2^63" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { 3037000500, 0 }, { 3037000500, 0 }, BUSTER_IR_INTRINSIC_SMULO, { 1, 0 }, INTERPRETER_OK, "smulo past the square root of 2^63" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { (uint64_t)INT64_MIN, 0 }, { UINT64_MAX, 0 }, BUSTER_IR_INTRINSIC_SMULO, { 1, 0 }, INTERPRETER_OK, "smulo of a long's minimum by -1" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { (uint64_t)INT64_MIN, 0 }, { 1, 0 }, BUSTER_IR_INTRINSIC_SMULO, { 0, 0 }, INTERPRETER_OK, "smulo of a long's minimum by 1" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0x10000, 0 }, { 0x8000, 0 }, BUSTER_IR_INTRINSIC_SMULO, { 1, 0 }, INTERPRETER_OK, "smulo reaching an int's 2^31" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0x10000, 0 }, { 0xffff8000, 0 }, BUSTER_IR_INTRINSIC_SMULO, { 0, 0 }, INTERPRETER_OK, "smulo reaching an int's -2^31" },
     };
     for (uint32_t t = 0; t < sizeof(cases) / sizeof(cases[0]); t += 1)
     {
@@ -183,7 +200,8 @@ static void ir_interpreter_test_numbers(IrInterpreterTestTally* tally, Arena* me
             function.block_offsets[1] = 4;
             ir_interpreter_test_instruction(&function, 0, IR_CONST, test.source, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
             ir_interpreter_test_instruction(&function, 1, IR_CONST, test.source, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            const uint8_t operands = ir_operand_table[test.op] | (test.op == IR_INTRINSIC && test.predicate < BUSTER_IR_INTRINSIC_TZCNT ? 2 : 0);
+            const bool unary = test.predicate >= BUSTER_IR_INTRINSIC_TZCNT && test.predicate <= BUSTER_IR_INTRINSIC_BSWAP;
+            const uint8_t operands = ir_operand_table[test.op] | (test.op == IR_INTRINSIC && !unary ? 2 : 0);
             const uint32_t b = (operands & 2) != 0 ? 1 : BUSTER_IR_NONE;
             const uint32_t c = test.op == IR_ICMP || test.op == IR_FCMP || test.op == IR_INTRINSIC ? test.predicate : BUSTER_IR_NONE;
             ir_interpreter_test_instruction(&function, 2, test.op, test.type, 0, b, c);
@@ -760,6 +778,11 @@ static void ir_interpreter_test_atomic_rmw(IrInterpreterTestTally* tally, Arena*
         const IrInterpreterProgram program = { .functions = &code, .function_count = 1 };
         ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ .low = 18 },
                                 "atomic addition and exchange return old values and leave the sum and the operand");
+        // A store's hardware xchg does not add an old-value read to its IR semantics, even with all memory checks on.
+        function.flags[2] = BUSTER_IR_ATOMIC | BUSTER_IR_FENCE_SEQ_CST << BUSTER_IR_ORDER_SHIFT;
+        ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ .low = 18 },
+                                "a seq_cst store initializes undefined bytes with memory checks enabled");
+        function.flags[2] = 0;
         // a = cas x, 5, 3 (5, x 3); b = cas x, 5, 5 (3, x 3): a + b + x, 13 had the second stored and 15 had the first
         // not.
         ir_interpreter_test_instruction(&function, 4, IR_ATOMIC_RMW, IR_I32, 0, 1, 3);

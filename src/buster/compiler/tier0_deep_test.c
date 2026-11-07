@@ -8,7 +8,7 @@
 
 #define BUSTER_TIER0_TEST_DEEP_ENTRIES 256
 #define BUSTER_TIER0_TEST_DEEP_INPUTS 6
-#define BUSTER_TIER0_TEST_DEEP_CASES 11
+#define BUSTER_TIER0_TEST_DEEP_CASES 13
 // The pages of each case's code.
 #define BUSTER_TIER0_TEST_DEEP_PAGES 16
 
@@ -86,6 +86,8 @@ static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
         "a conversion past the floating line",
         "a realigned frame's 14",
         "a realigned frame's base past the line",
+        "a seq_cst store's scratch at the line",
+        "seq_cst stores past the line",
     };
     deep->count = 0;
     if (c == 10)
@@ -127,7 +129,7 @@ static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
             tier0_test_deep_local_plus(deep, k);
         }
     }
-    const uint32_t held = c == 5 || c == 9 ? 14 : c == 8 || c == 10 ? 13 : 15;
+    const uint32_t held = c == 5 || c == 9 ? 14 : c == 8 || c == 10 || c == 11 ? 13 : 15;
     for (uint32_t k = 0; k < held; k += 1)
     {
         tier0_test_deep_operation(deep, BUSTER_TYPED_ADD, k);
@@ -290,6 +292,21 @@ static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
         tier0_test_deep_add(deep, BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, 0);
         folds += 5;
     }
+    else if (c == 11 || c == 12)
+    {
+        // Initialize a local through seq_cst SET, then STORE x + 7 and keep its desired result. With 13 values below,
+        // STORE's preserving scratch alone crosses the line; with 15, both accesses run wholly past it. The parameter's
+        // home stays live, so folding either value into xchg's destructive register would lose x.
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_ACCESS_ATOMIC | BUSTER_TYPED_FENCE_SEQ_CST);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_test_deep_operation(deep, BUSTER_TYPED_ADD, 7);
+        tier0_test_deep_add(deep, BUSTER_TYPED_STORE, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_ACCESS_ATOMIC | BUSTER_TYPED_FENCE_SEQ_CST);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_test_deep_add(deep, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        folds += 1;
+    }
     else if (c == 8)
     {
         // Over the 13 integers, a 17th floating value past the floating table, local 1 + 16, its constant through r15, the
@@ -346,7 +363,7 @@ static uint64_t tier0_test_deep_floating_sum(uint64_t x)
 // What case c returns for x.
 static uint64_t tier0_test_deep_model(uint32_t c, uint64_t x)
 {
-    const uint32_t held = c == 5 || c == 9 ? 14 : c == 8 || c == 10 ? 13 : 15;
+    const uint32_t held = c == 5 || c == 9 ? 14 : c == 8 || c == 10 || c == 11 ? 13 : 15;
     // Case 8's: the integers and its conversion's result, as a double, added to its 16 floating values from the top.
     uint64_t integers = (x & 0xffff) + 16;
     for (uint32_t k = 0; k < 13; k += 1)
@@ -376,6 +393,8 @@ static uint64_t tier0_test_deep_model(uint32_t c, uint64_t x)
         (uint64_t)floating + x - sum,
         x + (x + 15),
         x + (x ^ 3),
+        2 * (x + 7),
+        2 * (x + 7),
     };
     return sum + cases[c];
 }
@@ -413,6 +432,7 @@ static __attribute__((no_sanitize("function"))) void tier0_test_deep(Tier0TestTa
     static const uint8_t local_classes[5] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID };
     static const uint8_t floating_classes[2] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_F64 };
     static const uint8_t local_flags[5] = { 0, 0, 0, 0, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN };
+    static const uint8_t atomic_flags[2] = { 0, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN };
     static const uint32_t local_sizes[5] = { 0, 0, 0, 0, 16 };
     static const uint8_t alignments_64[5] = { 0, 0, 0, 0, 6 };
     static const uint8_t alignments_4096[5] = { 0, 0, 0, 0, 12 };
@@ -437,7 +457,7 @@ static __attribute__((no_sanitize("function"))) void tier0_test_deep(Tier0TestTa
         function.values = deep->values;
         function.count = deep->count;
         function.local_classes = c == 8 ? floating_classes : local_classes;
-        function.local_flags = local_flags;
+        function.local_flags = c == 11 || c == 12 ? atomic_flags : local_flags;
         function.local_count = c == 9 || c == 10 ? 5 : c == 7 ? 4 : 2;
         function.local_sizes = c == 9 || c == 10 ? local_sizes : 0;
         function.local_alignments = c == 9 ? alignments_64 : c == 10 ? alignments_4096 : 0;

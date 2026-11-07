@@ -595,7 +595,8 @@ static InterpreterStatus ir_interpreter_enter_block(IrInterpreterFrame* frame, u
 // An intrinsic's value (#141), of an I32's or an I64's operands (ir.c's rule) as the x86 instructions give it: mulhu
 // an I64's alone, the product of two 64-bit values fitting 128 bits; pdep and pext bit by bit along the mask; bzhi's
 // index and bextr's start and length their control's low byte and second byte, an index or a length past the width
-// keeping every bit and a start past it none; the bit operations (#1374) ir_intrinsic_bits's.
+// keeping every bit and a start past it none; the bit operations (#1374) ir_intrinsic_bits's, and the signed overflows
+// (#1385) ir_intrinsic_overflow's.
 static unsigned __int128 ir_interpreter_intrinsic(uint32_t operation, uint32_t bits, uint64_t a, uint64_t b)
 {
     const uint64_t all = bits == 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
@@ -643,6 +644,9 @@ static unsigned __int128 ir_interpreter_intrinsic(uint32_t operation, uint32_t b
         case BUSTER_IR_INTRINSIC_BSR:
         case BUSTER_IR_INTRINSIC_POPCNT:
         case BUSTER_IR_INTRINSIC_BSWAP: result = ir_intrinsic_bits(operation, bits, a); break;
+        case BUSTER_IR_INTRINSIC_SADDO:
+        case BUSTER_IR_INTRINSIC_SSUBO:
+        case BUSTER_IR_INTRINSIC_SMULO: result = ir_intrinsic_overflow(operation, bits, a, b); break;
         default: break;
     }
     return result;
