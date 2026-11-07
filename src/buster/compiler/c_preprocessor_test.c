@@ -5228,7 +5228,8 @@ static bool pp_test_raw_recovery_failures(void)
 // #595's review: an argument expanded in place (pp_expand_argument_in_place) that runs out of room, as the history records
 // it, ends the run before anything is substituted from it. X's body is 1,100 tokens, past the 1,024 origins a stack
 // starts with, so expanding F(X)'s argument grows its origins first. The direct path expands in pp->arguments; the
-// scalar path first captures the expansion. Limit the buffer each path actually fills: each fault must give one
+// capture path — the scalar request, or every run on a scalar host — first captures the expansion. Limit the buffer
+// each path actually fills: each fault must give one
 // fatal error and no output token. The control, with nothing taken away, gives F's whole expansion in both modes.
 static bool pp_test_direct_argument_failures(void)
 {
@@ -5255,7 +5256,7 @@ static bool pp_test_direct_argument_failures(void)
         const uint32_t captures = initialized ? pp.captures.capacity : 0;
         pp.fail_origin_growth = initialized && fault == 0;
         pp.arguments.capacity = initialized && fault == 1 ? 64 : capacity;
-        pp.captures.capacity = initialized && fault == 1 && pp.options.scalar ? 64 : captures;
+        pp.captures.capacity = initialized && fault == 1 && !pp.vectorized ? 64 : captures;
         const bool ran = initialized && pp_run_source(&pp, "direct-argument-failure.c", (const uint8_t*)source, length);
         const bool passed = initialized && (fault == 2 ? ran && !pp.fatal && pp.output.count == PP_TEST_DIRECT_TOKENS + 2
                                                        : !ran && pp.fatal && pp.errors == 1 && pp.output.count == 0);
