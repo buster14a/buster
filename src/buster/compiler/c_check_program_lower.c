@@ -7219,7 +7219,11 @@ static void check_lower_complex_update(CheckLowerWriter* writer, uint32_t node)
     // real floating calculation's type, whose value is of its class, into such a destination.
     const bool limbs = check_lower_limb_value(writer, calculated) || !check_lower_aggregate(writer, calculated);
     const bool increment = op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT;
-    if (!limbs && op != CHECK_OP_ADD_ASSIGN && op != CHECK_OP_SUBTRACT_ASSIGN && op != CHECK_OP_MULTIPLY_ASSIGN && op != CHECK_OP_DIVIDE_ASSIGN)
+    // A complex value's increment of its real part (#147, check_lower_complex_update_emit): of the complex types whose parts
+    // are scalars, not __float128's or a complex of aggregate parts.
+    const bool complex_increment = increment && check_lower_complex(writer, calculated) && !check_lower_complex_parts(writer, calculated) &&
+                                   !check_lower_quad(writer, calculated) && check_lower_complex(writer, check_stream_type(program->stream, graph->operand0[node]));
+    if (!limbs && !complex_increment && op != CHECK_OP_ADD_ASSIGN && op != CHECK_OP_SUBTRACT_ASSIGN && op != CHECK_OP_MULTIPLY_ASSIGN && op != CHECK_OP_DIVIDE_ASSIGN)
     {
         check_lower_unsupported(writer, check_lower_quad(writer, calculated) ? "increments of __float128 values" : "increments of complex values");
     }
@@ -7293,7 +7297,10 @@ static void check_lower_complex_update_emit(CheckLowerWriter* writer, uint32_t n
     const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
     const CheckOp op = graph->ops[node];
-    const CheckOp computed = op == CHECK_OP_ADD_ASSIGN ? CHECK_OP_ADD : op == CHECK_OP_SUBTRACT_ASSIGN ? CHECK_OP_SUBTRACT :
+    const bool increment = op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT;
+    const bool postfix = op == CHECK_OP_POST_INCREMENT || op == CHECK_OP_POST_DECREMENT;
+    const CheckOp computed = op == CHECK_OP_ADD_ASSIGN || op == CHECK_OP_PRE_INCREMENT || op == CHECK_OP_POST_INCREMENT ? CHECK_OP_ADD :
+                             op == CHECK_OP_SUBTRACT_ASSIGN || op == CHECK_OP_PRE_DECREMENT || op == CHECK_OP_POST_DECREMENT ? CHECK_OP_SUBTRACT :
                              op == CHECK_OP_MULTIPLY_ASSIGN ? CHECK_OP_MULTIPLY : CHECK_OP_DIVIDE;
     const TypeId stored = check_stream_type(stream, graph->operand0[node]);
     const TypeId calculated = stream->conversions[node].operands[0].type;
@@ -7302,10 +7309,27 @@ static void check_lower_complex_update_emit(CheckLowerWriter* writer, uint32_t n
     const bool stored_complex = check_lower_complex(writer, stored);
     const TypeId stored_element = stored_complex ? check_lower_complex_element(types, stored) : stored;
     const bool stored_aggregate = check_lower_aggregate(writer, stored_element);
-    const bool value_complex = check_lower_complex(writer, check_stream_type(stream, graph->operand1[node]));
+    const bool value_complex = !increment && check_lower_complex(writer, check_stream_type(stream, graph->operand1[node]));
     const uint8_t current_class = stored_complex ? BUSTER_TYPED_CLASS_U64 : class;
-    const CheckLowerComplexOperand value = { .local = (uint32_t)locals, .complex = value_complex };
     const uint32_t destination = (uint32_t)(locals >> 32);
+    // An increment's value is one, of the calculation's element type, added to or subtracted from the real part; a postfix
+    // one's expression is a copy of the object before it (check_lower_complex_update's complex_increment).
+    uint32_t value_local = (uint32_t)locals;
+    if (increment)
+    {
+        value_local = check_lower_temporary(writer, class);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 1);
+        check_lower_scalar_conversion(writer, BUSTER_TYPE_INT, element);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, class, value_local);
+    }
+    const uint32_t old = postfix && stored_complex ? check_lower_object(writer, type_size(types, stored), type_alignment_log2(types, stored)) : BUSTER_CHECK_NONE;
+    if (old != BUSTER_CHECK_NONE)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, old);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+        check_lower_copy(writer, type_size(types, stored), false, false);
+    }
+    const CheckLowerComplexOperand value = { .local = value_local, .complex = value_complex };
     const CheckLowerComplexOperand current = { .local = check_lower_temporary(writer, current_class), .complex = stored_complex };
     check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
     if (stored_complex)
@@ -7341,7 +7365,8 @@ static void check_lower_complex_update_emit(CheckLowerWriter* writer, uint32_t n
     }
     if (stored_complex)
     {
-        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+        check_lower_emit(writer, old != BUSTER_CHECK_NONE ? BUSTER_TYPED_LOCAL_ADDRESS : BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64,
+                         old != BUSTER_CHECK_NONE ? old : destination);
     }
     else if (result != BUSTER_CHECK_NONE)
     {

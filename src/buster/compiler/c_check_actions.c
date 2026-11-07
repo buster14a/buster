@@ -2372,82 +2372,76 @@ static void check_action_update(TypeTable* table, const CheckAction* action, Che
     }
     else if (check_action_modifiable(table, &target, action, result))
     {
-        if (increment && kind == BUSTER_TYPE_KIND_COMPLEX)
+        // A complex operand's `++` or `--` adds or subtracts one of its real part (#147: C2y's, clang's in every mode).
+        CheckAction arithmetic = *action;
+        switch (action->op)
         {
-            check_action_diagnose(result, CHECK_DIAG_ARITHMETIC_REQUIRED, 0);
+            case CHECK_OP_PRE_INCREMENT:
+            case CHECK_OP_POST_INCREMENT:
+            case CHECK_OP_ADD_ASSIGN: arithmetic.op = CHECK_OP_ADD; break;
+            case CHECK_OP_PRE_DECREMENT:
+            case CHECK_OP_POST_DECREMENT:
+            case CHECK_OP_SUBTRACT_ASSIGN: arithmetic.op = CHECK_OP_SUBTRACT; break;
+            case CHECK_OP_MULTIPLY_ASSIGN: arithmetic.op = CHECK_OP_MULTIPLY; break;
+            case CHECK_OP_DIVIDE_ASSIGN: arithmetic.op = CHECK_OP_DIVIDE; break;
+            case CHECK_OP_REMAINDER_ASSIGN: arithmetic.op = CHECK_OP_REMAINDER; break;
+            case CHECK_OP_SHIFT_LEFT_ASSIGN: arithmetic.op = CHECK_OP_SHIFT_LEFT; break;
+            case CHECK_OP_SHIFT_RIGHT_ASSIGN: arithmetic.op = CHECK_OP_SHIFT_RIGHT; break;
+            case CHECK_OP_BIT_AND_ASSIGN: arithmetic.op = CHECK_OP_BIT_AND; break;
+            case CHECK_OP_BIT_OR_ASSIGN: arithmetic.op = CHECK_OP_BIT_OR; break;
+            case CHECK_OP_BIT_XOR_ASSIGN: arithmetic.op = CHECK_OP_BIT_XOR; break;
+            default: break;
+        }
+        if (increment)
+        {
+            // Increment/decrement operate in the lvalue's type. Clang does not apply usual unary floating
+            // conversions here; compound assignments below do use the current evaluation method.
+            arithmetic.context.fp_environment &= ~BUSTER_CHECK_FP_EVAL_MASK;
+            arithmetic.operands[1] = (CheckValue){
+                .type = BUSTER_TYPE_INT,
+                .flags = BUSTER_CHECK_ICE,
+                .constant_kind = CHECK_CONSTANT_INTEGER,
+                .integer = 1
+            };
+        }
+        // This is one read-modify-store action, with one graph edge to the lvalue. The synthetic integer one
+        // belongs to the update operation itself; no extra operand edge or duplicated lvalue evaluation exists.
+        if ((arithmetic.op == CHECK_OP_ADD || arithmetic.op == CHECK_OP_SUBTRACT) && kind == BUSTER_TYPE_KIND_POINTER)
+        {
+            check_action_pointer_arithmetic(table, &arithmetic, result);
+            if (check_action_kind(table, result->value.type) != BUSTER_TYPE_KIND_POINTER && result->diagnostic == CHECK_DIAG_NONE)
+            {
+                check_action_diagnose(result, CHECK_DIAG_INTEGER_REQUIRED, 1);
+            }
         }
         else
         {
-            CheckAction arithmetic = *action;
-            switch (action->op)
+            check_action_arithmetic(table, &arithmetic, result, 0, NULL, !increment);
+        }
+        if (increment)
+        {
+            result->conversions[1] = (CheckConversion){ 0 };
+        }
+        if (result->diagnostic == CHECK_DIAG_NONE)
+        {
+            const TypeId destination = type_conversion_operand(table, target.type);
+            check_action_conversion(table, &result->value, destination, BUSTER_CHECK_CONVERT_ASSIGNMENT, &result->store_conversion, action->node);
+            check_action_bit_field_store(table, &target, &result->value);
+            if (postfix)
             {
-                case CHECK_OP_PRE_INCREMENT:
-                case CHECK_OP_POST_INCREMENT:
-                case CHECK_OP_ADD_ASSIGN: arithmetic.op = CHECK_OP_ADD; break;
-                case CHECK_OP_PRE_DECREMENT:
-                case CHECK_OP_POST_DECREMENT:
-                case CHECK_OP_SUBTRACT_ASSIGN: arithmetic.op = CHECK_OP_SUBTRACT; break;
-                case CHECK_OP_MULTIPLY_ASSIGN: arithmetic.op = CHECK_OP_MULTIPLY; break;
-                case CHECK_OP_DIVIDE_ASSIGN: arithmetic.op = CHECK_OP_DIVIDE; break;
-                case CHECK_OP_REMAINDER_ASSIGN: arithmetic.op = CHECK_OP_REMAINDER; break;
-                case CHECK_OP_SHIFT_LEFT_ASSIGN: arithmetic.op = CHECK_OP_SHIFT_LEFT; break;
-                case CHECK_OP_SHIFT_RIGHT_ASSIGN: arithmetic.op = CHECK_OP_SHIFT_RIGHT; break;
-                case CHECK_OP_BIT_AND_ASSIGN: arithmetic.op = CHECK_OP_BIT_AND; break;
-                case CHECK_OP_BIT_OR_ASSIGN: arithmetic.op = CHECK_OP_BIT_OR; break;
-                case CHECK_OP_BIT_XOR_ASSIGN: arithmetic.op = CHECK_OP_BIT_XOR; break;
-                default: break;
+                CheckActionResult old = { 0 };
+                CheckValue before = check_action_operand(table, action, &old, 0);
+                check_action_inherit(&before, &result->value);
+                before.flags &= ~BUSTER_CHECK_BIT_FIELD;
+                before.bit_width = 0;
+                result->value = before;
             }
-            if (increment)
+            result->value.category = CHECK_RVALUE;
+            result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_REGISTER);
+            result->value.flags |= BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_MODIFICATION;
+            if (result->value.fault != CHECK_FAULT_NONE)
             {
-                // Increment/decrement operate in the lvalue's type. Clang does not apply usual unary floating
-                // conversions here; compound assignments below do use the current evaluation method.
-                arithmetic.context.fp_environment &= ~BUSTER_CHECK_FP_EVAL_MASK;
-                arithmetic.operands[1] = (CheckValue){
-                    .type = BUSTER_TYPE_INT,
-                    .flags = BUSTER_CHECK_ICE,
-                    .constant_kind = CHECK_CONSTANT_INTEGER,
-                    .integer = 1
-                };
-            }
-            // This is one read-modify-store action, with one graph edge to the lvalue. The synthetic integer one
-            // belongs to the update operation itself; no extra operand edge or duplicated lvalue evaluation exists.
-            if ((arithmetic.op == CHECK_OP_ADD || arithmetic.op == CHECK_OP_SUBTRACT) && kind == BUSTER_TYPE_KIND_POINTER)
-            {
-                check_action_pointer_arithmetic(table, &arithmetic, result);
-                if (check_action_kind(table, result->value.type) != BUSTER_TYPE_KIND_POINTER && result->diagnostic == CHECK_DIAG_NONE)
-                {
-                    check_action_diagnose(result, CHECK_DIAG_INTEGER_REQUIRED, 1);
-                }
-            }
-            else
-            {
-                check_action_arithmetic(table, &arithmetic, result, 0, NULL, !increment);
-            }
-            if (increment)
-            {
-                result->conversions[1] = (CheckConversion){ 0 };
-            }
-            if (result->diagnostic == CHECK_DIAG_NONE)
-            {
-                const TypeId destination = type_conversion_operand(table, target.type);
-                check_action_conversion(table, &result->value, destination, BUSTER_CHECK_CONVERT_ASSIGNMENT, &result->store_conversion, action->node);
-                check_action_bit_field_store(table, &target, &result->value);
-                if (postfix)
-                {
-                    CheckActionResult old = { 0 };
-                    CheckValue before = check_action_operand(table, action, &old, 0);
-                    check_action_inherit(&before, &result->value);
-                    before.flags &= ~BUSTER_CHECK_BIT_FIELD;
-                    before.bit_width = 0;
-                    result->value = before;
-                }
-                result->value.category = CHECK_RVALUE;
-                result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_REGISTER);
-                result->value.flags |= BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_MODIFICATION;
-                if (result->value.fault != CHECK_FAULT_NONE)
-                {
-                    result->value.constant_kind = CHECK_CONSTANT_NONE;
-                }
+                result->value.constant_kind = CHECK_CONSTANT_NONE;
             }
         }
     }

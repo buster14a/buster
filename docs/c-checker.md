@@ -7024,7 +7024,11 @@ arguments against the function. The checker now gives these as clang does.
 - **Increments and decrements.** As clang's `CheckIncrementDecrementOperand`,
   the operand's type is tested before its modifiability
   (`check_action_steppable`). A real type (a complete enumeration's), a pointer
-  or a complex type is stepped. Any other is "cannot increment value of type
+  or a complex type is stepped: a complex one's real part by one, as C2y's and
+  clang's are (`check_lower_complex_update_emit`, a postfix one's value a copy
+  of the object before it; a complex of aggregate parts, past 128 bits, stays
+  "increments of complex values" in lowering, as a `__float128`'s increment
+  is "increments of __float128 values"). Any other is "cannot increment value of type
   T" (or "decrement"), an array's and a const record's too; a vector's, a
   record's and a function's are among them. T is the operand's type with its
   qualifiers, an `_Atomic` one's value type, spelled with the typedef its
@@ -7044,8 +7048,6 @@ arguments against the function. The checker now gives these as clang does.
   than a pointer (`check_init_converted_nonconstant`); an absolute address
   (`(int *)5`) stays a constant.
 - **Differences left.**
-  - `++` and `--` of a complex type are refused ("arithmetic operands
-    required"), where clang takes them.
   - Arithmetic on a pointer to an incomplete type is "incomplete type is not
     permitted here", where clang's is "arithmetic on a pointer to an incomplete
     type" with a "forward declaration" note.
