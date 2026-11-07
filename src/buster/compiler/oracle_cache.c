@@ -419,6 +419,12 @@ static bool oracle_hash_tool(OracleHash* hash, const char* name, char* path, siz
 static const char* const oracle_environment_names[] = {
     "CCC_OVERRIDE_OPTIONS", "CLANG_NO_DEFAULT_CONFIG", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH",
     "OBJC_INCLUDE_PATH", "OBJCPLUS_INCLUDE_PATH", "COMPILER_PATH", "LIBRARY_PATH", "GCC_EXEC_PREFIX",
+    "GCC_EXTRA_DIAGNOSTIC_OUTPUT",
+    "GCC_COLORS",
+    "GCC_URLS",
+    "TERM_URLS",
+    "TERM",
+    "GCC_DIAGNOSTICS_LOG",
     "DEPENDENCIES_OUTPUT", "SUNPRO_DEPENDENCIES", "SOURCE_DATE_EPOCH", "SDKROOT", "TZ", "LANG", "LC_ALL",
     "LC_CTYPE", "LC_MESSAGES", "LD_LIBRARY_PATH", "LD_PRELOAD", "PATH",
 };
@@ -1143,6 +1149,8 @@ static bool oracle_run_key(OracleRun* run)
     result = length > 0 && (size_t)length < sizeof(run->working);
     char* const* environment = run->environment != 0 ? run->environment : environ;
     result = result && (!run->dependencies || oracle_epoch_valid(oracle_variable(environment, "SOURCE_DATE_EPOCH")));
+    // GCC can write an additional log whose bytes are not among the caller-declared outputs.
+    result = result && (!run->dependencies || oracle_variable(environment, "GCC_DIAGNOSTICS_LOG") == 0);
     oracle_roots_begin(&run->roots);
     uint64_t count = 0;
     while (result && run->arguments[count] != 0)

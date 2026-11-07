@@ -39,6 +39,12 @@ key is SHA-256 of:
   (`oracle_environment_names`) with their values, each with its roots made
   alike (below); its time limit; and the bytes of its standard input.
 
+The keyed diagnostic controls include GCC's extra fix-it output, colors and
+URL settings (including `TERM_URLS` and `TERM`). Unset and empty values remain
+distinct. A compiler run with `GCC_DIAGNOSTICS_LOG` set (even to an empty
+value) executes without cache admission, as its log may be outside the
+caller-declared replay artifacts.
+
 A compiler's run (`OracleRun.dependencies`) is traced: it runs under a seccomp
 filter that stops each call of its processes that looks at a path (`open`,
 `stat`, `access`, `readlink`, `execve` and their kin), lists a directory, or
