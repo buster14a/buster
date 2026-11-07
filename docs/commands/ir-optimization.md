@@ -17,6 +17,11 @@ requirements. [Command index](README.md).
   #175's hand-written `tests/ir/optimize/*.ir` before/after pairs in the text form
   through both parser paths, both twins, the canonical printer and the
   independent executor (`--print-text` prints them for review).
+  #1729's join chains (arms of distinct constants, of the parameter's sums and
+  of one constant, meeting at one phi) run through both twins against the
+  executor, and chains of 4,096 arms bound the incoming values SCCP's phi
+  transfers examine (`sccp_phi_incoming`) to four per arm on both paths, which
+  the worklist path exceeded before the change.
   #1450's SIMD fixtures exercise constant lane folding against the lane model
   and interpreter, wide phi/bitcast propagation, exact-bit splats, GVN's complete
   vector payload keys and LICM's integer-lane motion on both paths. A floating

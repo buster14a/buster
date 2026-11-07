@@ -84,6 +84,13 @@ struct IrOptimizeWork
     uint32_t head;
     uint32_t tail;
     uint32_t queued_count;
+    // SCCP's worklist visits a queued phi only once no other instruction is queued (#1729), so that the edges and
+    // values reaching a join in one wave share a visit of its phis. Allocated by the worklist, null where it couldn't
+    // be: phis then wait in the shared queue. An instruction is in one of the two queues at most (`queued`).
+    uint32_t* phis;
+    uint32_t phi_head;
+    uint32_t phi_tail;
+    uint32_t phi_count;
     IrOptimizeResult statistics;
 };
 
@@ -707,11 +714,55 @@ static uint32_t ir_optimize_dequeue(IrOptimizeWork* work)
     return instruction;
 }
 
+// SCCP's queueing: a phi waits in the phis' queue (IrOptimizeWork.phis), every other instruction in the shared one.
+static void ir_optimize_enqueue_sccp(IrOptimizeWork* work, uint32_t instruction)
+{
+    if (work->phis != NULL && work->function->op[instruction] == IR_PHI)
+    {
+        if (work->queued[instruction] == 0)
+        {
+            work->queued[instruction] = 1;
+            work->phis[work->phi_tail] = instruction;
+            work->phi_tail += 1;
+            if (work->phi_tail == work->function->instruction_count)
+            {
+                work->phi_tail = 0;
+            }
+            work->phi_count += 1;
+        }
+    }
+    else
+    {
+        ir_optimize_enqueue(work, instruction);
+    }
+}
+
+static uint32_t ir_optimize_dequeue_sccp(IrOptimizeWork* work)
+{
+    uint32_t instruction;
+    if (work->queued_count != 0)
+    {
+        instruction = ir_optimize_dequeue(work);
+    }
+    else
+    {
+        instruction = work->phis[work->phi_head];
+        work->phi_head += 1;
+        if (work->phi_head == work->function->instruction_count)
+        {
+            work->phi_head = 0;
+        }
+        work->phi_count -= 1;
+        work->queued[instruction] = 0;
+    }
+    return instruction;
+}
+
 static void ir_optimize_enqueue_users(IrOptimizeWork* work, uint32_t value)
 {
     for (uint32_t use = work->uses.offsets[value]; use < work->uses.offsets[(uint64_t)value + 1]; use += 1)
     {
-        ir_optimize_enqueue(work, work->uses.uses[use].instruction);
+        ir_optimize_enqueue_sccp(work, work->uses.uses[use].instruction);
     }
 }
 
@@ -914,7 +965,7 @@ static bool ir_optimize_mark_edge(IrOptimizeWork* work, uint32_t edge, bool queu
         {
             for (uint32_t i = work->function->block_offsets[block]; i < work->function->block_offsets[(uint64_t)block + 1]; i += 1)
             {
-                ir_optimize_enqueue(work, i);
+                ir_optimize_enqueue_sccp(work, i);
             }
         }
     }
@@ -1020,19 +1071,25 @@ static bool ir_optimize_settle_unknown(IrOptimizeWork* work, bool queue)
 
 static __attribute__((aligned(64))) void ir_optimize_sccp_worklist(IrOptimizeWork* work)
 {
+    if (work->phis == NULL)
+    {
+        bool ok = true;
+        uint32_t* const phis = ir_allocate(work->scratch, work->function->instruction_count, sizeof(uint32_t), &ok);
+        work->phis = ok ? phis : NULL;
+    }
     for (uint32_t i = 0; i < work->function->instruction_count; i += 1)
     {
         if (work->blocks[work->cfg.instruction_blocks[i]] != 0)
         {
-            ir_optimize_enqueue(work, i);
+            ir_optimize_enqueue_sccp(work, i);
         }
     }
     bool pending = true;
     while (pending)
     {
-        while (work->queued_count != 0)
+        while (work->queued_count != 0 || work->phi_count != 0)
         {
-            ir_optimize_visit(work, ir_optimize_dequeue(work), true);
+            ir_optimize_visit(work, ir_optimize_dequeue_sccp(work), true);
         }
         pending = ir_optimize_settle_unknown(work, true);
     }

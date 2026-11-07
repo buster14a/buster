@@ -810,7 +810,7 @@ static void ir_optimize_test_joins(IrOptimizeTest* test, Arena* input, Arena* ve
             }
             arena_pop_to(input, 0);
         }
-        const uint32_t arms = kind == 2 ? 257 : 4096;
+        const uint32_t arms = 4096;
         IrFunction function = { 0 };
         const bool created = ir_optimize_test_chain(input, &function, arms, kind);
         ir_optimize_test_expect(test, created, "long join chain fixture allocation");
@@ -822,7 +822,7 @@ static void ir_optimize_test_joins(IrOptimizeTest* test, Arena* input, Arena* ve
             IrOptimizeResult result = { 0 };
             const IrCheck check = ir_optimize(&function, vector, scratch, options, &result);
             ir_optimize_test_expect(test, check.error == IR_OK, "long join chain optimizes");
-            if (check.error == IR_OK && kind != 2)
+            if (check.error == IR_OK)
             {
                 ir_optimize_test_expect(test, result.sccp_phi_incoming <= 4 * ((uint64_t)arms + 1), "a join's phi examines its incoming values a bounded number of times");
             }

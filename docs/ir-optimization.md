@@ -42,7 +42,8 @@ independent rebuilding control.
 SCCP tracks a state and two-word constant per instruction and an executable
 byte per deduplicated CFG edge. It sweeps executable blocks in reverse
 postorder, with 16-instruction transfer batches; the scalar solver queues
-changed SSA users and instructions affected by newly executable edges. Integer
+changed SSA users and instructions affected by newly executable edges, phis in a
+queue of their own (below). Integer
 operations support all IR integer widths, including scalar i128 handling.
 Copies, phis, selects, integer/pointer conversions, bitcasts and floating sign
 negation preserve exact constant bits. Scalar floating arithmetic, floating
@@ -50,6 +51,19 @@ comparisons and numeric floating conversions remain overdefined because their
 results can depend on the runtime floating environment; SIMD floating lanes fold
 where they can't (below). Unknown values remaining in an executable region are
 promoted to overdefined and propagated before rewriting.
+
+A join of n arms (a long `?:` chain's, nested ifs') is queued again by each
+incoming edge and value, and each visit of its phi meets the incoming values
+on executable edges: n visits of n each were 55–66% of a `--tier1` compile of
+such a chain at 16,000 arms (#1729). The lattice only falls, so a visit of an
+overdefined value skips its transfer, and a phi's meet stops at its first
+overdefined incoming value. The worklist also holds queued phis apart and
+visits one only once no other instruction is queued, so that the edges and
+values reaching a join in one wave share a visit: a join whose arms all give
+one constant, which stays constant, is visited once rather than once per arm.
+`IrOptimizeResult.sccp_phi_incoming` counts the incoming values the phi
+transfers examined. The order of visits doesn't change the fixed point, which
+the vector sweeps' exact agreement with the worklist checks.
 
 ### Constant SIMD lanes (#1450)
 
