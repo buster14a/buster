@@ -1494,6 +1494,58 @@ belong to the opt-in mode, whose plan must first stop costing more than it saves
 **Past the done-when,** #1671 tracks the stage's remaining time: the two walks and the declaration steps, 26 ms of the
 47.3 ms, with flat profiles.
 
+## The walk in source order's plain and ignored visits (#1671)
+
+**What bounds the walks.** One `perf record` of cycles, instructions, branch misses and fills from memory, by symbol,
+on the 9700X ([#1671](https://github.com/buster14a/buster/issues/1671#issuecomment-6707704992)):
+- **The walk in source order** (`check_input_resolve_range`) runs at about 2.4 IPC, with 1.5% of the compile's
+  branch misses.
+- **The coded walk** runs at about 3.0 IPC.
+- **The declarator step** runs at about 2.9 IPC.
+
+So the walks are bound by the instructions they retire, not by their branches or loads. The walk in source order
+retired about 290 instructions a visit.
+
+**Its visits, by class.** A probe of `-c sqlite3.c` counted them:
+
+| visit | count | now |
+| --- | ---: | --- |
+| a plain name: an identifier operand, marked for its syntax alone, of no syntax bit | 124,581 of 254,391 | the label's test and the name's step alone |
+| a token an earlier step ignored, marked for its syntax alone, not a return's or a for's | 40,290 | passed over |
+| another token marked for its syntax alone | 55,876 | the general visit |
+| a visit with another mark's reason | 33,643 | the general visit |
+
+**Why the two paths are exact.**
+- **A plain name.** Each of the walk's tests is false at it except the label's and the name's own:
+  - the tests of the other marks' reasons, by its mark;
+  - the tests of roles, kinds and syntax bits, by its own;
+  - C89's implicit declaration, by the standard, so a C89 unit's names take the general visit.
+- **An ignored token.** Every step tests that its token isn't ignored, except a return's and a for's. The label's test
+  would only set again the mark, which holds a bool.
+- **Shared code.** Both paths call the two steps as functions of their own, `check_input_resolve_ignored` and
+  `check_input_resolve_name`.
+- **The twin.** The scalar path visits every token and makes every test.
+
+**What the visits left do.** Every visit the general path still takes acts:
+- declarations' starts, blocks, conditions, casts and returns;
+- scopes' ends and activations.
+
+**Measured on the 9700X.** Main `cb021b04` against #1676's head, in 8 interleaved rounds, then `measure-compile` each
+way. Every run held the lock on its own. The objects are the same bytes.
+[The record](https://github.com/buster14a/buster-performance/tree/8bac1f50af1a9e5885304a223e6e7942ac3ef617/docs/measurements/check-input-1671-walk-visits-2026-11-07)
+keeps the receipts, each build's profile and the probe.
+
+| measure | main | head | difference |
+| --- | ---: | ---: | ---: |
+| wall time | 122.510 ms | 121.830 ms | −0.56% |
+| user cycles | 595.868 M | 592.436 M | −0.58% |
+| user instructions | 1,320.752 M | 1,302.454 M | −1.39% |
+| `check-input` | 47.115 ms | 46.908 ms | −0.21 ms |
+
+**Instructions against cycles.** The head retires 18.3 M fewer instructions per compile, about 110 a visit the two
+paths take. `check_input_resolve_range` went from 5.58% to 4.60% of the cycles. The compile's cycles fell by about a
+fifth as much as its instructions: the tests a visit no longer makes were cheap and well predicted.
+
 ## The passes after checking (#592)
 
 #641 removes more token-domain work from the same handoffs. Initializer plans keep only their ascending
