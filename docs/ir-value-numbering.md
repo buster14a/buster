@@ -314,11 +314,13 @@ objects are byte-identical, as the unchanged partition requires.
 
 A profile of the `gvn` variant's process gives the acyclic numbering
 (`ir_gvn_number`, `ir_gvn_visit`, `ir_gvn_payload`) about 6% of the samples.
-The IR verifier and its derived arrays take about 54%. `ir_optimize_prepare`
-checks the input's rows three times (in `ir_verify`, in `ir_build_cfg`, and
-in `ir_verify` again inside `ir_build_uses`), which every optimizer pass pays.
-A free numbering would therefore save at most that 6%, which is why it stays a
-scalar chain. [The measurement record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/gvn-866-acyclic-2026-11-06)
+The IR verifier and its derived arrays take about 54%, because at that base
+`ir_optimize_prepare` checked the input's rows three times (in `ir_verify`, in
+`ir_build_cfg`, and in `ir_verify` again inside `ir_build_uses`). #1570 (#786)
+has since made preparation verify once and build the graph and use lists
+without checking the function again, so these shares are of `ec5f0f6b`'s
+preparation, not the current one. A free numbering would have saved at most
+that 6%, which is why it stays a scalar chain. [The measurement record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/gvn-866-acyclic-2026-11-06)
 has the scripts, the raw logs and a disclosed invalid first attempt at the
 Tier 1 step (driver options it refused).
 
