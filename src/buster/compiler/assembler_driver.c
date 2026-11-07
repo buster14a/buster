@@ -14,24 +14,40 @@ static Object asm_object(AsmResult* result, String8 name, Arena* arena)
     return object;
 }
 
-// Reads to the end of the file rather than st_size bytes, which is 0 for a pipe, /dev/stdin or a /proc file. The
-// buffer is a reservation: only the pages the input fills are touched, and the arena keeps only the input afterwards.
+// Size ordinary input from the file, but read to EOF: a pipe or /proc file can report zero, and a file can grow.
+// This is the arena's last allocation throughout the read, so growth appends without moving or copying the bytes.
+// Keep one terminator byte; a full buffer probes EOF before growing, including at the representation/arena limit.
 static bool asm_read_descriptor(int fd, Arena* arena, String8* source)
 {
     const uint64_t saved = arena->length;
     struct stat stats;
     const bool sized = fstat(fd, &stats) == 0 && (!S_ISREG(stats.st_mode) || (uint64_t)stats.st_size <= BUSTER_ASM_MAX_SOURCE);
-    *source = (String8){.pointer = sized ? arena_push(arena, BUSTER_ASM_MAX_SOURCE + 2, 1) : 0};
+    const uint64_t available = saved < arena->capacity ? arena->capacity - saved - 1 : 0;
+    const uint64_t limit = available < BUSTER_ASM_MAX_SOURCE ? available : BUSTER_ASM_MAX_SOURCE;
+    uint64_t capacity = sized && S_ISREG(stats.st_mode) && stats.st_size > 0 ? (uint64_t)stats.st_size : 1u << 16;
+    capacity = capacity < limit ? capacity : limit;
+    *source = (String8){.pointer = sized ? arena_push(arena, capacity + 1, 1) : 0};
     bool result = source->pointer != 0;
     bool done = false;
     while (result && !done)
     {
-        // One byte past the limit is room to see that the input exceeds it.
-        const ssize_t count = read(fd, source->pointer + source->length, BUSTER_ASM_MAX_SOURCE + 1 - source->length);
+        uint8_t extra;
+        const bool full = source->length == capacity;
+        const ssize_t count = read(fd, full ? &extra : (uint8_t*)source->pointer + source->length, full ? 1 : capacity - source->length);
         if (count > 0)
         {
-            source->length += count;
-            result = source->length <= BUSTER_ASM_MAX_SOURCE;
+            if (full)
+            {
+                const uint64_t doubled = capacity != 0 ? capacity * 2 : 1;
+                const uint64_t grown = doubled < limit ? doubled : limit;
+                result = grown > capacity && arena_push(arena, grown - capacity, 1) != NULL;
+                if (result)
+                {
+                    source->pointer[source->length] = extra;
+                    capacity = grown;
+                }
+            }
+            source->length += result ? (uint64_t)count : 0;
         }
         else
         {
@@ -62,8 +78,46 @@ static bool asm_read_file(const char* path, Arena* arena, String8* source)
     return result;
 }
 
-// Reuse both preprocessor kernels and printers. The bounded in-memory stream includes their line markers and
-// avoids a subprocess or a temporary source file. The returned slice belongs to the assembler's arena.
+typedef struct AsmPrintBuffer AsmPrintBuffer;
+struct AsmPrintBuffer
+{
+    Arena* arena;
+    String8* source;
+    bool failed;
+};
+
+// libc's output boundary appends the printer's chunks directly to the destination arena, including its terminator.
+// The preprocessor owns separate arenas; nothing else pushes this destination until the stream has been closed.
+static ssize_t asm_print_write(void* cookie, const char* bytes, size_t count)
+{
+    AsmPrintBuffer* buffer = cookie;
+    String8* source = buffer->source;
+    const uint64_t length = source->length;
+    bool result = !buffer->failed && length <= BUSTER_ASM_MAX_SOURCE && count <= BUSTER_ASM_MAX_SOURCE - length;
+    if (result)
+    {
+        result = arena_push(buffer->arena, count, 1) != NULL;
+        if (!result)
+        {
+            errno = ENOMEM;
+        }
+    }
+    else
+    {
+        errno = EFBIG;
+    }
+    if (result)
+    {
+        memcpy(source->pointer + length, bytes, count);
+        source->length = length + count;
+        source->pointer[source->length] = 0;
+    }
+    buffer->failed |= !result;
+    return result ? (ssize_t)count : 0;
+}
+
+// Reuse both preprocessor kernels and printers. The growing in-memory stream includes their line markers and
+// avoids a subprocess, temporary source file or second source copy. The returned slice belongs to the arena.
 static bool asm_preprocess_unit(const char* path, PPOptions options, Arena* arena, String8* source,
                                 InternTable* table, Preprocessor* pp, DependencyOutput* dependency, Arena* dependency_arena,
                                 const char* output, FILE* errors, bool* fatal)
@@ -71,25 +125,28 @@ static bool asm_preprocess_unit(const char* path, PPOptions options, Arena* aren
     options.assembly = true;
     options.expansion_starts = true;
     const uint64_t saved = arena->length;
-    source->pointer = arena_push(arena, BUSTER_ASM_MAX_SOURCE + 1, 1);
+    *source = (String8){.pointer = arena_push(arena, 1, 1)};
     bool result = source->pointer != 0;
     if (result)
     {
+        source->pointer[0] = 0;
         const bool initialized = pp_initialize(pp, &options, table);
         result = initialized && pp_run_input(pp, path);
         if (fatal != NULL)
         {
             *fatal = !initialized || pp->fatal;
         }
-        FILE* stream = result ? fmemopen(source->pointer, BUSTER_ASM_MAX_SOURCE + 1, "w") : 0;
+        AsmPrintBuffer buffer = {
+            .arena = arena,
+            .source = source,
+        };
+        FILE* stream = result ? fopencookie(&buffer, "w", (cookie_io_functions_t){.write = asm_print_write}) : NULL;
         result = stream != 0 && pp_print(pp, stream, true);
         if (stream != 0)
         {
             result = fflush(stream) == 0 && result;
-            const long length = ftell(stream);
-            result = length >= 0 && (uint64_t)length <= BUSTER_ASM_MAX_SOURCE && result;
-            source->length = result ? (uint64_t)length : 0;
             result = fclose(stream) == 0 && result;
+            result = !buffer.failed && result;
         }
         if (result && dependency != NULL && options.dependencies.enabled)
         {
@@ -212,7 +269,7 @@ static void asm_diagnostic(const char* path, String8 source, AsmResult result, b
 
 static int run_assembler_command(int count, char** arguments)
 {
-    Arena arena = arena_reserve(1ull << 32);
+    Arena arena = arena_reserve(1ull << 36);
     char** preprocess_arguments = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, (uint64_t)count + 1);
     uint32_t preprocess_count = 0;
     PPOptions preprocessing = {0};
@@ -309,7 +366,7 @@ static int run_assembler_command(int count, char** arguments)
         if (!valid || index == 0 || !x86_encoder_initialize() || !(x86_semantics_initialized || x86_semantics_initialize()) ||
             !(preprocessed ? asm_preprocess_file(input, preprocessing, &arena, &source) : asm_read_file(input, &arena, &source)))
         {
-            fprintf(stderr, "%s: unable to initialize or read assembly input (maximum 64 MiB)\n", input);
+            fprintf(stderr, "%s: unable to initialize or read assembly input (I/O, memory, or 32-bit source-offset implementation limit)\n", input);
         }
         else
         {
