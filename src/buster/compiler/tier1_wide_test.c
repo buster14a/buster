@@ -25,7 +25,8 @@
 // long double phis, an edge's copy past the x87 stack's depth, which the CFG consumer refuses as unsupported; and
 // functions whose extra slices overlap, a call's arguments sharing a phi's words, which both split paths keep apart;
 // and I128 phis that share one predecessor list, whose halves' lists take the output's extra table past a u32's count,
-// which both paths refuse as a limit before they allocate.
+// which both paths refuse as a limit before they allocate. Then the vectors wider than the target's registers (#1624,
+// ir_vector_split.c), tier1_wide_vectors_test.c's.
 
 #include <inttypes.h>
 #include <signal.h>
@@ -69,6 +70,11 @@ struct Tier1WideTest
     uint64_t halves;
     uint32_t programs;
     uint32_t refused;
+    // The wide vectors' (#1624, tier1_wide_vectors_test.c): their native runs, apart from the I128 programs', the
+    // fixtures through every stage at a piece width, and the refusals.
+    uint64_t vector_native_runs;
+    uint32_t vector_programs;
+    uint32_t vector_refused;
 };
 
 typedef struct Tier1WideFixture Tier1WideFixture;
@@ -597,7 +603,9 @@ static bool tier1_wide_test_interpret(Tier1WideTest* test, const IrFunction* fun
 static bool tier1_wide_test_agrees(Tier1WideTest* test, const char* name, const char* stage, const IrFunction* function, const uint8_t* inputs, const uint64_t* counts, const uint8_t* expected)
 {
     bool ok = true;
-    uint8_t actual[BUSTER_TIER1_WIDE_TEST_BUFFER];
+    // Aligned to 64, as the native runs' mapping is: the interpreter checks the accesses' alignments (#1624's 64-byte
+    // vectors').
+    uint8_t actual[BUSTER_TIER1_WIDE_TEST_BUFFER] __attribute__((aligned(64)));
     for (uint32_t input = 0; ok && input < BUSTER_TIER1_WIDE_TEST_INPUTS; input += 1)
     {
         ok = tier1_wide_test_interpret(test, function, inputs + (uint64_t)input * BUSTER_TIER1_WIDE_TEST_BUFFER, counts[input], actual);
@@ -1731,6 +1739,8 @@ static void tier1_wide_test_boundaries(Tier1WideTest* test)
     }
 }
 
+#include "tier1_wide_vectors_test.c"
+
 static __attribute__((unused)) int run_tier1_wide_tests(int argc, char** argv)
 {
     uint64_t seed = 141;
@@ -1816,6 +1826,7 @@ static __attribute__((unused)) int run_tier1_wide_tests(int argc, char** argv)
             if (file == 0)
             {
                 tier1_wide_test_boundaries(&test);
+                tier1_wide_vectors(&test);
                 tier1_wide_test_shared_slices(&test);
                 tier1_wide_test_limit(&test);
                 typed = tier1_wide_test_typed(&test, BUSTER_TIER1_WIDE_TEST_TYPED);

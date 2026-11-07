@@ -1949,7 +1949,7 @@ static Tier1EmitError tier1_emit_cfg_labels(const Tier1SelectPlan* plan, Tier1Em
 static Tier1EmitError tier1_emit_cfg_aggregate_result(const IrFunction* function, const Tier1EmitResult* emitted, uint8_t source, Tier1EmitBuffer* buffer)
 {
     const AbiReturn result = function->result_abi;
-    Tier1SelectPart parts[2];
+    Tier1SelectPart parts[BUSTER_TIER1_SELECT_RESULT_PARTS];
     const uint32_t part_count = tier1_select_result_parts(result, function->result_size, parts);
     // In the x87's registers (#141): each part's 10 bytes loaded from its 16, the last first, so that st0 holds the first.
     const uint32_t x87_parts = tier1_select_x87_parts(result, function->result_size);
@@ -1963,18 +1963,18 @@ static Tier1EmitError tier1_emit_cfg_aggregate_result(const IrFunction* function
         const X86Instruction load = { .form = X86_FORM_FLD_M80, .rm = source, .mode = BUSTER_X86_MEMORY_BASE, .displacement = (int32_t)(16 * k) };
         error = tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
     }
-    // Each part staged from its slot on, a whole vector register's (#141) in its bytes' slots (tier1_emit_staging_part).
-    const uint32_t second_slot = part_count != 0 ? tier1_select_part_slots(parts[0].bytes) : 0;
+    // Each part staged from its slot on, after the parts before it (tier1_select_result_slot), a whole vector register's
+    // (#141) in its bytes' slots (tier1_emit_staging_part): a split vector's four xmm parts (#1624) in eight slots.
     for (uint32_t k = 0; error == TIER1_EMIT_OK && k < part_count; k += 1)
     {
-        const int32_t staged = tier1_emit_staging_part(k == 0 ? 0 : second_slot, parts[k].bytes);
+        const int32_t staged = tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes);
         error = tier1_emit_copy_bytes(buffer, BUSTER_TIER1_SELECT_SCRATCH, X86_REGISTER_RSP, staged, source, parts[k].offset, parts[k].bytes) ? error : TIER1_EMIT_MEMORY;
     }
     for (uint32_t k = 0; error == TIER1_EMIT_OK && k < part_count; k += 1)
     {
         const bool vector_part = (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
         const X86Instruction load = {
-            .displacement = tier1_emit_staging_part(k == 0 ? 0 : second_slot, parts[k].bytes),
+            .displacement = tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes),
             .reg = (uint8_t)(parts[k].reg & 0x1f),
             .rm = X86_REGISTER_RSP,
             .mode = BUSTER_X86_MEMORY_BASE,

@@ -14,6 +14,7 @@
 
 #include "ir_optimize_verified.c"
 #include "ir_wide.c"
+#include "ir_vector_split.c"
 #include "ir_truth.c"
 #include "c_check_tier1_inline.c"
 
@@ -280,8 +281,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     IrFunction lowered = { 0 };
     if (stage == CHECK_TIER1_COMPILED)
     {
-        const IrCheck check = scalar ? ir_lower_typed_target_scalar(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered) :
-                                       ir_lower_typed_target(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered);
+        // A vector wider than the target moves whole is taken, and split below (#1624).
+        const IrCheck check = ir_lower_typed_target_pieces(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered, scalar);
         outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
         stage = outcome.stage;
@@ -341,6 +342,18 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
+    }
+    // The vectors wider than the target moves whole, as its widest vectors' pieces (#1624, ir_vector_split.c), in the same
+    // step's arena, after the halves: a function without any is the halves' (or the promoted one) itself, borrowed.
+    if (stage == CHECK_TIER1_COMPILED)
+    {
+        IrVectorSplitResult pieces = { 0 };
+        const uint32_t piece = ir_typed_vector_piece(target->features);
+        const IrCheck check = scalar ? ir_vector_split_scalar(&wide.function, piece, &lane->steps[6], scratch, &pieces) : ir_vector_split(&wide.function, piece, &lane->steps[6], scratch, &pieces);
+        outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+        outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
+        stage = outcome.stage;
+        wide.function = stage == CHECK_TIER1_COMPILED ? pieces.function : wide.function;
     }
     if (stage == CHECK_TIER1_COMPILED)
     {
