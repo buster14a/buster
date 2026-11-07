@@ -141,6 +141,9 @@ struct CheckInputBatch
     uint8_t forms[BUSTER_CHECK_EXPRESSION_BATCH];
     // The contexts the actions add to a node after it is made: a static list's element's BUSTER_CHECK_CONTEXT_VALUE.
     uint8_t contexts[BUSTER_CHECK_EXPRESSION_BATCH];
+    // check_graph_classes' table, which the flush's vector path records its nodes by (check_input_batch_record), made once
+    // a walk.
+    _Alignas(64) uint8_t classes[BUSTER_CHECK_CLASS_OPERATORS];
 };
 
 _Static_assert(sizeof(CheckOp) == sizeof(uint32_t) && sizeof(TypeId) == sizeof(uint32_t), "the batch copies operators and types as 32-bit words");
@@ -221,11 +224,109 @@ static inline __attribute__((always_inline)) void check_input_batch_set_leaf(Che
 
 static inline __m512i check_input_gather_bytes(__mmask16 lanes, __m512i indices, const uint8_t* column);
 
+_Static_assert(sizeof(CheckGraphLeaf) == 32 && offsetof(CheckGraphLeaf, type) == 0 && offsetof(CheckGraphLeaf, overload_head) == 12,
+               "a leaf's record is eight dwords, its type the first and its overload head the fourth");
+
+// The builtin arithmetic types among 16 types: check_graph_builtin's test of each.
+static inline __mmask16 check_input_batch_builtin(__mmask16 lanes, __m512i types)
+{
+    const __m512i code = _mm512_sub_epi32(_mm512_srli_epi32(types, BUSTER_TYPE_INDEX_SHIFT), _mm512_set1_epi32(BUSTER_TYPE_CODE_BOOL));
+    return _mm512_mask_cmple_epu32_mask(lanes, code, _mm512_set1_epi32(BUSTER_TYPE_CODE_LONG_DOUBLE - BUSTER_TYPE_CODE_BOOL));
+}
+
+// The graph's nodes from `node` in `lanes`, the batch's, recorded as check_graph_record_nodes records them one at a time
+// (#1671): each one's purity (check_graph_pure) into recorded_pure and the validation's counters, from the columns the flush
+// has just written, every node before them recorded. As check_graph_validate_block computes purity: an operator's class
+// from check_graph_classes' table (`classes`, in two vectors), its requested type builtin or void, a leaf's type and
+// overload head gathered from its record, and its operands' purity, gathered from recorded_pure for those before the
+// lanes, and taken in node order from the lanes' own for those among them. The graph holds its leaves as records. The
+// scalar twin is check_graph_record_nodes, which the flush's scalar path and the walk's visits take.
+// Always inlined (#1671); hot caller: check_input_expression_flush's vector path, once per 16 nodes.
+static inline __attribute__((always_inline)) void check_input_batch_record(CheckGraph* graph, uint32_t node, __mmask16 lanes, __m512i ops, const __m512i operands[3],
+                                                                           __m512i requested, __m512i counts, __m512i slots, __m512i classes_low,
+                                                                           __m512i classes_high)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i none = _mm512_set1_epi32((int32_t)BUSTER_CHECK_NONE);
+    const __m512i classes = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutex2var_epi8(classes_low, _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(ops)), classes_high)));
+    // check_graph_pure's three cases in its order: a leaf, then sizeof or _Alignof, then an operator a region may reorder.
+    const __mmask16 leaves = _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_VALUE));
+    const __mmask16 query = _mm512_mask_test_epi32_mask(lanes & (__mmask16)~leaves, classes, _mm512_set1_epi32(BUSTER_CHECK_CLASS_QUERY));
+    const __mmask16 reorderable = _mm512_mask_test_epi32_mask(lanes & (__mmask16)~(leaves | query), classes, _mm512_set1_epi32(BUSTER_CHECK_CLASS_REORDERABLE));
+    const __mmask16 typed = _mm512_test_epi32_mask(classes, _mm512_set1_epi32(BUSTER_CHECK_CLASS_TYPED));
+    const __mmask16 type = check_input_batch_builtin(lanes, requested) | _mm512_cmpeq_epi32_mask(requested, _mm512_set1_epi32((int32_t)BUSTER_TYPE_VOID));
+    const __m512i words = _mm512_slli_epi32(slots, 3);
+    const __m512i leaf_types = _mm512_mask_i32gather_epi32(zero, leaves, words, graph->leaf_records, 4);
+    const __m512i heads = _mm512_mask_i32gather_epi32(zero, leaves, _mm512_add_epi32(words, _mm512_set1_epi32(3)), graph->leaf_records, 4);
+    const __mmask16 leaf_pure = check_input_batch_builtin(leaves, leaf_types) & _mm512_testn_epi32_mask(heads, heads);
+    uint32_t pure = (uint32_t)(leaf_pure | query | (reorderable & ((__mmask16)~typed | type)));
+    // The operands each case reads: sizeof's first, a reordered operator's three. An absent one is pure.
+    const __mmask16 used[3] =
+    {
+        query | reorderable,
+        reorderable,
+        reorderable,
+    };
+    const __m512i first = _mm512_set1_epi32((int32_t)node);
+    __mmask16 inside[3];
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        const __mmask16 present = _mm512_mask_cmpneq_epi32_mask(used[i], operands[i], none);
+        const __mmask16 before = _mm512_mask_cmplt_epu32_mask(present, operands[i], first);
+        const __m512i purity = check_input_gather_bytes(before, operands[i], graph->recorded_pure);
+        pure &= (uint32_t)((__mmask16)~before | _mm512_test_epi32_mask(purity, purity));
+        inside[i] = present & (__mmask16)~before;
+    }
+    // An operand among the lanes is an earlier lane, whose purity is final when its user's lane is taken in order.
+    const uint32_t chained = (uint32_t)(inside[0] | inside[1] | inside[2]);
+    if (chained != 0)
+    {
+        _Alignas(64) uint32_t edges[3][16];
+        for (uint32_t i = 0; i < 3; i += 1)
+        {
+            _mm512_store_si512(edges[i], _mm512_sub_epi32(operands[i], first));
+        }
+        for (uint32_t remaining = chained; remaining != 0; remaining &= remaining - 1)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctz(remaining);
+            for (uint32_t i = 0; i < 3; i += 1)
+            {
+                const uint32_t bit = ((uint32_t)inside[i] >> lane) & 1u;
+                pure &= ~(bit << lane) | (((pure >> (edges[i][lane] & 15u)) & 1u) << lane);
+            }
+        }
+    }
+    _mm_mask_storeu_epi8(graph->recorded_pure + node, lanes, _mm_maskz_mov_epi8((__mmask16)pure, _mm_set1_epi8(1)));
+    // The counters: varargs, and every other node's arguments; the effects and builtins by operator.
+    CheckGraphValidation* state = &graph->recorded;
+    const __mmask16 varargs = _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_VARARGS));
+    const __m512i arguments = _mm512_maskz_mov_epi32(lanes & (__mmask16)~varargs, counts);
+    const uint32_t widest = _mm512_reduce_max_epu32(arguments);
+    state->varargs += (uint32_t)__builtin_popcount(varargs);
+    state->maximum_arguments = widest > state->maximum_arguments ? widest : state->maximum_arguments;
+    state->arguments += (uint32_t)_mm512_reduce_add_epi32(arguments);
+    state->maximum_effects += (uint32_t)__builtin_popcount(_mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_OVERFLOW)));
+    const CheckOp counted[6] =
+    {
+        CHECK_OP_BUILTIN_MISC,
+        CHECK_OP_BUILTIN_FLOAT,
+        CHECK_OP_BUILTIN_QUERY,
+        CHECK_OP_BUILTIN_ATOMIC,
+        CHECK_OP_BUILTIN_VECTOR,
+        CHECK_OP_BUILTIN_BIT_CAST,
+    };
+    for (uint32_t i = 0; i < 6; i += 1)
+    {
+        state->builtins[i] += (uint32_t)__builtin_popcount(_mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(counted[i])));
+    }
+}
+
 // The batch's nodes written to the graph's columns, then recorded with the nodes a visit made before them
 // (check_graph_record_nodes, in node order), and the batch emptied after them. The vector path writes 16 nodes at a time:
 // the columns the batch holds as they are, and the types, contexts, expression ends, warnings' suppression and
-// floating-point environments from the nodes' tokens' columns, gathered (a byte column through check_input_gather_bytes);
-// the scalar path, its twin, a node at a time, as check_input_add_node and the actions write them.
+// floating-point environments from the nodes' tokens' columns, gathered (a byte column through check_input_gather_bytes),
+// and records them as it writes them (check_input_batch_record, #1671), after the nodes a visit made before them; the
+// scalar path, its twin, a node at a time, as check_input_add_node and the actions write them, and records them after.
 static void check_input_expression_flush(CheckInputReader* reader, CheckInputBatch* batch, bool scalar)
 {
     CheckInput* input = reader->output;
@@ -235,31 +336,56 @@ static void check_input_expression_flush(CheckInputReader* reader, CheckInputBat
     {
         const Parser* parser = reader->parser;
         const uint32_t base = batch->base;
-        // Gathers index by signed 32-bit offsets.
+        // Gathers index by signed 32-bit offsets: the tokens', and the leaves' records' dwords.
         const bool indexed = parser->tokens.count <= (uint32_t)INT32_MAX - 4;
+        const bool vector = !BUSTER_SCALAR_PATH(scalar) && indexed;
+        // The vector path records its nodes as it writes them (check_input_batch_record), where the graph holds its leaves
+        // as records, after the nodes a visit made before the batch.
+        const bool recording = vector && graph->recorded_pure != NULL && graph->leaf_records != NULL && graph->dense_leaves == NULL &&
+                               batch->leaf_base + batch->leaves <= (uint32_t)INT32_MAX / 8 - 4;
+        if (recording)
+        {
+            check_graph_record_nodes(graph);
+        }
+        const __m512i classes_low = _mm512_load_si512(batch->classes);
+        const __m512i classes_high = _mm512_load_si512(batch->classes + 64);
         const uint8_t* suppressed = reader->warning_suppressed;
         uint32_t k = 0;
-        for (; !BUSTER_SCALAR_PATH(scalar) && indexed && k < count; k += 16)
+        for (; vector && k < count; k += 16)
         {
             const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, count - k < 16 ? count - k : 16);
             const uint32_t node = base + k;
             const __m512i zero = _mm512_setzero_si512();
             const __m512i token = _mm512_maskz_loadu_epi32(lanes, batch->tokens + k);
-            _mm512_mask_storeu_epi32(graph->ops + node, lanes, _mm512_maskz_loadu_epi32(lanes, batch->ops + k));
+            const __m512i ops = _mm512_maskz_loadu_epi32(lanes, batch->ops + k);
+            const __m512i operands[3] =
+            {
+                _mm512_maskz_loadu_epi32(lanes, batch->operand0 + k),
+                _mm512_maskz_loadu_epi32(lanes, batch->operand1 + k),
+                _mm512_maskz_loadu_epi32(lanes, batch->operand2 + k),
+            };
+            const __m512i slots = _mm512_maskz_loadu_epi32(lanes, batch->leaf_slots + k);
+            const __m512i counts = _mm512_maskz_loadu_epi32(lanes, batch->argument_counts + k);
+            _mm512_mask_storeu_epi32(graph->ops + node, lanes, ops);
             _mm512_mask_storeu_epi32(graph->tokens + node, lanes, token);
-            _mm512_mask_storeu_epi32(graph->operand0 + node, lanes, _mm512_maskz_loadu_epi32(lanes, batch->operand0 + k));
-            _mm512_mask_storeu_epi32(graph->operand1 + node, lanes, _mm512_maskz_loadu_epi32(lanes, batch->operand1 + k));
-            _mm512_mask_storeu_epi32(graph->operand2 + node, lanes, _mm512_maskz_loadu_epi32(lanes, batch->operand2 + k));
-            _mm512_mask_storeu_epi32(graph->leaf_slots + node, lanes, _mm512_maskz_loadu_epi32(lanes, batch->leaf_slots + k));
+            _mm512_mask_storeu_epi32(graph->operand0 + node, lanes, operands[0]);
+            _mm512_mask_storeu_epi32(graph->operand1 + node, lanes, operands[1]);
+            _mm512_mask_storeu_epi32(graph->operand2 + node, lanes, operands[2]);
+            _mm512_mask_storeu_epi32(graph->leaf_slots + node, lanes, slots);
             _mm512_mask_storeu_epi32(graph->members + node, lanes, _mm512_maskz_loadu_epi32(lanes, batch->members + k));
             _mm512_mask_storeu_epi32(graph->argument_offsets + node, lanes, _mm512_maskz_loadu_epi32(lanes, batch->argument_offsets + k));
-            _mm512_mask_storeu_epi32(graph->argument_counts + node, lanes, _mm512_maskz_loadu_epi32(lanes, batch->argument_counts + k));
+            _mm512_mask_storeu_epi32(graph->argument_counts + node, lanes, counts);
             const __m512i forms = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, batch->forms + k));
             const __mmask16 operators = _mm512_mask_cmpeq_epi32_mask(lanes, forms, _mm512_set1_epi32(CHECK_INPUT_FORM_OPERATOR));
             const __mmask16 discards = _mm512_mask_cmpeq_epi32_mask(lanes, forms, _mm512_set1_epi32(CHECK_INPUT_FORM_DISCARD));
             const __mmask16 initializers = _mm512_mask_cmpeq_epi32_mask(lanes, forms, _mm512_set1_epi32(CHECK_INPUT_FORM_INITIALIZER));
             const __m512i queried = _mm512_mask_i32gather_epi32(zero, operators | initializers, token, reader->query_types, 4);
-            _mm512_mask_storeu_epi32(graph->types + node, lanes, _mm512_mask_mov_epi32(queried, discards, _mm512_set1_epi32((int32_t)BUSTER_TYPE_VOID)));
+            const __m512i types = _mm512_mask_mov_epi32(queried, discards, _mm512_set1_epi32((int32_t)BUSTER_TYPE_VOID));
+            _mm512_mask_storeu_epi32(graph->types + node, lanes, types);
+            if (recording)
+            {
+                check_input_batch_record(graph, node, lanes, ops, operands, types, counts, slots, classes_low, classes_high);
+            }
             const __m512i statics = check_input_gather_bytes(operators | initializers, token, reader->static_initializers);
             const __mmask16 initialized = _mm512_test_epi32_mask(statics, statics);
             const __m512i added = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, batch->contexts + k));
@@ -323,6 +449,7 @@ static void check_input_expression_flush(CheckInputReader* reader, CheckInputBat
         graph->count = base + count;
         graph->leaf_count = batch->leaf_base + batch->leaves;
         graph->recorded_ready = false;
+        graph->recorded_nodes = recording ? graph->count : graph->recorded_nodes;
         check_graph_record_nodes(graph);
     }
     batch->base = graph->count;
@@ -1512,6 +1639,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
         batch->leaf_base = reader->output->graph.leaf_count;
         batch->count = 0;
         batch->leaves = 0;
+        check_graph_classes(batch->classes);
     }
     // The parts' ticks (CheckInput.expression_part_ticks): three TSC reads a chunk, and two a visit of a coded unit's,
     // which are the actions' less their visits'. And the tokens of each class the actions reached, in four histograms

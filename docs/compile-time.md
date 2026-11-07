@@ -1822,6 +1822,56 @@ keeps the probe, main's profile by line and instruction, and the receipts.
 | `check-input` | 46.480 ms | 45.673 ms | −0.81 ms |
 | `expressions.actions` | 10.075 ms | 9.436 ms | −0.64 ms |
 
+## The coded walk's flush records its nodes 16 at a time (#1671)
+
+**What it replaces.** Each flush of the coded walk's batch called `check_graph_record_nodes`, which recorded the
+batch's nodes one at a time: about 0.8% of `-c sqlite3.c`'s cycles on the 9700X, about 15 cycles a node. It records:
+- each node's purity (`check_graph_pure`);
+- the validation's counters.
+
+`check_graph_run` takes these in place of a validation.
+
+**The change.** The flush's vector path records its 16 nodes in the step that writes them
+(`check_input_batch_record`), as `check_graph_validate_block` already computes purity:
+- **Each node's own part.** The operator's class from `check_graph_classes`' table (made once a walk), and the requested
+  type, builtin or void.
+- **A leaf's part.** Its type and overload head, gathered from its record by its slot.
+- **Operands before the 16** are gathered from `recorded_pure`. Those among them are taken in node order.
+- **The counters**, by popcounts and reductions.
+- **Around it.** The nodes a visit made before the batch are recorded first. The scalar path keeps
+  `check_graph_record_nodes` as the twin.
+
+**The checks.**
+- `test-checker` compares every source fixture's recorded facts with both validations.
+- A probe that validates every graph found `sqlite3.c`'s 309,214 nodes' recorded purity and counters equal to the
+  validation's.
+
+**Measured on the 9700X.** Main `219e7e9b`, with #1692, against the head `38152245` (this change merged with it), in 8
+interleaved rounds, then `measure-compile` each way. Every run held the lock on its own. The objects are the same bytes.
+Against main `73fcf006`, before #1692, it measured −0.56% wall and −0.67 ms of `check-input`.
+[The record](https://github.com/buster14a/buster-performance/tree/ee69c4a5186a0308078c67be14623f4baefd9ecd/docs/measurements/check-input-1671-coded-record-2026-11-07)
+keeps both A/Bs' receipts, each build's profile and the probe.
+
+| measure | main | head | difference |
+| --- | ---: | ---: | ---: |
+| wall time | 119.460 ms | 118.450 ms | −0.85% |
+| user cycles | 580.282 M | 575.560 M | −0.81% |
+| user instructions | 1,288.534 M | 1,279.602 M | −0.69% |
+| `check-input` | 43.966 ms | 43.183 ms | −0.78 ms |
+| `expressions.actions` | 9.660 ms | 8.868 ms | −0.79 ms |
+
+**A refinement that didn't pay.** The recording's gathers then took most of the flush's samples:
+- a leaf's type and overload head from its record;
+- its operands' purity.
+
+A version replaced them, keeping a leaf's purity as a batch byte written with the leaf and taking the operands lane by
+lane in node order. Against this change it was no faster:
+- `check-input` was 43.11 against 43.12 ms;
+- user cycles were −0.27%, lower in only 5 of 8 rounds;
+- user instructions were +0.41%.
+
+The gathers had overlapped with the flush's other work, so the change keeps them. The record holds both A/Bs.
+
 ## The passes after checking (#592)
 
 #641 removes more token-domain work from the same handoffs. Initializer plans keep only their ascending
