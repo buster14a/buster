@@ -1382,9 +1382,9 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         // One clang applies that the checker doesn't take is refused by name.
         {
             .name = "an attribute clang applies and the checker doesn't take is refused",
-            .source = "int f(void) __attribute__((availability(macos, introduced = 10.4)));\n",
+            .source = "int f(void) __attribute__((force_align_arg_pointer));\n",
             .error = CHECK_ATTRIBUTE_ERROR_UNKNOWN,
-            .error_word = "availability",
+            .error_word = "force_align_arg_pointer",
         },
     };
     enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };

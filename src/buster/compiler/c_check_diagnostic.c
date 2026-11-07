@@ -122,6 +122,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wthread-safety-attributes", "-Wthread-safety", "invalid thread-safety attribute" },
     { "-Wnoderef", NULL, "dereferencing expression marked as 'noderef'" },
     { "-Wexcessive-regsave", NULL, "interrupt service routine should only call a function with attribute 'no_caller_saved_registers'" },
+    { "-Wtcb-enforcement", NULL, "calling a function outside the trusted computing base" },
+    { "-Winvalid-version-availability", NULL, "invalid version in availability attribute" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

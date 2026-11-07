@@ -96,8 +96,12 @@ static bool check_input_thread_names(CheckInputReader* reader, CheckInputAttribu
                 argument = stop + 1;
             }
         }
-        const bool generic = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && kept;
-        const CheckInputArgumentsRow* row = generic ? check_input_arguments_row(check_input_attribute_name(reader, attribute->name)) : NULL;
+        // (availability's and external_source_symbol's arguments are no expressions: clang's parser reads them its own way,
+        // check_input_availability_parse and check_input_external_source_parse.)
+        const String8 generic_name = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword ? check_input_attribute_name(reader, attribute->name) : (String8){ 0 };
+        const bool custom = check_input_attribute_equal(generic_name, "availability") || check_input_attribute_equal(generic_name, "external_source_symbol");
+        const bool generic = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && kept && !custom;
+        const CheckInputArgumentsRow* row = generic ? check_input_arguments_row(generic_name) : NULL;
         const uint32_t flags = row != NULL ? row->flags : 0;
         const uint32_t strings = row != NULL ? row->strings : 0;
         const uint32_t in_scope = (flags & scoped) != 0 ? parameters : BUSTER_CHECK_NONE;
