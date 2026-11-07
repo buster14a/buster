@@ -42,6 +42,9 @@ struct IrOptimizeResult
     IrFunction function;
     uint64_t sccp_visits;
     uint64_t sccp_sweeps;
+    // The incoming values SCCP's phi transfers examined, executable or not: the work that grew as the square of a
+    // join's predecessors when each visit met them all (#1729).
+    uint64_t sccp_phi_incoming;
     uint64_t dce_visits;
     uint64_t dce_sweeps;
     uint64_t scratch_bytes;
@@ -757,7 +760,8 @@ static const uint8_t ir_optimize_transfer_kinds[64] = {
     [IR_FNEG] = 5,
 };
 
-static uint8_t ir_optimize_transfer(const IrOptimizeWork* work, uint32_t i, IrConstant* value)
+// `examined` counts a phi's incoming values looked at (IrOptimizeResult.sccp_phi_incoming).
+static uint8_t ir_optimize_transfer(const IrOptimizeWork* work, uint32_t i, IrConstant* value, uint64_t* examined)
 {
     const IrFunction* f = work->function;
     const uint32_t op = f->op[i];
@@ -778,7 +782,9 @@ static uint8_t ir_optimize_transfer(const IrOptimizeWork* work, uint32_t i, IrCo
     else if (kind == 3)
     {
         result = IROPT_UNKNOWN;
-        for (uint32_t incoming = 0; incoming < b; incoming += 1)
+        // Overdefined meets anything to overdefined: the rest of the incoming values can't change the result.
+        uint32_t incoming = 0;
+        for (; incoming < b && result != IROPT_OVERDEFINED; incoming += 1)
         {
             const uint32_t predecessor = f->extra[a + incoming * 2];
             const uint32_t source = f->extra[a + incoming * 2 + 1];
@@ -788,6 +794,7 @@ static uint8_t ir_optimize_transfer(const IrOptimizeWork* work, uint32_t i, IrCo
                 result = ir_optimize_meet(result, *value, work->states[source], work->values[source], value);
             }
         }
+        *examined += incoming;
     }
     else if (kind == 4)
     {
@@ -974,15 +981,20 @@ static __attribute__((aligned(64))) bool ir_optimize_visit(IrOptimizeWork* work,
     {
         const IrFunction* f = work->function;
         const uint32_t op = f->op[i];
-        if (ir_vector_type(f->type[i]) || op == IR_VCMP || (op == IR_BITCAST && ir_vector_type(f->type[f->a[i]])))
+        // The lattice only falls, so no transfer can change an overdefined value: its visits skip it. A join's phi is
+        // queued again by each incoming edge and value, and would otherwise meet all of them on every visit (#1729).
+        if (work->states[i] != IROPT_OVERDEFINED)
         {
-            changed = ir_optimize_simd_visit(work, i, queue);
-        }
-        else
-        {
-            IrConstant value = { 0 };
-            const uint8_t state = ir_optimize_transfer(work, i, &value);
-            changed = ir_optimize_publish(work, i, state, value, queue);
+            if (ir_vector_type(f->type[i]) || op == IR_VCMP || (op == IR_BITCAST && ir_vector_type(f->type[f->a[i]])))
+            {
+                changed = ir_optimize_simd_visit(work, i, queue);
+            }
+            else
+            {
+                IrConstant value = { 0 };
+                const uint8_t state = ir_optimize_transfer(work, i, &value, &work->statistics.sccp_phi_incoming);
+                changed = ir_optimize_publish(work, i, state, value, queue);
+            }
         }
         if (ir_terminator_table[work->function->op[i]] != 0)
         {
