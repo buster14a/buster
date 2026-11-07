@@ -1930,7 +1930,8 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                 check_test_expect(test, divides == 0 && shifts != 0 && masks != 0,
                                   "unsigned constant powers of two lower to shifts/masks on both paths without division");
                 CheckProgramLowered templated = { 0 };
-                bool same = check_program_lower_templates(&templated, &program, true, &output, &scratch) && templated.count == lower[0].count;
+                bool same = check_program_lower_templates(&templated, &program, true, &output, &scratch) && templated.count == lower[0].count &&
+                            templated.template_mismatches == 0;
                 for (uint32_t b = 0; same && b < templated.count; b += 1)
                 {
                     same = check_test_program_function(templated.functions + b, lower[0].functions + b);
