@@ -2926,7 +2926,16 @@ static void check_test_program_return_marks(CheckTest* test)
         uint32_t counts[] = { 0, 1 };
         uint32_t arguments[] = { 0 };
         CheckBuiltinMiscEffect misc = { .node = 0, .terminates = true };
-        CheckBuiltinQueryEffect query = { .node = 1, .evaluated_operands = 1 };
+        CheckBuiltinQueryEffect query = {
+            .node = 1,
+            .runtime_value = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE, .constant_kind = CHECK_CONSTANT_INTEGER,
+                               .flags = BUSTER_CHECK_SIDE_EFFECT },
+            .evaluated_operands = 1,
+            .known = true,
+            .source_proof = CHECK_BUILTIN_QUERY_PROOF_ZERO,
+            .runtime_plan = CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_KNOWN,
+            .runtime_effects = { .flags = BUSTER_CHECK_SIDE_EFFECT },
+        };
         const CheckInput input = { .graph = { .count = BUSTER_ARRAY_LENGTH(ops), .ops = ops, .operand0 = absent,
                                             .operand1 = absent, .operand2 = absent, .members = members,
                                             .argument_offsets = offsets, .argument_counts = counts, .argument_nodes = arguments } };
