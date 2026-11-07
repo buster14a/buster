@@ -1232,8 +1232,43 @@ static void check_init_test_vector_constants(CheckTest* test, const char* clang)
     }
 }
 
+// The constant cache belongs to static destinations, including block-scope statics whose compound-literal
+// operands have automatic storage. Pin each half lane's target bytes independently, then ask Clang's object
+// writer to confirm them. Ordinary automatic initializers retain their runtime graph.
+static void check_init_test_half_vector_constants(CheckTest* test, const char* clang)
+{
+    static const char source[] =
+        "typedef _Float16 H __attribute__((vector_size(8)));typedef __bf16 B __attribute__((vector_size(8)));\n"
+        "H half_sum=(H){1,7,3,1}+(H){2,-2,-1,-1};B brain_sum=(B){1,7,3,1}+(B){2,-2,-1,-1};\n"
+        "H half_product=(H){2,3,4,5}*(H){3,4,5,6};B brain_product=(B){2,3,4,5}*(B){3,4,5,6};\n"
+        "H half_quotient=(H){1,-1,1,-1}/(H){3,3,10,10};B brain_quotient=(B){1,-1,1,-1}/(B){3,3,10,10};\n"
+        "H half_midpoint=((H){2048,2048,2048,2048}+(H){1,3,5,7})-(H){2048,2048,2048,2048};\n"
+        "B brain_midpoint=((B){256,256,256,256}+(B){1,3,5,7})-(B){256,256,256,256};\n"
+        "H *half_vectors(void){static H half_local=((H){1,2,3,4}+(H){2,3,4,5})*(H){2,2,2,2};return &half_local;}\n"
+        "B *brain_vectors(void){static B brain_local=((B){1,2,3,4}+(B){2,3,4,5})*(B){2,2,2,2};return &brain_local;}\n";
+    static const CheckInitExpected expected[] = {
+        { .name = "half_sum", .bytes = { 0,0x42,0,0x45,0,0x40,0,0 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "brain_sum", .bytes = { 0x40,0x40,0xa0,0x40,0,0x40,0,0 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "half_product", .bytes = { 0,0x46,0,0x4a,0,0x4d,0x80,0x4f }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "brain_product", .bytes = { 0xc0,0x40,0x40,0x41,0xa0,0x41,0xf0,0x41 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "half_quotient", .bytes = { 0x55,0x35,0x55,0xb5,0x66,0x2e,0x66,0xae }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "brain_quotient", .bytes = { 0xab,0x3e,0xab,0xbe,0xcd,0x3d,0xcd,0xbd }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "half_midpoint", .bytes = { 0,0,0,0x44,0,0x44,0,0x48 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "brain_midpoint", .bytes = { 0,0,0x80,0x40,0x80,0x40,0,0x41 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "half_local", .clang_name = "half_vectors.half_local", .bytes = { 0,0x46,0,0x49,0,0x4b,0x80,0x4c }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+        { .name = "brain_local", .clang_name = "brain_vectors.brain_local", .bytes = { 0xc0,0x40,0x20,0x41,0x60,0x41,0x90,0x41 }, .size = 8, .class = BUSTER_LINK_CLASS_DATA },
+    };
+    check_init_test_source(test, source, expected, BUSTER_ARRAY_LENGTH(expected), true, true, clang);
+    static const char automatic[] =
+        "typedef _Float16 H __attribute__((vector_size(8)));typedef __bf16 B __attribute__((vector_size(8)));"
+        "H automatic_half(int n){H h=(H){2048,2048,2048,2048}+(H){n,n,n,n};return h;}"
+        "B automatic_brain(int n){B b=(B){256,256,256,256}+(B){n,n,n,n};return b;}";
+    check_init_test_source(test, automatic, NULL, 0, true, false, clang);
+}
+
 static void check_init_test_vectors(CheckTest* test, const char* clang)
 {
+    check_init_test_half_vector_constants(test, clang);
     check_init_test_vector_objects(test, clang);
     check_init_test_vector_constants(test, clang);
     static const char source[] =
