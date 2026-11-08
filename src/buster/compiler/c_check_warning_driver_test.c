@@ -900,6 +900,14 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .options = { "-Wformat" },
         .warnings = 6,
     },
+    {
+        // A fixed-parameter conversion must not transfer the source cast's typedef to the converted pointer.
+        .name = "format fixed conversion does not borrow source typedef",
+        .source = "typedef _BitInt(32) T;\nvoid f(const char*, _BitInt(32)*) __attribute__((format(printf,1,2)));\n"
+                  "void g(void) { f(\"%d\", (T)0); }\n",
+        .options = { "-Wformat", "-Wno-gcc-compat", "-Wno-non-literal-null-conversion" },
+        .warnings = 1,
+    },
 };
 
 static void check_test_driver_warning_fixtures(CheckTest* test, const char* clang, const char* executable, const char* directory,

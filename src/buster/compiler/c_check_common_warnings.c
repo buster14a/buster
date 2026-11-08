@@ -3871,8 +3871,10 @@ static void check_common_format_report_type(const Parser* parser, Preprocessor* 
 {
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
     const TypeId type = check_common_format_argument_type(graph, stream, types, offset, argument);
+    const uint32_t spelling = argument_node < graph->count && type == check_stream_type(stream, argument_node) ?
+                              check_common_operand_spelling(parser, input, graph, stream, argument_node) : 0;
     const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type,
-                                                  check_common_operand_spelling(parser, input, graph, stream, argument_node));
+                                                  spelling);
     const uint32_t at_token = argument_node < graph->count ? check_common_argument_start(parser, graph->tokens[argument_node]) : format_token;
     if (actual.length != 0)
     {
@@ -3897,8 +3899,10 @@ static void check_common_format_width_report(const Parser* parser, Preprocessor*
 {
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
     const TypeId type = check_common_format_argument_type(graph, stream, types, offset, argument);
+    const uint32_t spelling = argument_node < graph->count && type == check_stream_type(stream, argument_node) ?
+                              check_common_operand_spelling(parser, input, graph, stream, argument_node) : 0;
     const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type,
-                                                  check_common_operand_spelling(parser, input, graph, stream, argument_node));
+                                                  spelling);
     if (actual.length != 0)
     {
         const char* message = check_warning_text(scratch, "field %s should have type 'int', but argument has type %.*s",
