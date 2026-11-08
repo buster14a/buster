@@ -137,6 +137,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wuser-defined-warnings", NULL, "user-defined warning" },
     { "-Wfunction-multiversion", NULL, "CPU list contains duplicate entries; attribute ignored" },
     { "-Wunused-result", "-Wunused-value", "ignoring return value of function declared with 'warn_unused_result' attribute" },
+    { "-Wint-in-bool-context", NULL, "converting the result of '<<' to a boolean; did you mean to compare with '0'?" },
+    { "-Wtautological-constant-compare", "-Wtautological-compare", "converting the result of '?:' with integer constants to a boolean always evaluates to 'true'" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

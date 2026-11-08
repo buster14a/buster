@@ -395,6 +395,85 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .source = "#pragma clang diagnostic ignored \"-Wliteral-conversion\"\n#pragma clang diagnostic error \"-Wfloat-conversion\"\nint a=1.5;\n",
     },
     {
+        .name = "struct brace initializer members warn of constant conversions at file and block scope",
+        .source = "struct S{int i;char c;}s={2,300};\nvoid f(void){struct S t={2,300};(void)t;}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "array, nested and designated brace initializers warn in clang's reverse order",
+        .source = "char a[3]={300,301,302};struct T{struct S{char x,y;}s;char d[2];}t={{303,304},{305,306}};struct S u={.y=307};\n",
+        .warnings = 8,
+    },
+    {
+        .name = "brace constant conversions follow their values' runtime warnings, arms, commas and ranges",
+        .source = "void f(int x){char b[3]={301,x<<40,302};char c[2]={x?303:1,(x,304)};char e[3]={[0 ... 2]=305};(void)b;(void)c;(void)e;}\n",
+        .warnings = 9,
+    },
+    {
+        .name = "brace constant conversions skip unreachable code and keep clang's unsigned and bit-pattern exemptions",
+        .source = "void f(void){if(0){char g[1]={310};(void)g;}}unsigned char t1[]={255,256,-1,-129};signed char t2[]={127,128,-129,0xff,0x1ff};\n",
+        .warnings = 4,
+    },
+    {
+        .name = "same-width brace constants warn at once, except into a character element",
+        .source = "short g[]={32768,70000};struct{signed char c;short s;}h={128,32768};void k(int x){short t[2]={32768,70000};x<<40;(void)t;}\n",
+        .warnings = 7,
+    },
+    {
+        .name = "same-width scalar constants warn at once, before a body's queued warnings",
+        .source = "void f(int x){x<<40;short a=32768;short b=70000;(void)a;(void)b;}\n",
+        .warnings = 4,
+    },
+    {
+        .name = "a file-scope shift count follows its declarator's literal conversions",
+        .source = "int h[2]={15.5,1<<40};\n",
+        .warnings = 2,
+    },
+    {
+        .name = "file-scope declarators queue shift counts and constant conversions to their own ends",
+        .source = "int a=1<<40,b=2.5;int e[2]={1<<41,4.5},f=5.5,g=1<<42;char h[2]={301,1<<43},i[1]={6.5};struct{char c;int i;}k={302,1<<44};\n",
+        .warnings = 12,
+    },
+    {
+        .name = "literal conversions precede constant conversions in one brace initializer",
+        .source = "char a[4]={300,1.5,301,2.5};void f(void){char b[4]={303,5.5,304,6.5};int y=7.5;(void)b;(void)y;}\n",
+        .warnings = 9,
+    },
+    {
+        .name = "brace members of an enumeration warn by its integer type's range",
+        .source = "enum Small:signed char{S0};struct T{enum Small m;int i;}st={300,1};enum Small sa[2]={1,301};\n",
+        .warnings = 2,
+        .c23 = true,
+    },
+    {
+        .name = "brace parts of a constant shift warn of its changed value, and into _Bool of its truth",
+        .source = "struct S{short s;char c;};short a[1]={1<<20};int c[1]={3LL<<40};short d={1<<20};struct S e={1<<18,2<<8};"
+                  "void f(void){short x[1]={4<<18};struct S y={0,1<<9};_Bool b[1]={1<<3};short z[1]={1<<3};(void)x;(void)y;(void)b;(void)z;}\n",
+        .warnings = 8,
+    },
+    {
+        .name = "a compound literal's constant conversions follow its full expression's counts, in conditions and increments too",
+        .source = "struct S{int i;char c;};int f(int x){x=(struct S){x,300}.c+(x<<33);if((struct S){x,301}.c+(x<<34))return x<<32;"
+                  "for(int i=0;i<2;i+=(struct S){1,302}.c+(x<<35)){struct S s={1,303};x+=s.c+(x<<36);}return x;}\n",
+        .warnings = 9,
+    },
+    {
+        .name = "_Atomic brace elements and members take no constant conversion",
+        .source = "_Atomic short a0[2]={32768,1};struct{_Atomic char c;int i;}s={300,1};void f(void){_Atomic short a3[2]={32768,70000};(void)a3;}\n",
+    },
+    {
+        .name = "brace constant conversion suppression keeps literal conversions",
+        .source = "char a[4]={300,1.5,301,2.5};short g[]={32768};\n",
+        .options = { "-Wno-constant-conversion" },
+        .warnings = 2,
+    },
+    {
+        .name = "brace constant conversion promotion rejects object publication",
+        .source = "struct S{int i;char c;}s={2,300};\n",
+        .options = { "-Werror=constant-conversion" },
+        .errors = 1,
+    },
+    {
         .name = "file initializer discards pointer qualifiers at its declaration",
         .source = "const int b=1;\nint *c=&b;\n",
         .warnings = 1,

@@ -228,9 +228,33 @@ static void check_debug_values_test_ranges(CheckDebugTestTally* tally)
             check_debug_value_range_scan(&body, &a, trial, first, last, bytes, bytes != NULL ? sizeof(expression) : 0);
             check_debug_value_range_indexed(&body, breaks, segments, runs, tree, leaves, &b, trial, first, last, bytes, bytes != NULL ? sizeof(expression) : 0);
             same = a.size == b.size && memcmp(scanned, indexed, a.size) == 0;
+            const uint32_t begin = (draw >> 4) % (address + 1);
+            const uint32_t end = begin + (draw >> 14) % (address + 2 - begin);
+            const CheckDebugRangeClip clip = { .begin = begin, .end = end, .list = (query & 2) != 0 };
+            a.size = 0;
+            b.size = 0;
+            check_debug_value_range_scan_clipped(&body, &a, trial, first, last, bytes, bytes != NULL ? sizeof(expression) : 0, clip);
+            check_debug_value_range_indexed_clipped(&body, breaks, segments, runs, tree, leaves, &b, trial, first, last,
+                                                    bytes, bytes != NULL ? sizeof(expression) : 0, clip);
+            same = same && a.size == b.size && memcmp(scanned, indexed, a.size) == 0;
         }
     }
-    check_debug_test_expect(tally, same, "the span index's range and location lists are the scan's, byte for byte", "");
+    check_debug_test_expect(tally, same, "the span index's full and PC-clipped range/location lists are the scan's, byte for byte", "");
+    const CheckDebugValueSpan clipped_spans[] = {
+        { .begin = 0, .end = 10, .token = 1 },
+        { .begin = 10, .end = 20, .token = 5 },
+        { .begin = 20, .end = 30, .token = 1 },
+    };
+    const CheckDebugBody clipped_body = { .spans = clipped_spans, .span_count = BUSTER_ARRAY_LENGTH(clipped_spans) };
+    const uint8_t expression[] = { 0x91, 0x70 };
+    const uint8_t expected[] = { 4, 5, 10, 2, 0x91, 0x70, 4, 20, 25, 2, 0x91, 0x70 };
+    const CheckDebugRangeClip clip = { .begin = 5, .end = 25 };
+    DebugWriter clipped = { .bytes = indexed };
+    uint32_t runs = 0;
+    const uint32_t leaves = check_debug_value_index(clipped_spans, BUSTER_ARRAY_LENGTH(clipped_spans), breaks, segments, tree, &runs);
+    check_debug_value_range_indexed_clipped(&clipped_body, breaks, segments, runs, tree, leaves, &clipped, 0, 1, 1, expression, sizeof(expression), clip);
+    check_debug_test_expect(tally, clipped.size == sizeof(expected) && memcmp(indexed, expected, sizeof(expected)) == 0,
+                            "optimized locations intersect both PC bounds and lexical gaps without adding a default location", "");
 }
 
 // A function type's parameter names are not variables of the enclosing body (#1688). The const qualifiers here

@@ -1262,6 +1262,136 @@ static void ir_optimize_test_vector_compares(IrOptimizeTest* test, Arena* input,
     arena_pop_to(input, 0);
 }
 
+static void ir_optimize_test_debug_bindings(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
+{
+    const uint64_t im = input->length;
+    const uint64_t vm = vector->length;
+    const uint64_t sm = scalar->length;
+    const IrSizes sizes =
+    {
+        .instruction_count = 6,
+        .block_count = 1,
+        .constant_count = 2,
+        .parameter_count = 1,
+    };
+    IrFunction function = { 0 };
+    bool ready = ir_create(input, &sizes, &function) == IR_OK;
+    if (ready)
+    {
+        function.result_type = IR_I64;
+        function.parameter_types[0] = IR_I64;
+        function.block_offsets[1] = 6;
+        function.constants[0].low = 7;
+        function.constants[1].low = 9;
+        ir_optimize_test_instruction(&function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&function, 1, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&function, 2, IR_CONST, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&function, 3, IR_ADD, IR_I64, 1, 2, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&function, 4, IR_ADD, IR_I64, 0, 1, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&function, 5, IR_RET, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        IrDebugBinding bindings[] =
+        {
+            { .local = 0, .entry = BUSTER_IR_NONE, .value = 0, .anchor = 0, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+            { .local = 1, .entry = 2, .value = 3, .anchor = 3, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+            { .local = 1, .entry = 4, .value = 4, .anchor = 4, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+        };
+        uint8_t flags[] = { BUSTER_IR_DEBUG_BIND_ENTRY, BUSTER_IR_DEBUG_BIND_REGIONS };
+        IrDebugRegion regions[] =
+        {
+            { .local = 1, .block = 0, .begin = 3, .end = 4, .block_end = 6, .value = 3, .next = 2, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+            { .local = 1, .block = 0, .begin = 5, .end = 6, .block_end = 6, .value = 4, .next = BUSTER_IR_NONE, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+        };
+        const IrDebugInfo seed =
+        {
+            .entry_count = 6,
+            .local_count = 2,
+            .bindings = bindings,
+            .binding_count = BUSTER_ARRAY_LENGTH(bindings),
+            .regions = regions,
+            .region_count = BUSTER_ARRAY_LENGTH(regions),
+            .binding_flags = flags,
+            .first_block_end = 6,
+        };
+        ready = ir_debug_create(input, &function, &seed);
+    }
+    ir_optimize_test_expect(test, ready, "source assignment optimizer fixture allocated");
+    for (uint32_t path = 0; ready && path < 2; path += 1)
+    {
+        IrOptimizeOptions options = ir_optimize_options();
+        options.path = path != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
+        IrOptimizeResult described = { 0 };
+        IrOptimizeResult plain = { 0 };
+        IrFunction plain_input = function;
+        plain_input.debug = NULL;
+        const IrCheck a = ir_optimize(&function, vector, scratch, options, &described);
+        const IrCheck b = ir_optimize(&plain_input, scalar, scratch, options, &plain);
+        bool exact = a.error == IR_OK && b.error == IR_OK && ir_optimize_test_equal(&described.function, &plain.function) && described.function.instruction_count == 2;
+        if (exact)
+        {
+            const IrDebugInfo* debug = described.function.debug;
+            exact = debug != NULL && debug->binding_count == 3 && debug->bindings[0].kind == IR_DEBUG_BIND_VALUE && debug->bindings[0].value == 0 &&
+                    debug->bindings[1].kind == IR_DEBUG_BIND_CONSTANT && debug->bindings[1].literal == 16 && debug->bindings[1].entry == 2 &&
+                    debug->bindings[1].value == BUSTER_IR_NONE && debug->bindings[1].anchor == BUSTER_IR_NONE &&
+                    debug->bindings[2].kind == IR_DEBUG_BIND_UNAVAILABLE && debug->bindings[2].entry == 4 &&
+                    debug->bindings[2].value == BUSTER_IR_NONE && debug->bindings[2].anchor == BUSTER_IR_NONE &&
+                    debug->region_count == 2 && debug->regions[0].kind == IR_DEBUG_BIND_CONSTANT && debug->regions[0].literal == 16 &&
+                    debug->regions[0].value == BUSTER_IR_NONE && debug->regions[0].block == 0 && debug->regions[0].next == 2 &&
+                    debug->regions[1].kind == IR_DEBUG_BIND_UNAVAILABLE && debug->regions[1].value == BUSTER_IR_NONE && debug->regions[1].block == 0 &&
+                    function.debug->bindings[1].kind == IR_DEBUG_BIND_VALUE && function.debug->bindings[2].value == 4;
+        }
+        ir_optimize_test_expect(test, exact, "DCE preserved a dead definition for debug, lost a folded constant, or erased its later unknown assignment kill");
+        arena_pop_to(vector, vm);
+        arena_pop_to(scalar, sm);
+    }
+    arena_pop_to(input, im);
+}
+
+static void ir_optimize_test_debug_blocks(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
+{
+    const uint64_t im = input->length;
+    const uint64_t vm = vector->length;
+    const uint64_t sm = scalar->length;
+    IrFunction function = { 0 };
+    bool ready = ir_optimize_test_jumps(input, &function, 4, false);
+    if (ready)
+    {
+        uint8_t flags[] = { BUSTER_IR_DEBUG_BIND_REGIONS };
+        IrDebugRegion regions[] =
+        {
+            { .literal = 17, .local = 0, .block = 1, .begin = 2, .end = 3, .block_end = 3, .value = BUSTER_IR_NONE,
+              .next = BUSTER_IR_NONE, .kind = IR_DEBUG_BIND_CONSTANT, .bytes = 8, .type = IR_I64 },
+            { .literal = 17, .local = 0, .block = 3, .begin = 4, .end = 5, .block_end = 5, .value = BUSTER_IR_NONE,
+              .next = BUSTER_IR_NONE, .kind = IR_DEBUG_BIND_CONSTANT, .bytes = 8, .type = IR_I64 },
+        };
+        const IrDebugInfo seed = { .entry_count = 5, .local_count = 1, .regions = regions, .region_count = BUSTER_ARRAY_LENGTH(regions), .binding_flags = flags };
+        ready = ir_debug_create(input, &function, &seed);
+    }
+    ir_optimize_test_expect(test, ready, "source-region block threading fixture allocated");
+    for (uint32_t path = 0; ready && path < 2; path += 1)
+    {
+        IrOptimizeOptions options = ir_optimize_options();
+        options.path = path != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
+        IrOptimizeResult described = { 0 };
+        IrOptimizeResult plain = { 0 };
+        IrFunction control = function;
+        control.debug = NULL;
+        const IrCheck a = ir_optimize(&function, vector, scratch, options, &described);
+        const IrCheck b = ir_optimize(&control, scalar, scratch, options, &plain);
+        bool exact = a.error == IR_OK && b.error == IR_OK && ir_optimize_test_equal(&described.function, &plain.function) && described.function.block_count == 2;
+        if (exact)
+        {
+            const IrDebugInfo* debug = described.function.debug;
+            exact = debug != NULL && debug->region_count == 2 && debug->regions[0].block == BUSTER_IR_NONE &&
+                    debug->regions[0].kind == IR_DEBUG_BIND_UNAVAILABLE && debug->regions[1].block == 1 &&
+                    debug->regions[1].kind == IR_DEBUG_BIND_CONSTANT && debug->regions[1].literal == 17 && function.debug->regions[0].block == 1;
+        }
+        ir_optimize_test_expect(test, exact, "CFG threading drops removed source regions instead of redirecting them to a surviving successor");
+        arena_pop_to(vector, vm);
+        arena_pop_to(scalar, sm);
+    }
+    arena_pop_to(input, im);
+}
+
 static void ir_optimize_test_ir(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(16ull << 20);
@@ -1322,6 +1452,8 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
         ir_optimize_test_threading(test, &scratch);
         ir_optimize_test_records(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_vector_compares(test, &input, &vector, &scratch);
+        ir_optimize_test_debug_bindings(test, &input, &vector, &scalar, &scratch);
+        ir_optimize_test_debug_blocks(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_limits(test, &input, &vector, &scratch);
         ir_optimize_test_entry_phi(test, &input, &vector, &scratch);
         ir_optimize_test_joins(test, &input, &vector, &scalar, &scratch);

@@ -3864,7 +3864,7 @@ a unit whose only errors are its preprocessor's:
 Its `result` still fails, and `-c` emits nothing. The asm and control
 diagnosis cutoffs skip recovered reports. As in clang, a unit with any error
 publishes no unit-end warning: no unused file-scope object's and no unused
-function's (`check_driver_unit_end_warnings`).
+function's (`check_driver_rejected_warnings`).
 
 A body that recovers an error goes to source order, as one with a report does.
 So does a top level, before its bodies are dealt to lanes. Error-free units
@@ -3883,6 +3883,47 @@ It also checks that `-c` of each fixture is refused with no object written.
 The fixtures cover each pass above, shared records, two errors in one list,
 missing names and a control error after a recovered error, block declarations,
 exclusions, `_Alignas`, a dropped `format`, and enumerators.
+
+Phase 2 covers redeclarations that conflict with a declaration of the same
+name: the visible one in `check_input_bind`'s first test, or its entity's
+linked one in the second (`int k = 1; int k = 2;`). Clang marks such a
+redeclaration invalid and leaves it out of its name's lookup. So the checker
+recovers its report and leaves the declaration unbound and unlinked: later
+uses find the earlier declaration (after `int a; float a;`, `&a` is an
+`int *`), and the unit goes on as in phase 1. A loader variable's
+redefinition keeps its note and still stops the reader.
+
+These errors take clang's wording and notes through
+`check_input_redeclaration_report` (`c_check_redefinition.c`, from
+`bde006626`). Phase 2 adds two variants to it, both with the note "previous
+definition is here", where the error used to read "conflicting declaration":
+
+- `CHECK_REDECLARATION_TYPEDEF`: "typedef redefinition with different types
+  ('N' vs 'O')";
+- `CHECK_REDECLARATION_KIND`: "redefinition of 'X' as different kind of
+  symbol".
+
+`check_driver_rejected_warnings` follows clang's `ActOnPopScope`: a scope in
+which an error occurred gives no unused-variable warning, nested scopes'
+errors included. Its extent runs from the scope's `{` to its `}`, or, for a
+function body, from the definition's start, since clang's
+`ActOnStartOfFunctionDef` handles the definition's declarator inside the
+body's scope. Unused parameters are still warned. A per-token prefix count of
+the unit's error reports answers each scope's question in constant time, and
+only a unit with errors builds it.
+
+The later phases are left:
+
+- **Invalid declarations.** Not covered by phase 2:
+  - a tag's redefinition (`struct S { … }` twice);
+  - an invalid initializer the reader reports;
+  - a type attribute's error (`vector_size`, `mode`).
+
+  These still stop the reader.
+- **Statements.** A second control error (`break`, then `continue`) still
+  isn't reported. Neither are the runtime warnings (`-Wshift-count-overflow`,
+  `-Wdivision-by-zero`) of any rejected unit, a unit with only a preprocessing
+  error included.
 
 Phase 3 covers statements after an error:
 
@@ -3915,8 +3956,8 @@ diagnose paths give one generic message, not clang's wording.
 
 The later phases are left:
 
-- **Invalid declarations.** A redeclaration conflict, an invalid initializer,
-  or a type attribute's error (`vector_size`, `mode`) still stops the reader.
+- **Invalid declarations.** A tag's redefinition, an invalid initializer, or a
+  type attribute's error (`vector_size`, `mode`) still stops the reader.
 - **Units with a graph's or a reader's error.** These, other than a recovered
   one, still don't reach `check_program`. They get none of its diagnostics:
   the common warnings, their runtime warnings included. The asm and control
@@ -3926,6 +3967,8 @@ The later phases are left:
   source order instead.
 - **Shared `_Alignas`.** An `_Alignas` shared by several declarators gives its
   error once, where clang gives it for each.
+- **Unused `extern` locals.** A block's unused `extern` declaration gets no
+  warning, where clang gives one (on main too).
 
 ### What the lowering costs (#531)
 
@@ -4520,6 +4563,45 @@ An `_Atomic` destination takes neither. Its conversion is to the atomic's value
 type, which the lowering needs, so the action marks it
 `BUSTER_CHECK_CONVERT_ATOMIC` wherever it strips `_Atomic`: assignments,
 initializations, brace elements, returns and prototype arguments.
+
+A brace initializer's integer constants warn of their constant conversions too
+(#1447), in the reverse initializer order clang's `AnalyzeImplicitConversions`
+work list gives them. A plan whose part may change its constant
+(`CheckInitializer.changed_integers`, a superset made as its parts append) is
+the only one whose parts the walk reads for them. Clang's `DiagRuntimeBehavior`
+queues them where the full expression completes, after the runtime warnings its
+values queued as they were built, so a plan's constant conversions
+(`check_common_initializer_integers`) follow the roots of its values, inside a
+function at the body's end and never in unreachable code. A constant that fills
+a signed target's width exactly (`128` to `signed char`, clang's
+`isSameWidthConstantConversion`) is clang's `Diag` instead, reported at once
+with the literal conversions (`check_common_same_width`), scalar or listed, and
+never into a character element of a brace list, which clang takes for an array
+initialization. At file scope clang queues a declarator's runtime warnings to
+its end: its shift counts (`check_driver_file_initializer_end`) and constant
+conversions publish there in `PP_DIAGNOSTIC_RUNTIME`, after its literal
+conversions. Still separate: `-Wbitfield-constant-conversion`'s truncation into
+a bit-field, and a same-width conversion in unreachable code, which clang still
+reports.
+
+Clang's `DiagnoseIntInBoolContext` follows every conversion to `_Bool` (#1447,
+`check_common_int_in_bool`): the operands of `!`, `&&` and `||` and the
+conditions of statements and conditionals (`CheckBoolLikeConversion`, the
+operand itself and never a conditional's arms), and an initializer's,
+assignment's, return's or argument's conversion, whose conditional arms and
+comma result carry it. Its implicit conversions passed, a `<<` of a literal 0,
+or of two literals, always evaluates to one truth, which clang's evaluation
+gives (a count past the width shifts by the width less one, a negative one
+shifts right); any other signed `<<` is `-Wint-in-bool-context`'s, in `-Wmost`
+and so `-Wall`. A conditional whose two arms are integer literals of its own
+type, not both 0 or 1, and both nonzero always evaluates to true, at its
+condition's first token. A literal is clang's `IntegerLiteral`: a number, under
+at most a unary minus, with no parentheses. The always-forms are
+`-Wtautological-constant-compare`'s, on by default, under
+`-Wtautological-compare` and `-Wmost`. Clang's `Diag` reports them at once, as
+a literal conversion, in unreachable code and short-circuited operands too, and
+a brace initializer's in its reverse order; the walks' candidates test the
+operand's operator before any type.
 
 The graph's passes share their facts, `check_common_facts`, which give each
 node its parent, whether another node uses its value, whether it is evaluated,
