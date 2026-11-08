@@ -81,7 +81,10 @@ own; switching between them builds nothing that is up to date.
   `-g` (none with `BUSTER_DEBUG_INFO=0`), `-march=$BUSTER_HOST_ARCH -Isrc
   -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror
   -fno-stack-protector`, the host Clang's stack-protector default and default
-  triple as definitions, `-Wno-unused-function -Wno-psabi` for a scalar host,
+  triple as definitions, `-DBUSTER_EXECUTABLE_UNIT` (a unit of its own, such
+  as `c_lexer_benchmark.c`, then calls the driver unit's Unicode names rather
+  than compiling its own copy, which it has when compiled without it to be
+  linked alone), `-Wno-unused-function -Wno-psabi` for a scalar host,
   the sanitizer and fuzzing flags, `-O3` (or the sanitizers' level), then
   `BUSTER_BUILD_DEFINES`. CMake's own defaults take no part: no `-DNDEBUG`
   (`assert` stays), no other optimization, no PIE, and `CFLAGS` and `LDFLAGS`,

@@ -40,14 +40,19 @@ struct UnicodeNameRange
 #include "buster/compiler/c_unicode_names.inc"
 
 // The entry points' linkage, so that the executable has one copy of the table (about 300 KB): main.c's units call the
-// lexer's home's (BUSTER_LEXER_ENTRY), and so does a unit of its own that includes the lexer, a benchmark's, which the
-// executable links with them (its definitions are inline ones, which clang emits only to inline them, and noinline
-// keeps it from that). Where these definitions aren't the home's, they call this file's static functions, a C2y
-// feature that clang takes in C17 as an extension (-Wstatic-in-inline).
+// lexer's home's (BUSTER_LEXER_ENTRY), and so does a unit of its own that includes the lexer and is linked into the
+// executable, a benchmark's, which the build compiles with BUSTER_EXECUTABLE_UNIT as every unit of the executable
+// (cmake/BusterSettings.cmake): there its definitions are inline ones, which clang emits only to inline them, and
+// noinline keeps it from that. A unit compiled without it may be linked without main.c's units, as measure-tier1-rows
+// links c_lexer_benchmark.c alone, so nothing else would define them: they are static there, as the lexer's own entry
+// points are, and the unit has the table it calls. Where these definitions are inline ones, they call this file's
+// static functions, a C2y feature that clang takes in C17 as an extension (-Wstatic-in-inline).
 #if defined(BUSTER_HOME_DRIVER)
 #define BUSTER_UNICODE_ENTRY BUSTER_LEXER_ENTRY
-#else
+#elif defined(BUSTER_EXECUTABLE_UNIT)
 #define BUSTER_UNICODE_ENTRY inline __attribute__((noinline))
+#else
+#define BUSTER_UNICODE_ENTRY static
 #endif
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wstatic-in-inline"

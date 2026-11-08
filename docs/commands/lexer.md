@@ -16,7 +16,10 @@ requirements. [Command index](README.md).
   buckets of 16 and sorted by their loose keys, so that an exact or a loose
   lookup is a binary search over the buckets' first names, 283 KB of names
   and about 330 KB in all, which the executable has once (its lookups are the
-  lexer's entry points; the Release build's text grew by 337,584 bytes). Only a
+  lexer's entry points; the Release build's text grew by 337,584 bytes): its
+  benchmark units, compiled with `-DBUSTER_EXECUTABLE_UNIT`, call the driver
+  unit's, and a unit compiled without it, as `measure-tier1-rows` builds
+  `c_lexer_benchmark.c` to link it alone, has its own static copy. Only a
   `\N` reads it. `test-lexer` checks every stored name exactly and lowercased
   loosely, every listed name made by rule and every Hangul syllable
   (`check_unicode_names`).
