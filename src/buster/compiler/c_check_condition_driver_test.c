@@ -342,6 +342,51 @@ static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] 
         .warnings = 2,
         .notes = 2,
     },
+    {
+        .name = "object and function addresses are never null",
+        .source = "int glob;\n"
+                  "void helper(void) {}\n"
+                  "void f1(char *p) __attribute__((enable_if(p != 0, \"nonnull\")));\n"
+                  "void f3(void (*fp)(void)) __attribute__((enable_if(fp != 0, \"nn\")));\n"
+                  "void f4(int *p) __attribute__((enable_if(p != 0, \"nonnull\")));\n"
+                  "void d(int *p) __attribute__((diagnose_if(p != 0, \"nonnull arg\", \"warning\")));\n"
+                  "void h(void) { int local; f1(\"lit\"); f3(helper); f4(&glob); d(&glob); d(0); f4(&local); }\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "a variable read a short circuit can skip",
+        .source = "int g;\n"
+                  "void f(int x) __attribute__((enable_if(x > 0 && g > 0, \"c\")));\n"
+                  "void k(int x) __attribute__((enable_if(x > 0 ? g : 1, \"c\")));\n"
+                  "void m(int x) __attribute__((diagnose_if(x > 0 || g, \"c\", \"warning\")));\n"
+                  "void h(void) { f(0); }\n"
+                  "void h2(void) { k(0); }\n"
+                  "void h3(void) { m(1); m(0); }\n",
+        .warnings = 1,
+        .errors = 1,
+        .notes = 2,
+    },
+    {
+        .name = "addresses compared, tested and cast",
+        .source = "int a[4], b;\n"
+                  "void f(int *p, int *q) __attribute__((diagnose_if(p == q, \"same\", \"warning\")));\n"
+                  "void g(int *p) __attribute__((diagnose_if(!p, \"null\", \"warning\"), diagnose_if(p ? 1 : 0, \"set\", \"warning\")));\n"
+                  "void k(const char *s) __attribute__((diagnose_if((const void *)s != 0, \"cast\", \"warning\")));\n"
+                  "void h(void) { f(a, &b); f(0, 0); g(a); g(0); k(\"x\"); k(0); }\n",
+        .warnings = 4,
+        .notes = 4,
+    },
+    {
+        .name = "unknown operands skipped at calls",
+        .source = "int g;\n"
+                  "void m(int x) __attribute__((diagnose_if(x > 0 || g, \"or\", \"warning\")));\n"
+                  "void n(int x, int y) __attribute__((diagnose_if(x == 0 || y > 3, \"either\", \"warning\")));\n"
+                  "void k(int x) __attribute__((enable_if(x > 0 ? g : 1, \"c\")));\n"
+                  "void h(int v) { m(1); m(0); n(0, v); n(1, v); n(v, 5); k(0); }\n",
+        .warnings = 2,
+        .notes = 2,
+    },
 };
 
 static void check_test_driver_conditions(CheckTest* test, const char* clang, const char* executable, const char* directory)

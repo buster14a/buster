@@ -370,23 +370,35 @@ static CheckConditionBuild check_condition_steps(CheckInputReader* reader, Check
         {
             CheckValue value = { 0 };
             TypeId unused = 0;
-            const bool evaluated = check_input_constant_read(reader, first + low[v], first + high[v] + 1, false, false, true, &value, &unused, NULL, NULL) &&
-                                   check_input_const_rvalue(reader, first + high[v] + 1, &value) && value.constant_kind != CHECK_CONSTANT_NONE &&
-                                   value.fault == CHECK_FAULT_NONE;
-            // A variable's read never gives a constant; any other part the evaluator doesn't take alone (a call's callee) isn't
-            // supported.
+            const bool read = check_input_constant_read(reader, first + low[v], first + high[v] + 1, false, false, true, &value, &unused, NULL, NULL) &&
+                              check_input_const_rvalue(reader, first + high[v] + 1, &value);
+            const bool evaluated = read && value.constant_kind != CHECK_CONSTANT_NONE && value.fault == CHECK_FAULT_NONE;
+            // A variable's read never gives a constant. clang's check is whether some arguments give one: a read that a `&&`'s
+            // or `||`'s right operand, or a conditional's second or third, holds can be skipped, and is an unknown value each
+            // call's evaluation needs only where it reads it. Any other part the evaluator doesn't take alone (a call's
+            // callee) isn't supported.
             const uint32_t variable = evaluated ? BUSTER_CHECK_NONE : check_condition_variable(reader, parameters, list, first + low[v], first + high[v] + 1);
-            if (!evaluated && variable != BUSTER_CHECK_NONE)
+            bool avoidable = false;
+            for (uint32_t at = token; read && !evaluated && !avoidable && parser->tree.parents[at] >= first && parser->tree.parents[at] < end &&
+                 parser->tree.parents[at] != at; at = parser->tree.parents[at])
+            {
+                const uint32_t above = parser->tree.parents[at];
+                const uint8_t above_kind = parser->tokens.kinds[above];
+                avoidable = ((above_kind == PARSE_KIND_AMPAMP || above_kind == PARSE_KIND_PIPEPIPE) && at > above) ||
+                            (above_kind == PARSE_KIND_COLON && first_child[above - first] != at - first);
+            }
+            if (!evaluated && variable != BUSTER_CHECK_NONE && !avoidable)
             {
                 check_condition_never_constant(reader, attributes, attribute, variable);
                 result = CHECK_CONDITION_FAILED;
             }
-            else if (!evaluated)
+            else if (!evaluated && !avoidable)
             {
                 result = CHECK_CONDITION_UNSUPPORTED;
             }
             else
             {
+                value.constant_kind = evaluated ? value.constant_kind : CHECK_CONSTANT_NONE;
                 constants[constant_count] = value;
                 steps[step_count] = (CheckConditionStep){ .op = BUSTER_CHECK_CONDITION_CONSTANT, .index = constant_count, .operands = { 0, 0, 0 } };
                 constant_count += 1;

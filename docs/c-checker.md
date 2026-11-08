@@ -7179,7 +7179,11 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   then, false or true for every use, or clang's "'X' attribute expression
   never produces a constant expression" at the attribute, its note
   "subexpression not valid in a constant expression" at the variable it
-  reads. One that names a parameter becomes a program
+  reads. In one that names a parameter that error is clang's too where the
+  variable's read can't be skipped; a read in a `&&`'s or `||`'s right
+  operand or a conditional's second or third (`x > 0 && g > 0`) can be, as
+  clang asks whether some arguments give a constant, and it is an unknown
+  value that a call's evaluation needs only where it reads it. One that names a parameter becomes a program
   (`CheckConditionStep`), from the parse tree in postorder: each largest
   subexpression without a parameter, and each sizeof's or alignof's, is a
   constant the evaluator gives; a parameter is its place and type; the
@@ -7210,10 +7214,14 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   list (`c_check_condition_graph.c`, in the warning graph's pass over calls)
   binds each argument whose checked value is a constant (an integer, a
   floating value, a null or absolute address), converted to its parameter's
-  type, and runs the programs. An argument that isn't a constant, and an
-  action that faults (an overflow, a division by zero, a shift past the
-  width), leave a condition unknown, as clang's EvaluateWithSubstitution
-  does: a diagnose_if is then not given, an enable_if doesn't admit the
+  type, and runs the programs. An object's or a function's address (`&x`, an
+  array or a function that decays, a string literal) is an address that is
+  never null, as clang's evaluation knows: compared with a null pointer, or
+  tested for truth, it decides; any other action on it is unknown. An
+  argument that isn't a constant is an unknown value, which a `&&`, a `||` or
+  a conditional that doesn't read it skips. An unknown result, and an action
+  that faults (an overflow, a division by zero, a shift past the width),
+  leave a condition unknown, as clang's EvaluateWithSubstitution does: a diagnose_if is then not given, an enable_if doesn't admit the
   call. The first enable_if that doesn't admit it, in the order clang checks
   them (the latest declaration's first, each declaration's in source order),
   is "no matching function for call to 'f'" at the callee, its note

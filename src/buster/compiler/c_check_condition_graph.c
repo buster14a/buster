@@ -7,8 +7,25 @@
 // type. Included by c_check_warning_graph.c, whose pass over the checked calls calls check_input_condition_call: a unit
 // without conditions pays a count test there.
 
-// Whether `condition` holds at call `node` (`*known` false where it can't be evaluated: an argument isn't a constant, or an
-// action faults). Its steps run in order on `values`, the scratch room of a value for each.
+// Whether `value` is an address that is never null (an object's or a function's), and whether it is a null pointer: an
+// integer zero or a null address.
+static bool check_condition_nonnull(const CheckValue* value)
+{
+    return value->constant_kind == CHECK_CONSTANT_ADDRESS && (value->flags & BUSTER_CHECK_NONNULL_ADDRESS) != 0 && value->category != CHECK_LVALUE &&
+           value->fault == CHECK_FAULT_NONE;
+}
+
+static bool check_condition_null(const TypeTable* types, const CheckValue* value)
+{
+    bool truth = true;
+    const bool zero = value->constant_kind == CHECK_CONSTANT_INTEGER && check_action_truth(types, value, &truth) && !truth;
+    const bool address = value->constant_kind == CHECK_CONSTANT_ADDRESS && value->object == 0 && value->offset == 0 &&
+                         (value->flags & BUSTER_CHECK_NONNULL_ADDRESS) == 0 && value->fault == CHECK_FAULT_NONE;
+    return zero || address;
+}
+
+// Whether `condition` holds at call `node` (`*known` false where it can't be evaluated: an argument it reads isn't a
+// constant, or an action faults). Its steps run in order on `values`, the scratch room of a value for each.
 static bool check_condition_evaluate(TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t node, const CheckCondition* condition,
                                      CheckValue* values, bool* known)
 {
@@ -25,18 +42,30 @@ static bool check_condition_evaluate(TypeTable* types, const CheckGraph* graph, 
         else if (step->op == BUSTER_CHECK_CONDITION_PARAMETER)
         {
             valid = step->index < arguments;
-            CheckValue value = valid ? check_stream_value(stream, graph->argument_nodes[begin + step->index]) : (CheckValue){ 0 };
-            valid &= value.fault == CHECK_FAULT_NONE && (value.constant_kind == CHECK_CONSTANT_INTEGER || value.constant_kind == CHECK_CONSTANT_FLOATING ||
-                                                         (value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object == 0));
-            if (valid)
+            const uint32_t argument = valid ? graph->argument_nodes[begin + step->index] : BUSTER_CHECK_NONE;
+            CheckValue value = valid ? check_stream_value(stream, argument) : (CheckValue){ 0 };
+            const bool pointer = valid && type_kind(types, type_strip_aligned(types, step->type)) == BUSTER_TYPE_KIND_POINTER;
+            // An object's or a function's address is never null, as clang's evaluation knows: `&x`, an array or a function
+            // that decays, an address constant the checker marked so. Its value is otherwise unknown.
+            const bool nonnull = pointer && value.fault == CHECK_FAULT_NONE &&
+                                 (graph->ops[argument] == CHECK_OP_ADDRESS || value.category == CHECK_FUNCTION ||
+                                  (value.category == CHECK_LVALUE && type_kind_is_array(type_kind(types, type_strip_aligned(types, value.type)))) ||
+                                  (value.constant_kind == CHECK_CONSTANT_ADDRESS && (value.flags & BUSTER_CHECK_NONNULL_ADDRESS) != 0));
+            const bool constant = valid && !nonnull && value.fault == CHECK_FAULT_NONE &&
+                                  (value.constant_kind == CHECK_CONSTANT_INTEGER || value.constant_kind == CHECK_CONSTANT_FLOATING ||
+                                   (value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object == 0));
+            if (constant)
             {
                 // A parameter's value: neither an lvalue nor an integer constant expression.
                 value.category = CHECK_RVALUE;
                 value.flags = 0;
                 check_action_convert_value(types, &value, step->type, node);
-                values[s] = value;
-                valid = value.fault == CHECK_FAULT_NONE && value.constant_kind != CHECK_CONSTANT_NONE;
             }
+            // Where it isn't a constant, its value is unknown: an operator that doesn't read it (a `&&` whose left operand
+            // is false) still gives one.
+            values[s] = constant && value.fault == CHECK_FAULT_NONE ? value :
+                        (CheckValue){ .type = step->type, .category = CHECK_RVALUE, .constant_kind = nonnull ? CHECK_CONSTANT_ADDRESS : CHECK_CONSTANT_NONE,
+                                      .flags = nonnull ? BUSTER_CHECK_NONNULL_ADDRESS : 0 };
         }
         else
         {
@@ -47,8 +76,38 @@ static bool check_condition_evaluate(TypeTable* types, const CheckGraph* graph, 
             action.operands[1] = step->op == CHECK_OP_CAST || step->op == CHECK_OP_NEGATIVE || step->op == CHECK_OP_POSITIVE || step->op == CHECK_OP_NOT ||
                                  step->op == CHECK_OP_BIT_NOT ? (CheckValue){ 0 } : values[step->operands[1]];
             action.operands[2] = step->op == CHECK_OP_CONDITIONAL ? values[step->operands[2]] : (CheckValue){ 0 };
+            // An address that is never null against a null pointer, which the actions can't tell apart from a null address
+            // (the unknown address has no object): decided here.
+            const bool equality = step->op == CHECK_OP_EQUAL || step->op == CHECK_OP_NOT_EQUAL;
+            const bool decided = equality && ((check_condition_nonnull(&action.operands[0]) && check_condition_null(types, &action.operands[1])) ||
+                                              (check_condition_nonnull(&action.operands[1]) && check_condition_null(types, &action.operands[0])));
+            // Any other action on such an address but its truth's (`!`, `&&`, `||`, a conditional's condition) and a cast to
+            // another pointer has no known value.
+            const bool logical = step->op == CHECK_OP_NOT || step->op == CHECK_OP_LOGICAL_AND || step->op == CHECK_OP_LOGICAL_OR || step->op == CHECK_OP_CONDITIONAL;
+            const bool addressed = check_condition_nonnull(&action.operands[0]) ||
+                                   (step->op != CHECK_OP_CAST && step->op != CHECK_OP_NEGATIVE && step->op != CHECK_OP_POSITIVE && step->op != CHECK_OP_NOT &&
+                                    step->op != CHECK_OP_BIT_NOT && check_condition_nonnull(&action.operands[1])) ||
+                                   (step->op == CHECK_OP_CONDITIONAL && check_condition_nonnull(&action.operands[2]));
+            const bool pointer_cast = step->op == CHECK_OP_CAST && type_kind(types, type_strip_aligned(types, step->type)) == BUSTER_TYPE_KIND_POINTER;
             CheckActionResult result = { 0 };
-            check_action_scalar(types, &action, &result);
+            if (decided)
+            {
+                result.value = (CheckValue){ .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE, .constant_kind = CHECK_CONSTANT_INTEGER,
+                                             .integer = step->op == CHECK_OP_NOT_EQUAL };
+            }
+            else if (addressed && pointer_cast)
+            {
+                result.value = action.operands[0];
+                result.value.type = step->type;
+            }
+            else if (addressed && !logical)
+            {
+                result.value = (CheckValue){ .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE };
+            }
+            else
+            {
+                check_action_scalar(types, &action, &result);
+            }
             values[s] = result.value;
             valid = result.diagnostic == CHECK_DIAG_NONE;
         }
