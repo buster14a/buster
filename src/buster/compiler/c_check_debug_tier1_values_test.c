@@ -177,6 +177,12 @@ static const char check_debug_tier1_values_source[] =
     "#line 800 \"dbg_tier1_values.c\"\n"
     "    return number+barrier+(int)wide+(int)fraction+(int)precision+*pointer+literal+negative+(int)(literal_bits&15);\n"
     "}\n"
+    "int t1_straight(int input)\n"
+    "{\n"
+    "    int computed=input*3+2;\n"
+    "#line 900 \"dbg_tier1_values.c\"\n"
+    "    return computed^(computed>>3);\n"
+    "}\n"
     "int main(void)\n"
     "{\n"
     "    int failed=t1_values(10);\n"
@@ -188,6 +194,8 @@ static const char check_debug_tier1_values_source[] =
     "    failed|=t1_scalars(10,1000L,2.5f,3.75,&t1_global)!=1090;\n"
     "    printf(\"T1-PARAMS %d %ld %.2f %.2f %d\\n\",10,1000L,2.5,3.75,t1_global);\n"
     "    printf(\"T1-CONSTANTS %d %d %llu\\n\",29,-5,18446744073709551600ULL);\n"
+    "    failed|=t1_straight(10)!=36;\n"
+    "    printf(\"T1-COMPUTED %d\\n\",3*10+2);\n"
     "    if (!failed) puts(\"T1-RUN-OK\");\n"
     "    return failed;\n"
     "}\n";
@@ -235,6 +243,7 @@ static const char* const check_debug_tier1_values_expected[] = {
     "T1-LEAF 11",
     "T1-PARAMS 10 1000 2.50 3.75 41",
     "T1-CONSTANTS 29 -5 18446744073709551600",
+    "T1-COMPUTED 32",
 };
 
 // Unlike the short-command helper, a checked command file neither drops commands at an argv limit nor accepts a
@@ -262,6 +271,7 @@ static const char check_debug_tier1_values_script[] =
     "break dbg_tier1_values.c:700\n"
     "break *t1_scalars\n"
     "break dbg_tier1_values.c:800\n"
+    "break dbg_tier1_values.c:900\n"
     "run\n"
     "up\n"
     "t1-read printf \"GDB-T1-BASE %d %d %d %d %d %d %d %d %d\\n\",number,frame,escaped,record.first,record.small,*record.pointer,array[2],*pointer,shadow\n"
@@ -309,6 +319,8 @@ static const char check_debug_tier1_values_script[] =
     "t1-read printf \"GDB-T1-PARAMS %d %ld %.2f %.2f %d\\n\",number,wide,fraction,precision,*pointer\n"
     "continue\n"
     "t1-read printf \"GDB-T1-CONSTANTS %d %d %llu\\n\",literal,negative,(unsigned long long)literal_bits\n"
+    "continue\n"
+    "t1-read printf \"GDB-T1-COMPUTED %d\\n\",computed\n"
     "continue\n"
     "printf \"GDB-T1-DONE\\n\"\n";
 

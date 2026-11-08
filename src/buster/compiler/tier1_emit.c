@@ -1774,6 +1774,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
 
 #include "tier1_emit_cfg.c"
 #include "tier1_certificate_emitted.c"
+#include "tier1_debug_straight.c"
 
 static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
 {
@@ -1841,7 +1842,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
         chain = false;
         error = tier1_emit_cfg_function(plan, options, allowed_forms, output, scratch, &emitted, error_node);
     }
-    if (error == TIER1_EMIT_OK && chain && options->certify)
+    if (error == TIER1_EMIT_OK && chain && (options->certify || options->sources))
     {
         // The fragments' certificate (#939): a straight line has no edges, so the fragment checker is the whole proof of
         // its allocation; its scratch on `scratch`, popped after.
@@ -1914,6 +1915,10 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     if (error == TIER1_EMIT_OK && chain)
     {
         error = tier1_emit_records(plan, allowed_forms, BUSTER_VECTOR_PATH(options->vector), options->sources, output, scratch, &emitted, error_node);
+    }
+    if (error == TIER1_EMIT_OK && chain && options->sources)
+    {
+        error = tier1_debug_straight(plan, options, output, &emitted);
     }
     if (error == TIER1_EMIT_OK && !chain && (options->certify || options->sources))
     {

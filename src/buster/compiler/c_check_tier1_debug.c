@@ -11,11 +11,13 @@
 // unknown origins are gaps. A body write to the frame base also makes these homes unavailable. Unsupported storage
 // loses only its location; malformed metadata and capacity failures fail transactionally.
 //
-// Immutable incoming scalars use a separate decoded machine CFG proof: ABI carriers, exact register copies and
-// intersections at all predecessors, including backedges. Only proven preserved carriers survive a call's PC;
-// spills, arbitrary computation and indirect control do not invent facts. These parameter ranges also cover entry
-// and prologue PCs where a carrier is proved, regardless of source origins. Immutable literal locals need an exact
-// original typed initialization and later known source origins; they never extend through a synthetic source gap.
+// Scalar assignments use a separate decoded machine CFG proof: ABI carriers, checked machine definitions, exact
+// register/frame copies and intersections at all predecessors, including backedges. Calls retain only proven
+// preserved registers and inaccessible compiler rows. Initial parameter ranges also cover entry and prologue PCs
+// where a carrier is proved. Source assignment identities are independent of lines, and later actual RHS completion
+// prevents an old binding reviving under reordered source origins. Literal values need exact typed assignments;
+// unknown scopes, definitions, clobbers and indirect control produce gaps. Publication follows changed carriers and
+// source events through reverse lists, without rescanning every local at every machine instruction.
 //
 // Inputs remain immutable and disjoint from output/scratch throughout. Every column is bounded by its logical count;
 // no padding is read. Source-run compaction has exact scalar/vector paths, with masked final batches. Retained work

@@ -52,6 +52,14 @@ requirements. [Command index](README.md).
   it also combines a carried row with a by-value aggregate call. `test-tier1-emit`
   also requires zero repeat stores for a single earlier
   predecessor, while joins and backward-layout predecessors still store.
+  The debug-definition fixture (#1114) emits the real call program with source
+  metadata and without `certify`, and requires the complete code certificate
+  before publishing result claims. A call result begins only after its actual
+  return-value copy. Narrowing that copy, changing its source, assigning its
+  record to a different node or replacing the call must be refused. A stale
+  argument mutation preserves the result kernel but fails value-flow checking,
+  proving that kernel matching alone cannot publish a debug value. Disabling
+  source metadata must leave the emitted instruction and branch bytes unchanged.
 
 - The emitter checks its allocations, and the CFG consumer's code, under
   `Tier1EmitOptions.certify`, which its tests and the driver's `--verify` set. A failure is the emission stage's
@@ -59,6 +67,20 @@ requirements. [Command index](README.md).
   the checker's capacity (`TIER1_EMIT_MEMORY`) a resource failure. Either fails
   `--tier1 --verify`'s compile ([the outcomes
   guide](../../docs/tier1-outcomes.md)).
+  `Tier1EmitOptions.sources` also runs the CFG emitted-code certificate,
+  independently of `certify`, to obtain exact scalar definition locations for
+  debug metadata. Candidate definitions are private until the full check
+  returns `TIER1_CERT_EMITTED_OK`; unsupported shapes publish no definition
+  claims, and refusals or resource failures retain the same transactional
+  failure behavior. Debug metadata never substitutes allocator intervals for
+  that machine proof.
+  The straight-line emitter's `tier1_debug_straight.c` has a separate bounded
+  integer proof for source metadata: no calls, spills, rematerialization,
+  fixed-register sequences or transitions, and one register fragment per
+  allocated interval. After the allocation certificate, it checks every
+  selected operand against the actual register owner, regenerates each kernel
+  using the scalar form-choice oracle, and checks the concrete records and
+  clobbers. Unsupported straight-line shapes publish no definition claims.
 - #938's harness allocates every problem it adapts through
   `tier1_problem_allocate`, by both allocator paths, and reports an allocation
   only past `tier1_problem_certify`:

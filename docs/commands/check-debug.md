@@ -43,3 +43,49 @@ requirements. [Command index](README.md).
   path, by `--lanes 1` and 8 into one lane's bytes and linked by GNU ld and lld,
   and by gdb at every instruction.
   [The debug guide](../../docs/debug.md) ("The C driver's `-g`") has the details.
+
+## Optimized values (#1114)
+
+`c_check_debug_tier1_values_test.c` adds the Tier 1 value cross-checks. Its
+separate support unit makes object addresses escape and supplies explicit
+checkpoints; GDB stops at the checkpoint's exact entry and reads the caller's
+frame. Expected values match the fixture's own output, including mutations,
+inner/outer shadowing, two loop iterations, aligned objects, preserved load
+snapshots and reassigned call results. Exact-entry ABI parameters, later
+literal values and a computed straight-line local have separate stops. The
+straight-line fixture computes `input * 3 + 2`, uses that result twice, and
+requires both the exact intermediate value at its return line and the final
+native result. Inlined callee locals must not appear as
+caller locals. The compile requires `--tier1 --tier1-strict --verify` and an
+actual inline expansion.
+
+The bounded variant set covers default, scalar, pre/post scheduling,
+frame-pointer and no-rematerialization native builds, and a `-c -g` object
+linked by GNU ld, lld and `link-foreign`. Each native variant compares its
+allocated sections and entry point with a compile without `-g` (the build-ID
+note is excluded); one/eight-lane builds must be byte-identical. Every debug
+image passes through `llvm-dwarfdump --verify`, native execution and GDB.
+GDB must include Python support: a small command wrapper records each failed
+read and continues to the remaining checkpoints. The harness still requires
+every positive value, no read-error marker, successful GDB exit and the final
+completion marker, so a failed read cannot turn into a passing partial run.
+
+The ordinary `test-check-debug` path includes byte-range grouping, malformed
+and overlapping intervals, encoded zero-width ranges, patchable entry shifts,
+and arena rollback. `c_check_debug_tier1_parameters_test.c` is included after
+the Tier 1 producer so its machine fixtures can call the real helpers. Its
+hand-specified PC tables cover narrow/full register copies, floating carriers,
+partial writes, calls, diamonds, loop backedges, unreachable code and final
+record permutations. Its shared-object fixtures check complete versus partial
+initialization, exact source-object identity, lifetime pairing, foreign
+overlap, indexed writes, delayed openings, early closings and source gaps on
+both scalar/vector paths. Legal motion across an original fallthrough block
+boundary may shrink or remove a shared home without rejecting the program;
+malformed block metadata still fails transactionally.
+`c_check_debug_tier1_bindings_test.c` runs the same parameter tables through
+the sparse binding constructor and publisher, plus explicit private-row
+spill/reload, call, partial-overwrite and addressable-row cases. Assignment
+tables require full RHS completion, reject an interleaved foreign result
+overwrite, and forbid older source origins from reviving stale values.
+Full-emission certificate mutation tests live in
+`test-tier1-emit` ([the certificate command guide](tier1-certificate.md)).

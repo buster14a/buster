@@ -823,6 +823,129 @@ static void tier1_code_certificate_debug(Tier1EmitTest* test, bool vector)
     arena_pop_to(&test->input, 0);
 }
 
+static void tier1_code_certificate_debug_straight(Tier1EmitTest* test, bool vector)
+{
+    for (uint32_t alias = 0; alias < 2; alias += 1)
+    {
+        const IrSizes sizes = { .instruction_count = alias ? 3 : 5, .block_count = 1, .parameter_count = alias ? 1 : 2 };
+        IrFunction function = { 0 };
+        bool valid = ir_create(&test->input, &sizes, &function) == IR_OK;
+        if (valid)
+        {
+            function.result_type = IR_I64;
+            function.incoming = (AbiCall){ .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .integer_registers = (uint8_t)sizes.parameter_count };
+            function.block_offsets[1] = sizes.instruction_count;
+            function.parameter_types[0] = IR_I64;
+            tier1_emit_test_node(&function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE);
+            if (alias)
+            {
+                tier1_emit_test_node(&function, 1, IR_COPY, IR_I64, 0, BUSTER_IR_NONE);
+                tier1_emit_test_node(&function, 2, IR_RET, IR_VOID, 1, BUSTER_IR_NONE);
+            }
+            else
+            {
+                function.parameter_types[1] = IR_I64;
+                tier1_emit_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE);
+                tier1_emit_test_node(&function, 2, IR_XOR, IR_I64, 0, 1);
+                tier1_emit_test_node(&function, 3, IR_SUB, IR_I64, 2, 0);
+                tier1_emit_test_node(&function, 4, IR_RET, IR_VOID, 3, BUSTER_IR_NONE);
+            }
+        }
+        valid = valid && ir_verify_scalar(&function, &test->scratch, NULL).error == IR_OK;
+        IrDominance dominance = { 0 };
+        valid = valid && tier1_terminal_dominance(test, &function, vector, &dominance);
+        Tier1SelectPlan plan = { 0 };
+        uint32_t error_node = BUSTER_IR_NONE;
+        valid = valid && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &error_node) == TIER1_SELECT_OK;
+        Tier1EmitOptions options = {
+            .register_mask = alias ? 1u << X86_REGISTER_RDI : (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDI),
+            .vector = vector,
+            .sources = true,
+        };
+        Tier1EmitResult emitted = { 0 };
+        valid = valid && tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &error_node) == TIER1_EMIT_OK;
+        valid = valid && !emitted.general && emitted.certified && emitted.debug_definitions != NULL && emitted.body_record == 0;
+        const uint32_t value = alias ? 1 : 2;
+        const Tier1DebugDefinition definition = valid ? emitted.debug_definitions[value] : (Tier1DebugDefinition){ .first = BUSTER_IR_NONE, .end = BUSTER_IR_NONE };
+        const bool proven = valid && (alias ? emitted.code.node_first[1] == emitted.code.node_first[2] && definition.first == BUSTER_IR_NONE && definition.end == BUSTER_IR_NONE :
+                                     definition.first == emitted.code.node_first[2] && definition.end == emitted.code.node_first[3] && definition.first < definition.end && definition.bytes == 8);
+        tier1_emit_test_expect(test, proven, alias ? "an actual vanished straight-line copy retains operand ownership but invents no definition records" :
+                                                  "straight-line scalar definitions have complete checked kernels and actual operand owners");
+        options.sources = false;
+        Tier1EmitResult plain = { 0 };
+        const bool plain_ok = valid && tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &plain, &error_node) == TIER1_EMIT_OK;
+        tier1_emit_test_expect(test, plain_ok && plain.debug_definitions == NULL && plain.origins == NULL && plain.code.count == emitted.code.count &&
+                               memcmp(plain.code.records, emitted.code.records, (uint64_t)plain.code.count * sizeof(X86Instruction)) == 0,
+                               "straight-line source proofs leave every emitted instruction unchanged");
+        options.sources = true;
+        if (proven && !alias)
+        {
+            const uint64_t mark = test->output.length;
+            Tier1EmitResult candidate = emitted;
+            const X86Instruction saved = emitted.code.records[definition.first];
+            emitted.code.records[definition.first] = (X86Instruction){ .form = X86_FORM_NOP };
+            const Tier1EmitError corrupted = tier1_debug_straight(&plan, &options, &test->output, &candidate);
+            tier1_emit_test_expect(test, corrupted == TIER1_EMIT_CERTIFICATE && candidate.debug_definitions == NULL,
+                                   "a wrong concrete straight-line kernel refuses every definition claim");
+            emitted.code.records[definition.first] = saved;
+            arena_pop_to(&test->output, mark);
+
+            // Keep every kernel exactly regenerated, but make xor's output overwrite p0 before sub reads p0.
+            // Matching destination fragments and direct-register claims cannot substitute for this operand check.
+            uint8_t registers[5];
+            uint8_t fragments[8];
+            X86Instruction records[32];
+            uint32_t origins[32];
+            uint32_t first[6];
+            bool matched = emitted.allocation.fragment_count <= BUSTER_ARRAY_LENGTH(fragments);
+            memcpy(registers, emitted.allocation.value_registers, sizeof(registers));
+            if (matched)
+            {
+                memcpy(fragments, emitted.allocation.registers, emitted.allocation.fragment_count);
+            }
+            registers[2] = registers[0];
+            for (uint32_t interval = 0; matched && interval < emitted.prepared.allocation.count; interval += 1)
+            {
+                if (emitted.prepared.allocation.values[interval] == 2)
+                {
+                    fragments[emitted.allocation.fragment_offsets[interval]] = registers[2];
+                }
+            }
+            uint32_t count = 0;
+            for (uint32_t node = 0; matched && node < function.instruction_count; node += 1)
+            {
+                first[node] = count;
+                if (!plan.covered[node])
+                {
+                    const Tier1SelectHoles holes = tier1_select_holes(&plan, registers, node);
+                    const Tier1SelectRecords kernel = tier1_select_expand(&holes);
+                    matched = !kernel.overflowed && !kernel.requested && kernel.count <= BUSTER_ARRAY_LENGTH(records) - count;
+                    for (uint32_t r = 0; matched && r < kernel.count; r += 1)
+                    {
+                        records[count] = kernel.records[r];
+                        origins[count++] = tier1_origin(TIER1_ORIGIN_NODE, node);
+                    }
+                }
+            }
+            first[5] = count;
+            candidate = emitted;
+            candidate.allocation.value_registers = registers;
+            candidate.allocation.registers = fragments;
+            candidate.code.records = records;
+            candidate.code.node_first = first;
+            candidate.code.count = count;
+            candidate.origins = origins;
+            const Tier1EmitError ownership = matched ? tier1_debug_straight(&plan, &options, &test->output, &candidate) : TIER1_EMIT_INVALID;
+            tier1_emit_test_expect(test, matched && ownership == TIER1_EMIT_CERTIFICATE && candidate.debug_definitions == NULL,
+                                   "exactly regenerated straight-line kernels cannot prove a live operand overwritten by another SSA value");
+            arena_pop_to(&test->output, mark);
+        }
+        arena_pop_to(&test->output, 0);
+        arena_pop_to(&test->scratch, 0);
+        arena_pop_to(&test->input, 0);
+    }
+}
+
 static void tier1_code_certificate_saved(Tier1EmitTest* test, bool vector, Tier1CodeCertificateCounts* counts)
 {
     IrFunction function;
@@ -1191,6 +1314,7 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
     for (uint32_t variant = 0; variant < 2; variant += 1)
     {
         tier1_code_certificate_debug(test, variant != 0);
+        tier1_code_certificate_debug_straight(test, variant != 0);
         tier1_code_certificate_saved(test, variant != 0, &counts);
     }
     for (uint32_t variant = 0; variant < 2; variant += 1)

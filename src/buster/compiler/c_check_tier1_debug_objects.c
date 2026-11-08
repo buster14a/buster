@@ -88,25 +88,27 @@ static bool check_tier1_debug_object_clips(const Tier0Function* function, const 
             place[old] = r;
         }
     }
+    // The scheduler cuts at actual control-flow targets, not every IR block boundary: records may cross an
+    // unlabelled fallthrough boundary. Global prefix/suffix bounds conservatively shrink those lifetimes too.
+    // No additional debug-only cut is needed, and a legal permutation cannot turn into a publication failure.
+    if (valid && prove)
+    {
+        after[0] = 0;
+        before[count] = count;
+    }
+    for (uint32_t r = 0; valid && prove && r < count; r += 1)
+    {
+        after[r + 1] = after[r] > place[r] + 1 ? after[r] : place[r] + 1;
+    }
+    for (uint32_t r = count; valid && prove && r > 0; r -= 1)
+    {
+        before[r - 1] = before[r] < place[r - 1] ? before[r] : place[r - 1];
+    }
     for (uint32_t block = 0; valid && prove && block < emitted->cfg_input.block_count; block += 1)
     {
         const uint32_t first = emitted->block_records[block];
         const uint32_t end = emitted->block_records[block + 1];
         valid = first <= end && end <= count;
-        if (valid)
-        {
-            after[first] = first;
-            before[end] = end;
-        }
-        for (uint32_t r = first; valid && r < end; r += 1)
-        {
-            valid = place[r] >= first && place[r] < end;
-            after[r + 1] = after[r] > place[r] + 1 ? after[r] : place[r] + 1;
-        }
-        for (uint32_t r = end; valid && r > first; r -= 1)
-        {
-            before[r - 1] = before[r] < place[r - 1] ? before[r] : place[r - 1];
-        }
     }
     const uint32_t added = emitted->cfg_input.block_count - ir->block_count;
     for (uint32_t block = 0; valid && prove && block < ir->block_count; block += 1)

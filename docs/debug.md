@@ -97,7 +97,7 @@ pointer, spill a register value, or otherwise change generated instructions.
 Indirect homes for variable-length arrays dereference the saved array pointer;
 the variable-length bound itself is currently unspecified in the array type.
 
-`.debug_loclists` restricts a home to encoded source-entry ranges after the
+Tier 0's `.debug_loclists` restrict a home to encoded source-entry ranges after the
 prologue and within the declaration's lexical scope. Shared epilogues and
 whole tail-call entries are omitted: those can restore registers or destroy a
 frame base. Lexical blocks use corresponding `.debug_rnglists` entries, so
@@ -121,12 +121,11 @@ writer patches copies after layout. The object writer emits `R_X86_64_32` and
 fields and their values in relocation addends. The optional sixth section is
 omitted for producers which supply only the five core sections.
 
-**Limits:** Tier 1 allocator-interval locations remain a later step of #1114.
-Its parameters and locals are named and typed but deliberately have no location;
-no Tier 0 home is reused as a guess. Thread-local, unresolved and common symbols
-without a published ordinary object definition likewise have no location.
-Values before initialization are not guaranteed meaningful. The existing
-single-source-file-per-function and no-inline-scope limits still apply.
+**Limits:** Thread-local, unresolved and common symbols without a published
+ordinary object definition have no location. Values before initialization are
+not guaranteed meaningful. Each function still has one source file, and inline
+callee scopes are not represented. Tier 1's additional bounds are described
+below; a named, typed value without a proved location remains unavailable.
 
 `test-check-debug --cross-check` compares GDB reads against a fixture's own
 printed values: integer and floating parameters, pointers, arrays, recursive
@@ -138,6 +137,97 @@ It also compares an original nested prototype/function-pointer fixture with
 Clang's DWARF: function-type parameter names and otherwise unused prototype
 qualifiers are absent, while real parameters, locals, their qualifiers and
 callback signatures remain. The two Buster paths emit identical objects.
+
+### Optimized Tier 1 values
+
+With `--tier1 -g`, the typed-to-IR bridge retains an optional debug sidecar:
+each IR instruction's original typed entry, each retained stack object's
+original local, and source assignment identities. SSA promotion, optimization,
+splitting and scheduling preserve or explicitly discard these identities.
+Generated instructions have no invented source position. Inlined callee locals
+do not become caller locals; representing their instances needs inline scopes.
+The emitter's record origins and the post-scheduler's final permutation carry
+the surviving identities to the actual machine records. Source rows therefore
+describe surviving statements, including suspended callers' call sites.
+Optimization can still remove a statement or move its instructions.
+
+`c_check_tier1_debug.c` publishes locations only from concrete machine evidence:
+
+- A whole retained source object uses its actual frame row and displacement.
+  The producer checks the instructions establishing the frame base and rejects
+  a body write that invalidates it. This covers fixed objects in red-zone,
+  frame-pointer and realigned frames when their base stays stable. A split
+  object cannot acquire a whole-object home by choosing one surviving piece.
+  A row shared with another object or compiler temporary needs an additional
+  proof: one explicit start/end lifetime pair in one IR block, a complete
+  direct store of at most eight bytes, and a successful emitted-code
+  certificate. Final scheduling shrinks that interval; a foreign overlapping
+  frame write closes it. Repeated or interblock lifetimes remain unavailable
+  for shared rows.
+- Scalar source bindings are supported when the original local has no escaped
+  address or volatile access and all its assignments are in the original
+  entry source block, without an edge back into that block. The binding names
+  the actual SSA result of its RHS, or an exact literal of its source width.
+  A checked machine definition establishes an SSA value only after its full
+  emitted sequence completes. For a call result this includes the return-value
+  copy. Copies, spills, reloads, clobbers and overlapping writes then update
+  the set of registers and compiler frame rows containing that value. The
+  machine CFG intersects those facts at every predecessor and reaches a fixed
+  point for loops before publishing ranges. A snapshot loaded from a source
+  object keeps its own value identity when that object later changes.
+- Ordinary scalar integer, pointer, `float` and `double` parameters can start
+  in their ABI input registers, including at the exact function entry. An
+  incoming stack parameter has no such seed. At a call instruction, only a
+  proved callee-preserved register or private compiler frame row can describe
+  a suspended caller's scalar; a caller-clobbered register cannot. A row
+  shared with an addressable object loses a cached scalar across a call or an
+  unknown pointer write.
+
+The source assignment and the machine carrier are separate requirements.
+Source origins restrict when an assignment is visible; an old assignment also
+ends when a later RHS has actually completed, so moving an older source origin
+after that completion cannot resurrect a stale value. Assignment instructions
+themselves and unknown source spans are conservative gaps. Literal bindings
+use `DW_OP_implicit_value` with their exact source bytes. Values without a
+proved literal or concrete carrier, pieces of split values, and assignments
+outside the admitted source block do not receive a reconstructed value. They
+can still have a retained whole-object home where that separate proof applies.
+
+The CFG emitter runs the full emitted-code certificate when source metadata is
+requested, including without `--verify`. Exact regenerated instruction kernels
+are necessary but insufficient: the complete value-flow check must also
+succeed before definition claims are published. The separate straight-line
+emitter has a bounded integer proof: no calls, spills, rematerialization,
+fixed-register sequences or transitions, and one uninterrupted register
+fragment per interval. Its allocation certificate is followed by an actual
+register-owner sweep of every selected operand, scalar regeneration of each
+kernel, and exact record and clobber checks. Allocator intervals alone cannot
+establish its source values either. Unsupported shapes leave definition claims
+absent; independently proved parameter carriers, literals and unique retained
+objects can still be described. Debug metadata does not keep a value live,
+force spills, select a different frame, or add a scheduling barrier. No debug
+sidecar is allocated on a compile without `-g`.
+
+Record ranges become byte ranges only after branch sizing and encoding.
+Publication groups them by source local, rejects malformed, overlapping or
+out-of-bounds intervals, removes zero-byte intervals, and intersects the result
+with the declaration's source scope. Proven incoming parameter ranges also
+cover entry and prologue PCs. Patchable entry padding shifts the recorded
+addresses without making the inserted NOPs part of a body value's range.
+
+The Tier 1 cross-check fixture compares debugger reads with native output for
+retained scalar parameters and locals, aggregate and pointer aliases, nested
+shadowing, loops, aligned storage, immutable snapshots, reassigned call
+results, ABI register parameters, literal values and a computed straight-line
+local. Stops inside a separate
+callee read the caller's frame, exercising suspended-call locations. The
+suite runs default, scalar, pre-scheduled, post-scheduled, frame-pointer and
+no-rematerialization variants, plus objects linked by GNU ld, lld and
+`link-foreign`. For each native variant it compares the entry point and every
+allocated section with a compile without `-g`, excluding the build-ID note
+whose hash includes debug bytes. It also requires whole-file equality between
+one and eight lanes. These are regression assertions, not a qualification of
+every optimized source shape.
 
 ## Native executable attachment
 
