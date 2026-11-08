@@ -3873,20 +3873,48 @@ diagnosis cutoffs skip recovered reports. As in clang, a unit with any error
 publishes no unit-end warning: no unused file-scope object's and no unused
 function's (`check_driver_rejected_warnings`).
 
-A body that recovers an error goes to source order, as one with a report does.
-So does a top level, before its bodies are dealt to lanes. Error-free units
-take none of this: their recovered lists stay empty, and the driver copies
-their warning events only on an error.
+Deferred bodies (#1447's lanes item) carry their recovered reports through the
+lanes: a unit whose only errors are recovered keeps its deferred, multi-lane
+schedule. A lane starts each body with an empty list of its own, and the body's
+result keeps it. Each cut keeps the top level's count at the body's opening.
+The merge (`check_deferred_recovered`) rebuilds the unit's list in the order
+source order's reader finds them, by those counts:
+
+- the top level's reports before each body's opening;
+- then the body's;
+- and the top level's after the last body.
+
+Each report's TypeIds take the merged table's (`check_deferred_report`): the
+type it names, and the two whose `value` holds one, a redeclaration's prior type
+and an attribute expression's second operand's type. Every other `value` is a
+token, a count or a pair of tokens, and tokens, declarations and names are the
+unit's already. `check_input_recovered_publish` then appends them
+as source order's does.
+
+One recovered note isn't merged: an object's type conflict notes the entity's
+latest earlier declaration, even a block-scope one in another body. The deferred
+top level hasn't read the bodies it skipped, and a lane hasn't read the other
+bodies. So the scan back from the declaration sends the unit to source order
+when it reaches another body's closing brace before its match. A body with a report it doesn't recover still goes to
+source order, as does a top level with one. Error-free units take none of this:
+their recovered lists stay empty, and the driver copies their warning events
+only on an error.
 
 `test-checker-driver --semantic-recovery-only`
 (`c_check_semantic_recovery_driver_test.c`) compares the whole output and
 status with clang 23:
 
-- by the vector path, the scalar one and deferred bodies on two lanes;
+- by the vector path, the scalar one, and deferred bodies on one, two and
+  three lanes;
 - under gnu17 and gnu23;
 - with no option, `-Wall`, `-ferror-limit=2` and `-w`.
 
-It also checks that `-c` of each fixture is refused with no object written.
+It also checks that `-c` of each fixture is refused with no object written. The
+deferred readings are `-c`'s, on one, two and three lanes: `-fsyntax-only`
+starts no lanes, so a deferred `-fsyntax-only` reading is source order's. The
+driver reads `--scalar`'s in source order; `test-checker-deferred` compares the
+deferred reader with both paths, and its merge with its scalar twins, on its
+recovered fixtures too.
 The fixtures cover each pass above, shared records, two errors in one list,
 missing names and a control error after a recovered error, block declarations,
 exclusions, `_Alignas`, a dropped `format`, and enumerators.
@@ -4094,8 +4122,6 @@ The later phases are left:
   the common warnings, their runtime warnings included. The asm and control
   diagnose paths give only the unit's first error, in generic words, and a
   duplicate case has no "previous case" note on either path.
-- **Lanes.** Bodies don't carry their recovered reports; they fall back to
-  source order instead.
 
 ### What the lowering costs (#531)
 

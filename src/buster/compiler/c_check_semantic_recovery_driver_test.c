@@ -5,8 +5,10 @@
 // gives and then drops the attribute for leaves its declaration valid, so the checker goes on to the declaration's other
 // attributes, the declaration itself and the unit's later declarations (check_input_attribute_recover, CheckInput's
 // recovered reports). On original fixtures, the whole output, line for line, and the status, by the vector path, the
-// scalar one and deferred bodies on two lanes, under gnu17 and gnu23 and the warning and error-limit options; and -c of
-// each, which must be refused with no object written. Include after c_check_resume_driver_test.c, whose reader this
+// scalar one and deferred bodies (whose bodies carry their recovered reports through the lanes) on one, two and three
+// lanes, under gnu17 and gnu23 and the warning and error-limit options; and -c of each, which must be refused with no
+// object written. The deferred readings are -c's, since -fsyntax-only starts no lanes; the driver reads --scalar's in
+// source order, and test-checker-deferred checks the deferred reader's scalar twins. Include after c_check_resume_driver_test.c, whose reader this
 // takes.
 
 // The legacy preprocessor omits #warning's option suffix (the initializer/constant timing controls have the same
@@ -198,6 +200,25 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // A statement expression has its own inner scope; its error is also within the enclosing for scope.
         "void compound(void) { for (int j = ({ int k; 0; }); ; ) break; int x; float x; }\n"
         "void compound_error(void) { for (int j = ({ int k; int x; float x; 0; }); ; ) break; }\n",
+        // Recovered errors in several bodies, between the top level's, which the deferred reader's merge puts back in
+        // source order's (#1447, lanes): attributes', a block's redeclarations naming types the bodies make, a typedef's,
+        // statements outside their loops, and the bodies' warnings beside them.
+        "int t1 __attribute__((aligned(3)));\n"
+        "int f(void) { int a __attribute__((aligned(5))); int unused; return 0; }\n"
+        "int t2 __attribute__((aligned(7)));\n"
+        "int g(void) { int b __attribute__((aligned(9))); return 1; }\n"
+        "int t3 __attribute__((aligned(11)));\n"
+        "int h(int p) { if (p = 2) {} return p; }\n"
+        "int k(void) { struct S { int x; } a; float a; a.x = 1; return a.x; }\n"
+        "int m(void) { typedef struct Q { int y; } T; typedef long T; T q = { 2 }; return q.y; }\n"
+        "int n(void) { break; int u; return 0; }\n"
+        "int o(int p) { continue; return p << 40; }\n"
+        "typedef int U;\nint q(void) { U x = 2; return x; }\nint U;\n",
+        // An attribute expression's invalid operands, both of a type the body makes after an earlier body made its own:
+        // the merge maps both operands' types, the second's held in the report's value (review on #1794).
+        "int g(void) { struct G { int x; } gv; return gv.x; }\n"
+        "int f(void)\n{\n    struct S { int a; } s;\n    int x __attribute__((annotate(\"n\", s + s))) = 0;\n    return x;\n}\n"
+        "int h(void) { struct H { int y; } hv; return hv.y; }\n",
         // A repeated enumerator, dropped: the next one's implicit value restarts at 0 (of int, or of a fixed type), and
         // an enum left with none is unsigned int's.
         "enum A { X = 5 };\nenum B { Y = 3, X, Z };\n_Static_assert(Z == 0, \"z\");\n"
@@ -245,32 +266,51 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
                 arguments[count] = NULL;
                 char* expected = NULL;
                 const int oracle = check_test_driver_spawn(arguments, &expected);
+                // The deferred readings' arguments: -c's, of no object (-fsyntax-only starts no lanes).
+                char* compile[16] = { (char*)executable, (char*)standards[s], "-c", "-o", object, "-fno-caret-diagnostics", source };
+                uint32_t compile_count = 7;
+                if (options[o] != NULL)
+                {
+                    compile[compile_count++] = (char*)options[o];
+                }
                 check_test_semantic_recovery_lookahead(expected);
                 const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
                 check_test_expect(test, lines && oracle != 0, "semantic recovery: clang rejects the fixture and its lines are read");
-                for (uint32_t mode = 0; lines && mode < 3; mode += 1)
+                // The vector path, the scalar one, and deferred bodies on 1, 2 and 3 lanes.
+                static const char* const mode_lanes[] = { NULL, NULL, "1", "2", "3" };
+                for (uint32_t mode = 0; lines && mode < BUSTER_ARRAY_LENGTH(mode_lanes); mode += 1)
                 {
                     arguments[0] = (char*)executable;
                     uint32_t at = count;
+                    char** spawned = arguments;
                     if (mode == 1)
                     {
                         arguments[at++] = "--scalar";
+                        arguments[at] = NULL;
                     }
-                    else if (mode == 2)
+                    else if (mode_lanes[mode] != NULL)
                     {
-                        arguments[at++] = "--deferred-bodies";
-                        arguments[at++] = "--lanes";
-                        arguments[at++] = "2";
+                        at = compile_count;
+                        compile[at++] = "--deferred-bodies";
+                        compile[at++] = "--lanes";
+                        compile[at++] = (char*)mode_lanes[mode];
+                        compile[at] = NULL;
+                        spawned = compile;
+                        unlink(object);
                     }
-                    arguments[at] = NULL;
+                    else
+                    {
+                        arguments[at] = NULL;
+                    }
                     char* actual = NULL;
-                    const int status = check_test_driver_spawn(arguments, &actual);
+                    const int status = check_test_driver_spawn(spawned, &actual);
+                    const bool written = spawned == compile && access(object, F_OK) == 0;
                     check_test_semantic_recovery_lookahead(actual);
                     const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
                     char description[8192];
                     snprintf(description, sizeof(description), "semantic recovery %u, %s %s, mode %u: status %d (clang %d), lines\n%s(clang\n%s)", f, standards[s],
                              options[o] != NULL ? options[o] : "", mode, status, oracle, actual_lines, expected_lines);
-                    check_test_expect(test, same && (status != 0) == (oracle != 0), description);
+                    check_test_expect(test, same && (status != 0) == (oracle != 0) && !written, description);
                     free(actual);
                 }
                 free(expected);
