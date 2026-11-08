@@ -264,7 +264,8 @@ The other columns:
 
 Then `G` goes through `tier0_validate`, as the lowering's own streams do. If it
 refuses `G`, or anything above runs out of room, the caller compiles `F`, every
-site of it a call, and the callees' kept-call counters (below) count each one.
+site of it a call, which the reference count of "The callee's own code" then
+sees.
 
 ## Callees that call callees
 
