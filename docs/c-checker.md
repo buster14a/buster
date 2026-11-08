@@ -3912,12 +3912,29 @@ body's scope. Unused parameters are still warned. A per-token prefix count of
 the unit's error reports answers each scope's question in constant time, and
 only a unit with errors builds it.
 
+Two more redefinitions recover as clang's `ActOnTag` and `ActOnEnumConstant`
+do:
+
+- **A tag defined again in its own scope** (`struct S { … }` twice, or an enum
+  without a fixed type listed twice) gives "redefinition of 'S'" at the name,
+  noting the earlier definition. Its body is read as an anonymous tag's, so the
+  name's later uses find the first definition, and a repeated enumerator in it
+  is reported as below. This is before C23 only: C23 allows a compatible
+  redefinition and words an incompatible one otherwise (N3037), which the
+  checker doesn't model, and still refuses with its generic error.
+- **A repeated enumerator** gives "redefinition of enumerator 'A'" with its
+  note at the earlier one, and is dropped (`CheckTagFrame.dropped`). As in
+  clang, whose next `CheckEnumConstant` sees no previous constant, the next
+  implicit value restarts at 0 of `int` or of the fixed type
+  (`CheckTagFrame.restart`), and an enum left with no enumerator is
+  complete as `unsigned int`.
+
 The later phases are left:
 
 - **Invalid declarations.** Not covered by phase 2:
-  - a tag's redefinition (`struct S { … }` twice);
   - an invalid initializer the reader reports;
-  - a type attribute's error (`vector_size`, `mode`).
+  - a type attribute's error (`vector_size`, `mode`);
+  - C23's incompatible tag redefinitions (above).
 
   These still stop the reader.
 - **Statements.** A second control error (`break`, then `continue`) still
