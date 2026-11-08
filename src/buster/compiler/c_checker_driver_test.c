@@ -5236,6 +5236,8 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                     uint32_t located = token;
                     const char* message = warning == CHECK_WARNING_POINTER_SIGN || warning == CHECK_WARNING_DISCARDED_QUALIFIERS ?
                                           check_driver_pointer_conversion_message(parser, pp, input, stream, types, &spell, token, warning, &located, scratch) :
+                                          (warning & (CHECK_WARNING_SHIFT_NEGATIVE_VALUE | CHECK_WARNING_SHIFT_OVERFLOW)) != 0 ?
+                                          check_driver_shift_message(parser, pp, input, stream, types, &spell, token, warning, scratch) :
                                           check_diagnostic_message(warning);
                     if (suffix != NULL)
                     {
