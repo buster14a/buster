@@ -3992,6 +3992,13 @@ do:
   implicit value restarts at 0 of `int` or of the fixed type
   (`CheckTagFrame.restart`), and an enum left with no enumerator is
   complete as `unsigned int`.
+- **An enumerator whose name is another kind of the scope's** (an object, a
+  typedef, a parameter, a local) gives clang's "redefinition of 'K'", with
+  "previous definition is here" at the earlier declaration, and is dropped the
+  same way. (A name declared after an enumerator is the redeclaration's
+  "redefinition of 'K' as different kind of symbol" instead.) Clang's
+  `-Wvisibility` of a tag declared in a prototype, which the checker doesn't
+  give at all, is left out of its fixtures.
 
 Phase 3 covers statements after an error:
 
@@ -4018,9 +4025,42 @@ Phase 3 covers statements after an error:
 Error-free units take none of this: the flushed marks need an error, the
 uninitialized pass reads them only when there are some, and the diagnose
 paths run only on a rejected unit. `c_check_statement_recovery_driver_test.c`,
-in the same section, compares its fixtures as above. The asm and control
-errors after a graph's error are compared by place and severity alone: those
-diagnose paths give one generic message, not clang's wording.
+in the same section, compares its fixtures as above, the asm and control
+errors' whole text too.
+
+The asm and control errors give every one, in clang's words, after a graph's
+error and in a unit without one:
+
+- **Control.** `check_program_diagnose_all` lists each constraint error
+  (`CheckProgramConstraint`), with the token of its "previous case defined
+  here" note. A switch's conflicts come in clang's order
+  (`ActOnFinishSwitchStmt`), all published at the switch's end:
+  - the defaults, by a reverse walk of the order clang makes them in: a
+    default is made once its own statement is parsed, so one labelling
+    another comes first;
+  - the singletons in converted value order, each noting the one before;
+  - the nonempty ranges by their low values, each noting the last singleton
+    within it, or else the range before it, whose high value it names.
+
+  A condition of no integer type is "statement requires expression of integer
+  type ('T' invalid)" at the switch, by its typedef's name. So is a pointer or
+  record condition, which the graph's promotion refuses
+  (`check_semantic_expression`). A case value's error is the reader's alone:
+  clang drops the case.
+- **Asm.** `check_asms_diagnose_all` gives each failing statement's first
+  error (`CheckAsmFailure`, after `Sema::ActOnGCCAsmStmt`): an output's
+  memory-constraint bit-field, `_BitInt`, incomplete type or lvalue, then an
+  input's bit-field, memory-only lvalue, register `void`, `_BitInt` and
+  incomplete type. A tie's comes after every operand's own. A GNU lvalue cast
+  output gives `-Winvalid-gnu-asm-cast`'s error at the lvalue, through the
+  casts that don't change its value, and doesn't end its statement. Clang
+  names an output "input" in the bit-field and `_BitInt` errors, and an input
+  "output"; the words follow it. An incomplete type's error has the tag's
+  forward declaration note.
+
+A unit without other errors whose `check_asms_run` or `check_program` fails
+runs these diagnoses, so only a failing unit pays for them.
+`CheckDriverDiagnostic.note` carries a note through the reports' walk.
 
 Every declaration's failed initializer is given, as clang gives each
 (phase 2): `int a[2] = 5; int b[2] = 6;` has two errors where it had the
@@ -4159,9 +4199,9 @@ The later phases are left:
   operand; both on main too.
 - **Units with a graph's or a reader's error.** These, other than a recovered
   one, still don't reach `check_program`. They get none of its diagnostics:
-  the common warnings, their runtime warnings included. The asm and control
-  diagnose paths give only the unit's first error, in generic words, and a
-  duplicate case has no "previous case" note on either path.
+  the common warnings, their runtime warnings included. Nor does a unit whose
+  `check_program` finds a control error. Its unused-variable warnings
+  aren't suppressed in the error's scopes.
 
 ### What the lowering costs (#531)
 
@@ -7234,10 +7274,10 @@ arguments against the function. The checker now gives these as clang does.
     error first, as neither has subjects. `objc_gc(weak)` and
     `objc_gc(strong)` on a pointer make a garbage-collection qualifier that
     changes the type (`int *__weak`, which redeclarations, `_Generic` and the
-    types' spellings see): they are refused by name, and so are both
-    attributes' C23
-    spellings, which apply to other types than GNU's (clang 23 crashes on
-    `[[clang::objc_gc(weak)]]`).
+    types' spellings see): the type table's extended qualifier (#1447, "The
+    type qualifiers' attributes" below). Both attributes' C23 spellings, which
+    apply to other types than GNU's (clang 23 crashes on
+    `[[clang::objc_gc(weak)]]`), are refused by name.
   - `diagnose_as_builtin` (`check_input_attribute_diagnose_builtin`,
     `c_check_attribute_checks_input.c`), clang's handleDiagnoseAsBuiltinAttr:
     its first argument names a builtin function, as getBuiltinID finds one: a
@@ -7305,28 +7345,77 @@ arguments against the function. The checker now gives these as clang does.
   applied to a declaration" after a count's error, as `btf_type_tag`'s now are
   too.
 
-  The type qualifiers' attributes stay refused by name (#1447): GNU's
-  `address_space(N)`, the OpenCL address spaces (`opencl_global`,
-  `opencl_local`, `opencl_constant`, `opencl_private`, `opencl_generic`,
-  `opencl_global_device`, `opencl_global_host`), which clang 23 takes in C as
-  address spaces too (`'__global int *'`, the last two with -Wdeprecated-attributes'
-  "''opencl_global_device'' attribute is deprecated and may be removed in a
-  future version of Clang"), and `objc_gc(weak)` and `objc_gc(strong)` (`int
-  *__weak`). Each is one of clang's Qualifiers that is part of a type's
-  identity, which a TypeId's three qualifier bits don't hold: making them a
-  type's needs an extended qualifier's record that the table's consumers see
-  through as they see through ALIGNED, and the conversions' checks with
-  clang's words ("assigning to 'int *' from '__attribute__((address_space(1)))
-  int *' changes address space of pointer", "automatic variable qualified with
-  an address space", "multiple address spaces specified for type", a pointer
-  subtraction's and a conditional's "pointers to non-overlapping address
-  spaces"), where the checker's pointer conversions mostly say "incompatible
-  operand or conversion types"; clang also spells a type whose attribute a
-  user's macro wrote by the macro's name (MacroQualifiedType: `'AS1 int *'`).
-  Code generation then needs `%gs`, `%fs` and `%ss` memory operands for
-  address spaces 256, 257 and 258 (`__seg_gs`, `__seg_fs`), which clang's
-  -O0 code uses (`mov %gs:0x10,%eax`); any other address space is the default
-  one's code on x86-64.
+  The type qualifiers' attributes (#1447): GNU's `address_space(N)`, the
+  OpenCL address spaces (`opencl_global`, `opencl_local`, `opencl_constant`,
+  `opencl_private`, `opencl_generic`, `opencl_global_device`,
+  `opencl_global_host`), which clang 23 takes in C as address spaces too, and
+  `objc_gc(weak)` and `objc_gc(strong)`, are clang's extended qualifiers, part
+  of a type's identity: the type table's `QUALIFIED` record (docs/c-types.md's
+  "Extended qualifiers"), made by `type_extend`. An address space applies where
+  clang's processTypeAttrs applies it: the specifiers' type
+  (check_input_attribute_type), a pointer's chunk's pointer or a group's type
+  outside it (CheckDeclaratorPart.spaces, which CheckInputAttribute.space_applied
+  keeps from the whole type), and the whole type after the declarator; an
+  array's space is its element's. clang's checks are made in its order
+  (check_input_address_space): a function type's "function type may not be
+  qualified with an address space", address_space's count ("takes one
+  argument", before its subject, as a type attribute's), its argument ("requires
+  an integer constant", "address space is negative", "address space is larger
+  than the maximum supported (8388580)"), "multiple address spaces specified
+  for type", and -Wduplicate-decl-specifier's "multiple identical address spaces
+  specified for type"; the deprecated OpenCL spaces' -Wdeprecated-attributes
+  warning (with clang's doubled quotes) comes from the parser, at the attribute.
+  The declarations a space can't qualify are clang's errors at their names: an
+  automatic variable, a parameter (as declared, through a typedef), a member,
+  and a function's compound literal (at its `(`). objc_gc's weak and strong
+  qualify the type where check_input_attribute_objc's distribution handles
+  them, the declarator's outer levels made again from there
+  (check_input_objc_requalify), with clang's "multiple garbage collection
+  attributes specified for type" and -Wignored-attributes' `__weak` warnings
+  on an automatic variable and a member.
+
+  Types print as clang's (`'__attribute__((address_space(1))) int *'`,
+  `'const __global int *'`, `'int *__weak'`, `'__attribute__((address_space(1)))
+  T *'`). Compatibility needs equal extended qualifiers, so redeclarations and
+  `_Generic` see them; `__builtin_types_compatible_p` and `typeof_unqual` drop
+  them, as clang's getUnqualifiedType does, and a value has none. A member's
+  lvalue takes its record's space (not its garbage collection qualifier).
+  Pointer conversions follow clang's checkPointerTypesForAssignment: a pointee's
+  space the target's doesn't include (clang's isAddressSpaceSupersetOf in C:
+  equal spaces, OpenCL's generic over every space but constant, global over its
+  device and host parts; the default space and a target's, 0 among them, over
+  no other) is the error "changes address space of pointer", worded by the
+  conversion (assigning, initializing, returning, and passing with clang's note at
+  the parameter: c_check_semantic_diagnostic.c's check_semantic_address_space);
+  a garbage collection qualifier changed is the discarded qualifiers' warning.
+  A subtraction's and a conditional's pointers to spaces neither of which
+  includes the other are clang's "pointers to non-overlapping address spaces"
+  error (a conditional's at its `?`); a conditional of overlapping spaces is
+  clang's C result, the composite without the spaces (one type keeps its own,
+  and a void pointee takes the other's), and comparisons and casts take any
+  spaces.
+
+  Lowering: clang's x86 target maps address spaces 256, 257 and 258
+  (`__seg_gs`, `__seg_fs`) to the `%gs`, `%fs` and `%ss` segments, whose loads
+  and stores need a segment override that Tier 0's and Tier 1's memory operands
+  don't carry (the encoder has the prefixes, which only thread-local storage's
+  forms use). A load or store in one of those spaces is refused by name ("a load
+  or store in a segment's address space", check_lower_segment_access, where a
+  unit has such a type at all: CheckLowerWriter.segments); taking an address
+  there is compiled. Any other space's code is the default space's, as clang's.
+
+  What differs from clang: C23's spellings (`[[clang::address_space(1)]]` and
+  the others), which slide from a declaration to its specifiers with clang's
+  deprecation warning, are refused by name; clang names a type whose space a
+  macro wrote by the macro (MacroQualifiedType: `'AS1 int *'`), where the
+  attribute is spelled out here, and spells a group's leading space where it was
+  written (`'int (__attribute__((address_space(1))) *)[3]'`); a garbage
+  collection qualifier inside a function's level is refused by name, and the
+  specifiers' one that moves to a pointer whose chunk has another is
+  "multiple garbage collection attributes" at the chunk's, where clang's is at
+  the specifiers'. The discarded qualifiers' warning keeps the checker's generic
+  wording for these pointers as for any. A vector's element loses its space, as
+  it loses its `ALIGNED`.
 
   Other targets' calling conventions (`aarch64_sve_pcs`,
   `aarch64_vector_pcs`, `m68k_rtd`, `pcs`) are conventions x86-64 hasn't, as
@@ -7896,16 +7985,15 @@ arguments against the function. The checker now gives these as clang does.
     warning on a pointer is at the attribute with the macro's notes, where
     clang puts it at the macro's immediate expansion, and clang names either
     attribute `__weak` or `__strong` when the outermost macro is spelled so;
-    `objc_gc(weak)`, `objc_gc(strong)` and both C23 spellings are refused (see
-    above). In a `_Generic` association's type their warnings aren't made,
-    and a `typeof` type name that starts with a GNU attribute isn't read as
+    objc_gc's and objc_ownership's C23 spellings are refused (see above). In a
+    `_Generic` association's type their warnings aren't made, and a `typeof` type name that starts with a GNU attribute isn't read as
     one, as for every attribute there. `availability` on a tag's
     redeclaration isn't compared with the earlier one's. As everywhere, a
     declaration's first error ends the unit: a shared specifiers'
     `objc_ownership` with a count's error warns and errs for the first
     declarator alone, and a TCB function's call clang declares implicitly
     with an error (C99 and later) has no `-Wtcb-enforcement` warning after
-    it. `address_space` and OpenCL's address spaces are refused (see above).
+    it.
     `diagnose_as_builtin`'s calls have no `-Wfortify-source` warnings, as no
     call has. A C23 NEON vector attribute after a typedef's or a tag's name
     gets the deprecation warning where clang's error is "cannot be applied to

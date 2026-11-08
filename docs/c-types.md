@@ -93,6 +93,40 @@ type gives one id:
 and completeness are its base's, read through the base, since the base may be a
 tag completed later.
 
+### Extended qualifiers (#1447)
+
+clang's other qualifiers that are part of a type's identity, an address space
+and a garbage collection qualifier (objc_gc's `__weak` and `__strong`), have no
+room in a `TypeId`'s three qualifier bits. A `QUALIFIED` record holds them: its
+base is the unqualified type, and its extent a word of the address space
+(`BUSTER_TYPE_SPACE_*`: 0 the default, OpenCL's seven spaces, then a target's
+`address_space(N)` as `BUSTER_TYPE_SPACE_TARGET + N`, N at most clang's
+8388580) and the garbage collection qualifier. const, volatile and restrict
+stay in the `TypeId`, over it. `type_extend` makes one, normalized as clang's
+canonical types have it:
+
+- an array's space is its element's, at every level of arrays of arrays, which
+  are made again from the element out, each found again from the top so that no
+  level needs memory;
+- an aligned typedef's `ALIGNED` stays outside: `ALIGNED` may have a
+  `QUALIFIED` base, never the reverse, so stripping `ALIGNED` alone
+  (`type_strip_alignment`) leaves the type a typedef's name may name;
+- a second space replaces the first (the checker reports clang's error first);
+  a function type takes none (`TYPE_ERROR_OPERAND`), and `_Atomic` of a
+  qualified type is refused.
+
+The readers look through `QUALIFIED` as through `ALIGNED`: `type_strip_aligned`
+and `type_resolved_index` test the kind once for both wrappers (a bit of
+`BUSTER_TYPE_WRAPPER_KINDS`), out of line past the test, so that the common path
+is the one compare and branch it was. `type_alignment_log2` reads a
+`QUALIFIED` type's base's, since the base may be a tag completed later; its own
+columns hold the base's properties where the base is complete, for the layout's
+readers of a member's columns (only a `__weak` or `__strong` pointer can be a
+member's: a space's member is `TYPE_ERROR_MEMBER`, clang's "field may not be
+qualified with an address space"). `type_extended_qualifiers` reads a type's
+word, under its `ALIGNED`, and `type_object_qualifiers` an array's element's,
+as clang's `getAddressSpace` of an array type is.
+
 Sizes and validity follow clang's rules: an array's element must be complete,
 its size a multiple of its alignment, and the array below 2^61 bytes;
 `_Atomic` of a qualified, array, function, atomic, incomplete or `_BitInt`
@@ -434,8 +468,9 @@ missing answer, which could change an alignment.
 
 Equal ids are compatible at once; otherwise:
 
-- qualifiers must be equal, and `ALIGNED` is looked through, as clang's
-  canonical types have no typedefs;
+- qualifiers must be equal, extended ones too (in C, clang's `mergeTypes` takes
+  no garbage collection qualifier's difference), and `ALIGNED` is looked
+  through, as clang's canonical types have no typedefs;
 - an enum is compatible with its underlying type, compared as clang's
   `hasSameType` does, qualifiers included: `const enum E` and `const unsigned
   int` aren't, as clang has it;
@@ -463,6 +498,16 @@ each mode. Two things it can't spell as clang does: a variable array's size
 expression (it prints `[]`, and `[*]` for `[*]`) and an anonymous tag's
 location (it prints `(unnamed)` where clang names the file and line).
 
+Extended qualifiers print after const, volatile and restrict, as clang's
+`Qualifiers::print` has them (#1447): a target's space as its attribute
+(`__attribute__((address_space(1))) int *`), OpenCL's by keyword
+(`const __global int *`), then `__weak` or `__strong`; before a specifier and
+after a pointer's `*` (`int *const __attribute__((address_space(2)))`). A
+typedef's name under a space prints after it
+(`__attribute__((address_space(1))) T *`). clang's name of a type whose space
+a macro wrote (its `MacroQualifiedType`, `'AS1 int *'`) isn't given: the
+attribute is spelled out.
+
 ## Tests
 
 `./build/compiler test-types [--seed N] [--count N] [--clang PATH] [--keep]`
@@ -479,6 +524,11 @@ location (it prints `(unnamed)` where clang names the file and line).
   slices of batches to two tables that must end up identical (results, columns
   and index), growing the index well past its first size; then `ALIGNED`
   requests of a tag completed since its wrapper was made, through both.
+- **Extended qualifiers (#1447):** `type_extend`'s normalizations (arrays'
+  elements, under `ALIGNED`, the `TypeId`'s qualifiers kept, none on a function
+  type), the readers through `QUALIFIED` (a struct completed later's too), a
+  `__weak` member's layout and a space's member refused, compatibility and
+  composite types, clang's spellings, and the spaces' inclusions.
 - **Layout:** clang's corner cases as fixtures, then 3,000 random records of
   every member type, bit-fields of every width next to every type, packed,
   packs, aligned, nesting, anonymous members and flexible array members, with

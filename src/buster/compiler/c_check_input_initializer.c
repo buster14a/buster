@@ -235,7 +235,7 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
     {
         TypeId deduced_base = 0;
         TypeId deduced = deduced_declarator ? check_input_type_result(reader, check_input_c23_auto_deduce(reader, placeholder, value.type, declaration, &deduced_base)) :
-                                              check_input_type_result(reader, type_adjust_parameter(types, value.type));
+                                              check_input_type_result(reader, type_strip_aligned(types, type_adjust_parameter(types, value.type)));
         if (deduced == 0 && !reader->output->resource && reader->output->report_count == 0)
         {
             // A declarator shape its initializer doesn't fit, at clang's name for it.
