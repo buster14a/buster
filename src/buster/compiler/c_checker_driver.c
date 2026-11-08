@@ -22,12 +22,15 @@ static const char* check_driver_action_message(CheckDiagnostic diagnostic)
         case CHECK_DIAG_INCOMPATIBLE: result = "incompatible operand or conversion types"; break;
         case CHECK_DIAG_INCOMPLETE: result = "incomplete type is not permitted here"; break;
         case CHECK_DIAG_BIT_FIELD: result = "invalid use of a bit-field"; break;
-        case CHECK_DIAG_REGISTER_ADDRESS: result = "address of register object requested"; break;
+        case CHECK_DIAG_REGISTER_ADDRESS: result = "address of register variable requested"; break;
         case CHECK_DIAG_MEMBER: result = "no such member in the record type"; break;
         case CHECK_DIAG_CALL: result = "called object is not a function or function pointer"; break;
         case CHECK_DIAG_ARGUMENT_COUNT: result = "incorrect number of arguments"; break;
         case CHECK_DIAG_RESOURCE: result = "type checker ran out of memory"; break;
         case CHECK_DIAG_UNSUPPORTED: result = "expression is not yet supported by the type checker"; break;
+        case CHECK_DIAG_ADDRESS_SPACE: result = "conversion changes address space of pointer"; break;
+        case CHECK_DIAG_ADDRESS_SPACE_OVERLAP: result = "pointers to non-overlapping address spaces"; break;
+        case CHECK_DIAG_ADDRESS_SPACE_NESTED: result = "conversion changes address space of nested pointer"; break;
         case CHECK_DIAG_NONE: break;
     }
     return result;
@@ -154,6 +157,16 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_VECTOR_TOO_LARGE: result = "vector size too large"; break;
         case CHECK_INPUT_VECTOR_ZERO: result = "zero vector size"; break;
         case CHECK_INPUT_VECTOR_MULTIPLE: result = "vector size not an integral multiple of component size"; break;
+        case CHECK_INPUT_ADDRESS_SPACE_CONSTANT: result = "'address_space' attribute requires an integer constant"; break;
+        case CHECK_INPUT_ADDRESS_SPACE_NEGATIVE: result = "address space is negative"; break;
+        case CHECK_INPUT_ADDRESS_SPACE_TOO_HIGH: result = "address space is larger than the maximum supported (8388580)"; break;
+        case CHECK_INPUT_ADDRESS_SPACE_FUNCTION: result = "function type may not be qualified with an address space"; break;
+        case CHECK_INPUT_ADDRESS_SPACE_MULTIPLE: result = "multiple address spaces specified for type"; break;
+        case CHECK_INPUT_ADDRESS_SPACE_AUTOMATIC: result = "automatic variable qualified with an address space"; break;
+        case CHECK_INPUT_ADDRESS_SPACE_PARAMETER: result = "parameter may not be qualified with an address space"; break;
+        case CHECK_INPUT_ADDRESS_SPACE_FIELD: result = "field may not be qualified with an address space"; break;
+        case CHECK_INPUT_ADDRESS_SPACE_COMPOUND: result = "compound literal in function scope may not be qualified with an address space"; break;
+        case CHECK_INPUT_GC_MULTIPLE: result = "multiple garbage collection attributes specified for type"; break;
         case CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT: result = "attribute takes another count of arguments"; break;
         case CHECK_INPUT_ATTRIBUTE_EXCLUSION: result = "attributes are not compatible"; break;
         case CHECK_INPUT_ATTRIBUTE_ANNOTATE_STRING: result = "expected string literal as argument of 'annotate' attribute"; break;
@@ -278,6 +291,8 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_PARAMETER_INTEGER: snprintf(text, capacity, "'%s' attribute requires parameter %u to be an integer constant", parsed, number); break;
         case CHECK_ARGUMENT_EXT_VECTOR_INTEGER: snprintf(text, capacity, "ext_vector_type attribute requires an integer constant"); break;
         case CHECK_ARGUMENT_ALIGNMENT_POWER: snprintf(text, capacity, "%s", check_driver_alignment_power); break;
+        case CHECK_ARGUMENT_ALIGNAS_INTEGER_CONSTANT: snprintf(text, capacity, "'aligned' attribute requires integer constant"); break;
+        case CHECK_ARGUMENT_ALIGNMENT_TOO_LARGE: snprintf(text, capacity, "requested alignment must be 4294967296 bytes or smaller"); break;
         case CHECK_ARGUMENT_ZERO_VECTOR: snprintf(text, capacity, "zero vector size"); break;
         case CHECK_ARGUMENT_REGPARM_RANGE: snprintf(text, capacity, "'regparm' parameter must be between 0 and 6 inclusive"); break;
         case CHECK_ARGUMENT_OUT_OF_BOUNDS: snprintf(text, capacity, "'%s' attribute parameter %u is out of bounds", parsed, number); break;
@@ -625,6 +640,10 @@ static const char* check_driver_input_report_message(const CheckInput* input, co
            section != NULL ? section->text.pointer : optimize != NULL ? optimize->text.pointer : fp != NULL ? check_input_fp_error_message(fp->error) :
            layout != NULL ? "this pragma cannot appear in struct declaration" :
            report->message == CHECK_INPUT_INTERRUPT_HANDLER ? check_driver_interrupt_message(report->detail) :
+           report->message == CHECK_INPUT_DIRECT_INITIALIZER_ARRAY && report->detail == CHECK_INPUT_ARRAY_LIST_WIDE ?
+           "array initializer must be an initializer list or wide string literal" :
+           report->message == CHECK_INPUT_DIRECT_INITIALIZER_ARRAY && report->detail == CHECK_INPUT_ARRAY_LIST_ONLY ?
+           "array initializer must be an initializer list" :
            report->message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (report->detail & 0xffu) == CHECK_ARGUMENT_ALIGNMENT_POWER ?
            check_driver_alignment_power : check_driver_input_message(report->message);
 }
@@ -3002,14 +3021,10 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         uint32_t visibility = 0;
         uint32_t pragma = 0;
         uint32_t packed = 0;
-        while (from != 0 && visibility_history != NULL && visibility < visibility_history->count && visibility_history->records[visibility].token < from)
-        {
-            visibility += 1;
-        }
-        while (from != 0 && pragma < pragma_input->fp_pragma_count && pragma_input->fp_pragmas[pragma].token < from)
-        {
-            pragma += 1;
-        }
+        // From `from` on (a rejected unit's second reading, check_driver_rejected_common), the pragmas' records are the
+        // unit's, which the first reading published whole, wherever its walk ended: none of them again.
+        visibility = from != 0 && visibility_history != NULL ? visibility_history->count : 0;
+        pragma = from != 0 ? pragma_input->fp_pragma_count : 0;
         while (from != 0 && packed < input->packed_member_count && input->packed_members[packed].address < from)
         {
             packed += 1;
@@ -4206,8 +4221,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         }
     }
     const CheckInput* directives = original_pragmas != NULL ? original_pragmas : input;
-    const bool pragma_ready = ready && check_driver_warning_events_at(original_pragmas != NULL ? original : parser, pp, directives, NULL,
-        &directives->pragma_warnings, NULL, publication_end, scratch);
+    // (As the pragmas' records, their warnings are the first reading's alone.)
+    const bool pragma_ready = ready && (from != 0 || check_driver_warning_events_at(original_pragmas != NULL ? original : parser, pp, directives, NULL,
+        &directives->pragma_warnings, NULL, publication_end, scratch));
     arena_pop_to(scratch, mark);
     return pragma_ready && shifts_ready;
 }
@@ -6603,6 +6619,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 ready = ready && check_input_packed_finalize(&input, checking, &types, &stream, scratch);
                 ready = ready && check_input_warning_graph(&input, checking, &types, &stream, output_arena, scratch);
                 check_clock_mark(stage_clock, CHECK_STAGE_CHECK_EXPRESSIONS);
+                if (ready && input.recovered_published != 0)
+                {
+                    // An array's recovered "array initializer must be an initializer list" whose initializer is no valid
+                    // value, which clang reports alone (#1447).
+                    check_init_listless_drop(&input, checking, &stream, &types, scratch);
+                }
                 if (ready)
                 {
                     // The musttail returns' errors (c_check_musttail.c), each clang's, with the three below.
@@ -6699,29 +6721,57 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             earlier.token = initializers.token;
                             earlier.completion = initializers.completion;
                         }
-                        if ((diagnosed && earlier.status != CHECK_INIT_OK) || earlier.status == CHECK_INIT_RESOURCE ||
-                            (!diagnosed && initializers.status != CHECK_INIT_OK))
+                        // The other declarations' failed initializers (#1447, phase 2), which clang reports too: room for
+                        // two diagnostics each beside the first's.
+                        const uint32_t others = diagnosed && earlier.status != CHECK_INIT_OK && earlier.status != CHECK_INIT_RESOURCE ? earlier.failure_count : 0;
+                        CheckDriverDiagnostic* widened = others > 1 ?
+                            BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverDiagnostic, 5 + (uint64_t)musttails.count + 2 * (uint64_t)others) : NULL;
+                        if (widened != NULL)
                         {
-                            // A subobject's failed conversion is clang's words of it (#147), at its place.
-                            uint32_t place = earlier.token;
-                            const char* conversion = earlier.status == CHECK_INIT_INVALID ?
-                                check_driver_initializer_conversion(checking, checking_pp, &input, &stream, &types, earlier.failed_type, earlier.failed_source - 1,
-                                                                    earlier.failed_declaration, earlier.token, &place, output_arena) : NULL;
-                            const char* message = conversion != NULL ? conversion : earlier.status == CHECK_INIT_MEMBER ?
-                                check_driver_initializer_field_message(checking, checking_pp, &input, &types, earlier.failed_type, earlier.token, output_arena) :
-                                check_driver_initializer_message(earlier.status);
-                            place = conversion != NULL ? place : earlier.token;
-                            additional[additional_count++] = (CheckDriverDiagnostic){ place,
-                                message != NULL ? message : "initializer checking capacity exhausted", place, earlier.completion };
-                            // A static object's braced subobject whose conversion clang warns of and makes, where its value is
-                            // then no constant: clang's second error at it (check_init_value_nonconstant, #147).
-                            if (conversion != NULL && earlier.failed_source != 0 && earlier.failed_declaration < input.token_count &&
-                                check_input_bit(input.declaration_bits, earlier.failed_declaration, BUSTER_CHECK_BITS_STATIC) != 0 &&
-                                check_init_value_nonconstant(&stream, &types, earlier.failed_type, earlier.failed_source - 1))
+                            memcpy(widened, additional, (uint64_t)additional_count * sizeof(CheckDriverDiagnostic));
+                            additional = widened;
+                        }
+                        const uint32_t failure_total = widened != NULL ? others + 1 : 1;
+                        for (uint32_t f = 0; f < failure_total; f += 1)
+                        {
+                            const CheckInitFailure* other = f != 0 ? earlier.failures + (f - 1) : NULL;
+                            // The first is `earlier`'s own, which the list holds too.
+                            const bool repeated = other != NULL && other->token == earlier.token && other->failed_declaration == earlier.failed_declaration &&
+                                                  other->status == earlier.status;
+                            const CheckInitFailure failure = other != NULL ? *other : (CheckInitFailure){
+                                .status = earlier.status,
+                                .failed_type = earlier.failed_type,
+                                .failed_source = earlier.failed_source,
+                                .failed_declaration = earlier.failed_declaration,
+                                .token = earlier.token,
+                                .completion = earlier.completion,
+                            };
+                            const bool given = other != NULL ? !repeated :
+                                               (diagnosed && earlier.status != CHECK_INIT_OK) || earlier.status == CHECK_INIT_RESOURCE ||
+                                               (!diagnosed && initializers.status != CHECK_INIT_OK);
+                            if (given)
                             {
-                                // (Repeated: at the conversion's own place, which the reports' walk would keep alone.)
-                                additional[additional_count++] = (CheckDriverDiagnostic){ place, check_driver_initializer_message(CHECK_INIT_NON_CONSTANT), place,
-                                                                                          earlier.completion, true };
+                                // A subobject's failed conversion is clang's words of it (#147), at its place.
+                                uint32_t place = failure.token;
+                                const char* conversion = failure.status == CHECK_INIT_INVALID ?
+                                    check_driver_initializer_conversion(checking, checking_pp, &input, &stream, &types, failure.failed_type, failure.failed_source - 1,
+                                                                        failure.failed_declaration, failure.token, &place, output_arena) : NULL;
+                                const char* message = conversion != NULL ? conversion : failure.status == CHECK_INIT_MEMBER ?
+                                    check_driver_initializer_field_message(checking, checking_pp, &input, &types, failure.failed_type, failure.token, output_arena) :
+                                    check_driver_initializer_message(failure.status);
+                                place = conversion != NULL ? place : failure.token;
+                                additional[additional_count++] = (CheckDriverDiagnostic){ place,
+                                    message != NULL ? message : "initializer checking capacity exhausted", place, failure.completion };
+                                // A static object's braced subobject whose conversion clang warns of and makes, where its value is
+                                // then no constant: clang's second error at it (check_init_value_nonconstant, #147).
+                                if (conversion != NULL && failure.failed_source != 0 && failure.failed_declaration < input.token_count &&
+                                    check_input_bit(input.declaration_bits, failure.failed_declaration, BUSTER_CHECK_BITS_STATIC) != 0 &&
+                                    check_init_value_nonconstant(&stream, &types, failure.failed_type, failure.failed_source - 1))
+                                {
+                                    // (Repeated: at the conversion's own place, which the reports' walk would keep alone.)
+                                    additional[additional_count++] = (CheckDriverDiagnostic){ place, check_driver_initializer_message(CHECK_INIT_NON_CONSTANT), place,
+                                                                                              failure.completion, true };
+                                }
                             }
                         }
                         if (diagnosed)
