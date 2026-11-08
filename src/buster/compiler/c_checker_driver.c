@@ -6289,11 +6289,13 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     promoted |= check_driver_warning_promoted(pp, pragma_input, &pragma_input->pragma_warnings, NULL);
                     promoted |= check_diagnostic_first_pragma_error_mode(pragma_input, pragma_end, &promoted_token, &promoted_source, quiet);
                     bool visibility_diagnostics = false;
+                    bool visibility_errors = false;
                     const CheckInputVisibilityPragmas* visibility_history = pragma_input->visibility_pragmas;
                     for (uint32_t i = 0; visibility_history != NULL && i < visibility_history->count; i += 1)
                     {
                         const CheckInputVisibilityPragma* record = visibility_history->records + i;
                         visibility_diagnostics |= record->error || record->warning != 0;
+                        visibility_errors |= record->error;
                     }
                     for (uint32_t i = 0; !quiet && !promoted && i < excess_count; i += 1)
                     {
@@ -6327,8 +6329,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 control.position < tokens ? control.position + 1u : tokens };
                         }
                     }
+                    // The errors the reports' publication below makes: warnings promoted to errors and visibility pragmas'
+                    // errors, which reject the unit as those already published do.
+                    const bool publication_errors = promoted || visibility_errors;
                     result = !driver_fatal && ready && expression_valid && !input.recovered_valid && additional_count == 0 && !repairing && pp->errors == 0 &&
-                             !pp->diagnostic_collection_failed && !pp->history_failed ? 0 : 1;
+                             !publication_errors && !pp->diagnostic_collection_failed && !pp->history_failed ? 0 : 1;
                     CheckProgram program;
                     CheckDataPrepared data = { 0 };
                     check_clock_mark(stage_clock, CHECK_STAGE_CHECK_DECLARATIONS);
@@ -6358,7 +6363,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .discard_huge = lanes != NULL && lanes->units_lane != NULL && check_units_discard_huge(lanes->units_lane),
                     });
                     const bool program_diagnostics = result == 0 ||
-                        (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && (pp->errors != 0 || input.recovered_valid) &&
+                        (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && (pp->errors != 0 || publication_errors || input.recovered_valid) &&
                          !pp->diagnostic_collection_failed && !pp->history_failed);
                     CheckInput diagnostic_input;
                     const CheckInput* program_input = &input;
@@ -6427,6 +6432,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         check_driver_dump(&input.graph, &stream, &types, scratch);
                     }
+                    // A warning the publication promoted to an error rejects the unit, before its final warnings.
+                    result = pp->errors != 0 ? 1 : result;
                     check_driver_x86_reports(checking, recovered, pp, &input, &stream, &types, quiet);
                     const bool final_warnings = result == 0 && program_checked && !prefix_only && !repairing && !parse_failed &&
                                                 input.deferred_tokens == NULL && !pp->diagnostic_collection_failed && !pp->history_failed;
