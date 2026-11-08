@@ -347,6 +347,12 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "recovered-redeclaration-kind",
       "int g(void) { struct G { int x; } gv; return gv.x; }\nint f(void) { struct S { int a; } s; typedef int s; return 0; }\n"
       "int h(void) { return 2; }\n", true },
+    // #1793's type attributes in two bodies: a shared alignment's error once for each declarator, an _Alignas's too, and
+    // an invalid vector element type, of a type the body makes, which the report names.
+    { "recovered-shared-alignments-in-two-bodies",
+      "int f(void) { __attribute__((aligned(3))) int a, b; return a + b; }\n"
+      "int g(void) { struct V { int x; }; _Alignas(3) int c, d; typedef struct V W __attribute__((vector_size(16))); return c + d; }\n"
+      "int h(void) { return 2; }\n", true },
     { "recovered-control", "int f(void) { break; return 0; }\nint g(void) { continue; return 1; }\nint h(void) { return 2; }\n", true },
     // A type conflict notes the entity's latest earlier declaration, even another body's block-scope one, which neither
     // the top level's walk nor another body's lane has read: source order's, at file scope and in a body. One whose
