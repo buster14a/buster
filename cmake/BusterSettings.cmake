@@ -321,6 +321,11 @@ function(buster_settings_tools clang)
     endif()
     list(APPEND flags "-DBUSTER_CLANG_DEFAULT_TARGET=\"${triple}\"")
 
+    # Every unit is linked into the executable, with main.c's units, whose homes define what a unit of its own then
+    # calls rather than compiles a copy of: the lexer's Unicode names, about 300 KB (c_unicode_names.c). The same unit
+    # compiled without it, to be linked alone (measure-tier1-rows' lexer), has its own copy.
+    list(APPEND flags -DBUSTER_EXECUTABLE_UNIT)
+
     # The scalar host build retains the vector kernels in source but does not emit them. Their unused helpers are
     # expected in that build alone.
     execute_process(COMMAND "${clang}" ${flags} -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null
