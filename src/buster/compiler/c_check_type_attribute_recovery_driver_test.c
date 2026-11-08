@@ -122,8 +122,15 @@ static void check_test_driver_type_attribute_recovery(CheckTest* test, const cha
         "enum __attribute__((mode(SF))) E { A };\nenum E e = 2.5;\nenum E g = 5000000000;\nenum E h = 1e20;\n"
         "void f(enum E x, double d) { enum E y = d; x = 3.5; e = 1ll << 40; (void)x; (void)y; }\n"
         "enum F { B } __attribute__((mode(DF)));\nenum F k = 1e30;\nenum F m = 1ll << 40;\nint after = B + A;\n",
+        // Last, gnu17's alone (C23 has no K&R definition): a K&R definition's parameter declarations' _Alignas, which the
+        // parser takes as the function declarator's suffix, each declarator's "cannot be applied to a function parameter".
+        "void kr(a) _Alignas(3) int a; {}\nvoid kr2(a, b) _Alignas(8) int a, b; { (void)a; (void)b; }\n"
+        "void kr3(a, b) int a; _Alignas(3) _Alignas(8) int b; { (void)a; }\nint kr4(a) _Alignas(8) register int a; { return a; }\n"
+        "int n;\nvoid kr5(a) _Alignas(n) int a; { (void)a; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
+    // The K&R definitions, the last fixture, are gnu17's alone.
+    const uint32_t before_c23 = BUSTER_ARRAY_LENGTH(fixtures) - 1;
     static const char* const options[] = { NULL, "-Wall", "-ferror-limit=2", "-w" };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);
@@ -135,7 +142,8 @@ static void check_test_driver_type_attribute_recovery(CheckTest* test, const cha
     {
         snprintf(source, sizeof(source), "%s/type-attribute-recovery-%u.c", directory, f);
         const bool made = parse_test_write(source, fixtures[f], strlen(fixtures[f]));
-        for (uint32_t s = 0; made && s < BUSTER_ARRAY_LENGTH(standards); s += 1)
+        const uint32_t standard_count = f >= before_c23 ? 1u : (uint32_t)BUSTER_ARRAY_LENGTH(standards);
+        for (uint32_t s = 0; made && s < standard_count; s += 1)
         {
             for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(options); o += 1)
             {

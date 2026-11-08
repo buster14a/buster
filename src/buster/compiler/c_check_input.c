@@ -6409,7 +6409,18 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
             // OPEN_GROUP is Clang's parenthesized initializer, outside the completed top-level declarator (#1252).
             const bool direct_initializer = depth == 1 && !frame->parameter && frame->name != BUSTER_CHECK_NONE &&
                                             i < frame->end && parser->tree.roles[i] == PARSE_ROLE_OPEN_GROUP;
-            valid = direct_initializer || (frame->parameter ? i <= frame->end && (i == frame->end || parser->tokens.kinds[i] == PARSE_KIND_COMMA) : i == frame->end);
+            // A K&R definition's declarator ends before its first parameter declaration's _Alignas groups, which the parser
+            // takes as the declarator's suffix: they are that declaration's specifiers (check_input_kr_declarations, #1447).
+            uint32_t alignas_end = i;
+            while (alignas_end + 1 < frame->end && parser->tokens.kinds[alignas_end] == PARSE_KIND_ALIGNAS &&
+                   parser->tokens.kinds[alignas_end + 1] == PARSE_KIND_L_PAREN && parser->tree.parents[alignas_end + 1] > alignas_end + 1)
+            {
+                alignas_end = parser->tree.parents[alignas_end + 1] + 1;
+            }
+            const bool kr_alignas = depth == 1 && !frame->parameter && alignas_end != i && alignas_end == frame->end && frame->last != BUSTER_CHECK_NONE &&
+                                    parts[frame->last].kind == BUSTER_TYPE_KIND_FUNCTION && parts[frame->last].identifier_list;
+            valid = direct_initializer || kr_alignas ||
+                    (frame->parameter ? i <= frame->end && (i == frame->end || parser->tokens.kinds[i] == PARSE_KIND_COMMA) : i == frame->end);
             if (frame->last != BUSTER_CHECK_NONE)
             {
                 parts[frame->last].next = frame->pointers;

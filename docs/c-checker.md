@@ -4044,6 +4044,9 @@ lists have no repeats.
    each `_Alignas`:
    - a function or a typedef: "only applies to variables and fields";
    - a parameter, a bit-field or a register variable: "cannot be applied to".
+     A K&R definition's parameter declarations are parameters too. The parser
+     takes their first `_Alignas` groups as the function declarator's suffix,
+     so the declarator step ends before them.
 2. **Its value.** The reader keeps the value's error on the record
    (`CheckInputAttribute.deferred`) instead of giving it when the list is
    read, and each declarator that may take the `_Alignas` gives it. The value
@@ -4066,9 +4069,6 @@ These differences remain:
   E`) still stops the reader.
 - An enum's vector mode after its body gives its deprecation warning twice (on
   main too).
-- A K&R parameter declaration's `_Alignas` gives "only applies to variables and
-  fields" where clang gives "cannot be applied to a function parameter", and
-  stops the reader.
 
 The later phases are left:
 
