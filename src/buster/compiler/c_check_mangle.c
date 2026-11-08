@@ -299,6 +299,43 @@ static void check_mangle_type(CheckMangle* writer, TypeId original)
                 check_mangle_parameters(writer, type, false);
                 check_mangle_push(writer, CHECK_MANGLE_TYPE, type_return(types, type));
             }
+            else if (kind == BUSTER_TYPE_KIND_VECTOR && (types->types.flags[index] & (BUSTER_TYPE_FLAG_NEON | BUSTER_TYPE_FLAG_NEON_POLY)) != 0)
+            {
+                // A NEON vector (#1447), as clang's mangleNeonVectorType names it off ARM: __simd64_ or __simd128_ and its
+                // element's NEON name. clang has none for long and unsigned long, which it takes as NEON elements on x86-64
+                // (its mangler's unreachable case): refused.
+                const bool poly = (types->types.flags[index] & BUSTER_TYPE_FLAG_NEON_POLY) != 0;
+                const TypeId element = type_unqualified(type_strip_aligned(types, type_element(types, type)));
+                const char* name = NULL;
+                switch (type_index(element))
+                {
+                    case BUSTER_TYPE_CODE_SCHAR: name = poly ? "poly8_t" : "int8_t"; break;
+                    case BUSTER_TYPE_CODE_UCHAR: name = poly ? "poly8_t" : "uint8_t"; break;
+                    case BUSTER_TYPE_CODE_SHORT: name = poly ? "poly16_t" : "int16_t"; break;
+                    case BUSTER_TYPE_CODE_USHORT: name = poly ? "poly16_t" : "uint16_t"; break;
+                    case BUSTER_TYPE_CODE_INT: name = poly ? NULL : "int32_t"; break;
+                    case BUSTER_TYPE_CODE_UINT: name = poly ? NULL : "uint32_t"; break;
+                    case BUSTER_TYPE_CODE_LLONG: name = poly ? "poly64_t" : "int64_t"; break;
+                    case BUSTER_TYPE_CODE_ULLONG: name = poly ? "poly64_t" : "uint64_t"; break;
+                    case BUSTER_TYPE_CODE_DOUBLE: name = poly ? NULL : "float64_t"; break;
+                    case BUSTER_TYPE_CODE_FLOAT: name = poly ? NULL : "float32_t"; break;
+                    case BUSTER_TYPE_CODE_HALF: name = poly ? NULL : "float16_t"; break;
+                    case BUSTER_TYPE_CODE_BF16: name = poly ? NULL : "bfloat16_t"; break;
+                    default: break;
+                }
+                const uint64_t bits = name != NULL ? type_size(types, element) * 8 * types->types.extent[index] : 0;
+                const char* prefix = bits == 64 ? "__simd64_" : bits == 128 ? "__simd128_" : NULL;
+                if (prefix == NULL)
+                {
+                    writer->status = CHECK_MANGLE_UNSUPPORTED;
+                }
+                else
+                {
+                    check_mangle_number(writer, strlen(prefix) + strlen(name), 10);
+                    check_mangle_text(writer, prefix);
+                    check_mangle_text(writer, name);
+                }
+            }
             else if (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR || kind == BUSTER_TYPE_KIND_BIT_INT)
             {
                 check_mangle_text(writer, kind != BUSTER_TYPE_KIND_BIT_INT ? "Dv" :

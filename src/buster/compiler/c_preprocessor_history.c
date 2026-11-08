@@ -615,7 +615,7 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
 // A cold source-command queue, allocated only for diagnostics. Messages and the optional explicit note are owned;
 // origin indices keep the recording preprocessor alive until publication. No rendered include-stack state is saved:
 // its suppression follows the final source order, not the order in which compiler stages discover reports.
-static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_t position, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const PPOutputDiagnosticNote* source_notes, uint32_t source_note_count, const char* format, va_list arguments)
+static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_t position, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const PPOutputDiagnosticNote* source_notes, uint32_t source_note_count, const PPDiagnosticSourceNote* placed_notes, uint32_t placed_note_count, const char* format, va_list arguments)
 {
     const bool failed_before = pp->diagnostic_collection_failed;
     va_list copy;
@@ -623,8 +623,9 @@ static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_
     const int length = vsnprintf(NULL, 0, format, copy);
     va_end(copy);
     const uint64_t note_bytes = note != NULL && note->message != NULL ? strlen(note->message) + 1u : 0;
-    uint64_t bytes = length >= 0 ? sizeof(PPDiagnosticRecord) + (uint64_t)(uint32_t)length + 1u + note_bytes + (uint64_t)source_note_count * sizeof(PPDiagnosticSourceNote) : 0;
-    bool valid = length >= 0 && (source_note_count == 0 || source_notes != NULL);
+    const uint32_t note_count = source_note_count + placed_note_count;
+    uint64_t bytes = length >= 0 ? sizeof(PPDiagnosticRecord) + (uint64_t)(uint32_t)length + 1u + note_bytes + (uint64_t)note_count * sizeof(PPDiagnosticSourceNote) : 0;
+    bool valid = length >= 0 && (source_note_count == 0 || source_notes != NULL) && (placed_note_count == 0 || placed_notes != NULL);
     for (uint32_t i = 0; valid && i < source_note_count; i += 1)
     {
         valid = source_notes[i].token < pp->output.count && source_notes[i].message != NULL;
@@ -633,12 +634,16 @@ static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_
             valid = !__builtin_add_overflow(bytes, (uint64_t)strlen(source_notes[i].message) + 1u, &bytes);
         }
     }
+    for (uint32_t i = 0; valid && i < placed_note_count; i += 1)
+    {
+        valid = placed_notes[i].message != NULL && !__builtin_add_overflow(bytes, (uint64_t)strlen(placed_notes[i].message) + 1u, &bytes);
+    }
     bytes = valid ? bytes : 0;
     PPDiagnosticRecord* record = bytes != 0 && !pp->diagnostic_collection_failed ? arena_push(&pp->arena, bytes, _Alignof(PPDiagnosticRecord)) : NULL;
     if (record != NULL)
     {
         PPDiagnosticSourceNote* owned_notes = (PPDiagnosticSourceNote*)(record + 1);
-        char* message = (char*)(owned_notes + source_note_count);
+        char* message = (char*)(owned_notes + note_count);
         va_copy(copy, arguments);
         const int written = vsnprintf(message, (uint64_t)(uint32_t)length + 1u, format, copy);
         va_end(copy);
@@ -655,7 +660,7 @@ static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_
                 .message = message,
                 .note_message = note_bytes != 0 ? message + length + 1 : NULL,
                 .source_notes = owned_notes,
-                .source_note_count = source_note_count,
+                .source_note_count = note_count,
                 .severity = (uint8_t)severity,
             };
             if (note_bytes != 0)
@@ -669,6 +674,13 @@ static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_
                 const uint64_t size = strlen(source_notes[i].message) + 1u;
                 owned_notes[i] = (PPDiagnosticSourceNote){ pp->output.locations[token], pp_history_at(pp, token), next };
                 memcpy(next, source_notes[i].message, size);
+                next += size;
+            }
+            for (uint32_t i = 0; i < placed_note_count; i += 1)
+            {
+                const uint64_t size = strlen(placed_notes[i].message) + 1u;
+                owned_notes[source_note_count + i] = (PPDiagnosticSourceNote){ placed_notes[i].location, placed_notes[i].origin, next };
+                memcpy(next, placed_notes[i].message, size);
                 next += size;
             }
             if (pp->diagnostic_last != NULL)
@@ -853,7 +865,7 @@ static __attribute__((format(printf, 5, 6))) void pp_diagnose_note(Preprocessor*
         const uint32_t position = pp->diagnostic_position != BUSTER_PP_NONE ? pp->diagnostic_position : pp->output.count;
         if (pp->options.collect_diagnostics)
         {
-            pp_collect_diagnostic(pp, requested, (uint64_t)position * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_LEXICAL, location, location != 0 ? pp->diagnostic_origin : 0, note, NULL, 0, format, arguments);
+            pp_collect_diagnostic(pp, requested, (uint64_t)position * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_LEXICAL, location, location != 0 ? pp->diagnostic_origin : 0, note, NULL, 0, NULL, 0, format, arguments);
         }
         else
         {
@@ -878,7 +890,8 @@ static void pp_diagnose_output_arguments(Preprocessor* pp, PPSeverity severity, 
 // Explicit source coordinates can name a consumed preprocessing token. The caller has ensured history, so both
 // its origin and every output note's origin belong to the same replay. They publish as one diagnostic group.
 static void pp_diagnose_source_location(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, uint32_t position, PPDiagnosticPhase phase,
-                                        const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, va_list arguments)
+                                        const PPOutputDiagnosticNote* notes, uint32_t note_count, const PPDiagnosticSourceNote* placed, uint32_t placed_count,
+                                        const char* format, va_list arguments)
 {
     // The notes' places are the output's (pp_release_output).
     pp_output_ensure(pp);
@@ -896,7 +909,7 @@ static void pp_diagnose_source_location(Preprocessor* pp, PPSeverity severity, u
     {
         if (pp->options.collect_diagnostics)
         {
-            pp_collect_diagnostic(pp, requested, (uint64_t)position * PP_DIAGNOSTIC_PHASE_COUNT + phase, location, origin, NULL, notes, note_count, format, arguments);
+            pp_collect_diagnostic(pp, requested, (uint64_t)position * PP_DIAGNOSTIC_PHASE_COUNT + phase, location, origin, NULL, notes, note_count, placed, placed_count, format, arguments);
         }
         else
         {
@@ -905,6 +918,10 @@ static void pp_diagnose_source_location(Preprocessor* pp, PPSeverity severity, u
             {
                 const uint32_t at = notes[i].token;
                 pp_render_message(pp, PP_SEVERITY_NOTE, at < pp->output.count ? pp->output.locations[at] : 0, pp_history_at(pp, at), NULL, "%s", notes[i].message);
+            }
+            for (uint32_t i = 0; placed != NULL && i < placed_count; i += 1)
+            {
+                pp_render_message(pp, PP_SEVERITY_NOTE, placed[i].location, placed[i].origin, NULL, "%s", placed[i].message);
             }
         }
     }
@@ -915,7 +932,7 @@ static void pp_diagnose_output_location(Preprocessor* pp, PPSeverity severity, u
                                         const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, va_list arguments)
 {
     pp_history_ensure(pp);
-    pp_diagnose_source_location(pp, severity, location, pp_history_at(pp, token), position, phase, notes, note_count, format, arguments);
+    pp_diagnose_source_location(pp, severity, location, pp_history_at(pp, token), position, phase, notes, note_count, NULL, 0, format, arguments);
 }
 
 static __attribute__((format(printf, 9, 10))) void pp_diagnose_source_notes_phase(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin,
@@ -924,7 +941,7 @@ static __attribute__((format(printf, 9, 10))) void pp_diagnose_source_notes_phas
 {
     va_list arguments;
     va_start(arguments, format);
-    pp_diagnose_source_location(pp, severity, location, origin, position, phase, notes, note_count, format, arguments);
+    pp_diagnose_source_location(pp, severity, location, origin, position, phase, notes, note_count, NULL, 0, format, arguments);
     va_end(arguments);
 }
 
@@ -999,6 +1016,64 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_
     va_end(arguments);
 }
 
+// pp_diagnose_output_offset_at with notes at places of their own (#1447: a named universal character name's, at bytes of
+// its name in the token's spelling, `offset` each), the token's history theirs.
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 8, 9))) void pp_diagnose_output_offset_notes(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t offset,
+                                                                                                              uint32_t position, const PPOffsetNote* notes,
+                                                                                                              uint32_t note_count, const char* format, ...)
+{
+    pp_history_ensure(pp);
+    pp_output_ensure(pp);
+    const uint32_t base = token < pp->output.count ? pp->output.locations[token] : 0;
+    const uint32_t origin = pp_history_at(pp, token);
+    const uint32_t location = base != 0 ? pp_spelling_offset_location(pp, base, offset) : 0;
+    PPDiagnosticSourceNote placed[BUSTER_PP_PLACED_NOTES];
+    const uint32_t count = note_count < BUSTER_PP_PLACED_NOTES ? note_count : BUSTER_PP_PLACED_NOTES;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        placed[i] = (PPDiagnosticSourceNote){ base != 0 ? pp_spelling_offset_location(pp, base, notes[i].offset) : 0, origin, notes[i].message };
+    }
+    va_list arguments;
+    va_start(arguments, format);
+    pp_diagnose_source_location(pp, severity, location, origin, position, PP_DIAGNOSTIC_SEMANTIC, NULL, 0, placed, count, format, arguments);
+    va_end(arguments);
+}
+
+// pp_diagnose with notes at places of their own (`notes`, in the source as `location` is), a lexical diagnostic's (#1447:
+// a named universal character name's in a character constant #if reads).
+static __attribute__((format(printf, 6, 7))) void pp_diagnose_notes(Preprocessor* pp, PPSeverity severity, uint32_t location, const PPDiagnosticSourceNote* notes, uint32_t note_count,
+                                                                   const char* format, ...)
+{
+    const PPSeverity requested = severity;
+    const bool visible = severity != PP_SEVERITY_WARNING || pp_diagnostic_warning_visible(pp, location, location != 0 ? pp->diagnostic_origin : 0);
+    bool limited = false;
+    const bool accepted = visible && pp_diagnostic_begin(pp, &severity, &limited);
+    if (accepted && !pp->options.quiet && limited)
+    {
+        pp_diagnostic_limit(pp);
+    }
+    else if (accepted && (!pp->options.quiet || (pp->options.collect_diagnostics && !pp->history_deferred)))
+    {
+        va_list arguments;
+        va_start(arguments, format);
+        const uint32_t position = pp->diagnostic_position != BUSTER_PP_NONE ? pp->diagnostic_position : pp->output.count;
+        if (pp->options.collect_diagnostics)
+        {
+            pp_collect_diagnostic(pp, requested, (uint64_t)position * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_LEXICAL, location, location != 0 ? pp->diagnostic_origin : 0, NULL, NULL, 0, notes,
+                                  note_count, format, arguments);
+        }
+        else
+        {
+            pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, NULL, format, arguments);
+            for (uint32_t i = 0; i < note_count; i += 1)
+            {
+                pp_render_message(pp, PP_SEVERITY_NOTE, notes[i].location, notes[i].origin, NULL, "%s", notes[i].message);
+            }
+        }
+        va_end(arguments);
+    }
+}
+
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 4, 5))) void pp_diagnose_output(Preprocessor* pp, PPSeverity severity, uint32_t token, const char* format, ...)
 {
     va_list arguments;
@@ -1039,7 +1114,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_
     va_list arguments;
     va_start(arguments, format);
     pp_history_ensure(pp);
-    pp_diagnose_source_location(pp, severity, 0, 0, position, PP_DIAGNOSTIC_SEMANTIC, notes, note_count, format, arguments);
+    pp_diagnose_source_location(pp, severity, 0, 0, position, PP_DIAGNOSTIC_SEMANTIC, notes, note_count, NULL, 0, format, arguments);
     va_end(arguments);
 }
 

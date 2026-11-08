@@ -305,9 +305,9 @@
 //   - A token's start is its first character after any line splices (clang starts it at the first splice).
 //   - Digraphs have the kind of the punctuator they stand for (`<:` is `C_TOKEN_L_SQUARE`), like clang.
 //   - Header names aren't recognized: after `#include`, re-lex the `<...>` form from the source starting at the `<`.
-//   - A named universal character name `\N{...}` is accepted in an identifier if the name is written in capital
-//     letters, digits, spaces and hyphens; clang also checks that the name exists. The preprocessor refuses every named
-//     UCN its tokens have, at its backslash (#452): buster has no table of Unicode's character names to read one with.
+//   - A named universal character name `\N{...}` is read by Unicode's names (c_unicode_names.c, #1447): exactly within an
+//     identifier, as clang's lexer reads one without diagnosing it, and loosely where it starts a token, as clang recovers
+//     from a misspelled one once it has diagnosed it (the preprocessor words those diagnostics).
 //
 // Requires Clang and AVX-512 F/BW/VL/VBMI/VBMI2/VPOPCNTDQ plus BMI2 (e.g. -march=znver4, znver5 or tigerlake).
 
@@ -904,8 +904,7 @@ static const uint32_t c_identifier_continue_ranges[812][2] =
 #define BUSTER_ARRAY_LENGTH(x) (sizeof(x) / sizeof((x)[0]))
 #endif
 #define BUSTER_LEX_END_OF_FILE (-1)
-// The code point of a named UCN (`\N{...}`) whose name looks valid. See the header.
-#define BUSTER_LEX_NAMED_UCN 0xFFFFFFFFu
+#include "buster/compiler/c_unicode_names.c"
 
 typedef struct ScalarLexer ScalarLexer;
 struct ScalarLexer
@@ -1012,12 +1011,12 @@ static bool code_point_in(const uint32_t (*ranges)[2], uint64_t count, uint32_t 
 
 static bool is_identifier_start_code_point(uint32_t code_point)
 {
-    return code_point == BUSTER_LEX_NAMED_UCN || code_point_in(c_identifier_start_ranges, BUSTER_ARRAY_LENGTH(c_identifier_start_ranges), code_point);
+    return code_point_in(c_identifier_start_ranges, BUSTER_ARRAY_LENGTH(c_identifier_start_ranges), code_point);
 }
 
 static bool is_identifier_continue_code_point(uint32_t code_point)
 {
-    return code_point == BUSTER_LEX_NAMED_UCN || code_point_in(c_identifier_continue_ranges, BUSTER_ARRAY_LENGTH(c_identifier_continue_ranges), code_point);
+    return code_point_in(c_identifier_continue_ranges, BUSTER_ARRAY_LENGTH(c_identifier_continue_ranges), code_point);
 }
 
 // clang's getEscapedNewLineSize: the size of the whitespace and newline after a backslash, if they make it a line
@@ -1162,10 +1161,48 @@ static uint64_t decode_utf8(const ScalarLexer* lexer, uint64_t position, uint32_
     return result;
 }
 
+// clang's tryReadNamedUCN's reading: the name of the named UCN \N{...} whose backslash `get_char` returns at `position`,
+// its bytes after translation phases 1 and 2 up to its '}' (or a line break, the file's end or a NUL, which end none)
+// into `name` (its first `capacity`), their count in `*length`. Returns false if there is none: no '{', no '}' or no
+// byte. Otherwise `*start` is the position after its '{' (where clang words a bad name) and `*end` the one past its '}'.
+static bool read_ucn_name(const ScalarLexer* lexer, uint64_t position, uint8_t* name, uint64_t capacity, uint64_t* length, uint64_t* start, uint64_t* end)
+{
+    uint64_t size;
+    peek_char(lexer, position, &size);
+    uint64_t p = position + size;
+    const int32_t kind = peek_char(lexer, p, &size);
+    p += size;
+    const bool braced = kind == 'N' && peek_char(lexer, p, &size) == '{';
+    p += braced ? size : 0;
+    *start = p;
+    uint64_t count = 0;
+    bool found_end = false;
+    bool reading = braced;
+    while (reading)
+    {
+        const int32_t c = peek_char(lexer, p, &size);
+        reading = c != BUSTER_LEX_END_OF_FILE && c != '\n' && c != '\r';
+        p += c != BUSTER_LEX_END_OF_FILE ? size : 0;
+        found_end = c == '}';
+        reading = reading && !found_end;
+        if (reading && count < capacity)
+        {
+            name[count] = (uint8_t)c;
+        }
+        count += reading ? 1 : 0;
+        reading = reading && c != 0;
+    }
+    *length = count;
+    *end = p;
+    return found_end && count != 0;
+}
+
 // clang's tryReadUCN: reads the universal character name whose backslash `get_char` returns at `position`. Returns
 // false if there is none. Otherwise `end` is past it and `code_point` is its code point, or 0 if C doesn't allow it
-// outside of literals (clang still treats the whole UCN as one character then).
-static bool read_ucn(const ScalarLexer* lexer, uint64_t position, uint64_t* end, uint32_t* code_point)
+// outside of literals (clang still treats the whole UCN as one character then). A named one's name is Unicode's exactly
+// (unicode_name_strict) or, with `loose` (a token's first character, which clang reads diagnosing it), loosely; any
+// other is 0.
+static bool read_ucn_by(const ScalarLexer* lexer, uint64_t position, uint64_t* end, uint32_t* code_point, bool loose)
 {
     uint64_t size;
     peek_char(lexer, position, &size);
@@ -1217,44 +1254,29 @@ static bool read_ucn(const ScalarLexer* lexer, uint64_t position, uint64_t* end,
             *code_point = (value < 0xA0 || (value >= 0xD800 && value <= 0xDFFF)) ? 0 : value;
         }
     }
-    else if (kind == 'N' && peek_char(lexer, p, &size) == '{')
+    else if (kind == 'N')
     {
-        p += size;
+        uint8_t name[BUSTER_UNICODE_NAME_BYTES];
         uint64_t name_length = 0;
-        bool found_end = false;
-        bool valid_name = true;
-        for (;;)
+        uint64_t name_start = 0;
+        uint64_t name_end = 0;
+        if (read_ucn_name(lexer, position, name, sizeof(name), &name_length, &name_start, &name_end))
         {
-            int32_t c = peek_char(lexer, p, &size);
-            if (c == BUSTER_LEX_END_OF_FILE)
-            {
-                break;
-            }
-            p += size;
-            if (c == '}')
-            {
-                found_end = true;
-                break;
-            }
-            if (c == '\n' || c == '\r')
-            {
-                break;
-            }
-            name_length += 1;
-            if (c == 0)
-            {
-                break;
-            }
-            valid_name &= (c >= 'A' && c <= 'Z') || is_digit(c) || c == ' ' || c == '-';
-        }
-        if (found_end && name_length != 0)
-        {
+            *end = name_end;
+            // (A name longer than any of Unicode's is none.)
+            uint32_t value = 0;
+            const bool short_enough = name_length < BUSTER_UNICODE_NAME_BYTES;
+            const bool named = short_enough && (unicode_name_strict(name, (uint32_t)name_length, &value) || (loose && unicode_name_loose(name, (uint32_t)name_length, &value)));
             result = true;
-            *end = p;
-            *code_point = valid_name ? BUSTER_LEX_NAMED_UCN : 0;
+            *code_point = named && value >= 0xA0 && (value < 0xD800 || value > 0xDFFF) ? value : 0;
         }
     }
     return result;
+}
+
+static bool read_ucn(const ScalarLexer* lexer, uint64_t position, uint64_t* end, uint32_t* code_point)
+{
+    return read_ucn_by(lexer, position, end, code_point, false);
 }
 
 // clang's tryConsumeIdentifierUCN: `get_char` returns a backslash at `position`.
@@ -1949,7 +1971,7 @@ BUSTER_LEXER_ENTRY uint64_t c_tokenize_scalar_range(const uint8_t* source, uint6
                 uint64_t end;
                 uint32_t code_point;
                 kind = C_TOKEN_UNKNOWN;
-                if (read_ucn(lexer, start, &end, &code_point))
+                if (read_ucn_by(lexer, start, &end, &code_point, true))
                 {
                     p = end;
                     if (code_point != 0 && is_identifier_start_code_point(code_point))

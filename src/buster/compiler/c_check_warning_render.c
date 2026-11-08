@@ -955,6 +955,13 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = type.length != 0 ? check_warning_text(scratch, "ISO C does not allow indirection on operand of type %.*s", (int)type.length, type.pointer) : NULL;
             break;
         }
+        case CHECK_WARNING_EVENT_DIAGNOSE_IF:
+        {
+            // diagnose_if's message, its string literals decoded and joined, as clang prints it (#1447).
+            const String8 message = check_warning_strings_value(parser, pp, payload->token, scratch);
+            result = check_warning_text(scratch, "%.*s", (int)message.length, message.pointer);
+            break;
+        }
         case CHECK_WARNING_EVENT_DEPRECATED_USE:
         {
             // The message is the attribute's string as written, without its quotes or prefix. An anonymous tag's name is its
@@ -1266,6 +1273,9 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
             break;
         case CHECK_WARNING_NOTE_DECLARED_HERE:
             result = check_warning_text(scratch, "'%.*s' declared here", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_NOTE_DIAGNOSE_IF:
+            result = check_warning_text(scratch, "from 'diagnose_if' attribute on '%.*s':", (int)name.length, name.pointer);
             break;
         case CHECK_WARNING_NOTE_SPAN_REASON:
         {

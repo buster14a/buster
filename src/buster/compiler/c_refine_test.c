@@ -234,7 +234,8 @@ static int32_t refine_oracle_hex(uint8_t c)
 }
 
 // The key of an identifier token in two passes: translation phase 2 (splices removed, and "??/" read as a backslash
-// with trigraphs), then each UCN (\uXXXX, \UXXXXXXXX or \u{...}) as UTF-8; a named UCN stays as written.
+// with trigraphs), then each UCN (\uXXXX, \UXXXXXXXX, \u{...} or \N{NAME}) as UTF-8: a named one by Unicode's names, its
+// name read loosely where it starts the identifier (#1447: the lexer's recovery from a misspelled name there).
 static uint32_t refine_oracle_key(const uint8_t* source, uint64_t length, uint32_t start, uint32_t end, bool trigraphs, uint8_t* cleaned, uint8_t* out)
 {
     uint32_t cleaned_length = 0;
@@ -263,7 +264,20 @@ static uint32_t refine_oracle_key(const uint8_t* source, uint64_t length, uint32
     uint32_t i = 0;
     while (i < cleaned_length)
     {
-        if (cleaned[i] == '\\' && i + 1 < cleaned_length && (cleaned[i + 1] == 'u' || cleaned[i + 1] == 'U'))
+        uint32_t close = i + 3;
+        while (close < cleaned_length && cleaned[close] != '}')
+        {
+            close += 1;
+        }
+        uint32_t named = 0;
+        const bool name = cleaned[i] == '\\' && i + 2 < cleaned_length && cleaned[i + 1] == 'N' && cleaned[i + 2] == '{' && close < cleaned_length &&
+                          (unicode_name_strict(cleaned + i + 3, close - i - 3, &named) || (i == 0 && unicode_name_loose(cleaned + i + 3, close - i - 3, &named)));
+        if (name)
+        {
+            result += refine_encode_utf8(named, out + result);
+            i = close + 1;
+        }
+        else if (cleaned[i] == '\\' && i + 1 < cleaned_length && (cleaned[i + 1] == 'u' || cleaned[i + 1] == 'U'))
         {
             uint32_t code_point = 0;
             uint32_t j = i + 2;
@@ -977,19 +991,24 @@ static const RefineFixture refine_fixtures[] = {
     { "\xC3\xA9t\xC3\xA9 \\u00e9t\\u00E9 \\U000000e9t\\u{e9}", 0, -1, false, 1, 2 },
     { "caf\\u00\\\ne9 caf\xC3\xA9", 0, -1, false, 0, 1 },
     { "x?" "?/u00e9 x\xC3\xA9", C_TOKENIZER_TRIGRAPHS, -1, false, 0, 1 },
-    // A named UCN stays as written, its line splices removed (#452: the preprocessor refuses it): never the identifier
-    // that another spelling of its character makes (\u, \U or UTF-8), nor one with its name spelled otherwise (two spaces,
-    // which clang's loose matching would read as its name).
+    // A named UCN is its character (#1447), its line splices removed: the identifier that another spelling of its character
+    // makes (\u, \U or UTF-8), by a name, an alias or a name made by rule; where it starts the identifier, its name spelled
+    // loosely too (two spaces), as clang recovers from it after its error.
     { "x\\N{LATIN SMALL LETTER E WITH ACUTE}y x\\N{LATIN SMALL LET\\\nTER E WITH ACUTE}y", 0, -1, false, 0, 1 },
-    { "x\\N{LATIN SMALL LETTER E WITH ACUTE}y x\\u00e9y", 0, -1, false, 0, 1, true },
-    { "x\\N{LATIN SMALL LETTER E WITH ACUTE}y x\\U000000E9y", 0, -1, false, 0, 1, true },
-    { "x\\N{LATIN SMALL LETTER E WITH ACUTE}y x\xC3\xA9y", 0, -1, false, 0, 1, true },
+    { "x\\N{LATIN SMALL LETTER E WITH ACUTE}y x\\u00e9y", 0, -1, false, 0, 1 },
+    { "x\\N{LATIN SMALL LETTER E WITH ACUTE}y x\\U000000E9y", 0, -1, false, 0, 1 },
+    { "x\\N{LATIN SMALL LETTER E WITH ACUTE}y x\xC3\xA9y", 0, -1, false, 0, 1 },
     { "\\N{GREEK SMALL LETTER ALPHA} \\N{GREEK SMALL LETTER ALPHA}", 0, -1, false, 0, 1 },
-    { "\\N{GREEK SMALL LETTER ALPHA} \\N{GREEK  SMALL LETTER ALPHA}", 0, -1, false, 0, 1, true },
+    { "\\N{GREEK SMALL LETTER ALPHA} \\N{GREEK  SMALL LETTER ALPHA}", 0, -1, false, 0, 1 },
+    { "\\N{GREEK SMALL LETTER ALPHA} \\u03b1", 0, -1, false, 0, 1 },
     { "x?" "?/N{GREEK SMALL LETTER ALPHA} x\\N{GREEK SMALL LETTER ALPHA}", C_TOKENIZER_TRIGRAPHS, -1, false, 0, 1 },
-    // A name not written with capital letters, digits, spaces and hyphens isn't one (clang has none such): the identifier
-    // before it ends there.
+    { "x\\N{LATIN CAPITAL LETTER GHA} x\\u01A2 x\\N{LATIN CAPITAL LETTER OI}", 0, -1, false, 0, 2 },
+    { "\\N{CJK UNIFIED IDEOGRAPH-4E00}\\N{HANGUL SYLLABLE GAG} \xE4\xB8\x80\xEA\xB0\x81", 0, -1, false, 0, 1 },
+    { "\\N{CJK UNIFIED IDEOGRAPH-4E00} \\N{CJK UNIFIED IDEOGRAPH-4E01}", 0, -1, false, 0, 1, true },
+    // Within an identifier, a name not exactly Unicode's isn't one: the identifier before it ends there, and the UCN starts
+    // the next, read loosely (x, then α, then x).
     { "x\\N{greek small letter alpha} x", 0, -1, false, 0, 2 },
+    { "x\\N{greek small letter alpha} \\u03b1", 0, -1, false, 1, 2 },
     // Around the vectorized path's 63-byte limit: 62, 63, 64 and 65 bytes, and a spliced long one.
     { "a12345678901234567890123456789012345678901234567890123456789012 a12345678901234567890123456789012345678901234567890123456789012", 0, -1, false, 0, 1 },
     { "a123456789012345678901234567890123456789012345678901234567890123 a123456789012345678901234567890123456789012345678901234567890123", 0, -1, false, 0, 1 },
