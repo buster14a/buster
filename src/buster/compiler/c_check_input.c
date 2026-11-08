@@ -4642,6 +4642,7 @@ static void check_input_alloc_token_evidence(CheckInputReader* reader, uint32_t 
 #include "c_check_generic.c"
 static void check_input_implicit_function(CheckInputReader* reader, uint32_t token);
 // The plain library builtins' calls that clang folds (#148), defined after the implicit declarations below.
+static inline __attribute__((always_inline)) uint32_t check_input_library_declaration(CheckInputReader* reader, uint32_t declaration);
 static inline __attribute__((always_inline)) uint32_t check_input_library_call(CheckInputReader* reader, uint32_t use);
 
 // A constexpr object's value (#793), if its initializer's finish has read it: an integer, floating or null pointer
@@ -8858,7 +8859,7 @@ static __attribute__((noinline)) void check_input_library_names(CheckInputReader
 }
 
 // The mark of a call of `declaration`, a function with external linkage whose name, `name`, shares its low 6 bits with a
-// fold's (check_input_library_call): BUSTER_CHECK_LIBRARY_CALL and the fold's index where it is one and clang makes the
+// fold's (check_input_library_declaration): BUSTER_CHECK_LIBRARY_CALL and the fold's index where it is one and clang makes the
 // declaration the builtin, else 0.
 static __attribute__((noinline)) uint32_t check_input_library_match(CheckInputReader* reader, uint32_t declaration, IdentId name)
 {
@@ -8872,6 +8873,21 @@ static __attribute__((noinline)) uint32_t check_input_library_match(CheckInputRe
                          pp_library_builtin(&reader->pp->options, intern_bytes(table, name), intern_length(table, name)) &&
                          check_library_plain_prototype(reader->types, reader->declared_types[declaration], index);
     return library ? BUSTER_CHECK_LIBRARY_CALL | index : 0;
+}
+
+// The same declaration permission serves named calls and immutable overload candidates. The latter publish it only
+// for ordinary declarations, after inheriting attributes from their earlier declarations (#1234).
+static inline __attribute__((always_inline)) uint32_t check_input_library_declaration(CheckInputReader* reader, uint32_t declaration)
+{
+    if (!reader->library_names_known)
+    {
+        check_input_library_names(reader);
+    }
+    const Parser* parser = reader->parser;
+    const IdentId name = declaration < parser->tokens.count ? parser->tokens.names[declaration] : 0;
+    const bool candidate = name != 0 && ((reader->library_names_mask >> (name & 63)) & 1) != 0 && check_input_linkage(reader->declaration_bits, declaration) == 2 &&
+                           reader->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+    return candidate ? check_input_library_match(reader, declaration, name) : 0;
 }
 
 // The member that marks a call whose designator, at `use`, names the unit's declaration of a plain library builtin that
@@ -8891,10 +8907,7 @@ static inline __attribute__((always_inline)) uint32_t check_input_library_call(C
     const IdentId spelled = use < parser->tokens.count ? parser->tokens.names[use] : 0;
     const bool masked = ((reader->library_names_mask >> (spelled & 63)) & 1) != 0 && parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER;
     const uint32_t declaration = masked ? reader->output->declarations[use] : BUSTER_CHECK_NONE;
-    const IdentId name = declaration < parser->tokens.count ? parser->tokens.names[declaration] : 0;
-    const bool candidate = name != 0 && ((reader->library_names_mask >> (name & 63)) & 1) != 0 && check_input_linkage(reader->declaration_bits, declaration) == 2 &&
-                           reader->declaration_kinds[declaration] == C_BINDING_FUNCTION;
-    return candidate ? check_input_library_match(reader, declaration, name) : 0;
+    return masked ? check_input_library_declaration(reader, declaration) : 0;
 }
 
 #include "c_check_literal_table_input.c"

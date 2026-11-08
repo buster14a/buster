@@ -3197,7 +3197,16 @@ of such a name is the library's function, which calls
 reach as any function's; where it has external linkage and the row's
 prototype, its calls fold as `__builtin_X`'s do (Sema's `BuiltinAttr`:
 `check_input_library_call` marks them, `check_builtin_library_fold_plain` folds
-them). An undeclared one's use declares it with its catalog row's prototype
+them). In units with overload tables, each ordinary declaration retains this
+permission in `CheckOverloadCandidate.library_call` after attribute inheritance
+(`#1234`, `check_input_library_declaration`). `check_overload_call` folds the
+selected candidate's call after resolving and converting its arguments, for
+both the expression graph and source-time constant evaluation. A newer
+overload sharing the name cannot grant or remove the selected declaration's
+permission; an `overloadable` declaration never has it, even with the library
+prototype. Linkage, prototype and `-fno-builtin`/freestanding policy use the
+same checks as calls in units without overload tables. An undeclared one's
+use declares it with its catalog row's prototype
 (#927's `check_input_implicit_function`, `c_check_implicit_input.c`, clang's
 `LazilyCreateBuiltin`), which the driver reports as clang does
 (`check_driver_implicit_library`): from C99 on, an error, `call to undeclared

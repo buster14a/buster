@@ -2297,7 +2297,30 @@ static uint32_t parse_test_check_kernels(Parser* parser, const Parser* scalar, P
         };
         const ParseKernelResult twins = parse_twins(kernels, &input, parser->predeclared, copies.typed, copies.statements);
         tally->fallback_items += twins.fallback.items;
-        if (scalar->errors == 0 && !twins.fallback.errors)
+        bool accepted = !twins.fallback.errors;
+        if (scalar->errors == 0 && twins.fallback.errors)
+        {
+            // A declaration can make a typedef name ordinary: the production vector path retries the whole unit.
+            // Exercise that protocol here too, where scalar hosts no longer take it through parse_translation_unit.
+            ParseTree tree = {
+                .roles = kernels->roles,
+                .depths = kernels->node_depths,
+                .parents = kernels->parents,
+            };
+            uint32_t diagnostic_count = 0;
+            const bool prepared = parse_prepare_meanings(parser, pp->table);
+            const ParseScalarResult retry = prepared ?
+                parse_scalar(kinds, names, parser->tokens.flags, count, parser->language, &parser->meanings, &tree, &parser->scratch, copies.diagnostics,
+                             (uint32_t)slots, &diagnostic_count) :
+                (ParseScalarResult){ .out_of_memory = true };
+            accepted = !retry.out_of_memory && retry.errors == 0;
+            if (!accepted || (BUSTER_HOST_VECTOR && !parser->statistics.whole))
+            {
+                parse_test_report("%s: the twins' whole-unit retry differs from the scalar parser or the vector path\n", name);
+                result += 1;
+            }
+        }
+        if (scalar->errors == 0 && accepted)
         {
             first = BUSTER_PARSE_NONE;
             for (uint32_t i = 0; i < count && first == BUSTER_PARSE_NONE; i += 1)
@@ -2315,10 +2338,9 @@ static uint32_t parse_test_check_kernels(Parser* parser, const Parser* scalar, P
                 result += 1;
             }
         }
-        else if (scalar->errors == 0 && !parser->statistics.whole)
+        else if (scalar->errors != 0 && accepted)
         {
-            // The vector path took the unit to the scalar parser too, as a declaration may make a typedef name ordinary.
-            parse_test_report("%s: the twins' fallback found an error the scalar parser didn't\n", name);
+            parse_test_report("%s: the twins accepted a unit the scalar parser rejected\n", name);
             result += 1;
         }
     }
@@ -3429,9 +3451,9 @@ static const char* parse_test_parse_difference(const Parser* a, const Parser* b)
 // and dirty pages above it: each parse's own temporaries, and a pattern written before each parse. The units: the
 // fixtures' sources, valid code of which the vector path sends some declarations to the scalar parser (`_Generic`, a
 // declarator's group, a parameter's array qualifier, a K&R definition), an error and an unclosed brace (which it sends
-// whole), and random streams. Each must parse as it does on a fresh Parser with arenas of its own (parse_test_parse_difference), and
-// leave the arena's length and the caller's data as they were. Valid units must take the vector path's fallback, and
-// others its errors.
+// whole), an empty unit and random streams. Each must parse as it does on a fresh Parser with arenas of its own (parse_test_parse_difference), and
+// leave the arena's length and the caller's data as they were. Vector hosts must exercise the fallback. On scalar
+// hosts the default must match an explicitly scalar fresh parser, including diagnostics and zero fallback work.
 static uint32_t parse_test_borrowed_scratch(const PPOptions* options, const char* directory, uint64_t seed)
 {
     static const char* const written[] = {
@@ -3440,6 +3462,7 @@ static uint32_t parse_test_borrowed_scratch(const PPOptions* options, const char
         "int k(p, q) int p; int q; { return p + q; }\nint c(void) { T t = 2; return t; }\n",
         "int f(void) { return (1 + ; }\n",
         "int g(void) { if (1) { return 2; }\n",
+        "",
     };
     const uint32_t fixtures = (uint32_t)(sizeof(parse_test_fixtures) / sizeof(parse_test_fixtures[0]));
     const uint32_t streams = 64;
@@ -3488,7 +3511,8 @@ static uint32_t parse_test_borrowed_scratch(const PPOptions* options, const char
             static InternTable table;
             static Preprocessor pp;
             static Parser fresh;
-            const ParseOptions fresh_options = { .scalar = scalar != 0 };
+            const bool scalar_path = BUSTER_SCALAR_PATH(scalar != 0);
+            const ParseOptions fresh_options = { .scalar = scalar_path };
             const bool preprocessed = intern_initialize(&table) && pp_initialize(&pp, options, &table) && pp_run(&pp, path);
             uint8_t* dirt = preprocessed ? arena_push(&borrowed, dirt_bytes, 64) : 0;
             if (dirt != 0)
@@ -3510,13 +3534,18 @@ static uint32_t parse_test_borrowed_scratch(const PPOptions* options, const char
                     parse_translation_unit(&fresh, &pp);
                 }
                 const char* difference = fresh_ready ? parse_test_parse_difference(&reused[scalar], &fresh) : "a fresh parser's reservation";
+                // A default parse on a scalar host must not allocate or run the emulated vector protocol (#1369).
+                const ParseStatistics* statistics = &reused[scalar].statistics;
+                const bool dispatch = !scalar_path || (reused[scalar].kernels.roles == 0 && statistics->fallback_items == 0 && statistics->fallback_tokens == 0 &&
+                                                       statistics->flagged_tokens == 0 && !statistics->whole);
+                difference = difference != 0 ? difference : !dispatch ? "the resolved scalar path ran vector kernels" : 0;
                 if (!kept || difference != 0)
                 {
                     failures += 1;
                     const ParseStatistics* x = &reused[scalar].statistics;
                     const ParseStatistics* y = &fresh.statistics;
                     printf("borrowed scratch: unit %u (%s path): %s; fallback %llu items, %llu tokens, %llu flagged, whole %u, %u errors, against a fresh "
-                           "parser's %llu, %llu, %llu, %u, %u\n    %s", u, scalar ? "scalar" : "vector",
+                           "parser's %llu, %llu, %llu, %u, %u\n    %s", u, scalar ? "scalar" : "default",
                            !kept ? "the borrowed arena's length or the caller's data below it changed" : difference, (unsigned long long)x->fallback_items,
                            (unsigned long long)x->fallback_tokens, (unsigned long long)x->flagged_tokens, x->whole, reused[scalar].errors,
                            (unsigned long long)y->fallback_items, (unsigned long long)y->fallback_tokens, (unsigned long long)y->flagged_tokens, y->whole, fresh.errors,
@@ -3535,11 +3564,11 @@ static uint32_t parse_test_borrowed_scratch(const PPOptions* options, const char
             intern_release(&table);
         }
     }
-    if (!ready || fallbacks == 0 || rejected == 0)
+    if (!ready || (BUSTER_HOST_VECTOR && fallbacks == 0) || rejected == 0)
     {
         failures += 1;
         printf("borrowed scratch: %s\n", !ready ? "a parser or the arena couldn't be reserved, or a unit written" :
-                                          "no valid unit took the vector path's fallback, or none was rejected");
+                                          "no unit was rejected, or a vector host had no valid unit through the fallback");
     }
     parse_release(&reused[0]);
     parse_release(&reused[1]);

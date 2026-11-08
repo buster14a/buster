@@ -1906,6 +1906,39 @@ probe.
 3.50.4's `-c -g -Wall -Wextra` objects and diagnostics are the same bytes as main's on the vector path and with
 `--scalar`.
 
+## What remains of check-input (#1671)
+
+After #1692 and #1694, `check-input` is 43.15 ms on `-c sqlite3.c` (main `829eb71a`, the 9700X). A study found no
+remaining part worth more than about 0.3 ms by local changes.
+[The record](https://github.com/buster14a/buster-performance/tree/72bc1dd97d260c9b7e04ddaffcde4ad72a0eae71/docs/measurements/check-input-1671-remaining-2026-11-07)
+keeps the profiles, the probes and the A/Bs below.
+
+**Where its time is,** in shares of the compile's cycles:
+
+| part | share | profile |
+| --- | ---: | --- |
+| the coded walk | about 6% | its loop's spills, the flush's recording, the value splice and the dispatch, each 0.7–0.8% |
+| the walk in source order's own lines | 4.3% | no line above 0.27% |
+| the declaration steps | about 4.9% | flat |
+
+**What was ruled out, by measurement:**
+- **The declaration steps in vector passes.** The file-scope declarations hold 70% of the steps' time, and each is
+  distinct. Their per-parameter bookkeeping is branching and binding calls; its stores are about 0.04 ms in all.
+- **Caching the specifiers.** 96.5% of `check_input_specifiers`' 42,308 calls repeat an earlier call's tokens, but
+  they are one or two tokens long, and each still writes its tokens' ignored marks. The bound is about 0.3 ms.
+- **The expressions' graph built by passes.** #1038's numbering alone takes 3.21 ms for 323,623 nodes, as much as the
+  class actions it would replace, before any column is written.
+- **The coded walk's rare class actions out of line.** The instructions were identical: clang already kept them out of
+  line.
+- **The walk's label marks computed ahead.**
+  - Gathered a line at a time, they cost +0.28% cycles: the gathers sat on the walk's path.
+  - Made before the walk without gathers, they removed 5.5 M instructions and no cycles: the per-visit tests were cheap
+    and well predicted.
+  - So batching the plain names' visits, 17% of the walk's time, wasn't tried.
+
+**Outside check-input.** check-program's `check_program_return_call` looks every direct call's callee up in the builtin
+catalogue by name: 13,142 binary searches on `sqlite3.c`, 0.95% of the compile.
+
 ## The passes after checking (#592)
 
 #641 removes more token-domain work from the same handoffs. Initializer plans keep only their ascending
