@@ -96,6 +96,8 @@ struct CheckTargetFeatureAttributes
 {
     // The target attribute that applies, where it is a version's (predefines_target_attribute's), or null.
     const CheckInputAttribute* version;
+    // A cpu_specific version's attribute (#1447), whose CPUs' features the function has (getFunctionFeatureMap's), or null.
+    const CheckInputAttribute* specific;
     // Whether a target attribute applies: a version's or "default" (clang's hasAttr<TargetAttr>).
     bool targeted;
     // GNU's function multiversioning: target_clones, "default", or target attributes of other strings
@@ -160,6 +162,8 @@ struct CheckTargetFeatureBuiltins
 typedef struct CheckTargetFeatureMaps CheckTargetFeatureMaps;
 struct CheckTargetFeatureMaps
 {
+    // The program, whose cpu_specific versions' CPUs give their features (#1447).
+    const CheckProgram* program;
     const PredefinesOptions* options;
     PredefinesHost host;
     PredefinesFeatures unit;
@@ -211,6 +215,7 @@ static CheckTargetFeatureAttributes check_target_feature_attributes(const CheckP
                 result.noreturn |= attribute->kind == CHECK_ATTRIBUTE_NORETURN;
                 result.versions |= attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES || attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
                                    attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH;
+                result.specific = result.specific == 0 && attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ? attribute : result.specific;
                 int32_t cpu = -1;
                 // What clang ignores with a warning isn't the function's attribute at all.
                 const PredefinesTargetAttribute kind = attribute->kind == CHECK_ATTRIBUTE_TARGET && attribute->text.length < UINT32_MAX ?
@@ -238,7 +243,15 @@ static CheckTargetFeatureAttributes check_target_feature_attributes(const CheckP
 static PredefinesFeatures check_target_feature_map(CheckTargetFeatureMaps* maps, const CheckTargetFeatureAttributes* attributes)
 {
     PredefinesFeatures result = maps->unit;
-    if (attributes->version != 0)
+    if (attributes->version == 0 && attributes->specific != 0)
+    {
+        // A cpu_specific version's (#1447): the unit's and its CPUs' features, as its body is compiled
+        // (check_program_targets). Rare: not cached.
+        char text[BUSTER_CHECK_PROGRAM_CPU_FEATURES];
+        const uint64_t length = check_program_cpu_features_write(maps->program, attributes->specific, text, sizeof(text));
+        result = predefines_apply(maps->options, &maps->host, maps->host.cpu, text, (uint32_t)length);
+    }
+    else if (attributes->version != 0)
     {
         const String8 text = attributes->version->text;
         uint32_t hash = 2166136261u;
@@ -1855,7 +1868,7 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
     {
         const CheckInput* input = program->input;
         const uint64_t mark = scratch->length;
-        CheckTargetFeatureMaps maps = { .options = options, .host = program->host_read ? program->host : predefines_host_of(options) };
+        CheckTargetFeatureMaps maps = { .program = program, .options = options, .host = program->host_read ? program->host : predefines_host_of(options) };
         maps.unit = predefines_apply(options, &maps.host, maps.host.cpu, 0, 0);
         // The objects with a key: a callee without one has no attribute, which only a flatten caller checks.
         const uint64_t words = ((uint64_t)program->object_count + 63) / 64;

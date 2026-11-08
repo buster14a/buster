@@ -1410,12 +1410,15 @@ tag names, variable array bounds and unsupported calling conventions still
 refuse by name unless an explicit asm label supplies the ABI name. Advertising
 these implemented paths does not remove their argument, subject or ABI limits.
 
-Standard `nodiscard` remains zero: its parsed record has no discarded-result
-diagnostic consumer yet (#1394). The `deprecated` and `maybe_unused` query fix
-does not enable other attribute spellings or promise that consumer; #1475's
-`nodiscard` request remains open. Generic GNU atomic load/store/exchange/compare-exchange,
-GNU lock-free queries and test-and-set/clear remain unadvertised; scalar GNU atomics and
-implemented C11 atomics are advertised.
+Standard `nodiscard` still answers zero. Its discarded-result diagnostics now
+exist (#1447, `c_check_ignored_result.c`: a discarded call of a `nodiscard`
+function, or of one returning a `nodiscard` type, warns as clang's does; the
+[checker guide](c-checker.md) has the rules), but the query does not advertise
+them yet, and #1475's `nodiscard` request remains open. The `deprecated` and
+`maybe_unused` query fix does not enable other attribute spellings.
+Generic GNU atomic load/store/exchange/compare-exchange, GNU lock-free queries
+and test-and-set/clear remain unadvertised; scalar GNU atomics and implemented
+C11 atomics are advertised.
 The query fix does not implement these outstanding semantics.
 
 `test-preprocessor` checks an independent 233-name generic builtin inventory,

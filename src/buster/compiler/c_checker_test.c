@@ -5648,10 +5648,70 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
-            "multiversioning: a cpu_specific declaration alone is unsupported",
+            "multiversioning: a cpu_specific declaration alone is accepted (#1447)",
             "__attribute__((cpu_specific(generic))) int h(void);\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: cpu_specific versions and their dispatcher (#1447)",
+            "__attribute__((cpu_specific(generic))) int h(void) { return 1; }\n__attribute__((cpu_specific(core_2_duo_ssse3))) int h(void) { return 2; }\n__attribute__((cpu_dispatch(generic, core_2_duo_ssse3))) int h(void);\nint caller(void) { return h(); }\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: cpu_specific of an unknown CPU (#1447)",
+            "__attribute__((cpu_specific(generic, nocpu))) int h(void);\n",
             true,
-            true
+            false
+        },
+        {
+            "multiversioning: cpu_dispatch of an unknown CPU (#1447)",
+            "__attribute__((cpu_dispatch(nocpu))) int h(void);\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: cpu_specific versions of one CPU (#1447)",
+            "__attribute__((cpu_specific(generic))) int h(void);\n__attribute__((cpu_specific(atom, generic))) int h(void);\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: cpu_dispatch redeclared with other CPUs (#1447)",
+            "__attribute__((cpu_dispatch(atom))) int h(void);\n__attribute__((cpu_dispatch(generic))) int h(void);\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: a plain redeclaration of a cpu_specific function (#1447)",
+            "__attribute__((cpu_specific(atom))) int h(void);\nint h(void);\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: cpu_specific beside a target version (#1447)",
+            "__attribute__((target(\"default\"))) int h(void);\n__attribute__((cpu_specific(atom))) int h(void);\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: a cpu_specific version's other return type (#1447)",
+            "__attribute__((cpu_specific(atom))) int h(void);\n__attribute__((cpu_specific(generic))) long h(void);\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: a cpu_specific version redefined (#1447)",
+            "__attribute__((cpu_specific(atom))) int h(void) { return 0; }\n__attribute__((cpu_specific(atom))) int h(void) { return 1; }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: a cpu_specific main (#1447)",
+            "__attribute__((cpu_specific(atom))) int main(void) { return 0; }\n",
+            true,
+            false
         },
         {
             "multiversioning: C23-only attributes are ignored in gnu17",
