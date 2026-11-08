@@ -689,7 +689,7 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // against one lane's (time-runs' runs, of test-check-units' program of synth's shape).
 #include "buster/compiler/c_check_units_benchmark.c"
 // measure-tier1-programs (#138, #1189): speedtest1 and Lua's scripts by both tiers, clang -O0 and -O2 and tcc, as whole
-// processes in a rotating order, against each other.
+// processes in a Williams design's order, against each other.
 #include "buster/compiler/tier1_programs_measure.c"
 // measure-tier1-rows (#1283): vector code (test-checker-driver's machine rows' unit, a lexer's byte scan and the compiler's
 // own lexer) by Tier 0, Tier 1 and another compiler's Tier 1, with the moves around Tier 1's machine rows counted.
@@ -698,7 +698,7 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // -O2's, with and without the objects' lifetimes).
 #include "buster/compiler/frame_measure.c"
 // measure-helpers (#1059): the direct forms against the helpers they replace (--helper-forms=all), by both tiers, as
-// whole processes in a rotating order: the primitives' kernels and speedtest1.
+// whole processes in a Williams design's order: the primitives' kernels and speedtest1.
 #include "buster/compiler/helpers_measure.c"
 
 // The runner the 9700X job runs its tests through (a list of commands at once, each one's output printed in the list's

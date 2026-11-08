@@ -1499,7 +1499,7 @@ jobs:
             -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
             "$musl/src/regex/regcomp.c"
           # The whole compile with them and without: sqlite3.c's -c with measure-compile's options, as whole processes in a
-          # rotating order, whose objects must be the same bytes.
+          # Williams design's order, whose objects must be the same bytes.
           sqlite="$corpus/sqlite"
           options=(-c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sqlite" "$sqlite/sqlite3.c")
           taskset -c 2 ./build/compiler time-runs --runs 21 --list "${options[@]}" -o "$RUNNER_TEMP/regions.o" \
@@ -1699,7 +1699,7 @@ jobs:
 
       - name: Attribute sqlite3.c's compile time to the compiler's stages, against tcc
         # #518 (docs/compile-time.md): `-c` of the frozen corpus's sqlite3.c with the options of #136's speedtest1
-        # record, as whole processes in a rotating order with tcc's, with --time-stages' report of where the time goes;
+        # record, as whole processes in a Williams design's order with tcc's, with --time-stages' report of where the time goes;
         # then perf's counters and a profile by function of the default compile. Where `changes` doesn't rule it out
         # (the stage clock and measure-compile: `compile_time`), and on the daily and dispatched runs.
         if: needs.changes.outputs.compile_time != 'false'
@@ -1943,7 +1943,7 @@ jobs:
       - name: Time speedtest1 and Lua's scripts by both tiers, clang -O0 and -O2 and tcc
         # #138 and #1189: the programs Tier 1 is measured by against clang -O2, each built by this compiler's Tier 0 and
         # --tier1, clang -O0 and -O2 and tcc. Their outputs must agree (speedtest1's verification hash, each script's
-        # output clang -O0's); then every build runs every program in each of 11 rounds, in an order that rotates by round,
+        # output clang -O0's); then every build runs every program in each of 11 rounds, each round in a Williams design's order,
         # as whole processes on one CPU with their user cycles and instructions (docs/tier1.md has the results). Where
         # `changes` doesn't rule it out (Tier 1's pipeline and the measurement: `tier1_programs`), and on the daily and
         # dispatched runs.
@@ -1974,7 +1974,7 @@ jobs:
         # #1283: test-checker-driver's machine rows' unit, a lexer's byte scan and the compiler's own lexer (on
         # c_lexer.c), each built by this compiler's Tier 0 and --tier1, clang -O2 and, on a pull request, its base's
         # --tier1, with each Tier 1 build's records, machine rows and moves around them. Their outputs must agree; then
-        # every build runs every program in each of 11 rounds, in an order that rotates by round, as whole processes on
+        # every build runs every program in each of 11 rounds, each round in a Williams design's order, as whole processes on
         # one CPU with their user cycles and instructions (measure-tier1-rows). Where `changes` doesn't rule it out (Tier
         # 1's input and pipeline and the measurement: `tier1_programs`), and on the daily and dispatched runs.
         if: needs.changes.outputs.tier1_programs != 'false'
@@ -1999,8 +1999,8 @@ jobs:
         # #1059's paired measurements: the primitives' kernels (reference counts, a spin lock, a sequence lock, flags, a
         # running maximum, inline asm) and speedtest1, each built by this compiler's Tier 0 and --tier1 as it lowers them
         # and with --helper-forms=all, which gives every operation of a direct form its helper's call. Every build's output
-        # must be the first's; then each source's -c compile in each of 5 rounds and each program's run in each of 11, in an
-        # order that rotates by round, as whole processes on one CPU with their user cycles and instructions, beside each
+        # must be the first's; then each source's -c compile in each of 5 rounds and each program's run in each of 11, each
+        # round in a Williams design's order, as whole processes on one CPU with their user cycles and instructions, beside each
         # object's helper calls, executable bytes and Tier 1's spill and call stores and loads
         # (docs/c-builtins-integration.md has the results). Where `changes` doesn't rule it out (the direct forms' and the
         # helpers' planning, and the measurement: `helpers`), and on the daily and dispatched runs.
