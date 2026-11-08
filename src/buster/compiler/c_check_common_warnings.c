@@ -736,8 +736,6 @@ struct CheckCommonFacts
     uint8_t* evaluated;
     // What each node's subtree holds for the expression walk (BUSTER_CHECK_REACH_*).
     uint8_t* reach;
-    // CheckCommonEmission.arm_effects.
-    uint8_t* arm_effects;
 };
 
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
@@ -765,10 +763,6 @@ typedef struct CheckCommonEmission
     const uint8_t* evaluated;
     const uint32_t* parents;
     uint8_t* emitted;
-    // Whether a discarded arm is quiet: an effect or explicit void cast along its value path. CONDITIONAL answers
-    // its arms', COMMA its result operand's, SELECT its chosen value's; others are checked directly (check_common_arm_of).
-    // Children precede parents in the graph, so one ascending pass fills it and every query stays iterative.
-    const uint8_t* arm_effects;
     // What each node's subtree holds for the walks (BUSTER_CHECK_REACH_*), so that a walk enters only the subtrees where
     // a warning can come from.
     const uint8_t* reach;
@@ -877,25 +871,6 @@ static void check_common_emit_push(CheckCommonEmission* emission, uint32_t node,
 static void check_common_emit_run(CheckCommonEmission* emission);
 static void check_common_own(CheckCommonEmission* emission, uint32_t node);
 
-// The node a discard marker points at inside an operand: a comma resolves to its result and a conditional
-// to its else arm, so `x, 0` and `x ? y : z` report at the `0` and the `z`.
-static uint32_t check_common_result_root(const CheckGraph* graph, uint32_t node)
-{
-    uint32_t result = node;
-    for (uint32_t steps = 0; result < graph->count && steps < graph->count; steps += 1)
-    {
-        const CheckOp op = graph->ops[result];
-        const uint32_t next = op == CHECK_OP_COMMA ? graph->operand1[result] :
-                              op == CHECK_OP_CONDITIONAL ? graph->operand2[result] : BUSTER_CHECK_NONE;
-        if (next >= graph->count)
-        {
-            break;
-        }
-        result = next;
-    }
-    return result;
-}
-
 // The `expr, 0` idiom: a literal integer 0 result stays silent — it exists to sequence the left operand's
 // effect. Only a bare numeric literal counts: `+0`, `0.0`, `'\0'` and enum zeros still report.
 static bool check_common_literal_zero(const Parser* parser, const CheckStream* stream, const CheckGraph* graph, uint32_t node)
@@ -904,38 +879,6 @@ static bool check_common_literal_zero(const Parser* parser, const CheckStream* s
     const bool result = node < graph->count && graph->ops[node] == CHECK_OP_VALUE && token < parser->tokens.count &&
                         parser->tokens.kinds[token] == PARSE_KIND_NUMBER && check_common_integer_constant(stream, node) &&
                         check_stream_value(stream, node).integer == 0;
-    return result;
-}
-
-// Whether an arm's value path accepts discard: an effect or an explicit cast to void. Conditional, comma and
-// selected-value results use postorder facts, so nested void casts stay quiet while inner diagnostics still run.
-// An implicit conversion is not an explicit discard, and a side effect off the comma's result path is not enough.
-static bool check_common_arm_of(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types,
-                                 const uint8_t* arm_effects, uint32_t node)
-{
-    const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
-    const bool void_cast = op == CHECK_OP_CAST &&
-                           type_kind(types, type_unqualified(type_strip_aligned(types, check_stream_type(stream, node)))) == BUSTER_TYPE_KIND_VOID;
-    const bool result = node < graph->count && (void_cast ||
-                        (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA || op == CHECK_OP_SELECT ? arm_effects[node] != 0 : check_common_node_effect(graph, node)));
-    return result;
-}
-
-static bool check_common_arm_at(const CheckCommonEmission* emission, uint32_t node)
-{
-    return check_common_arm_of(&emission->input->graph, emission->stream, emission->types, emission->arm_effects, node);
-}
-
-// One conditional, comma or selected-value entry, after every operand's entry.
-static bool check_common_arm_effect(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types,
-                                     const uint8_t* arm_effects, uint32_t node)
-{
-    const CheckOp op = graph->ops[node];
-    const uint32_t first = graph->operand1[node];
-    const uint32_t second = graph->operand2[node];
-    const bool result = op == CHECK_OP_CONDITIONAL ? check_common_arm_of(graph, stream, types, arm_effects, first) || check_common_arm_of(graph, stream, types, arm_effects, second) :
-                        op == CHECK_OP_COMMA ? check_common_arm_of(graph, stream, types, arm_effects, first) :
-                        op == CHECK_OP_SELECT ? check_common_arm_of(graph, stream, types, arm_effects, graph->operand0[node]) : check_common_node_effect(graph, node);
     return result;
 }
 
@@ -1310,14 +1253,147 @@ static void check_common_own(CheckCommonEmission* emission, uint32_t node)
     }
 }
 
+#include "c_check_ignored_result.c"
+
+// How many conditionals' else arms check_common_unused_of holds at once: a deeper nest of then arms is quiet.
+#define BUSTER_CHECK_UNUSED_DEPTH 64u
+
+// What a discarded value warns of (check_common_unused_of): the node clang reports, or none where the value is quiet, and
+// whether that node is a call whose result warns (check_common_ignored_of), with what it warns of.
+typedef struct CheckCommonUnused CheckCommonUnused;
+struct CheckCommonUnused
+{
+    uint32_t node;
+    bool call;
+    CheckCommonIgnoredResult found;
+};
+
+// Whether the discarded value of `node` warns, as clang's Expr::isUnusedResultAWarning decides (#1447), and where: a
+// comma's is its right operand's, but for a literal 0, the `(x = y), 0` idiom, which is quiet; a conditional's warns where
+// both arms' do (a GNU `x ?: y`'s where its else arm's does), and is reported at the else arm's, which clang evaluates
+// last; a selection's is its chosen operand's. Any other value warns where it has no effect and is no cast to void, or
+// where it is a call whose result warns. The walk goes into the then arms first and holds the else arms on a bounded
+// stack; it runs only for a discarded statement's value, a comma's left operand and a discarded comma's, so that the
+// graph's facts needn't hold an answer for every operator.
+static __attribute__((noinline)) CheckCommonUnused check_common_unused_of(CheckCommonEmission* emission, uint32_t node)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    const TypeTable* types = emission->types;
+    uint32_t pending[BUSTER_CHECK_UNUSED_DEPTH];
+    uint32_t depth = 0;
+    CheckCommonUnused result = { .node = BUSTER_CHECK_NONE };
+    uint32_t leaf = BUSTER_CHECK_NONE;
+    bool call = false;
+    bool warns = true;
+    bool done = false;
+    uint32_t at = node;
+    for (uint32_t steps = 0; warns && !done && steps <= graph->count; steps += 1)
+    {
+        const CheckOp op = at < graph->count ? graph->ops[at] : CHECK_OP_COUNT;
+        const bool gnu = op == CHECK_OP_CONDITIONAL && graph->operand1[at] == graph->operand0[at];
+        if (op == CHECK_OP_COUNT)
+        {
+            warns = false;
+        }
+        else if (op == CHECK_OP_COMMA)
+        {
+            warns = !check_common_literal_zero(emission->parser, emission->stream, graph, graph->operand1[at]);
+            at = graph->operand1[at];
+        }
+        else if (op == CHECK_OP_SELECT || gnu)
+        {
+            at = op == CHECK_OP_SELECT ? graph->operand0[at] : graph->operand2[at];
+        }
+        else if (op == CHECK_OP_CONDITIONAL)
+        {
+            warns = depth < BUSTER_CHECK_UNUSED_DEPTH;
+            if (warns)
+            {
+                pending[depth] = graph->operand2[at];
+                depth += 1;
+            }
+            at = graph->operand1[at];
+        }
+        else
+        {
+            const TypeId type = op == CHECK_OP_CAST ? check_stream_type(emission->stream, at) : 0;
+            const bool void_cast = type != 0 && type_kind(types, type_unqualified(type_strip_aligned(types, type))) == BUSTER_TYPE_KIND_VOID;
+            call = emission->ignored != NULL && check_common_ignored_op(op) && check_common_ignored_of(emission, at, &result.found);
+            warns = call || (!void_cast && !check_common_node_effect(graph, at));
+            leaf = at;
+            done = depth == 0;
+            at = depth != 0 ? pending[depth - 1] : BUSTER_CHECK_NONE;
+            depth -= depth != 0 ? 1u : 0u;
+        }
+    }
+    result.node = warns && done ? leaf : BUSTER_CHECK_NONE;
+    result.call = result.node != BUSTER_CHECK_NONE && call;
+    // A pure or const call's warning is dropped where the discarded expression itself, past its selections, is written in
+    // a macro's body (clang's ShouldSuppress): a comma's at its operator, a conditional's at its first token.
+    uint32_t top = node;
+    for (uint32_t steps = 0; result.call && top < graph->count && graph->ops[top] == CHECK_OP_SELECT && steps < graph->count; steps += 1)
+    {
+        top = graph->operand0[top];
+    }
+    const CheckOp top_op = result.call && top < graph->count ? graph->ops[top] : CHECK_OP_COUNT;
+    result.found.macro = top_op == CHECK_OP_COMMA ? graph->tokens[top] :
+                         top_op == CHECK_OP_CONDITIONAL ? check_common_emission_subtree_start(emission, graph->tokens[top]) : result.found.macro;
+    return result;
+}
+
+// The warning of a discarded value that warns (check_common_unused_of), `message` its text for a value of no effect: a
+// call's result's at once (check_common_ignored_report), a `void *` cast's question at once, and otherwise `message` at
+// the value (a cast's at its `(`, a member's at its name, a keyword's, `__builtin_LINE()`'s, at the keyword) at the body's
+// end. A cast spelled to void is quiet.
+static __attribute__((noinline)) void check_common_unused_report(CheckCommonEmission* emission, const CheckCommonUnused* unused, const char* message)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    const Parser* parser = emission->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t token = unused->node < graph->count ? graph->tokens[unused->node] : BUSTER_CHECK_NONE;
+    const uint8_t role = token < count ? parser->tree.roles[token] : PARSE_ROLE_NONE;
+    const bool cast = role == PARSE_ROLE_CLOSE_CAST;
+    if (unused->call)
+    {
+        check_common_ignored_report(emission, &unused->found);
+    }
+    else if (token < count && !(cast && check_common_void_cast(parser, emission->pp, emission->input, emission->stream, emission->types, token)))
+    {
+        const uint32_t opener = cast ? check_common_cast_opener(parser, token) :
+                                role == PARSE_ROLE_CLOSE_KEYWORD ? check_common_ignored_opener(parser, token) : BUSTER_CHECK_NONE;
+        const uint32_t spot = opener != BUSTER_CHECK_NONE ? (cast || opener == 0 ? opener : opener - 1) :
+                              role == PARSE_ROLE_MEMBER_OPERATOR && token + 1 < count ? token + 1 : token;
+        if (cast && graph->ops[unused->node] == CHECK_OP_CAST && check_common_void_pointer_cast(emission->stream, emission->types, unused->node))
+        {
+            check_common_report_discarded(parser, emission->pp, emission->input, spot, CHECK_WARNING_ID_UNUSED_VALUE,
+                                          "expression result unused; should this cast be to 'void'?", NULL, 0, emission->scratch);
+        }
+        else
+        {
+            check_common_report_unused(parser, emission->pp, emission->input, spot, CHECK_WARNING_ID_UNUSED_VALUE, message, NULL, 0, emission->scratch);
+        }
+    }
+}
+
+// A discarded value the walks leave out as unevaluated (in unreachable code, a constant condition's other arm, a
+// short-circuited side): only a call's result warns, at once, as clang's DiagnoseNoDiscard and pure or const call warnings
+// are no runtime diagnostics, where an unused value's DiagRuntimeBehavior drops itself there; in an unevaluated operand
+// the report drops itself (check_common_report_discarded).
+static __attribute__((noinline)) void check_common_unused_unevaluated(CheckCommonEmission* emission, uint32_t node)
+{
+    const CheckCommonUnused unused = check_common_unused_of(emission, node);
+    if (unused.call)
+    {
+        check_common_ignored_report(emission, &unused.found);
+    }
+}
+
 // The diagnostics for one evaluated comma: every left operand is evaluated for effect only — a discarded
 // comparison reports as a comparison when the operand's own root is the comparison, anything else as the
-// operand's own value, and a nested comma's contribution is its right operand's. A chain ending a
+// operand's own value (check_common_unused_of), a call's whose result warns included. A chain ending a
 // statement or for clause leaves its result unused.
 // The discarded-left-operand analysis a comma node's frame runs once both operands' deep warnings are
 // out: the marker between the children's warnings and the operand roots' own.
-#include "c_check_ignored_result.c"
-
 static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t node)
 {
     const CheckGraph* graph = &emission->input->graph;
@@ -1341,29 +1417,32 @@ static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t no
         left = up;
     }
     const uint32_t left_start = check_common_emission_subtree_start(emission, left);
-    const uint32_t left_result = check_common_result_root(graph, left_node);
-    const bool left_effect = left_node < graph->count ?
-                             (graph->ops[left_node] == CHECK_OP_CONDITIONAL ? check_common_arm_at(emission, left_node) :
-                              check_common_node_effect(graph, left_result)) :
-                             check_common_expression_has_effect(parser, left_start, comma);
-    // A left operand that resolves to a literal 0 through commas of its own stays quiet, like the
-    // `expr, 0` result does — a bare `0, x` still reports the `0`, and so does a conditional's `0` arm.
-    uint32_t left_zero_node = left_node;
-    for (uint32_t steps = 0; left_zero_node < graph->count && graph->ops[left_zero_node] == CHECK_OP_COMMA && steps < graph->count; steps += 1)
+    // Clang's CheckCommaOperands asks DiagnoseUnusedExprResult of the left operand (check_common_unused_of): a literal 0
+    // that ends commas of its own is quiet, like the `expr, 0` result; a bare `0, x` still reports the `0`, and so does
+    // a conditional's `0` arm where the other arm warns too.
+    const CheckCommonUnused unused = left_node < graph->count ? check_common_unused_of(emission, left_node) : (CheckCommonUnused){ .node = BUSTER_CHECK_NONE };
+    const uint32_t left_result = unused.node;
+    const bool left_effect = left_node < graph->count ? left_result == BUSTER_CHECK_NONE : check_common_expression_has_effect(parser, left_start, comma);
+    if (unused.call)
     {
-        left_zero_node = graph->operand1[left_zero_node];
+        // A call's result the left operand drops (#1447).
+        check_common_ignored_report(emission, &unused.found);
     }
-    const bool left_zero = left_zero_node != left_node && left_zero_node < graph->count &&
-                           check_common_literal_zero(parser, stream, graph, left_zero_node);
-    if (left_start < comma && !left_effect && !left_zero)
+    else if (left_start < comma && !left_effect)
     {
         uint32_t report = left_result < graph->count && graph->tokens[left_result] < count ? graph->tokens[left_result] : left;
         uint8_t report_role = report < count ? parser->tree.roles[report] : PARSE_ROLE_NONE;
         const uint8_t left_role = left < count ? parser->tree.roles[left] : PARSE_ROLE_NONE;
-        // Clang points a discarded member at the member's name.
+        // Clang points a discarded member at the member's name, and a keyword's value (`__builtin_LINE()`) at its keyword.
+        const uint32_t keyword = report_role == PARSE_ROLE_CLOSE_KEYWORD ? check_common_ignored_opener(parser, report) : BUSTER_CHECK_NONE;
         if (report_role == PARSE_ROLE_MEMBER_OPERATOR && report + 1 < count)
         {
             report += 1;
+            report_role = parser->tree.roles[report];
+        }
+        else if (keyword != BUSTER_CHECK_NONE && keyword > 0)
+        {
+            report = keyword - 1;
             report_role = parser->tree.roles[report];
         }
         if (left_role == PARSE_ROLE_EQUALITY || left_role == PARSE_ROLE_RELATIONAL)
@@ -1403,11 +1482,6 @@ static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t no
                                        "left operand of comma operator has no effect", NULL, 0, scratch);
         }
     }
-    else if (left_effect && left_node < graph->count && graph->ops[left_node] != CHECK_OP_CONDITIONAL)
-    {
-        // A call's result the left operand drops (#1447): clang's CheckCommaOperands asks DiagnoseUnusedExprResult.
-        check_common_ignored_call(emission, left_result);
-    }
 }
 
 // The comma node's last stage: its operand roots marked emitted and, in a discarded position, the
@@ -1418,8 +1492,6 @@ static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node)
     const Parser* parser = emission->parser;
     Preprocessor* pp = emission->pp;
     const CheckInput* input = emission->input;
-    const CheckStream* stream = emission->stream;
-    const TypeTable* types = emission->types;
     Arena* scratch = emission->scratch;
     const uint32_t count = parser->tokens.count;
     const uint32_t comma = graph->tokens[node];
@@ -1435,55 +1507,28 @@ static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node)
     }
     const uint32_t parent = check_common_parent(parser, comma);
     const bool discarded = check_common_discarded_place(parser, comma);
-    if (discarded)
+    if (discarded && right_node < graph->count)
     {
-        // The `expr, 0` idiom looks through nested comma results only: a conditional arm that happens to
-        // be a literal 0 is still a discarded conditional, not the sequencing marker.
-        uint32_t zero_node = right_node;
-        for (uint32_t steps = 0; zero_node < graph->count && graph->ops[zero_node] == CHECK_OP_COMMA && steps < graph->count; steps += 1)
-        {
-            zero_node = graph->operand1[zero_node];
-        }
-        const uint32_t right_result = check_common_result_root(graph, right_node);
-        const uint32_t right = right_result < graph->count && graph->tokens[right_result] < count ? graph->tokens[right_result] : comma + 1;
+        // A discarded comma's value is its right operand's (check_common_unused_of), but for the `expr, 0` idiom's literal
+        // 0, through nested commas and the conditional arms that all warn: a call's whose result warns (#1447), or one of no
+        // effect.
+        const CheckCommonUnused unused = check_common_unused_of(emission, node);
+        check_common_unused_report(emission, &unused, "expression result unused");
+    }
+    else if (discarded)
+    {
+        // A right operand outside the graph has no effect where its tokens have none.
+        const uint32_t right = comma + 1;
         const uint32_t right_start = right < count ? check_common_emission_subtree_start(emission, right) : right;
-        const bool right_cast = right < count && parser->tree.roles[right] == PARSE_ROLE_CLOSE_CAST;
-        const bool right_void = right_cast && check_common_void_cast(parser, pp, input, stream, types, right);
-        const bool right_zero = check_common_literal_zero(parser, stream, graph, zero_node);
-        const bool right_effect = right_node < graph->count ?
-                                  (graph->ops[right_node] == CHECK_OP_CONDITIONAL ? check_common_arm_at(emission, right_node) :
-                                   check_common_node_effect(graph, right_result)) :
-                                  check_common_expression_has_effect(parser, right_start, parent);
-        if (right_start < parent && !right_void && !right_zero && !right_effect)
+        if (right_start < parent && !check_common_expression_has_effect(parser, right_start, parent))
         {
-            const uint32_t cast = right_cast ? check_common_cast_opener(parser, right) : BUSTER_CHECK_NONE;
-            const bool void_pointer = right_cast && right_result < graph->count && graph->ops[right_result] == CHECK_OP_CAST &&
-                                      check_common_void_pointer_cast(stream, types, right_result);
-            if (void_pointer)
-            {
-                check_common_report_discarded(parser, pp, input, cast != BUSTER_CHECK_NONE ? cast : right, CHECK_WARNING_ID_UNUSED_VALUE,
-                                              "expression result unused; should this cast be to 'void'?", NULL, 0, scratch);
-            }
-            else
-            {
-                // A discarded member reports at the member's name, like the left operand does.
-                const uint32_t spot = right < count && parser->tree.roles[right] == PARSE_ROLE_MEMBER_OPERATOR && right + 1 < count ?
-                                      right + 1 : right;
-                check_common_report_unused(parser, pp, input, cast != BUSTER_CHECK_NONE ? cast : spot, CHECK_WARNING_ID_UNUSED_VALUE,
-                                           "expression result unused", NULL, 0, scratch);
-            }
-        }
-        else if (right_start < parent && right_effect && !right_zero && right_node < graph->count && graph->ops[right_node] != CHECK_OP_CONDITIONAL)
-        {
-            // A discarded comma's result is its right operand's (#1447): a call's whose result warns.
-            check_common_ignored_call(emission, right_result);
+            check_common_report_unused(parser, pp, input, right, CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused", NULL, 0, scratch);
         }
     }
 }
 
 // A discarded selection's or query builtin's marker (check_common_stmt_marker's, #1447), out of line as rare: a _Generic's
-// or a __builtin_choose_expr's result is its chosen operand's, and a __builtin_offsetof's or a
-// __builtin_types_compatible_p's constant reports at its keyword.
+// or a __builtin_choose_expr's result is its chosen operand's, and a query builtin's constant reports at its keyword.
 static __attribute__((noinline)) void check_common_selected_marker(CheckCommonEmission* emission, uint32_t node)
 {
     const CheckGraph* graph = &emission->input->graph;
@@ -1493,30 +1538,28 @@ static __attribute__((noinline)) void check_common_selected_marker(CheckCommonEm
     const CheckOp op = graph->ops[node];
     if (op == CHECK_OP_SELECT)
     {
-        // A _Generic's or a __builtin_choose_expr's result is its chosen operand's (#1447): a call's whose result warns,
-        // or one without an effect's, at it.
-        uint32_t chosen = graph->operand0[node];
-        for (uint32_t steps = 0; chosen < graph->count && graph->ops[chosen] == CHECK_OP_SELECT && steps < graph->count; steps += 1)
-        {
-            chosen = graph->operand0[chosen];
-        }
-        const uint32_t at = chosen < graph->count ? graph->tokens[chosen] : count;
+        // A _Generic's or a __builtin_choose_expr's value is its chosen operand's (check_common_unused_of, #1447): a call's
+        // whose result warns, or one of no effect whose role may warn, at it.
+        const CheckCommonUnused unused = check_common_unused_of(emission, node);
+        const uint32_t at = unused.node < graph->count ? graph->tokens[unused.node] : count;
         const uint8_t chosen_role = at < count ? parser->tree.roles[at] : PARSE_ROLE_NONE;
-        if (at < count && !check_common_ignored_call(emission, chosen) && !check_common_node_effect(graph, chosen) && graph->ops[chosen] != CHECK_OP_CONDITIONAL &&
-            graph->ops[chosen] != CHECK_OP_COMMA && check_common_effect_role(chosen_role) && chosen_role != PARSE_ROLE_ASSIGN &&
-            !(chosen_role == PARSE_ROLE_CLOSE_CAST && check_common_void_cast(parser, emission->pp, emission->input, emission->stream, emission->types, at)))
+        if (unused.call || (at < count && (check_common_effect_role(chosen_role) || chosen_role == PARSE_ROLE_CLOSE_KEYWORD) &&
+                            chosen_role != PARSE_ROLE_ASSIGN))
         {
-            check_common_report_unused(parser, emission->pp, emission->input, chosen_role == PARSE_ROLE_MEMBER_OPERATOR && at + 1 < count ? at + 1 : at,
-                                       CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused", NULL, 0, emission->scratch);
+            check_common_unused_report(emission, &unused, "expression result unused");
         }
     }
     else
     {
-        // A __builtin_offsetof's or a __builtin_types_compatible_p's constant, at its keyword (#1447).
+        // A __builtin_offsetof's, a __builtin_types_compatible_p's, a place's (__builtin_LINE's, __builtin_COLUMN's,
+        // __builtin_FILE's, __builtin_FILE_NAME's, __builtin_FUNCTION's) or a type query's constant, at its keyword (#1447).
         const uint32_t open = check_common_ignored_opener(parser, token);
         const uint32_t keyword = open != BUSTER_CHECK_NONE && open > 0 ? open - 1 : count;
         const uint32_t name = keyword < count ? parser->tokens.names[keyword] : 0;
-        if (name == C_NAME_BUILTIN_OFFSETOF || name == C_NAME_BUILTIN_TYPES_COMPATIBLE_P)
+        if (name == C_NAME_BUILTIN_OFFSETOF || name == C_NAME_BUILTIN_TYPES_COMPATIBLE_P || name == C_NAME_BUILTIN_LINE || name == C_NAME_BUILTIN_COLUMN ||
+            name == C_NAME_BUILTIN_FILE || name == C_NAME_BUILTIN_FILE_NAME || name == C_NAME_BUILTIN_FUNCTION || name == C_NAME_BUILTIN_VECTORELEMENTS ||
+            name == C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN || name == C_NAME_IS_BITWISE_CLONEABLE || name == C_NAME_IS_DESTRUCTIBLE ||
+            name == C_NAME_IS_NOTHROW_DESTRUCTIBLE)
         {
             check_common_report_unused(parser, emission->pp, emission->input, keyword, CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused", NULL, 0,
                                        emission->scratch);
@@ -1548,22 +1591,10 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
     }
     else if (discarded && op == CHECK_OP_CONDITIONAL)
     {
-        // An arm warns where it has no effect, or where it is a call whose result warns (#1447, clang's
-        // isUnusedResultAWarning): both must, and the else arm's result is the one reported.
-        CheckCommonIgnoredResult arm;
-        const uint32_t first = graph->operand1[node];
-        const uint32_t second = graph->operand2[node];
-        if ((!check_common_arm_at(emission, first) || (emission->ignored != NULL && check_common_ignored_of(emission, first, &arm))) &&
-            (!check_common_arm_at(emission, second) || (emission->ignored != NULL && check_common_ignored_of(emission, second, &arm))))
-        {
-            const uint32_t root = check_common_result_root(graph, node);
-            const uint32_t report = root < graph->count && graph->tokens[root] < count ? graph->tokens[root] : token;
-            if (!check_common_ignored_call(emission, root))
-            {
-                check_common_report_unused(parser, emission->pp, emission->input, report, CHECK_WARNING_ID_UNUSED_VALUE,
-                                           "expression result unused", NULL, 0, emission->scratch);
-            }
-        }
+        // Both arms must warn, through their commas and conditionals, and the else arm's value is the one reported
+        // (check_common_unused_of): a call's whose result warns (#1447), or one of no effect.
+        const CheckCommonUnused unused = check_common_unused_of(emission, node);
+        check_common_unused_report(emission, &unused, "expression result unused");
     }
     else if (discarded && (op == CHECK_OP_SELECT || (op == CHECK_OP_VALUE && role == PARSE_ROLE_CLOSE_KEYWORD)))
     {
@@ -2578,7 +2609,6 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             .evaluated = facts->evaluated,
             .parents = facts->parents,
             .emitted = emitted,
-            .arm_effects = facts->arm_effects,
             .reach = reach,
             .work_nodes = work_nodes,
             .work_kinds = work_kinds,
@@ -2595,17 +2625,26 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         // Expression roots in graph order: each evaluated expression emits its subtree's deferred warnings
         // where clang's traversal puts them — the diagnostics' shared publication slot keeps this order. A root
         // whose subtree holds no reach and whose discarded expression is no comma and can't have a marker can't warn.
-        // An expression statement's call warns of its discarded result at once (#1447), in unreachable code too; an
-        // initializer's values, which a declaration's `;` casts to void as roots of their own, are read, not discarded.
+        // An expression statement's call warns of its discarded result at once (#1447), in unreachable code too, as does
+        // the call an unevaluated statement's comma, conditional or selection leaves as its value (the walk's own where
+        // it's evaluated); an initializer's values, which a declaration's `;` casts to void as roots of their own, are
+        // read, not discarded.
         CheckCommonScan roots = { 0 };
         for (uint32_t node = check_common_next_root(facts->parents, graph->count, &roots, vector); node < graph->count && !pp->fatal;
              node = check_common_next_root(facts->parents, graph->count, &roots, vector))
         {
             const uint32_t expr = check_common_discarded(parser, graph, node);
-            if (expr != node && expr < graph->count && check_common_ignored_op(graph->ops[expr]) && facts->parents[node] == BUSTER_CHECK_NONE &&
-                stream->diagnostics[node] == CHECK_DIAG_NONE)
+            const CheckOp expr_op = expr != node && expr < graph->count && facts->parents[node] == BUSTER_CHECK_NONE &&
+                                    stream->diagnostics[node] == CHECK_DIAG_NONE ? graph->ops[expr] : CHECK_OP_COUNT;
+            if (expr_op != CHECK_OP_COUNT && check_common_ignored_op(expr_op))
             {
                 check_common_ignored_statement(&emission, expr);
+            }
+            else if ((expr_op == CHECK_OP_CONDITIONAL || expr_op == CHECK_OP_COMMA || expr_op == CHECK_OP_SELECT) && facts->evaluated[node] == 0 &&
+                     check_common_discarded_place(parser, graph->tokens[expr]))
+            {
+                // An unevaluated statement's comma, conditional or selection, which no walk reaches: its value's call.
+                check_common_unused_unevaluated(&emission, expr);
             }
             if (facts->parents[node] == BUSTER_CHECK_NONE && facts->evaluated[node] != 0 && stream->diagnostics[node] == CHECK_DIAG_NONE &&
                 emitted[node] == 0)
@@ -2629,6 +2668,21 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                 {
                     check_common_emit_root(&emission, node);
                 }
+            }
+        }
+        // A source comma no walk reaches, unevaluated (check_common_unused_unevaluated): its left operand's call whose result
+        // warns, as clang's CheckCommaOperands asks DiagnoseUnusedExprResult of it.
+        static const CheckOp comma_ops[] = { CHECK_OP_COMMA };
+        const CheckCommonOps commas = check_common_ops(comma_ops, BUSTER_ARRAY_LENGTH(comma_ops));
+        CheckCommonScan unevaluated = { 0 };
+        for (uint32_t node = check_common_next_op(graph, &commas, &unevaluated, vector); node < graph->count && !pp->fatal;
+             node = check_common_next_op(graph, &commas, &unevaluated, vector))
+        {
+            const uint32_t comma = graph->tokens[node];
+            if (graph->ops[node] == CHECK_OP_COMMA && facts->evaluated[node] == 0 && stream->diagnostics[node] == CHECK_DIAG_NONE &&
+                comma < parser->tokens.count && parser->tokens.kinds[comma] == PARSE_KIND_COMMA)
+            {
+                check_common_unused_unevaluated(&emission, graph->operand0[node]);
             }
         }
         // Anything a root walk did not reach still reports its own warning at its own place — through the
@@ -4880,14 +4934,7 @@ static const CheckOp check_common_reach_ops[] =
     CHECK_OP_NOT_EQUAL,
 };
 
-// The operators whose arm effects check_common_arm_effect records, and those that may leave an operand unevaluated
-// (check_common_operand_mask).
-static const CheckOp check_common_arm_ops[] =
-{
-    CHECK_OP_CONDITIONAL,
-    CHECK_OP_COMMA,
-    CHECK_OP_SELECT,
-};
+// The operators that may leave an operand unevaluated (check_common_operand_mask).
 static const CheckOp check_common_mask_ops[] =
 {
     CHECK_OP_SIZEOF,
@@ -5117,12 +5164,13 @@ static uint8_t* check_common_evaluated_tree(const CheckGraph* graph, const Check
 }
 
 // The graph's facts (CheckCommonFacts) into `facts`: each node's parent, whether its value is used (where -Wuninitialized
-// reads it), its reach and its arm effect, then which nodes are evaluated. The scalar path makes them in one pass over
-// the nodes in graph order, so that its operands' and arguments' already hold; an operand that doesn't precede its node,
-// which the graph's validation rules out, gives it every bit of reach. The vector path, where the graph is a tree in that
-// order (check_common_facts_tree), visits only the nodes that may have a bit of their own reach and carries each bit up to
-// the first ancestor that has it, whose ancestors all do; computes the arm effects of the operators that have them, found
-// 16 at a time; and takes the evaluated nodes by check_common_evaluated_tree. False where scratch can't hold them.
+// reads it) and its reach, then which nodes are evaluated. The scalar path makes them in one pass over the nodes in graph
+// order, so that its operands' and arguments' already hold; an operand that doesn't precede its node, which the graph's
+// validation rules out, gives it every bit of reach. The vector path, where the graph is a tree in that order
+// (check_common_facts_tree), visits only the nodes that may have a bit of their own reach and carries each bit up to the
+// first ancestor that has it, whose ancestors all do; and takes the evaluated nodes by check_common_evaluated_tree. False
+// where scratch can't hold them. (Whether a discarded value warns is check_common_unused_of's, asked only of a discarded
+// one.)
 static bool check_common_facts(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
                                const CheckProgram* program, const CheckCommonEnabled* enabled, Arena* scratch, CheckCommonFacts* facts)
 {
@@ -5131,9 +5179,8 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
     uint32_t* parents = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : NULL;
     uint8_t* used = count != 0 && enabled->uninitialized ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : NULL;
     uint8_t* reach = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
-    uint8_t* arm_effects = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
     uint8_t* evaluated = NULL;
-    const bool allocated = parents != NULL && (used != NULL || !enabled->uninitialized) && reach != NULL && arm_effects != NULL;
+    const bool allocated = parents != NULL && (used != NULL || !enabled->uninitialized) && reach != NULL;
     const bool walk = allocated && vector && check_common_facts_tree(graph, stream, types, parents, used);
     if (walk)
     {
@@ -5149,12 +5196,6 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
                 bits &= (uint8_t)~reach[at];
                 reach[at] |= bits;
             }
-        }
-        const CheckCommonOps arms = check_common_ops(check_common_arm_ops, BUSTER_ARRAY_LENGTH(check_common_arm_ops));
-        CheckCommonScan armed = { 0 };
-        for (uint32_t node = check_common_next_op(graph, &arms, &armed, true); node < count; node = check_common_next_op(graph, &arms, &armed, true))
-        {
-            arm_effects[node] = check_common_arm_effect(graph, stream, types, arm_effects, node);
         }
         evaluated = check_common_evaluated_tree(graph, stream, types, parser, program, parents, scratch);
     }
@@ -5201,14 +5242,10 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
                 }
             }
             reach[node] = bits;
-            if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA || op == CHECK_OP_SELECT)
-            {
-                arm_effects[node] = check_common_arm_effect(graph, stream, types, arm_effects, node);
-            }
         }
         evaluated = check_common_evaluated(graph, stream, types, parser, program, parents, scratch);
     }
-    *facts = (CheckCommonFacts){ .parents = parents, .used = used, .evaluated = evaluated, .reach = reach, .arm_effects = arm_effects };
+    *facts = (CheckCommonFacts){ .parents = parents, .used = used, .evaluated = evaluated, .reach = reach };
     const bool result = count == 0 || evaluated != NULL;
     return result;
 }

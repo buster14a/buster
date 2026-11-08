@@ -200,7 +200,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   `c_check_unused_result_driver_test.c` (#1447) compares a discarded call's result warnings (`-Wunused-result`'s
   warn_unused_result and nodiscard, a return type's, pure's and const's, the builtin table's) with Clang's whole
   output at each warning policy, both paths and one or three lanes: their spellings and messages, macros, types,
-  redeclarations, comma, conditional and for clauses, builtins and `-Wno-unused`'s groups.
+  redeclarations, comma, conditional and for clauses, builtins and `-Wno-unused`'s groups; nested commas,
+  conditionals and selections (clang's `isUnusedResultAWarning`, `check_common_unused_of`), calls through pointers,
+  unreachable code and keyword builtins' values.
   `c_check_return_flow.c` supplies source return-warning facts for checked graphs. Ordinary direct calls no longer
   suppress a function's `-Wreturn-type` warning; a proven direct `noreturn` call or terminating builtin ends only its
   own warning-flow edge. Short circuit, conditional and unevaluated operands retain their execution rules, and

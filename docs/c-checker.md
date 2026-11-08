@@ -4116,11 +4116,27 @@ scratch allocation.
 `-Wunused-value` covers a bare identifier or literal, a parenthesized
 comparison, a cast (including a typedef of `void`), a conditional, and a comma
 expression, parenthesized or not; a comma operand with a call, assignment or
-increment has an effect and does not get the left-operand warning. Its reports
-complete with the function's closing brace, as Clang's do, after the body's
-own warnings and before an unused declaration's. A discarded `__builtin_offsetof`,
-`__builtin_types_compatible_p`, and a `_Generic`'s or `__builtin_choose_expr`'s
-chosen operand without an effect report there too. `-Wunused-value` is in
+increment has an effect and does not get the left-operand warning. Whether a
+discarded value warns, and where, is clang's `Expr::isUnusedResultAWarning`
+(`check_common_unused_of`): a comma's value is its right operand's, but a
+literal `0` there (`(x = y), 0`, parenthesized or not) is quiet; a conditional
+warns where both arms do (a GNU `x ?: y` where its else arm does), at the else
+arm's value, which clang evaluates last, so `n ? (f(), 0) : (g(), 0)` is
+quiet; a `_Generic`'s or `__builtin_choose_expr`'s value is its chosen
+operand's; and a call warns where its result does (below). The walk runs only
+for a discarded statement's or for clause's value and a comma's operands,
+rather than as a fact of every operator, and takes the then arms first while
+a 64-deep stack holds the else arms (a deeper nest of then arms is quiet). Its
+reports complete with the function's closing brace, as Clang's do, after the
+body's own warnings and before an unused declaration's. A discarded
+`__builtin_offsetof`, `__builtin_types_compatible_p`, place builtin
+(`__builtin_LINE`, `__builtin_COLUMN`, `__builtin_FILE`, `__builtin_FILE_NAME`,
+`__builtin_FUNCTION`) or type query (`__builtin_vectorelements`,
+`__builtin_omp_required_simd_align`, `__is_destructible`,
+`__is_nothrow_destructible`, `__is_bitwise_cloneable`) reports there too, at its
+keyword, as a value of a conditional's arm or a comma's operand does, and so
+does a `_Generic`'s or `__builtin_choose_expr`'s chosen operand without an
+effect. `-Wunused-value` is in
 `-Wunused`, `-Wmost` and `-Wall`, with `-Wunused-comparison` and
 `-Wunused-result` under it.
 A discarded call's result (#1447, `c_check_ignored_result.c`, clang's
@@ -4138,20 +4154,37 @@ macro's argument warns). Clang's builtin table gives a builtin's const and pure
 (its c, U and g rows; an e row's const needs -fno-math-errno, which clang's
 default isn't), a plain library function's only where the unit keeps the name a
 builtin and declares it with external linkage. These report at once at the
-callee's first token, in unreachable code too: a statement's, a for clause's,
-a comma's left operand's and, discarded, right operand's, and a discarded
-conditional's else arm where both arms warn (an arm of no effect, or such a
-call). The marks are found once a unit, from the tokens that have attributes:
-a function's by its first declaration, each redeclaration's in source order,
-so that a call reads those up to the declaration its lookup finds; a call then
-tests one bit of its callee's first declaration and one byte of its name.
+callee's first token (its own parentheses', `(w)(n)`'s, a dereference's or an
+address's, but not a group's around the call, `(w(n))`): a statement's and a
+for clause's call, and the call a comma's left operand or a discarded comma,
+conditional or selection leaves as the value that warns
+(`check_common_unused_of`), so that `n ? (n, w(n)) : (n, w(n))` and
+`(n ? w(n) : w(n)), 0` report the else arm's `w`, and `(a, n ? e(n) : w(n)), x`
+nothing. They warn in unreachable code too, as clang's are no runtime
+diagnostics: the walks leave out an unevaluated statement and comma (after a
+`return`, in a dead `for` clause, a constant condition's other arm, a
+short-circuited side), whose value's and left operand's calls a pass of their
+own then reports (`check_common_unused_unevaluated`, the root loop's and a scan
+of the commas, 16 operators at a time); an unevaluated operand's report drops
+itself. A pure or const call stays quiet where the discarded expression itself
+is written in a macro's body (clang's `ShouldSuppress`): a call's callee, a
+comma's operator, a conditional's first token. A call through dereferences and
+addresses (`(*f)()`, `(&f)()`) is its function's, and a call of a pointer
+object (a parameter's too) reads the typedef its declarator spells past its
+`*`, or past the `*` of the pointer typedef its specifiers name
+(`check_common_ignored_pointee`). The marks are found once a unit, from the
+tokens that have attributes: a function's by its first declaration, each
+redeclaration's in source order, so that a call reads those up to the
+declaration its lookup finds; a call then tests one bit of its callee's first
+declaration and one byte of its name.
 A statement expression in an unevaluated operand drops them, as clang does
 (`check_common_report_discarded`). The functions stay out of line, as does
 the discarded selection's marker: inlined into the emission's loops they cost
 sqlite3.c's `-fsyntax-only` instructions even where no call warns. Left: a
-discarded call in an unreachable comma or conditional, and the "expanded from
-macro" note clang gives a call a macro's argument writes (as for every warning
-at a macro argument here).
+call whose callee is a member, an element, another call's result or a pointer
+to a pointer's dereference (`(*pp)()`), which warns of no return type's
+attribute, and the "expanded from macro" note clang gives a call a macro's
+argument writes (as for every warning at a macro argument here).
 `-Warray-bounds` reports a direct array object, including a nested subscript
 such as `b[1][5]` at `b`, treats a zero extent as unknown, and leaves
 struct-member arrays to a full bounds analysis. `-Wunused-function` reports a
@@ -4193,9 +4226,9 @@ and each callee name's answer from clang's builtin table is looked up once.
 
 The graph's passes share their facts, `check_common_facts`, which give each
 node its parent, whether another node uses its value, whether it is evaluated,
-a conditional's or comma's arm effect, and its reach: a bit each for whether
-its subtree holds a node whose own warning may fire, a division by a constant
-zero, or a comparison (#1340). A node's own bit counts only where its tests can
+and its reach: a bit each for whether its subtree holds a node whose own
+warning may fire, a division by a constant zero, or a comparison (#1340). A
+node's own bit counts only where its tests can
 warn (`check_common_own_candidate`): a constant whose value an initialization's,
 an assignment's, a conversion's or a call's argument's conversion changes (the
 types alone rule out a widening conversion, before the value's row is read), a
@@ -4210,10 +4243,9 @@ tree where every operand and argument precedes its node and no node has two
 readers, which counting the distinct children against the edges tells, and
 otherwise the scalar path). It visits only the nodes whose operators may have a
 bit of their own, 16 at a time, and carries each bit up to the first ancestor
-that has it; computes the arm effects of the operators that have them; and
-takes the evaluated nodes as everything with a parent, then clears, with all
-below them, the roots the control and selection walks left out and the
-operands a `sizeof` or a constant condition leaves out. A root that reaches
+that has it; and takes the evaluated nodes as everything with a parent, then
+clears, with all below them, the roots the control and selection walks left
+out and the operands a `sizeof` or a constant condition leaves out. A root that reaches
 nothing runs its statement's unused-value marker alone, without the walk's
 frames, which would find nothing else. The comma markers' subtree starts come
 from a search back from the operand by doubling steps, then halving, each

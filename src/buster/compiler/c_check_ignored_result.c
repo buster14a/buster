@@ -71,11 +71,14 @@ struct CheckCommonIgnored
 };
 
 // What a discarded call's result warns of (check_common_ignored_of): its callee's pure or const, the warn_unused_result or
-// nodiscard of its callee or of its return type, and where clang reports it, the callee's first token.
+// nodiscard of its callee or of its return type, and where clang reports it, the callee's first token; and the token whose
+// macro's body drops a pure or const call's warning, the discarded expression's own (clang's ShouldSuppress), which is
+// the callee's where the call is the expression (check_common_unused_of gives another's).
 typedef struct CheckCommonIgnoredResult CheckCommonIgnoredResult;
 struct CheckCommonIgnoredResult
 {
     uint32_t token;
+    uint32_t macro;
     uint8_t kinds;
     const CheckInputAttribute* result;
     const CheckInputAttribute* type_result;
@@ -310,6 +313,24 @@ static uint32_t check_common_ignored_typedef(const Parser* parser, const CheckIn
     return result;
 }
 
+// The typedef a call through a pointer to a function gets its return type from (check_common_ignored_typedef's): past
+// the pointer's `*` in the declarator of `declaration`, an object's, or in that of the typedef its specifiers name; or
+// none. (A pointer to a pointer's call, `(*pp)()`, finds none past its first `*`.)
+static uint32_t check_common_ignored_pointee(const Parser* parser, const CheckInput* input, uint32_t declaration)
+{
+    const uint32_t count = parser->tokens.count < input->token_count ? parser->tokens.count : input->token_count;
+    uint32_t name = declaration;
+    uint32_t result = BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; name < count && steps < 64; steps += 1)
+    {
+        const uint32_t up = parser->tree.parents[name];
+        const bool star = up < count && parser->tree.roles[up] == PARSE_ROLE_PREFIX && parser->tokens.kinds[up] == PARSE_KIND_STAR;
+        result = star ? check_common_ignored_typedef(parser, input, up) : BUSTER_CHECK_NONE;
+        name = star ? BUSTER_CHECK_NONE : check_common_ignored_typedef(parser, input, name);
+    }
+    return result;
+}
+
 // What the call `node`'s discarded result warns of (CheckCommonIgnoredResult), or false: a call of a function or a
 // builtin whose result isn't void.
 static __attribute__((noinline)) bool check_common_ignored_of(CheckCommonEmission* emission, uint32_t node, CheckCommonIgnoredResult* out)
@@ -323,14 +344,23 @@ static __attribute__((noinline)) bool check_common_ignored_of(CheckCommonEmissio
     const bool call = op == CHECK_OP_CALL;
     const bool builtin = !call && op < CHECK_OP_COUNT && check_common_ignored_op(op);
     const TypeTable* types = emission->types;
-    *out = (CheckCommonIgnoredResult){ .token = BUSTER_CHECK_NONE, .type_name = BUSTER_CHECK_NONE };
-    // A function's name, its declaration as the call's lookup finds it, and its first declaration; an indirect call has
-    // no name, and warns of its return type's alone.
-    const uint32_t callee = call ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    *out = (CheckCommonIgnoredResult){ .token = BUSTER_CHECK_NONE, .macro = BUSTER_CHECK_NONE, .type_name = BUSTER_CHECK_NONE };
+    // A function's name, its declaration as the call's lookup finds it, and its first declaration, through the callee's
+    // dereferences and addresses (`(*f)()`, `(&f)()`, clang's getReferencedDeclOfCallee); a pointer object's name, whose
+    // call warns of its return type's alone, its tag's or the typedef its declaration spells (check_common_ignored_pointee).
+    // A callee of no name (a member's, an element's, a call's result) warns of none.
+    const uint32_t written = call ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    uint32_t callee = written;
+    for (uint32_t steps = 0; callee < graph->count && (graph->ops[callee] == CHECK_OP_DEREFERENCE || graph->ops[callee] == CHECK_OP_ADDRESS) && steps < 64;
+         steps += 1)
+    {
+        callee = graph->operand0[callee];
+    }
     const uint32_t name = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
     const uint32_t declaration = name < count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ?
                                  input->declarations[name] : BUSTER_CHECK_NONE;
     const bool function = declaration < count && input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+    const bool pointer = declaration < count && input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_OBJECT;
     const uint32_t object = function && input->objects != NULL ? input->objects[declaration] : 0;
     const uint32_t key = object != 0 && object - 1 < count ? object - 1 : declaration;
     // A call of an unmarked function whose name is no builtin's, in a unit of no marked return type, is most calls: one bit
@@ -354,13 +384,20 @@ static __attribute__((noinline)) bool check_common_ignored_of(CheckCommonEmissio
                                   pp_library_builtin(&emission->pp->options, emission->pp->table->records + span.offset, span.length));
             out->kinds |= library ? table & (BUSTER_CHECK_IGNORED_CONST | BUSTER_CHECK_IGNORED_PURE) : 0u;
         }
-        // The report is at the callee's first token, its parentheses' too.
-        uint32_t at = name;
-        while (at < count && at > 0 && parser->tokens.kinds[at - 1] == PARSE_KIND_L_PAREN && parser->tree.roles[at - 1] == PARSE_ROLE_OPEN_GROUP)
+        // The report is at the callee's first token (a dereference's `*`, an address's `&`), and at the parentheses that
+        // wrap the callee alone, which close before the call's own `(`, but not at a group around the call (clang's callee's
+        // begin).
+        const uint32_t close = graph->tokens[node];
+        const uint32_t open = close < count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL ? check_common_ignored_opener(parser, close) :
+                              BUSTER_CHECK_NONE;
+        uint32_t at = written != callee && written < graph->count ? graph->tokens[written] : name;
+        while (at < count && at > 0 && parser->tokens.kinds[at - 1] == PARSE_KIND_L_PAREN && parser->tree.roles[at - 1] == PARSE_ROLE_OPEN_GROUP &&
+               parser->tree.parents[at - 1] < open)
         {
             at -= 1;
         }
         out->token = at;
+        out->macro = at;
         // The return type's: its struct's, union's or enum's, then its typedef's and theirs.
         const uint32_t tag = ignored->tag_count != 0 ? check_input_tag_of(types, type) : 0;
         for (uint32_t i = 0; tag != 0 && out->type_result == NULL && i < ignored->tag_count; i += 1)
@@ -368,7 +405,9 @@ static __attribute__((noinline)) bool check_common_ignored_of(CheckCommonEmissio
             out->type_result = ignored->tags[i].key == tag ? ignored->tags[i].result : NULL;
             out->type_name = ignored->tags[i].key == tag ? ignored->tags[i].declaration : BUSTER_CHECK_NONE;
         }
-        uint32_t spelled = ignored->typedefs && out->type_result == NULL && function ? check_common_ignored_typedef(parser, input, declaration) : BUSTER_CHECK_NONE;
+        uint32_t spelled = !ignored->typedefs || out->type_result != NULL ? BUSTER_CHECK_NONE :
+                           function ? check_common_ignored_typedef(parser, input, declaration) :
+                           pointer ? check_common_ignored_pointee(parser, input, declaration) : BUSTER_CHECK_NONE;
         for (uint32_t steps = 0; spelled < count && out->type_result == NULL && steps < 64; steps += 1)
         {
             const CheckInputAttribute* result = NULL;
@@ -391,6 +430,7 @@ static __attribute__((noinline)) bool check_common_ignored_of(CheckCommonEmissio
                              pp_library_builtin(&emission->pp->options, emission->pp->table->records + span.offset, span.length);
         out->kinds = library ? table & (BUSTER_CHECK_IGNORED_CONST | BUSTER_CHECK_IGNORED_PURE) : 0u;
         out->token = name;
+        out->macro = name;
     }
     return out->token < count && (out->kinds != 0 || out->result != NULL || out->type_result != NULL);
 }
@@ -442,7 +482,7 @@ static __attribute__((noinline)) void check_common_ignored_report(CheckCommonEmi
                                   (const char*)intern_bytes(pp->table, name), (int)spelling.length, spelling.pointer, message ? ": " : "",
                                   message ? (int)attribute->text.length : 0, message ? attribute->text.pointer : "");
     }
-    else if (found->kinds != 0 && !check_common_ignored_macro(parser, pp, found->token))
+    else if (found->kinds != 0 && !check_common_ignored_macro(parser, pp, found->macro))
     {
         text = check_warning_text(emission->scratch, "ignoring return value of function declared with %s attribute",
                                   (found->kinds & BUSTER_CHECK_IGNORED_PURE) != 0 ? "pure" : "const");
@@ -463,16 +503,4 @@ static __attribute__((noinline)) void check_common_ignored_statement(CheckCommon
     {
         check_common_ignored_report(emission, &found);
     }
-}
-
-// The discarded call `node`'s warning, if its result warns of one (check_common_ignored_of): whether it does.
-static __attribute__((noinline)) bool check_common_ignored_call(CheckCommonEmission* emission, uint32_t node)
-{
-    CheckCommonIgnoredResult found;
-    const bool result = emission->ignored != NULL && check_common_ignored_of(emission, node, &found);
-    if (result)
-    {
-        check_common_ignored_report(emission, &found);
-    }
-    return result;
 }

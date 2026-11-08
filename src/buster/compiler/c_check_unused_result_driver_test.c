@@ -24,6 +24,26 @@ static const char check_driver_unused_result_functions[] =
     "  return c(n), w(n);\n"
     "}\n";
 
+// Discarded conditionals, commas and selections (clang's isUnusedResultAWarning, check_common_unused_of).
+static const char check_driver_unused_result_conditionals[] =
+    "__attribute__((warn_unused_result)) int w(int);\n"
+    "__attribute__((warn_unused_result)) long wl(int);\n"
+    "__attribute__((const)) int c(int);\n"
+    "int e(int);\n"
+    "void f(void);\n"
+    "void g(void);\n"
+    "struct S { int a; } s;\n"
+    "void h(int n) {\n"
+    "  n ? (f(), 0) : (g(), 1); n ? (f(), 1) : (g(), (0)); n ? (n ? (f(), 0) : (g(), 0)) : (g(), 0);\n"
+    "  (n ? (f(), 0) : (g(), 0)), n; (n ? c(n) : c(n)), 0; 0, (n ? c(n) : e(n));\n"
+    "  n ? (0, w(n)) : (n, (0)); n ? (n, (n, w(n))) : w(n); n ? (n ? 1 : 2) : (n ? 3 : f());\n"
+    "  n, (n, w(n)); (n, w(n)), n; n, (n ? (f(), 0) : (g(), 0));\n"
+    "  n ?: w(n); e(n) ?: 0; w(n) ?: w(n);\n"
+    "  n ? wl(n) : w(n); n ? w(n) : e(n); n ? w(n) : n + 1; n ? n + 1 : w(n); n ? c(n) : (n, 0); n ? s.a : s.a;\n"
+    "  _Generic(n, int: (n ? w(n) : w(n))); _Generic(n, int: (f(), 0)); _Generic(n, int: (n ? 1 : 2)); n ? _Generic(n, int: w(n)) : c(n);\n"
+    "  for (n ? w(n) : w(n); n; n ? c(n) : c(n)) { }\n"
+    "}\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_unused_result_fixtures[] =
 {
     {
@@ -175,6 +195,156 @@ static const CheckDriverDefaultWarningFixture check_driver_unused_result_fixture
                   "static int z[2] = { sizeof(int), 1 };\n"
                   "int y(int n) { c(n); strlen(\"\"); return z[0]; }\n",
         .warnings = 2,
+    },
+    {
+        // A conditional whose arms hide their results behind the `(x, 0)` idiom is quiet (clang's isUnusedResultAWarning).
+        .name = "ignored results: a conditional of hidden results",
+        .source = "void f(void); void g(void);\n"
+                  "void h(int n) { n ? (f(), 0) : (g(), 0); }\n",
+    },
+    {
+        // A comma's left operand or a discarded comma's value warns of the call the conditional leaves, the else arm's.
+        .name = "ignored results: a comma's conditional operand",
+        .source = "__attribute__((warn_unused_result)) int w(int);\n"
+                  "void f(int n) { (n ? w(n) : w(n)), 0; }\n"
+                  "void f2(int n) { 0, (n ? w(n) : w(n)); }\n",
+        .warnings = 3,
+    },
+    {
+        // A conditional's arms warn through their commas and their own conditionals.
+        .name = "ignored results: a conditional's comma and conditional arms",
+        .source = "__attribute__((warn_unused_result)) int w(int);\n"
+                  "void f(int n) { n ? (n, w(n)) : (n, w(n)); }\n"
+                  "void f2(int n) { n ? (n ? w(n) : w(n)) : w(n); }\n",
+        .warnings = 4,
+    },
+    {
+        // A call through a pointer warns of the typedef its declarator spells as the return type.
+        .name = "ignored results: a call through a pointer",
+        .source = "typedef int __attribute__((warn_unused_result)) WI;\n"
+                  "WI (*fp)(void);\n"
+                  "void f(void) { fp(); }\n",
+        .warnings = 1,
+    },
+    {
+        // The `(x, 0)` idiom in one arm, parenthesized, nested; commas of commas; GNU `?:`, whose else arm alone counts;
+        // an arm of no effect, of a plain call, of another type; a member; selections of conditionals and commas; a for
+        // clause's conditionals.
+        .name = "ignored results through conditionals, commas and selections",
+        .source = check_driver_unused_result_conditionals,
+        .warnings = 28,
+    },
+    {
+        .name = "ignored results through conditionals without -Wunused-result",
+        .source = check_driver_unused_result_conditionals,
+        .options = { "-Wno-unused-result" },
+        .warnings = 19,
+    },
+    {
+        // A pointer object's and a parameter's declarator, a pointer typedef, a function typedef's pointer, a typedef of the
+        // typedef; not a pointer the call returns; a tag; a callee through dereferences.
+        .name = "ignored results of calls through pointers",
+        .source = "typedef int __attribute__((warn_unused_result)) WI;\n"
+                  "typedef WI WJ;\n"
+                  "typedef WI (*FP)(void);\n"
+                  "typedef WI FN(void);\n"
+                  "struct __attribute__((warn_unused_result)) S { int a; };\n"
+                  "__attribute__((warn_unused_result)) int w(int);\n"
+                  "__attribute__((const)) int c(int);\n"
+                  "WI (*fp)(void);\n"
+                  "WJ (*fj)(void);\n"
+                  "WI *(*fpp)(void);\n"
+                  "WI *pw(void);\n"
+                  "FP fq;\n"
+                  "FN *fn;\n"
+                  "struct S (*sp)(void);\n"
+                  "int (*plain)(void);\n"
+                  "void f(WI (*cb)(void), FP cb2) {\n"
+                  "  fp(); (*fp)(); (fp)(); fj(); fpp(); pw(); fq(); fn(); sp(); plain(); cb(); cb2(); (*w)(1); (**c)(1);\n"
+                  "}\n",
+        .warnings = 11,
+    },
+    {
+        // A pure or const call is quiet where the discarded expression itself is a macro body's: a call's callee, a comma's
+        // operator, a conditional's first token; a warn_unused_result call warns anyway.
+        .name = "ignored results of conditionals and commas through macros",
+        .source = "__attribute__((const)) int c(int);\n"
+                  "__attribute__((warn_unused_result)) int w(int);\n"
+                  "#define C c\n"
+                  "#define W w\n"
+                  "#define PICK(n) ((n) ? c(n) : c(n))\n"
+                  "#define COMMA(n) ((void)0, c(n))\n"
+                  "#define CO ,\n"
+                  "#define N n\n"
+                  "#define Q ?\n"
+                  "void f(int n) {\n"
+                  "  n ? C(n) : C(n); n, C(n); C(n), n; C(n);\n"
+                  "  PICK(n); COMMA(n); n CO c(n); N ? c(n) : c(n); n Q c(n) : c(n);\n"
+                  "  n ? W(n) : W(n); N ? w(n) : w(n);\n"
+                  "}\n",
+        .warnings = 8,
+        .notes = 3,
+    },
+    {
+        // A conditional in a comma's result chain warns only where both arms do; a conditional's comma, conditional and
+        // selection arms; a selection's comma and conditional; a statement's comma, conditional and selection in
+        // unreachable code, a dead for clause's, a constant condition's other arm's and a short-circuited side's comma;
+        // a call's report at its callee, through the parentheses of the callee alone, a dereference and an address.
+        .name = "ignored results through nested values, unreachable code and callee groups",
+        .source = "int e(int);\n"
+                  "__attribute__((warn_unused_result)) int w(int);\n"
+                  "__attribute__((pure)) int q(int);\n"
+                  "int a, x, m;\n"
+                  "void f(int n) {\n"
+                  "  (a, n ? e(n) : w(n)), x; x, (a, n ? e(n) : w(n));\n"
+                  "  n ? w(n) : (x, w(n)); n ? (x, w(n)) : w(n); n ? w(n) : (m ? w(n) : w(n)); n ? w(n) : _Generic(n, int: w(n));\n"
+                  "  n ? w(n) : (x, q(n)); n ? q(n) : _Generic(n, int: q(n));\n"
+                  "  _Generic(n, int: (x, w(n)), default: 0); __builtin_choose_expr(1, (x, w(n)), 0); _Generic(n, int: (n ? w(n) : w(n)), default: 0);\n"
+                  "}\n"
+                  "int g(int n) {\n"
+                  "  if (n) { return 0; n ? w(n) : w(n); n, w(n); (n ? w(n) : w(n)), 0; w(n), 0; _Generic(n, int: w(n)); (n, w(n)), n; }\n"
+                  "  for (;; n ? w(n) : w(n)) break;\n"
+                  "  if (0) { n ? w(n) : w(n); }\n"
+                  "  return 1 ? 0 : (w(n), 1);\n"
+                  "}\n"
+                  "int h(int n) { return 0 && (w(n), 1); }\n"
+                  "void k(int n) {\n"
+                  "  (w(n)); x = (w(n), 5); (w)(n); ((w))(n); ((w)(n)); (*w)(n); (**w)(n); (&w)(n);\n"
+                  "}\n",
+        .warnings = 36,
+    },
+    {
+        // A place's and a type query's builtin constant, discarded, reports at its keyword, in a conditional's arm, a
+        // comma's operand and a selection too.
+        .name = "unused values of keyword builtins",
+        .source = "typedef int v4 __attribute__((vector_size(16)));\n"
+                  "struct S { int a; };\n"
+                  "void f(int n) {\n"
+                  "  __builtin_FILE(); __builtin_LINE(); __builtin_FUNCTION(); __builtin_COLUMN(); __builtin_FILE_NAME();\n"
+                  "  __builtin_vectorelements(v4); __is_destructible(int); __is_bitwise_cloneable(int); __is_nothrow_destructible(int);\n"
+                  "  n ? __builtin_LINE() : __builtin_LINE(); n, __builtin_FILE(); __builtin_LINE(), n;\n"
+                  "  n ? __builtin_offsetof(struct S, a) : __builtin_offsetof(struct S, a); _Generic(n, int: __builtin_LINE()); _Generic(n, int: (n, __builtin_LINE()));\n"
+                  "}\n",
+        .warnings = 18,
+    },
+    {
+        // An unevaluated operand's (sizeof's, typeof's, _Alignof's, a _Generic's controlling expression) commas and
+        // conditionals are quiet; a _Generic's other association, a short-circuited side, a statement expression's
+        // unreachable statement and a constant condition's other arm are clang's to warn of.
+        .name = "ignored results in unevaluated operands and dead code",
+        .source = "__attribute__((warn_unused_result)) int w(int);\n"
+                  "__attribute__((const)) int c(int);\n"
+                  "void f(int n) {\n"
+                  "  (void)sizeof((w(1), 1)); __typeof__((w(1), 1)) y = 0; (void)_Alignof(__typeof__((w(1), 1))); (void)y;\n"
+                  "  (void)_Generic(n, int: 0, default: (w(1), 1)); (void)_Generic((w(1), n), int: 0);\n"
+                  "  (void)sizeof((n ? w(1) : w(2), 1));\n"
+                  "  (void)sizeof(({ n ? w(1) : w(2); 1; }));\n"
+                  "  (void)(0 && (c(1), 1)); (void)(1 || (n, c(1)));\n"
+                  "  ({ return; n ? w(1) : w(2); });\n"
+                  "}\n"
+                  "static int g(int n) { return 0 ? (c(n), 1) : 0; }\n"
+                  "int h(int n) { return g(n); }\n",
+        .warnings = 4,
     },
     {
         .name = "ignored results of library functions without builtins",
