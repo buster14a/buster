@@ -4054,12 +4054,22 @@ shields a name in a statement before its last, its value
 (`check_init_undeclared_poisons`). The report keeps its initializer's first
 token (`value`) for this; only a unit with another error drops one. A
 parenthesized initializer, a cast, a scalar's compound literal or an array's
-compound literal that is only part of the initializer is no list either; an
-array's compound literal that is all of it (GNU's, `int z[] =
-(int[2]){1,2};`, which clang accepts), even inside parentheses, is still
-refused, on main too. Clang's typo correction ("did you mean"), which buster
-lacks, keeps a misspelled name's initializer a value, so there clang gives the
-error where buster doesn't.
+compound literal that is only part of the initializer is no list either. An
+array's compound literal that is all of it, even inside parentheses, is GNU's
+array initializer, which clang accepts (#1447): `check_input_initializer_finish`
+(which `prepare` schedules for an array whose initializer is parenthesized)
+takes it where its element type is the array's, qualifiers too, and its size
+the array's or the array has none. The literal's body is then the array's
+initializer in the sparse columns, so the size inference, the initializers'
+run and the emission read `{1, 2}` as the array's own; an array of unknown
+size takes the literal's size (`((int[3]){1})` makes `int[3]`), the literal's
+own completed type where it had none (`(int[]){1, 2}`). Any other array type
+is clang's "cannot initialize array of type 'int[3]' with array of type
+'int[2]'" at the name (`CHECK_INPUT_ARRAY_LITERAL_MISMATCH`, its value the
+literal's TypeId, which lanes remap), recovered, the array keeping its type and
+no initializer. Clang's typo correction ("did you mean"), which buster lacks,
+keeps a misspelled name's initializer a value, so there clang gives the error
+where buster doesn't.
 
 Type attributes' errors don't stop the reader either (`check_input_attribute_type`).
 What clang 23 does with each is followed:

@@ -111,7 +111,9 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
         }
     }
     const bool incomplete = type_kind(reader->types, type) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
-    if (valid && (incomplete || check_const_eligible(reader->types, type) || check_input_auto_type(type) ||
+    // An array whose initializer is parenthesized may be a compound literal's (GNU's, check_input_initializer_finish).
+    const bool parenthesized = parser->tokens.kinds[begin] == PARSE_KIND_L_PAREN && type_kind_is_array(type_kind(reader->types, type_strip_aligned(reader->types, type)));
+    if (valid && (incomplete || parenthesized || check_const_eligible(reader->types, type) || check_input_auto_type(type) ||
                   (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0))
     {
         check_input_rare_claim(reader, &reader->incomplete_array_types[declaration]);
@@ -504,14 +506,77 @@ static __attribute__((noinline)) bool check_input_constexpr_finish(CheckInputRea
     return valid;
 }
 
+// The braced body `{`'s token of an array's compound literal that is all of an initializer from `begin` to `end`, past
+// parentheses around it, and the literal's type at its `)` (as the casts' are), or BUSTER_CHECK_NONE.
+static uint32_t check_input_array_literal(const CheckInputReader* reader, uint32_t begin, uint32_t end, TypeId* literal)
+{
+    const Parser* parser = reader->parser;
+    uint32_t inner = begin;
+    uint32_t inner_end = end;
+    while (inner + 1 < inner_end && parser->tokens.kinds[inner] == PARSE_KIND_L_PAREN && parser->tree.parents[inner] == inner_end - 1)
+    {
+        inner += 1;
+        inner_end -= 1;
+    }
+    const uint32_t group_close = inner < inner_end && parser->tokens.kinds[inner] == PARSE_KIND_L_PAREN ? parser->tree.parents[inner] : 0;
+    const bool compound = group_close > inner && group_close + 1 < inner_end && parser->tree.roles[group_close + 1] == PARSE_ROLE_OPEN_COMPOUND_BODY &&
+                          parser->tree.parents[group_close + 1] == inner_end - 1;
+    // The literal's own declaration, at its `(`, has its completed type once its initializer finished (`(int[]){1, 2}`'s
+    // int[2]); its written type is at its `)`.
+    const bool declared = compound && reader->output->declarations[inner] == inner && check_input_bit(reader->output->declaration_bits, inner, BUSTER_CHECK_BITS_COMPOUND);
+    const TypeId type = !compound ? 0 : type_strip_aligned(reader->types, declared ? reader->declared_types[inner] : reader->query_types[group_close]);
+    const bool array = type != 0 && type_kind_is_array(type_kind(reader->types, type));
+    *literal = array ? type : 0;
+    return array ? group_close + 1 : BUSTER_CHECK_NONE;
+}
+
 static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t declaration)
 {
     const Parser* parser = reader->parser;
-    const uint32_t begin = check_sparse_get(reader->output->initializer_begins, declaration);
-    const uint32_t end = check_sparse_get(reader->output->initializer_ends, declaration);
-    const uint32_t assignment = check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) ? declaration : begin - 1;
+    const uint32_t written = check_sparse_get(reader->output->initializer_begins, declaration);
+    uint32_t begin = written;
+    uint32_t end = check_sparse_get(reader->output->initializer_ends, declaration);
+    // GNU's array initialized by a compound literal of its array type (#1447), as clang accepts it: the same element type,
+    // qualifiers too, and the same size or none yet. The literal's body is then the array's initializer, which every
+    // reader of the initializer's tokens takes from here. Another array type is clang's "cannot initialize array of type
+    // 'int[3]' with array of type 'int[2]'" at the name, recovered, the array keeping its type and no initializer.
+    TypeId literal = 0;
+    const TypeId declared = type_strip_aligned(reader->types, reader->declared_types[declaration]);
+    const bool array = begin < end && end <= parser->tokens.count && parser->tokens.kinds[begin] == PARSE_KIND_L_PAREN &&
+                       type_kind_is_array(type_kind(reader->types, declared));
+    const uint32_t body = array ? check_input_array_literal(reader, begin, end, &literal) : BUSTER_CHECK_NONE;
+    const bool unsized = array && type_kind(reader->types, declared) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
+    const bool matched = body != BUSTER_CHECK_NONE && type_element(reader->types, declared) == type_element(reader->types, literal) &&
+                         (unsized || reader->types->types.extent[type_index(declared)] == reader->types->types.extent[type_index(literal)]);
+    bool mismatched = false;
+    if (matched)
+    {
+        begin = body;
+        end = parser->tree.parents[body] + 1;
+        check_sparse_set(reader->output->sparse_pool, reader->output->initializer_begins, declaration, begin);
+        check_sparse_set(reader->output->sparse_pool, reader->output->initializer_ends, declaration, end);
+    }
+    else if (body != BUSTER_CHECK_NONE)
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_report(reader, declaration, CHECK_INPUT_ARRAY_LITERAL_MISMATCH);
+        if (reader->output->report_count == before + 1 && !reader->output->resource)
+        {
+            reader->output->reports[before].type = reader->declared_types[declaration];
+            reader->output->reports[before].type_spelling = check_input_typedef_spelling(reader->output, parser, declaration);
+            reader->output->reports[before].value = literal;
+            reader->output->reports[before].completion = end;
+        }
+        mismatched = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
+        if (mismatched)
+        {
+            check_sparse_set(reader->output->sparse_pool, reader->output->initializer_begins, declaration, BUSTER_CHECK_NONE);
+            check_sparse_set(reader->output->sparse_pool, reader->output->initializer_ends, declaration, BUSTER_CHECK_NONE);
+        }
+    }
+    const uint32_t assignment = check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) ? declaration : written - 1;
     TypeId type = reader->declared_types[declaration];
-    bool valid = begin < end && end <= parser->tokens.count;
+    bool valid = !mismatched && begin < end && end <= parser->tokens.count;
     // An array of unknown size whose initializer is no list, recovered (below): it keeps its type and no initializer.
     bool listless = false;
     if (valid && (check_input_auto_type(type) || (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0))
@@ -525,6 +590,8 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
     }
     if (valid && type_kind(reader->types, type) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
     {
+        // A compound literal's array of its own size gives it (GNU's, above): `((int[3]){1})` makes int[3].
+        const bool sized = matched && type_kind(reader->types, literal) == BUSTER_TYPE_KIND_ARRAY;
         uint32_t string_token = begin;
         string_token += parser->tree.roles[begin] == PARSE_ROLE_OPEN_INITIALIZER || parser->tree.roles[begin] == PARSE_ROLE_OPEN_COMPOUND_BODY;
         const TypeId element = type_unqualified(type_strip_aligned(reader->types, type_element(reader->types, type)));
@@ -532,7 +599,12 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
         const TypeId string_element = string != 0 ? type_element(reader->types, string->type) : 0;
         const bool character = element == BUSTER_TYPE_CHAR || element == BUSTER_TYPE_SCHAR || element == BUSTER_TYPE_UCHAR;
         string = string != 0 && (element == string_element || (character && string_element == BUSTER_TYPE_CHAR)) ? string : 0;
-        if (string != 0)
+        if (sized)
+        {
+            type = check_input_type_result(reader, type_array(reader->types, type_element(reader->types, type), reader->types->types.extent[type_index(literal)]));
+            valid = type != 0;
+        }
+        else if (string != 0)
         {
             type = check_input_type_result(reader, type_array(reader->types, type_element(reader->types, type), reader->types->types.extent[type_index(string->type)]));
             valid = type != 0;
@@ -636,9 +708,9 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
     {
         check_input_initializer_const(reader, declaration, begin, end, type);
     }
-    if (!valid && reader->output->report_count == 0)
+    if (!valid && !mismatched && reader->output->report_count == 0)
     {
         check_input_report(reader, assignment, CHECK_INPUT_DECLARATION);
     }
-    return valid;
+    return valid || mismatched;
 }
