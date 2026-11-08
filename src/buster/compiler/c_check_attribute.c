@@ -768,6 +768,10 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_ANNOTATE_CONSTANT,
     CHECK_ARGUMENT_TARGET_CLONES_DEFAULT,
     CHECK_ARGUMENT_SELECTANY_LINKAGE,
+    // pcs's identifier argument aapcs, after its "requires a string" (#147): the convention's warning the driver gives, and
+    // on a tag then the warning that it takes functions alone.
+    CHECK_ARGUMENT_CONVENTION_UNSUPPORTED,
+    CHECK_ARGUMENT_FUNCTIONS_METHODS,
     // clang's checks-only attributes' (#1447, check_input_attribute_checks): enforce_tcb's and enforce_tcb_leaf's of one TCB,
     // "attributes 'X("T")' and 'Y("T")' are mutually exclusive" (Y's name token in CheckInputReport.value's low half, the
     // TCB's string token in its high half); callback's "'callback' attribute specifies no callback callee", "'callback'
@@ -1929,7 +1933,9 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             }
             // clang's error of an argument that is no string literal, at it (#147): visibility's own wording, the others'
             // checkStringLiteralArgumentAttr's.
-            // visibility's argument is an enumerator's, which clang's parser reads as an identifier: one is its own error.
+            // visibility's and pcs's arguments are enumerators', which clang's parser reads as identifiers: one is "requires a
+            // string". pcs's is its handler's, once a function or a tag takes it (check_input_attribute_pcs): on another type
+            // clang's type processing never reads the argument, and the attribute's warning is all.
             // An asm label's string literal that refuses its escapes is the literal's error (#1447, clang's literal parser's
             // escape errors: check_driver_literal_escapes).
             const bool label_literal = !decoded && attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !reader->output->resource &&
@@ -1945,8 +1951,15 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             else if (!decoded)
             {
                 const bool named = first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER;
-                check_input_attribute_argument_error(reader, attributes, attribute, first,
-                                                     attribute->kind == CHECK_ATTRIBUTE_VISIBILITY && named ? CHECK_ARGUMENT_STRING : CHECK_ARGUMENT_STRING_LITERAL, 0);
+                const bool pcs = attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION &&
+                                 check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "pcs");
+                const bool enumerated = attribute->kind == CHECK_ATTRIBUTE_VISIBILITY || pcs;
+                const CheckInputAttributeError saved = attributes->error;
+                const uint32_t saved_first = attributes->error_first;
+                const uint32_t saved_end = attributes->error_end;
+                const uint32_t before = reader->output->report_count;
+                check_input_attribute_argument_error(reader, attributes, attribute, first, enumerated && named ? CHECK_ARGUMENT_STRING : CHECK_ARGUMENT_STRING_LITERAL, 0);
+                valid = pcs && named && check_input_attribute_defer(reader, attributes, attribute, before, saved, saved_first, saved_end);
             }
         }
         else if (valid)
@@ -2792,28 +2805,31 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
 // clang's parser's -Wgcc-compat warning for a function definition (#147, Parser::ParseFunctionDefinition): each GNU
 // attribute after its declarator (`attributes`, the declarator's own) whose attribute GCC knows, at its name, named as
 // written, "GCC does not allow 'X' attribute in this position on a function definition".
+static void check_input_attribute_gcc_one(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    const CheckInputFactRow* fact = attribute->standard || attribute->keyword ? NULL : check_input_attribute_gnu_fact(reader, attribute->name);
+    if (fact != NULL && (fact->flags & BUSTER_CHECK_FACT_GCC) != 0)
+    {
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_GCC_COMPAT,
+            .kind = CHECK_WARNING_EVENT_GCC_ATTRIBUTE_POSITION,
+            .token = attribute->name_token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            // The parser's, before Sema's diagnostics of the same attribute (published at the token before it).
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = attribute->name_token != 0 ? attribute->name_token - 1 : 0,
+            .payload = { .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        check_input_warning_once(reader, &event);
+    }
+}
+
 static void check_input_attribute_gcc_position(CheckInputReader* reader, const CheckInputAttributes* attributes)
 {
     for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
     {
-        const CheckInputAttribute* attribute = attributes->records + i;
-        const CheckInputFactRow* fact = attribute->standard || attribute->keyword ? NULL :
-                                        check_input_attribute_gnu_fact(reader, attribute->name);
-        if (fact != NULL && (fact->flags & BUSTER_CHECK_FACT_GCC) != 0)
-        {
-            const CheckWarningEvent event =
-            {
-                .id = CHECK_WARNING_ID_GCC_COMPAT,
-                .kind = CHECK_WARNING_EVENT_GCC_ATTRIBUTE_POSITION,
-                .token = attribute->name_token,
-                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
-                // The parser's, before Sema's diagnostics of the same attribute (published at the token before it).
-                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-                .completion = attribute->name_token != 0 ? attribute->name_token - 1 : 0,
-                .payload = { .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
-            };
-            check_input_warning_event(reader, &event, NULL, 0);
-        }
+        check_input_attribute_gcc_one(reader, attributes->records + i);
     }
 }
 
@@ -3165,12 +3181,29 @@ static bool check_input_attribute_pcs_valid(CheckInputReader* reader, const Chec
                     (check_input_attribute_equal(attribute->text, "aapcs") || check_input_attribute_equal(attribute->text, "aapcs-vfp")));
 }
 
-static bool check_input_attribute_pcs(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute)
+static bool check_input_attribute_pcs(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, bool tag)
 {
     const bool pcs = attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "pcs");
     const bool counted = !pcs || attribute->argument_count == 1;
     const bool known = !counted || check_input_attribute_pcs_valid(reader, attribute);
-    if (!counted && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+    const CheckInputReport* deferred = pcs ? attribute->deferred : NULL;
+    if (deferred != NULL)
+    {
+        // An identifier for its string (check_input_attribute_validate): "requires a string", given once. clang's
+        // checkStringLiteralArgumentAttr goes on with the identifier's text, which the driver words after the error: aapcs's
+        // convention x86-64 warns of and ignores, any other's "invalid PCS type".
+        CheckInput* output = reader->output;
+        if (output->report_count < output->report_capacity)
+        {
+            // (A tag's, whose aapcs clang then also finds no function's: `value` 1.)
+            output->reports[output->report_count] = *deferred;
+            output->reports[output->report_count++].value = tag ? 1u : 0u;
+        }
+        output->resource |= output->report_count >= output->report_capacity && output->reports[output->report_count - 1].token != deferred->token;
+        attributes->error = attributes->error == CHECK_ATTRIBUTE_ERROR_NONE ? CHECK_ATTRIBUTE_ERROR_ARGUMENTS : attributes->error;
+        attribute->deferred = NULL;
+    }
+    else if (!counted && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
     {
         attributes->error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
         attributes->error_first = attribute->first;
@@ -3181,7 +3214,7 @@ static bool check_input_attribute_pcs(CheckInputReader* reader, CheckInputAttrib
     {
         check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PCS_TYPE, 0);
     }
-    return counted && known;
+    return deferred == NULL && counted && known;
 }
 
 // The count of an attribute's arguments, its commas outside nested brackets (#147).
@@ -3450,7 +3483,7 @@ static uint32_t check_input_attribute_standard_previous(CheckInputReader* reader
 }
 
 static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t* cursor, uint32_t end, bool standard,
-                                            uint32_t place)
+                                            uint32_t place, bool definition)
 {
     const Parser* parser = reader->parser;
     uint32_t i = *cursor;
@@ -3579,6 +3612,13 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         {
             check_input_attribute_argument_error(reader, attributes, &attribute, literal, CHECK_ARGUMENT_STRING_LITERAL, 0);
             valid = false;
+        }
+        // The parser recognizes a definition's suffix before Sema processes its attributes: its warning holds even
+        // where a type attribute's arguments (regparm's or pcs's) then keep the declarator from completing. An attribute
+        // whose argument the parser itself refused (pcs(1)'s, above, or an escape's, below) it dropped first, with no warning.
+        else if (definition && !escaped)
+        {
+            check_input_attribute_gcc_one(reader, &attribute);
         }
         // An argument's escape sequence's error drops the attribute, as clang's parser drops it (its arguments' parse
         // failed): nothing more of it is read or kept, and its list and declaration go on without it.
@@ -4094,6 +4134,14 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
             valid &= close > open + 1 && close < end && parser->tokens.kinds[open + 1] == (standard ? PARSE_KIND_L_SQUARE : PARSE_KIND_L_PAREN);
             const uint32_t list_end = valid ? parser->tree.parents[open + 1] : end;
             valid &= list_end + 1 == close;
+            uint32_t after = close + 1;
+            const bool suffix = valid && !standard && parser->tree.roles[open] == PARSE_ROLE_OPEN_ATTRIBUTE;
+            while (suffix && after < end && check_input_attribute_starts(parser, after, end))
+            {
+                const uint32_t next_open = parser->tokens.kinds[after] == PARSE_KIND_L_SQUARE ? after : after + 1;
+                after = next_open < end ? check_input_attribute_after_group(parser, next_open, end) : end + 1;
+            }
+            const bool definition = suffix && after <= end && after < parser->tokens.count && parser->tree.roles[after] == PARSE_ROLE_OPEN_BODY;
             i = open + 2;
             if (valid && (place == BUSTER_CHECK_PLACE_QUALIFIERS || place == BUSTER_CHECK_PLACE_GROUP))
             {
@@ -4121,7 +4169,7 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
                 }
                 else
                 {
-                    valid = check_input_attribute_read_item(reader, attributes, &i, list_end, standard, place);
+                    valid = check_input_attribute_read_item(reader, attributes, &i, list_end, standard, place, definition);
                 }
             }
             i = valid ? close + 1 : i;
@@ -4159,6 +4207,18 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
                 const CheckInputCallingConvention call = check_input_attribute_call(check_input_attribute_name(reader, name));
                 attribute.value = call;
                 attributes->calling_convention = check_input_convention_merge(attributes->calling_convention, call);
+            }
+            else if (name == C_NAME_NORETURN)
+            {
+                bool duplicate = false;
+                for (uint32_t a = 0; !duplicate && a < attributes->count; a += 1)
+                {
+                    duplicate = attributes->records[a].kind == CHECK_ATTRIBUTE_NORETURN && attributes->records[a].keyword;
+                }
+                if (duplicate)
+                {
+                    check_input_duplicate_specifier(reader, first, C_NAME_NORETURN);
+                }
             }
             valid = valid && check_input_attribute_append(reader, attributes, attribute);
         }
@@ -4786,10 +4846,10 @@ static void check_input_attribute_conventions(CheckInputReader* reader, CheckInp
     uint32_t current = CHECK_CALL_DEFAULT;
     for (uint32_t i = 0; is_function && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE && i < attributes->count; i += 1)
     {
-        const CheckInputAttribute* attribute = attributes->records + i;
+        CheckInputAttribute* attribute = attributes->records + i;
         const bool convention = attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !attribute->specifier_ignored && !attribute->specifier_applied;
         // One of a wrong count is its count's error alone, at its subject's check (CheckInputAttribute.convention_count).
-        if (convention && attribute->convention_count == BUSTER_CHECK_COUNT_NONE && check_input_attribute_pcs(reader, attributes, attribute))
+        if (convention && attribute->convention_count == BUSTER_CHECK_COUNT_NONE && check_input_attribute_pcs(reader, attributes, attribute, false))
         {
             const uint32_t call = attribute->value == CHECK_CALL_IGNORED_X86_32 ? CHECK_CALL_SYSV : (uint32_t)attribute->value;
             // (A GPU kernel's convention is a function's declaration's alone, not a pointer's to one.)
@@ -7269,7 +7329,7 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
                                     check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "cfi_unchecked_callee"));
         if (valid && tag && function_type && !attribute->ignored && !attribute->subject_ignored)
         {
-            valid = check_input_attribute_pcs(reader, attributes, attribute);
+            valid = check_input_attribute_pcs(reader, attributes, attribute, true);
             if (valid && convention && attribute->value == CHECK_CALL_IGNORED_X86_32)
             {
                 check_input_attribute_unsupported(reader, attribute);
@@ -7388,9 +7448,10 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_SELECTANY_LINKAGE, 0);
             valid = false;
         }
-        else if (kept && attribute->deferred != NULL)
+        else if (kept && attribute->deferred != NULL && attribute->kind != CHECK_ATTRIBUTE_CALLING_CONVENTION)
         {
-            // Its argument's error, its handler's once its subject takes it (check_input_attribute_defer).
+            // Its argument's error, its handler's once its subject takes it (check_input_attribute_defer); a convention's
+            // where it meets a function or a tag (check_input_attribute_pcs).
             CheckInput* output = reader->output;
             if (output->report_count < output->report_capacity)
             {
