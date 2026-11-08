@@ -1827,16 +1827,47 @@ of records larger than 16 bytes, and as fast as before for the assignment.
 
 The type table keeps a function type's calling convention from its attribute
 (`ms_abi`, `vectorcall`, `regcall`, `preserve_most`, `preserve_all`,
-`preserve_none`, or `sysv_abi`, which is System V's: `TypeFunctionABI`), and
-the module classifies and assigns System V's alone. clang 23 on x86-64 Linux
-compiles each of the six. `ms_abi`, `vectorcall`, `regcall` and
-`preserve_none` pass arguments in registers of their own. `preserve_most` and
-`preserve_all` pass System V's arguments in System V's registers, and their
-callee keeps more registers than System V's callee does.
+`preserve_none`, `intel_ocl_bicc`, `swiftcall`, `swiftasynccall`, or
+`sysv_abi`, which is System V's: `TypeFunctionABI`), and the module classifies
+and assigns System V's alone. clang 23 on x86-64 Linux compiles each of them.
+`ms_abi`, `vectorcall`, `regcall` and `preserve_none` pass arguments in
+registers of their own. `swiftcall` lowers aggregates its own way (a struct of
+up to four registers in them, its result too), passes `swift_context` in r13
+and `swift_error_result` in r12, which the callee writes the error into and
+the caller stores back; `swiftasynccall` (LLVM's `swifttailcc`) passes
+`swift_async_context` in r14, keeps neither r13 nor r14 and pops its own
+frame (`retq $8`). `preserve_most`, `preserve_all` and `intel_ocl_bicc` pass
+System V's arguments in System V's registers, and their callee keeps more
+registers than System V's callee does.
 
-The producer refuses each of the first four by name
+The function type's convention is no longer three flag bits, all of whose
+values the first eight took (#1447): a function whose convention isn't System
+V's, or whose parameters have Swift ABIs, has `BUSTER_TYPE_FLAG_FUNCTION_INFO`
+and an info word after its parameters, the convention in its low byte, then a
+word of eight 4-bit parameter ABIs (`TypeParameterABI`, clang's
+`ParameterABI`) per eight parameters where any isn't ordinary. A System V
+function without them, almost every function, is hashed, stored and compared
+as before.
+
+The producer refuses each of the first six by name
 (`check_lower_convention`): a definition, and a call through a function type
-of one, directly or through a pointer.
+of one, directly or through a pointer. Swift's aggregate lowering, swifterror's
+register and swifttailcc's callee-popped frame are no location or frame Tier 0
+has.
+
+`intel_ocl_bicc` passes System V's arguments on x86-64 Linux: clang's
+`X86_64ABIInfo` classifies them as System V's, and LLVM's
+`CC_X86_64_Intel_OCL_BI` gives a vector argument the first free register of
+xmm0 to xmm3 (ymm or zmm by its width), which is the one System V's order gives
+too, then delegates to `CC_X86_64_C`. Its callee keeps xmm8 to xmm15
+(`CSR_64_Intel_OCL_BI`), whole YMMs with AVX (`_AVX`), and with AVX-512F
+(`_AVX512`) rbx, rsi, r14 and r15 of the general registers, zmm16 to zmm31 and
+k4 to k7: rbp, r12 and r13 are the caller's to keep then. A definition compiles
+with Tier 0's preserving frame (the general registers System V's frame keeps,
+rsi with AVX-512, and the vector registers by their bits; the block keeps k0 to
+k7, a superset), and a call compiles as a System V call but on an AVX-512
+target, whose callee may clobber rbp, r12 and r13, which Tier 0's frame keeps
+across a call: that one is refused by name (`check_lower_convention_call`).
 
 A call of a `preserve_most` or `preserve_all` function, or of a
 `no_caller_saved_registers` one, compiles as a System V call, since its callee
@@ -1858,9 +1889,8 @@ registers LLVM's frames of the three keep (`check_lower_preserve`):
   without SSE.
 
 `no_caller_saved_registers` is clang's function type bit beside the calling
-convention. Here it is `TYPE_FUNCTION_ABI_NO_CALLER_SAVED`, the last value of
-the function type's three ABI bits: a System V function whose callee keeps
-every register. With `sysv_abi` or `cdecl` it is that type. With another
+convention. Here it is `TYPE_FUNCTION_ABI_NO_CALLER_SAVED`, a convention of its
+own: a System V function whose callee keeps every register. With `sysv_abi` or `cdecl` it is that type. With another
 convention (`ms_abi`, `vectorcall`, `preserve_all` and the others, which clang
 takes), it is refused by name, since the type has no room for both.
 

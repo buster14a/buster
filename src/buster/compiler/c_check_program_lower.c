@@ -966,7 +966,13 @@ static void check_lower_unsupported(CheckLowerWriter* writer, const char* featur
 // the callee, as no_caller_saved_registers' System V function keeps every register. A definition or a call of any of the
 // first four is refused. The last three's definitions keep their registers with Tier 0's preserving frame
 // (check_lower_preserve), and their calls are System V's, whose callees keep whatever a System V caller expects. The same
-// for a definition's type and a call's callee's.
+// for a definition's type and a call's callee's. intel_ocl_bicc (#1447) is the last three's kind on x86-64 Linux: clang's
+// X86_64ABIInfo classifies its arguments and result as System V's, and LLVM's CC_X86_64_Intel_OCL_BI gives its vectors
+// the registers System V's would (xmm0 to xmm3 first, then what CC_X86_64_C gives); its callee keeps more registers
+// (check_lower_preserve), but with AVX-512 fewer general ones too, which check_lower_convention_call refuses. swiftcall
+// and swiftasynccall are refused: Swift's own lowering of aggregates (a struct of up to four registers in them, not in
+// memory), swifterror's register (r12, which the callee writes the error into and the caller stores back) and
+// swifttailcc's callee-popped frame (swiftasynccall's) are no frame or location Tier 0 has.
 static const char* check_lower_convention(const TypeTable* types, TypeId function)
 {
     const TypeFunctionABI convention = type_function_abi_kind(types, function);
@@ -977,12 +983,28 @@ static const char* check_lower_convention(const TypeTable* types, TypeId functio
         case TYPE_FUNCTION_ABI_VECTOR: result = "functions of the vectorcall calling convention"; break;
         case TYPE_FUNCTION_ABI_REG: result = "functions of the regcall calling convention"; break;
         case TYPE_FUNCTION_ABI_PRESERVE_NONE: result = "functions of the preserve_none calling convention"; break;
+        case TYPE_FUNCTION_ABI_SWIFT: result = "functions of the swiftcall calling convention"; break;
+        case TYPE_FUNCTION_ABI_SWIFT_ASYNC: result = "functions of the swiftasynccall calling convention"; break;
+        case TYPE_FUNCTION_ABI_INTEL_OCL:
         case TYPE_FUNCTION_ABI_PRESERVE_MOST:
         case TYPE_FUNCTION_ABI_PRESERVE_ALL:
         case TYPE_FUNCTION_ABI_NO_CALLER_SAVED:
         case TYPE_FUNCTION_ABI_SYSV:
         case TYPE_FUNCTION_ABI_COUNT:
         case TYPE_FUNCTION_ABI_INVALID: break;
+    }
+    return result;
+}
+
+// A call's callee's convention that the backend doesn't compile (check_lower_convention), on the caller's instruction set
+// `target`: with AVX-512F, intel_ocl_bicc's callee keeps rbx, rsi, r14 and r15 of the general registers alone (LLVM's
+// CSR_64_Intel_OCL_BI_AVX512), and Tier 0's frame keeps rbp, r12 and r13 across a call.
+static const char* check_lower_convention_call(const TypeTable* types, TypeId function, uint64_t target)
+{
+    const char* result = check_lower_convention(types, function);
+    if (result == NULL && type_function_abi_kind(types, function) == TYPE_FUNCTION_ABI_INTEL_OCL && (target & BUSTER_X86_FEATURE(AVX512F)) != 0)
+    {
+        result = "calls of intel_ocl_bicc functions on an AVX-512 target, whose callees don't keep rbp, r12 and r13";
     }
     return result;
 }
@@ -996,7 +1018,9 @@ static const char* check_lower_convention(const TypeTable* types, TypeId functio
 // with BW (a kmovq's 8 bytes) and a kmovw's 16 bits without, as LLVM spills them. (Its _NoSSE set, -mgeneral-regs-only's,
 // is never asked for: the checker takes no target without SSE.) An interrupt service routine (`interrupt`, LLVM's
 // x86_intrcc) keeps that same set. Tier 0 leaves out the result's registers, which LLVM's return lowering takes out of the
-// set. Nothing for another convention.
+// set. intel_ocl_bicc's (#1447, LLVM's CSR_64_Intel_OCL_BI and its _AVX and _AVX512): xmm8 to xmm15, whole YMMs with AVX,
+// and with AVX-512F rsi (of the general registers, rbx, rsi, r14 and r15, which System V's frame keeps but rsi), zmm16 to
+// zmm31 and the mask registers, k4 to k7 of them (Tier 0's block keeps k0 to k7). Nothing for another convention.
 static void check_lower_preserve(const TypeTable* types, TypeId function, uint64_t target, bool interrupt, Tier0Function* output)
 {
     const TypeFunctionABI convention = type_function_abi_kind(types, function);
@@ -1006,10 +1030,13 @@ static void check_lower_preserve(const TypeTable* types, TypeId function, uint64
     const bool wide = every && (target & BUSTER_X86_FEATURE(AVX512F)) != 0;
     const uint16_t general = (uint16_t)(1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RCX | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RSI |
                                         1u << X86_REGISTER_RDI | 1u << X86_REGISTER_R8 | 1u << X86_REGISTER_R9 | 1u << X86_REGISTER_R10);
-    output->preserve_general = most || all ? general : every ? (uint16_t)(general | 1u << X86_REGISTER_R11) : 0;
-    output->preserve_vectors = wide ? 32 : all || every ? 16 : 0;
-    output->preserve_vector_bytes = wide ? 64 : all || every ? ((target & BUSTER_X86_FEATURE(AVX)) != 0 ? 32 : 16) : 0;
-    output->preserve_mask_bytes = wide ? ((target & BUSTER_X86_FEATURE(AVX512BW)) != 0 ? 8 : 2) : 0;
+    const bool ocl = convention == TYPE_FUNCTION_ABI_INTEL_OCL;
+    const bool ocl_wide = ocl && (target & BUSTER_X86_FEATURE(AVX512F)) != 0;
+    const uint16_t ocl_general = ocl_wide ? (uint16_t)(1u << X86_REGISTER_RSI) : 0;
+    output->preserve_general = most || all ? general : every ? (uint16_t)(general | 1u << X86_REGISTER_R11) : ocl_general;
+    output->preserve_vectors = wide ? UINT32_MAX : all || every ? 0xffffu : ocl_wide ? 0xffff0000u : ocl ? 0xff00u : 0;
+    output->preserve_vector_bytes = wide || ocl_wide ? 64 : all || every || ocl ? ((target & BUSTER_X86_FEATURE(AVX)) != 0 ? 32 : 16) : 0;
+    output->preserve_mask_bytes = wide || ocl_wide ? ((target & BUSTER_X86_FEATURE(AVX512BW)) != 0 ? 8 : 2) : 0;
 }
 
 // A vector type's bytes, where Tier 0 takes its values (BUSTER_TYPED_CLASS_VECTOR): GNU C's and Clang's extended
@@ -6026,7 +6053,7 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
     CheckLowerAbi* abi = writer->abi;
     // What the parameters' and the arguments' types need that isn't lowered, the first one's (a struct or a union passes
     // its address, and its bytes go where abi_assign puts them), after the callee's calling convention.
-    const char* passed = check_lower_convention(types, type);
+    const char* passed = check_lower_convention_call(types, type, writer->target.features);
     // A plain call: a source call whose parameters and arguments are all plain scalars (check_lower_plain_scalar), none a
     // transparent union's, and whose result is one or void, which passes every check below and records its arguments by
     // their packed classes and facts alone, on the vector path (#1048: 0.05 ms of sqlite3.c's lowering on the 9700X,
@@ -15218,16 +15245,21 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         function->realign_stack = !bare && check_program_realign(program, b);
         if (tier0_preserving(function) && (writer->tails || writer->eh_return || writer->returns_twice))
         {
-            const bool every = type_function_abi_kind(types, type) == TYPE_FUNCTION_ABI_NO_CALLER_SAVED;
-            static const char* const reasons[3][3] = {
+            const TypeFunctionABI convention = type_function_abi_kind(types, type);
+            const bool every = convention == TYPE_FUNCTION_ABI_NO_CALLER_SAVED;
+            const bool ocl = convention == TYPE_FUNCTION_ABI_INTEL_OCL;
+            static const char* const reasons[3][4] = {
                 { "__builtin_eh_return in an interrupt service routine", "__builtin_eh_return in a function with no_caller_saved_registers",
-                  "__builtin_eh_return in a function of the preserve_most or preserve_all calling convention" },
+                  "__builtin_eh_return in a function of the preserve_most or preserve_all calling convention",
+                  "__builtin_eh_return in a function of the intel_ocl_bicc calling convention" },
                 { "__builtin_setjmp in an interrupt service routine", "__builtin_setjmp in a function with no_caller_saved_registers",
-                  "__builtin_setjmp in a function of the preserve_most or preserve_all calling convention" },
+                  "__builtin_setjmp in a function of the preserve_most or preserve_all calling convention",
+                  "__builtin_setjmp in a function of the intel_ocl_bicc calling convention" },
                 { "musttail calls in an interrupt service routine", "musttail calls in a function with no_caller_saved_registers",
-                  "musttail calls in a function of the preserve_most or preserve_all calling convention" },
+                  "musttail calls in a function of the preserve_most or preserve_all calling convention",
+                  "musttail calls in a function of the intel_ocl_bicc calling convention" },
             };
-            check_lower_unsupported(writer, reasons[writer->eh_return ? 0 : writer->returns_twice ? 1 : 2][handler ? 0 : every ? 1 : 2]);
+            check_lower_unsupported(writer, reasons[writer->eh_return ? 0 : writer->returns_twice ? 1 : 2][handler ? 0 : every ? 1 : ocl ? 3 : 2]);
         }
         function->vectors = writer->vectors;
         function->masks = writer->masks;

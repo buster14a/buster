@@ -146,6 +146,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ATTRIBUTES_MISPLACED: result = "misplaced attributes; expected attributes here"; break;
         case CHECK_INPUT_ENUM_NOT_REPRESENTABLE: result = "enumerator value is not representable in the underlying type"; break;
         case CHECK_INPUT_ATTRIBUTE_CONVENTIONS: result = "calling convention attributes are not compatible"; break;
+        case CHECK_INPUT_CONVENTION_CHANGE: result = "function declared here was previously declared with another calling convention"; break;
         case CHECK_INPUT_VECTOR_ELEMENT: result = "invalid vector element type"; break;
         case CHECK_INPUT_VECTOR_BIT_INT: result = "'_BitInt' vector element width must be a power of 2"; break;
         case CHECK_INPUT_VECTOR_CONSTANT: result = "vector_size attribute requires an integer constant"; break;
@@ -472,6 +473,22 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_MATRIX_DISABLED: snprintf(text, capacity, "matrix types extension is disabled. Pass -fenable-matrix to enable it"); break;
         case CHECK_ARGUMENT_KERNEL_FUNCTIONS: snprintf(text, capacity, "'%s' attribute only applies to functions", parsed); break;
         case CHECK_ARGUMENT_VARIADIC_CONVENTION: snprintf(text, capacity, "variadic function cannot use %s calling convention", check_input_convention_name(number)); break;
+        case CHECK_ARGUMENT_NO_PROTOTYPE_CONVENTION:
+            snprintf(text, capacity, "function with no prototype cannot use the %s calling convention", check_input_convention_name(number));
+            break;
+        case CHECK_ARGUMENT_SWIFT_PARAMETER_TYPE:
+            snprintf(text, capacity, "'%s' parameter must have pointer%s type; type here is %.*s", check_input_parameter_abi_name(number & 0xfu),
+                     (number & BUSTER_CHECK_SWIFT_POINTER_POINTER) != 0 ? " to unqualified pointer" : "", (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_SWIFT_PARAMETER_CONVENTION:
+            snprintf(text, capacity, "'%s' parameter can only be used with swiftcall%s calling convention%s", check_input_parameter_abi_name(number & 0xfu),
+                     (number & BUSTER_CHECK_SWIFT_ONLY) != 0 ? "" : " or swiftasynccall", (number & BUSTER_CHECK_SWIFT_ONLY) != 0 ? "s" : "");
+            break;
+        case CHECK_ARGUMENT_SWIFT_INDIRECT_FIRST: snprintf(text, capacity, "'swift_indirect_result' parameters must be first parameters of function"); break;
+        case CHECK_ARGUMENT_SWIFT_ERROR_AFTER_CONTEXT: snprintf(text, capacity, "'swift_error_result' parameter must follow 'swift_context' parameter"); break;
+        case CHECK_ARGUMENT_SWIFT_PARAMETER_CONFLICT:
+            snprintf(text, capacity, "%s and '%s' attributes are not compatible", check_input_parameter_abi_name(number & 0xffu), check_input_parameter_abi_name(number >> 8 & 0xffu));
+            break;
         default: snprintf(text, capacity, "invalid attribute argument"); break;
     }
 }
@@ -2319,6 +2336,23 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
                                                        "redefinition of '%.*s'", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
+                        else if (phase == 0 && kind == CHECK_INPUT_CONVENTION_CHANGE)
+                        {
+                            // A redeclaration's other calling convention (check_input_report_redeclaration), clang's err_cconv_change
+                            // with its note at the first declaration.
+                            const CheckInputReport* report = input->reports + index;
+                            const bool explicit_first = (report->detail >> 16 & 1u) != 0;
+                            char previous_text[64];
+                            snprintf(previous_text, sizeof(previous_text), explicit_first ? "'%s'" : "without calling convention",
+                                     check_input_convention_name(report->detail >> 8 & 0xffu));
+                            const PPOutputDiagnosticNote note = {
+                                .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
+                                .message = "previous declaration is here",
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u,
+                                                        "function declared '%s' here was previously declared %s", check_input_convention_name(report->detail & 0xffu),
+                                                        previous_text);
+                        }
                         else if (phase == 0 && kind == CHECK_INPUT_ATTRIBUTE_CONVENTIONS)
                         {
                             // Two calling conventions on one function, by clang's names (check_input_attribute_conflict).
@@ -2493,7 +2527,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_SIZEOF ||
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_BINARY ||
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_CALLBACK_COUNT ||
-                                                (report->detail & 0xffu) == CHECK_ARGUMENT_SWIFT_ASYNC_BLOCK) &&
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_SWIFT_ASYNC_BLOCK ||
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_SWIFT_PARAMETER_TYPE) &&
                                                report->type != 0;
                             CheckWarningSpelling spell = { .count = pp->table->count };
                             spell.bytes = typed ? BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count) : NULL;
