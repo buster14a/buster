@@ -311,7 +311,8 @@ static void check_input_warning_suppress(CheckInputReader* reader, uint32_t firs
     check_input_warning_range(reader, first, end, warnings, warnings);
 }
 
-static bool check_constant_warning_unevaluated(const TypeTable* types, const CheckAction* action, uint32_t operand, uint32_t count)
+// Always inlined, as it was before #1447 grew the type readers it inlines past clang's threshold.
+static inline __attribute__((always_inline)) bool check_constant_warning_unevaluated(const TypeTable* types, const CheckAction* action, uint32_t operand, uint32_t count)
 {
     const TypeId type = action->type != 0 ? action->type : action->operands[0].type;
     bool skip = action->op == CHECK_OP_ALIGNOF || (action->op == CHECK_OP_SIZEOF && !check_action_runtime_size(types, type));
@@ -1402,7 +1403,7 @@ static bool check_constant_attribute_evaluate(CheckConstantInput* input, CheckCo
                 const bool integral = valid && check_input_integer_attribute(reader, &value) && check_action_i64(reader->types, &value, &integer);
                 // vector_size's size of no integer constant stays unresolved: its element type is checked first, then its
                 // size, with clang's error (check_input_vector_size, #147).
-                unresolved = valid && !integral && attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE;
+                unresolved = valid && !integral && (attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE || attribute->kind == CHECK_ATTRIBUTE_ADDRESS_SPACE);
                 // clang's errors of an argument that is no integer constant (#147), as the reader's evaluation gives them.
                 if (!integral && !unresolved)
                 {
@@ -2038,10 +2039,16 @@ static bool check_constant_builtin_type(CheckConstantInput* input, uint32_t toke
     if (valid && name == C_NAME_BUILTIN_TYPES_COMPATIBLE_P)
     {
         const TypeId other = check_constant_type(input, separator + 1, token);
-        valid = other != 0;
+        // clang's getUnqualifiedType: its extended qualifiers too, an array's element's (#1447).
+        const uint32_t extended = BUSTER_TYPE_SPACE_MASK | BUSTER_TYPE_GC_MASK;
+        const TypeId left = other != 0 && type_object_qualifiers(reader->types, type) != 0 ? type_unextend(reader->types, type_unqualified(type), extended) :
+                            type_unqualified(type);
+        const TypeId right = other != 0 && type_object_qualifiers(reader->types, other) != 0 ? type_unextend(reader->types, type_unqualified(other), extended) :
+                             type_unqualified(other);
+        valid = other != 0 && left != 0 && right != 0;
         if (valid)
         {
-            const TypeAnswer answer = type_compatible_at(reader->types, type_unqualified(type), type_unqualified(other), reader->transparent_unions, reader->types->tags.count, token + 1);
+            const TypeAnswer answer = type_compatible_at(reader->types, left, right, reader->transparent_unions, reader->types->tags.count, token + 1);
             reader->output->resource |= answer == TYPE_ANSWER_FULL;
             valid = answer != TYPE_ANSWER_FULL;
             number = answer == TYPE_ANSWER_YES;
@@ -2803,7 +2810,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                     .type = type,
                     .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
                     .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) |
-                             (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0) | check_input_nonnull_flag(reader, declaration, token, enumeration, reader->objects[declaration]),
+                             check_input_register_flags(reader, declaration, token) | check_input_nonnull_flag(reader, declaration, token, enumeration, reader->objects[declaration]),
                     .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
                     .integer = enumeration ? reader->enum_values[declaration] : 0,
                     .object = reader->objects[declaration],
@@ -2944,6 +2951,9 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 type = type_unqualified(type);
                 noderef = type_kind(reader->types, type) == BUSTER_TYPE_KIND_ATOMIC ? check_input_noderef_base(noderef) : noderef;
                 type = type_kind(reader->types, type) == BUSTER_TYPE_KIND_ATOMIC ? type_element(reader->types, type) : type;
+                // Its extended qualifiers too (#1447, clang's getUnqualifiedType).
+                type = type != 0 && type_object_qualifiers(reader->types, type) != 0 ?
+                       check_input_type_result(reader, type_unextend(reader->types, type, BUSTER_TYPE_SPACE_MASK | BUSTER_TYPE_GC_MASK)) : type;
             }
             else
             {
@@ -3585,7 +3595,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                     .type = type,
                     .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
                     .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) |
-                             (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0) | check_input_nonnull_flag(reader, declaration, token, enumeration, reader->objects[declaration]),
+                             check_input_register_flags(reader, declaration, token) | check_input_nonnull_flag(reader, declaration, token, enumeration, reader->objects[declaration]),
                     .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
                     .integer = enumeration ? reader->enum_values[declaration] : 0,
                     .object = reader->objects[declaration],
@@ -4091,6 +4101,9 @@ static bool check_constant_raw_prepare(CheckConstantInput* input)
                 else if (name == C_NAME_TYPEOF_UNQUAL || name == C_NAME_GNU_TYPEOF_UNQUAL || name == C_NAME_GNU_TYPEOF_UNQUAL2)
                 {
                     type = type_unqualified(type);
+                    // Its extended qualifiers too (#1447, clang's getUnqualifiedType).
+                    type = type != 0 && type_object_qualifiers(reader->types, type) != 0 ?
+                           check_input_type_result(reader, type_unextend(reader->types, type, BUSTER_TYPE_SPACE_MASK | BUSTER_TYPE_GC_MASK)) : type;
                     if (type_kind(reader->types, type) == BUSTER_TYPE_KIND_ATOMIC)
                     {
                         check_input_noderef_set(reader->output, close, check_input_noderef_base(check_input_noderef_at(reader->output, close)));

@@ -353,6 +353,11 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
       "int f(void) { __attribute__((aligned(3))) int a, b; return a + b; }\n"
       "int g(void) { struct V { int x; }; _Alignas(3) int c, d; typedef struct V W __attribute__((vector_size(16))); return c + d; }\n"
       "int h(void) { return 2; }\n", true },
+    // #1791's array of unknown size whose initializer is no list, in two bodies: its report holds tokens alone, and the
+    // initializer's sparse entries it clears are the merged columns' too.
+    { "recovered-unsized-arrays-in-two-bodies",
+      "int f(void) { char loc[] = 1; int p[] = (5); return 0; }\nint g(void) { struct V { int x; }; struct V w[] = 3; int c[] = (int){7}; return 0; }\n"
+      "int h(void) { int ok[] = { 1, 2 }; return ok[1]; }\n", true },
     { "recovered-control", "int f(void) { break; return 0; }\nint g(void) { continue; return 1; }\nint h(void) { return 2; }\n", true },
     // A type conflict notes the entity's latest earlier declaration, even another body's block-scope one, which neither
     // the top level's walk nor another body's lane has read: source order's, at file scope and in a body. One whose

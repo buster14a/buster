@@ -233,7 +233,7 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
     {
         TypeId deduced_base = 0;
         TypeId deduced = deduced_declarator ? check_input_type_result(reader, check_input_c23_auto_deduce(reader, placeholder, value.type, declaration, &deduced_base)) :
-                                              check_input_type_result(reader, type_adjust_parameter(types, value.type));
+                                              check_input_type_result(reader, type_strip_aligned(types, type_adjust_parameter(types, value.type)));
         if (deduced == 0 && !reader->output->resource && reader->output->report_count == 0)
         {
             // A declarator shape its initializer doesn't fit, at clang's name for it.
@@ -272,7 +272,8 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
             for (uint32_t i = 0; i < attributes->count; i += 1)
             {
                 const CheckInputAttribute* attribute = &attributes->records[i];
-                if (attribute->kind == CHECK_ATTRIBUTE_ALIGNAS)
+                // (One whose value has an error has no alignment: check_input_alignas_declarator.)
+                if (attribute->kind == CHECK_ATTRIBUTE_ALIGNAS && attribute->deferred == NULL)
                 {
                     check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_ALIGNMENT);
                 }
@@ -511,6 +512,8 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
     const uint32_t assignment = check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) ? declaration : begin - 1;
     TypeId type = reader->declared_types[declaration];
     bool valid = begin < end && end <= parser->tokens.count;
+    // An array of unknown size whose initializer is no list, recovered (below): it keeps its type and no initializer.
+    bool listless = false;
     if (valid && (check_input_auto_type(type) || (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0))
     {
         type = check_input_auto_type_finish(reader, declaration, begin, end, type);
@@ -544,7 +547,66 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
                                                   reader->designator_valid, reader->declared_types, reader->query_types, reader->scratch, &type,
                                                   &failed, &status, &failed_type);
             reader->output->resource |= status == CHECK_INIT_RESOURCE;
-            if (!valid)
+            // An initializer of no braces that isn't a string of the element (#1447, phase 2): clang's "array initializer
+            // must be an initializer list" (FK_ArrayNeedsInitList) at the declarator, worded by the literal its element
+            // takes (CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail), after the initializer's own diagnostics (its
+            // completion at the initializer's end), and none where the initializer is no valid value, which the expressions'
+            // check decides (check_init_listless_drop, in the driver). The report is recovered: the array keeps its unknown size, as clang's invalid
+            // declaration does, and its initializer leaves the initializers' run. A compound literal (GNU's array
+            // initializer, `(int[2]){1, 2}`) keeps the refusal below; any other parenthesized initializer is no list.
+            const uint8_t first_role = parser->tree.roles[begin];
+            // Past parentheses around the whole initializer, an array's compound literal that is all of it: its type at its
+            // `)` (as the casts' are, above), its body closing the initializer.
+            uint32_t inner = begin;
+            uint32_t inner_end = end;
+            while (inner + 1 < inner_end && parser->tokens.kinds[inner] == PARSE_KIND_L_PAREN && parser->tree.parents[inner] == inner_end - 1)
+            {
+                inner += 1;
+                inner_end -= 1;
+            }
+            const uint32_t group_close = parser->tokens.kinds[inner] == PARSE_KIND_L_PAREN ? parser->tree.parents[inner] : 0;
+            const bool compound = group_close > inner && group_close + 1 < inner_end && parser->tree.roles[group_close + 1] == PARSE_ROLE_OPEN_COMPOUND_BODY &&
+                                  parser->tree.parents[group_close + 1] == inner_end - 1 &&
+                                  type_kind_is_array(type_kind(reader->types, type_strip_aligned(reader->types, reader->query_types[group_close])));
+            const bool unbraced = first_role != PARSE_ROLE_OPEN_INITIALIZER && first_role != PARSE_ROLE_OPEN_COMPOUND_BODY && !compound;
+            const bool needs_list = !valid && unbraced && status != CHECK_INIT_MEMBER && !reader->output->resource;
+            if (needs_list)
+            {
+                const uint32_t before = reader->output->report_count;
+                const bool wide = element == BUSTER_TYPE_INT || element == BUSTER_TYPE_USHORT || element == BUSTER_TYPE_UINT;
+                check_input_report(reader, declaration, CHECK_INPUT_DIRECT_INITIALIZER_ARRAY);
+                if (reader->output->report_count == before + 1)
+                {
+                    reader->output->reports[before].detail = character ? CHECK_INPUT_ARRAY_LIST_STRING : wide ? CHECK_INPUT_ARRAY_LIST_WIDE : CHECK_INPUT_ARRAY_LIST_ONLY;
+                    reader->output->reports[before].completion = end;
+                    // Its initializer's first token, for check_init_listless_drop.
+                    reader->output->reports[before].value = begin;
+                }
+                type = reader->declared_types[declaration];
+                listless = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
+                valid = listless;
+                if (listless)
+                {
+                    check_sparse_set(reader->output->sparse_pool, reader->output->initializer_begins, declaration, BUSTER_CHECK_NONE);
+                    check_sparse_set(reader->output->sparse_pool, reader->output->initializer_ends, declaration, BUSTER_CHECK_NONE);
+                    // An extern array's -Wextern-initializer, which clang gives of no invalid initializer: its event leaves
+                    // the reader's warnings (events name their notes by index, so the others keep theirs).
+                    CheckWarningBuffer* events = &reader->warning_events;
+                    bool found = false;
+                    for (uint32_t e = events->count; e > 0 && !found; e -= 1)
+                    {
+                        CheckWarningEvent* event = events->events + (e - 1);
+                        found = event->id == CHECK_WARNING_ID_EXTERN_INITIALIZER && event->token == declaration;
+                        if (found)
+                        {
+                            memmove(event, event + 1, (uint64_t)(events->count - e) * sizeof(CheckWarningEvent));
+                            events->count -= 1;
+                            reader->output->warning_events = check_warning_view(events);
+                        }
+                    }
+                }
+            }
+            else if (!valid)
             {
                 const uint32_t before = reader->output->report_count;
                 check_input_report(reader, failed, status == CHECK_INIT_MEMBER ? CHECK_INPUT_INITIALIZER_MEMBER : CHECK_INPUT_DECLARATION);
@@ -570,7 +632,7 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
             }
         }
     }
-    if (valid && check_const_eligible(reader->types, type))
+    if (valid && !listless && check_const_eligible(reader->types, type))
     {
         check_input_initializer_const(reader, declaration, begin, end, type);
     }
