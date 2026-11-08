@@ -298,6 +298,10 @@ static bool tier1_rows_build(Arena* arena, Tier1Rows* p, uint32_t b)
         if (g == TIER1_ROWS_LEXER)
         {
             tier1_programs_add(&c, p->include_option);
+            // The lexer's \N names (c_unicode_names.c) take BUSTER_LEXER_ENTRY, static in a unit that isn't a home:
+            // this standalone link has no driver unit's definitions for its calls to bind to, so the unit is its own
+            // home and the names are static here, as c_tokenize's are.
+            tier1_programs_add(&c, "-DBUSTER_HOME_DRIVER");
             tier1_programs_add(&c, "-fwrapv");
             tier1_programs_add(&c, "-funsigned-char");
             tier1_programs_add(&c, "-fno-strict-aliasing");
