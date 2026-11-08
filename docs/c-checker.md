@@ -4018,9 +4018,42 @@ Phase 3 covers statements after an error:
 Error-free units take none of this: the flushed marks need an error, the
 uninitialized pass reads them only when there are some, and the diagnose
 paths run only on a rejected unit. `c_check_statement_recovery_driver_test.c`,
-in the same section, compares its fixtures as above. The asm and control
-errors after a graph's error are compared by place and severity alone: those
-diagnose paths give one generic message, not clang's wording.
+in the same section, compares its fixtures as above, the asm and control
+errors' whole text too.
+
+The asm and control errors give every one, in clang's words, after a graph's
+error and in a unit without one:
+
+- **Control.** `check_program_diagnose_all` lists each constraint error
+  (`CheckProgramConstraint`), with the token of its "previous case defined
+  here" note. A switch's conflicts come in clang's order
+  (`ActOnFinishSwitchStmt`), all published at the switch's end:
+  - the defaults, by a reverse walk of the order clang makes them in: a
+    default is made once its own statement is parsed, so one labelling
+    another comes first;
+  - the singletons in converted value order, each noting the one before;
+  - the nonempty ranges by their low values, each noting the last singleton
+    within it, or else the range before it, whose high value it names.
+
+  A condition of no integer type is "statement requires expression of integer
+  type ('T' invalid)" at the switch, by its typedef's name. So is a pointer or
+  record condition, which the graph's promotion refuses
+  (`check_semantic_expression`). A case value's error is the reader's alone:
+  clang drops the case.
+- **Asm.** `check_asms_diagnose_all` gives each failing statement's first
+  error (`CheckAsmFailure`, after `Sema::ActOnGCCAsmStmt`): an output's
+  memory-constraint bit-field, `_BitInt`, incomplete type or lvalue, then an
+  input's bit-field, memory-only lvalue, register `void`, `_BitInt` and
+  incomplete type. A tie's comes after every operand's own. A GNU lvalue cast
+  output gives `-Winvalid-gnu-asm-cast`'s error at the lvalue, through the
+  casts that don't change its value, and doesn't end its statement. Clang
+  names an output "input" in the bit-field and `_BitInt` errors, and an input
+  "output"; the words follow it. An incomplete type's error has the tag's
+  forward declaration note.
+
+A unit without other errors whose `check_asms_run` or `check_program` fails
+runs these diagnoses, so only a failing unit pays for them.
+`CheckDriverDiagnostic.note` carries a note through the reports' walk.
 
 Every declaration's failed initializer is given, as clang gives each
 (phase 2): `int a[2] = 5; int b[2] = 6;` has two errors where it had the
@@ -4149,9 +4182,9 @@ The later phases are left:
   operand; both on main too.
 - **Units with a graph's or a reader's error.** These, other than a recovered
   one, still don't reach `check_program`. They get none of its diagnostics:
-  the common warnings, their runtime warnings included. The asm and control
-  diagnose paths give only the unit's first error, in generic words, and a
-  duplicate case has no "previous case" note on either path.
+  the common warnings, their runtime warnings included. Nor does a unit whose
+  `check_program` finds a control error. Its unused-variable warnings
+  aren't suppressed in the error's scopes.
 
 ### What the lowering costs (#531)
 
