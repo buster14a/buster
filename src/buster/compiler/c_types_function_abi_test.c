@@ -58,10 +58,10 @@ static void check_test_function_abi_relations(CheckTest* test, TypeTable* table)
                                type_same_canonical(table, aligned_function, other_function) == TYPE_ANSWER_NO,
                           "nested alignment sugar cannot erase or invent a calling-convention match");
         const TypeId variadic = type_function_abi(table, integer, &integer, 1, BUSTER_TYPE_FLAG_PROTOTYPE | BUSTER_TYPE_FLAG_VARIADIC, (TypeFunctionABI)abi);
-        const bool forbidden = abi == TYPE_FUNCTION_ABI_VECTOR || abi == TYPE_FUNCTION_ABI_REG;
+        const bool forbidden = abi == TYPE_FUNCTION_ABI_VECTOR || abi == TYPE_FUNCTION_ABI_REG || abi == TYPE_FUNCTION_ABI_SWIFT || abi == TYPE_FUNCTION_ABI_SWIFT_ASYNC;
         check_test_expect(test, forbidden ? variadic == 0 && table->last_error == TYPE_ERROR_OPERAND :
                                            variadic != 0 && type_function_abi_kind(table, variadic) == abi,
-                          "only vectorcall and regcall reject variadic prototypes");
+                          "only vectorcall, regcall and the Swift conventions reject variadic prototypes");
     }
     const uint32_t before_types = table->types.count;
     const uint32_t before_parameters = table->parameters.count;
@@ -116,6 +116,68 @@ static void check_test_function_abi_relations(CheckTest* test, TypeTable* table)
     table->types.capacity = capacity;
 }
 
+// The Swift parameter attributes' ABIs (#1447, TypeParameterABI), part of a function's type: in its key (an equal request
+// is the same type, other ABIs another), compatible only with the same ones, kept by a composite with an old-style
+// declaration's type and by type_function_like, printed before their parameters' types, and over more parameters than an
+// ABIs' word holds; ordinary ones are no info at all, so that type_function_abi's type is theirs.
+static void check_test_function_parameter_abis(CheckTest* test, TypeTable* table)
+{
+    const TypeId pointer = type_pointer(table, BUSTER_TYPE_VOID);
+    const TypeId pointers[2] = { pointer, type_pointer(table, pointer) };
+    const uint8_t context[2] = { TYPE_PARAMETER_ABI_SWIFT_CONTEXT, TYPE_PARAMETER_ABI_SWIFT_ERROR_RESULT };
+    const uint8_t ordinary[2] = { TYPE_PARAMETER_ABI_ORDINARY, TYPE_PARAMETER_ABI_ORDINARY };
+    const uint8_t other[2] = { TYPE_PARAMETER_ABI_SWIFT_ASYNC_CONTEXT, TYPE_PARAMETER_ABI_ORDINARY };
+    const TypeId swift = type_function_full(table, BUSTER_TYPE_VOID, pointers, 2, BUSTER_TYPE_FLAG_PROTOTYPE, TYPE_FUNCTION_ABI_SWIFT, context);
+    const TypeId again = type_function_full(table, BUSTER_TYPE_VOID, pointers, 2, BUSTER_TYPE_FLAG_PROTOTYPE, TYPE_FUNCTION_ABI_SWIFT, context);
+    const TypeId plain = type_function_full(table, BUSTER_TYPE_VOID, pointers, 2, BUSTER_TYPE_FLAG_PROTOTYPE, TYPE_FUNCTION_ABI_SWIFT, ordinary);
+    const TypeId bare = type_function_abi(table, BUSTER_TYPE_VOID, pointers, 2, BUSTER_TYPE_FLAG_PROTOTYPE, TYPE_FUNCTION_ABI_SWIFT);
+    const TypeId async = type_function_full(table, BUSTER_TYPE_VOID, pointers, 2, BUSTER_TYPE_FLAG_PROTOTYPE, TYPE_FUNCTION_ABI_SWIFT, other);
+    const TypeId sysv = type_function_full(table, BUSTER_TYPE_VOID, pointers, 2, BUSTER_TYPE_FLAG_PROTOTYPE, TYPE_FUNCTION_ABI_SYSV, ordinary);
+    check_test_expect(test, swift != 0 && swift == again && plain == bare && swift != plain && async != swift && async != plain &&
+                           sysv == type_function(table, BUSTER_TYPE_VOID, pointers, 2, BUSTER_TYPE_FLAG_PROTOTYPE),
+                      "parameter ABIs are part of a function type's key, and ordinary ones are none");
+    check_test_expect(test, type_function_has_parameter_abis(table, swift) && !type_function_has_parameter_abis(table, plain) &&
+                           type_parameter_abi(table, swift, 0) == TYPE_PARAMETER_ABI_SWIFT_CONTEXT &&
+                           type_parameter_abi(table, swift, 1) == TYPE_PARAMETER_ABI_SWIFT_ERROR_RESULT && type_parameter_abi(table, swift, 2) == TYPE_PARAMETER_ABI_ORDINARY &&
+                           type_function_abi_kind(table, swift) == TYPE_FUNCTION_ABI_SWIFT, "parameter ABIs read back by parameter");
+    const TypeId swift_pointer = type_pointer(table, swift);
+    check_test_expect(test, type_compatible(table, swift_pointer, type_pointer(table, plain)) == TYPE_ANSWER_NO &&
+                           type_compatible(table, swift_pointer, type_pointer(table, async)) == TYPE_ANSWER_NO &&
+                           type_same_canonical(table, swift, plain) == TYPE_ANSWER_NO && type_compatible(table, swift_pointer, swift_pointer) == TYPE_ANSWER_YES,
+                      "parameter ABIs decide compatibility and canonical identity");
+    const TypeId oldstyle = type_function_abi(table, BUSTER_TYPE_VOID, 0, 0, 0, TYPE_FUNCTION_ABI_SWIFT);
+    check_test_expect(test, type_composite(table, oldstyle, swift) == swift && type_composite(table, swift, oldstyle) == swift,
+                      "a composite with an old-style declaration's type keeps the parameter ABIs");
+    const TypeId changed = type_function_like(table, BUSTER_TYPE_INT, pointers, 2, BUSTER_TYPE_FLAG_PROTOTYPE, TYPE_FUNCTION_ABI_SWIFT_ASYNC, swift);
+    check_test_expect(test, changed != 0 && type_parameter_abi(table, changed, 0) == TYPE_PARAMETER_ABI_SWIFT_CONTEXT &&
+                           type_function_abi_kind(table, changed) == TYPE_FUNCTION_ABI_SWIFT_ASYNC, "type_function_like keeps a model's parameter ABIs");
+    Arena text = arena_reserve(65536);
+    const String8 printed = type_print(table, &text, swift, (String8){ 0 }, 0, 0);
+    static const char expected[] = "void (__attribute__((swift_context)) void *, __attribute__((swift_error_result)) void **) __attribute__((swiftcall))";
+    check_test_expect(test, printed.length == sizeof(expected) - 1 && memcmp(printed.pointer, expected, printed.length) == 0,
+                      "a parameter's ABI prints before its type, as clang's TypePrinter prints it");
+    arena_release(&text);
+    // More parameters than a word of ABIs holds, the last one's in the second word.
+    TypeId many[11];
+    uint8_t abis[11] = { 0 };
+    for (uint32_t i = 0; i < 11; i += 1)
+    {
+        many[i] = pointer;
+    }
+    abis[0] = TYPE_PARAMETER_ABI_SWIFT_INDIRECT_RESULT;
+    abis[10] = TYPE_PARAMETER_ABI_SWIFT_CONTEXT;
+    const TypeId wide = type_function_full(table, BUSTER_TYPE_VOID, many, 11, BUSTER_TYPE_FLAG_PROTOTYPE, TYPE_FUNCTION_ABI_SWIFT, abis);
+    abis[10] = TYPE_PARAMETER_ABI_SWIFT_ASYNC_CONTEXT;
+    const TypeId wide_other = type_function_full(table, BUSTER_TYPE_VOID, many, 11, BUSTER_TYPE_FLAG_PROTOTYPE, TYPE_FUNCTION_ABI_SWIFT, abis);
+    check_test_expect(test, wide != 0 && wide_other != 0 && wide != wide_other && type_parameter_abi(table, wide, 10) == TYPE_PARAMETER_ABI_SWIFT_CONTEXT &&
+                           type_parameter_abi(table, wide_other, 10) == TYPE_PARAMETER_ABI_SWIFT_ASYNC_CONTEXT &&
+                           type_parameter_abi(table, wide, 0) == TYPE_PARAMETER_ABI_SWIFT_INDIRECT_RESULT && type_parameter_abi(table, wide, 5) == TYPE_PARAMETER_ABI_ORDINARY,
+                      "parameter ABIs past a word's eight keep their own identity");
+    const uint8_t invalid[2] = { TYPE_PARAMETER_ABI_COUNT, TYPE_PARAMETER_ABI_ORDINARY };
+    check_test_expect(test, type_function_full(table, BUSTER_TYPE_VOID, pointers, 2, BUSTER_TYPE_FLAG_PROTOTYPE, TYPE_FUNCTION_ABI_SWIFT, invalid) == 0 &&
+                           table->last_error == TYPE_ERROR_OPERAND, "an unknown parameter ABI is refused");
+}
+
 static void check_test_function_abi_oracle(CheckTest* test, TypeTable* table, const char* clang)
 {
     static const char* const names[] = {
@@ -127,6 +189,9 @@ static void check_test_function_abi_oracle(CheckTest* test, TypeTable* table, co
         "preserve_all",
         "preserve_none",
         "no_caller_saved_registers",
+        "intel_ocl_bicc",
+        "swiftcall",
+        "swiftasynccall",
     };
     _Static_assert(sizeof(names) / sizeof(names[0]) == TYPE_FUNCTION_ABI_COUNT, "a spelling for each function ABI");
     char directory[] = "/tmp/buster-check-function-abi-XXXXXX";
@@ -147,9 +212,34 @@ static void check_test_function_abi_oracle(CheckTest* test, TypeTable* table, co
         {
             const TypeId function = type_function_abi(table, integer, &integer, 1, BUSTER_TYPE_FLAG_PROTOTYPE, (TypeFunctionABI)i);
             const TypeId pointer = type_pointer(table, function);
-            const String8 printed = type_print(table, &text, pointer, BUSTER_S8("value"), 0, 0);
-            const String8 nested = type_print(table, &text, type_array(table, pointer, 2), BUSTER_S8("array"), 0, 0);
+            String8 printed = type_print(table, &text, pointer, BUSTER_S8("value"), 0, 0);
+            String8 nested = type_print(table, &text, type_array(table, pointer, 2), BUSTER_S8("array"), 0, 0);
             check_test_expect(test, printed.pointer != 0 && nested.pointer != 0, "ABI-bearing function pointers and nested arrays print");
+            // clang's TypePrinter spells intel_ocl_bicc's canonical type "inteloclbicc", which no attribute is: the
+            // roundtrip takes it back by its attribute's name.
+            if (i == TYPE_FUNCTION_ABI_INTEL_OCL && printed.pointer != 0 && nested.pointer != 0)
+            {
+                String8* both[] = { &printed, &nested };
+                for (uint32_t b = 0; b < 2; b += 1)
+                {
+                    const String8 from = *both[b];
+                    const char* found = 0;
+                    for (uint64_t at = 0; found == 0 && at + 12 <= from.length; at += 1)
+                    {
+                        found = memcmp(from.pointer + at, "inteloclbicc", 12) == 0 ? from.pointer + at : 0;
+                    }
+                    check_test_expect(test, found != 0, "intel_ocl_bicc's canonical type prints clang's inteloclbicc");
+                    char* copy = found != 0 ? arena_push(&text, from.length + 2, 1) : 0;
+                    if (copy != 0)
+                    {
+                        const uint64_t at = (uint64_t)(found - (const char*)from.pointer);
+                        memcpy(copy, from.pointer, at);
+                        memcpy(copy + at, "intel_ocl_bicc", 14);
+                        memcpy(copy + at + 14, found + 12, from.length - at - 12);
+                        *both[b] = (String8){ copy, from.length + 2 };
+                    }
+                }
+            }
             const int written = snprintf(source, sizeof(source),
                 "typedef int Expected(int) __attribute__((%s));\n%.*s;\n%.*s;\n"
                 "_Static_assert(__builtin_types_compatible_p(__typeof__(value),Expected*),\"printed pointer ABI\");\n"
@@ -185,7 +275,8 @@ static void check_test_function_abi_oracle(CheckTest* test, TypeTable* table, co
     check_test_expect(test, oracle, "independent ABI spellings, all compatibility pairs and printer roundtrips compile through Clang");
     for (uint32_t i = 0; i < COUNT; i += 1)
     {
-        const bool rejected = i == TYPE_FUNCTION_ABI_COUNT + TYPE_FUNCTION_ABI_VECTOR || i == TYPE_FUNCTION_ABI_COUNT + TYPE_FUNCTION_ABI_REG;
+        const bool rejected = i == TYPE_FUNCTION_ABI_COUNT + TYPE_FUNCTION_ABI_VECTOR || i == TYPE_FUNCTION_ABI_COUNT + TYPE_FUNCTION_ABI_REG ||
+                              i == TYPE_FUNCTION_ABI_COUNT + TYPE_FUNCTION_ABI_SWIFT || i == TYPE_FUNCTION_ABI_COUNT + TYPE_FUNCTION_ABI_SWIFT_ASYNC;
         if (oracle)
         {
             check_test_expect(test, outcomes[i].rejected == rejected, "Clang confirms the exact ABI identity, printed spelling and variadic constraint");
@@ -252,6 +343,7 @@ static __attribute__((noinline)) void check_test_function_abis(CheckTest* test, 
     if (ready)
     {
         check_test_function_abi_relations(test, &storage.table);
+        check_test_function_parameter_abis(test, &storage.table);
         check_test_function_abi_oracle(test, &storage.table, clang);
         type_test_table_close(&storage);
     }

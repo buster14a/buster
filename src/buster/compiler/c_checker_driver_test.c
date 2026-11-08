@@ -8454,6 +8454,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_conventions(&test, clang, executable, directory);
+                check_test_driver_convention_diagnostics(&test, clang, executable, directory);
                 check_test_driver_preserving_frames(&test, clang, executable, directory);
                 check_test_driver_interrupt_handlers(&test, clang, executable, directory);
             }

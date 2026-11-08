@@ -184,8 +184,9 @@ typedef uint32_t TypeId;
 #define BUSTER_TYPE_KIND_ENUM 18
 #define BUSTER_TYPE_KIND_COUNT 19
 
-// Flags. The first two are part of a derived type's key. Functions additionally use the three record-only high
-// bits for calling convention; pointers retain it through their base TypeId, never through inherited flags.
+// Flags. The first two are part of a derived type's key. Functions additionally use the record-only DEFINED bit for
+// BUSTER_TYPE_FLAG_FUNCTION_INFO, which is part of their key; pointers retain a function's convention through their base
+// TypeId, never through inherited flags.
 #define BUSTER_TYPE_FLAG_UNSIGNED 0x01
 #define BUSTER_TYPE_FLAG_VARIADIC 0x01
 #define BUSTER_TYPE_FLAG_PROTOTYPE 0x02
@@ -207,16 +208,24 @@ typedef uint32_t TypeId;
 // A validated GNU transparent union. This nominal-record property does not make the union itself compatible with
 // its members. The source owner retains activation history when an attribute is added after earlier uses.
 #define BUSTER_TYPE_FLAG_TRANSPARENT_UNION 0x80
-#define BUSTER_TYPE_FUNCTION_ABI_SHIFT 5
-#define BUSTER_TYPE_FUNCTION_ABI_MASK 0xe0
-#define BUSTER_TYPE_FLAG_FUNCTION_KEY (BUSTER_TYPE_FLAG_KEY | BUSTER_TYPE_FUNCTION_ABI_MASK)
+// A function whose calling convention isn't System V's, or whose parameters have ABIs (TypeParameterABI): its parameter
+// range holds an info word after its parameters, the convention in its low byte and BUSTER_TYPE_FUNCTION_PARAMETER_ABIS,
+// and with that bit a word of eight 4-bit parameter ABIs per eight parameters after it. A System V function without them,
+// almost every function, has neither the bit nor the words, and is hashed, stored and compared as it was when the
+// convention was three flag bits, all of whose values were taken (#1447).
+#define BUSTER_TYPE_FLAG_FUNCTION_INFO 0x20
+#define BUSTER_TYPE_FLAG_FUNCTION_KEY (BUSTER_TYPE_FLAG_KEY | BUSTER_TYPE_FLAG_FUNCTION_INFO)
+#define BUSTER_TYPE_FUNCTION_ABI_MASK 0xffu
+#define BUSTER_TYPE_FUNCTION_PARAMETER_ABIS 0x100u
+#define BUSTER_TYPE_PARAMETER_ABI_BITS 4
+#define BUSTER_TYPE_PARAMETER_ABIS_PER_WORD 8
 
 // Semantic function identity on the supported x86-64 target. This is not a claim that code generation implements
 // every convention. The ordinary constructor and explicit sysv_abi/cdecl have the same default identity.
 // no_caller_saved_registers is clang's function type bit (FunctionType::ExtInfo's NoCallerSavedRegs), beside the
-// convention there; here it is the last of the three bits' values, a System V function's whose callee keeps every
-// register (#147), so that it takes no flag the table hasn't: with another convention than System V's, which clang
-// takes, it is refused by name (check_input_attribute_conventions).
+// convention there; here it is a convention of its own, a System V function's whose callee keeps every register (#147):
+// with another convention than System V's, which clang takes, it is refused by name (check_input_attribute_conventions).
+// intel_ocl_bicc, swiftcall and swiftasynccall are clang's CC_IntelOclBicc, CC_Swift and CC_SwiftAsync (#1447).
 typedef enum TypeFunctionABI
 {
     TYPE_FUNCTION_ABI_SYSV,
@@ -227,10 +236,26 @@ typedef enum TypeFunctionABI
     TYPE_FUNCTION_ABI_PRESERVE_ALL,
     TYPE_FUNCTION_ABI_PRESERVE_NONE,
     TYPE_FUNCTION_ABI_NO_CALLER_SAVED,
+    TYPE_FUNCTION_ABI_INTEL_OCL,
+    TYPE_FUNCTION_ABI_SWIFT,
+    TYPE_FUNCTION_ABI_SWIFT_ASYNC,
     TYPE_FUNCTION_ABI_COUNT,
     TYPE_FUNCTION_ABI_INVALID = 255,
 } TypeFunctionABI;
-_Static_assert(TYPE_FUNCTION_ABI_COUNT <= (BUSTER_TYPE_FUNCTION_ABI_MASK >> BUSTER_TYPE_FUNCTION_ABI_SHIFT) + 1, "a function's ABI fits its flags' bits");
+_Static_assert(TYPE_FUNCTION_ABI_COUNT <= BUSTER_TYPE_FUNCTION_ABI_MASK, "a function's ABI fits its info word's low byte");
+
+// A parameter's ABI, clang's ParameterABI (FunctionProtoType::ExtParameterInfo), part of its function's type: the Swift
+// parameter attributes swift_indirect_result, swift_error_result, swift_context and swift_async_context.
+typedef enum TypeParameterABI
+{
+    TYPE_PARAMETER_ABI_ORDINARY,
+    TYPE_PARAMETER_ABI_SWIFT_INDIRECT_RESULT,
+    TYPE_PARAMETER_ABI_SWIFT_ERROR_RESULT,
+    TYPE_PARAMETER_ABI_SWIFT_CONTEXT,
+    TYPE_PARAMETER_ABI_SWIFT_ASYNC_CONTEXT,
+    TYPE_PARAMETER_ABI_COUNT,
+} TypeParameterABI;
+_Static_assert(TYPE_PARAMETER_ABI_COUNT <= 1u << BUSTER_TYPE_PARAMETER_ABI_BITS, "a parameter's ABI fits its bits");
 
 // A member's flags.
 #define BUSTER_TYPE_MEMBER_PACKED 0x01
@@ -699,6 +724,9 @@ static __attribute__((unused)) const TypeId* type_parameters(const TypeTable* ta
 static __attribute__((unused)) TypeId type_return(const TypeTable* table, TypeId function);
 // A function's semantic calling convention; INVALID for a non-function or invalid TypeId.
 static __attribute__((unused)) TypeFunctionABI type_function_abi_kind(const TypeTable* table, TypeId function);
+// A function's parameter's ABI (ORDINARY past its parameters); whether any of them isn't ORDINARY.
+static __attribute__((unused)) TypeParameterABI type_parameter_abi(const TypeTable* table, TypeId function, uint32_t parameter);
+static __attribute__((unused)) bool type_function_has_parameter_abis(const TypeTable* table, TypeId function);
 // The type without ALIGNED at its top: its base, with the ALIGNED type's qualifiers.
 static __attribute__((unused)) TypeId type_strip_aligned(const TypeTable* table, TypeId type);
 
@@ -715,6 +743,13 @@ static __attribute__((unused)) TypeId type_variable_array(TypeTable* table, Type
 static __attribute__((unused)) TypeId type_function(TypeTable* table, TypeId result, const TypeId* parameters, uint32_t count, uint8_t flags);
 // As type_function, with an explicit calling convention. Vectorcall and regcall cannot be variadic.
 static __attribute__((unused)) TypeId type_function_abi(TypeTable* table, TypeId result, const TypeId* parameters, uint32_t count, uint8_t flags, TypeFunctionABI abi);
+// As type_function_abi, with each parameter's ABI (TypeParameterABI, count of them), or none for null.
+static __attribute__((unused)) TypeId type_function_full(TypeTable* table, TypeId result, const TypeId* parameters, uint32_t count, uint8_t flags, TypeFunctionABI abi,
+                                                         const uint8_t* parameter_abis);
+// As type_function_abi, with `model`'s parameter ABIs: for a function type made again from one, with other parameters
+// of the same count, another return type or another convention.
+static __attribute__((unused)) TypeId type_function_like(TypeTable* table, TypeId result, const TypeId* parameters, uint32_t count, uint8_t flags, TypeFunctionABI abi,
+                                                         TypeId model);
 // A vector of `count` elements; ext chooses clang's ext_vector_type over GNU's vector_size (type_vector_size converts
 // the latter's size in bytes).
 static __attribute__((unused)) TypeId type_vector(TypeTable* table, TypeId element, uint32_t count, bool ext);
@@ -1446,6 +1481,19 @@ static uint64_t type_parameters_hash(const TypeId* parameters, uint32_t count)
     return type_hash_finish(hash);
 }
 
+// How many words a function's parameter range has (BUSTER_TYPE_FLAG_FUNCTION_INFO): its `count` parameters, and with the
+// flag its info word and its parameter ABIs' words.
+static uint64_t type_function_words(const TypeId* words, uint8_t flags, uint64_t count)
+{
+    uint64_t result = count;
+    if ((flags & BUSTER_TYPE_FLAG_FUNCTION_INFO) != 0)
+    {
+        const bool abis = (words[count] & BUSTER_TYPE_FUNCTION_PARAMETER_ABIS) != 0;
+        result += 1 + (abis ? (count + BUSTER_TYPE_PARAMETER_ABIS_PER_WORD - 1) / BUSTER_TYPE_PARAMETER_ABIS_PER_WORD : 0);
+    }
+    return result;
+}
+
 static uint64_t type_key_hash(uint8_t kind, uint8_t flags, TypeId base, uint64_t extent, uint64_t parameters_hash)
 {
     uint64_t hash = type_hash_mix(BUSTER_TYPE_HASH_SEED, (uint64_t)kind | (uint64_t)flags << 8 | (uint64_t)base << 32);
@@ -1461,8 +1509,7 @@ static uint8_t type_key_flags(uint8_t kind, uint8_t flags)
 
 static uint32_t type_slot_key(uint8_t kind, uint8_t flags, uint64_t extent, uint64_t hash)
 {
-    // Functions have a 32-bit parameter count. Their ABI can share the WIDE bit because key matching dispatches
-    // on FUNCTION before reading WIDE; non-functions never carry the function-only high flag bits.
+    // Functions have a 32-bit parameter count; non-functions never carry the function-only INFO flag bit.
     const uint32_t wide = extent > UINT32_MAX ? BUSTER_TYPE_SLOT_WIDE : 0;
     return (uint32_t)kind | (uint32_t)flags << 8 | wide | (uint32_t)(hash >> 48) << 16;
 }
@@ -1474,7 +1521,15 @@ static bool type_key_matches(const TypeTable* table, uint32_t index, uint32_t ke
     bool result = true;
     if ((key & 0xff) == BUSTER_TYPE_KIND_FUNCTION)
     {
-        result = extent == 0 || memcmp(table->parameters.type + table->types.index[index], parameters, extent * sizeof(TypeId)) == 0;
+        // The flags are the slot's, so the two have the info word or neither: the parameters and it first, and only where
+        // the info words are equal, which gives both the same count of words, the parameter ABIs' words after them, so that
+        // no comparison reads past the stored type's words.
+        const uint8_t flags = (uint8_t)(key >> 8);
+        const TypeId* stored = table->parameters.type + table->types.index[index];
+        const uint64_t head = extent + ((flags & BUSTER_TYPE_FLAG_FUNCTION_INFO) != 0 ? 1 : 0);
+        result = head == 0 || memcmp(stored, parameters, head * sizeof(TypeId)) == 0;
+        const uint64_t words = result ? type_function_words(parameters, flags, extent) : 0;
+        result = result && (words == head || memcmp(stored + head, parameters + head, (words - head) * sizeof(TypeId)) == 0);
     }
     else if ((key & BUSTER_TYPE_SLOT_WIDE) != 0)
     {
@@ -1713,11 +1768,30 @@ static TypeError type_check_derivation(const TypeTable* table, uint8_t kind, uin
         const TypeId result_type = type_strip_aligned(table, base);
         const uint8_t result_kind = type_kind(table, result_type);
         const bool prototype = (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
-        const uint8_t abi = (flags & BUSTER_TYPE_FUNCTION_ABI_MASK) >> BUSTER_TYPE_FUNCTION_ABI_SHIFT;
+        const bool info = (flags & BUSTER_TYPE_FLAG_FUNCTION_INFO) != 0 && extent <= UINT32_MAX;
+        const uint32_t word = info ? parameters[extent] : TYPE_FUNCTION_ABI_SYSV;
+        const uint32_t abi = word & BUSTER_TYPE_FUNCTION_ABI_MASK;
         const bool variadic = (flags & BUSTER_TYPE_FLAG_VARIADIC) != 0;
-        if ((flags & ~BUSTER_TYPE_FLAG_FUNCTION_KEY) != 0 || abi >= TYPE_FUNCTION_ABI_COUNT ||
-            (!prototype && ((flags & BUSTER_TYPE_FLAG_KEY) != 0 || extent != 0)) || extent > UINT32_MAX ||
-            (variadic && (abi == TYPE_FUNCTION_ABI_VECTOR || abi == TYPE_FUNCTION_ABI_REG)))
+        // The info word is there only for what a System V function without parameter ABIs hasn't, so that each type has
+        // one key; and a parameter ABI's value is one of TypeParameterABI's, none past the parameters.
+        bool words_valid = !info || ((word & ~(BUSTER_TYPE_FUNCTION_ABI_MASK | BUSTER_TYPE_FUNCTION_PARAMETER_ABIS)) == 0 && word != TYPE_FUNCTION_ABI_SYSV);
+        const uint64_t abi_words = info ? type_function_words(parameters, flags, extent) - extent - 1 : 0;
+        bool any = false;
+        for (uint64_t i = 0; words_valid && i < abi_words; i += 1)
+        {
+            const uint32_t abis = parameters[extent + 1 + i];
+            for (uint32_t j = 0; j < BUSTER_TYPE_PARAMETER_ABIS_PER_WORD; j += 1)
+            {
+                const uint32_t value = abis >> (j * BUSTER_TYPE_PARAMETER_ABI_BITS) & ((1u << BUSTER_TYPE_PARAMETER_ABI_BITS) - 1);
+                words_valid = words_valid && value < TYPE_PARAMETER_ABI_COUNT && (value == 0 || i * BUSTER_TYPE_PARAMETER_ABIS_PER_WORD + j < extent);
+                any = any || value != 0;
+            }
+        }
+        words_valid = words_valid && (abi_words == 0 || any);
+        // clang's supportsVariadicCall: vectorcall, regcall and the Swift conventions take no variadic function.
+        const bool unvariadic = abi == TYPE_FUNCTION_ABI_VECTOR || abi == TYPE_FUNCTION_ABI_REG || abi == TYPE_FUNCTION_ABI_SWIFT || abi == TYPE_FUNCTION_ABI_SWIFT_ASYNC;
+        if ((flags & ~BUSTER_TYPE_FLAG_FUNCTION_KEY) != 0 || abi >= TYPE_FUNCTION_ABI_COUNT || !words_valid ||
+            (!prototype && ((flags & BUSTER_TYPE_FLAG_KEY) != 0 || extent != 0)) || extent > UINT32_MAX || (variadic && unvariadic))
         {
             result = TYPE_ERROR_OPERAND;
         }
@@ -1869,7 +1943,7 @@ static uint32_t type_append(TypeTable* table, uint8_t kind, uint8_t flags, TypeI
 {
     TypeColumns* types = &table->types;
     TypeParameters* parameter_column = &table->parameters;
-    const uint64_t parameter_count = kind == BUSTER_TYPE_KIND_FUNCTION ? extent : 0;
+    const uint64_t parameter_count = kind == BUSTER_TYPE_KIND_FUNCTION ? type_function_words(parameters, flags, extent) : 0;
     uint32_t result = 0;
     if (types->count < types->capacity && parameter_count <= parameter_column->capacity - parameter_column->count)
     {
@@ -1896,7 +1970,8 @@ static uint32_t type_append(TypeTable* table, uint8_t kind, uint8_t flags, TypeI
 // Finds or adds a normalized request's type: its index, or 0 with last_error set.
 static uint32_t type_find_or_add(TypeTable* table, uint8_t kind, uint8_t flags, TypeId base, uint64_t extent, const TypeId* parameters)
 {
-    const uint64_t parameters_hash = kind == BUSTER_TYPE_KIND_FUNCTION ? type_parameters_hash(parameters, (uint32_t)extent) : 0;
+    const uint64_t words = kind == BUSTER_TYPE_KIND_FUNCTION ? type_function_words(parameters, flags, extent) : 0;
+    const uint64_t parameters_hash = kind == BUSTER_TYPE_KIND_FUNCTION ? type_parameters_hash(parameters, (uint32_t)words) : 0;
     const uint64_t hash = type_key_hash(kind, flags, base, extent, parameters_hash);
     const uint32_t key = type_slot_key(kind, flags, extent, hash);
     uint32_t slot = 0;
@@ -1944,7 +2019,7 @@ static uint32_t type_find_or_add(TypeTable* table, uint8_t kind, uint8_t flags, 
                 .extent = extent,
                 .type = (TypeId)result << BUSTER_TYPE_INDEX_SHIFT,
             };
-            type_change_record(table, change, parameters, kind == BUSTER_TYPE_KIND_FUNCTION ? extent : 0, 0, 0);
+            type_change_record(table, change, parameters, words, 0, 0);
         }
         else
         {
@@ -2451,6 +2526,13 @@ static TypeId type_machine_mode(TypeTable* table, TypeId base, String8 mode)
     return result;
 }
 
+// A function's info word (BUSTER_TYPE_FLAG_FUNCTION_INFO): System V's convention, without parameter ABIs, if it has none.
+static uint32_t type_function_info(const TypeTable* table, uint32_t index)
+{
+    const bool info = (table->types.flags[index] & BUSTER_TYPE_FLAG_FUNCTION_INFO) != 0;
+    return info ? table->parameters.type[table->types.index[index] + (uint32_t)table->types.extent[index]] : TYPE_FUNCTION_ABI_SYSV;
+}
+
 static TypeFunctionABI type_function_abi_kind(const TypeTable* table, TypeId function)
 {
     TypeFunctionABI result = TYPE_FUNCTION_ABI_INVALID;
@@ -2459,32 +2541,85 @@ static TypeFunctionABI type_function_abi_kind(const TypeTable* table, TypeId fun
         const TypeId stripped = type_strip_aligned(table, function);
         if (type_kind(table, stripped) == BUSTER_TYPE_KIND_FUNCTION)
         {
-            result = (TypeFunctionABI)((table->types.flags[type_index(stripped)] & BUSTER_TYPE_FUNCTION_ABI_MASK) >> BUSTER_TYPE_FUNCTION_ABI_SHIFT);
+            result = (TypeFunctionABI)(type_function_info(table, type_index(stripped)) & BUSTER_TYPE_FUNCTION_ABI_MASK);
         }
     }
     return result;
 }
 
-// Parameters are stored unqualified: a qualified one is copied without its qualifiers into scratch memory first.
-static TypeId type_function_abi(TypeTable* table, TypeId result_type, const TypeId* parameters, uint32_t count, uint8_t flags, TypeFunctionABI abi)
+static bool type_function_has_parameter_abis(const TypeTable* table, TypeId function)
+{
+    bool result = false;
+    if (type_is_valid(table, function))
+    {
+        const TypeId stripped = type_strip_aligned(table, function);
+        result = type_kind(table, stripped) == BUSTER_TYPE_KIND_FUNCTION && (type_function_info(table, type_index(stripped)) & BUSTER_TYPE_FUNCTION_PARAMETER_ABIS) != 0;
+    }
+    return result;
+}
+
+static TypeParameterABI type_parameter_abi(const TypeTable* table, TypeId function, uint32_t parameter)
+{
+    TypeParameterABI result = TYPE_PARAMETER_ABI_ORDINARY;
+    if (type_function_has_parameter_abis(table, function))
+    {
+        const uint32_t index = type_index(type_strip_aligned(table, function));
+        const uint32_t count = (uint32_t)table->types.extent[index];
+        if (parameter < count)
+        {
+            const uint32_t word = table->parameters.type[table->types.index[index] + count + 1 + parameter / BUSTER_TYPE_PARAMETER_ABIS_PER_WORD];
+            const uint32_t shift = parameter % BUSTER_TYPE_PARAMETER_ABIS_PER_WORD * BUSTER_TYPE_PARAMETER_ABI_BITS;
+            result = (TypeParameterABI)(word >> shift & ((1u << BUSTER_TYPE_PARAMETER_ABI_BITS) - 1));
+        }
+    }
+    return result;
+}
+
+// Parameters are stored unqualified, and are copied without their qualifiers into scratch memory, with the info word and
+// the parameter ABIs' words where the function has them (BUSTER_TYPE_FLAG_FUNCTION_INFO).
+static TypeId type_function_full(TypeTable* table, TypeId result_type, const TypeId* parameters, uint32_t count, uint8_t flags, TypeFunctionABI abi,
+                                 const uint8_t* parameter_abis)
 {
     TypeId result = 0;
     Scratch scratch = scratch_begin(0);
-    const TypeId* normal = parameters;
+    bool any = false;
+    bool abis_valid = true;
+    for (uint32_t i = 0; parameter_abis != 0 && i < count; i += 1)
+    {
+        any = any || parameter_abis[i] != TYPE_PARAMETER_ABI_ORDINARY;
+        abis_valid = abis_valid && parameter_abis[i] < TYPE_PARAMETER_ABI_COUNT;
+    }
+    const bool valid = (flags & ~BUSTER_TYPE_FLAG_KEY) == 0 && (uint32_t)abi < TYPE_FUNCTION_ABI_COUNT && (count == 0 || parameters != 0) && abis_valid;
+    const bool info = abi != TYPE_FUNCTION_ABI_SYSV || any;
+    const uint32_t abi_words = any ? (count + BUSTER_TYPE_PARAMETER_ABIS_PER_WORD - 1) / BUSTER_TYPE_PARAMETER_ABIS_PER_WORD : 0;
+    const uint64_t words = (uint64_t)count + (info ? 1 + abi_words : 0);
     bool qualified = false;
-    const bool valid = (flags & ~BUSTER_TYPE_FLAG_KEY) == 0 && (uint32_t)abi < TYPE_FUNCTION_ABI_COUNT && (count == 0 || parameters != 0);
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
         qualified = qualified || type_qualifiers(parameters[i]) != 0;
     }
-    if (qualified)
+    const TypeId* normal = parameters;
+    if (valid && (qualified || info))
     {
-        TypeId* copy = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, TypeId, count);
+        TypeId* copy = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, TypeId, words);
         if (copy != 0)
         {
             for (uint32_t i = 0; i < count; i += 1)
             {
                 copy[i] = type_unqualified(parameters[i]);
+            }
+            if (info)
+            {
+                copy[count] = (uint32_t)abi | (any ? BUSTER_TYPE_FUNCTION_PARAMETER_ABIS : 0);
+            }
+            for (uint32_t i = 0; i < abi_words; i += 1)
+            {
+                uint32_t word = 0;
+                for (uint32_t j = 0; j < BUSTER_TYPE_PARAMETER_ABIS_PER_WORD && i * BUSTER_TYPE_PARAMETER_ABIS_PER_WORD + j < count; j += 1)
+                {
+                    word |= (uint32_t)parameter_abis[i * BUSTER_TYPE_PARAMETER_ABIS_PER_WORD + j] << (j * BUSTER_TYPE_PARAMETER_ABI_BITS);
+                }
+                copy[count + 1 + i] = word;
             }
         }
         normal = copy;
@@ -2493,7 +2628,7 @@ static TypeId type_function_abi(TypeTable* table, TypeId result_type, const Type
     {
         type_set_error(table, TYPE_ERROR_OPERAND);
     }
-    else if (normal == 0 && count != 0)
+    else if (normal == 0 && words != 0)
     {
         type_set_error(table, TYPE_ERROR_FULL);
     }
@@ -2503,11 +2638,44 @@ static TypeId type_function_abi(TypeTable* table, TypeId result_type, const Type
     }
     else
     {
-        const uint8_t key_flags = flags | (uint8_t)((uint32_t)abi << BUSTER_TYPE_FUNCTION_ABI_SHIFT);
+        const uint8_t key_flags = flags | (info ? BUSTER_TYPE_FLAG_FUNCTION_INFO : 0);
         const uint32_t index = type_find_or_add(table, BUSTER_TYPE_KIND_FUNCTION, key_flags, result_type, count, normal);
         result = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
     }
     scratch_end(scratch);
+    return result;
+}
+
+static TypeId type_function_abi(TypeTable* table, TypeId result_type, const TypeId* parameters, uint32_t count, uint8_t flags, TypeFunctionABI abi)
+{
+    return type_function_full(table, result_type, parameters, count, flags, abi, 0);
+}
+
+static TypeId type_function_like(TypeTable* table, TypeId result_type, const TypeId* parameters, uint32_t count, uint8_t flags, TypeFunctionABI abi, TypeId model)
+{
+    TypeId result = 0;
+    if (type_function_has_parameter_abis(table, model))
+    {
+        Scratch scratch = scratch_begin(0);
+        uint8_t* abis = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)count + 1);
+        if (abis != 0)
+        {
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                abis[i] = (uint8_t)type_parameter_abi(table, model, i);
+            }
+            result = type_function_full(table, result_type, parameters, count, flags, abi, abis);
+        }
+        else
+        {
+            type_set_error(table, TYPE_ERROR_FULL);
+        }
+        scratch_end(scratch);
+    }
+    else
+    {
+        result = type_function_full(table, result_type, parameters, count, flags, abi, 0);
+    }
     return result;
 }
 
@@ -4891,6 +5059,8 @@ static bool type_prototype_matches_promotions(const TypeTable* table, TypeId fun
 // The checks of one pair of mergeTypes that don't need the pairs inside it: false if they rule the pair incompatible.
 // *leaf says the pair is settled (compatible, or an enum against an integer type); otherwise the pairs inside it must
 // be compatible too.
+static bool type_parameter_abis_equal(const TypeTable* table, TypeId left, TypeId right);
+
 static bool type_merge_shallow(const TypeTable* table, TypeId left, TypeId right, bool* leaf)
 {
     const TypeId l = type_strip_aligned(table, left);
@@ -4936,7 +5106,10 @@ static bool type_merge_shallow(const TypeTable* table, TypeId left, TypeId right
         {
             result = type_prototype_matches_promotions(table, left_prototype ? l : r);
         }
-        result = result && type_function_abi_kind(table, l) == type_function_abi_kind(table, r);
+        // The conventions are the same; and two prototypes' parameter ABIs too, which an old-style declaration's type hasn't
+        // (clang's mergeFunctionTypes takes it with any).
+        result = result && type_function_abi_kind(table, l) == type_function_abi_kind(table, r) &&
+                 (!(left_prototype && right_prototype) || type_parameter_abis_equal(table, l, r));
         *leaf = false;
     }
     else if (left_kind == BUSTER_TYPE_KIND_VECTOR || left_kind == BUSTER_TYPE_KIND_EXT_VECTOR)
@@ -4948,6 +5121,19 @@ static bool type_merge_shallow(const TypeTable* table, TypeId left, TypeId right
         // Builtin, complex, _BitInt and tag types are compatible only with themselves, which hash-consing makes the
         // same TypeId.
         result = false;
+    }
+    return result;
+}
+
+// Whether two functions' parameters have the same ABIs (clang's ExtParameterInfos, part of a function's type).
+static bool type_parameter_abis_equal(const TypeTable* table, TypeId left, TypeId right)
+{
+    const bool has = type_function_has_parameter_abis(table, left);
+    bool result = has == type_function_has_parameter_abis(table, right);
+    const uint32_t count = (uint32_t)table->types.extent[type_index(left)];
+    for (uint32_t i = 0; has && result && i < count; i += 1)
+    {
+        result = type_parameter_abi(table, left, i) == type_parameter_abi(table, right, i);
     }
     return result;
 }
@@ -5088,7 +5274,8 @@ static bool type_canonical_shallow(const TypeTable* table, TypeId l, TypeId r)
     const uint8_t kind = types->kind[li];
     const bool inside = ((types->flags[li] | types->flags[ri]) & BUSTER_TYPE_FLAG_ALIGNED_INSIDE) != 0;
     return inside && type_qualifiers(l) == type_qualifiers(r) && kind == types->kind[ri] && type_key_flags(kind, types->flags[li]) == type_key_flags(kind, types->flags[ri]) &&
-           types->extent[li] == types->extent[ri] && (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_ATOMIC);
+           types->extent[li] == types->extent[ri] && (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_ATOMIC) &&
+           (kind != BUSTER_TYPE_KIND_FUNCTION || (type_function_info(table, li) == type_function_info(table, ri) && type_parameter_abis_equal(table, l, r)));
 }
 
 // Whether two types have one canonical type (clang's, without typedefs): the same TypeId, or the same structure once
@@ -5355,13 +5542,13 @@ static TypeId type_merge_finish(TypeTable* table, TypeId left, TypeId right, con
         }
         else if (left_prototype && right_prototype)
         {
-            result = type_function_abi(table, merged, results + 1, count, left_flags & BUSTER_TYPE_FLAG_KEY, type_function_abi_kind(table, l));
+            result = type_function_like(table, merged, results + 1, count, left_flags & BUSTER_TYPE_FLAG_KEY, type_function_abi_kind(table, l), l);
         }
         else if (left_prototype || right_prototype)
         {
             const TypeId prototype = left_prototype ? l : r;
             const TypeId* parameters = type_parameters(table, prototype, &count);
-            result = type_function_abi(table, merged, parameters, count, table->types.flags[type_index(prototype)] & BUSTER_TYPE_FLAG_KEY, type_function_abi_kind(table, prototype));
+            result = type_function_like(table, merged, parameters, count, table->types.flags[type_index(prototype)] & BUSTER_TYPE_FLAG_KEY, type_function_abi_kind(table, prototype), prototype);
         }
         else
         {
@@ -6157,7 +6344,16 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         const TypeId* parameters = type_parameters(table, frame.type, &count);
         if (frame.step < count)
         {
+            // A parameter's ABI before its type, as clang's TypePrinter::printFunctionProtoAfter prints it.
+            static const char* const parameter_spellings[] = {
+                "",
+                "__attribute__((swift_indirect_result)) ",
+                "__attribute__((swift_error_result)) ",
+                "__attribute__((swift_context)) ",
+                "__attribute__((swift_async_context)) ",
+            };
             type_print_text(printer, frame.step != 0 ? ", " : "");
+            type_print_text(printer, parameter_spellings[type_parameter_abi(table, frame.type, frame.step)]);
             type_print_push(printer, BUSTER_TYPE_PRINT_PARAMETERS, frame.type, false, false, frame.step + 1);
             type_print_push(printer, BUSTER_TYPE_PRINT_TYPE, parameters[frame.step], false, false, 0);
         }
@@ -6185,7 +6381,12 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
             "preserve_all",
             "preserve_none",
             "no_caller_saved_registers",
+            // clang's TypePrinter spells CC_IntelOclBicc without its underscores.
+            "inteloclbicc",
+            "swiftcall",
+            "swiftasynccall",
         };
+        _Static_assert(sizeof(spellings) / sizeof(spellings[0]) == TYPE_FUNCTION_ABI_COUNT, "every convention has a spelling");
         const TypeFunctionABI abi = type_function_abi_kind(table, frame.type);
         if ((uint32_t)abi < sizeof(spellings) / sizeof(spellings[0]))
         {
@@ -6601,10 +6802,14 @@ static bool type_replay_change(TypeTable* table, TypeReplayPart* part, const Typ
     bool valid = true;
     if (change->operation == BUSTER_TYPE_CHANGE_DERIVE)
     {
-        const uint64_t parameter_count = change->kind == BUSTER_TYPE_KIND_FUNCTION ? change->extent : 0;
-        for (uint64_t i = 0; i < parameter_count; i += 1)
+        // A function's parameters are types to map; its info word and parameter ABIs' words, after them, are not.
+        const bool function = change->kind == BUSTER_TYPE_KIND_FUNCTION;
+        const uint64_t parameter_count = function ? change->extent : 0;
+        const uint64_t word_count = function ? type_function_words(changes->parameters + change->first, change->flags, change->extent) : 0;
+        for (uint64_t i = 0; i < word_count; i += 1)
         {
-            parameters[i] = type_replay_type(part, changes->parameters[change->first + i]);
+            const TypeId word = changes->parameters[change->first + i];
+            parameters[i] = i < parameter_count ? type_replay_type(part, word) : word;
         }
         const uint32_t made = type_find_or_add(table, change->kind, change->flags, type_replay_type(part, change->base), change->extent, parameters);
         valid = made != 0 && local >= part->base;
@@ -6677,8 +6882,9 @@ static bool type_replay(TypeTable* table, TypeReplayPart* parts, uint32_t count,
         for (uint32_t i = 0; valid && i < changes->count; i += 1)
         {
             const TypeChange* change = changes->items + i;
-            parameter_room = change->operation == BUSTER_TYPE_CHANGE_DERIVE && change->kind == BUSTER_TYPE_KIND_FUNCTION && change->extent > parameter_room ?
-                             change->extent : parameter_room;
+            // A function's words: its parameters, and at most an info word and a word per eight parameter ABIs.
+            const uint64_t words = change->extent + 1 + (change->extent + BUSTER_TYPE_PARAMETER_ABIS_PER_WORD - 1) / BUSTER_TYPE_PARAMETER_ABIS_PER_WORD;
+            parameter_room = change->operation == BUSTER_TYPE_CHANGE_DERIVE && change->kind == BUSTER_TYPE_KIND_FUNCTION && words > parameter_room ? words : parameter_room;
             member_room = change->operation == BUSTER_TYPE_CHANGE_DEFINE && change->count > member_room ? change->count : member_room;
         }
     }

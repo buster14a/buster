@@ -962,12 +962,13 @@ What the probe returns must reach the driver, through the hidden pointer too.
 
 ## Preserving frames (#147)
 
-A function that keeps registers for its caller past System V's callee-saved ones (clang's `preserve_most` and
-`preserve_all`, [the calling convention guide](calling-convention.md#other-calling-conventions)) names them in its
-`Tier0Function`. Without them, nothing in the frame changes:
+A function that keeps registers for its caller past System V's callee-saved ones (clang's `preserve_most`,
+`preserve_all` and `intel_ocl_bicc`, [the calling convention guide](calling-convention.md#other-calling-conventions)) names
+them in its `Tier0Function`. Without them, nothing in the frame changes:
 
 - `preserve_general` has a bit per caller-saved general register to keep;
-- `preserve_vectors` keeps vector registers 0 to it less 1 (0, 16 or 32), `preserve_vector_bytes` of each (16, 32 or 64);
+- `preserve_vectors` has a bit per vector register to keep (`0xffff` and `0xffffffff` for the first three's, `intel_ocl_bicc`'s
+  xmm8 to xmm15, `0xff00`, or zmm16 to zmm31 with AVX-512, `0xffff0000`), `preserve_vector_bytes` of each (16, 32 or 64);
 - `preserve_mask_bytes` keeps k0 to k7 (0, 2 or 8 bytes each).
 
 Tier 0 leaves out the result's registers (`tier0_result_set`): rax for a hidden pointer's result, and each register
@@ -989,7 +990,7 @@ The set is the convention's whole set, not the registers the body touches. Tier 
 registers and xmm0 to xmm15 alone, and nothing has checked a template's scratch caller-saved registers against
 `Tier0Frame.clobbers`. These conventions are rare. A leaf `preserve_most` function pays seven pushes and pops.
 
-`tier0_preserve_valid` refuses a callee-saved register, a vector width the count doesn't allow (32 registers only as
+`tier0_preserve_valid` refuses a callee-saved register, a vector width the registers don't allow (16 to 31 only as
 ZMMs), a mask width other than 2 or 8, and a preserving frame with `eh_return`, tail calls or `returns_twice`. Their
 teardowns and saves know nothing of the kept registers, and the producer refuses such functions by name. `test-tier0`'s
 "aggregate errors" break each rule once, and both compile paths must refuse the metadata. Tier 1 leaves the function to

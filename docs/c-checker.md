@@ -6752,7 +6752,36 @@ arguments against the function. The checker now gives these as clang does.
   declarator; a bit-field's after its width meets its type
   ("only applies to function types"). A variadic function's `vectorcall` or
   `regcall` is clang's "variadic function cannot use vectorcall calling
-  convention". A definition's `-Wgcc-compat` warning comes before Sema's
+  convention", and so is a `swiftcall` or `swiftasynccall` one's; a declaration
+  (not a definition or a typedef) of such a function without a prototype is
+  "function with no prototype cannot use the vectorcall calling convention"
+  (clang's `err_cconv_knr`), unless an earlier declaration of the name is
+  visible, which clang merges first (#1447).
+
+  `intel_ocl_bicc`, `swiftcall` and `swiftasynccall` are function types'
+  conventions (#1447), spelled in types as clang's `TypePrinter` spells them:
+  `inteloclbicc`, `swiftcall` and `swiftasynccall`. The Swift parameter
+  attributes (`swift_indirect_result`, `swift_error_result`, `swift_context`,
+  `swift_async_context`) are a parameter's ABI in its function's type
+  (`TypeParameterABI`), printed before its type
+  (`void (__attribute__((swift_context)) void *)`), so that two functions'
+  types differ by them. A parameter's are checked as
+  `SemaSwift::AddParameterABIAttr` checks them, at the attribute: a pointer
+  ("'swift_context' parameter must have pointer type; type here is 'int'"), a
+  pointer to an unqualified pointer for `swift_error_result`, and two ABIs
+  on one parameter ("swift_async_context and 'swift_context' attributes are
+  not compatible", with its note); then the declared function's own, once its
+  convention is final (`check_input_declarator_conventions`), as
+  `checkExtParameterInfos` checks them, at the parameter: the convention
+  (swiftcall or swiftasynccall, swiftcall's alone for an error result, and any
+  for `swift_async_context`, whose function clang's backend gives it r14, which
+  the producer refuses by name), an indirect result first or after another, an
+  error result just after a context. A Swift parameter of another function type
+  than a declaration's own (a pointer's, a parameter's or a type name's), whose
+  convention clang takes from attributes it places otherwise, is refused by
+  name. Off a parameter, each is "only applies to parameters" (a warning).
+
+  A definition's `-Wgcc-compat` warning comes before Sema's
   diagnostics of the same attribute.
 
   The GPU kernels' attributes change nothing here but have their handlers'
@@ -7198,13 +7227,20 @@ arguments against the function. The checker now gives these as clang does.
     (`CheckInputAttribute.convention_count`).
   - A calling convention's redeclaration and assignment messages, the same for
     `no_caller_saved_registers`:
-    - a function declared `preserve_all` after a declaration without it is
-      "conflicting types for 'f'". clang's is "function declared
-      'preserve_all' here was previously declared without calling
-      convention", or for `no_caller_saved_registers` "function declared with
-      'no_caller_saved_registers' attribute was previously declared without
-      the 'no_caller_saved_registers' attribute", with its "previous
-      declaration is here" note;
+    - a function declared with an explicit convention other than its earlier
+      declaration's is clang's "function declared 'A' here was previously
+      declared 'B'" (or "without calling convention", where its first
+      declaration has none explicit), with its "previous declaration is here"
+      note at the first declaration (#1447, `check_input_report_redeclaration`),
+      but for `no_caller_saved_registers`, whose clang message is "function
+      declared with 'no_caller_saved_registers' attribute was previously
+      declared without the 'no_caller_saved_registers' attribute": that one is
+      "conflicting types for 'f'", without its note;
+    - a function type spelled with a macro of its convention prints without
+      clang's macro name (`'MS void (void) __attribute__((ms_abi))'`), and a
+      typedef's attribute without clang's sugar
+      (`__attribute__((intel_ocl_bicc))` where its canonical type is
+      `inteloclbicc`);
     - an assignment between pointers to functions of two conventions is
       "incompatible operand or conversion types", where clang's is
       "incompatible function pointer types assigning to …";
