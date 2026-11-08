@@ -207,6 +207,11 @@ test "${#units[@]}" -gt 0
 # --cross-check also runs them beside clang -O0's builds of the same programs as C, and links those that pass
 # structs and unions by value with clang's functions, calls crossing both ways.
 "$BUSTER_COMPILER" test-tier0 --cross-check
+== Test Tier 0's inlining of always_inline functions
+# #1398: the driver fixture's bodies and the compiler's own main.c spliced by the vector path and its scalar twin,
+# which must give the same streams, each accepted by tier0_validate and compiled.
+"$BUSTER_COMPILER" test-tier0-inline
+"$BUSTER_COMPILER" test-tier0-inline -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing src/buster/compiler/main.c
 == Check the repository's translation units with the checker
 # #619: run in both hosted variants and the target suite, using the build's expanded arguments (including
 # its configured host ISA, target defaults and optimization) rather than shell text from build.sh.
