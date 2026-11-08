@@ -648,6 +648,25 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 12,
     },
     {
+        // A file-scope declaration of attribute lists and `__extension__`s alone is clang's extra `;` (#1447), which says
+        // nothing but its C23 lists' ignored-attribute warnings; GNU attributes after an `__extension__` are specifiers,
+        // which declare nothing. A declaration's leading attribute lists, C23's and GNU's in any order, go on past its
+        // `__extension__`s.
+        .name = "file-scope extension markers after attributes",
+        .source = "__extension__;\n__attribute__((unused)) __extension__;\nint a; __extension__ __extension__;\n"
+                  "__extension__ __attribute__((unused));\n__attribute__((unused)) [[gnu::unused]] __extension__ int b;\n"
+                  "__attribute__((unused)) [[gnu::unused]] __extension__;\n[[gnu::unused]] __extension__ __extension__;\n",
+        .warnings = 3,
+        .c23 = true,
+    },
+    {
+        // `__extension__`s before a static assertion (#1447), at file scope and in a block: the assertion, checked.
+        .name = "extension markers before static assertions",
+        .source = "__extension__ _Static_assert(1, \"\");\n__extension__ _Static_assert(0, \"file\");\n"
+                  "void f(void) { __extension__ __extension__ _Static_assert(0, \"block\"); }\n",
+        .errors = 2,
+    },
+    {
         // An assignment to a const variable, through an array's subscripts or a record's members to it, or through a
         // pointer to a const record (#147): the variable named with its declared type and the "declared const here" note at
         // its name; a pointer's target is the generic error.

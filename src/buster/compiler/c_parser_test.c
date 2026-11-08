@@ -951,6 +951,30 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(void) { __attribute__((unknown)) x; }\n", "1:41: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     { "void f(void) { __attribute__((unused)) __extension__ int x; }\n", "1:40: expected identifier or '('", 0 },
     { "void f(void) { L: __attribute__((unused)) __extension__ int x; }\n", "1:57: expected expression", 0 },
+    // A file-scope declaration's leading attribute lists (C23's, then GNU's) and the `__extension__`s after them, as clang's
+    // ParseTopLevelDecl reads them before ParseExternalDeclaration (#1447), in any order. An `__extension__` after a
+    // specifier or after a list after an `__extension__` is none; a C23 list just after an `__extension__` and the lists
+    // before a static assertion are clang's error, at the first of them.
+    { "__attribute__((unused)) __extension__ int a;\n", "", 0 },
+    { "__attribute__((unused)) __attribute__((used)) __extension__ __extension__ int a;\n", "", 0 },
+    { "__attribute__((unused)) __extension__ __attribute__((unused)) int a;\n", "", 0 },
+    { "__attribute__((unused)) __extension__ static int c(void) { return 0; }\n", "", 0 },
+    { "__attribute__((unused)) __extension__ struct S { int x; } s;\n", "", 0 },
+    { "__attribute__((unused)) __extension__ typedef int T;\n", "", 0 },
+    { "int a; __attribute__((unused)) __extension__ int b(void), c;\n", "", 0 },
+    { "[[gnu::unused]] __attribute__((unused)) __extension__ int a;\n", "", "c23" },
+    { "[[gnu::unused]] __extension__ __attribute__((unused)) int a;\n", "", "c23" },
+    { "__attribute__((unused)) static __extension__ int a;\n", "1:32: expected identifier or '('", 0 },
+    { "__attribute__((unused)) __extension__ __attribute__((unused)) __extension__ int a;\n", "1:63: expected identifier or '('", 0 },
+    { "__extension__ __attribute__((unused)) __extension__ int a;\n", "1:39: expected identifier or '('", 0 },
+    { "__attribute__((unused)) [[gnu::unused]] __extension__ int a;\n", "", "c23" },
+    { "__attribute__((unused)) __extension__ [[gnu::unused]] int a;\n", "1:39: an attribute list cannot appear here", "c23" },
+    { "__extension__ [[gnu::unused]] int a;\n", "1:15: an attribute list cannot appear here", "c23" },
+    { "__attribute__((unused)) _Static_assert(1, \"\");\n", "1:1: an attribute list cannot appear here", 0 },
+    { "__attribute__((unused)) __extension__ __extension__ _Static_assert(1, \"\");\n", "1:1: an attribute list cannot appear here", 0 },
+    { "[[gnu::unused]] _Static_assert(1, \"\");\n", "1:1: an attribute list cannot appear here", "c23" },
+    // `__extension__`s before a static assertion, at file scope and in a block, which clang takes (#1447).
+    { "__extension__ _Static_assert(1, \"\");\nvoid f(void) { __extension__ __extension__ _Static_assert(1, \"\"); }\n", "", 0 },
     // Attribute applicability belongs to semantic checking; the parser retains even an invalid statement attribute.
     { "void f(void) { __attribute__((unused)); }\n", "", 0, true },
     // #1127's places and messages. A GNU attribute list's and its arguments' `)` and its second `(` are expected after the

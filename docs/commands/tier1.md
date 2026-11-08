@@ -24,7 +24,12 @@ requirements. [Command index](README.md).
   direct scalar calls preserve live caller registers and publish symbolic CALL
   references. Byte/word memory and integer conversions
   use canonical 32-bit storage; terminal chains retain explicit traps or empty
-  self-loops. Every other function, general CFGs with loops and phis, goes
+  self-loops. Integer comparisons fold single-use loads at their original
+  access width when the final consumer's memory-order proof permits it
+  (#1218), including exact immediate comparisons through zero/sign extension.
+  `test-tier1-select` checks guard-page boundaries, predicates, address aliases
+  and access-order refusals; `test-tier1-emit` checks frame-object comparisons,
+  realignment and fused branches. Every other function, general CFGs with loops and phis, goes
   through `tier1_emit_cfg.c` (#140): `tier1_cfg.c` allocates it and its edges
   move values, before a jump, at a successor's start or in a split critical
   edge's stub. A straight line whose allocation can't place a value (an evicted
@@ -185,8 +190,8 @@ rematerialization on and off, kept frame pointers and realigned frames.
 `tier1_address_coalesce_test.c` checks that a simple unscaled, undisplaced
 base-plus-index uses `add` when allocation puts the result in either input
 register. This removes the SIB byte while keeping one instruction. Other
-destinations, scales and displacements retain `lea`; unpatched frame operands
-also retain it for the frame-layout handoff. Both selector paths execute the
+destinations, scales, displacements and `rsp` bases retain `lea`. Folded frame
+operands have their final base and offset before this decision. Both selector paths execute the
 32-bit, 64-bit and pointer fixtures against the independent IR interpreter.
 Flags are dead between IR nodes, as required by the existing emitter contract.
 
