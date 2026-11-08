@@ -232,6 +232,14 @@ unused-warning fixtures also check exact scope-completion tokens.
   in an unselected statement expression. Retained runtime constant-fold warnings join the count traversal without being
   rendered or counted twice, preserving their order with new runtime warnings and discarded expressions;
   required-constant warnings and groups collected before a failed program keep their original publication.
+  A source comma's "left operand of comma operator has no effect" is queued where clang's `CheckCommaOperands` builds
+  it (#1447): the arithmetic scan's post-order visit runs its marker among the divisions and shift counts, ahead of the
+  full expression's conversions, and the tree walk skips it. A comma whose operands hold an index's bound
+  (`BUSTER_CHECK_REACH_BOUND`) keeps its marker in the tree walk, which orders the bound as clang checks it; bounds still
+  follow every division and count of their root. Roots the reader adds after what follows their operand (a
+  statement's condition, a switch's, or a `for` increment's discard) are taken where their
+  operand stands (`check_common_displaced_roots`), so a condition's warnings precede its body's, as clang analyzes it.
+  A statement expression's inner statements still warn before the enclosing root's own divisions and counts.
   `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both
   shift directions, narrow promotions, 128-bit and bit-precise widths, compound assignments, side effects, macros
   and warning policy. The shared default-warning harness covers syntax checking and object publication through
