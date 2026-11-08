@@ -1499,12 +1499,17 @@ jobs:
         # #1050's measure: sqlite3.c's -c by the base and by this tree, each over four placements of its checker unit
         # (./build.sh shifts) from two fresh copies apiece, with the base's executables again as the comparison's floor
         # (main-again); then each build's stages, counters (with store-to-load forwarding's failures) and checker
-        # functions' samples. Where this tree changes what -c writes (the lowering's code, #1376), the step says so and
-        # gives both objects' sizes, and the comparison includes that work.
+        # functions' samples. Where this tree changes what -c writes, the step says so and gives both objects' sizes:
+        # #1376's lowering work is the legitimate cause, so a pull request that touches lowering-affecting files
+        # (check_debug, ir_lowering, tier1_programs) only warns, and any other checker pull request fails on the
+        # difference (#1572). The placements pad .text, so they move the backend's, the encoder's and Tier 0's code;
+        # the checker's own code sits in the page-aligned .text.buster_checker, which wild places first, and every
+        # shift is a multiple of 64, so the checker unit's own placement is not one of the samples (#1312).
         if: github.event_name == 'pull_request' && needs.changes.outputs.checker != 'false'
         timeout-minutes: 6
         env:
           AB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          LOWERING: ${{ needs.changes.outputs.check_debug != 'false' || needs.changes.outputs.ir_lowering != 'false' || needs.changes.outputs.tier1_programs != 'false' }}
         run: |
           set -euo pipefail
           [[ "$AB_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -1520,7 +1525,16 @@ jobs:
           if ! cmp -s "$ab/main.o" "$ab/head.o"; then
               echo "== the objects differ: this tree changes sqlite3.c's code"
               size "$ab/main.o" "$ab/head.o"
+              if [ "$LOWERING" != true ]; then
+                  echo "::error::sqlite3.c's object differs and no lowering-affecting file changed; a checker pull request that touches none of check_debug's, ir_lowering's or tier1_programs' sources must write the same bytes"
+                  exit 1
+              fi
+              echo "== a lowering-affecting change (check_debug, ir_lowering or tier1_programs) explains it; continuing"
           fi
+          echo "== what the placements move: ./build.sh shifts pads .text, so the four shifts move the backend's, the"
+          echo "== encoder's and Tier 0's code; the checker's own code sits in the page-aligned .text.buster_checker,"
+          echo "== which wild places first, and every shift is a multiple of 64, so the checker unit's own placement is"
+          echo "== not one of the samples (#1312)"
           builds=()
           for build in main:main head:head main-again:main; do
               for shift in "${shifts[@]}"; do
