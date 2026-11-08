@@ -3254,7 +3254,15 @@ static void check_common_enum_arithmetic(const Parser* parser, Preprocessor* pp,
                               op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL ? 2 : op == CHECK_OP_CONDITIONAL ? 3 : compound ? 4 : 5;
         const uint32_t left = op == CHECK_OP_CONDITIONAL ? graph->operand1[node] : graph->operand0[node];
         const uint32_t right = op == CHECK_OP_CONDITIONAL ? graph->operand2[node] : graph->operand1[node];
-        if (kind < 5 && left < graph->count && right < graph->count && stream->diagnostics[node] == CHECK_DIAG_NONE)
+        // The fast rejection, by the operands' own kinds: a mix needs an enumeration's or a floating operand (an aligned
+        // typedef's kind hides its type's), or two constant leaves, which may be enumerators.
+        const uint8_t left_kind = left < graph->count ? type_kind(types, check_stream_type(stream, left)) : BUSTER_TYPE_KIND_VOID;
+        const uint8_t right_kind = right < graph->count ? type_kind(types, check_stream_type(stream, right)) : BUSTER_TYPE_KIND_VOID;
+        const uint32_t kinds_seen = 1u << left_kind | 1u << right_kind;
+        const uint32_t special = 1u << BUSTER_TYPE_KIND_ENUM | 1u << BUSTER_TYPE_KIND_ALIGNED | 1u << BUSTER_TYPE_KIND_FLOATING | 1u << BUSTER_TYPE_KIND_COMPLEX;
+        const bool named = left < graph->count && right < graph->count && graph->ops[left] == CHECK_OP_VALUE && graph->ops[right] == CHECK_OP_VALUE &&
+                           (check_stream_flags(stream, left) & check_stream_flags(stream, right) & BUSTER_CHECK_ICE) != 0;
+        if (kind < 5 && left < graph->count && right < graph->count && ((kinds_seen & special) != 0 || named) && stream->diagnostics[node] == CHECK_DIAG_NONE)
         {
             const TypeId left_type = check_common_enum_coerced(input, stream, left);
             const TypeId right_type = check_common_enum_coerced(input, stream, right);
