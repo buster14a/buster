@@ -89,7 +89,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
   `CheckDriverPart`; `--cpu-dispatch-only` runs the `cpu_specific` and
   `cpu_dispatch` section alone, #1447; `--semantic-recovery-only` runs
-  `c_check_semantic_recovery_driver_test.c` and `c_check_statement_recovery_driver_test.c` alone, the whole output and status
+  `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c` and
+  `c_check_type_attribute_recovery_driver_test.c` alone, the whole output and status
   of semantic error recovery's fixtures against clang's on the vector, scalar
   and two-lane deferred paths, and `-c`'s refusal of each: `docs/c-checker.md`'s
   "Semantic error recovery", #1447). Its library-builtin comparisons are pinned to Clang
@@ -254,9 +255,31 @@ unused-warning fixtures also check exact scope-completion tokens.
   displaced condition's first. Its last value, its statement's and the statement expression's, is scanned once. Still
   different: a short-circuited or unreachable statement expression's statements warn, and a comparison as its last
   value warns as a comparison where clang says "expression result unused".
+  A folded shift's warnings take clang's words (#1447, `check_driver_shift_message`): "shifting a negative signed
+  value is undefined", and "signed shift result (0x…) requires N bits to represent, but 'T' only has W bits", the
+  result's hexadecimal and its significant bits. Its `-Wshift-negative-value` is a runtime one like its counts: the
+  driver stashes both (`CheckCommonShiftWarnings`) rather than reporting them, the common walk reports each at its
+  shift and drops one it proves unevaluated (after a return, a `goto` or an endless loop, in a constant condition's
+  other branch), so that a dropped `-Werror` one neither counts nor rejects the unit, and whatever no walk reached is
+  reported at the end (a unit with errors runs none). `-Wshift-overflow` is no runtime warning, and stays. Two
+  unevaluated places still warn, as clang's do: an unselected `_Generic` or `__builtin_choose_expr` arm, which has no CFG
+  block, whose warnings keep the selection's order, and a reachable statement's condition that folds to a constant,
+  whose range the program drops. That statement is reached by its keyword and by the first kept root of its executed arm
+  (never a static selection's unselected one) in the evaluation with no range dropped; with an arm of no expression, by
+  its place in its function's control program (after its block's last entry before it, by a fall-through or a jump from
+  a label before it). Its warnings are reported where its root stands in the roots' order.
   `c_check_int_in_bool_driver_test.c` (#1447) compares clang's `-Wint-in-bool-context` and the
   `-Wtautological-constant-compare` forms of a `<<` or a conditional converted to `_Bool` (`docs/c-checker.md`)
   with complete pinned-Clang output at each policy, both paths and with `-c`.
+  A constant a bit-field truncates is clang's `-Wbitfield-constant-conversion` (#1447, AnalyzeBitFieldAssignment,
+  `check_common_bitfield_truncates`), and a 1 in a signed one-bit bit-field its
+  `-Wsingle-bit-bitfield-constant-conversion`, both under `-Wconstant-conversion`, which `-Wconversion` and `-Wnon-gcc`
+  hold. The constant keeps its own width, or a `-` or a `~` operand's significant bits, and warns where the
+  bit-field's width and signedness change it. An assignment's warns at its `=` with the full expression's other implicit
+  conversions, in unreachable code too, and leaves out the value's constant conversion. An initializer's warns at each
+  value's first token in member order, before that initializer's conversions, which it keeps, even in an unevaluated
+  operand. `c_check_bitfield_driver_test.c` compares both with complete pinned-Clang output at each policy, both paths
+  and with `-c`.
   `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both
   shift directions, narrow promotions, 128-bit and bit-precise widths, compound assignments, side effects, macros
   and warning policy. The shared default-warning harness covers syntax checking and object publication through
