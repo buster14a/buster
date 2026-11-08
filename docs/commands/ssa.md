@@ -13,8 +13,11 @@ requirements. [Command index](README.md).
   `benchmark-ssa [--only scalar|vector] [--after-scalar MS]` measures synthetic
   CFGs, including analysis and allocation. `docs/ssa.md` records the view's
   contract. `ssa_ir.c` adapts shared IR slots, rebuilds every operand form and
-  verifies the promoted IR; `test-ssa-ir` compares typed-stream, all-memory IR
-  and both promoted forms, with and without frame objects and copies.
+  verifies the promoted IR. New phi prefixes use canonical local order
+  before assigning value IDs (#1395), independent of constructor discovery
+  order. `test-ssa-ir` compares typed-stream, all-memory IR and both promoted
+  forms, with and without frame objects and copies, and requires identical
+  serialized loop IR where first-read and local orders differ.
   `test-ssa-source [--typed] [--generate N] [--seed N] [--clang PATH] [--timeout SECONDS]
   [--steps N] [--lifetimes] [--tier1] [--keep] [preprocessor options] [file...]`
   (`ssa_source_test.c`, #134) promotes every function `-c` compiles of C files,

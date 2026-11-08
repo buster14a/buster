@@ -101,9 +101,9 @@ The focused fixture alone is not the full source-corpus acceptance.
 
 Adding the gate is not evidence that it has passed the corpus. Full compiler
 builds, the focused source command and all corpus invocations must be executed
-on the actual checkout. #174 also still requires controlled repeated real-function
-9700X measurements, especially `sqlite3VdbeExec`, a measured selection policy and
-consumer-specific acceptance. Neither the original memory fallback nor this test
+on the actual checkout. AUTO's tree solver is chosen from 9700X measurements of
+sqlite3.c's exported CFGs (#1352, [dominators.md](dominators.md)); #174 also
+still requires consumer-specific acceptance. Neither the original memory fallback nor this test
 change supplies that evidence. Keep raw campaign records in
 `buster14a/buster-performance`, not in this repository's documentation tree.
 

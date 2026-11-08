@@ -118,7 +118,9 @@ static const char check_test_tier1_divide_main[] =
 // it in a loop; tier1_classify's switch is a jump table, with values live across it; tier1_pick jumps once through a ?:
 // of two labels' addresses; tier1_both enters a label directly and through its table, where a phi meets values that stay
 // live apart, so that each edge into it has moves and the indirect jump's has a stub, where the label's symbol goes;
-// tier1_once loads its target from its table; tier1_single can jump to one label alone.
+// tier1_once loads its target from its table; tier1_single can jump to one label alone. tier1_tables has two switch
+// tables (#1217), with holes, signed and unsigned nonzero lower bounds, whose dispatches share each table's address.
+// tier1_table_loop keeps one table base before its loop and dispatches with movsxd, add and jmp on each iteration.
 static const char check_test_tier1_labels_source[] =
     "#include <stdio.h>\n"
     "static long tier1_interpret(const unsigned char* code, long n)\n"
@@ -212,6 +214,43 @@ static const char check_test_tier1_labels_source[] =
     "only:\n"
     "    return x + 1;\n"
     "}\n"
+    "static long tier1_tables(int x, unsigned long y)\n"
+    "{\n"
+    "    long r = 13;\n"
+    "    switch (x)\n"
+    "    {\n"
+    "        case -3: r += 5; break;\n"
+    "        case -2: r ^= 7; break;\n"
+    "        case 0: r -= 11; break;\n"
+    "        case 2: r *= 3; break;\n"
+    "        default: r += 17; break;\n"
+    "    }\n"
+    "    switch (y)\n"
+    "    {\n"
+    "        case 18446744073709551611ul: r += x; break;\n"
+    "        case 18446744073709551612ul: r ^= x; break;\n"
+    "        case 18446744073709551614ul: r += x * 3; break;\n"
+    "        case 18446744073709551615ul: r -= x * 5; break;\n"
+    "        default: r -= x; break;\n"
+    "    }\n"
+    "    return r;\n"
+    "}\n"
+    "static long tier1_table_loop(long n)\n"
+    "{\n"
+    "    long r = 0;\n"
+    "    for (long i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        switch (i & 7)\n"
+    "        {\n"
+    "        case 0: r += 3; break;\n"
+    "        case 1: r ^= 5; break;\n"
+    "        case 2: r -= 7; break;\n"
+    "        case 3: r += i; break;\n"
+    "        default: r ^= i; break;\n"
+    "        }\n"
+    "    }\n"
+    "    return r;\n"
+    "}\n"
     "int main(void)\n"
     "{\n"
     "    static const unsigned char program[] = { 0, 1, 2, 0, 1, 1, 2, 0, 3 };\n"
@@ -219,6 +258,13 @@ static const char check_test_tier1_labels_source[] =
     "    printf(\"%d %d\\n\", tier1_pick(1), tier1_pick(0));\n"
     "    printf(\"%ld %ld %ld %ld\\n\", tier1_both(5), tier1_both(6), tier1_both(8), tier1_both(-3));\n"
     "    printf(\"%d %d %d %d\\n\", tier1_once(0), tier1_once(1), tier1_once(2), tier1_single(41));\n"
+    "    unsigned long sum = 0;\n"
+    "    for (int i = -8; i <= 8; i += 1)\n"
+    "    {\n"
+    "        sum = sum * 33 + (unsigned long)tier1_tables(i, (unsigned long)i);\n"
+    "    }\n"
+    "    printf(\"%lu\\n\", sum);\n"
+    "    printf(\"%ld %ld %ld %ld\\n\", tier1_table_loop(0), tier1_table_loop(1), tier1_table_loop(17), tier1_table_loop(257));\n"
     "    return 0;\n"
     "}\n";
 
@@ -1331,6 +1377,189 @@ static void check_test_driver_tier1_rematerialization(CheckTest* test, const cha
     unlink(reference);
 }
 
+// #1395: the same target must produce the same object regardless of the compiler host's kernel path. The address
+// sum and load-add loop exposed the former maximal-munch/costed split; multiplication by 3/5/9 and by a power of two
+// retain #1217's already established costs. A parameter-free leaf's volatile loads keep every operand visible and
+// leave register assignment unrestricted, exercising the common allocation policy without phi order. Unsigned
+// arithmetic keeps every oracle input defined.
+static const char check_test_tier1_reproducible_source[] =
+    "#include <stdio.h>\n"
+    "__attribute__((noinline)) unsigned long m3(unsigned long x) { return x * 3; }\n"
+    "__attribute__((noinline)) unsigned long m5(unsigned long x) { return x * 5; }\n"
+    "__attribute__((noinline)) unsigned long m9(unsigned long x) { return x * 9; }\n"
+    "__attribute__((noinline)) unsigned long m4(unsigned long x) { return x * 4; }\n"
+    "__attribute__((noinline)) unsigned m3i(unsigned x) { return x * 3; }\n"
+    "__attribute__((noinline)) unsigned long address_sum(unsigned long x, unsigned long y) { return x + y * 4 + 8; }\n"
+    "__attribute__((noinline)) unsigned long chain(unsigned long x) { return (x * 3) * 3; }\n"
+    "__attribute__((noinline)) unsigned long load_add(unsigned long x, const unsigned long* p) { return x + *p; }\n"
+    "__attribute__((noinline)) unsigned long two_loads(const unsigned long* p) { return p[0] + p[1]; }\n"
+    "volatile unsigned long allocation_inputs[] = {0x123456789abcdeful, ~0ul, 0x8000000000000000ul, 5};\n"
+    "__attribute__((noinline)) unsigned long unrestricted(void)\n"
+    "{ unsigned long a = allocation_inputs[0], b = allocation_inputs[1], c = allocation_inputs[2], d = allocation_inputs[3]; return (a + b) + (c + d); }\n"
+    "__attribute__((noinline)) unsigned long loop(const unsigned long* p, unsigned n)\n"
+    "{ unsigned long s = 1; for (unsigned i = 0; i < n; i += 1) s = (s * 3) * 3 + p[i]; return s; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned long p[] = {0, 1, ~0ul, 0x8000000000000000ul, 0x123456789abcdeful};\n"
+    "    unsigned long s = loop(p, 0) ^ loop(p, 5) ^ two_loads(p + 2) ^ unrestricted();\n"
+    "    for (unsigned i = 0; i < 5; i += 1)\n"
+    "    {\n"
+    "        unsigned long x = p[i];\n"
+    "        s += m3(x) ^ m5(x) ^ m9(x) ^ m4(x) ^ m3i((unsigned)x);\n"
+    "        s ^= address_sum(x, p[4 - i]) + chain(x) + load_add(x, p + i);\n"
+    "    }\n"
+    "    printf(\"%lx\\n\", s);\n"
+    "    return 0;\n"
+    "}\n";
+
+// A failed whole-object comparison must locate a code difference without a local rerun: report its first byte and
+// each fixture function's first different decoded record, with a short window on either side and its relocations.
+static void check_test_tier1_reproducible_difference(const char* first, const char* second, uint32_t remat)
+{
+    const char* paths[2] = { first, second };
+    uint64_t lengths[2] = { 0 };
+    uint8_t* bytes[2] = { check_test_driver_read_aligned(first, &lengths[0]), check_test_driver_read_aligned(second, &lengths[1]) };
+    if (bytes[0] != NULL && bytes[1] != NULL)
+    {
+        uint64_t at = 0;
+        while (at < lengths[0] && at < lengths[1] && bytes[0][at] == bytes[1][at])
+        {
+            at += 1;
+        }
+        char values[2][8];
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            if (at < lengths[path])
+            {
+                snprintf(values[path], sizeof(values[path]), "%02x", bytes[path][at]);
+            }
+            else
+            {
+                snprintf(values[path], sizeof(values[path]), "EOF");
+            }
+        }
+        fprintf(stderr, "test-checker: Tier 1 object difference remat=%u offset=%" PRIu64 " vector=%s scalar=%s sizes=%" PRIu64 "/%" PRIu64 "\n",
+                remat, at, values[0], values[1], lengths[0], lengths[1]);
+    }
+    else
+    {
+        fprintf(stderr, "test-checker: Tier 1 object comparison remat=%u cannot read vector=%s or scalar=%s\n", remat, first, second);
+    }
+    free(bytes[0]);
+    free(bytes[1]);
+    enum
+    {
+        CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS = 4096,
+    };
+    X86Decoded* records[2] = { calloc(CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS, sizeof(X86Decoded)), calloc(CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS, sizeof(X86Decoded)) };
+    uint32_t* offsets = calloc(2 * CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS, sizeof(uint32_t));
+    uint32_t* types = calloc(2 * CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS, sizeof(uint32_t));
+    const bool ready = records[0] != NULL && records[1] != NULL && offsets != NULL && types != NULL && x86_disassembler_initialize();
+    static const char* const names[] = { "m3", "m5", "m9", "m4", "m3i", "address_sum", "chain", "load_add", "two_loads", "unrestricted", "loop", "main" };
+    for (uint32_t f = 0; ready && f < sizeof(names) / sizeof(names[0]); f += 1)
+    {
+        uint32_t counts[2];
+        uint32_t relocations[2];
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            counts[path] = check_test_tier1_function(paths[path], names[f], records[path], CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS,
+                                                   offsets + path * CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS, types + path * CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS, &relocations[path]);
+        }
+        uint32_t at = 0;
+        while (at < counts[0] && at < counts[1] && records[0][at].offset == records[1][at].offset && records[0][at].length == records[1][at].length &&
+               records[0][at].address32 == records[1][at].address32 && memcmp(&records[0][at].instruction, &records[1][at].instruction, sizeof(X86Instruction)) == 0)
+        {
+            at += 1;
+        }
+        const bool same = counts[0] != 0 && counts[0] == counts[1] && at == counts[0];
+        fprintf(stderr, "test-checker: Tier 1 object function=%s remat=%u records=%u/%u relocations=%u/%u code=%s\n",
+                names[f], remat, counts[0], counts[1], relocations[0], relocations[1], same ? "same" : "different or undecodable");
+        for (uint32_t r = at != 0 ? at - 1 : 0; !same && r < at + 4; r += 1)
+        {
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                if (r < counts[path])
+                {
+                    const X86Decoded* decoded = &records[path][r];
+                    const X86Instruction* instruction = &decoded->instruction;
+                    fprintf(stderr, "  function=%s remat=%u path=%s record=%u offset=%u length=%u form=%u reg=%u rm=%u index=%u mode=%u vvvv=%u decorations=%u address32=%u disp=%" PRId32 " imm=%" PRId32 "\n",
+                            names[f], remat, path == 0 ? "vector" : "scalar", r, decoded->offset, decoded->length, instruction->form, instruction->reg, instruction->rm, instruction->index,
+                            instruction->mode, instruction->vvvv, instruction->decorations, decoded->address32, instruction->displacement, instruction->immediate);
+                }
+            }
+        }
+        uint32_t reported = 0;
+        for (uint32_t r = 0; reported < 4 && (r < relocations[0] || r < relocations[1]); r += 1)
+        {
+            const uint32_t s = r + CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS;
+            if (r >= relocations[0] || r >= relocations[1] || offsets[r] != offsets[s] || types[r] != types[s])
+            {
+                fprintf(stderr, "  function=%s remat=%u relocation=%u vector-offset/type=%u/%u scalar-offset/type=%u/%u (UINT32_MAX absent)\n", names[f], remat, r,
+                        r < relocations[0] ? offsets[r] : UINT32_MAX, r < relocations[0] ? types[r] : UINT32_MAX,
+                        r < relocations[1] ? offsets[s] : UINT32_MAX, r < relocations[1] ? types[s] : UINT32_MAX);
+                reported += 1;
+            }
+        }
+    }
+    if (!ready)
+    {
+        fprintf(stderr, "test-checker: Tier 1 object comparison remat=%u cannot allocate or initialize decoded diagnostics\n", remat);
+    }
+    free(records[0]);
+    free(records[1]);
+    free(offsets);
+    free(types);
+}
+
+static void check_test_driver_tier1_reproducible(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/tier1-reproducible.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-reproducible-clang", directory);
+    const bool written = parse_test_write(source, check_test_tier1_reproducible_source, sizeof(check_test_tier1_reproducible_source) - 1);
+    char* oracle[] = { (char*)clang, "-O0", "-march=x86-64", "-o", reference, source, NULL };
+    char* diagnostics = NULL;
+    const bool referenced = written && check_test_driver_spawn(oracle, &diagnostics) == 0;
+    free(diagnostics);
+    char expected[256] = {0};
+    const bool ready = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ready, "the independent C oracle runs the host-reproducibility fixture");
+    for (uint32_t remat = 0; ready && remat < 2; remat += 1)
+    {
+        char objects[2][512];
+        bool compiled[2] = {false};
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char linked[512];
+            snprintf(objects[path], sizeof(objects[path]), "%s/tier1-reproducible-%u-%u.o", directory, remat, path);
+            snprintf(linked, sizeof(linked), "%s/tier1-reproducible-%u-%u", directory, remat, path);
+            CheckTestTier1Build build;
+            compiled[path] = check_test_tier1_build(executable, source, "", objects[path], remat != 0, path != 0, true, false, "-march=x86-64", &build);
+            check_test_expect(test, compiled[path], "both host paths compile every reproducibility fixture function through Tier 1");
+            char* link[] = { (char*)clang, "-o", linked, objects[path], NULL };
+            char* text = NULL;
+            const bool built = compiled[path] && check_test_driver_spawn(link, &text) == 0;
+            free(text);
+            char actual[256] = {0};
+            check_test_expect(test, built && check_test_driver_capture(linked, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "each reproducibility object executes like the independent C oracle");
+            unlink(linked);
+        }
+        const bool same = compiled[0] && compiled[1] && check_test_driver_same_files(objects[0], objects[1]);
+        if (compiled[0] && compiled[1] && !same)
+        {
+            check_test_tier1_reproducible_difference(objects[0], objects[1], remat);
+        }
+        check_test_expect(test, same,
+                          "Tier 1 emits byte-identical scalar/vector objects for the same baseline target, with either rematerialization mode");
+        unlink(objects[0]);
+        unlink(objects[1]);
+    }
+    unlink(source);
+    unlink(reference);
+}
+
 // `path` as sh reads it between single quotes: each ' closes, escapes and reopens its quote. False if it doesn't fit.
 static bool check_test_tier1_quoted(char* out, size_t size, const char* path)
 {
@@ -1708,6 +1937,70 @@ static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, c
             check_test_expect(test, decoded && registers[1] == 1 && memory[1] == 0, "tier1_classify's switch is one indirect jump through a register");
             check_test_expect(test, decoded && registers[3] == 0 && memory[3] == 0, "tier1_single's jump to its one label is a direct jump");
             check_test_expect(test, decoded && registers[4] == 1 && trailing[4] != 0, "tier1_both's indirect jump has a stub after it, for the label its edge moves into");
+            uint32_t table_relocations = 0;
+            const uint32_t table_records = decoded ? check_test_tier1_function(object, "tier1_tables", records, CHECK_TEST_TIER1_LABELS_RECORDS, offsets, types, &table_relocations) : 0;
+            uint32_t table_addresses = 0;
+            uint32_t table_jumps = 0;
+            for (uint32_t i = 0; i < table_records; i += 1)
+            {
+                const X86Instruction* instruction = &records[i].instruction;
+                const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
+                table_addresses += form == X86_FORM_LEA_R64_M && instruction->mode == BUSTER_X86_MEMORY_RIP;
+                table_jumps += form == X86_FORM_JMP_RM64 && instruction->mode == BUSTER_X86_REGISTER_DIRECT;
+            }
+            check_test_expect(test, table_records != 0 && table_jumps == 2 && table_addresses == 2 && table_relocations == 2,
+                              "each of two switches shares one relocated table address between its signed load and target addition");
+            uint32_t loop_relocations = 0;
+            const uint32_t loop_records = decoded ? check_test_tier1_function(object, "tier1_table_loop", records, CHECK_TEST_TIER1_LABELS_RECORDS, offsets, types, &loop_relocations) : 0;
+            uint32_t loop_addresses = 0;
+            uint32_t loop_jumps = 0;
+            uint32_t loop_address = loop_records;
+            uint32_t loop_base = UINT32_MAX;
+            uint32_t loop_first = loop_records;
+            uint32_t loop_last = 0;
+            uint32_t dispatch = loop_records;
+            bool triples = true;
+            for (uint32_t i = 0; i < loop_records; i += 1)
+            {
+                const X86Instruction* instruction = &records[i].instruction;
+                const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
+                if (form == X86_FORM_LEA_R64_M && instruction->mode == BUSTER_X86_MEMORY_RIP)
+                {
+                    loop_addresses += 1;
+                    loop_address = i;
+                    loop_base = instruction->reg;
+                }
+                if (form == X86_FORM_JMP_RM64 && instruction->mode == BUSTER_X86_REGISTER_DIRECT)
+                {
+                    loop_jumps += 1;
+                    dispatch = i;
+                    triples &= i >= 2;
+                    if (i >= 2)
+                    {
+                        const X86Instruction* load = &records[i - 2].instruction;
+                        const X86Instruction* add = &records[i - 1].instruction;
+                        const uint32_t add_form = add->form & BUSTER_X86_FORM_NUMBER;
+                        const bool reversed = add_form == X86_FORM_ADD_RM64_R64;
+                        const uint32_t destination = reversed ? add->rm : add->reg;
+                        const uint32_t source_register = reversed ? add->reg : add->rm;
+                        triples &= (load->form & BUSTER_X86_FORM_NUMBER) == X86_FORM_MOVSXD_R64_RM32 && load->mode == BUSTER_X86_MEMORY_BASE_INDEX(2) &&
+                                   load->displacement == 0 && load->rm == loop_base && load->reg != loop_base &&
+                                   (reversed || add_form == X86_FORM_ADD_R64_RM64) && add->mode == BUSTER_X86_REGISTER_DIRECT &&
+                                   destination == load->reg && source_register == loop_base && instruction->rm == destination;
+                    }
+                }
+                const bool branch = x86_form_descriptions[form].relative_bytes != 0 && (x86_effects(form)->kinds >> 4) != BUSTER_X86_CONTROL_CALL;
+                const int64_t goal = (int64_t)records[i].offset + records[i].length + instruction->displacement;
+                for (uint32_t j = 0; branch && goal < (int64_t)records[i].offset && j < i; j += 1)
+                {
+                    loop_first = (int64_t)records[j].offset == goal ? j : loop_first;
+                    loop_last = (int64_t)records[j].offset == goal ? i : loop_last;
+                }
+            }
+            check_test_expect(test, loop_records != 0 && loop_jumps == 1 && triples,
+                              "each loop dispatch is adjacent movsxd [base + index*4], add base and jmp through the same target register");
+            check_test_expect(test, loop_addresses == 1 && loop_relocations == 1 && loop_address < loop_first && loop_first <= dispatch && dispatch <= loop_last,
+                              "the loop's one relocated table base is materialized before the backedge target");
             unlink(output);
             unlink(object);
         }

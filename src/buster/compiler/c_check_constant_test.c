@@ -213,6 +213,19 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
                       "_Static_assert(__builtin_isnan((__bf16)__builtin_inf()+(__bf16)-__builtin_inf()) && "
                       "!__builtin_signbit((__bf16)__builtin_inf()+(__bf16)-__builtin_inf()),\"bf16 NaN\");\n",
         },
+        {
+            // The host's SSE and x87 give a negative NaN for each of these and may take either NaN operand (#1473).
+            .name = "real invalid constant arithmetic has Clang NaN signs",
+            .source = "_Static_assert(__builtin_isnan(__builtin_inff()+-__builtin_inff()) && "
+                      "!__builtin_signbit(__builtin_inff()+-__builtin_inff()),\"float sum NaN\");"
+                      "_Static_assert(!__builtin_signbit(0.0f*__builtin_inff()) && !__builtin_signbit(0.0f/0.0f),\"float NaN\");"
+                      "_Static_assert(!__builtin_signbit(__builtin_inf()-__builtin_inf()) && !__builtin_signbit(0.0*-__builtin_inf()),\"double NaN\");"
+                      "_Static_assert(!__builtin_signbit(0.0/-0.0) && !__builtin_signbit(-__builtin_inf()/__builtin_inf()),\"double quotient NaN\");"
+                      "_Static_assert(!__builtin_signbit(__builtin_infl()+-__builtin_infl()) && !__builtin_signbit(0.0L/0.0L),\"long double NaN\");"
+                      "_Static_assert(__builtin_signbit(-(__builtin_inf()-__builtin_inf())) && __builtin_signbit(1.0-(-__builtin_nan(\"\"))),\"NaN signs\");"
+                      "_Static_assert(__builtin_signbit(-__builtin_nan(\"\")+__builtin_nan(\"\")) && "
+                      "!__builtin_signbit(__builtin_nanl(\"\")*-__builtin_nanl(\"\")),\"first NaN operand\");\n",
+        },
         { .name = "deep selected choose expressions", .source = nested_selections[0] },
         { .name = "deep unselected choose expressions", .source = nested_selections[1] },
         { .name = "deep selected generic expressions", .source = nested_selections[2] },

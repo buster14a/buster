@@ -238,11 +238,22 @@ static bool check_literal_table_batch(CheckInputReader* reader, const uint32_t* 
             valid = check_literal_table_value(reader, spellings[lane], lengths[lane], negative, width, is_signed, values + lane);
         }
     }
-    for (uint32_t lane = 0; valid && reader->parser->options.scalar && lane < count; lane += 1)
+#if __has_feature(memory_sanitizer)
+    // Clang MSan does not publish initialized shadow for AVX-512 masked narrowing stores.
+    // Keep vector literal decoding, but use ordinary stores for its final bytes under MSan.
+    // This preserves uninitialized-value detection instead of unpoisoning the destination.
+    const bool scalar_store = true;
+#else
+    const bool scalar_store = reader->parser->options.scalar;
+#endif
+#if __has_feature(memory_sanitizer)
+#pragma clang loop vectorize(disable) interleave(disable)
+#endif
+    for (uint32_t lane = 0; valid && scalar_store && lane < count; lane += 1)
     {
         memcpy(destination + (uint64_t)lane * (width / 8), values + lane, width / 8);
     }
-    for (uint32_t first = 0; valid && !reader->parser->options.scalar && first < count; first += 8)
+    for (uint32_t first = 0; valid && !scalar_store && first < count; first += 8)
     {
         const uint32_t left = count - first;
         const __mmask8 live = (__mmask8)((1u << (left < 8 ? left : 8)) - 1);

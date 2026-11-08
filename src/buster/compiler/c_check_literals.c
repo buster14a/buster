@@ -44,6 +44,9 @@ struct CheckLiteral
     // CHECK_LITERAL_RANGE_*: whether the spelling's magnitude is past its type's largest or below its smallest, in
     // what was the literal's padding before `high`, so that every literal keeps its 48 bytes.
     uint8_t range;
+    // A character constant's characters (#1447, at most 255): an ordinary one of more than one is clang's multi-character
+    // constant (check_input_multichar), in what was the literal's padding.
+    uint8_t characters;
     // A bit-precise constant's bits past 64, 0 for every other literal: in what was the literal's padding, so that it
     // keeps its 48 bytes, which every literal is zeroed and copied in.
     uint64_t high;
@@ -307,6 +310,9 @@ static long double check_literal_half(const char* spelling, char** end)
 }
 
 #include "c_check_literal_quad.c"
+// The escapes' diagnostics a refused literal's extended decoding needs (#1447), shared with the driver and the
+// preprocessor.
+#include "c_check_literal_diagnostic.c"
 
 // A number without an imaginary suffix, into `result`, which the caller zeroed.
 static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Arena* scratch, CheckLiteral* result)
@@ -504,7 +510,13 @@ static CheckValue check_literal_value(CheckLiteral literal)
 #include "c_check_literal_warning.c"
 
 // Always inlined (#880), as profile-guided builds do; hot caller: check_literal_string_part, once per character.
-static inline __attribute__((always_inline)) bool check_literal_character_unit(const uint8_t* bytes, uint32_t end, uint32_t* position, uint32_t* value, bool c23)
+// `extended` (#1447) is the refused literal's cold decoding's alone (check_literal_strings_extended), which every hot
+// caller's constant false takes out: it reads what clang reads that the fast decoding refuses, a delimited escape
+// (\x{...} and \o{...}, numeric, and \u{...}, a universal character name's), a named universal character name
+// (\N{NAME}, its name exactly Unicode's: unicode_name_strict) and an unknown escape, whose character is its value, as
+// clang's, which warns of it (check_literal_unknown_escape).
+static inline __attribute__((always_inline)) bool check_literal_character_unit_by(const uint8_t* bytes, uint32_t end, uint32_t* position, uint32_t* value, bool c23,
+                                                                                bool extended)
 {
     uint32_t i = *position;
     bool valid = i < end;
@@ -543,6 +555,42 @@ static inline __attribute__((always_inline)) bool check_literal_character_unit(c
                 n += 1;
             }
         }
+        else if (extended && (c == 'x' || c == 'o' || c == 'u') && i < end && bytes[i] == '{')
+        {
+            // Its digits up to its brace, one at least, of its radix, and its value as a plain one's.
+            const uint32_t radix = c == 'o' ? 8 : 16;
+            const bool name = c == 'u';
+            uint32_t n = 0;
+            uint32_t digits = 0;
+            i += 1;
+            while (valid && i < end && bytes[i] != '}')
+            {
+                const uint32_t digit = check_literal_digit(bytes[i++]);
+                valid = digit < radix && digits <= (UINT32_MAX - digit) / radix;
+                digits = valid ? digits * radix + digit : digits;
+                n += 1;
+            }
+            valid &= n != 0 && i < end;
+            i += valid ? 1 : 0;
+            valid &= !name || (digits <= 0x10FFFFu && (digits < 0xD800 || digits > 0xDFFF) && (c23 || digits >= 0xA0 || digits == '$' || digits == '@' || digits == '`'));
+            c = digits;
+        }
+        else if (extended && c == 'N')
+        {
+            // A name up to its brace (no line break: clang's ends there), one byte at least, and its character, as a
+            // universal character name's.
+            const uint32_t name = i + 1;
+            uint32_t close = name;
+            while (close < end && bytes[close] != '}' && bytes[close] != '\n' && bytes[close] != '\r')
+            {
+                close += 1;
+            }
+            uint32_t named = 0;
+            valid = i < end && bytes[i] == '{' && close < end && bytes[close] == '}' && close != name && unicode_name_strict(bytes + name, close - name, &named);
+            valid &= c23 || named >= 0xA0 || named == '$' || named == '@' || named == '`';
+            i = valid ? close + 1 : i;
+            c = named;
+        }
         else if (c == 'x' || c == 'u' || c == 'U')
         {
             const uint32_t maximum = c == 'u' ? 4 : c == 'U' ? 8 : UINT32_MAX;
@@ -560,7 +608,10 @@ static inline __attribute__((always_inline)) bool check_literal_character_unit(c
         }
         else
         {
-            valid = false;
+            // An unknown escape's character (a printable ASCII one's but a digit, which the octal escape reads, and the
+            // letters of a universal character name's) is its value in the extended decoding alone.
+            valid = extended && c >= 0x20 && c < 0x7F && c != 'N' && c != 'U' && c != 'o';
+            c = c == 'E' ? 27 : c;
         }
     }
     else if (c == '\\')
@@ -589,7 +640,12 @@ static inline __attribute__((always_inline)) bool check_literal_character_unit(c
     return valid;
 }
 
-static CheckLiteral check_literal_character(const uint8_t* bytes, uint32_t length, bool c23, bool char_unsigned)
+static inline __attribute__((always_inline)) bool check_literal_character_unit(const uint8_t* bytes, uint32_t end, uint32_t* position, uint32_t* value, bool c23)
+{
+    return check_literal_character_unit_by(bytes, end, position, value, c23, false);
+}
+
+static CheckLiteral check_literal_character_by(const uint8_t* bytes, uint32_t length, bool c23, bool char_unsigned, bool extended)
 {
     CheckLiteral result = { 0 };
     uint32_t start = 0;
@@ -619,12 +675,14 @@ static CheckLiteral check_literal_character(const uint8_t* bytes, uint32_t lengt
     {
         const uint32_t begin = position;
         uint32_t value = 0;
-        valid = check_literal_character_unit(bytes, length - 1, &position, &value, c23) && value <= maximum;
-        const bool numeric_escape = bytes[begin] == '\\' && begin + 1 < length && (bytes[begin + 1] == 'x' || (bytes[begin + 1] >= '0' && bytes[begin + 1] <= '7'));
+        valid = check_literal_character_unit_by(bytes, length - 1, &position, &value, c23, extended) && value <= maximum;
+        const bool numeric_escape = bytes[begin] == '\\' && begin + 1 < length &&
+                                    (bytes[begin + 1] == 'x' || (bytes[begin + 1] >= '0' && bytes[begin + 1] <= '7') || (extended && bytes[begin + 1] == 'o'));
         valid &= !(ordinary || utf8) || value <= 127 || numeric_escape;
         combined = ordinary ? (combined << 8) | value : value;
         count += 1;
-        valid &= ordinary ? count <= 4 : count == 1;
+        // (More than four is clang's warning that keeps the last four, in the extended decoding.)
+        valid &= ordinary ? count <= 4 || extended : count == 1;
     }
     if (valid && count != 0)
     {
@@ -636,9 +694,15 @@ static CheckLiteral check_literal_character(const uint8_t* bytes, uint32_t lengt
             .type = type,
             .integer = bits,
             .valid = true,
+            .characters = (uint8_t)(count < 255 ? count : 255),
         };
     }
     return result;
+}
+
+static CheckLiteral check_literal_character(const uint8_t* bytes, uint32_t length, bool c23, bool char_unsigned)
+{
+    return check_literal_character_by(bytes, length, c23, char_unsigned, false);
 }
 
 static CheckStringSpan check_literal_string_span(const CheckStringPart* part)
@@ -740,7 +804,8 @@ static inline __attribute__((always_inline)) bool check_literal_string_unit(uint
 // One unit of a part's characters at `*position` (span.begin <= *position < span.end): a character, an escape sequence
 // or, in a raw string literal, a byte, appended to `output` (when not NULL) at `*length`. The scalar loop's body, which
 // check_literal_string_part_scalar runs for every unit and check_literal_string_part for the units its blocks leave.
-static inline __attribute__((always_inline)) bool check_literal_string_step(const CheckStringPart* part, const CheckStringSpan* span, CheckStringEncoding encoding, bool c23, uint32_t* position, uint8_t* output, uint64_t* length)
+static inline __attribute__((always_inline)) bool check_literal_string_step(const CheckStringPart* part, const CheckStringSpan* span, CheckStringEncoding encoding, bool c23, uint32_t* position, uint8_t* output, uint64_t* length,
+                                                                          bool extended)
 {
     const uint32_t begin = *position;
     const uint8_t first = part->bytes[begin];
@@ -755,7 +820,7 @@ static inline __attribute__((always_inline)) bool check_literal_string_step(cons
         valid = !closes && first != 0;
         if (valid && first >= 0x80)
         {
-            valid = check_literal_character_unit(part->bytes, span->end, position, &value, c23);
+            valid = check_literal_character_unit_by(part->bytes, span->end, position, &value, c23, extended);
         }
         else
         {
@@ -769,8 +834,9 @@ static inline __attribute__((always_inline)) bool check_literal_string_step(cons
     }
     else
     {
-        valid = first != '"' && check_literal_character_unit(part->bytes, span->end, position, &value, c23);
-        numeric = first == '\\' && begin + 1 < span->end && (part->bytes[begin + 1] == 'x' || (part->bytes[begin + 1] >= '0' && part->bytes[begin + 1] <= '7'));
+        valid = first != '"' && check_literal_character_unit_by(part->bytes, span->end, position, &value, c23, extended);
+        numeric = first == '\\' && begin + 1 < span->end &&
+                  (part->bytes[begin + 1] == 'x' || (part->bytes[begin + 1] >= '0' && part->bytes[begin + 1] <= '7') || (extended && part->bytes[begin + 1] == 'o'));
     }
     if (valid)
     {
@@ -780,14 +846,14 @@ static inline __attribute__((always_inline)) bool check_literal_string_step(cons
 }
 
 // The scalar decoder of one part: the twin and oracle of check_literal_string_part's blocks (--scalar).
-static bool check_literal_string_part_scalar(const CheckStringPart* part, CheckStringEncoding encoding, bool c23, uint8_t* output, uint64_t* length)
+static bool check_literal_string_part_scalar(const CheckStringPart* part, CheckStringEncoding encoding, bool c23, uint8_t* output, uint64_t* length, bool extended)
 {
     const CheckStringSpan span = check_literal_string_span(part);
     bool valid = span.valid;
     uint32_t position = span.begin;
     while (valid && position < span.end)
     {
-        valid = check_literal_string_step(part, &span, encoding, c23, &position, output, length);
+        valid = check_literal_string_step(part, &span, encoding, c23, &position, output, length, extended);
     }
     return valid;
 }
@@ -1008,17 +1074,17 @@ static bool check_literal_string_part(const CheckStringPart* part, CheckStringEn
             position = *length <= UINT64_MAX - 64 ? check_literal_string_blocks(part->bytes, position, span.end, output, length) : position;
             if (position < span.end)
             {
-                valid = check_literal_string_step(part, &span, encoding, c23, &position, output, length);
+                valid = check_literal_string_step(part, &span, encoding, c23, &position, output, length, false);
             }
         }
     }
     else
     {
-        valid = check_literal_string_part_scalar(part, encoding, c23, output, length);
+        valid = check_literal_string_part_scalar(part, encoding, c23, output, length, false);
     }
 #else
     (void)scalar;
-    valid = check_literal_string_part_scalar(part, encoding, c23, output, length);
+    valid = check_literal_string_part_scalar(part, encoding, c23, output, length, false);
 #endif
     return valid;
 }
@@ -1028,7 +1094,7 @@ static bool check_literal_string_part(const CheckStringPart* part, CheckStringEn
 // allocation, so invalid input or insufficient output capacity leaves the caller's arena unchanged. The caller
 // interns the completed array type and owns first-use string identities; this decoder does no interning. Input
 // slices may reside in the arena's existing used prefix, but must not overlap the storage appended by this call.
-static CheckStringLiteral check_literal_strings_by(const CheckStringPart* parts, uint32_t count, bool c23, bool scalar, Arena* output)
+static inline __attribute__((always_inline)) CheckStringLiteral check_literal_strings_decode(const CheckStringPart* parts, uint32_t count, bool c23, bool scalar, bool extended, Arena* output)
 {
     CheckStringLiteral result = { .failed_part = UINT32_MAX };
     CheckStringEncoding encoding = CHECK_STRING_ORDINARY;
@@ -1049,7 +1115,8 @@ static CheckStringLiteral check_literal_strings_by(const CheckStringPart* parts,
     uint64_t length = 0;
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
-        valid = check_literal_string_part(&parts[i], encoding, c23, scalar, NULL, &length);
+        valid = extended ? check_literal_string_part_scalar(&parts[i], encoding, c23, NULL, &length, true) :
+                           check_literal_string_part(&parts[i], encoding, c23, scalar, NULL, &length);
         if (!valid)
         {
             result.failed_part = i;
@@ -1067,7 +1134,8 @@ static CheckStringLiteral check_literal_strings_by(const CheckStringPart* parts,
             uint64_t written = 0;
             for (uint32_t i = 0; valid && i < count; i += 1)
             {
-                valid = check_literal_string_part(&parts[i], encoding, c23, scalar, bytes, &written);
+                valid = extended ? check_literal_string_part_scalar(&parts[i], encoding, c23, bytes, &written, true) :
+                                   check_literal_string_part(&parts[i], encoding, c23, scalar, bytes, &written);
             }
             valid = valid && check_literal_string_unit(0, true, encoding, bytes, &written) && written == length;
             if (valid)
@@ -1086,6 +1154,18 @@ static CheckStringLiteral check_literal_strings_by(const CheckStringPart* parts,
         }
     }
     return result;
+}
+
+static CheckStringLiteral check_literal_strings_by(const CheckStringPart* parts, uint32_t count, bool c23, bool scalar, Arena* output)
+{
+    return check_literal_strings_decode(parts, count, c23, scalar, false, output);
+}
+
+// The extended decoding of a literal the fast one refused (#1447, check_literal_character_unit_by's `extended`): the
+// scalar step's, on the cold path of a refused literal alone.
+static __attribute__((noinline, cold)) CheckStringLiteral check_literal_strings_extended(const CheckStringPart* parts, uint32_t count, bool c23, Arena* output)
+{
+    return check_literal_strings_decode(parts, count, c23, true, true, output);
 }
 
 // check_literal_strings_by with the host's decoder: its blocks on a vector host (#1388).
