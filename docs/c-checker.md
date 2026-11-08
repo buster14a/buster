@@ -3978,12 +3978,59 @@ in the same section, compares its fixtures as above. The asm and control
 errors after a graph's error are compared by place and severity alone: those
 diagnose paths give one generic message, not clang's wording.
 
+Type attributes' errors don't stop the reader either (`check_input_attribute_type`).
+What clang 23 does with each is followed:
+
+- **`vector_size` and `neon_vector_type`.** An error of the element type or
+  the size leaves the type as it was (`HandleVectorSizeAttr`,
+  `HandleNeonVectorTypeAttr`): `int v __attribute__((vector_size(3)))` is an
+  `int`. The vector errors join `check_input_attribute_recoverable`'s list.
+- **`mode`.** An unknown or unsupported mode, a vector mode of an enum and a
+  complex mode of a vector leave the type as it was. A mode of the other kind
+  (`int` with `SF`), or a base of no integer or floating type (a struct, a
+  pointer), is clang's error too, but `AddModeAttr` still installs the mode's
+  type: `float v __attribute__((mode(SI)))` is an `unsigned int`
+  (`check_input_attribute_mode`'s `installed`). Clang installs a type even in
+  an enum (`double` as its integer type), which the type table doesn't hold,
+  so an enum's mode error recovers only where clang installs nothing. The enum
+  is then as without the mode.
+
+In each case the declaration stays valid and the attribute is ignored, as in
+phase 1.
+
+Clang's handlers run for each declarator, so an error shared by several is
+given for each. The subject checks already repeat theirs. Two errors are given
+before them, once per list, and are now repeated
+(`CheckInputAttributeRepeat`):
+
+- an `aligned` or `_Alignas` value's error, which the reader recovers and drops
+  the record for;
+- a specifiers' `mode` error, which the specifiers' type gives.
+
+The list keeps a copy of each report. Its copies share it, since each
+declarator merges the common list with its own. The first declarator that takes
+the list keeps the original. Each later one gives the copy again, completing
+with its own waiting errors (`check_input_attribute_repeats`). Error-free
+lists have no repeats.
+
+`c_check_type_attribute_recovery_driver_test.c` compares its fixtures as above.
+These differences remain:
+
+- An enum's mode of the other kind (`enum __attribute__((mode(SF))) E`) still
+  stops the reader.
+- An enum's vector mode after its body gives its deprecation warning twice (on
+  main too).
+- A shared `_Alignas` on a function declarator gives the value's error, where
+  clang gives its subject's ("only applies to variables and fields"). So does
+  an `_Alignas` of a typedef.
+- `_Alignas`'s non-constant and too-large values still give the generic error
+  and stop the reader.
+
 The later phases are left:
 
 - **Invalid declarations.** Not covered by phase 2:
   - a tag's redefinition (`struct S { … }` twice);
-  - an invalid initializer the reader reports;
-  - a type attribute's error (`vector_size`, `mode`).
+  - an invalid initializer the reader reports.
 
   These still stop the reader.
 - **Units with a graph's or a reader's error.** These, other than a recovered
@@ -3993,8 +4040,6 @@ The later phases are left:
   duplicate case has no "previous case" note on either path.
 - **Lanes.** Bodies don't carry their recovered reports; they fall back to
   source order instead.
-- **Shared `_Alignas`.** An `_Alignas` shared by several declarators gives its
-  error once, where clang gives it for each.
 - **Unused `extern` locals.** A block's unused `extern` declaration gets no
   warning, where clang gives one (on main too).
 
