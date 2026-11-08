@@ -3992,6 +3992,13 @@ do:
   implicit value restarts at 0 of `int` or of the fixed type
   (`CheckTagFrame.restart`), and an enum left with no enumerator is
   complete as `unsigned int`.
+- **An enumerator whose name is another kind of the scope's** (an object, a
+  typedef, a parameter, a local) gives clang's "redefinition of 'K'", with
+  "previous definition is here" at the earlier declaration, and is dropped the
+  same way. (A name declared after an enumerator is the redeclaration's
+  "redefinition of 'K' as different kind of symbol" instead.) Clang's
+  `-Wvisibility` of a tag declared in a prototype, which the checker doesn't
+  give at all, is left out of its fixtures.
 
 Phase 3 covers statements after an error:
 
