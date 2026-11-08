@@ -484,7 +484,7 @@ static void cc_compat_show_includes(CCCompatibilityTest* test)
     static const char* const actions[][2] = {
         { "-E", "-P" },
         { "-fsyntax-only", NULL },
-        { "-c", "-ooutput1380.o" },
+        { "-c", NULL },
     };
     for (uint32_t source = 0; written && source < 3; source += 1)
     {
@@ -492,11 +492,16 @@ static void cc_compat_show_includes(CCCompatibilityTest* test)
         {
             for (uint32_t route = 0; route < 3; route += 1)
             {
-                const char* arguments[16] = { "-std=gnu17", "-fno-caret-diagnostics", "-fno-diagnostics-show-option", "-H", actions[action][0] };
-                uint32_t used = 5;
+                const char* arguments[16] = { "-std=gnu17", "-H", actions[action][0] };
+                uint32_t used = 3;
                 if (actions[action][1] != NULL)
                 {
                     arguments[used++] = actions[action][1];
+                }
+                if (action == 2)
+                {
+                    arguments[used++] = "-o";
+                    arguments[used++] = "output1380.o";
                 }
                 if (source == 1)
                 {
@@ -504,36 +509,44 @@ static void cc_compat_show_includes(CCCompatibilityTest* test)
                     arguments[used++] = "show1380-forced.h";
                 }
                 arguments[used++] = source == 2 ? "show1380-warn.c" : "show1380.c";
+                arguments[used] = NULL;
+                CCCompatibilityRun clang = cc_compat_run(test, test->clang, NULL, arguments);
                 if (route == 2)
                 {
                     arguments[used++] = "--scalar";
+                    arguments[used] = NULL;
                 }
-                arguments[used] = NULL;
-                CCCompatibilityRun clang = cc_compat_run(test, test->clang, NULL, arguments);
                 CCCompatibilityRun ours = cc_compat_run(test, route == 0 ? test->clang : test->compiler, NULL, arguments);
-                // Away from -E, our diagnostics follow the header lines: compare the lines alone, in order.
+                // The header lines, and by -E the #warning's place among them as a line "warning"; the warning's
+                // own text (its option, its caret, the summary) is the diagnostics' tests'. Away from -E, our
+                // diagnostics follow the header lines: compare the lines alone.
                 bool good = clang.status == 0 && ours.status == 0 && clang.errors != NULL && ours.errors != NULL;
-                if (good && source == 2 && action != 0)
+                char* lines[2] = { clang.errors, ours.errors };
+                for (uint32_t side = 0; good && side < 2; side += 1)
                 {
-                    char* lines[2] = { clang.errors, ours.errors };
-                    for (uint32_t side = 0; side < 2; side += 1)
+                    char* write = lines[side];
+                    for (const char* read = lines[side]; *read != 0;)
                     {
-                        char* write = lines[side];
-                        for (const char* read = lines[side]; *read != 0;)
+                        const char* end = strchr(read, '\n');
+                        const size_t length = end != NULL ? (size_t)(end - read) + 1 : strlen(read);
+                        const char* warning = strstr(read, "warning: show1380");
+                        const size_t dots = strspn(read, ".");
+                        if (dots != 0 && read[dots] == ' ')
                         {
-                            const char* end = strchr(read, '\n');
-                            const size_t length = end != NULL ? (size_t)(end - read) + 1 : strlen(read);
-                            if (read[0] == '.')
-                            {
-                                memmove(write, read, length);
-                                write += length;
-                            }
-                            read += length;
+                            memmove(write, read, length);
+                            write += length;
                         }
-                        *write = 0;
+                        else if (action == 0 && warning != NULL && (end == NULL || warning < end))
+                        {
+                            memcpy(write, "warning\n", 8);
+                            write += 8;
+                        }
+                        read += length;
                     }
+                    *write = 0;
                 }
-                good = good && strcmp(clang.errors, ours.errors) == 0 && strstr(ours.errors, "show1380") != NULL;
+                const bool interleaved = source != 2 || action != 0 || strstr(ours.errors, "warning\n") != NULL;
+                good = good && interleaved && strcmp(clang.errors, ours.errors) == 0 && strstr(ours.errors, "show1380") != NULL;
                 char description[256];
                 snprintf(description, sizeof(description), "-H shows clang's headers: source %u action %s route %u", source, actions[action][0], route);
                 cc_compat_expect(test, good, description);
