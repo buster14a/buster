@@ -20,6 +20,9 @@ struct CheckInitializers
     uint32_t warning_count;
     CheckInitStatus status;
     TypeId failed_type;
+    // A failed conversion's source node plus one and its declaration (CheckInitializer.failed_source, #147).
+    uint32_t failed_source;
+    uint32_t failed_declaration;
     uint32_t token;
     uint32_t completion;
 };
@@ -263,6 +266,9 @@ struct CheckInitDiagnostic
 {
     CheckInitStatus status;
     TypeId failed_type;
+    // A failed conversion's source node plus one and its declaration (CheckInitializer.failed_source, #147).
+    uint32_t failed_source;
+    uint32_t failed_declaration;
     uint32_t token;
     uint32_t completion;
     uint32_t warning_count;
@@ -275,9 +281,8 @@ struct CheckInitDiagnostic
 // reports next, at the initializer (#147): an object's value read, or an object's address converted to an integer
 // narrower than a pointer (an absolute address, `(int *)5`'s, stays a constant). Another failed conversion, of a record or a
 // floating value, is the initializer's only error.
-static bool check_init_converted_nonconstant(const CheckInput* input, const CheckStream* stream, const TypeTable* types, TypeId target, uint32_t initialize)
+static bool check_init_value_nonconstant(const CheckStream* stream, const TypeTable* types, TypeId target, uint32_t source)
 {
-    const uint32_t source = input->graph.operand0[initialize];
     const bool known = source < stream->count && stream->diagnostics[source] == CHECK_DIAG_NONE;
     const CheckValue value = known ? check_stream_value(stream, source) : (CheckValue){ 0 };
     const uint8_t to = check_action_kind(types, type_conversion_operand(types, target));
@@ -285,10 +290,18 @@ static bool check_init_converted_nonconstant(const CheckInput* input, const Chec
     const bool designator = type_kind_is_array(from) || from == BUSTER_TYPE_KIND_FUNCTION;
     const bool pointer = from == BUSTER_TYPE_KIND_POINTER || designator;
     const bool integer = from == BUSTER_TYPE_KIND_INTEGER || from == BUSTER_TYPE_KIND_ENUM || from == BUSTER_TYPE_KIND_BIT_INT;
-    const bool converted = (to == BUSTER_TYPE_KIND_INTEGER && pointer) || (to == BUSTER_TYPE_KIND_POINTER && (pointer || integer));
+    // (An enumeration's and a _BitInt's targets are integers too, as check_driver_conversion_kind takes them.)
+    const bool to_integer = to == BUSTER_TYPE_KIND_INTEGER || to == BUSTER_TYPE_KIND_ENUM || to == BUSTER_TYPE_KIND_BIT_INT;
+    const bool converted = (to_integer && pointer) || (to == BUSTER_TYPE_KIND_POINTER && (pointer || integer));
     const bool read = value.category == CHECK_LVALUE && !designator;
-    const bool narrowed = to == BUSTER_TYPE_KIND_INTEGER && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && type_size(types, target) < 8;
+    const bool narrowed = to_integer && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && type_size(types, target) < 8;
     return converted && (read || !check_value_static_initializer(&value, false) || narrowed);
+}
+
+// check_init_value_nonconstant of a scalar initializer's INITIALIZE `initialize`, its value its operand.
+static bool check_init_converted_nonconstant(const CheckInput* input, const CheckStream* stream, const TypeTable* types, TypeId target, uint32_t initialize)
+{
+    return check_init_value_nonconstant(stream, types, target, input->graph.operand0[initialize]);
 }
 
 // Diagnose complete roots before before_token (exclusive). A report elsewhere in the unit no longer cuts the
@@ -448,6 +461,8 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
             {
                 result->status = plan.status;
                 result->failed_type = plan.failed_type;
+                result->failed_source = plan.failed_source;
+                result->failed_declaration = declaration;
                 result->token = plan.failed_token;
                 result->completion = end;
             }
@@ -598,6 +613,8 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
         {
             result->status = plan->status;
             result->failed_type = plan->failed_type;
+            result->failed_source = plan->failed_source;
+            result->failed_declaration = token;
             result->token = plan->failed_token;
             result->completion = check_sparse_get(input->initializer_ends, token);
 
@@ -614,10 +631,13 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
     {
         const CheckInitStatus status = result->status;
         const TypeId failed_type = result->failed_type;
+        const uint32_t failed_source = result->failed_source;
+        const uint32_t failed_declaration = result->failed_declaration;
         const uint32_t token = result->token;
         const uint32_t completion = result->completion;
         arena_pop_to(output, output_mark);
-        *result = (CheckInitializers){ .status = status, .failed_type = failed_type, .token = token, .completion = completion };
+        *result = (CheckInitializers){ .status = status, .failed_type = failed_type, .failed_source = failed_source, .failed_declaration = failed_declaration,
+                                       .token = token, .completion = completion };
         if (semantic != NULL)
         {
             if (semantic->arena != NULL)

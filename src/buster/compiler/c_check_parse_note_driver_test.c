@@ -19,6 +19,8 @@ static void check_test_driver_parse_notes(CheckTest* test, const char* clang, co
         "int y(int (*p)(int x); \n",
         "int v(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n); int r = __builtin_va_arg(ap, int; return r; }\n",
         "void w(void) __attribute__((noreturn);\n",
+        "int x; void f(void) { __attribute__(()) x = 1; }\n",
+        "void f(int x) { __attribute__((unused)) x; }\n",
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);
