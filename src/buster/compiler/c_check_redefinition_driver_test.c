@@ -33,6 +33,8 @@ static void check_test_driver_redefinitions(CheckTest* test, const char* clang, 
         "void f(void) { extern int y; }\nvoid g(void) { extern double y; }\n",
         "int a;\nextern double a;\n",
         "extern int b;\nextern double b;\n",
+        // Its note is the entity's latest earlier declaration, another block's out of scope.
+        "int y;\nvoid f(void) { extern int y; }\nvoid g(void) { extern double y; }\n",
     };
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/redefinition.c", directory);

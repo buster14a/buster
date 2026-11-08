@@ -98,6 +98,20 @@ static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t 
                                  (object && check_input_bit(reader->declaration_bits, previous, BUSTER_CHECK_BITS_TENTATIVE)) ||
                                  (object && earlier_linkage == 0);
             note_kind = defined ? CHECK_INPUT_NOTE_PREVIOUS_DEFINITION : CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
+            // A type conflict of an entity with linkage notes its latest earlier declaration, as clang's redeclaration chain
+            // does, though another block's, out of scope here (`int y; void f(void) { extern int y; }` then g's `extern
+            // double y;`, review on #1453): the entity's linked declaration (CheckInputReader.linked_declarations), which a
+            // definition keeps.
+            const uint32_t name = reader->parser->tokens.names[token];
+            const uint32_t latest = reader->linked_declarations != NULL && reader->linked_declarations[name] != 0 ? reader->linked_declarations[name] - 1 : BUSTER_CHECK_NONE;
+            if ((detail == CHECK_REDECLARATION_OBJECT_TYPE || detail == CHECK_REDECLARATION_FUNCTION_TYPE) && linkage != 0 && earlier_linkage != 0 &&
+                latest < token && latest != previous && reader->declaration_kinds[latest] == kind && check_input_linkage(reader->declaration_bits, latest) != 0)
+            {
+                noted = latest;
+                note_kind = check_input_bit(reader->declaration_bits, latest, BUSTER_CHECK_BITS_DEFINED) ||
+                            (object && check_input_bit(reader->declaration_bits, latest, BUSTER_CHECK_BITS_TENTATIVE)) ?
+                            CHECK_INPUT_NOTE_PREVIOUS_DEFINITION : CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
+            }
         }
     }
     // (A function's other explicit calling convention reports CHECK_INPUT_CONVENTION_CHANGE instead, with its own detail
@@ -113,7 +127,7 @@ static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t 
         report->note_kind = note_kind;
         report->type = reader->declared_types[token];
         report->type_spelling = check_input_typedef_spelling(input, reader->parser, token);
-        report->value = reader->declared_types[previous];
+        report->value = reader->declared_types[noted < count ? noted : previous];
     }
 }
 
