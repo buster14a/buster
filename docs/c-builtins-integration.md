@@ -1177,7 +1177,7 @@ them) are its direct forms. For each object it reports the families' direct
 forms and helper calls, its executable bytes, and Tier 1's spill and call stores
 and loads (the save and reload traffic: Tier 0 saves the values live across
 every call); every build's output must be the first's; then it times each
-source's `-c` compile and each program's run in rotating rounds, as
+source's `-c` compile and each program's run in a Williams design's order, as
 `measure-tier1-programs` times its programs. The 9700X job runs it where the
 direct forms' admission, the helpers' planning or the measurement changes (the
 `helpers` gate), and on the daily and dispatched runs.

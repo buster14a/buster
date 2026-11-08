@@ -65,6 +65,11 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
     return bodies != 0 && ready != 0;
 }
 
+static void check_tier1_inline_renew(CheckTier1Inline* table)
+{
+    table->generation = __atomic_add_fetch(&check_tier1_inline_generations, 1, __ATOMIC_RELAXED);
+}
+
 // Body `b`'s target (check_program_emit_tier1's).
 static const X86Target* check_tier1_inline_target(const CheckProgram* program, uint32_t b)
 {
