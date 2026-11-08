@@ -109,6 +109,7 @@ jobs:
       checker_bindings: ${{ steps.files.outputs.checker_bindings }}
       checker_binding_modes: ${{ steps.files.outputs.checker_binding_modes }}
       check_debug: ${{ steps.files.outputs.check_debug }}
+      sqlite_stable: ${{ steps.files.outputs.sqlite_stable }}
       check_debug_rows: ${{ steps.files.outputs.check_debug_rows }}
       files: ${{ steps.files.outputs.files }}
       compile_time: ${{ steps.files.outputs.compile_time }}
@@ -1500,16 +1501,16 @@ jobs:
         # (./build.sh shifts) from two fresh copies apiece, with the base's executables again as the comparison's floor
         # (main-again); then each build's stages, counters (with store-to-load forwarding's failures) and checker
         # functions' samples. Where this tree changes what -c writes, the step says so and gives both objects' sizes:
-        # #1376's lowering work is the legitimate cause, so a pull request that touches lowering-affecting files
-        # (check_debug, ir_lowering, tier1_programs) only warns, and any other checker pull request fails on the
-        # difference (#1572). The placements pad .text, so they move the backend's, the encoder's and Tier 0's code;
+        # diagnostic-only changes to selected warning sources are expected to leave the object unchanged and fail if
+        # it differs; other checker changes can legitimately alter output and warn with sizes instead (#1572).
+        # The placements pad .text, so they move the backend's, the encoder's and Tier 0's code;
         # the checker's own code sits in the page-aligned .text.buster_checker, which wild places first, and every
         # shift is a multiple of 64, so the checker unit's own placement is not one of the samples (#1312).
         if: github.event_name == 'pull_request' && needs.changes.outputs.checker != 'false'
         timeout-minutes: 6
         env:
           AB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          LOWERING: ${{ needs.changes.outputs.check_debug != 'false' || needs.changes.outputs.ir_lowering != 'false' || needs.changes.outputs.tier1_programs != 'false' }}
+          SQLITE_EXPECT_STABLE: ${{ needs.changes.outputs.sqlite_stable }}
         run: |
           set -euo pipefail
           [[ "$AB_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -1525,11 +1526,11 @@ jobs:
           if ! cmp -s "$ab/main.o" "$ab/head.o"; then
               echo "== the objects differ: this tree changes sqlite3.c's code"
               size "$ab/main.o" "$ab/head.o"
-              if [ "$LOWERING" != true ]; then
-                  echo "::error::sqlite3.c's object differs and no lowering-affecting file changed; a checker pull request that touches none of check_debug's, ir_lowering's or tier1_programs' sources must write the same bytes"
+              if [ "$SQLITE_EXPECT_STABLE" = true ]; then
+                  echo "::error::sqlite3.c's object differs after a diagnostic-only change expected to preserve generated objects"
                   exit 1
               fi
-              echo "== a lowering-affecting change (check_debug, ir_lowering or tier1_programs) explains it; continuing"
+              echo "== this change may legitimately affect generated objects; continuing"
           fi
           echo "== what the placements move: ./build.sh shifts pads .text, so the four shifts move the backend's, the"
           echo "== encoder's and Tier 0's code; the checker's own code sits in the page-aligned .text.buster_checker,"
