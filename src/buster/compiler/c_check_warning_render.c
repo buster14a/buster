@@ -414,9 +414,19 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
     String8 result = { 0 };
     if (type != 0 && type_is_valid(types, type))
     {
+        // Builtin scalar types carry no tag or typedef name when there is no source spelling. Printing one
+        // needs neither the interned-name columns nor the unit-wide anonymous-tag map.
+        const uint32_t index = type_index(type);
+        if (spelling == 0 && index >= BUSTER_TYPE_CODE_BOOL && index <= BUSTER_TYPE_CODE_FLOAT128)
+        {
+            const uint32_t options = pp->options.language.standard >= 2023 ? BUSTER_TYPE_PRINT_C23 : 0;
+            const String8 text = type_print(types, scratch, type, (String8){ 0 }, NULL, options);
+            const char* quoted = text.length != 0 ? check_warning_text(scratch, "'%.*s'", (int)text.length, text.pointer) : NULL;
+            result = quoted != NULL ? (String8){ .pointer = (char*)quoted, .length = (uint64_t)strlen(quoted) } : (String8){ 0 };
+        }
         // Only diagnostic rendering needs these spelling arrays; clean checking retains no identifier-sized view.
         // The pass's columns live in `spell`, built on the pass's first rendered type below its marks (#992).
-        if (check_driver_spelling_ready(parser, pp, input, types, spell, scratch))
+        else if (check_driver_spelling_ready(parser, pp, input, types, spell, scratch))
         {
             TypeNames names = {
                 .bytes = spell->bytes,
@@ -632,6 +642,15 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
     const char* result = event->id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[event->id].message : NULL;
     switch (event->kind)
     {
+        case CHECK_WARNING_EVENT_DUPLICATE_DECLSPEC:
+            result = check_warning_text(scratch, "duplicate '%.*s' declaration specifier", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_NORETURN_RETURN:
+            result = check_warning_text(scratch, "function '%.*s' declared 'noreturn' should not return", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_NORETURN_FALLS:
+            result = "function declared 'noreturn' should not return";
+            break;
         case CHECK_WARNING_EVENT_PRAGMA:
         {
             const CheckInputSymbolPragma* record = check_input_symbol_warning(input, event);
@@ -1237,6 +1256,9 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
     const char* result = NULL;
     switch (note->kind)
     {
+        case CHECK_WARNING_NOTE_PRIVATE_EXTERN:
+            result = "use __attribute__((visibility(\"hidden\"))) attribute instead";
+            break;
         case CHECK_WARNING_NOTE_PRIOR_INITIALIZATION:
             result = note->payload.data != 0 ? "previous initialization with side effects is here (side effects will not occur at run time)" :
                                               "previous initialization is here";
