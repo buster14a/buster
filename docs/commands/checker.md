@@ -84,7 +84,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   `-flazy-system-headers`, since the others run the same either way, and
   `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
   `CheckDriverPart`; `--cpu-dispatch-only` runs the `cpu_specific` and
-  `cpu_dispatch` section alone, #1447). Its library-builtin comparisons are pinned to Clang
+  `cpu_dispatch` section alone, #1447; `--semantic-recovery-only` runs
+  `c_check_semantic_recovery_driver_test.c` alone, the whole output and status
+  of semantic error recovery's fixtures against clang's on the vector, scalar
+  and two-lane deferred paths, and `-c`'s refusal of each: `docs/c-checker.md`'s
+  "Semantic error recovery", #1447). Its library-builtin comparisons are pinned to Clang
   23.1.4's official build, CI's reference: it compares `clang --version` with
   it, prints `expected clang 23.1.4, found …` when another build is found, and
   skips only the plain names that build's vendor is known to classify
