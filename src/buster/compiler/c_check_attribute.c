@@ -3482,6 +3482,114 @@ static uint32_t check_input_attribute_standard_previous(CheckInputReader* reader
     return result;
 }
 
+// One attribute's handler's errors, which phase 1 of #1447's semantic recovery can carry past (check_input_attribute_recover):
+// the attribute, the unit's report count and its declaration's first attribute error before the handler ran.
+typedef struct CheckInputAttributeRecovery CheckInputAttributeRecovery;
+struct CheckInputAttributeRecovery
+{
+    CheckInputAttribute* attribute;
+    uint32_t reports;
+    CheckInputAttributeError error;
+    uint32_t error_first;
+    uint32_t error_end;
+};
+
+// Whether an attribute's error is one clang's handleDeclAttribute gives and then returns from without adding the attribute,
+// which leaves the declaration valid: its arguments' (their values, counts, strings and parameter indices), its subject's
+// and a mutual exclusion's. Others stop the reader as before: an undeclared name's, a pragma's, conflicting calling
+// conventions' (a type's, which clang makes invalid) and a list's place (its parser's).
+static bool check_input_attribute_recoverable(const CheckInputReport* report)
+{
+    const CheckInputMessage message = report->message;
+    const bool attribute = message == CHECK_INPUT_ATTRIBUTE_ARGUMENT || message == CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT ||
+                           message == CHECK_INPUT_ATTRIBUTE_SUBJECT || message == CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS ||
+                           message == CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS || message == CHECK_INPUT_ATTRIBUTE_EXCLUSION ||
+                           message == CHECK_INPUT_ATTRIBUTE_ANNOTATE_STRING || message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT ||
+                           message == CHECK_INPUT_ATTRIBUTE_INT_OR_BOOL || message == CHECK_INPUT_ATTRIBUTE_TYPES;
+    return attribute && report->pragma == 0;
+}
+
+// Whether the errors an attribute's reading or handler gave since `recovery` moved past (#1447): each is one clang gives and
+// then drops the attribute for (check_input_attribute_recoverable), and they move to the unit's recovered reports
+// (check_input_recover_reports), each kept at its token where another is (CheckInputReport.repeated: each declarator's run of
+// a shared record's handler is clang's error again). The declaration's first attribute error is as it was before them, so
+// that a later attribute's error is reported too, as clang's is. With `completion`, a subject check's boundary, they take
+// it as the subject checks' reports do (check_input_attribute_subjects).
+static bool check_input_attribute_errors_recover(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttributeRecovery* recovery,
+                                                 uint32_t completion)
+{
+    CheckInput* input = reader->output;
+    bool recoverable = input->report_count > recovery->reports && !input->resource;
+    for (uint32_t r = recovery->reports; recoverable && r < input->report_count; r += 1)
+    {
+        recoverable = check_input_attribute_recoverable(input->reports + r);
+    }
+    for (uint32_t r = recovery->reports; recoverable && r < input->report_count; r += 1)
+    {
+        CheckInputReport* report = input->reports + r;
+        if (completion != 0)
+        {
+            report->suborder = (uint64_t)(report->sort != 0 ? report->sort : report->completion != 0 ? report->completion : report->token) + 1;
+            report->completion = report->completion < completion ? completion : report->completion;
+        }
+        report->repeated = true;
+        // Without a boundary, it waits for its declarator's (CheckInputReport.pending).
+        report->pending = completion == 0;
+    }
+    const bool recovered = recoverable && check_input_recover_reports(reader, recovery->reports);
+    if (recovered)
+    {
+        attributes->error = recovery->error;
+        attributes->error_first = recovery->error_first;
+        attributes->error_end = recovery->error_end;
+    }
+    return recovered;
+}
+
+// The state check_input_attribute_errors_recover restores, before an attribute's reading or handler (`attribute`, NULL for
+// a reading's).
+static CheckInputAttributeRecovery check_input_attribute_recovery(const CheckInputReader* reader, const CheckInputAttributes* attributes, CheckInputAttribute* attribute)
+{
+    return (CheckInputAttributeRecovery){
+        .attribute = attribute,
+        .reports = reader->output->report_count,
+        .error = attributes->error,
+        .error_first = attributes->error_first,
+        .error_end = attributes->error_end,
+    };
+}
+
+// After an attribute's handler (`recovery->attribute`, none before the first) has run, whether the declaration's attributes
+// are still valid (`valid`, as it left them): clang drops an attribute whose handler gives an error and goes on, so the
+// declaration's later attributes, the declaration itself and the unit's later ones are checked as without it (#1447). The
+// attribute's errors move past (check_input_attribute_errors_recover), with `completion` (the subject checks' boundary, or
+// 0), and the attribute is ignored: by the subject checks' handlers (`subject`) as their own ignored ones are, which they
+// check again for a shared record's next declarator; by the other passes for good, which leaves it to the calls' checks
+// too (a format's) while those passes, which don't read the mark, give its error again for each declarator, as clang does.
+static bool check_input_attribute_recover(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttributeRecovery* recovery,
+                                          uint32_t completion, bool subject, bool valid)
+{
+    const bool recovered = !valid && recovery->attribute != NULL && check_input_attribute_errors_recover(reader, attributes, recovery, completion);
+    if (recovered)
+    {
+        recovery->attribute->ignored = true;
+        recovery->attribute->subject_ignored |= subject;
+    }
+    return valid || recovered;
+}
+
+// The token after a GNU or C23 list's item that starts at `item`: its next comma at the list's level, or the list's end.
+static uint32_t check_input_attribute_item_end(const Parser* parser, uint32_t item, uint32_t list_end)
+{
+    uint32_t t = item;
+    while (t < list_end && parser->tokens.kinds[t] != PARSE_KIND_COMMA)
+    {
+        const uint32_t close = parser->tokens.kinds[t] == PARSE_KIND_L_PAREN ? parser->tree.parents[t] : t;
+        t = close > t && close < list_end ? close + 1 : t + 1;
+    }
+    return t;
+}
+
 static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t* cursor, uint32_t end, bool standard,
                                             uint32_t place, bool definition)
 {
@@ -4126,6 +4234,7 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
         const uint32_t name = parser->tokens.names[i];
         const bool standard = kind == PARSE_KIND_L_SQUARE;
         const uint32_t place = standard ? check_input_standard_place(parser, i) : BUSTER_CHECK_PLACE_DECLARATION;
+        bool recovered = false;
         if (kind == PARSE_KIND_ATTRIBUTE || standard)
         {
             const uint32_t open = standard ? i : i + 1;
@@ -4169,7 +4278,21 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
                 }
                 else
                 {
+                    // An item whose reading gives an error clang drops it for is left out, and the list goes on (#1447).
+                    const uint32_t item = i;
+                    const CheckInputAttributeRecovery recovery = check_input_attribute_recovery(reader, attributes, NULL);
+                    const uint32_t moved = reader->output->recovered_count;
                     valid = check_input_attribute_read_item(reader, attributes, &i, list_end, standard, place, definition);
+                    if (!valid && check_input_attribute_errors_recover(reader, attributes, &recovery, 0))
+                    {
+                        // Its parser's error, at its place: no Sema completion waits for it.
+                        for (uint32_t r = moved; r < reader->output->recovered_count; r += 1)
+                        {
+                            reader->output->recovered_reports[r].pending = false;
+                        }
+                        i = check_input_attribute_item_end(parser, item, list_end);
+                        valid = true;
+                    }
                 }
             }
             i = valid ? close + 1 : i;
@@ -4199,7 +4322,12 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
                 attribute.argument_first = i + 1;
                 attribute.argument_end = close;
                 attribute.end = valid ? close + 1 : i;
+                const CheckInputAttributeRecovery recovery = check_input_attribute_recovery(reader, attributes, NULL);
+                const bool read = valid;
                 valid = valid && check_input_attribute_validate(reader, attributes, &attribute, 1, 1);
+                // An alignment specifier or an asm label whose argument gives an error clang drops it for is left out (#1447).
+                recovered = read && !valid && check_input_attribute_errors_recover(reader, attributes, &recovery, 0);
+                valid |= recovered;
                 i = attribute.end;
             }
             else if (kind == PARSE_KIND_CALLING_CONVENTION)
@@ -4220,11 +4348,11 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
                     check_input_duplicate_specifier(reader, first, C_NAME_NORETURN);
                 }
             }
-            valid = valid && check_input_attribute_append(reader, attributes, attribute);
+            valid = valid && (recovered || check_input_attribute_append(reader, attributes, attribute));
         }
         if (valid)
         {
-            attributes->has_alignas |= kind == PARSE_KIND_ALIGNAS;
+            attributes->has_alignas |= kind == PARSE_KIND_ALIGNAS && !recovered;
             memset(reader->ignored + first, 1, i - first);
         }
         else if (attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
@@ -7094,7 +7222,32 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
     uint32_t ordinary_layout = UINT32_MAX;
     bool valid = true;
     const CheckInputUnknownAttribute* unknown = attributes != NULL ? attributes->unknown_begin : NULL;
-    for (uint32_t i = 0; valid && attributes != NULL && (i < attributes->count || unknown != NULL);)
+    // The waiting recovered errors of this declarator's attributes, which Sema gives where it processes them (#1447,
+    // CheckInputReport.pending), complete at its last token: after the parser's errors in it, before the next token's (a
+    // missing `;`'s, check_prefix_resume). Only those within the declaration's tokens: a parameter's checks, which come
+    // first, leave its function's to the function's. Those of a declaration with no subject check keep waiting, and so
+    // their places; the cursor passes the ones no longer waiting.
+    CheckInput* output = reader->output;
+    const uint32_t last = completion != 0 ? completion - 1 : 0;
+    for (uint32_t r = reader->recovered_pending; r < output->recovered_count; r += 1)
+    {
+        CheckInputReport* report = output->recovered_reports + r;
+        if (report->pending && report->token >= begin && report->token < last)
+        {
+            report->suborder = (uint64_t)(report->sort != 0 ? report->sort : report->completion != 0 ? report->completion : report->token) + 1;
+            report->completion = report->completion < last ? last : report->completion;
+            report->pending = false;
+        }
+    }
+    while (reader->recovered_pending < output->recovered_count && !output->recovered_reports[reader->recovered_pending].pending)
+    {
+        reader->recovered_pending += 1;
+    }
+    CheckInputAttributeRecovery recovery = { 0 };
+    // The condition first takes the last attribute's errors past, where it can (#1447): the body leaves an attribute at
+    // several `continue`s.
+    for (uint32_t i = 0; (valid = check_input_attribute_recover(reader, attributes, &recovery, completion, true, valid)) && attributes != NULL &&
+                         (i < attributes->count || unknown != NULL);)
     {
         if (unknown != NULL && (i == attributes->count || unknown->first < attributes->records[i].first))
         {
@@ -7110,6 +7263,7 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             continue;
         }
         CheckInputAttribute* attribute = attributes->records + i++;
+        recovery = check_input_attribute_recovery(reader, attributes, attribute);
         if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->convention_count != BUSTER_CHECK_COUNT_NONE && !attribute->subject_ignored &&
             check_input_attribute_function_wrapped(reader->types, type))
         {
@@ -7551,9 +7705,12 @@ static bool check_input_attribute_definition(CheckInputReader* reader, CheckInpu
     bool defining = subject.function ? subject.function_definition : subject.variable_definition;
     bool weakref = false;
     bool targeted = false;
-    for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
+    CheckInputAttributeRecovery recovery = { 0 };
+    // The condition first takes the last attribute's errors past, where it can (#1447).
+    for (uint32_t i = 0; (valid = check_input_attribute_recover(reader, attributes, &recovery, 0, false, valid)) && attributes != 0 && i < attributes->count; i += 1)
     {
         CheckInputAttribute* attribute = &attributes->records[i];
+        recovery = check_input_attribute_recovery(reader, attributes, attribute);
         // These spellings are standard C23 attributes, not GNU attributes clang's older C modes know: it warns and
         // ignores them, so they don't conflict with multiversioning (#839's review).
         if (!attribute->ignored)
@@ -7961,9 +8118,12 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
     const TypeId* parameters = is_function ? type_parameters(reader->types, function, &count) : 0;
     const TypeId result = is_function ? type_return(reader->types, function) : 0;
     const bool prototyped = is_function && (reader->types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
-    for (uint32_t i = 0; valid && is_function && i < attributes->count; i += 1)
+    CheckInputAttributeRecovery recovery = { 0 };
+    // The condition first takes the last attribute's errors past, where it can (#1447).
+    for (uint32_t i = 0; (valid = check_input_attribute_recover(reader, attributes, &recovery, 0, false, valid)) && is_function && i < attributes->count; i += 1)
     {
         CheckInputAttribute* attribute = &attributes->records[i];
+        recovery = check_input_attribute_recovery(reader, attributes, attribute);
         // One whose subjects are prototyped functions alone (format and the like) on a K&R function's type, which clang
         // ignores with its subject's warning before reading its arguments (check_input_attribute_subjects).
         const bool scoped = attribute->standard && attribute->first != attribute->name_token;

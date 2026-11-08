@@ -114,10 +114,18 @@ static void check_init_test_diagnostic_source(CheckTest* test, const char* sourc
                                        warning_tokens[0] == 0 && output.length == 64 && scratch.length == 64,
                                   "warning sink exhaustion restores its published count and both arena prefixes after partial collection");
             }
+            // A unit whose only reports are recovered ones (#1447, a dropped conflicting redeclaration's) is checked as a valid
+            // one, which the driver never emits: its initializers' own result, the diagnosed error's or none; every other
+            // erroneous unit is refused.
             CheckInitializers rejected = { 0 };
-            check_test_expect(test, !check_initializers_run(&rejected, &input, &stream, &parser, &types.table, &output, &scratch) &&
-                                   rejected.status == CHECK_INIT_CHECK_FAILED && rejected.plans == 0 && rejected.count == 0 && output.length == 64 && scratch.length == 64,
-                              "the ordinary initializer publisher still rejects every erroneous unit");
+            const bool published = check_initializers_run(&rejected, &input, &stream, &parser, &types.table, &output, &scratch);
+            check_test_expect(test, input.recovered_valid && stream.report_count == 0 ? published != expected && rejected.status == (expected ? CHECK_INIT_INVALID : CHECK_INIT_OK) :
+                                   !published && rejected.status == CHECK_INIT_CHECK_FAILED && rejected.plans == 0 && rejected.count == 0 && output.length == 64 &&
+                                   scratch.length == 64,
+                              "the ordinary initializer publisher still rejects every erroneous unit but a recovered one");
+            // (A published plan's arenas go back to the prefixes the checks below expect.)
+            arena_pop_to(&output, 64);
+            arena_pop_to(&scratch, 64);
             if (expected && declaration != BUSTER_CHECK_NONE)
             {
                 CheckInitDiagnostic limited = { 0 };

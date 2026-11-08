@@ -800,6 +800,9 @@ struct CheckEmitBody
     uint64_t length;
     CheckDebugValueSpan* debug_spans;
     uint32_t debug_span_count;
+    CheckDebugLocation* debug_locations;
+    uint32_t* debug_location_first;
+    uint32_t debug_location_count;
     uint32_t* fixup_ends;
     uint32_t* label_offsets;
     uint32_t* asm_offsets;
@@ -1166,6 +1169,11 @@ static __attribute__((noinline, cold)) void check_program_emit_patchable(CheckEm
         body->debug_spans[s].begin += body->debug_spans[s].begin != 0 ? entry : 0;
         body->debug_spans[s].end += entry;
     }
+    for (uint32_t r = 0; run->sources && r < body->debug_location_count; r += 1)
+    {
+        body->debug_locations[r].begin += entry;
+        body->debug_locations[r].end += entry;
+    }
     if (run->unwind)
     {
         UnwindFunction* frame = &run->frames[b];
@@ -1181,6 +1189,67 @@ static __attribute__((noinline, cold)) void check_program_emit_patchable(CheckEm
     }
     body->sled = sled;
     body->prefix = prefix;
+}
+
+// Resolve optional optimized locations after branch sizing, then group by stable source local in one count/place/fill
+// pass. The input remains record-relative; only these retained bytes acquire patchable-entry adjustments. All arrays
+// are lane-owned and disjoint, and their counts/pointers remain unchanged across these bounded scans.
+static CheckProgramStatus check_program_emit_locations(CheckEmitBody* body, const EmittedCode* code, uint32_t locals, const uint32_t* offsets, Arena* scratch)
+{
+    const EmittedLocalRange* ranges = code->local_ranges;
+    const uint32_t count = code->local_range_count;
+    CheckProgramStatus status = count == 0 || ranges != NULL ? CHECK_PROGRAM_OK : CHECK_PROGRAM_BACKEND;
+    if (status == CHECK_PROGRAM_OK && count != 0)
+    {
+        uint32_t* first = body->debug_location_first;
+        CheckDebugLocation* locations = body->debug_locations;
+        uint32_t* next = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)locals + 1);
+        status = first != NULL && locations != NULL && next != NULL ? CHECK_PROGRAM_OK : CHECK_PROGRAM_RESOURCE;
+        if (status == CHECK_PROGRAM_OK)
+        {
+            memset(first, 0, ((uint64_t)locals + 1) * sizeof(uint32_t));
+            for (uint32_t r = 0; status == CHECK_PROGRAM_OK && r < count; r += 1)
+            {
+                const EmittedLocalRange range = ranges[r];
+                const bool valid = range.local < locals && range.begin < range.end && range.end <= code->count && range.value_bytes <= 8;
+                status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_BACKEND;
+                if (valid && offsets[range.begin] < offsets[range.end])
+                {
+                    first[range.local + 1] += 1;
+                }
+            }
+            for (uint32_t local = 0; status == CHECK_PROGRAM_OK && local < locals; local += 1)
+            {
+                first[local + 1] += first[local];
+                next[local] = first[local];
+            }
+            for (uint32_t r = 0; status == CHECK_PROGRAM_OK && r < count; r += 1)
+            {
+                const EmittedLocalRange range = ranges[r];
+                const uint32_t begin = offsets[range.begin];
+                const uint32_t end = offsets[range.end];
+                if (begin < end)
+                {
+                    const uint32_t index = next[range.local];
+                    const bool ordered = index == first[range.local] || locations[index - 1].end <= begin;
+                    status = ordered ? CHECK_PROGRAM_OK : CHECK_PROGRAM_BACKEND;
+                    if (ordered)
+                    {
+                        locations[index] = (CheckDebugLocation){
+                            .home = range.home,
+                            .value = range.value,
+                            .begin = begin,
+                            .end = end,
+                            .value_bytes = range.value_bytes,
+                        };
+                        next[range.local] = index + 1;
+                    }
+                }
+            }
+            body->debug_location_count = status == CHECK_PROGRAM_OK ? first[locals] : 0;
+        }
+    }
+    return status;
 }
 
 // Body `b`'s code after its code generator (Tier 0's or Tier 1's), on its lane (`lane`): branch sizing, encoding into
@@ -1207,6 +1276,9 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     // Its frame's rows (#1056, emitted_unwind), which the tables read once the lanes are done.
     EmissionFrameRow* frame_rows = run->unwind && code->frame_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, EmissionFrameRow, code->frame_count) : 0;
     body->debug_spans = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDebugValueSpan, (uint64_t)code->source_count + 1) : NULL;
+    const uint32_t locals = run->lowered->functions[b].local_count;
+    body->debug_locations = run->sources && code->local_range_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDebugLocation, code->local_range_count) : NULL;
+    body->debug_location_first = run->sources && code->local_range_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)locals + 1) : NULL;
     const uint64_t work_mark = scratch->length;
     uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)code->count + 1);
     // patchable_function_entry's NOPs (#1447): room for them after the code, which check_program_emit_patchable moves past
@@ -1219,6 +1291,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     uint8_t* encoded = arena_push(bytes, byte_capacity + sled, 16);
     bool valid = offsets != 0 && body->fixup_ends != 0 && encoded != 0 && (code->label_count == 0 || body->label_offsets != 0) &&
                  (naked == 0 || naked->label_count == 0 || body->asm_offsets != 0) && (!run->sources || (body->row_offsets != 0 && body->row_tokens != 0 && body->debug_spans != NULL)) &&
+                 (!run->sources || code->local_range_count == 0 || (body->debug_locations != NULL && body->debug_location_first != NULL)) &&
                  (!run->unwind || code->frame_count == 0 || frame_rows != 0);
     body->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_RESOURCE;
     // A failure past the encoding is the backend's, but where a frame's room ran out.
@@ -1261,10 +1334,17 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
                     const bool tail = code->local_homes != NULL && function->kinds[e] == BUSTER_TYPED_TAIL_CALL;
                     const uint32_t begin = offsets[code->source_records[e]];
                     const uint32_t end = offsets[code->source_records[e + 1]];
-                    if (!tail && begin < end)
+                    const bool known = code->source_origins == NULL || code->source_origins[e] != BUSTER_EMISSION_NO_ORIGIN;
+                    if (!tail && known && begin < end)
                     {
                         spans[body->debug_span_count++] = (CheckDebugValueSpan){ .begin = begin, .end = end, .token = check_debug_origin_token(code->source_origins, tokens, e, program->bodies[b].declaration) };
                     }
+                }
+                if (valid)
+                {
+                    const CheckProgramStatus locations = check_program_emit_locations(body, code, locals, offsets, scratch);
+                    valid = locations == CHECK_PROGRAM_OK;
+                    failure = valid ? failure : locations;
                 }
             }
             check_clock_lap(run->stage_clock, CHECK_STAGE_DEBUG);
@@ -3428,7 +3508,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             Tier0Home* homes = BUSTER_ARENA_PUSH_ARRAY(output, Tier0Home, (uint64_t)locals + 1);
             uint8_t* classes = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, (uint64_t)locals + 1);
             CheckDebugValueSpan* spans = BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugValueSpan, (uint64_t)body->debug_span_count + 1);
-            valid = bindings != NULL && homes != NULL && classes != NULL && spans != NULL;
+            const uint32_t location_count = body->debug_location_count;
+            CheckDebugLocation* locations = location_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugLocation, location_count) : NULL;
+            uint32_t* location_first = location_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)locals + 1) : NULL;
+            valid = bindings != NULL && homes != NULL && classes != NULL && spans != NULL && (location_count == 0 || (locations != NULL && location_first != NULL));
             if (valid)
             {
                 if (locals != 0)
@@ -3448,7 +3531,22 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 {
                     memcpy(spans, body->debug_spans, (uint64_t)body->debug_span_count * sizeof(*spans));
                 }
-                *value = (CheckDebugBody){ .bindings = bindings, .homes = homes, .classes = classes, .spans = spans, .local_count = locals, .span_count = body->debug_span_count };
+                if (location_count != 0)
+                {
+                    memcpy(locations, body->debug_locations, (uint64_t)location_count * sizeof(*locations));
+                    memcpy(location_first, body->debug_location_first, ((uint64_t)locals + 1) * sizeof(*location_first));
+                }
+                *value = (CheckDebugBody){
+                    .bindings = bindings,
+                    .homes = homes,
+                    .classes = classes,
+                    .spans = spans,
+                    .locations = locations,
+                    .location_first = location_first,
+                    .local_count = locals,
+                    .span_count = body->debug_span_count,
+                    .location_count = location_count,
+                };
             }
             if (body->row_count != 0)
             {

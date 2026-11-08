@@ -3185,12 +3185,19 @@ no C library has. Each is a builtin of the unit unless `-fno-builtin`,
 and one of `C23_LANG` (`<stdbit.h>`'s 70 functions) in C23 and later
 (`pp_library_builtin`, from `PPOptions.no_builtin`, `freestanding` and
 `no_builtin_functions`, which the driver's options set), which `__has_builtin`
-answers by. The list is pinned to Clang 23.1.4, CI's reference: its GNU rows
-include `strlcat` and `strlcpy`, which 23.1.5's table drops. The oracles compare
-`clang --version` with the release, print `expected clang 23.1.4, found …`
-when another release is found, and skip only the plain names the found release
-is known to classify differently (`cbuiltin_library_table_differences`: 23.1.5's
-`strlcat` and `strlcpy`), a difference no named release explains still failing.
+answers by. The list is pinned to Clang 23.1.4's official build, CI's
+reference: its GNU rows include `strlcat` and `strlcpy`, as every upstream 23.x
+release's do (the `llvmorg-23.1.4` and `llvmorg-23.1.5` tags' `Builtins.td` and
+`release/23.x` keep them). Debian's and Ubuntu's clang packages, apt.llvm.org's
+included, comment both rows out with
+`debian/patches/23-strlcpy_strlcat_warning_removed.diff`, whatever the release,
+so their `__has_builtin` answers 0 and a call is an ordinary implicit
+declaration. The oracles compare `clang --version` with the reference, print
+`expected clang 23.1.4, found …` (`found Ubuntu 23.1.6` for such a package's
+build) when another build is found, and skip only the plain names that build's
+vendor is known to classify differently (`cbuiltin_library_table_differences`:
+Debian's and Ubuntu's `strlcat` and `strlcpy`), a difference no named build
+explains still failing.
 Neither `strlcat` nor `strlcpy` is folded: a call
 of either stays a call of the library's function in every mode. A declaration
 of such a name is the library's function, which calls

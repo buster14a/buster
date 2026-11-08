@@ -71,6 +71,19 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
                 report->detail == CHECK_REDECLARATION_OBJECT_TYPE_EXTERN ? "redeclaration" : "redefinition", (int)name.length, name.pointer,
                 (int)current.length, current.pointer, (int)prior.length, prior.pointer);
         }
+        else if (report->detail == CHECK_REDECLARATION_TYPEDEF)
+        {
+            const String8 current = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
+            const uint32_t noted = report->note_token < count ? report->note_token : previous;
+            const uint32_t prior_spelling = noted < count ? check_input_typedef_spelling(input, parser, noted) : 0;
+            const String8 prior = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, prior_spelling);
+            result = current.length == 0 || prior.length == 0 ? NULL : check_warning_text(scratch, "typedef redefinition with different types (%.*s vs %.*s)",
+                                                                                         (int)current.length, current.pointer, (int)prior.length, prior.pointer);
+        }
+        else if (report->detail == CHECK_REDECLARATION_KIND)
+        {
+            result = check_warning_text(scratch, "redefinition of '%.*s' as different kind of symbol", (int)name.length, name.pointer);
+        }
         else if (report->detail > CHECK_REDECLARATION_GENERIC && report->detail <= CHECK_REDECLARATION_NON_STATIC)
         {
             const char* format = report->detail == CHECK_REDECLARATION_FUNCTION_TYPE ? "conflicting types for '%.*s'" :

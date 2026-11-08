@@ -115,6 +115,25 @@ static void ir_sroa_test_compare(IrOptimizeTest* test, const IrFunction* f, Aren
     {
         const bool slots_equal = a.function.slot_count == b.function.slot_count && (a.function.slot_count == 0 || memcmp(a.function.slots, b.function.slots, (uint64_t)a.function.slot_count * sizeof(IrSlot)) == 0);
         ir_optimize_test_expect(test, a.fields == expected_fields && b.fields == expected_fields && ir_optimize_test_equal(&a.function, &b.function) && slots_equal, "SROA exact scalar/vector fields, layout and output");
+        if (f->debug != NULL)
+        {
+            const IrDebugInfo* ad = a.function.debug;
+            const IrDebugInfo* bd = b.function.debug;
+            bool exact = ad != NULL && bd != NULL && ad != f->debug && bd != f->debug && ad != bd &&
+                         ad->entry_count == f->instruction_count && bd->entry_count == f->instruction_count && f->debug->locals[0] == 0 &&
+                         ad->slot_count == bd->slot_count && ad->instruction_count == bd->instruction_count;
+            for (uint32_t slot = 0; exact && slot < ad->slot_count; slot += 1)
+            {
+                const uint32_t expected = expected_fields != 0 ? BUSTER_IR_NONE : 0;
+                exact = ad->locals[slot] == expected && bd->locals[slot] == expected;
+            }
+            for (uint32_t i = 0; exact && i < ad->instruction_count; i += 1)
+            {
+                exact = ad->origins[i] == bd->origins[i] && ad->origins[i] < f->instruction_count &&
+                        (i == 0 || ad->origins[i - 1] < ad->origins[i]);
+            }
+            ir_optimize_test_expect(test, exact, "SROA keeps exact origins and refused objects but drops every split whole-object identity");
+        }
         IrFunction ssa = { 0 };
         const IrCheck sc = ssa_ir_promote(&a.function, promoted, scratch, &ssa);
         ir_optimize_test_expect(test, sc.error == IR_OK, "SROA output accepted by upstream SSA promoter");
@@ -277,7 +296,24 @@ static void ir_sroa_test_ir(IrOptimizeTest* test)
         for (uint32_t kind = 0; kind < 13; kind += 1)
         {
             IrFunction f = { 0 };
-            const bool created = ir_sroa_test_fields(&input, &f, kind);
+            bool created = ir_sroa_test_fields(&input, &f, kind);
+            if (created && (kind == 0 || kind == 3))
+            {
+                const IrDebugInfo seed =
+                {
+                    .entry_count = f.instruction_count,
+                    .local_count = f.slot_count,
+                };
+                created = ir_debug_create(&input, &f, &seed);
+                if (created)
+                {
+                    f.debug->locals[0] = 0;
+                    for (uint32_t i = 0; i < f.instruction_count; i += 1)
+                    {
+                        f.debug->origins[i] = i;
+                    }
+                }
+            }
             ir_optimize_test_expect(test, created, "SROA field fixture allocation");
             if (created)
             {

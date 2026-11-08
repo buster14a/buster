@@ -427,8 +427,13 @@ static IrError ir_sroa_view(IrSroaWork* work, Arena* scratch, IrFunction* result
         view.slot_count = slots;
         error = ok ? IR_OK : IR_ERROR_MEMORY;
     }
+    if (error == IR_OK && !ir_debug_create(scratch, &view, f->debug))
+    {
+        error = IR_ERROR_MEMORY;
+    }
     if (error == IR_OK)
     {
+        ir_debug_remap(f, &view, NULL, NULL, NULL);
         for (uint32_t slot = 0; slot < f->slot_count; slot += 1)
         {
             view.slots[slot] = f->slots[slot];
@@ -443,6 +448,12 @@ static IrError ir_sroa_view(IrSroaWork* work, Arena* scratch, IrFunction* result
             work->field_slots[field] = BUSTER_IR_NONE;
             if (work->refused[root] == 0)
             {
+                if (view.debug != NULL)
+                {
+                    // A split object's whole home no longer exists. New field slots start unknown too; describing
+                    // either as the original whole object would let the debugger read adjacent, unrelated storage.
+                    view.debug->locals[root] = BUSTER_IR_NONE;
+                }
                 firsts[root] = firsts[root] == BUSTER_IR_NONE ? next : firsts[root];
                 work->field_slots[field] = next;
                 view.slots[next++] = (IrSlot){
@@ -475,6 +486,12 @@ static IrError ir_sroa_view(IrSroaWork* work, Arena* scratch, IrFunction* result
             const uint32_t root = work->roots[i];
             if (work->dead[i] != 0 && work->refused[work->roots[f->a[i]]] == 0)
             {
+                if (view.debug != NULL)
+                {
+                    // Even without a split field, surviving lifetime markers can keep this now-unwritten slot.
+                    // Its bytes no longer represent every source assignment, so it cannot retain a whole home.
+                    view.debug->locals[work->roots[f->a[i]]] = BUSTER_IR_NONE;
+                }
                 view.op[i] = IR_LIFETIME;
                 view.flags[i] = 0;
                 view.alignment_log2[i] = 0;
@@ -529,6 +546,10 @@ static IrError ir_sroa_compact_slots(IrFunction* f, Arena* scratch)
             if (slots[slot] != BUSTER_IR_NONE)
             {
                 slots[slot] = count;
+                if (f->debug != NULL)
+                {
+                    f->debug->locals[count] = f->debug->locals[slot];
+                }
                 f->slots[count++] = f->slots[slot];
             }
         }
@@ -540,6 +561,10 @@ static IrError ir_sroa_compact_slots(IrFunction* f, Arena* scratch)
             }
         }
         f->slot_count = count;
+        if (f->debug != NULL)
+        {
+            f->debug->slot_count = count;
+        }
     }
     const IrError error = ok ? IR_OK : IR_ERROR_MEMORY;
     return error;

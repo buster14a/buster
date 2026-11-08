@@ -305,6 +305,96 @@ struct IrSizes
 };
 
 typedef struct IrFunction IrFunction;
+typedef enum IrDebugScalarKind
+{
+    IR_DEBUG_PARAMETER = 1,
+    IR_DEBUG_CONSTANT,
+} IrDebugScalarKind;
+
+// Immutable whole values proven by the original typed replay, not rediscovered after optimization. A constant's
+// entry is its initializing store's completion point in the first source block; a parameter has no such entry.
+typedef struct IrDebugScalar IrDebugScalar;
+struct IrDebugScalar
+{
+    uint64_t value;
+    uint32_t local;
+    uint32_t entry;
+    uint8_t kind;
+    uint8_t bytes;
+};
+
+typedef enum IrDebugBindingKind
+{
+    IR_DEBUG_BIND_VALUE = 1,
+    IR_DEBUG_BIND_CONSTANT,
+    IR_DEBUG_BIND_UNAVAILABLE,
+} IrDebugBindingKind;
+
+#define BUSTER_IR_DEBUG_BIND_ENTRY 1u
+#define BUSTER_IR_DEBUG_BIND_REGIONS 2u
+
+// Source assignments survive even when their value has no reconstruction. `entry` is the original typed completion
+// point; NONE is the initial parameter binding. `value` is a current IR node only for VALUE. `anchor` is an optional
+// current RHS definition whose completion can conservatively kill older bindings. It can precede the assignment,
+// so it never establishes source visibility by itself. Events are not semantic uses and preserve no machine lifetime.
+typedef struct IrDebugBinding IrDebugBinding;
+struct IrDebugBinding
+{
+    uint64_t literal;
+    uint32_t local;
+    uint32_t entry;
+    uint32_t value;
+    uint32_t anchor;
+    uint8_t kind;
+    uint8_t bytes;
+    uint8_t type;
+};
+
+// A real source read or assignment witnesses one unchanged local value within an original typed block. `block`
+// follows the current IR's exact block remaps, while [begin, end) and block_end stay in original typed-entry coordinates. `next`
+// names the next original assignment binding in that block, including after a lifetime gap, or NONE if there is
+// none. It supplies a conservative completion kill when scheduling moves an older source instruction after it.
+typedef struct IrDebugRegion IrDebugRegion;
+struct IrDebugRegion
+{
+    uint64_t literal;
+    uint32_t local;
+    uint32_t block;
+    uint32_t begin;
+    uint32_t end;
+    uint32_t block_end;
+    uint32_t value;
+    uint32_t next;
+    uint8_t kind;
+    uint8_t bytes;
+    uint8_t type;
+};
+
+// Optional source identities (#1114), separate from the instruction/slot columns that execution consumes. An origin
+// is a typed-stream entry; a local is its original typed local. NONE means generated/unknown, never a nearby source.
+// Rewriters keep the original bounds and rebuild the current lengths before their old arenas can be retired.
+typedef struct IrDebugInfo IrDebugInfo;
+struct IrDebugInfo
+{
+    uint32_t* origins;
+    uint32_t* locals;
+    uint32_t instruction_count;
+    uint32_t slot_count;
+    uint32_t entry_count;
+    uint32_t local_count;
+    IrDebugScalar* scalars;
+    uint32_t scalar_count;
+    IrDebugBinding* bindings;
+    uint32_t binding_count;
+    IrDebugRegion* regions;
+    uint32_t region_count;
+    // Original-local flags: ENTRY proves a normal scalar with no escape/volatile access and all assignments in the
+    // first source block, with no edge back into it. REGIONS admits other normal private scalars only through their
+    // witnessed source regions. The flags are mutually exclusive; neither flag admits an escaped/volatile local.
+    uint8_t* binding_flags;
+    uint32_t first_block_end;
+};
+
 struct IrFunction
 {
     uint8_t* op;
@@ -367,6 +457,7 @@ struct IrFunction
     // Tier0Function.incoming_variadic): the overflow area starts stack_bytes past the incoming stack arguments.
     bool variadic;
     AbiCall incoming;
+    IrDebugInfo* debug;
     // Exact bytes charged to the arena, alignment gaps included; excludes this view and optional derived arrays.
     uint64_t arena_bytes;
 };
@@ -740,6 +831,136 @@ static IrError ir_create(Arena* arena, const IrSizes* sizes, IrFunction* result)
         }
     }
     return error;
+}
+
+// Allocate a fresh sidecar for a derived function. A source-less pipeline allocates and initializes nothing here.
+// New instructions and slots start without identities; the transformation fills only the mappings it proves.
+static bool ir_debug_create(Arena* arena, IrFunction* function, const IrDebugInfo* source)
+{
+    const uint64_t mark = arena->length;
+    bool ok = true;
+    IrDebugInfo* debug = NULL;
+    if (source != NULL)
+    {
+        debug = ir_allocate(arena, 1, sizeof(IrDebugInfo), &ok);
+        uint32_t* origins = ir_allocate(arena, function->instruction_count, sizeof(uint32_t), &ok);
+        uint32_t* locals = ir_allocate(arena, function->slot_count, sizeof(uint32_t), &ok);
+        IrDebugScalar* scalars = ir_allocate(arena, source->scalar_count, sizeof(IrDebugScalar), &ok);
+        IrDebugBinding* bindings = ir_allocate(arena, source->binding_count, sizeof(IrDebugBinding), &ok);
+        IrDebugRegion* regions = ir_allocate(arena, source->region_count, sizeof(IrDebugRegion), &ok);
+        uint8_t* binding_flags = ir_allocate(arena, source->binding_flags != NULL ? source->local_count : 0, 1, &ok);
+        if (ok)
+        {
+            *debug = (IrDebugInfo){
+                .origins = origins,
+                .locals = locals,
+                .instruction_count = function->instruction_count,
+                .slot_count = function->slot_count,
+                .entry_count = source->entry_count,
+                .local_count = source->local_count,
+                .scalars = scalars,
+                .scalar_count = source->scalar_count,
+                .bindings = bindings,
+                .binding_count = source->binding_count,
+                .regions = regions,
+                .region_count = source->region_count,
+                .binding_flags = binding_flags,
+                .first_block_end = source->first_block_end,
+            };
+            if (function->instruction_count != 0)
+            {
+                memset(origins, 0xff, (uint64_t)function->instruction_count * sizeof(uint32_t));
+            }
+            if (function->slot_count != 0)
+            {
+                memset(locals, 0xff, (uint64_t)function->slot_count * sizeof(uint32_t));
+            }
+            if (source->scalar_count != 0)
+            {
+                memcpy(scalars, source->scalars, (uint64_t)source->scalar_count * sizeof(IrDebugScalar));
+            }
+            if (source->binding_count != 0)
+            {
+                memcpy(bindings, source->bindings, (uint64_t)source->binding_count * sizeof(IrDebugBinding));
+            }
+            if (source->region_count != 0)
+            {
+                memcpy(regions, source->regions, (uint64_t)source->region_count * sizeof(IrDebugRegion));
+            }
+            if (source->binding_flags != NULL && source->local_count != 0)
+            {
+                memcpy(binding_flags, source->binding_flags, source->local_count);
+            }
+        }
+    }
+    if (ok)
+    {
+        function->debug = debug;
+        function->arena_bytes += arena->length - mark;
+    }
+    else
+    {
+        arena_pop_to(arena, mark);
+    }
+    return ok;
+}
+
+// The old-to-new instruction, slot and block maps belong to the transformation. A null map means unchanged numbering;
+// NONE removes that identity. Block maps preserve each surviving block's identity, never redirect a removed block
+// to its threaded successor or merge source blocks; a merger must omit or split those source regions explicitly.
+// Call only after a fresh sidecar was allocated for the result.
+static void ir_debug_remap(const IrFunction* source, IrFunction* result, const uint32_t* instructions, const uint32_t* slots, const uint32_t* blocks)
+{
+    if (source->debug != NULL && result->debug != NULL)
+    {
+        const uint32_t* const origins = source->debug->origins;
+        const uint32_t* const locals = source->debug->locals;
+        uint32_t* const rewritten_origins = result->debug->origins;
+        uint32_t* const rewritten_locals = result->debug->locals;
+        for (uint32_t i = 0; i < source->instruction_count; i += 1)
+        {
+            const uint32_t out = instructions != NULL ? instructions[i] : i;
+            if (out != BUSTER_IR_NONE)
+            {
+                rewritten_origins[out] = origins[i];
+            }
+        }
+        for (uint32_t s = 0; s < source->slot_count; s += 1)
+        {
+            const uint32_t out = slots != NULL ? slots[s] : s;
+            if (out != BUSTER_IR_NONE)
+            {
+                rewritten_locals[out] = locals[s];
+            }
+        }
+        for (uint32_t k = 0; k < source->debug->binding_count; k += 1)
+        {
+            const IrDebugBinding binding = source->debug->bindings[k];
+            IrDebugBinding* rewritten = result->debug->bindings + k;
+            rewritten->anchor = binding.anchor != BUSTER_IR_NONE && instructions != NULL ? instructions[binding.anchor] : binding.anchor;
+            if (binding.kind == IR_DEBUG_BIND_VALUE)
+            {
+                rewritten->value = instructions != NULL ? instructions[binding.value] : binding.value;
+                rewritten->kind = rewritten->value == BUSTER_IR_NONE ? IR_DEBUG_BIND_UNAVAILABLE : IR_DEBUG_BIND_VALUE;
+            }
+        }
+        for (uint32_t k = 0; k < source->debug->region_count; k += 1)
+        {
+            const IrDebugRegion region = source->debug->regions[k];
+            IrDebugRegion* rewritten = result->debug->regions + k;
+            rewritten->block = region.block != BUSTER_IR_NONE && blocks != NULL ? blocks[region.block] : region.block;
+            if (region.kind == IR_DEBUG_BIND_VALUE)
+            {
+                rewritten->value = instructions != NULL ? instructions[region.value] : region.value;
+                rewritten->kind = rewritten->value == BUSTER_IR_NONE ? IR_DEBUG_BIND_UNAVAILABLE : IR_DEBUG_BIND_VALUE;
+            }
+            if (rewritten->block == BUSTER_IR_NONE)
+            {
+                rewritten->kind = IR_DEBUG_BIND_UNAVAILABLE;
+                rewritten->value = BUSTER_IR_NONE;
+            }
+        }
+    }
 }
 
 typedef enum IrRule
@@ -1237,6 +1458,92 @@ static IrCheck ir_check_shape(const IrFunction* f)
     if (check.error == IR_OK && ((f->vector_constant_count != 0 && f->vector_constants == NULL) || (f->row_count != 0 && f->rows == NULL)))
     {
         check.error = IR_ERROR_STRUCTURE;
+    }
+    const IrDebugInfo* const debug = f->debug;
+    if (check.error == IR_OK && debug != NULL && (debug->instruction_count != n || debug->slot_count != f->slot_count ||
+        (n != 0 && debug->origins == NULL) || (f->slot_count != 0 && debug->locals == NULL) || debug->scalar_count > debug->local_count ||
+        (debug->scalar_count != 0 && debug->scalars == NULL) || debug->first_block_end > debug->entry_count ||
+        debug->binding_count > (uint64_t)debug->entry_count + f->parameter_count ||
+        (debug->binding_count != 0 && (debug->bindings == NULL || debug->binding_flags == NULL)) ||
+        debug->region_count > debug->entry_count || (debug->region_count != 0 && (debug->regions == NULL || debug->binding_flags == NULL))))
+    {
+        check.error = IR_ERROR_METADATA;
+    }
+    for (uint32_t i = 0; check.error == IR_OK && debug != NULL && i < n; i += 1)
+    {
+        if (debug->origins[i] != BUSTER_IR_NONE && debug->origins[i] >= debug->entry_count)
+        {
+            check = ir_check(IR_ERROR_METADATA, i, debug->origins[i]);
+        }
+    }
+    for (uint32_t s = 0; check.error == IR_OK && debug != NULL && s < f->slot_count; s += 1)
+    {
+        if (debug->locals[s] != BUSTER_IR_NONE && debug->locals[s] >= debug->local_count)
+        {
+            check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, s);
+        }
+    }
+    for (uint32_t s = 0; check.error == IR_OK && debug != NULL && s < debug->scalar_count; s += 1)
+    {
+        const IrDebugScalar scalar = debug->scalars[s];
+        const bool kind = scalar.kind == IR_DEBUG_PARAMETER ? scalar.local < f->parameter_count && scalar.entry == BUSTER_IR_NONE :
+                          scalar.kind == IR_DEBUG_CONSTANT && scalar.entry < debug->entry_count;
+        if (!kind || scalar.local >= debug->local_count || (s != 0 && scalar.local <= debug->scalars[s - 1].local) ||
+            (scalar.bytes != 1 && scalar.bytes != 2 && scalar.bytes != 4 && scalar.bytes != 8))
+        {
+            check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, s);
+        }
+    }
+    for (uint32_t local = 0; check.error == IR_OK && debug != NULL && debug->binding_flags != NULL && local < debug->local_count; local += 1)
+    {
+        const uint32_t flags = debug->binding_flags[local];
+        if (flags != 0 && flags != BUSTER_IR_DEBUG_BIND_ENTRY && flags != BUSTER_IR_DEBUG_BIND_REGIONS)
+        {
+            check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, local);
+        }
+    }
+    for (uint32_t k = 0; check.error == IR_OK && debug != NULL && k < debug->binding_count; k += 1)
+    {
+        const IrDebugBinding binding = debug->bindings[k];
+        const bool initial = binding.entry == BUSTER_IR_NONE;
+        const bool ordered = k == 0 || (initial ? debug->bindings[k - 1].entry == BUSTER_IR_NONE && debug->bindings[k - 1].local < binding.local :
+                                      debug->bindings[k - 1].entry == BUSTER_IR_NONE || debug->bindings[k - 1].entry < binding.entry);
+        const bool scalar = binding.type == IR_I8 || binding.type == IR_I16 || binding.type == IR_I32 || binding.type == IR_I64 ||
+                            binding.type == IR_PTR || binding.type == IR_F32 || binding.type == IR_F64;
+        const bool width = scalar && binding.bytes * 8u == ir_type_bits[binding.type];
+        const bool unavailable = binding.kind == IR_DEBUG_BIND_UNAVAILABLE;
+        const bool value = binding.kind == IR_DEBUG_BIND_VALUE && binding.value < n && f->type[binding.value] == binding.type;
+        const bool kind = value || binding.kind == IR_DEBUG_BIND_CONSTANT || unavailable;
+        const bool anchor = binding.anchor == BUSTER_IR_NONE || (binding.anchor < n && f->type[binding.anchor] == binding.type);
+        const bool local = binding.local < debug->local_count;
+        const bool entry = initial ? binding.local < f->parameter_count : binding.entry < debug->entry_count;
+        const bool admitted = local && (debug->binding_flags[binding.local] & BUSTER_IR_DEBUG_BIND_ENTRY) != 0;
+        if (!kind || !local || !entry || !ordered || !anchor || (!width && !(unavailable && binding.bytes == 0 && binding.type == IR_VOID)) ||
+            (!value && binding.value != BUSTER_IR_NONE) || (admitted && !initial && binding.entry >= debug->first_block_end))
+        {
+            check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, k);
+        }
+    }
+    for (uint32_t k = 0; check.error == IR_OK && debug != NULL && k < debug->region_count; k += 1)
+    {
+        const IrDebugRegion region = debug->regions[k];
+        const bool local = region.local < debug->local_count && debug->binding_flags[region.local] == BUSTER_IR_DEBUG_BIND_REGIONS;
+        const bool scalar = region.type == IR_I8 || region.type == IR_I16 || region.type == IR_I32 || region.type == IR_I64 ||
+                            region.type == IR_PTR || region.type == IR_F32 || region.type == IR_F64;
+        const bool width = scalar && region.bytes * 8u == ir_type_bits[region.type];
+        const bool value = region.kind == IR_DEBUG_BIND_VALUE && region.value < n && f->type[region.value] == region.type;
+        const bool kind = value || region.kind == IR_DEBUG_BIND_CONSTANT || region.kind == IR_DEBUG_BIND_UNAVAILABLE;
+        const bool block = region.block < f->block_count || (region.block == BUSTER_IR_NONE && region.kind == IR_DEBUG_BIND_UNAVAILABLE);
+        const bool ordered = k == 0 || debug->regions[k - 1].local < region.local ||
+                             (debug->regions[k - 1].local == region.local && debug->regions[k - 1].end <= region.begin);
+        const bool next = region.next == BUSTER_IR_NONE || (region.next < debug->binding_count &&
+                          debug->bindings[region.next].local == region.local && debug->bindings[region.next].entry != BUSTER_IR_NONE &&
+                          debug->bindings[region.next].entry >= region.end && debug->bindings[region.next].entry < region.block_end);
+        if (!local || !width || !kind || !block || !ordered || !next || region.begin >= region.end || region.end > region.block_end || region.block_end > debug->entry_count ||
+            (!value && region.value != BUSTER_IR_NONE))
+        {
+            check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, k);
+        }
     }
     if (check.error == IR_OK && (f->block_offsets[0] != 0 || f->block_offsets[f->block_count] != n))
     {

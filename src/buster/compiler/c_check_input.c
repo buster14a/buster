@@ -530,6 +530,11 @@ struct CheckInputReport
     // Keep this report even when another at its token comes first: clang's multiversioning check repeats the earlier
     // declaration's error when a later declaration makes it a version.
     bool repeated;
+    // An error that didn't stop the reader (CheckInput.recovered_reports): it rejects the unit, but the diagnostics'
+    // cutoffs after the reader don't end at it.
+    bool recovered;
+    // A recovered error that waits for its declarator's completion (CheckInputReader.recovered_pending).
+    bool pending;
 };
 
 static __attribute__((unused)) uint32_t check_input_report_source(const Parser* parser, const CheckInputReport* report)
@@ -739,6 +744,18 @@ struct CheckInput
     CheckInputReport* reports;
     uint32_t report_count;
     uint32_t report_capacity;
+    // Errors that clang answers by dropping what they are about, so that their declaration stays valid (#1447's semantic
+    // recovery, phase 1: an attribute whose handler refuses it, check_input_attribute_recover). Held apart from `reports`
+    // while the reader runs, so that they don't stop it, and appended to them, each `recovered`, once it has run
+    // (check_input_recovered_publish): the unit stays rejected, and nothing after them is cut by them.
+    CheckInputReport* recovered_reports;
+    uint32_t recovered_count;
+    uint32_t recovered_capacity;
+    // The recovered reports appended to `reports`; and whether they are all of them, in a unit that is otherwise valid: one
+    // whose checking completed as a valid unit's does, whose diagnostics the driver publishes as a valid unit's, and which
+    // it still never emits (c_checker_driver.c).
+    uint32_t recovered_published;
+    bool recovered_valid;
     // GNU's multiversioning reports are deferred until the unit's body checks have run, so they don't cut the first
     // declaration's expression walk (#839): clang reports the body's errors after them.
     CheckInputReport* multiversion_reports;
@@ -1698,6 +1715,12 @@ struct CheckInputReader
     CheckInputAttributes* declarator_common;
     // The current complete declarator's end: type and declaration attribute warnings follow its parameters (#147).
     uint32_t attribute_completion;
+    // The first of the unit's recovered reports (CheckInput.recovered_reports, #1447) that may wait for its declarator's
+    // completion (CheckInputReport.pending): an attribute's error clang's Sema gives where it processes the declaration's
+    // attributes, which the subject checks of the declaration whose tokens hold it give it (check_input_attribute_subjects).
+    // A parameter's checks, which come first, leave its function's errors waiting. One its reading's parser gives doesn't
+    // wait.
+    uint32_t recovered_pending;
     uint32_t declarator_declarations;
     // The prototypes open around the reader's position: a declarator's parameter lists, each a scope a level deeper than
     // the one around it (check_input_declaration_depth).
@@ -2553,6 +2576,63 @@ static void check_input_report_multiversion(CheckInputReader* reader, uint32_t t
         .multiversion = multiversion,
         .sort = sort,
     };
+}
+
+// Moves the unit's reports from `from` on to its recovered reports (CheckInput.recovered_reports, #1447), so that they no
+// longer stop the reader: an error clang answers by dropping what it is about, which leaves its declaration valid. A lane's
+// input is private and its reports are source order's, so a lane that recovers one gives its body to source order. Whether
+// they moved: not where room ran out, which leaves them where they were.
+static bool check_input_recover_reports(CheckInputReader* reader, uint32_t from)
+{
+    CheckInput* input = reader->output;
+    const uint32_t moved = input->report_count - from;
+    bool room = !input->resource && from < input->report_count;
+    if (room && input->recovered_count + (uint64_t)moved > input->recovered_capacity)
+    {
+        const uint64_t needed = (uint64_t)input->recovered_count + moved;
+        const uint64_t doubled = (uint64_t)input->recovered_capacity * 2;
+        const uint64_t capacity = doubled > needed ? doubled : needed < 4 ? 4 : needed;
+        CheckInputReport* records = capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputReport, capacity) : NULL;
+        room = records != NULL;
+        if (room && input->recovered_count != 0)
+        {
+            memcpy(records, input->recovered_reports, (uint64_t)input->recovered_count * sizeof(CheckInputReport));
+        }
+        input->recovered_reports = room ? records : input->recovered_reports;
+        input->recovered_capacity = room ? (uint32_t)capacity : input->recovered_capacity;
+    }
+    if (room)
+    {
+        for (uint32_t i = from; i < input->report_count; i += 1)
+        {
+            input->recovered_reports[input->recovered_count] = input->reports[i];
+            input->recovered_reports[input->recovered_count].recovered = true;
+            input->recovered_count += 1;
+        }
+        input->report_count = from;
+        check_input_lane_refuse(reader, reader->lane, "a body recovers from an error");
+    }
+    return room;
+}
+
+// The recovered reports appended to the unit's reports once the reader has run (#1447), which rejects the unit: its
+// expressions' and declarations' later diagnostics were found as a valid unit's would be.
+static void check_input_recovered_publish(CheckInputReader* reader)
+{
+    CheckInput* input = reader->output;
+    for (uint32_t i = 0; !input->resource && i < input->recovered_count; i += 1)
+    {
+        if (input->report_count < input->report_capacity)
+        {
+            input->reports[input->report_count++] = input->recovered_reports[i];
+            input->recovered_published += 1;
+        }
+        else
+        {
+            input->resource = true;
+        }
+    }
+    input->recovered_count = input->resource ? input->recovered_count : 0;
 }
 
 // Publish the unit's deferred multiversioning reports after its body checks have run, in their discovery order.
@@ -5243,6 +5323,24 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
         if (!valid && deferring)
         {
             valid = check_input_attribute_defer(reader, &parsed, attribute, before, saved, saved_first, saved_end);
+        }
+        // An argument's error that clang drops the attribute for (#1447): the attribute leaves the declaration's list, whose
+        // other attributes stand, and the next takes its index.
+        const CheckInputAttributeRecovery recovery = {
+            .attribute = attribute,
+            .reports = before,
+            .error = saved,
+            .error_first = saved_first,
+            .error_end = saved_end,
+        };
+        const bool dropped = !valid && check_input_attribute_errors_recover(reader, &parsed, &recovery, 0);
+        if (dropped)
+        {
+            // (At the first record, `i` wraps to UINT32_MAX, which the loop's step takes back to 0.)
+            memmove(parsed.records + i, parsed.records + i + 1, (uint64_t)(parsed.count - i - 1) * sizeof(CheckInputAttribute));
+            parsed.count -= 1;
+            i -= 1;
+            valid = true;
         }
     }
     CheckInputAttributes* combined = valid ? arena_push(reader->arena, sizeof(CheckInputAttributes), 8) : 0;
@@ -9035,6 +9133,8 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
         }
     }
+    // Whether the declaration conflicts with the visible one and is left out (below).
+    bool dropped = false;
     if (!overload && !versions && old != 0 && (reader->bindings.depth[old - 1] == reader->scope_count || linked_visible))
     {
         const uint32_t previous = reader->bindings.declaration[old - 1];
@@ -9055,7 +9155,12 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         {
             const CheckInputMessage message = kind == C_BINDING_FUNCTION && reader->declaration_kinds[previous] == kind && compatible == TYPE_ANSWER_NO && !library_redeclaration ?
                                               CHECK_INPUT_CONFLICTING_TYPES : CHECK_INPUT_REDECLARATION;
+            const uint32_t before = reader->output->report_count;
             check_input_redeclaration_report(reader, token, previous, compatible, repeatable, parameter_conflict, message);
+            // clang marks the redeclaration invalid and leaves it out of its name's lookup, which finds the visible
+            // declaration still (#1447's semantic recovery, phase 2): the report moves past, and the declaration isn't
+            // bound or linked.
+            dropped = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
         }
         else
         {
@@ -9090,7 +9195,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
         }
     }
-    if (!overload && !versions && check_input_linkage(reader->declaration_bits, token) != 0 && reader->output->report_count == 0)
+    if (!dropped && !overload && !versions && check_input_linkage(reader->declaration_bits, token) != 0 && reader->output->report_count == 0)
     {
         // Lexical scope restoration does not create a new externally linked entity. Keep its compatibility and
         // object identity for the translation unit, while only a visible declaration contributes to the source
@@ -9126,6 +9231,10 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 const CheckInputMessage message = kind == C_BINDING_FUNCTION && reader->declaration_kinds[previous] == kind && compatible == TYPE_ANSWER_NO && !library_redeclaration ?
                                                   CHECK_INPUT_CONFLICTING_TYPES : CHECK_INPUT_REDECLARATION;
                 check_input_redeclaration_report(reader, token, previous, compatible, true, parameter_conflict, message);
+                // Its entity's redeclaration is left out too (#1447, phase 2), but for a loader variable's, whose note
+                // follows below.
+                const bool loading = has_attributes && check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL;
+                dropped = !loading && reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
                 const bool loader = has_attributes &&
                     ((definition != 0 && check_input_attribute_of(check_input_attributes_at(reader->output, definition - 1), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL) ||
                      check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL);
@@ -9188,7 +9297,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 }
             }
         }
-        if (linked == 0 || !check_input_bit(reader->declaration_bits, linked - 1, BUSTER_CHECK_BITS_DEFINED))
+        if (!dropped && (linked == 0 || !check_input_bit(reader->declaration_bits, linked - 1, BUSTER_CHECK_BITS_DEFINED)))
         {
             reader->linked_declarations[name] = token + 1;
         }
@@ -9206,7 +9315,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             check_input_lane_refuse(reader, linked != 0 && composite != reader->linked_types[name], "a body's declaration with linkage changes its entity's type");
             check_input_lane_refuse(reader, (flags & CHECK_INPUT_FUNCTION_NAKED) != 0, "a body's declaration with linkage differs from the one it replaces");
         }
-        reader->linked_types[name] = composite;
+        reader->linked_types[name] = dropped ? reader->linked_types[name] : composite;
         // Attribute evaluation may publish a declaration's attributes after it binds. Retain its scope independently of
         // that publication, for check_input_attribute_merge_exclusions and the late masks. One without a visible
         // previous declaration records none: a later declaration that sees no other finds it, as clang's
@@ -9255,7 +9364,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     // Lazy library declarations have file scope. Their lexical cache can be restored and rebuilt, but a local
     // object declared after the first call is allowed to shadow them, unlike an ordinary block-scope implicit int.
     const uint32_t depth = reader->output->function_flags != NULL && (reader->output->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0 ? 0 : reader->scope_count;
-    if (c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, name, kind, token, point, depth) == 0)
+    if (!dropped && c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, name, kind, token, point, depth) == 0)
     {
         reader->output->resource = true;
     }
@@ -13203,6 +13312,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     check_input_fp_types(&reader);
                 }
                 check_input_fp_eval_finish(&reader);
+                check_input_recovered_publish(&reader);
                 input->diagnostic_graph = input->report_count != 0 && !input->resource;
                 if (!input->resource)
                 {
@@ -13212,7 +13322,12 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         }
         // A sparse column's write that found no block (c_check_sparse.c), which the pool's capacity rules out, lost its value.
         input->resource |= input->sparse_pool != NULL && input->sparse_pool->exhausted;
-        valid = !input->resource && input->report_count == 0 && reader.bindings.valid;
+        // Where the reader ended early, its recovered reports are still the unit's.
+        check_input_recovered_publish(&reader);
+        // A unit whose only reports are recovered ones completes as a valid one does (CheckInput.recovered_valid), but is
+        // rejected.
+        const bool recovered = input->recovered_published != 0 && input->recovered_published == input->report_count;
+        valid = !input->resource && (input->report_count == 0 || recovered) && reader.bindings.valid;
         if (valid && environment)
         {
             valid = check_environment_publish(&input->environment, parser, &reader.bindings, input->declared_types, types, reader.tag_completions, arena, scratch);
@@ -13223,6 +13338,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             valid = check_input_enum_records(&reader, arena);
             input->resource |= !valid;
         }
+        input->recovered_valid = valid && recovered;
+        valid = valid && !recovered;
     }
     else
     {
