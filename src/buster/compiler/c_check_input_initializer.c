@@ -549,41 +549,40 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
             // An initializer of no braces that isn't a string of the element (#1447, phase 2): clang's "array initializer
             // must be an initializer list" (FK_ArrayNeedsInitList) at the declarator, worded by the literal its element
             // takes (CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail), after the initializer's own diagnostics (its
-            // completion at the initializer's end), and none where the initializer names an undeclared identifier, which
-            // makes it no value to clang (found now, or by the bindings' pass: check_input_initializer_list_drop). The
-            // report is recovered: the array keeps its unknown size, as clang's invalid
+            // completion at the initializer's end), and none where the initializer is no valid value, which the expressions'
+            // check decides (check_init_listless_drop, in the driver). The report is recovered: the array keeps its unknown size, as clang's invalid
             // declaration does, and its initializer leaves the initializers' run. A compound literal (GNU's array
             // initializer, `(int[2]){1, 2}`) keeps the refusal below; any other parenthesized initializer is no list.
             const uint8_t first_role = parser->tree.roles[begin];
-            const uint32_t group_close = parser->tokens.kinds[begin] == PARSE_KIND_L_PAREN ? parser->tree.parents[begin] : 0;
-            // An array's compound literal: its type is at its `)` (as the casts' are, above).
-            const bool compound = group_close > begin && group_close + 1 < end && parser->tree.roles[group_close + 1] == PARSE_ROLE_OPEN_COMPOUND_BODY &&
+            // Past parentheses around the whole initializer, an array's compound literal that is all of it: its type at its
+            // `)` (as the casts' are, above), its body closing the initializer.
+            uint32_t inner = begin;
+            uint32_t inner_end = end;
+            while (inner + 1 < inner_end && parser->tokens.kinds[inner] == PARSE_KIND_L_PAREN && parser->tree.parents[inner] == inner_end - 1)
+            {
+                inner += 1;
+                inner_end -= 1;
+            }
+            const uint32_t group_close = parser->tokens.kinds[inner] == PARSE_KIND_L_PAREN ? parser->tree.parents[inner] : 0;
+            const bool compound = group_close > inner && group_close + 1 < inner_end && parser->tree.roles[group_close + 1] == PARSE_ROLE_OPEN_COMPOUND_BODY &&
+                                  parser->tree.parents[group_close + 1] == inner_end - 1 &&
                                   type_kind_is_array(type_kind(reader->types, type_strip_aligned(reader->types, reader->query_types[group_close])));
             const bool unbraced = first_role != PARSE_ROLE_OPEN_INITIALIZER && first_role != PARSE_ROLE_OPEN_COMPOUND_BODY && !compound;
             const bool needs_list = !valid && unbraced && status != CHECK_INIT_MEMBER && !reader->output->resource;
             if (needs_list)
             {
-                bool undeclared = false;
-                for (uint32_t r = reader->output->report_count; r > 0 && !undeclared; r -= 1)
-                {
-                    const CheckInputReport* report = reader->output->reports + (r - 1);
-                    undeclared = report->message == CHECK_INPUT_UNDECLARED && report->token >= begin && report->token < end;
-                }
                 const uint32_t before = reader->output->report_count;
                 const bool wide = element == BUSTER_TYPE_INT || element == BUSTER_TYPE_USHORT || element == BUSTER_TYPE_UINT;
-                if (!undeclared)
-                {
-                    check_input_report(reader, declaration, CHECK_INPUT_DIRECT_INITIALIZER_ARRAY);
-                }
-                if (!undeclared && reader->output->report_count == before + 1)
+                check_input_report(reader, declaration, CHECK_INPUT_DIRECT_INITIALIZER_ARRAY);
+                if (reader->output->report_count == before + 1)
                 {
                     reader->output->reports[before].detail = character ? CHECK_INPUT_ARRAY_LIST_STRING : wide ? CHECK_INPUT_ARRAY_LIST_WIDE : CHECK_INPUT_ARRAY_LIST_ONLY;
                     reader->output->reports[before].completion = end;
-                    // Its initializer's first token, for check_input_initializer_list_drop.
+                    // Its initializer's first token, for check_init_listless_drop.
                     reader->output->reports[before].value = begin;
                 }
                 type = reader->declared_types[declaration];
-                listless = undeclared || (reader->output->report_count == before + 1 && check_input_recover_reports(reader, before));
+                listless = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
                 valid = listless;
                 if (listless)
                 {
@@ -641,28 +640,4 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
         check_input_report(reader, assignment, CHECK_INPUT_DECLARATION);
     }
     return valid;
-}
-
-// An array's "array initializer must be an initializer list" (check_input_initializer_finish, #1447) whose initializer
-// names an undeclared identifier, which the bindings' pass reports after the walk: clang gives no such error for an
-// initializer that is no value, so the recovered report is dropped before the reports are published. Only a unit with
-// recovered reports looks; each such report scans the unit's reports once.
-static void check_input_initializer_list_drop(CheckInputReader* reader)
-{
-    CheckInput* input = reader->output;
-    uint32_t kept = 0;
-    for (uint32_t i = 0; i < input->recovered_count; i += 1)
-    {
-        const CheckInputReport* report = input->recovered_reports + i;
-        bool undeclared = false;
-        const bool listless = report->message == CHECK_INPUT_DIRECT_INITIALIZER_ARRAY && report->completion != 0;
-        for (uint32_t r = 0; listless && !undeclared && r < input->report_count; r += 1)
-        {
-            const CheckInputReport* other = input->reports + r;
-            undeclared = other->message == CHECK_INPUT_UNDECLARED && other->token >= report->value && other->token < report->completion;
-        }
-        input->recovered_reports[kept] = *report;
-        kept += !undeclared;
-    }
-    input->recovered_count = kept;
 }

@@ -5957,6 +5957,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 ready = ready && check_input_packed_finalize(&input, checking, &types, &stream, scratch);
                 ready = ready && check_input_warning_graph(&input, checking, &types, &stream, output_arena, scratch);
                 check_clock_mark(stage_clock, CHECK_STAGE_CHECK_EXPRESSIONS);
+                if (ready && input.recovered_published != 0)
+                {
+                    // An array's recovered "array initializer must be an initializer list" whose initializer is no valid
+                    // value, which clang reports alone (#1447).
+                    check_init_listless_drop(&input, checking, &stream, &types, scratch);
+                }
                 if (ready)
                 {
                     // The musttail returns' errors (c_check_musttail.c), each clang's, with the three below.

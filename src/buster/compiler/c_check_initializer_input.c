@@ -297,6 +297,116 @@ struct CheckInitDiagnostic
 // reports next, at the initializer (#147): an object's value read, or an object's address converted to an integer
 // narrower than a pointer (an absolute address, `(int *)5`'s, stays a constant). Another failed conversion, of a record or a
 // floating value, is the initializer's only error.
+// An array of unknown size's recovered "array initializer must be an initializer list" (check_input_initializer_finish,
+// #1447) whose initializer is no valid value, which clang reports alone: its outermost node (its last token's, as
+// check_init_node takes it) is missing, diagnosed, of no valid type or past a missing name's diagnostic limit, or has an
+// operand or argument that is (the initializers' diagnosis's `complete`). A statement expression's inner errors leave its
+// value valid, as clang's. Such reports leave `input->reports`; only a unit with another error drops one, so a rejected
+// unit always says why. Error-free units and those without the report don't look.
+// Whether an undeclared name at `token`, in an initializer from `begin`, makes the initializer no value: unless a
+// statement expression shields it, a statement of it before its last (its value) holding the name. From the innermost
+// statement expression around the name outward, the statement that holds it (from it to the next `;` of that block,
+// past nested groups) must be the block's last, its `;` right before the block's `}`. Bounded by the initializer's tokens.
+static bool check_init_undeclared_poisons(const Parser* parser, uint32_t begin, uint32_t token)
+{
+    const uint8_t* kinds = parser->tokens.kinds;
+    const uint32_t* parents = parser->tree.parents;
+    bool poisons = true;
+    uint32_t at = token;
+    bool enclosed = true;
+    while (poisons && enclosed)
+    {
+        // The innermost statement expression's `(` before `at` whose group holds it.
+        uint32_t open = BUSTER_CHECK_NONE;
+        for (uint32_t j = begin; j + 1 < at; j += 1)
+        {
+            const bool statement = kinds[j] == PARSE_KIND_L_PAREN && kinds[j + 1] == PARSE_KIND_L_BRACE && parents[j] > at;
+            open = statement ? j : open;
+        }
+        enclosed = open != BUSTER_CHECK_NONE;
+        const uint32_t close = enclosed ? parents[open + 1] : 0;
+        uint32_t semicolon = BUSTER_CHECK_NONE;
+        for (uint32_t j = at + 1; enclosed && semicolon == BUSTER_CHECK_NONE && j < close; j += 1)
+        {
+            const uint8_t kind = kinds[j];
+            const bool opener = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_L_SQUARE;
+            semicolon = kind == PARSE_KIND_SEMI ? j : semicolon;
+            j = opener && parents[j] > j && parents[j] < close ? parents[j] : j;
+        }
+        poisons = !enclosed || semicolon + 1 == close;
+        at = enclosed ? open : at;
+    }
+    return poisons;
+}
+
+static void check_init_listless_drop(CheckInput* input, const Parser* parser, const CheckStream* stream, const TypeTable* types, Arena* scratch)
+{
+    uint32_t listless = 0;
+    for (uint32_t r = 0; r < input->report_count; r += 1)
+    {
+        listless += input->reports[r].recovered && input->reports[r].message == CHECK_INPUT_DIRECT_INITIALIZER_ARRAY && input->reports[r].completion != 0;
+    }
+    const uint64_t mark = scratch->length;
+    const CheckGraph* graph = &input->graph;
+    uint8_t* complete = listless != 0 && stream->count != 0 && stream->count == graph->count && input->token_nodes != NULL ?
+                        BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, stream->count) : NULL;
+    // With no graph (a walk that ended before any expression), no initializer has a value.
+    const bool nodes_ready = listless != 0 && (complete != NULL || stream->count == 0);
+    for (uint32_t node = 0; complete != NULL && node < stream->count; node += 1)
+    {
+        bool checked = graph->tokens[node] < check_input_diagnostic_limit(input, graph->tokens[node]) &&
+                       stream->diagnostics[node] == CHECK_DIAG_NONE && type_is_valid(types, check_stream_type(stream, node));
+        const uint32_t operands[] = {
+            graph->operand0[node],
+            graph->operand1[node],
+            graph->operand2[node],
+        };
+        for (uint32_t i = 0; checked && i < BUSTER_ARRAY_LENGTH(operands); i += 1)
+        {
+            checked = operands[i] == BUSTER_CHECK_NONE || (operands[i] < node && complete[operands[i]]);
+        }
+        if (checked && check_graph_has_arguments(graph->ops[node]) && graph->argument_counts != 0)
+        {
+            const uint32_t first = graph->argument_offsets != 0 ? graph->argument_offsets[node] : 0;
+            const uint32_t count = graph->argument_counts[node];
+            checked = first <= graph->argument_count && count <= graph->argument_count - first && (count == 0 || graph->argument_nodes != 0);
+            for (uint32_t i = 0; checked && i < count; i += 1)
+            {
+                const uint32_t operand = graph->argument_nodes[first + i];
+                checked = operand < node && complete[operand];
+            }
+        }
+        complete[node] = checked;
+    }
+    const bool other_errors = input->report_count > listless || stream->report_count != 0;
+    uint32_t kept = 0;
+    for (uint32_t r = 0; r < input->report_count; r += 1)
+    {
+        const CheckInputReport* report = input->reports + r;
+        const bool candidate = nodes_ready && other_errors && report->recovered && report->message == CHECK_INPUT_DIRECT_INITIALIZER_ARRAY &&
+                               report->completion != 0;
+        uint32_t outermost = BUSTER_CHECK_NONE;
+        for (uint64_t at = report->value; candidate && complete != NULL && at < report->completion && at < input->token_count; at += 1)
+        {
+            const uint32_t node = input->token_nodes[at];
+            outermost = node < stream->count && (outermost == BUSTER_CHECK_NONE || node > outermost) ? node : outermost;
+        }
+        bool undeclared = false;
+        for (uint32_t u = 0; candidate && !undeclared && u < input->report_count; u += 1)
+        {
+            const CheckInputReport* name = input->reports + u;
+            undeclared = name->message == CHECK_INPUT_UNDECLARED && name->token >= report->value && name->token < report->completion &&
+                         check_init_undeclared_poisons(parser, (uint32_t)report->value, name->token);
+        }
+        const bool dropped = candidate && (undeclared || outermost == BUSTER_CHECK_NONE || !complete[outermost]);
+        input->reports[kept] = *report;
+        kept += !dropped;
+        input->recovered_published -= dropped;
+    }
+    input->report_count = kept;
+    arena_pop_to(scratch, mark);
+}
+
 static bool check_init_value_nonconstant(const CheckStream* stream, const TypeTable* types, TypeId target, uint32_t source)
 {
     const bool known = source < stream->count && stream->diagnostics[source] == CHECK_DIAG_NONE;

@@ -167,6 +167,13 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // list either (review on #1791).
         "int u1[] = undecl_fn2();\nint u2[] = undecl;\nint u3[] = undecl + 1;\nint u4[] = sizeof(undecl2);\nextern int e[] = 7;\n"
         "int h[] = (5);\nint i[] = (int)6;\nint j[] = (int){7};\nint n[] = 4, o[] = 5;\n",
+        // None where the initializer is no valid value: a missing name outside a statement expression or in its value, a
+        // missing member, a called non-function; one where a statement expression shields the name in an earlier
+        // statement; and an array's compound literal only a prefix of the initializer (second review on #1791).
+        "struct S { int a; };\nint f(void);\nint x;\nvoid g(void) { int u[] = ({ undecl; 5; }); }\n"
+        "void h(void) { int u[] = ({ int y = undecl2; 5; }); }\nvoid k(void) { int u[] = ({ sizeof(undecl3); 5; }); }\n"
+        "void n(void) { int u[] = ({ int z = ({ undecl8; 1; }); 5; }); }\nvoid q(void) { int u[] = ({ if (1) undecl10 = 2; 5; }); }\n"
+        "void r(void) { int u[] = (undecl11); }\nint v1[] = ((struct S){0}).nosuch;\nint v4[] = (int[2]){1,2} + x;\nint v6[] = undecl6 + 1;\n",
         // A block's, and clang's unused-variable warnings of no scope in which an error occurred (a body's from its
         // definition's start).
         "void f(int p)\n{\n    int x;\n    float x;\n    int y = 1;\n    long y = 2;\n    (void)y;\n    if (y = 2) {}\n}\n"

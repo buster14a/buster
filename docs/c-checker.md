@@ -4014,14 +4014,22 @@ the array keeps its unknown size, as clang's invalid declaration does, and its
 initializer leaves the sparse columns, so the initializers' run doesn't see it.
 As clang checks the initializer first, the report completes at the
 initializer's end, after the initializer's own diagnostics, and an extern
-array loses its -Wextern-initializer event. Where the initializer names an
-undeclared identifier, clang has no value to check and gives no such error:
-the bindings' pass reports those names after the walk, so the report keeps its
-initializer's first token (`value`) and `check_input_initializer_list_drop`
-drops it before the recovered reports are published. A parenthesized
-initializer, a cast or a scalar's compound literal is no list either; an
-array's compound literal (GNU's, `int z[] = (int[2]){1,2};`, which clang
-accepts) is still refused, on main too.
+array loses its -Wextern-initializer event. Clang gives no such error where
+the initializer is no valid value. The driver decides that once the
+expressions are checked (`check_init_listless_drop`, which removes the
+report): the initializer's outermost node is missing, diagnosed, of no valid
+type or incomplete as the initializers' diagnosis counts it, or an undeclared
+name in it isn't shielded by a statement expression. A statement expression
+shields a name in a statement before its last, its value
+(`check_init_undeclared_poisons`). The report keeps its initializer's first
+token (`value`) for this; only a unit with another error drops one. A
+parenthesized initializer, a cast, a scalar's compound literal or an array's
+compound literal that is only part of the initializer is no list either; an
+array's compound literal that is all of it (GNU's, `int z[] =
+(int[2]){1,2};`, which clang accepts), even inside parentheses, is still
+refused, on main too. Clang's typo correction ("did you mean"), which buster
+lacks, keeps a misspelled name's initializer a value, so there clang gives the
+error where buster doesn't.
 
 The later phases are left:
 
