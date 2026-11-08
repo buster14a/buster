@@ -734,7 +734,8 @@ static const BuiltinIntrinsicInfo* check_input_checks_library(CheckInputReader* 
 // builtin parameter's: in 32 bits (checkUInt32Argument's errors), within the function's parameters. Refused by name where
 // clang's diagnostics are its own (an undeclared library function's implicit declaration, a builtin's name in another
 // expression, a redeclared builtin), where it crashes (an index of 0), where the checker can't spell a builtin parameter's
-// type in its error, and for a definition's identifier list or more than 32 arguments. Nothing else changes: the
+// type in its error, and for more than 32 arguments. A definition's identifier list compares its parameters by their
+// declarations' types, the promoted prototype's standing aside (clang's ParmVarDecl types). Nothing else changes: the
 // -Wfortify-source warnings it would give the function's calls, as a builtin's, the checker doesn't make. Whether the
 // declaration goes on.
 static bool check_input_attribute_diagnose_builtin(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, TypeId function,
@@ -803,6 +804,28 @@ static bool check_input_attribute_diagnose_builtin(CheckInputReader* reader, Che
     const TypeId* parameter_types = type_parameters(types, function, &parameter_count);
     const uint32_t declared = prototyped ? parameter_count : 0;
     refused |= !prototyped && reader->attribute_parameters != 0;
+    // A K&R definition's type counts its parameters' promoted types, but clang compares the declarations' own:
+    // subject_identifier_list's parameters' declared types, in the same order, stand in for the type's.
+    if (!refused && reader->subject_identifier_list && reader->attribute_parameters != 0)
+    {
+        const uint32_t names = reader->attribute_parameters - 1;
+        uint32_t count = 0;
+        for (uint32_t parameter = names; parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(reader->parameter_next, parameter))
+        {
+            count += 1;
+        }
+        TypeId* kr = arena_push_array(reader->scratch, count, sizeof(TypeId), 4);
+        reader->output->resource |= kr == 0;
+        if (kr != NULL)
+        {
+            uint32_t k = 0;
+            for (uint32_t parameter = names; parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(reader->parameter_next, parameter))
+            {
+                kr[k++] = reader->declared_types[parameter];
+            }
+            parameter_types = kr;
+        }
+    }
     bool valid = !refused;
     if (refused)
     {

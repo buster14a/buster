@@ -6535,8 +6535,10 @@ arguments against the function. The checker now gives these as clang does.
     library function's name (its implicit declaration's), a builtin's name in
     another expression (`&__builtin_abs`), a redeclared builtin, a builtin
     parameter's type the spelling doesn't cover (a vector's, `FILE`'s); an
-    index of 0, on which clang 23 crashes; and a definition's identifier list
-    or more than 32 arguments. It changes nothing else here: the
+    index of 0, on which clang 23 crashes; and more than 32 arguments. A
+    definition's identifier list compares its parameters by their declarations'
+    types, the promoted prototype's standing aside, as clang's ParmVarDecl
+    types do. It changes nothing else here: the
     `-Wfortify-source` warnings clang gives the function's calls, as it gives
     them a builtin's, the checker makes for no call.
 

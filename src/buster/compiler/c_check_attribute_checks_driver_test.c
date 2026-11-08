@@ -811,6 +811,11 @@ static void check_test_driver_checks_attributes(CheckTest* test, const char* cla
         "int f(int, int) __attribute__((diagnose_as_builtin(__builtin_abs, 2), diagnose_as_builtin(__builtin_abs, 1)));\n",
         "int f(int x) __attribute__((diagnose_as_builtin((__builtin_abs), 1)));\n",
         "int f(int x) __attribute__((diagnose_as_builtin(((x)), 1)));\n",
+        // diagnose_as_builtin on K&R definitions (#1447): the declarations' types compare, not the promoted prototype's.
+        "int f(a, b) __attribute__((diagnose_as_builtin(__builtin_abs, 2)))\nint a;\nint b;\n{ return a + b; }\n",
+        "int f(a, b) __attribute__((diagnose_as_builtin(__builtin_abs, 2)))\nint a;\nchar b;\n{ return a + b; }\n",
+        "int f(a) __attribute__((diagnose_as_builtin(__builtin_abs, 1)))\nshort a;\n{ return a; }\n",
+        "double f(a) __attribute__((diagnose_as_builtin(__builtin_fabs, 1)))\nfloat a;\n{ return a; }\n",
     };
     // Units whose warnings each option set below changes.
     static const char* const flagged[] = {
