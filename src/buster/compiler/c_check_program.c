@@ -4352,6 +4352,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 #include "c_check_debug.c"
 #include "c_check_clock.c"
 #include "c_check_program_emit.c"
+#include "c_check_tier0_inline.c"
 
 #endif
 

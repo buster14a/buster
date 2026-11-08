@@ -269,6 +269,7 @@ typedef enum ChangesFixed
     CHANGES_BRANCH_SIZING,
     CHANGES_PERFORMANCE,
     CHANGES_PREPROCESSOR_CLANG,
+    CHANGES_SQLITE_STABLE,
     CHANGES_FIXED_COUNT,
 } ChangesFixed;
 
@@ -278,6 +279,7 @@ static const char* const changes_fixed_names[CHANGES_FIXED_COUNT] = {
     [CHANGES_BRANCH_SIZING] = "branch_sizing",
     [CHANGES_PERFORMANCE] = "performance",
     [CHANGES_PREPROCESSOR_CLANG] = "preprocessor_clang",
+    [CHANGES_SQLITE_STABLE] = "sqlite_stable",
 };
 
 typedef struct ChangesModule ChangesModule;
@@ -1261,6 +1263,21 @@ static ChangesResult changes_decide(const ChangesInput* input)
         // docs/performance is an input of the performance readers' qualification (its manifest schema), which runs
         // in `test`: it counts as code.
         regex_t documentation = changes_regex("", "docs/.*|.*\\.md", "");
+        bool warning_only = true;
+        bool warning_source = false;
+        for (uint32_t i = 0; i < files->count; i += 1)
+        {
+            Text file = files->items[i];
+            bool document = regexec(&documentation, file.data, 0, NULL, 0) == 0 && !text_starts_with(file, "docs/performance/");
+            bool test = text_starts_with(file, "src/buster/compiler/") && file.length >= strlen("_test.c") && memcmp(file.data + file.length - strlen("_test.c"), "_test.c", strlen("_test.c")) == 0;
+            bool warning = text_equal_c(file, "src/buster/compiler/c_check_common_warnings.c") ||
+                           text_equal_c(file, "src/buster/compiler/c_check_literal_warning.c");
+            warning_source = warning_source || warning;
+            warning_only = warning_only && (warning || document || test);
+        }
+        // These diagnostic-only sources are expected to leave successful object output unchanged. Other checker
+        // sources may legitimately change it, including lowering paths outside the benchmark selectors' tables.
+        result.fixed[CHANGES_SQLITE_STABLE] = warning_source && warning_only;
         for (uint32_t i = 0; i < files->count && !result.code; i += 1)
         {
             bool document = regexec(&documentation, files->items[i].data, 0, NULL, 0) == 0;
@@ -1624,6 +1641,28 @@ static const ChangesFixture changes_fixtures[] = {
         .outputs_true = "code",
         .outputs_false = "checker checker_bindings checker_binding_modes check_debug check_debug_rows",
         .measured = "checker-source checker-bindings",
+    },
+    {
+        .name = "diagnostic-only checker changes expect identical sqlite objects",
+        .files = "src/buster/compiler/c_check_common_warnings.c src/buster/compiler/c_check_warning_driver_test.c docs/c-checker.md",
+        .outputs_true = "checker sqlite_stable",
+    },
+    {
+        .name = "mixed warning and atomic lowering changes don't require identical objects",
+        .files = "src/buster/compiler/c_check_common_warnings.c src/buster/compiler/c_check_program_atomic.c",
+        .outputs_true = "checker",
+        .outputs_false = "sqlite_stable",
+    },
+    {
+        .name = "a checker semantic change does not require identical objects",
+        .files = "src/buster/compiler/c_check_constant.c",
+        .outputs_true = "checker",
+        .outputs_false = "sqlite_stable",
+    },
+    {
+        .name = "warning tests alone don't assert object identity",
+        .files = "src/buster/compiler/c_check_warning_driver_test.c",
+        .outputs_false = "sqlite_stable",
     },
     {
         .name = "the reader produces the binding events: the default handoff's samples, not the modes' comparison",
@@ -2143,7 +2182,10 @@ static void changes_test_workflow(ChangesTest* test, Text workflow, const char* 
         for (uint32_t j = 0; j < all_gates.count; j += 1)
         {
             bool code_or_measure = text_equal_c(all_gates.items[j], "code") || text_equal_c(all_gates.items[j], "measure");
-            changes_expect(test, code_or_measure || list_contains(&gates, all_gates.items[j]) || strstr(text_terminated(step->body), text_concat(text_concat(text_c("needs.changes.outputs."), all_gates.items[j]), text_c(" == 'false'")).data) != NULL, "a gate the matcher reads", step->name);
+            // This output is data for the comparison inside the step, not a condition that skips the step.
+            bool sqlite_data = text_equal_c(all_gates.items[j], "sqlite_stable") &&
+                               strstr(text_terminated(step->body), "SQLITE_EXPECT_STABLE: ${{ needs.changes.outputs.sqlite_stable }}") != NULL;
+            changes_expect(test, code_or_measure || sqlite_data || list_contains(&gates, all_gates.items[j]) || strstr(text_terminated(step->body), text_concat(text_concat(text_c("needs.changes.outputs."), all_gates.items[j]), text_c(" == 'false'")).data) != NULL, "a gate the matcher reads", step->name);
         }
         TextList names = { 0 };
         changes_scan_names(step->body, "contains(env.MEASURE, ',", true, ",')", &names);
@@ -2633,13 +2675,20 @@ static bool changes_main_policy(Text workflow)
     } required[] = {
         { 0, "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}" },
         { 0, "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}" },
-        { 1, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}" },
+        { 4, "    needs: [changes, evidence, agent-guide-size, dco-hooks]" },
+        { 4, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}" },
+        { 4, "    uses: ./.github/workflows/prepare-hosted-tools.yml" },
+        { 1, "    needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]" },
+        { 1, "          artifact-name: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}" },
+        { 1, "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}" },
         { 1, "      fail-fast: ${{ github.event_name == 'pull_request' }}" },
         { 1, "        host_arch: [x86-64, native]" },
         { 1, "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}" },
         { 1, "          ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]' || '[{\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 3}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 3}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}]') }}" },
         { 1, "          ref: ${{ github.sha }}" },
-        { 2, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}" },
+        { 2, "    needs: [changes, evidence, prepare-hosted-tools]" },
+        { 2, "          artifact-name: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}" },
+        { 2, "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}" },
         { 2, "      fail-fast: false" },
         { 2, "          - entry: frontend" },
         { 2, "          - entry: elf-override" },
@@ -2684,7 +2733,7 @@ static bool changes_main_policy(Text workflow)
             }
             else if (section == 3 && indent == 2)
             {
-                job = text_equal_c(line, "  test:") ? 1 : text_equal_c(line, "  fuzz:") ? 2 : 3;
+                job = text_equal_c(line, "  test:") ? 1 : text_equal_c(line, "  fuzz:") ? 2 : text_equal_c(line, "  prepare-hosted-tools:") ? 4 : 3;
             }
             const uint32_t current = section == 2 ? 0 : section == 3 ? job : 3;
             for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
@@ -2717,14 +2766,22 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         { "concurrency:", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "shared main pending slot" },
         { "concurrency:", "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}", "  cancel-in-progress: true", "main cancellation" },
         { "concurrency:", "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}", "  cancel-in-progress: false", "lost PR cancellation" },
-        { "  test:", "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}", "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}", "native reuse suppresses hosted tests" },
+        { "  test:", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}", "native reuse suppresses hosted tests" },
+        { "  prepare-hosted-tools:", "needs.evidence.outputs.hosted == 'run'", "needs.evidence.outputs.hosted == 'reused'", "preparation excludes required hosted work" },
+        { "  prepare-hosted-tools:", "    uses: ./.github/workflows/prepare-hosted-tools.yml", "    uses: ./.github/workflows/absent.yml", "missing preparation implementation" },
+        { "  test:", "needs.prepare-hosted-tools.result == 'success' && ", "", "tests bypass preparation failure" },
+        { "  test:", "needs.prepare-hosted-tools.result == 'success'", "needs.prepare-hosted-tools.result != 'failure'", "tests accept skipped preparation" },
+        { "  test:", "    needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]", "    needs: [changes, evidence, agent-guide-size, dco-hooks]", "tests omit preparation dependency" },
         { "  test:", "      fail-fast: ${{ github.event_name == 'pull_request' }}", "      fail-fast: true", "main matrix fail-fast" },
         { "  test:", "        host_arch: [x86-64, native]", "        host_arch: [native]", "missing baseline architecture" },
         { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\"]') }}", "missing memory sanitizer" },
         { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name != 'schedule' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}", "push gets plain matrix" },
         { "  test:", "          ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]' || '[{\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 3}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 3}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}]') }}", "          ${{ fromJSON('[]') }}", "missing O1 sanitizer rows" },
         { "  test:", "          ref: ${{ github.sha }}", "          ref: main", "moving hosted revision" },
-        { "  fuzz:", "    if: ${{ !cancelled() && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}", "    if: ${{ !cancelled() && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.hardware == 'admit' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}", "native reuse suppresses fuzzing" },
+        { "  fuzz:", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.hardware == 'admit' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}", "native reuse suppresses fuzzing" },
+        { "  fuzz:", "needs.prepare-hosted-tools.result == 'success' && ", "", "fuzzing bypasses preparation failure" },
+        { "  fuzz:", "needs.prepare-hosted-tools.result == 'success'", "needs.prepare-hosted-tools.result != 'failure'", "fuzzing accepts skipped preparation" },
+        { "  fuzz:", "    needs: [changes, evidence, prepare-hosted-tools]", "    needs: [changes, evidence]", "fuzzing omits preparation dependency" },
         { "  fuzz:", "      fail-fast: false", "      fail-fast: true", "fuzz campaign cancellation" },
         { "  fuzz:", "          - entry: frontend", "          - entry: removed", "missing frontend fuzzing" },
         { "  fuzz:", "          - entry: elf-override", "          - entry: removed", "missing ELF fuzzing" },

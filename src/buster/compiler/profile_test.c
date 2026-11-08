@@ -24,8 +24,9 @@
 //     the table, without a disassembly;
 //   - a program: clang's assembly of a program that prints __func__ of a static function with spills, labeled,
 //     assembled and run, must print what the original prints (clang on PATH);
-//   - ab: the rotating order, then runs of programs that succeed, fail and don't exist, with two argument lists, and
-//     through a lock (env) pinned to an allowed CPU, with every heading and failure in the output;
+//   - ab: the order of a Williams design for 1 to 17 trees (#1311), then runs of programs that succeed, fail and don't
+//     exist, with two argument lists, and through a lock (env) pinned to an allowed CPU, with every heading and
+//     failure in the output;
 //   - time-runs: shell commands that log their order, statuses kept and changed, and an executable that can't start;
 //     copies of scripts (two builds of two placements) that log their tags and paths, in the slots' order, removed
 //     afterwards, and a copy that fails; and the builds' comparison on values made by hand, with placements and
@@ -538,15 +539,61 @@ static void profile_test_ab_case(ProfileTest* test, const char* name, const Prof
 static void profile_test_ab(ProfileTest* test)
 {
     test->cases += 1;
+    // #1311: for every count of trees to 17, over its period (n rounds for an even n, 2n for an odd one) each round
+    // runs every tree once, every tree runs at every place, and directly after every other tree, n's period / n times;
+    // a round past the period repeats the round a period before it. Then rows worked out by hand.
     bool order = true;
-    for (uint64_t round = 0; round < 7; round += 1)
+    for (uint64_t n = 1; n <= 17; n += 1)
+    {
+        const uint64_t period = n % 2 == 0 ? n : 2 * n;
+        uint64_t places[17][17] = { 0 };
+        uint64_t follows[17][17] = { 0 };
+        for (uint64_t round = 0; round < period; round += 1)
+        {
+            uint64_t seen = 0;
+            for (uint64_t position = 0; position < n; position += 1)
+            {
+                const uint64_t tree = profile_ab_tree(round, position, n);
+                order = order && tree < n && profile_ab_tree(round + period, position, n) == tree;
+                seen |= tree < n ? (uint64_t)1 << tree : 0;
+                places[tree % n][position] += 1;
+                if (position != 0)
+                {
+                    follows[profile_ab_tree(round, position - 1, n) % n][tree % n] += 1;
+                }
+            }
+            order = order && seen == ((uint64_t)1 << n) - 1;
+        }
+        for (uint64_t a = 0; a < n; a += 1)
+        {
+            for (uint64_t b = 0; b < n; b += 1)
+            {
+                order = order && places[a][b] == period / n && follows[a][b] == (a == b ? 0 : period / n);
+            }
+        }
+    }
+    const uint64_t rows[][4] = {
+        { 0, 1, 3, 2 },
+        { 1, 2, 0, 3 },
+        { 2, 3, 1, 0 },
+        { 3, 0, 2, 1 },
+    };
+    for (uint64_t round = 0; round < 4; round += 1)
+    {
+        for (uint64_t position = 0; position < 4; position += 1)
+        {
+            order = order && profile_ab_tree(round, position, 4) == rows[round][position];
+        }
+    }
+    for (uint64_t round = 0; round < 3; round += 1)
     {
         for (uint64_t position = 0; position < 3; position += 1)
         {
             order = order && profile_ab_tree(round, position, 3) == (round + position) % 3;
+            order = order && profile_ab_tree(round + 3, position, 3) == (round + 2 - position) % 3;
         }
     }
-    order = order && profile_ab_tree(1, 0, 2) == 1 && profile_ab_tree(1, 1, 2) == 0;
+    order = order && profile_ab_tree(1, 0, 2) == 1 && profile_ab_tree(1, 1, 2) == 0 && profile_ab_tree(2, 0, 2) == 0;
     if (!order)
     {
         test->failures += 1;
@@ -622,7 +669,7 @@ static void profile_test_ab(ProfileTest* test)
 }
 
 // time-runs on shell commands that log their order into a file: the warm-ups in list order, then each run's lists from
-// an order that rotates by run; statuses kept as the first warm-up's (0 and 3) pass, and one that changes after it
+// a Williams design's order; statuses kept as the first warm-up's (0 and 3) pass, and one that changes after it
 // fails each run, as does a list that can't start.
 static void profile_test_time_runs(ProfileTest* test)
 {
@@ -688,8 +735,9 @@ static void profile_test_time_runs(ProfileTest* test)
 // time-runs' copies (#509): two builds of two placements each, given out of the slots' order, run from two copies each
 // for two runs after a warm-up. Each executable is a script that logs its tag, its path after the copies' directory
 // (in the test's directory, where any other path stays whole) and its argument, so the log must be the slots' order:
-// placement by placement, each build's in turn, then each copy, rotating by run. The copies must be gone afterwards,
-// and so must they after a copy that fails, which fails the command once without running anything.
+// placement by placement, each build's in turn, then each copy, in the order of a Williams design by run. The copies
+// must be gone afterwards, and so must they after a copy that fails, which fails the command once without running
+// anything.
 static void profile_test_time_copies(ProfileTest* test)
 {
     test->cases += 1;
@@ -736,10 +784,11 @@ static void profile_test_time_copies(ProfileTest* test)
     char log[96];
     snprintf(log, sizeof(log), "%s/log", directory);
     const String8 text = ok ? profile_read_file(&test->arena, log) : (String8){ 0 };
-    // The warm-up and the first run in slot order, the second from slot 1.
+    // The warm-up in slot order, then the runs in the first two rows of the 8 slots' Williams design (#1311): slots
+    // 0, 1, 7, 2, 6, 3, 5, 4, then each one more.
     const char* expected = "a0 000-000 x\nb0 001-000 x\na1 002-000 x\nb1 003-000 x\na0 000-001 x\nb0 001-001 x\na1 002-001 x\nb1 003-001 x\n"
-                           "a0 000-000 x\nb0 001-000 x\na1 002-000 x\nb1 003-000 x\na0 000-001 x\nb0 001-001 x\na1 002-001 x\nb1 003-001 x\n"
-                           "b0 001-000 x\na1 002-000 x\nb1 003-000 x\na0 000-001 x\nb0 001-001 x\na1 002-001 x\nb1 003-001 x\na0 000-000 x\n";
+                           "a0 000-000 x\nb0 001-000 x\nb1 003-001 x\na1 002-000 x\na1 002-001 x\nb1 003-000 x\nb0 001-001 x\na0 000-001 x\n"
+                           "b0 001-000 x\na1 002-000 x\na0 000-000 x\nb1 003-000 x\nb1 003-001 x\na0 000-001 x\na1 002-001 x\nb0 001-001 x\n";
     ok = ok && profile_equal(text, profile_test_string(expected));
     unlink(log);
     // A copy of an executable that doesn't exist.

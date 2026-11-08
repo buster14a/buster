@@ -452,6 +452,12 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 8,
     },
     {
+        .name = "a compound literal's constant conversions follow its full expression's counts, in conditions and increments too",
+        .source = "struct S{int i;char c;};int f(int x){x=(struct S){x,300}.c+(x<<33);if((struct S){x,301}.c+(x<<34))return x<<32;"
+                  "for(int i=0;i<2;i+=(struct S){1,302}.c+(x<<35)){struct S s={1,303};x+=s.c+(x<<36);}return x;}\n",
+        .warnings = 9,
+    },
+    {
         .name = "_Atomic brace elements and members take no constant conversion",
         .source = "_Atomic short a0[2]={32768,1};struct{_Atomic char c;int i;}s={300,1};void f(void){_Atomic short a3[2]={32768,70000};(void)a3;}\n",
     },
@@ -1633,6 +1639,19 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         // and stays unevaluated. (A statement expression inside a variable array's operand isn't supported yet.)
         .name = "a statement expression decaying from a variable array stays unevaluated",
         .source = "void g(int n) {\n    char vv[n][n];\n    (void)sizeof(({ 3; vv[0]; }));\n    (void)sizeof(({ 4; vv; }));\n}\n",
+    },
+    {
+        // A for clause's value in parentheses is the clause's (#1447): clang's IgnoreParens finds the discarded comma,
+        // its operand of no effect and its literal 0 idiom through them, in the init and the increment; the condition's
+        // value is read.
+        .name = "parenthesized comma for clauses discard their values",
+        .source = "int g(int);\nvoid f(int n, int *p) {\n    int i = 0, j = 0;\n    for ((i, j); i < n; ++i) {}\n"
+                  "    for (; ; (i++, j)) { break; }\n    for (((i, j)); ; ) { break; }\n    for ((j, i++); ; ((i, 2))) { break; }\n"
+                  "    for (; (i, j); ) { break; }\n    for ((i == 1, j == 2); ; (i < 2)) { break; }\n"
+                  "    for ((i == 1); ; ((i < 2))) { break; }\n    for ((g(1), j); ; (j, (void)0)) { break; }\n"
+                  "    for ((i, 0); ; (j, 0)) { break; }\n    for ((void)(i, j); ; ) { break; }\n    for ((p[0], (j)); ; ) { break; }\n}\n",
+        .warnings = 14,
+        .notes = 1,
     },
 };
 

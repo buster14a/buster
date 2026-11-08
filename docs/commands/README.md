@@ -79,7 +79,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-snapshot, benchmark-snapshot` | `snapshot.c` | [snapshot](snapshot.md) |
 | `test-ssa, test-ssa-ir, test-ssa-source` | `ssa.c` | [ssa](ssa.md) |
 | `test-streaming, benchmark-streaming` | `streaming.c` | [streaming](streaming.md) |
-| `test-tier0, benchmark-backend, benchmark-backend-source` | `tier0.c` | [tier0](tier0.md) |
+| `test-tier0, test-tier0-inline, benchmark-backend, benchmark-backend-source` | `tier0.c`, `tier0_inline.c` | [tier0](tier0.md) |
 | `test-tier1-select, test-tier1-pipeline, test-tier1-masks, measure-tier1-programs, measure-tier1-rows` | `tier1_select.c`, `tier1_programs_measure.c`, `tier1_rows_measure.c` | [tier1](tier1.md) |
 | `test-tier1-allocation, benchmark-tier1-allocation` | `tier1_allocate.c` | [tier1-allocation](tier1-allocation.md) |
 | `benchmark-tier1-certificate`, `benchmark-tier1-code-certificate`, allocation and code certificate checks | `tier1_certificate.c` | [tier1-certificate](tier1-certificate.md) |
@@ -164,6 +164,7 @@ The original section titles are retained in their owning guides.
 - [Calling convention tests](calling-convention.md#calling-convention-tests).
 - [Calling convention benchmark](calling-convention.md#calling-convention-benchmark).
 - [Tier 0 tests](tier0.md#tier-0-tests).
+- [Inlining always_inline functions (#1398)](tier0.md#inlining-always_inline-functions-1398).
 - [Backend benchmark](tier0.md#backend-benchmark).
 - [Streaming tests](streaming.md#streaming-tests).
 - [Streaming benchmark](streaming.md#streaming-benchmark).

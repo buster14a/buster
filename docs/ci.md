@@ -718,3 +718,7 @@ inputs per campaign; scheduled/manual runs use 100,000. A third, deliberately
 crashing entry proves the override, saved crash bytes and exact-input replay.
 All three jobs retain their corpora, crash inputs, logs, compile commands and
 matching executable, and on those runs must pass before hardware qualification can start.
+
+## Hosted toolchain delivery
+
+See [the hosted toolchain guide](hosted-toolchain.md) for verified preparation, the digest-pinned GHCR mirror and its promotion, cache/handoff recovery and offline shard installation.
