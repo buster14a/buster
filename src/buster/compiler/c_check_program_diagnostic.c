@@ -24,7 +24,7 @@ struct CheckProgramDiagnostic
 
 // A constraint error at `token`, complete at `position`: the first one, by position, is the program's; a list
 // (check_program_diagnose_all) takes every one, with its words' facts and its note's token. `kept` false lists it alone.
-static void check_program_constraint_record(CheckProgram* program, uint32_t token, uint32_t position, CheckProgramFailure failure, uint32_t previous,
+static __attribute__((cold, noinline)) void check_program_constraint_record(CheckProgram* program, uint32_t token, uint32_t position, CheckProgramFailure failure, uint32_t previous,
                                             uint32_t node, bool kept)
 {
     if (kept && (program->status == CHECK_PROGRAM_OK || (program->status == CHECK_PROGRAM_INVALID && position <= program->diagnostic_position)))
@@ -139,7 +139,7 @@ static uint32_t* check_program_statement_ends(CheckProgram* program, const Parse
 }
 
 // The statements' ends, made at the first conflict: a program without one makes none.
-static bool check_program_conflict_ends(CheckProgram* program, const Parser* parser, const uint32_t** ends, Arena* scratch)
+static __attribute__((cold, noinline)) bool check_program_conflict_ends(CheckProgram* program, const Parser* parser, const uint32_t** ends, Arena* scratch)
 {
     if (*ends == 0)
     {
@@ -148,7 +148,7 @@ static bool check_program_conflict_ends(CheckProgram* program, const Parser* par
     return *ends != 0;
 }
 
-static void check_program_case_conflicts(CheckProgram* program, const Parser* parser, const uint32_t* ends, Arena* scratch)
+static __attribute__((noinline)) void check_program_case_conflicts(CheckProgram* program, const Parser* parser, const uint32_t* ends, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     const uint32_t count = program->case_count;
@@ -318,7 +318,7 @@ static void check_program_case_conflicts(CheckProgram* program, const Parser* pa
 // diagnostic. False means unusable inputs or resource failure. No output is published and scratch is restored.
 // `output`, when given, takes the list of every constraint error (CheckProgramDiagnostic.constraints, #1447), in the
 // order the driver publishes them among errors of one place: a switch's conflicts in clang's order.
-static bool check_program_diagnose_all(CheckProgramDiagnostic* result, const CheckInput* input, const CheckStream* stream,
+static __attribute__((cold, noinline)) bool check_program_diagnose_all(CheckProgramDiagnostic* result, const CheckInput* input, const CheckStream* stream,
                                        const Parser* parser, const TypeTable* types, uint32_t before_token, Arena* output, Arena* scratch)
 {
     *result = (CheckProgramDiagnostic){ .token = BUSTER_CHECK_NONE, .position = BUSTER_CHECK_NONE };

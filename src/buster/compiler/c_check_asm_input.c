@@ -1198,7 +1198,7 @@ struct CheckAsmDiagnostic
 // (a memory constraint's bit-field, a _BitInt, a modifiable lvalue's completeness then itself), or an input's (a memory
 // constraint's bit-field, a memory-only constraint's lvalue, a register's void, a _BitInt, a complete type), and a
 // tie's last. Cold: only a refused operand's.
-static CheckAsmError check_asm_operand_error(const CheckInput* input, const CheckStream* stream, TypeTable* types, uint32_t statement, uint32_t operand,
+static __attribute__((cold, noinline)) CheckAsmError check_asm_operand_error(const CheckInput* input, const CheckStream* stream, TypeTable* types, uint32_t statement, uint32_t operand,
                                              TypeId* type, TypeId* output_type, uint32_t* place)
 {
     const CheckGraph* graph = &input->graph;
@@ -1280,7 +1280,7 @@ static CheckAsmError check_asm_operand_error(const CheckInput* input, const Chec
 // tainted roots are declined. True means the scan completed, even on a semantic error. Nothing is published.
 // `output`, when given, takes the list of each failing statement's error (CheckAsmDiagnostic.failures, #1447): its
 // first operand's by clang's order, the operands' own checks before their ties'.
-static bool check_asms_diagnose_all(CheckAsmDiagnostic* result, const CheckInput* input, const CheckStream* stream,
+static __attribute__((cold, noinline)) bool check_asms_diagnose_all(CheckAsmDiagnostic* result, const CheckInput* input, const CheckStream* stream,
                                     TypeTable* types, uint32_t before_token, Arena* output, Arena* scratch)
 {
     *result = (CheckAsmDiagnostic){ .token = BUSTER_CHECK_NONE };

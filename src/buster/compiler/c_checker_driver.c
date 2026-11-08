@@ -691,7 +691,7 @@ struct CheckDriverDiagnostic
 // driver adds after a list (BUSTER_CHECK_DRIVER_ADDITIONAL_SINGLES): a bigger list in `arena` with them copied, where it
 // hasn't. False, and the list as it was, where the arena has none.
 #define BUSTER_CHECK_DRIVER_ADDITIONAL_SINGLES 8u
-static bool check_driver_additional_room(CheckDriverDiagnostic** list, uint32_t* capacity, uint32_t count, uint64_t more, Arena* arena)
+static __attribute__((cold, noinline)) bool check_driver_additional_room(CheckDriverDiagnostic** list, uint32_t* capacity, uint32_t count, uint64_t more, Arena* arena)
 {
     const uint64_t needed = (uint64_t)count + more + BUSTER_CHECK_DRIVER_ADDITIONAL_SINGLES;
     bool result = needed <= *capacity;
@@ -870,7 +870,7 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
 
 // Each failing asm statement's error (check_asms_diagnose_all, #1447) in clang's words, after the unit's `*count`
 // additional diagnostics, before `before`; false where the diagnosis lists none, for the caller's generic one.
-static bool check_driver_asm_errors(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
+static __attribute__((cold, noinline)) bool check_driver_asm_errors(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
                                     uint32_t before, CheckDriverDiagnostic** additional, uint32_t* capacity, uint32_t* count, Arena* output, Arena* scratch)
 {
     CheckAsmDiagnostic diagnostic = { 0 };
