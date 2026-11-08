@@ -1399,8 +1399,8 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
                 // Each value takes a callee-saved register, which the frame pushes, and no call-save row (#1116). Without a
                 // frame pointer, six take all six, rbp among them, and five any five. With one, rbp is the frame's (its
                 // own push, not a saved register's), and five take exactly the other five. Six values past those five
-                // would split one, which discards the preference whole (tier1_emit_cfg_callee), so that case only runs:
-                // its registers prove nothing about rbp.
+                // may use caller overflow, covered by the native result here and the eight-value loop's explicit
+                // location/save checks; that case does not constrain the exact callee-register set.
                 const uint32_t rbp = 1u << X86_REGISTER_RBP;
                 const uint32_t others = (1u << X86_REGISTER_RBX) | (1u << X86_REGISTER_R12) | (1u << X86_REGISTER_R13) | (1u << X86_REGISTER_R14) | (1u << X86_REGISTER_R15);
                 const bool pointer = (frame_flags & BUSTER_TIER1_FRAME_KEEP_POINTER) != 0;
