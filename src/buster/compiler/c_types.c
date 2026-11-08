@@ -1389,18 +1389,16 @@ static TypeId type_qualify(const TypeTable* table, TypeId type, uint32_t qualifi
     return result;
 }
 
-// The index under a wrapper: an ALIGNED type's base's, then a QUALIFIED one's.
-static __attribute__((noinline)) uint32_t type_unwrapped_index(const TypeTable* table, uint32_t index)
+// The index under a wrapper: an ALIGNED type's base's, then a QUALIFIED one's. Inline, past its callers' one compare:
+// as a call, it made their callers too large to inline where they were (check_action_integer_type, #1447).
+static inline __attribute__((always_inline)) uint32_t type_unwrapped_index(const TypeTable* table, uint32_t index)
 {
+    // `index` is a wrapper (its callers' compare); an ALIGNED type's base may be QUALIFIED, whose base is no wrapper.
     uint32_t result = index;
-    if (table->types.kind[result] == BUSTER_TYPE_KIND_ALIGNED)
+    do
     {
         result = table->types.base[result] >> BUSTER_TYPE_INDEX_SHIFT;
-    }
-    if (table->types.kind[result] == BUSTER_TYPE_KIND_QUALIFIED)
-    {
-        result = table->types.base[result] >> BUSTER_TYPE_INDEX_SHIFT;
-    }
+    } while (table->types.kind[result] >= BUSTER_TYPE_KIND_WRAPPERS);
     return result;
 }
 
@@ -1469,8 +1467,8 @@ static TypeId type_strip_alignment(const TypeTable* table, TypeId type)
     return result;
 }
 
-// A wrapper's word, out of line: the compare before it is the readers' whole cost (#1447).
-static __attribute__((noinline)) uint32_t type_wrapper_qualifiers(const TypeTable* table, uint32_t index)
+// A wrapper's word, past the compare that is the readers' whole cost (#1447).
+static inline __attribute__((always_inline)) uint32_t type_wrapper_qualifiers(const TypeTable* table, uint32_t index)
 {
     uint32_t at = index;
     at = table->types.kind[at] == BUSTER_TYPE_KIND_ALIGNED ? table->types.base[at] >> BUSTER_TYPE_INDEX_SHIFT : at;
