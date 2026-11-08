@@ -245,7 +245,7 @@ static uint32_t c_environment_type_point(const TypeTable* types, const uint32_t*
                 result = tag < tags ? completions[tag] : BUSTER_C_ENVIRONMENT_INCOMPLETE;
                 done = true;
             }
-            else if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ATOMIC || kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR ||
+            else if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED || kind == BUSTER_TYPE_KIND_ATOMIC || kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR ||
                      kind == BUSTER_TYPE_KIND_COMPLEX || type_kind_is_array(kind))
             {
                 type = types->types.base[index];

@@ -5,9 +5,13 @@
 // - A vector_size or neon_vector_type error leaves the type as it was (clang's HandleVectorSizeAttr and
 //   HandleNeonVectorTypeAttr). A mode error leaves it too, or installs the mode's type all the same where clang's
 //   AddModeAttr does (a mode of the other kind, or a base of no integer or floating type). An enum's mode whose error
-//   installs nothing leaves the enum without it.
-// - An aligned's or _Alignas's value error, and a specifiers' mode error, is given again for each later declarator that
-//   shares it, as clang's handlers run for each (CheckInputAttributeRepeat).
+//   installs nothing leaves the enum without it; one that installs a floating type gives it the integer of its layout.
+// - An aligned's value error, and a specifiers' mode error, is given again for each later declarator that shares it, as
+//   clang's handlers run for each (CheckInputAttributeRepeat).
+// - Each _Alignas error is each declarator's, in clang's order (check_input_alignas_declarator): its place's (a function's,
+//   a typedef's, a parameter's, a bit-field's, a register variable's), else its value's (no power of 2, no integer
+//   constant, past 2^32), then the underalignment, at the last _Alignas that stands. A declaration that declares nothing
+//   has none.
 // The checker goes on to the declaration and the unit's later ones (check_input_attribute_type). On original fixtures,
 // the whole output, line for line, and the status, by the vector path, the scalar one and deferred bodies on two lanes,
 // under gnu17 and gnu23 and the warning and error-limit options; and -c of each, which must be refused with no object
@@ -67,8 +71,66 @@ static void check_test_driver_type_attribute_recovery(CheckTest* test, const cha
         "void f(void) { _Alignas(3) int a = \"x\", b; _Alignas(3) static int c, d; extern _Alignas(3) int e, g; __attribute__((aligned(3))) int h, i; }\n"
         "_Alignas(3) int i = 1, j = \"x\";\n_Alignas(3) int k; _Alignas(3) int l, m, o;\n"
         "__attribute__((aligned(3), section(1))) int p, r;\n__attribute__((aligned(3), nonnull(1))) int s, t;\nint after = \"a\";\n",
+        // _Alignas on a function or a typedef, the subject's error for each _Alignas and declarator, a variable's value error after.
+        "_Alignas(3) int f(void), b;\n"
+        "_Alignas(3) _Alignas(8) int g(void), c;\n"
+        "typedef _Alignas(3) int T, U;\n"
+        "typedef _Alignas(8) int V;\n"
+        "_Alignas(3) int a, h(void), d;\n"
+        "_Alignas(3) int k(void) { return 0; }\n"
+        "struct Z *q = &b;\n",
+        // _Alignas on a parameter, a bit-field and a register variable: the place's error for each, before the value's.
+        "void g(_Alignas(3) int p);\n"
+        "void g2(_Alignas(8) int p, _Alignas(8) _Alignas(16) int q);\n"
+        "int f(_Alignas(3) int);\n"
+        "struct S { _Alignas(3) int a : 2, b; _Alignas(8) int c : 2, d : 3; };\n"
+        "void h(void) { _Alignas(3) register int r, s; _Alignas(8) register int t; int u = r + s + t; struct Z *q = &u; }\n",
+        // _Alignas's and aligned's values of no integer constant and past 2^32, for each declarator; a typedef's and a parameter's place first.
+        "int n;\n"
+        "_Alignas(n) int a, b;\n"
+        "_Alignas(1ull << 40) int c, d;\n"
+        "_Alignas(1.5) int e;\n"
+        "__attribute__((aligned(1ull << 40))) int g, h;\n"
+        "typedef _Alignas(n) int T, U;\n"
+        "void p(_Alignas(n) int x);\n"
+        "struct Z *q = &a;\n"
+        "struct Z *r = &c;\n",
+        // Underalignment after the declarator's _Alignas values' errors, at the last _Alignas that stands.
+        "_Alignas(1) int u, v;\n"
+        "_Alignas(1) _Alignas(3) int w, x;\n"
+        "_Alignas(3) _Alignas(1) int y;\n"
+        "_Alignas(1) _Alignas(2) int z;\n"
+        "_Alignas(1) int _Alignas(2) z2;\n"
+        "struct S { _Alignas(1) int a, b; _Alignas(1) _Alignas(2) int c; };\n"
+        "void f(void) { _Alignas(1) _Alignas(3) int m = 1, n; struct Z *q = &n; }\n",
+        // Declarations that declare nothing take no _Alignas value error; an anonymous record member and a for's declarators do.
+        "_Alignas(3) int;\n"
+        "_Alignas(3) struct S { int a; };\n"
+        "struct T { _Alignas(3) int; _Alignas(1) int; int b; _Alignas(3) struct { int x; }; };\n"
+        "void f(void) { for (_Alignas(3) int i = 0, j; i; i++) ; }\n"
+        "_Alignas(3) _Thread_local int t, u;\n"
+        "struct Z *q = &t;\n",
+        // An enum's floating mode, of the other kind: clang installs the floating type as its integer type, here the integer
+        // of its layout (check_input_mode_enum_integer), before and after its body.
+        "enum __attribute__((mode(SF))) E { A, B = A + 1 };\n_Static_assert(sizeof(enum E) == 4 && _Alignof(enum E) == 4, \"four\");\n"
+        "enum E e = B;\nstruct Z *q = &e;\nenum F { C } __attribute__((mode(DF)));\n"
+        "_Static_assert(sizeof(enum F) == 8 && _Alignof(enum F) == 8, \"eight\");\nenum F f = C;\nstruct Z *s = &f;\n"
+        "enum __attribute__((mode(XF))) G { D };\n_Static_assert(sizeof(enum G) == 16 && _Alignof(enum G) == 16, \"sixteen\");\n"
+        "enum __attribute__((mode(HF))) I { I0 };\n_Static_assert(sizeof(enum I) == 2, \"hf\");\nint k = C << 40;\nstruct Z *t = (enum I *)0;\n",
+        // Conversions into such an enum: a floating value's silent (no -Wliteral-conversion on an enumeration target), an
+        // integer's -Wconstant-conversion at its integer's width, as clang's; no other error, so the common warnings run.
+        "enum __attribute__((mode(SF))) E { A };\nenum E e = 2.5;\nenum E g = 5000000000;\nenum E h = 1e20;\n"
+        "void f(enum E x, double d) { enum E y = d; x = 3.5; e = 1ll << 40; (void)x; (void)y; }\n"
+        "enum F { B } __attribute__((mode(DF)));\nenum F k = 1e30;\nenum F m = 1ll << 40;\nint after = B + A;\n",
+        // Last, gnu17's alone (C23 has no K&R definition): a K&R definition's parameter declarations' _Alignas, which the
+        // parser takes as the function declarator's suffix, each declarator's "cannot be applied to a function parameter".
+        "void kr(a) _Alignas(3) int a; {}\nvoid kr2(a, b) _Alignas(8) int a, b; { (void)a; (void)b; }\n"
+        "void kr3(a, b) int a; _Alignas(3) _Alignas(8) int b; { (void)a; }\nint kr4(a) _Alignas(8) register int a; { return a; }\n"
+        "int n;\nvoid kr5(a) _Alignas(n) int a; { (void)a; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
+    // The K&R definitions, the last fixture, are gnu17's alone.
+    const uint32_t before_c23 = BUSTER_ARRAY_LENGTH(fixtures) - 1;
     static const char* const options[] = { NULL, "-Wall", "-ferror-limit=2", "-w" };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);
@@ -80,7 +142,8 @@ static void check_test_driver_type_attribute_recovery(CheckTest* test, const cha
     {
         snprintf(source, sizeof(source), "%s/type-attribute-recovery-%u.c", directory, f);
         const bool made = parse_test_write(source, fixtures[f], strlen(fixtures[f]));
-        for (uint32_t s = 0; made && s < BUSTER_ARRAY_LENGTH(standards); s += 1)
+        const uint32_t standard_count = f >= before_c23 ? 1u : (uint32_t)BUSTER_ARRAY_LENGTH(standards);
+        for (uint32_t s = 0; made && s < standard_count; s += 1)
         {
             for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(options); o += 1)
             {
