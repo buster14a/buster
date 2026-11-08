@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Value hints (Tier1AllocationInput.hint_values, #140): a literal trace of two values that end and restart at one
-// position, which the level rule alone gives each other's registers, and random inputs on both paths against the
-// interval verifier, the position occupancy oracle and an independent reference of the common path's hint rule.
+// Value hints (Tier1AllocationInput.hint_values, #140, and hint_intervals, #1216): literal traces of two values that
+// end and restart at one position, which the level rule alone gives each other's registers, and of a range that takes
+// an earlier one's opening register over its own value's last; and random inputs on both paths against the interval
+// verifier, the position occupancy oracle and an independent reference of the common path's hint rule.
 // Included by tier1_allocate_test.c.
 
 // The common path's rule with hints, written over positions as tier1_allocation_test_levels writes it, with the free
-// registers as a set per level: a start whose hinted value's last register is free takes it, from the level above
-// that holds it (which then holds what the level rule would have taken) or as a fresh one (which makes a register
-// taken from this level fresh again). False when the class doesn't fit.
-static bool tier1_allocation_test_hinted_levels(const Tier1AllocationInput* input, uint32_t class, uint8_t* regs, uint8_t* last)
+// registers as a set per level: a start whose hinted register is free takes it, from the level above that holds it
+// (which then holds what the level rule would have taken) or as a fresh one (which makes a register taken from this
+// level fresh again). The hinted register is the hinted interval's opening one (`openings`, per interval), then the
+// own value's last, then the hinted value's. False when the class doesn't fit.
+static bool tier1_allocation_test_hinted_levels(const Tier1AllocationInput* input, uint32_t class, uint8_t* regs, uint8_t* last, uint8_t* openings)
 {
     uint8_t levels[33];
     memset(levels, UINT8_MAX, sizeof(levels));
@@ -44,7 +46,9 @@ static bool tier1_allocation_test_hinted_levels(const Tier1AllocationInput* inpu
                     const uint32_t hinted = input->hint_values[i];
                     // A hinted interval's own value's register from an earlier interval first, then the hinted value's.
                     const uint8_t own = hinted != UINT32_MAX ? last[input->values[i]] : UINT8_MAX;
-                    const uint8_t follow = own != UINT8_MAX ? own : hinted != UINT32_MAX ? last[hinted] : UINT8_MAX;
+                    const uint32_t earlier = input->hint_intervals != 0 ? input->hint_intervals[i] : UINT32_MAX;
+                    const uint8_t opening = earlier != UINT32_MAX ? openings[earlier] : UINT8_MAX;
+                    const uint8_t follow = opening != UINT8_MAX ? opening : own != UINT8_MAX ? own : hinted != UINT32_MAX ? last[hinted] : UINT8_MAX;
                     uint32_t holder = UINT32_MAX;
                     for (uint32_t k = height + 1; follow != UINT8_MAX && k < 33; k += 1)
                     {
@@ -69,6 +73,7 @@ static bool tier1_allocation_test_hinted_levels(const Tier1AllocationInput* inpu
                     levels[height] = UINT8_MAX;
                     regs[i] = r;
                     last[input->values[i]] = r;
+                    openings[i] = r;
                     height += 1;
                 }
             }
@@ -181,6 +186,138 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
         input.hint_values = outside;
         tier1_allocation_test_expect(tally, tier1_allocate_scalar(&input, arena, &refused) == TIER1_ALLOCATION_INVALID && arena->length == saved, "a hint past the values is refused");
     }
+    // Three values over [0, 10), then the first one's again over [10, 20), hinted to its own value and to the second
+    // range's opening register: a dispatch loop's handler taking its sibling's entry convention. Without the interval
+    // hint every path gives it its own value's register; with it, the second range's.
+    {
+        const uint32_t starts[] = {
+            0,
+            0,
+            0,
+            10,
+        };
+        const uint32_t ends[] = {
+            10,
+            10,
+            10,
+            20,
+        };
+        const uint32_t values[] = {
+            0,
+            1,
+            2,
+            0,
+        };
+        const uint32_t allowed[] = {
+            0xffff,
+            0xffff,
+            0xffff,
+            0xffff,
+        };
+        const uint8_t classes[] = {
+            0,
+            0,
+            0,
+            0,
+        };
+        const uint32_t hint_values[] = {
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+            0,
+        };
+        const uint32_t hint_intervals[] = {
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+            1,
+        };
+        Tier1AllocationInput input = {
+            .starts = starts,
+            .ends = ends,
+            .values = values,
+            .allowed_registers = allowed,
+            .classes = classes,
+            .hint_values = hint_values,
+            .count = 4,
+            .value_count = 3,
+            .position_count = 20,
+            .registers = {
+                0xffff,
+                0xffff,
+            },
+        };
+        for (uint32_t hinted = 0; hinted < 2; hinted += 1)
+        {
+            input.hint_intervals = hinted != 0 ? hint_intervals : 0;
+            for (uint32_t path = 0; path < 3; path += 1)
+            {
+                const uint64_t saved = arena->length;
+                Tier1Allocation output = { 0 };
+                const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : path == 1 ? tier1_allocate_scalar(&input, arena, &output) : tier1_allocate_scan_reference(&input, arena, &output);
+                const bool produced = error == TIER1_ALLOCATION_OK && output.fragment_count == 4;
+                tier1_allocation_test_expect(tally, produced && tier1_allocation_verify(&input, &output), "interval hint trace allocates");
+                if (produced)
+                {
+                    const uint32_t model = hinted != 0 ? 1 : 0;
+                    tier1_allocation_test_expect(tally, output.registers[3] == output.registers[model], hinted != 0 ? "a range takes its hinted interval's opening register first" : "a range without an interval hint keeps its value's register");
+                }
+                arena_pop_to(arena, saved);
+            }
+        }
+        // The hinted interval must start before the range and have its class.
+        const uint32_t refused_hints[][4] = {
+            {
+                UINT32_MAX,
+                UINT32_MAX,
+                UINT32_MAX,
+                3,
+            },
+            {
+                UINT32_MAX,
+                UINT32_MAX,
+                UINT32_MAX,
+                4,
+            },
+            {
+                UINT32_MAX,
+                0,
+                UINT32_MAX,
+                UINT32_MAX,
+            },
+            {
+                3,
+                UINT32_MAX,
+                UINT32_MAX,
+                UINT32_MAX,
+            },
+        };
+        const char* refused_names[] = {
+            "an interval hint to itself is refused",
+            "an interval hint past the intervals is refused",
+            "an interval hint to one starting with it is refused",
+            "an interval hint to a later one is refused",
+        };
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(refused_hints); k += 1)
+        {
+            input.hint_intervals = refused_hints[k];
+            Tier1Allocation refused = { 0 };
+            const uint64_t saved = arena->length;
+            const Tier1AllocationError error = k % 2 == 0 ? tier1_allocate(&input, arena, &refused) : tier1_allocate_scalar(&input, arena, &refused);
+            tier1_allocation_test_expect(tally, error == TIER1_ALLOCATION_INVALID && arena->length == saved, refused_names[k]);
+        }
+        const uint8_t mixed[] = {
+            0,
+            1,
+            0,
+            0,
+        };
+        input.classes = mixed;
+        input.hint_intervals = hint_intervals;
+        Tier1Allocation refused = { 0 };
+        const uint64_t saved = arena->length;
+        tier1_allocation_test_expect(tally, tier1_allocate(&input, arena, &refused) == TIER1_ALLOCATION_INVALID && arena->length == saved, "an interval hint across classes is refused");
+    }
     // Random ranges of a few values each, adjacent and apart, every one hinted to a random value of its class or to
     // none, at pressures to the class's registers and past them, with required uses and fixed ranges in some.
     uint32_t starts[128];
@@ -189,6 +326,7 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
     uint32_t allowed[128];
     uint8_t classes[128];
     uint32_t hint_values[128];
+    uint32_t hint_intervals[128];
     uint32_t use_offsets[129];
     uint32_t use_positions[128];
     uint8_t required[128];
@@ -261,6 +399,10 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
                 hinted = value_classes[other] == classes[i] ? other : UINT32_MAX;
             }
             hint_values[i] = hinted;
+            // Every other iteration, a third of the ranges also hinted to a random earlier range of their class.
+            const uint32_t earlier = tier1_allocation_test_random(&seed) % count;
+            const bool model = iteration % 2 == 1 && tier1_allocation_test_random(&seed) % 3 == 0 && classes[earlier] == classes[i] && starts[earlier] < starts[i];
+            hint_intervals[i] = model ? earlier : UINT32_MAX;
             use_offsets[i] = i;
             use_positions[i] = ends[i] - 1;
             required[i] = (uint8_t)(tier1_allocation_test_random(&seed) & 1);
@@ -273,6 +415,7 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
             .allowed_registers = allowed,
             .classes = classes,
             .hint_values = hint_values,
+            .hint_intervals = iteration % 2 == 1 ? hint_intervals : 0,
             .use_offsets = use_offsets,
             .use_positions = use_positions,
             .use_required = constrained ? required : 0,
@@ -309,10 +452,12 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
             // A class the common path colors, against the reference; the classes are colored in order, sharing `last`.
             uint8_t reference[128];
             uint8_t last[25];
+            uint8_t openings[128];
             memset(last, UINT8_MAX, sizeof(last));
+            memset(openings, UINT8_MAX, sizeof(openings));
             for (uint32_t class = 0; !constrained && class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
             {
-                if (tier1_allocation_test_hinted_levels(&input, class, reference, last))
+                if (tier1_allocation_test_hinted_levels(&input, class, reference, last, openings))
                 {
                     bool same = true;
                     for (uint32_t i = 0; i < count; i += 1)

@@ -150,12 +150,29 @@ registers: ends deposit downward in input order and starts take upward in input
 order. A CFG's per-block ranges do exactly that at a block's start, so
 `hint_values` names, per interval, a value whose most recently assigned register
 the interval takes where it is free; `tier1_cfg.c` hints each range a value
-enters a block with to the value itself, each phi to an operand, and a value
-a phi takes along a back edge (defined after the phi) to the phi, which has its
-register by then, so that the back edge moves nothing for it. A hinted
-interval whose own value already had a register, in an interval earlier in the
-order, takes that one first: a loop's header laid out after its body keeps the
-register the body gave its phi rather than its operand's (#1216). The common
+enters a block with to the value itself, each phi to an operand, and each phi
+operand nothing else hints to the phi, which along a back edge has its register
+by then, so that the edge moves nothing for it. A hinted interval whose own
+value already had a register, in an interval earlier in the order, takes that
+one first: a loop's header laid out after its body keeps the register the body
+gave its phi rather than its operand's (#1216).
+
+`hint_intervals`, optional with `hint_values` (ignored without it), names per
+interval an earlier-starting interval of its class whose register at its start,
+its opening register, the interval takes before either of those (#1216);
+validation refuses one of another class, starting at the same position or
+later, or past `count`. The openings follow `value_count + 1` per-value bytes in
+the same scratch array, written as each interval starts on every path, and an
+interval that started in memory leaves the memory hint, which an interval
+without uses follows as it would its value's. `tier1_cfg.c` gives a block that no
+earlier block reaches (a dispatch loop's handler, its join laid out after the
+handlers) the entry convention of its sibling, the first block in layout that
+its predecessors reach; and the join's phis their places at the entry of its
+first successor, which is laid out before it. Each handler then enters with the
+loop's values where the first one has them, and the join's edges move nothing
+for a value every handler keeps. Before, a handler's entry ranges took registers
+by the values each handler had last placed in them, which differ per handler, so
+that each join edge rotated the loop's values through registers. The common
 path takes the hinted register from the level above that holds it, which then
 holds the register the rule would have taken, or as a fresh one, which makes a
 register taken from the current level fresh again. Every level from the current
@@ -170,8 +187,9 @@ the 9700X, `benchmark-tier1-allocation`'s cases (which have no hints) then run
 within 2% of the allocator before hints, but tiny-fit's vector path at +2.9%, 30
 cycles per call for the dispatch; with the hint code in the plain loops they had
 run 4% to 15% slower. `tier1_allocate_hints_test.c` checks the rule against an
-independent reference over positions, and a trace whose two values the rule
-alone swaps.
+independent reference over positions, with and without interval hints, a trace
+whose two values the rule alone swaps, and one whose range takes an earlier
+range's opening register over its own value's last.
 
 That matching stays scalar, for a measured reason. It used to resolve the
 partners' registers afterwards: pointer-jumping rounds over every interval,
@@ -220,7 +238,13 @@ next use, then, at equal distance, the value with fewer uses over all its
 intervals; and an interval with no use of its own, starting where it is not
 required, takes no register where it would be rematerialized or where its value
 was last in its slot. A CFG's edges move it where a successor wants it in a
-register, instead of the range holding one through a loop's other paths. A value without a
+register, instead of the range holding one through a loop's other paths. The
+intervals starting at one position claim the registers they are hinted to,
+first come in input order, before any takes one; an interval whose hint is
+another's claim, or that has none, takes a free register no other claims there,
+or a claimed one only where it is required. Taking registers in input order
+alone gave a value another's wanted register, pushed that one into a third, and
+so on along a block's entry. A value without a
 register gets a spill/rematerialization fragment. An eviction closes its
 register prefix. With `use_required`, it reenters a register at its next
 required use, potentially evicting another value, and can be split again.

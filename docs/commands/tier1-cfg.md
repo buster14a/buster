@@ -7,7 +7,8 @@ requirements. [Command index](README.md).
 ## Module overview
 
 - `tier1_cfg.c` allocates over a CFG (#140): per-block ranges from `dataflow.c`'s
-  liveness with phi operands on their edges, hinted (`hint_values`) to keep one
+  liveness with phi operands on their edges, hinted (`hint_values`, and
+  `hint_intervals` for a dispatch loop's handlers' entries, #1216) to keep one
   register, then each edge's parallel move, placed at a block's end or start or
   on the split edge, with a temporary slot for slot cycles. `tier1_cfg_verify`
   is its independent checker, which simulates each block and edge, and checks

@@ -71,6 +71,10 @@ struct Tier1AllocationInput
     // that a value's separate intervals, a CFG's per-block ranges, can keep one register. The hinted value's intervals
     // must have this interval's class.
     const uint32_t* hint_values;
+    // Optional, with hint_values: per interval, an interval of its class starting before it, whose register at its
+    // start the interval takes first (UINT32_MAX for none): a block's entry can take a sibling block's convention, as
+    // every successor of a dispatch loop's join does from the first, which no value's last register says.
+    const uint32_t* hint_intervals;
     const uint8_t* rematerializable;
     // Both use columns may be absent (next use then conservatively means interval end). Otherwise each slice is
     // sorted, contains positions inside its interval, and may be empty. Duplicate positions are legal.
@@ -215,14 +219,26 @@ static uint8_t tier1_allocation_spill_kind(const Tier1AllocationInput* input, ui
 // frees its register at its end event, unless an eviction gave the register to another interval (active[r] says
 // whose it is); ends precede starts at one position, so adjacent half-open intervals still share registers.
 // Fixed clobbers restrict a whole interval; splitting around call sites belongs in the producer's machine ranges.
-// The register a hinted value holds last, or UINT8_MAX: `last` is null without hint_values.
+// The register a hinted value holds last, or UINT8_MAX: `last` is null without hint_values. With hint_intervals, `last`'s
+// value_count + 1 bytes are followed by each interval's opening register (BUSTER_TIER1_ALLOCATE_MEMORY_HINT where it
+// started without one), which the scans and the coloring write as each interval starts.
 static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval)
 {
     const uint32_t value = last != 0 ? columns->hint_values[interval] : UINT32_MAX;
+    const uint32_t earlier = last != 0 && columns->hint_intervals != 0 ? columns->hint_intervals[interval] : UINT32_MAX;
+    const uint8_t opening = earlier != UINT32_MAX ? last[(uint64_t)columns->value_count + 1 + earlier] : UINT8_MAX;
     // A hinted interval whose own value already had a place, in an interval earlier in layout, keeps it: a loop's header
     // after its body takes the register the body gave its phi, not its operand's.
     const uint8_t own = value != UINT32_MAX ? last[columns->values[interval]] : UINT8_MAX;
-    return own != UINT8_MAX ? own : value != UINT32_MAX ? last[value] : UINT8_MAX;
+    return opening != UINT8_MAX ? opening : own != UINT8_MAX ? own : value != UINT32_MAX ? last[value] : UINT8_MAX;
+}
+
+static void tier1_allocation_note_opening(const Tier1AllocationInput* columns, uint8_t* last, uint32_t interval, uint32_t chosen)
+{
+    if (last != 0 && columns->hint_intervals != 0)
+    {
+        last[(uint64_t)columns->value_count + 1 + interval] = chosen < 32 ? (uint8_t)chosen : BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
+    }
 }
 
 static inline __attribute__((always_inline)) bool tier1_allocate_scan(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* allowed, uint8_t* regs, uint32_t* split, uint8_t* kinds, uint8_t* last)
@@ -297,6 +313,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan(const Tier
                         valid = false;
                     }
                 }
+                tier1_allocation_note_opening(&columns, last, interval, chosen);
                 if (chosen != UINT32_MAX)
                 {
                     regs[interval] = (uint8_t)chosen;
@@ -412,6 +429,12 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
         }
     }
     uint32_t occupied = 0;
+    // The registers the intervals starting at claims_at continue in (their hints), each claimed by the first of them
+    // that wants it while it is free: an interval without one there takes another, so that it doesn't push a value
+    // that keeps its register into another one, and that one's value into a third, as layout order would.
+    uint32_t claimed = 0;
+    uint32_t claims_at = UINT32_MAX;
+    uint32_t claimers[32];
     bool valid = true;
     for (uint32_t e = 0; valid && e < event_count; e += 1)
     {
@@ -419,6 +442,24 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
         const uint32_t use = events[e] & ~BUSTER_TIER1_ALLOCATE_USE_EVENT;
         const uint32_t interval = use_event ? use_intervals[use] : events[e] >> 1;
         const bool end_event = !use_event && (events[e] & 1) == 0;
+        if (last != 0 && !use_event && !end_event && columns.classes[interval] == class && columns.starts[interval] != claims_at)
+        {
+            // Ends precede starts at a position, so the run of starts from here is every one at it.
+            claims_at = columns.starts[interval];
+            claimed = 0;
+            for (uint32_t k = e; k < event_count && (events[k] & (BUSTER_TIER1_ALLOCATE_USE_EVENT | 1)) == 1 && columns.starts[events[k] >> 1] == claims_at; k += 1)
+            {
+                const uint32_t other = events[k] >> 1;
+                const uint8_t want = columns.classes[other] == class ? tier1_allocation_value_hint(&columns, last, other) : UINT8_MAX;
+                const bool unused = columns.use_offsets[other] == columns.use_offsets[other + 1] && !tier1_allocation_required_at(&columns, other, claims_at);
+                const bool resting = unused && (tier1_allocation_spill_kind(&columns, other) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE || want == BUSTER_TIER1_ALLOCATE_MEMORY_HINT);
+                if (!resting && want < 32 && (((~occupied & allowed[other] & ~claimed) >> want) & 1) != 0)
+                {
+                    claimed |= 1u << want;
+                    claimers[want] = other;
+                }
+            }
+        }
         if (end_event && columns.classes[interval] == class)
         {
             const uint32_t r = regs[interval];
@@ -438,18 +479,23 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             // A value with no use in its interval holds no register there where it would be recomputed, or where its
             // value was in memory last: edges move it where a successor wants it in one.
             const bool idle = !use_event && !required && columns.use_offsets[interval] == columns.use_offsets[interval + 1] && (recomputed || follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT);
+            const bool starting = !use_event && position == claims_at;
+            const uint32_t mine = starting && follow < 32 && ((claimed >> follow) & 1) != 0 && claimers[follow] == interval ? 1u << follow : 0;
+            const uint32_t open = free & ~(starting ? claimed & ~mine : 0);
+            claimed &= ~mine;
             uint32_t chosen = UINT32_MAX;
             if (idle)
             {
             }
-            else if (free != 0)
+            else if (open != 0 || (free != 0 && required))
             {
-                chosen = (uint32_t)__builtin_ctz(free);
+                const uint32_t pool = open != 0 ? open : free;
+                chosen = (uint32_t)__builtin_ctz(pool);
                 if (columns.hints != 0 && columns.hints[interval] != UINT8_MAX && ((free >> columns.hints[interval]) & 1) != 0)
                 {
                     chosen = columns.hints[interval];
                 }
-                else if (follow < 32 && ((free >> follow) & 1) != 0)
+                else if (follow < 32 && ((pool >> follow) & 1) != 0)
                 {
                     chosen = follow;
                 }
@@ -494,6 +540,10 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
                 {
                     valid = false;
                 }
+            }
+            if (!use_event)
+            {
+                tier1_allocation_note_opening(&columns, last, interval, chosen);
             }
             if (chosen != UINT32_MAX)
             {
@@ -605,6 +655,7 @@ static inline __attribute__((always_inline)) void tier1_allocation_color(const T
             ended[level] = UINT8_MAX;
             regs[interval] = r;
             last[input->values[interval]] = r;
+            tier1_allocation_note_opening(input, last, interval, r);
             level += 1;
         }
     }
@@ -781,7 +832,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
         }
         if (error == TIER1_ALLOCATION_OK && hinted)
         {
-            value_last = arena_push_array(arena, (uint64_t)columns.value_count + 1, sizeof(uint8_t), 1);
+            value_last = arena_push_array(arena, (uint64_t)columns.value_count + 1 + (columns.hint_intervals != 0 ? columns.count : 0), sizeof(uint8_t), 1);
             if (value_last == 0)
             {
                 error = TIER1_ALLOCATION_CAPACITY;
@@ -894,7 +945,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
         }
         if (hinted && value_last != 0)
         {
-            memset(value_last, UINT8_MAX, (uint64_t)columns.value_count + 1);
+            memset(value_last, UINT8_MAX, (uint64_t)columns.value_count + 1 + (columns.hint_intervals != 0 ? columns.count : 0));
         }
         if (error == TIER1_ALLOCATION_OK && columns.fixed.count != 0 && !tier1_allocation_filter_fixed(input, arena, BUSTER_VECTOR_PATH(vector), events, event_count, buckets, allowed))
         {
@@ -1049,15 +1100,23 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
     return error;
 }
 
-// The hinted copy: each hint a value of the input's, then the body with its hint code.
-static __attribute__((noinline)) Tier1AllocationError tier1_allocate_hinted(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1Allocation* result)
+// Each hint a value of the input's, and each hinted interval one of its class that starts before it.
+static bool tier1_allocation_hints_valid(const Tier1AllocationInput* input)
 {
     bool valid = true;
     for (uint32_t i = 0; valid && i < input->count && input->count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS; i += 1)
     {
         valid = input->hint_values[i] == UINT32_MAX || input->hint_values[i] < input->value_count;
+        const uint32_t earlier = input->hint_intervals != 0 ? input->hint_intervals[i] : UINT32_MAX;
+        valid = valid && (earlier == UINT32_MAX || (earlier < input->count && input->classes != 0 && input->starts != 0 && input->classes[earlier] == input->classes[i] && input->starts[earlier] < input->starts[i]));
     }
-    return valid ? tier1_allocate_body(input, arena, vector, true, true, result) : TIER1_ALLOCATION_INVALID;
+    return valid;
+}
+
+// The hinted copy: valid hints, then the body with its hint code.
+static __attribute__((noinline)) Tier1AllocationError tier1_allocate_hinted(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1Allocation* result)
+{
+    return tier1_allocation_hints_valid(input) ? tier1_allocate_body(input, arena, vector, true, true, result) : TIER1_ALLOCATION_INVALID;
 }
 
 static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1Allocation* result)
@@ -1088,12 +1147,7 @@ static __attribute__((unused)) Tier1AllocationError tier1_allocate_scan_referenc
     Tier1AllocationError error = TIER1_ALLOCATION_INVALID;
     if (input != 0 && input->hint_values != 0)
     {
-        bool valid = true;
-        for (uint32_t i = 0; valid && i < input->count && input->count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS; i += 1)
-        {
-            valid = input->hint_values[i] == UINT32_MAX || input->hint_values[i] < input->value_count;
-        }
-        error = valid ? tier1_allocate_body(input, arena, false, false, true, result) : TIER1_ALLOCATION_INVALID;
+        error = tier1_allocation_hints_valid(input) ? tier1_allocate_body(input, arena, false, false, true, result) : TIER1_ALLOCATION_INVALID;
     }
     else
     {
