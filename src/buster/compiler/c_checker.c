@@ -3488,6 +3488,12 @@ static void check_graph_report(const CheckGraph* graph, CheckStream* stream, uin
     {
         token = graph->argument_tokens[graph->argument_offsets[node] + operand - 1];
     }
+    else if (diagnostic == CHECK_DIAG_REGISTER_ADDRESS && graph->ops[node] != CHECK_OP_ADDRESS && graph->ops[node] != CHECK_OP_CALL && operand < 3)
+    {
+        // A register array's decay, at its name, as clang's DefaultFunctionArrayConversion reports it (#1447).
+        const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+        token = operands[operand] < graph->count && graph->tokens != 0 ? graph->tokens[operands[operand]] : token;
+    }
     stream->reports[stream->report_count] = (CheckReport){
         .node = node,
         .token = token,
