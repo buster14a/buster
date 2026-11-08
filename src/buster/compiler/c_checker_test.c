@@ -442,6 +442,10 @@ static __attribute__((noinline)) void check_test_action_constraints(CheckTest* t
     action.operands[1].type = const_pointer;
     result = check_test_action(test, table, action);
     check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.warnings == CHECK_WARNING_DISCARDED_QUALIFIERS, "pointer assignment discarding pointed-to const warns");
+    action.operands[1].type = type_pointer(table, BUSTER_TYPE_UINT | BUSTER_TYPE_CONST);
+    result = check_test_action(test, table, action);
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.warnings == CHECK_WARNING_POINTER_SIGN,
+                      "pointer signedness warning takes precedence over an ordinary qualifier discard");
     action.operands[0].type = type_pointer(table, type_pointer(table, BUSTER_TYPE_CHAR));
     action.operands[1].type = double_pointer;
     result = check_test_action(test, table, action);

@@ -12,6 +12,11 @@ on:
       - 'tests/ci/selfhost.c'
       - 'tools/ci/correctness.tests'
       - 'tools/ci/setup-hosted.sh'
+      - 'tools/ci/hosted-release.sh'
+      - 'tools/ci/hosted-tools.lock'
+      - 'tools/ci/install-hosted-tools.sh'
+      - '.github/actions/hosted-tools/action.yml'
+      - '.github/workflows/prepare-hosted-tools.yml'
       - 'src/buster/compiler/host_isa.h'
       - 'build.sh'
       - 'CMakeLists.txt'
@@ -24,6 +29,11 @@ on:
       - 'tests/ci/selfhost.c'
       - 'tools/ci/correctness.tests'
       - 'tools/ci/setup-hosted.sh'
+      - 'tools/ci/hosted-release.sh'
+      - 'tools/ci/hosted-tools.lock'
+      - 'tools/ci/install-hosted-tools.sh'
+      - '.github/actions/hosted-tools/action.yml'
+      - '.github/workflows/prepare-hosted-tools.yml'
       - 'src/buster/compiler/host_isa.h'
       - 'build.sh'
       - 'CMakeLists.txt'
@@ -73,9 +83,13 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  # One verified release-input acquisition for both bootstrap rows.
+  prepare-hosted-tools:
+    uses: ./.github/workflows/prepare-hosted-tools.yml
+
   bootstrap:
     name: Self-host bootstrap and probe equivalence (${{ matrix.host_arch }})
-    needs: harness
+    needs: [harness, prepare-hosted-tools]
     runs-on: ubuntu-26.04
     # This is an initial budget on a hosted runner, not a throughput acceptance
     # threshold. The first artifact records the actual cost; 900 s bounds each
@@ -134,6 +148,12 @@ jobs:
               printf 'run=0\n' >> "$GITHUB_OUTPUT"
               printf '%s\n' '::warning::This hosted runner has no complete host vector path; the native self-host bootstrap is skipped. The x86-64 bootstrap qualifies the scalar host path.'
           fi
+
+      - name: Restore verified hosted release inputs
+        if: steps.host.outputs.run == '1'
+        uses: ./.github/actions/hosted-tools
+        with:
+          artifact-name: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
 
       - name: Stage the official Clang 23 toolchain
         if: steps.host.outputs.run == '1'
