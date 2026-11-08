@@ -4011,8 +4011,6 @@ The later phases are left:
   source order instead.
 - **Shared `_Alignas`.** An `_Alignas` shared by several declarators gives its
   error once, where clang gives it for each.
-- **Unused `extern` locals.** A block's unused `extern` declaration gets no
-  warning, where clang gives one (on main too).
 
 ### What the lowering costs (#531)
 
@@ -4391,8 +4389,14 @@ the completion, so they follow Clang's after-function order; a redeclaration
 inherits an earlier `unused` or `used` attribute. A file-scope variable's
 unused warning is given only in the main file, as Clang leaves a header's
 file-scope variables alone because every unit that includes the header shares
-them. The graph pass adds `-Wunused-but-set-parameter` for a parameter a
-statement assignment writes and no read uses.
+them. A block's declaration with linkage (an `extern` object, any function
+declaration) is never unused: clang's semantic context for it is the
+translation unit, not the function, so `ShouldDiagnoseUnusedDecl` passes it
+by. A use through it uses the outer declaration with linkage it redeclares,
+so `static int s; void f(void) { extern int s; (void)s; }` leaves `s` used.
+A block's own `static`, `register` and automatic objects can be unused. The
+graph pass adds `-Wunused-but-set-parameter` for a parameter a statement
+assignment writes and no read uses.
 
 Each uses the shared warning policy, so a default or group option, a
 `#pragma clang diagnostic` change and `-Werror` promotion behave as the other
