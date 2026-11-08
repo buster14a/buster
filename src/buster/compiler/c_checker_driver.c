@@ -5455,6 +5455,8 @@ struct CheckDriverCommand
     bool tier1_gvn;
     bool tier1_no_lifetimes;
     bool tier1_no_inline;
+    // --tier0-no-inline keeps Tier 0's calls of always_inline functions (#1398).
+    bool tier0_no_inline;
     // --tier1-schedule=post|pre (#172): BUSTER_CHECK_TIER1_SCHEDULE_*.
     uint8_t tier1_schedule;
     CheckTier1Report* tier1_report;
@@ -6825,6 +6827,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             lanes->tier1_no_inline = true;
         }
+        else if (strcmp(arguments[i], "--tier0-no-inline") == 0)
+        {
+            lanes->tier0_no_inline = true;
+        }
         else if (strcmp(arguments[i], "--tier1-gvn") == 0)
         {
             lanes->tier1_gvn = true;
@@ -7138,6 +7144,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_gvn = lanes->tier1_gvn,
         .tier1_no_lifetimes = lanes->tier1_no_lifetimes,
         .tier1_no_inline = lanes->tier1_no_inline,
+        .tier0_no_inline = lanes->tier0_no_inline,
         .tier1_schedule = lanes->tier1_schedule,
         .tier1_report = &lanes->tier1_report,
         .tier1_refusals = lanes->tier1_refusals,

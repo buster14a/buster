@@ -440,6 +440,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 // depths), the programs its tests and benchmark generate, and its tests, for the test-tier0 command. Its benchmark
 // (benchmark-backend) is another translation unit.
 #include "buster/compiler/tier0.c"
+#include "buster/compiler/tier0_inline.c"
 #include "buster/compiler/unwind.c"
 #include "buster/compiler/unwind_tier0.c"
 // The tier-neutral emitted function (#1056): Tier 0's adapter, the frame events' resolution and their verifier.
@@ -552,6 +553,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_lower_inventory.c"
 // #136's benchmark-backend-source: benchmark-backend's variants on the functions -c compiles of real units.
 #include "buster/compiler/tier0_source_benchmark.c"
+// #1398's test-tier0-inline: Tier 0's splice of always_inline functions, its vector path against its twin, on real C.
+#include "buster/compiler/c_check_tier0_inline_test.c"
 // #151's benchmark-check-lanes: a unit's functions compiled on lanes, against one lane.
 #include "buster/compiler/c_check_lanes_benchmark.c"
 #include "buster/compiler/c_check_binding_benchmark.c"
@@ -686,7 +689,7 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // against one lane's (time-runs' runs, of test-check-units' program of synth's shape).
 #include "buster/compiler/c_check_units_benchmark.c"
 // measure-tier1-programs (#138, #1189): speedtest1 and Lua's scripts by both tiers, clang -O0 and -O2 and tcc, as whole
-// processes in a rotating order, against each other.
+// processes in a Williams design's order, against each other.
 #include "buster/compiler/tier1_programs_measure.c"
 // measure-tier1-rows (#1283): vector code (test-checker-driver's machine rows' unit, a lexer's byte scan and the compiler's
 // own lexer) by Tier 0, Tier 1 and another compiler's Tier 1, with the moves around Tier 1's machine rows counted.
@@ -695,7 +698,7 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // -O2's, with and without the objects' lifetimes).
 #include "buster/compiler/frame_measure.c"
 // measure-helpers (#1059): the direct forms against the helpers they replace (--helper-forms=all), by both tiers, as
-// whole processes in a rotating order: the primitives' kernels and speedtest1.
+// whole processes in a Williams design's order: the primitives' kernels and speedtest1.
 #include "buster/compiler/helpers_measure.c"
 
 // The runner the 9700X job runs its tests through (a list of commands at once, each one's output printed in the list's
@@ -1330,6 +1333,10 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-source") == 0)
     {
         result = run_ir_source_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-tier0-inline") == 0)
+    {
+        result = run_tier0_inline_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-backend-source") == 0)
     {

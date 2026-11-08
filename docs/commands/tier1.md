@@ -86,7 +86,7 @@ requirements. [Command index](README.md).
   builds them: speedtest1 as one translation unit but by clang, which compiles an
   object of each file and links them. It checks that speedtest1's `--verify`
   gives one hash and each script prints clang -O0's output, then runs every
-  build of every program in `--runs` rounds (11) of a rotating order, as whole
+  build of every program in `--runs` rounds (11) of a Williams design's order, as whole
   processes (`profile.c`'s), each with its wall time and its user cycles and
   instructions, every speedtest1 run from a fresh database: its files and
   SQLite's temporary directory removed before it, outside its time, as the
@@ -229,6 +229,21 @@ memory-order and shared-load counterexamples, and full-width pointer-integer
 addition folded into a memory operand. `test-x86-target-selection` also
 reaches these fixtures through the existing memory-plan tests.
 
+The index walk also folds same-block, single-use I64 shifts and power-of-two
+multiplies into the addressing mode's scale when the combined scale is at most
+eight. It carries the current scale through constant additions/subtractions:
+`(i + 3) << 2` contributes displacement 12, while `(i << 2) + 3` contributes 3.
+Narrow arithmetic before an extension, shared index producers and larger scales
+remain computed. Existing pattern kinds and intrinsic costs stay unchanged;
+the BURS load/store/copy actions select their filled address operands without
+new grammar tables. The regression checks both multiply operand orders, scales
+of one through eight and a refused scale of sixteen, exact effective uses,
+separately used constants, both pointer-address forms, and native memory and
+returned addresses against the independent IR interpreter, including I32 wrap
+before widening and high-bit I64 inputs. The C driver's host-reproducibility
+fixture also exercises scaled loads and an intervening store against Clang,
+with rematerialization enabled and disabled and byte-identical host-path objects.
+
 Memory operands may also fold shared same-block pointer conversions,
 full-width additions and address nodes. Each access publishes the original
 base/index as its effective uses; the shared producer remains only when another
@@ -262,3 +277,11 @@ need corpus evidence. Record speedtest1/Lua dynamic
 counts and approved-host runtime results in `buster14a/buster-performance`,
 not in this source repository; use `measure-tier1-programs` for the runtime
 comparison described above.
+
+For the instruction breakdown, retain the generated programs with `--keep`
+and use the corrected [#1189 `gap.c`](https://github.com/buster14a/buster-performance/blob/e44d737737d8b811065931fd82a5c034a6e9c39c/docs/measurements/tier1-gap-1189-2026-11-03/tools/gap.c):
+`GAP_INSTRUCTIONS=1 gap count DISASSEMBLY CALLGRIND OBJECT BASE` retains the
+per-instruction rows needed for non-frame LEAs and power-of-two immediate
+IMULs. Disassemble the same retained executable and derive its own Callgrind
+object/base mapping; a historical binary's mapping does not qualify a fresh
+one. These opcode counts need no origin-tagging compiler patch.

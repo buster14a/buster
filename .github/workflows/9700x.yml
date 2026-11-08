@@ -109,6 +109,7 @@ jobs:
       checker_bindings: ${{ steps.files.outputs.checker_bindings }}
       checker_binding_modes: ${{ steps.files.outputs.checker_binding_modes }}
       check_debug: ${{ steps.files.outputs.check_debug }}
+      sqlite_stable: ${{ steps.files.outputs.sqlite_stable }}
       check_debug_rows: ${{ steps.files.outputs.check_debug_rows }}
       files: ${{ steps.files.outputs.files }}
       compile_time: ${{ steps.files.outputs.compile_time }}
@@ -223,6 +224,12 @@ jobs:
           EVIDENCE_NIGHTLY: ${{ vars.BUSTER_NIGHTLY }}
         run: bash tools/ci/nightly.sh evidence "$RUNNER_TEMP/evidence"
 
+  # One verified release-input acquisition before any hosted shard starts.
+  prepare-hosted-tools:
+    needs: [changes, evidence, agent-guide-size, dco-hooks]
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}
+    uses: ./.github/workflows/prepare-hosted-tools.yml
+
   test:
     name: Tests on Ubuntu 26.04 (Clang 23, ${{ matrix.host_arch }}, ${{ matrix.sanitizer }}, O${{ matrix.optimization }}, shard ${{ matrix.shard }} of 4)
     # A pull request's run stops at its first failure. GitHub has no fail-fast across jobs, so its tests wait for the
@@ -230,8 +237,8 @@ jobs:
     # after them would change a qualification that can't pass. Pushes to main, the daily run and dispatched runs test
     # regardless, so that every row reports.
     # A nightly dispatch whose commit's earlier run qualified its plain rows reuses them (`evidence`), and runs none.
-    needs: [changes, evidence, agent-guide-size, dco-hooks]
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}
+    needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]
+    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}
     runs-on: ubuntu-26.04
     # The sanitizer rows run their shard of the inventory on runners whose detectors make it several times slower; the
     # driver's in-process commands take tens of minutes each there. Unsharded, the plain rows took up to 80 minutes and the
@@ -273,6 +280,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+
+      - name: Restore verified hosted release inputs
+        uses: ./.github/actions/hosted-tools
+        with:
+          artifact-name: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
 
       - name: Install official Clang 23.1.4 and test tools
         run: bash tools/ci/setup-hosted.sh
@@ -543,9 +555,9 @@ jobs:
 
   fuzz:
     name: libFuzzer (ASan + UBSan + leaks, ${{ matrix.entry }})
-    needs: [changes, evidence]
+    needs: [changes, evidence, prepare-hosted-tools]
     # Like the sanitizer rows, not on pull requests, nor in the `plain` scope.
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}
+    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     strategy:
@@ -576,6 +588,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+
+      - name: Restore verified hosted release inputs
+        uses: ./.github/actions/hosted-tools
+        with:
+          artifact-name: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
 
       - name: Install official Clang, sanitizer and libFuzzer runtimes
         run: bash tools/ci/setup-hosted.sh
@@ -1482,7 +1499,7 @@ jobs:
             -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
             "$musl/src/regex/regcomp.c"
           # The whole compile with them and without: sqlite3.c's -c with measure-compile's options, as whole processes in a
-          # rotating order, whose objects must be the same bytes.
+          # Williams design's order, whose objects must be the same bytes.
           sqlite="$corpus/sqlite"
           options=(-c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sqlite" "$sqlite/sqlite3.c")
           taskset -c 2 ./build/compiler time-runs --runs 21 --list "${options[@]}" -o "$RUNNER_TEMP/regions.o" \
@@ -1499,12 +1516,17 @@ jobs:
         # #1050's measure: sqlite3.c's -c by the base and by this tree, each over four placements of its checker unit
         # (./build.sh shifts) from two fresh copies apiece, with the base's executables again as the comparison's floor
         # (main-again); then each build's stages, counters (with store-to-load forwarding's failures) and checker
-        # functions' samples. Where this tree changes what -c writes (the lowering's code, #1376), the step says so and
-        # gives both objects' sizes, and the comparison includes that work.
+        # functions' samples. Where this tree changes what -c writes, the step says so and gives both objects' sizes:
+        # diagnostic-only changes to selected warning sources are expected to leave the object unchanged and fail if
+        # it differs; other checker changes can legitimately alter output and warn with sizes instead (#1572).
+        # The placements pad .text, so they move the backend's, the encoder's and Tier 0's code;
+        # the checker's own code sits in the page-aligned .text.buster_checker, which wild places first, and every
+        # shift is a multiple of 64, so the checker unit's own placement is not one of the samples (#1312).
         if: github.event_name == 'pull_request' && needs.changes.outputs.checker != 'false'
         timeout-minutes: 6
         env:
           AB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SQLITE_EXPECT_STABLE: ${{ needs.changes.outputs.sqlite_stable }}
         run: |
           set -euo pipefail
           [[ "$AB_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -1520,7 +1542,16 @@ jobs:
           if ! cmp -s "$ab/main.o" "$ab/head.o"; then
               echo "== the objects differ: this tree changes sqlite3.c's code"
               size "$ab/main.o" "$ab/head.o"
+              if [ "$SQLITE_EXPECT_STABLE" = true ]; then
+                  echo "::error::sqlite3.c's object differs after a diagnostic-only change expected to preserve generated objects"
+                  exit 1
+              fi
+              echo "== this change may legitimately affect generated objects; continuing"
           fi
+          echo "== what the placements move: ./build.sh shifts pads .text, so the four shifts move the backend's, the"
+          echo "== encoder's and Tier 0's code; the checker's own code sits in the page-aligned .text.buster_checker,"
+          echo "== which wild places first, and every shift is a multiple of 64, so the checker unit's own placement is"
+          echo "== not one of the samples (#1312)"
           builds=()
           for build in main:main head:head main-again:main; do
               for shift in "${shifts[@]}"; do
@@ -1668,7 +1699,7 @@ jobs:
 
       - name: Attribute sqlite3.c's compile time to the compiler's stages, against tcc
         # #518 (docs/compile-time.md): `-c` of the frozen corpus's sqlite3.c with the options of #136's speedtest1
-        # record, as whole processes in a rotating order with tcc's, with --time-stages' report of where the time goes;
+        # record, as whole processes in a Williams design's order with tcc's, with --time-stages' report of where the time goes;
         # then perf's counters and a profile by function of the default compile. Where `changes` doesn't rule it out
         # (the stage clock and measure-compile: `compile_time`), and on the daily and dispatched runs.
         if: needs.changes.outputs.compile_time != 'false'
@@ -1912,7 +1943,7 @@ jobs:
       - name: Time speedtest1 and Lua's scripts by both tiers, clang -O0 and -O2 and tcc
         # #138 and #1189: the programs Tier 1 is measured by against clang -O2, each built by this compiler's Tier 0 and
         # --tier1, clang -O0 and -O2 and tcc. Their outputs must agree (speedtest1's verification hash, each script's
-        # output clang -O0's); then every build runs every program in each of 11 rounds, in an order that rotates by round,
+        # output clang -O0's); then every build runs every program in each of 11 rounds, each round in a Williams design's order,
         # as whole processes on one CPU with their user cycles and instructions (docs/tier1.md has the results). Where
         # `changes` doesn't rule it out (Tier 1's pipeline and the measurement: `tier1_programs`), and on the daily and
         # dispatched runs.
@@ -1943,7 +1974,7 @@ jobs:
         # #1283: test-checker-driver's machine rows' unit, a lexer's byte scan and the compiler's own lexer (on
         # c_lexer.c), each built by this compiler's Tier 0 and --tier1, clang -O2 and, on a pull request, its base's
         # --tier1, with each Tier 1 build's records, machine rows and moves around them. Their outputs must agree; then
-        # every build runs every program in each of 11 rounds, in an order that rotates by round, as whole processes on
+        # every build runs every program in each of 11 rounds, each round in a Williams design's order, as whole processes on
         # one CPU with their user cycles and instructions (measure-tier1-rows). Where `changes` doesn't rule it out (Tier
         # 1's input and pipeline and the measurement: `tier1_programs`), and on the daily and dispatched runs.
         if: needs.changes.outputs.tier1_programs != 'false'
@@ -1968,8 +1999,8 @@ jobs:
         # #1059's paired measurements: the primitives' kernels (reference counts, a spin lock, a sequence lock, flags, a
         # running maximum, inline asm) and speedtest1, each built by this compiler's Tier 0 and --tier1 as it lowers them
         # and with --helper-forms=all, which gives every operation of a direct form its helper's call. Every build's output
-        # must be the first's; then each source's -c compile in each of 5 rounds and each program's run in each of 11, in an
-        # order that rotates by round, as whole processes on one CPU with their user cycles and instructions, beside each
+        # must be the first's; then each source's -c compile in each of 5 rounds and each program's run in each of 11, each
+        # round in a Williams design's order, as whole processes on one CPU with their user cycles and instructions, beside each
         # object's helper calls, executable bytes and Tier 1's spill and call stores and loads
         # (docs/c-builtins-integration.md has the results). Where `changes` doesn't rule it out (the direct forms' and the
         # helpers' planning, and the measurement: `helpers`), and on the daily and dispatched runs.

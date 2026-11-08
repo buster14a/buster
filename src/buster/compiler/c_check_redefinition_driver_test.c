@@ -57,6 +57,9 @@ static void check_test_driver_redefinitions(CheckTest* test, const char* clang, 
         "int e;\nextern _BitInt(8) e;\n",
         "int g;\nstruct { int m; } extern g;\n",
         "typedef int T;\nT x;\nvoid f(void) { extern int x; }\nvoid g(void) { extern double x; }\n",
+        // A statement expression's braces and storage classes belong to it, not to the declaration (review on #1453).
+        "double x;\nvoid f(void) { extern int g(typeof(({ 0; })) p), x; }\n",
+        "double x;\nvoid f(void) { int a = ({ extern int y; y; }), x; double x; }\n",
     };
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/redefinition.c", directory);
