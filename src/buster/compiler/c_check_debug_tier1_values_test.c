@@ -250,6 +250,8 @@ static const char* const check_debug_tier1_values_expected[] = {
 // successful inferior run as proof that GDB reached all value assertions. GDB's Python exception boundary lets a
 // failed read report its own error without hiding subsequent checkpoints. Errors, missing exact values and missing
 // DONE are all failures; catching the error only preserves the rest of the diagnostic transcript.
+// Scheduling may put the scalar return's first source row at function entry. Resolve the actual line PCs before
+// advancing from the parameter stop, so coincident entry/constant breakpoints still perform both exact reads.
 static const char check_debug_tier1_values_script[] =
     "set pagination off\n"
     "set confirm off\n"
@@ -317,7 +319,13 @@ static const char check_debug_tier1_values_script[] =
     "t1-read printf \"GDB-T1-LEAF %d\\n\",leaf\n"
     "continue\n"
     "t1-read printf \"GDB-T1-PARAMS %d %ld %.2f %.2f %d\\n\",number,wide,fraction,precision,*pointer\n"
-    "continue\n"
+    "python\n"
+    "t1_literal_sites = gdb.decode_line('dbg_tier1_values.c:800')[1]\n"
+    "if not t1_literal_sites:\n"
+    "    raise gdb.GdbError('T1 constant checkpoint has no code location')\n"
+    "if gdb.selected_frame().pc() not in [site.pc for site in t1_literal_sites]:\n"
+    "    gdb.execute('continue')\n"
+    "end\n"
     "t1-read printf \"GDB-T1-CONSTANTS %d %d %llu\\n\",literal,negative,(unsigned long long)literal_bits\n"
     "continue\n"
     "t1-read printf \"GDB-T1-COMPUTED %d\\n\",computed\n"
