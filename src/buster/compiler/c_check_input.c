@@ -1844,6 +1844,12 @@ struct CheckInputReader
     // Per tag: whether an enum has a fixed underlying type (C23's `enum E : T`), which completes it at its base, and
     // whether its enumerators were listed yet (BUSTER_CHECK_ENUM_*).
     uint8_t* enum_fixed;
+    // Per tag: its latest declaration's name, clang's most recent redeclaration, which an enum's mismatch notes (#1447).
+    // Unset where nothing declared it again: a reader trusts it only for a name its tag's first declaration declares.
+    uint32_t* tag_declared;
+    // The keyword of the latest tag whose declaration clang drops (an enum's mismatch, #1447): its declaration's attributes
+    // are dropped with it, with no warning that they are ignored.
+    uint32_t dropped_tag;
     uint32_t* transparent_unions;
     const uint32_t* ends;
     const uint32_t* first_child;
@@ -3867,6 +3873,8 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
         const bool anonymous = redefinition || again;
         // A body that a mismatched enum's declaration drops, past which the tag ends.
         bool skipped = false;
+        // A mismatched enum's declaration, which clang drops with its attributes.
+        bool dropped = false;
         if (valid && previous != 0 && !anonymous && (same_scope || (!body && !forward)))
         {
             const uint32_t old = reader->bindings.declaration[previous - 1];
@@ -3888,17 +3896,22 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
                 const bool listed_again = fixed && body && state == BUSTER_CHECK_ENUM_LISTED && reader->types->types.base[type_index(type)] == underlying;
                 const bool known = state != BUSTER_CHECK_ENUM_MODED && (state != BUSTER_CHECK_ENUM_NONE || fixed) && !listed_again;
                 const uint32_t before = reader->output->report_count;
+                // The note is at the latest declaration that clang kept, whose base its "(was …)" spells.
+                const uint32_t latest = tag != 0 ? reader->tag_declared[tag] : old;
+                const uint32_t noted = latest > old && latest < declaration && reader->output->declarations[latest] == old ? latest : old;
                 check_input_report_subject(reader, declaration, known ? CHECK_INPUT_REDECLARATION : CHECK_INPUT_DECLARATION, old);
                 if (known && reader->output->report_count == before + 1 && !reader->output->resource)
                 {
                     CheckInputReport* report = reader->output->reports + before;
                     report->detail = mismatch;
-                    report->note_token = old;
+                    report->note_token = noted;
                     report->note_kind = CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
                     report->type = underlying;
                     report->value = tag != 0 ? reader->types->types.base[type_index(type)] : 0;
                 }
                 valid = known && reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
+                dropped = valid;
+                reader->dropped_tag = valid ? token : reader->dropped_tag;
                 const uint32_t close = valid && body ? parser->tree.parents[i] : 0;
                 for (uint32_t t = i; valid && body && t <= close && close < end; t += 1)
                 {
@@ -3909,6 +3922,10 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
             }
             reader->output->declarations[declaration] = old;
             reader->declared_types[declaration] = type;
+            if (valid && !dropped && tag != 0 && (body || forward))
+            {
+                reader->tag_declared[tag] = declaration;
+            }
         }
         else if (valid)
         {
@@ -3920,6 +3937,7 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
                 reader->tag_completions[tag] = BUSTER_CHECK_NONE;
                 // A deferred body's tag takes an index that an earlier body on its lane may have had (c_check_deferred.c).
                 reader->enum_fixed[tag] = BUSTER_CHECK_ENUM_NONE;
+                reader->tag_declared[tag] = declaration;
                 if (reader->transparent_unions != 0)
                 {
                     reader->transparent_unions[tag] = 0;
@@ -3971,7 +3989,7 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
         // declaration's or a reference's kept for its definition or warned of after it; those after a reference's name are
         // its declarators' (the specifiers read them: the tag ends at the name), and a bare declaration's ignored.
         const bool bare = (!body || skipped) && i < end && parser->tokens.kinds[i] == PARSE_KIND_SEMI;
-        valid = valid && check_input_tag_attributes(reader, token, declaration, type, body && !skipped, bare, after_name, colon, i);
+        valid = valid && (dropped || check_input_tag_attributes(reader, token, declaration, type, body && !skipped, bare, after_name, colon, i));
         if (valid)
         {
             reader->ignored[token] = true;
@@ -8665,7 +8683,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             const uint8_t base_kind = type_kind(reader->types, type_strip_aligned(reader->types, base));
             const bool tag_type = base_kind == BUSTER_TYPE_KIND_STRUCT || base_kind == BUSTER_TYPE_KIND_UNION || base_kind == BUSTER_TYPE_KIND_ENUM;
             const uint32_t keyword = base_kind == BUSTER_TYPE_KIND_UNION ? 1u : base_kind == BUSTER_TYPE_KIND_ENUM ? 2u : 0u;
-            valid = (!free_standing || check_input_attribute_ignored_lists(reader, first, i, tag && tag_type, keyword, i)) && !leading_list;
+            const bool dropped = keyword_token != BUSTER_CHECK_NONE && keyword_token == reader->dropped_tag;
+            valid = (!free_standing || check_input_attribute_ignored_lists(reader, first, i, tag && tag_type && !dropped, keyword, i)) && !leading_list;
         }
         valid = valid && !specifier_errors;
     }
@@ -13226,6 +13245,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     valid &= reader.tag_completions != 0;
     reader.enum_fixed = valid ? arena_push_array(scratch, types->tags.capacity, sizeof(uint8_t), 4) : 0;
     valid &= reader.enum_fixed != 0;
+    reader.tag_declared = valid ? arena_push_array(scratch, types->tags.capacity, sizeof(uint32_t), 4) : 0;
+    valid &= reader.tag_declared != 0;
     if (valid && transparent_unions)
     {
         reader.transparent_unions = arena_push_array(scratch, types->tags.capacity, sizeof(uint32_t), 4);

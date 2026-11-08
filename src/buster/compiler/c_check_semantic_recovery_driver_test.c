@@ -229,6 +229,15 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum Y : char;\n"
         "struct T t;\n"
         "int s = sizeof(t.c);\n",
+        // The note is at the latest declaration clang kept, whose base the "(was …)" spells, not the first (review on
+        // #1805); a dropped one's attributes go with it, unwarned.
+        "enum E : short;\nenum E : short int;\nenum E : signed short;\nenum E : long;\n"
+        "typedef int I;\nenum F : I;\nenum F : int;\nenum F : long;\n"
+        "enum G : int;\nenum G;\nenum G : int;\nenum G g;\nenum G : long;\n"
+        "void f(void) { enum K : char; enum K : char; enum K : int; }\n",
+        "enum E : int { A };\nenum E : long { B } __attribute__((unused));\nenum __attribute__((unused)) E : long { C };\n"
+        "enum F { F1 };\nenum F : int { F2 } __attribute__((unused));\nenum F;\nenum F : char;\n"
+        "__attribute__((unused)) enum H : int { H1 };\n__attribute__((unused)) enum H : long { H2 };\n",
         // GNU's array initialized by a compound literal of its array type (#1447): the same element type and size or none
         // (the literal's size then the array's, `(int[]){…}`'s once its own initializer finished); another array type's
         // "cannot initialize array of type 'int[3]' with array of type 'int[2]'", recovered.
