@@ -3194,6 +3194,110 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
     }
 }
 
+// The type clang's getEnumCoercedType gives an operand: an enumerator's own enumeration where the operand names one
+// (parentheses are no nodes) and that enumeration's definition is complete, past its closing brace, else its type.
+static TypeId check_common_enum_coerced(const CheckInput* input, const CheckStream* stream, uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    TypeId result = check_stream_type(stream, node);
+    const uint32_t token = graph->tokens[node];
+    const uint32_t declaration = graph->ops[node] == CHECK_OP_VALUE && token < input->token_count && input->declarations != NULL ?
+                                 input->declarations[token] : BUSTER_CHECK_NONE;
+    if (declaration < input->token_count && input->declaration_kinds[declaration] == C_BINDING_ENUMERATOR)
+    {
+        for (uint32_t i = 0; i < input->enum_definition_count; i += 1)
+        {
+            const CheckInputEnumDefinition* definition = input->enum_definitions + i;
+            result = definition->open < declaration && declaration < definition->close && token > definition->close ? definition->type : result;
+        }
+    }
+    return result;
+}
+
+// Whether `type` is clang's isFloatingType: a real or complex floating type.
+static bool check_common_floating_kind(const TypeTable* types, TypeId type)
+{
+    const uint8_t kind = check_action_kind(types, type);
+    return kind == BUSTER_TYPE_KIND_FLOATING ||
+           (kind == BUSTER_TYPE_KIND_COMPLEX && check_action_kind(types, type_element(types, type_strip_aligned(types, type))) == BUSTER_TYPE_KIND_FLOATING);
+}
+
+// Clang's checkEnumArithmeticConversions (#1447): the usual arithmetic conversions of an operator whose operands are
+// enumerations of different types, or an enumeration and a floating type, warned as the operator is built, at it. The
+// operands are as written, an enumerator as its enumeration (check_common_enum_coerced). A compound assignment warns only
+// for an enumeration converted to its floating target. A unit that defines no enumeration has nothing to warn of.
+static void check_common_enum_arithmetic(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
+                                         CheckWarningSpelling* spell, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    static const CheckOp ops[] =
+    {
+        CHECK_OP_ADD, CHECK_OP_SUBTRACT, CHECK_OP_MULTIPLY, CHECK_OP_DIVIDE, CHECK_OP_REMAINDER, CHECK_OP_LESS, CHECK_OP_LESS_EQUAL,
+        CHECK_OP_GREATER, CHECK_OP_GREATER_EQUAL, CHECK_OP_EQUAL, CHECK_OP_NOT_EQUAL, CHECK_OP_BIT_AND, CHECK_OP_BIT_OR, CHECK_OP_BIT_XOR,
+        CHECK_OP_CONDITIONAL, CHECK_OP_ADD_ASSIGN, CHECK_OP_SUBTRACT_ASSIGN, CHECK_OP_MULTIPLY_ASSIGN, CHECK_OP_DIVIDE_ASSIGN,
+        CHECK_OP_REMAINDER_ASSIGN, CHECK_OP_BIT_AND_ASSIGN, CHECK_OP_BIT_OR_ASSIGN, CHECK_OP_BIT_XOR_ASSIGN,
+    };
+    static const char* const kinds[] = { "arithmetic between", "bitwise operation between", "comparison of", "conditional expression between",
+                                         "compound assignment of" };
+    const CheckCommonOps set = check_common_ops(ops, BUSTER_ARRAY_LENGTH(ops));
+    CheckCommonScan scan = { 0 };
+    for (uint32_t node = input->enum_definition_count != 0 ? check_common_next_op(graph, &set, &scan, vector) : graph->count; node < graph->count && !pp->fatal;
+         node = check_common_next_op(graph, &set, &scan, vector))
+    {
+        const CheckOp op = graph->ops[node];
+        const bool compound = (op >= CHECK_OP_ADD_ASSIGN && op <= CHECK_OP_REMAINDER_ASSIGN) || op == CHECK_OP_BIT_AND_ASSIGN ||
+                              op == CHECK_OP_BIT_OR_ASSIGN || op == CHECK_OP_BIT_XOR_ASSIGN;
+        const uint32_t kind = op >= CHECK_OP_ADD && op <= CHECK_OP_REMAINDER ? 0 : op >= CHECK_OP_BIT_AND && op <= CHECK_OP_BIT_XOR ? 1 :
+                              op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL ? 2 : op == CHECK_OP_CONDITIONAL ? 3 : compound ? 4 : 5;
+        const uint32_t left = op == CHECK_OP_CONDITIONAL ? graph->operand1[node] : graph->operand0[node];
+        const uint32_t right = op == CHECK_OP_CONDITIONAL ? graph->operand2[node] : graph->operand1[node];
+        if (kind < 5 && left < graph->count && right < graph->count && stream->diagnostics[node] == CHECK_DIAG_NONE)
+        {
+            const TypeId left_type = check_common_enum_coerced(input, stream, left);
+            const TypeId right_type = check_common_enum_coerced(input, stream, right);
+            const bool left_enum = check_action_kind(types, left_type) == BUSTER_TYPE_KIND_ENUM;
+            const bool right_enum = check_action_kind(types, right_type) == BUSTER_TYPE_KIND_ENUM;
+            const bool floating = (!compound && left_enum && check_common_floating_kind(types, right_type)) ||
+                                  (right_enum && check_common_floating_kind(types, left_type));
+            const bool mixed = !floating && !compound && left_enum && right_enum &&
+                               type_unqualified(type_strip_aligned(types, left_type)) != type_unqualified(type_strip_aligned(types, right_type));
+            if (floating || mixed)
+            {
+                const uint32_t left_spelling = left_type == check_stream_type(stream, left) ? check_common_operand_spelling(parser, input, graph, stream, left) : 0;
+                const uint32_t right_spelling = right_type == check_stream_type(stream, right) ? check_common_operand_spelling(parser, input, graph, stream, right) : 0;
+                const String8 left_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, left_type, left_spelling);
+                const String8 right_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, right_type, right_spelling);
+                const String8 left_plain = mixed ? check_driver_warning_type(parser, pp, input, types, spell, scratch, left_type, 0) : (String8){ 0 };
+                const String8 right_plain = mixed ? check_driver_warning_type(parser, pp, input, types, spell, scratch, right_type, 0) : (String8){ 0 };
+                const bool anonymous = mixed && (memmem(left_plain.pointer, left_plain.length, "(unnamed", 8) != NULL ||
+                                                 memmem(right_plain.pointer, right_plain.length, "(unnamed", 8) != NULL);
+                const uint32_t id = floating ? CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION : anonymous ? CHECK_WARNING_ID_ANON_ENUM_ENUM_CONVERSION :
+                                    kind == 3 ? CHECK_WARNING_ID_ENUM_COMPARE_CONDITIONAL : kind == 2 ? CHECK_WARNING_ID_ENUM_COMPARE :
+                                    CHECK_WARNING_ID_ENUM_ENUM_CONVERSION;
+                const char* message = floating ?
+                    check_warning_text(scratch, "%s %s type %.*s %s %s type %.*s", kinds[kind], left_enum ? "enumeration" : "floating-point",
+                                       (int)left_name.length, left_name.pointer, kind == 2 ? "with" : kind == 4 ? "from" : "and",
+                                       left_enum ? "floating-point" : "enumeration", (int)right_name.length, right_name.pointer) :
+                    check_warning_text(scratch, "%s different enumeration types (%.*s and %.*s)", kinds[kind], (int)left_name.length, left_name.pointer,
+                                       (int)right_name.length, right_name.pointer);
+                if (left_name.length != 0 && right_name.length != 0 && message != NULL)
+                {
+                    // (A conditional's node is its `:`; clang's place is its `?`, the `:`'s child.)
+                    const uint32_t colon = graph->tokens[node];
+                    uint32_t token = colon;
+                    for (uint32_t at = op == CHECK_OP_CONDITIONAL ? colon : 0; at != 0 && token == colon;)
+                    {
+                        at -= 1;
+                        token = parser->tree.parents[at] == colon && parser->tree.roles[at] == PARSE_ROLE_OPEN_TERNARY ? at : token;
+                    }
+                    check_common_report(parser, pp, input, token, id, id != CHECK_WARNING_ID_ENUM_COMPARE, message, NULL, 0, scratch);
+                }
+            }
+        }
+    }
+}
+
 // `token`'s line in the file its text spells in — clang's getSpellingLineNumber: a `;` a macro produced
 // spells on its definition's line, never the loop head's call-site one.
 static uint32_t check_common_spelling_line(const Parser* parser, Preprocessor* pp, uint32_t token)
@@ -8577,6 +8681,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
                          check_common_enabled(pp, input, CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER, true),
     };
     check_common_parentheses(parser, pp, input, stream, types, scratch);
+    check_common_enum_arithmetic(parser, pp, input, stream, types, &spell, scratch);
     check_common_empty_bodies(parser, pp, input, scratch);
     check_common_dangling_else(parser, pp, input, scratch);
     check_common_switches(parser, pp, input, stream, types, &spell, program, scratch);
