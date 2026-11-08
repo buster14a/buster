@@ -134,6 +134,12 @@ typedef enum CheckInputAttributeKind
     // old caller may leave misaligned (Tier0Function.realign_stack); clang's handler ignores it, without a word, on a
     // function pointer or a typedef of a function's type or of a pointer to one.
     CHECK_ATTRIBUTE_FORCE_ALIGN_ARG_POINTER,
+    // GCC's and clang's patchable_function_entry(N[, M[, "section"]]) (#1447): N bytes of NOPs at a function's entry, M of
+    // them before its symbol, and an entry for the sled in a section (__patchable_function_entries by default) that tools
+    // patch through. Its count and offset are 32-bit unsigned integer constants (argument_values, constants and wide, read
+    // where its attributes are read), its section's string `text`, which clang's handler checks once its subject takes it
+    // (check_input_patchable_entry).
+    CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY,
 } CheckInputAttributeKind;
 
 typedef enum CheckInputAttributeError
@@ -522,6 +528,9 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     // x86's, whose arguments clang's parser reads as expressions and its handler ignores, whatever their count.
     { "interrupt", CHECK_ATTRIBUTE_INTERRUPT, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 255 },
     { "force_align_arg_pointer", CHECK_ATTRIBUTE_FORCE_ALIGN_ARG_POINTER, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    // Its count, its offset and its section (#1447): two integers and a string, which its own reading takes
+    // (check_input_read_attributes) rather than the integer lists' evaluator.
+    { "patchable_function_entry", CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY, CHECK_ATTRIBUTE_INTEGER_LIST, 1, 3 },
     { "no_stack_protector", CHECK_ATTRIBUTE_NO_STACK_PROTECTOR, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "fallthrough", CHECK_ATTRIBUTE_FALLTHROUGH, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     // clang's, on a return statement alone (check_input_statement_attributes, c_check_musttail.c): GNU's spelling and
@@ -832,6 +841,12 @@ typedef enum CheckAttributeArgumentError
     // declarator, "'X' attribute only applies to variables", at its first token.
     CHECK_ARGUMENT_UNEXPECTED_SEMI,
     CHECK_ARGUMENT_OBJC_VARIABLES,
+    // patchable_function_entry's (#1447, check_input_patchable_entry): an offset past its count, "'X' attribute requires
+    // integer constant between 0 and N inclusive" (N the count, CheckInputReport.value), at the attribute; an empty section,
+    // "section argument to 'patchable_function_entry' attribute is not valid for this target: section must not be empty",
+    // at its string.
+    CHECK_ARGUMENT_BETWEEN,
+    CHECK_ARGUMENT_PATCHABLE_SECTION,
     // neon_vector_type's and neon_polyvector_type's vector of another width than 64 or 128 bits (#1447), at the attribute.
     CHECK_ARGUMENT_NEON_SIZE,
     // diagnose_as_builtin's (#1447, clang's handleDiagnoseAsBuiltinAttr): its first argument no builtin function's name (at
@@ -4012,7 +4027,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         {
             const bool numeric = attribute.schema == CHECK_ATTRIBUTE_INTEGER || attribute.schema == CHECK_ATTRIBUTE_INTEGER_LIST ||
                                  attribute.schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS;
-            attribute.resolved = !numeric || attribute.argument_count == 0 || (attribute.schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS && attribute.argument_count == 1);
+            // patchable_function_entry's arguments its own reading takes (#1447, check_input_read_attributes): its section
+            // is a string, which the integer lists' evaluators would refuse.
+            attribute.resolved = !numeric || attribute.argument_count == 0 || (attribute.schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS && attribute.argument_count == 1) ||
+                                 attribute.kind == CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY;
             if (attribute.kind == CHECK_ATTRIBUTE_CALLING_CONVENTION)
             {
                 // The first convention x86-64 has is the one asked for; one that conflicts with an earlier one is clang's
@@ -5601,6 +5619,60 @@ static bool check_input_attribute_handled(CheckInputReader* reader, CheckInputAt
 }
 
 
+// patchable_function_entry where its subject takes it (#1447): clang's handlePatchableFunctionEntryAttr's checks, in its
+// order, each an error that drops it: its count's, then its offset's, as checkUInt32Argument reads them strictly unsigned
+// (CheckInputAttribute.constants, wide and argument_values: no integer constant, "'X' attribute requires parameter N to be
+// an integer constant" at the attribute, N from 0; past 32 bits, err_ice_too_large at the argument's expression; negative,
+// "'X' attribute requires a non-negative integral compile time constant expression" at the attribute); an offset past the
+// count, "'X' attribute requires integer constant between 0 and N inclusive" at the attribute; and an empty section (its
+// string, `text`), at the string. Whether it stands.
+static bool check_input_patchable_entry(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute)
+{
+    const uint32_t count = attribute->argument_count;
+    const int64_t* values = attribute->argument_values;
+    bool valid = values != NULL;
+    for (uint32_t i = 0; valid && i < count && i < 2; i += 1)
+    {
+        uint32_t first = attribute->argument_first;
+        uint32_t end = attribute->argument_end;
+        check_input_attribute_argument(attribute, i, &first, &end);
+        const int64_t number = values[i];
+        if (((attribute->constants >> i) & 1u) == 0)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PARAMETER_INTEGER, i);
+            valid = false;
+        }
+        else if (((attribute->wide >> i) & 1u) != 0)
+        {
+            check_input_attribute_too_large(reader, attributes, attribute, first, end, number);
+            valid = false;
+        }
+        else if (number < 0)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_NON_NEGATIVE, 0);
+            valid = false;
+        }
+    }
+    if (valid && count >= 2 && values[1] > values[0])
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_BETWEEN, 0);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].value = (uint64_t)values[0];
+        }
+        valid = false;
+    }
+    uint32_t section = attribute->argument_end;
+    uint32_t section_end = attribute->argument_end;
+    if (valid && count == 3 && check_input_attribute_argument(attribute, 2, &section, &section_end) && attribute->text.length == 0)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, section, CHECK_ARGUMENT_PATCHABLE_SECTION, 0);
+        valid = false;
+    }
+    return valid;
+}
+
 // The function an ownership attribute's subject has (#147): a function's type, or a pointer to one's.
 static TypeId check_input_ownership_function(const TypeTable* types, TypeId bare)
 {
@@ -7173,6 +7245,11 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             valid = check_input_interrupt_handler(reader, attributes, attribute, declaration, type, begin, name);
             attribute->ignored = !valid;
             attribute->subject_ignored = !valid;
+        }
+        // patchable_function_entry where its subjects take it (#1447): its handler's checks of its arguments.
+        if (valid && attribute->kind == CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY && !attribute->ignored && !attribute->subject_ignored)
+        {
+            valid = check_input_patchable_entry(reader, attributes, attribute);
         }
         // A GPU kernel's convention off a function (#147): clang's "'X' attribute only applies to functions" error.
         if (valid && kernel && (declaration & BUSTER_CHECK_SUBJECT_FUNCTION) == 0)

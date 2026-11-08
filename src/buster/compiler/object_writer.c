@@ -149,7 +149,10 @@ struct ObjectDebug
 // with equal descriptors share a section, in id order, after the atoms of their class's own (#619: -c's named sections,
 // which a definition's section attribute or a #pragma clang section setting gives it): an atom without one (an empty
 // name) and one whose descriptor is its class's own section's go in that, as without the table. Names are counted
-// slices, not NUL-terminated strings. A non-null table must cover every atom including id 0.
+// slices, not NUL-terminated strings. A non-null table must cover every atom including id 0. A descriptor with
+// SHF_LINK_ORDER names in `link` an atom of its unit and of an earlier class, whose section is its sh_link (#1447:
+// patchable_function_entry's entries, linked to their functions'), and descriptors of other links are other sections, as
+// clang's object has one per function; any other descriptor's `link` is 0.
 typedef struct ObjectAtomSection ObjectAtomSection;
 struct ObjectAtomSection
 {
@@ -157,6 +160,7 @@ struct ObjectAtomSection
     uint32_t type;
     uint64_t flags;
     uint64_t entry_size;
+    AtomId link;
 };
 
 typedef struct ObjectOptions ObjectOptions;
@@ -871,7 +875,7 @@ static bool object_section_is_default(const ObjectAtomSection* section, uint8_t 
 
 static bool object_sections_equal(const ObjectAtomSection* a, const ObjectAtomSection* b)
 {
-    return a->name.length == b->name.length && a->type == b->type && a->flags == b->flags && a->entry_size == b->entry_size &&
+    return a->name.length == b->name.length && a->type == b->type && a->flags == b->flags && a->entry_size == b->entry_size && a->link == b->link &&
            memcmp(a->name.pointer, b->name.pointer, a->name.length) == 0;
 }
 
@@ -913,8 +917,10 @@ static bool object_group_atoms(const ObjectBuilder* builder, uint8_t class, cons
             uint32_t g = 0;
             if (descriptor != 0 || membership != 0)
             {
+                // (A linked section's atom too: a unit's patchable function entries share a name, one section a function.)
                 const uint64_t hash = (descriptor != 0 ? link_hash((const uint8_t*)descriptor->name.pointer, descriptor->name.length) ^ descriptor->flags ^
-                                       ((uint64_t)descriptor->type << 32) : 0) ^ ((uint64_t)membership * UINT64_C(0x9e3779b97f4a7c15));
+                                       ((uint64_t)descriptor->type << 32) ^ ((uint64_t)descriptor->link * UINT64_C(0xc2b2ae3d27d4eb4f)) : 0) ^
+                                      ((uint64_t)membership * UINT64_C(0x9e3779b97f4a7c15));
                 uint64_t slot = hash & (capacity - 1);
                 while (slots[slot] != 0)
                 {
@@ -988,7 +994,12 @@ static bool object_count_sections(ObjectBuilder* builder, Arena* scratch)
             const AtomId atom = units->atoms[unit_begin + i];
             const ObjectAtomSection* descriptor = &builder->options.atom_sections[atom];
             const bool grouped = builder->link->groups.count != 0 && builder->link->groups.atom_groups[atom] != 0;
-            result = object_section_valid(descriptor, class) && ((descriptor->flags & SHF_GROUP) == 0 || grouped);
+            // A linked section's atom is the unit's, of a class whose sections are already counted (#1447).
+            const AtomId linked = descriptor->link;
+            const bool ordered = (descriptor->flags & SHF_LINK_ORDER) != 0;
+            const bool link_valid = ordered ? linked != 0 && linked < atoms->count && atoms->unit[linked] == builder->unit && atoms->class[linked] < class :
+                                              linked == 0;
+            result = object_section_valid(descriptor, class) && ((descriptor->flags & SHF_GROUP) == 0 || grouped) && link_valid;
         }
         if (result && described && begin != end)
         {
@@ -1675,11 +1686,14 @@ static bool object_place(ObjectBuilder* builder, Arena* scratch)
             const ObjectSection* section = &builder->sections[s];
             const ObjectSectionFormat* format = &object_class_sections[section->class];
             const ObjectAtomSection* explicit = section->explicit_section;
+            // A linked section's sh_link is its atom's section's index (#1447, ObjectAtomSection.link).
+            const AtomId linked = explicit != 0 ? explicit->link : 0;
             headers[section->index] = (Elf64_Shdr){
                 .sh_name = section->name,
                 .sh_type = explicit != 0 ? explicit->type : format->type,
                 .sh_flags = (explicit != 0 ? explicit->flags : format->flags) | (section->group != 0 ? SHF_GROUP : 0),
                 .sh_size = section->size,
+                .sh_link = linked != 0 ? builder->sections[builder->units->atom_section[linked]].index : 0,
                 .sh_addralign = section->alignment,
                 .sh_entsize = explicit != 0 ? explicit->entry_size : format->entry_size,
             };

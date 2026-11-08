@@ -4988,6 +4988,37 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
             // Its earlier handler error wins once the declaration accepts the attribute. In particular a malformed
             // format kind must not be replaced by an integer-argument error before the subject is available.
         }
+        else if (attribute->kind == CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY)
+        {
+            // patchable_function_entry's count and offset, each in 32 bits as clang's checkUInt32Argument reads them, and its
+            // section's string (#1447, CheckInputAttribute.constants, wide, argument_values and text): its handler checks
+            // them once its subject takes it (check_input_patchable_entry).
+            const uint32_t integers = attribute->argument_count < 2 ? attribute->argument_count : 2;
+            attribute->argument_values = arena_push_array(reader->arena, 2, sizeof(int64_t), 8);
+            reader->output->resource |= attribute->argument_values == NULL;
+            valid = attribute->argument_values != NULL;
+            if (valid)
+            {
+                memset(attribute->argument_values, 0, 2 * sizeof(int64_t));
+            }
+            for (uint32_t argument = 0; valid && argument < integers; argument += 1)
+            {
+                uint32_t first = 0;
+                uint32_t end = 0;
+                int64_t value = 0;
+                bool wide = false;
+                const bool constant = check_input_attribute_argument(attribute, argument, &first, &end) && check_input_constant_u32(reader, first, end, &value, &wide);
+                attribute->argument_values[argument] = value;
+                attribute->constants |= constant ? 1u << argument : 0u;
+                attribute->wide |= constant && wide ? 1u << argument : 0u;
+            }
+            uint32_t first = 0;
+            uint32_t end = 0;
+            if (valid && attribute->argument_count == 3 && check_input_attribute_argument(attribute, 2, &first, &end))
+            {
+                valid = check_input_attribute_string(reader, first, end, false, &attribute->text);
+            }
+        }
         else if (!attribute->resolved && attribute->schema == CHECK_ATTRIBUTE_INTEGER && !tag_type)
         {
             int64_t value = 0;
