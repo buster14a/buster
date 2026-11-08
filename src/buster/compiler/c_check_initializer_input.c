@@ -261,9 +261,25 @@ static void check_init_warning_order(CheckInitWarningCollector* collector, uint3
     }
 }
 
+// One declaration's failed initializer, as CheckInitDiagnostic's first is given (#1447, phase 2).
+typedef struct CheckInitFailure CheckInitFailure;
+struct CheckInitFailure
+{
+    CheckInitStatus status;
+    TypeId failed_type;
+    uint32_t failed_source;
+    uint32_t failed_declaration;
+    uint32_t token;
+    uint32_t completion;
+};
+
 typedef struct CheckInitDiagnostic CheckInitDiagnostic;
 struct CheckInitDiagnostic
 {
+    // Every declaration's failed initializer, in declaration order (#1447, phase 2): clang reports each, where the fields
+    // below keep the first. In `output` when there is more than one, else NULL with failure_count at most 1.
+    CheckInitFailure* failures;
+    uint32_t failure_count;
     CheckInitStatus status;
     TypeId failed_type;
     // A failed conversion's source node plus one and its declaration (CheckInitializer.failed_source, #147).
@@ -403,6 +419,12 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         valid = false;
         result->status = CHECK_INIT_RESOURCE;
     }
+    CheckInitFailure* failures = valid && declaration_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckInitFailure, declaration_count) : NULL;
+    if (valid && declaration_count != 0 && failures == NULL)
+    {
+        valid = false;
+        result->status = CHECK_INIT_RESOURCE;
+    }
     CheckInitWarningCollector collector = { 0 };
     if (valid && !check_init_warning_collector(&collector, warnings, parser->tokens.count, scratch))
     {
@@ -438,6 +460,12 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
             result->token = begin;
             result->completion = end;
         }
+        if (placed && !eligible && initialize < stream->count && stream->diagnostics[initialize] == CHECK_DIAG_INCOMPATIBLE &&
+            check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) != 0 &&
+            check_init_converted_nonconstant(input, stream, types, input->declared_types[declaration], initialize))
+        {
+            failures[result->failure_count++] = (CheckInitFailure){ .status = CHECK_INIT_NON_CONSTANT, .token = begin, .completion = end };
+        }
         if (eligible)
         {
             CheckInitializer plan = { 0 };
@@ -466,6 +494,17 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
                 result->token = plan.failed_token;
                 result->completion = end;
             }
+            if (valid && !accepted && plan.status != CHECK_INIT_CHECK_FAILED)
+            {
+                failures[result->failure_count++] = (CheckInitFailure){
+                    .status = plan.status,
+                    .failed_type = plan.failed_type,
+                    .failed_source = plan.failed_source,
+                    .failed_declaration = declaration,
+                    .token = plan.failed_token,
+                    .completion = end,
+                };
+            }
             arena_pop_to(output, mark);
         }
     }
@@ -477,6 +516,19 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
     {
         arena_pop_to(output, mark);
     }
+    // The failures outlive the walk's scratch in `output` when there is more than one to give.
+    CheckInitFailure* kept = valid && result->failure_count > 1 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckInitFailure, result->failure_count) : NULL;
+    if (kept != NULL)
+    {
+        memcpy(kept, failures, (uint64_t)result->failure_count * sizeof(CheckInitFailure));
+    }
+    else if (valid && result->failure_count > 1)
+    {
+        valid = false;
+        result->status = CHECK_INIT_RESOURCE;
+    }
+    result->failures = kept;
+    result->failure_count = valid ? result->failure_count : 0;
     if (scratch != 0)
     {
         arena_pop_to(scratch, temporary);

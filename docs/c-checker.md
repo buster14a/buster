@@ -3978,14 +3978,27 @@ in the same section, compares its fixtures as above. The asm and control
 errors after a graph's error are compared by place and severity alone: those
 diagnose paths give one generic message, not clang's wording.
 
+Every declaration's failed initializer is given, as clang gives each
+(phase 2): `int a[2] = 5; int b[2] = 6;` has two errors where it had the
+first alone. `check_initializers_diagnose_warnings` already visited every
+declaration and kept the earliest failure; it now also lists each one
+(`CheckInitDiagnostic.failures`, `CheckInitFailure`), copied into `output` after
+its walk's arenas are rolled back, and the driver gives each with its own
+conversion's words and a static object's second "not a compile-time constant"
+error. Only a unit whose initializers failed takes this path.
+
 The later phases are left:
 
 - **Invalid declarations.** Not covered by phase 2:
   - a tag's redefinition (`struct S { … }` twice);
-  - an invalid initializer the reader reports;
+  - an invalid initializer the reader reports: an array of unknown size whose
+    initializer is no list nor string (`int y[] = 5;`), which clang reports
+    at the name and keeps `int[]`;
   - a type attribute's error (`vector_size`, `mode`).
 
-  These still stop the reader.
+  These still stop the reader. A non-constant initializer's error is at its
+  first token, where clang's is at the operand that isn't constant
+  (`k + 1`'s `+`), on main too.
 - **Units with a graph's or a reader's error.** These, other than a recovered
   one, still don't reach `check_program`. They get none of its diagnostics:
   the common warnings, their runtime warnings included. The asm and control
