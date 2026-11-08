@@ -398,6 +398,34 @@ static const CheckDriverDefaultWarningFixture check_driver_unused_result_fixture
         .options = { "-fno-builtin" },
         .warnings = 1,
     },
+    {
+        // An initialized pointer declarator's return-type typedef (review on #1732): the declarator hangs from its `=`,
+        // at file scope and in a block, static, a later declarator's, a pointer typedef's object, `_Nonnull`.
+        .name = "ignored results through initialized pointer declarators",
+        .source = "typedef __attribute__((warn_unused_result)) int wur_int;\n"
+                  "int plain_fn(void) { return 0; }\n"
+                  "wur_int (*gp)(void) = plain_fn;\n"
+                  "static wur_int (*sp)(void) = &plain_fn, (*sq)(void) = 0;\n"
+                  "typedef wur_int (*FP)(void);\n"
+                  "FP tp = plain_fn;\n"
+                  "void test(int n)\n"
+                  "{\n"
+                  "    wur_int (*fp)(void) = plain_fn;\n"
+                  "    fp();\n"
+                  "    gp();\n"
+                  "    sp();\n"
+                  "    sq();\n"
+                  "    tp();\n"
+                  "    wur_int (*_Nonnull np)(void) = (plain_fn);\n"
+                  "    np();\n"
+                  "    wur_int (*cp)(void) = n ? plain_fn : plain_fn;\n"
+                  "    cp();\n"
+                  "    wur_int x = 1, (*dp)(void) = plain_fn;\n"
+                  "    dp();\n"
+                  "    (void)x;\n"
+                  "}\n",
+        .warnings = 8,
+    },
 };
 
 static void check_test_driver_unused_results(CheckTest* test, const char* clang, const char* executable, const char* directory)

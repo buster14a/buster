@@ -4222,9 +4222,9 @@ A statement expression in an unevaluated operand drops them, as clang does
 (`check_common_report_discarded`). The functions stay out of line, as does
 the discarded selection's marker: inlined into the emission's loops they cost
 sqlite3.c's `-fsyntax-only` instructions even where no call warns. Left: a
-call whose callee is a member, an element, another call's result or a pointer
-to a pointer's dereference (`(*pp)()`), which warns of no return type's
-attribute, and the "expanded from macro" note clang gives a call a macro's
+call whose callee is a member, an element, another call's result, a comma's or
+a conditional's value (`(n, g)()`, `(n ? fp : fq)()`) or a pointer to a
+pointer's dereference (`(*pp)()`), which warns of no return type's attribute, and the "expanded from macro" note clang gives a call a macro's
 argument writes (as for every warning at a macro argument here).
 `-Warray-bounds` reports a direct array object, including a nested subscript
 such as `b[1][5]` at `b`, treats a zero extent as unknown, and leaves

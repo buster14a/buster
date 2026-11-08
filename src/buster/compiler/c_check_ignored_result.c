@@ -290,7 +290,8 @@ static uint32_t check_common_ignored_opener(const Parser* parser, uint32_t close
 }
 
 // The typedef a function declaration's return type is spelled with: the specifiers its declarator hangs from, up its
-// chunks (a pointer's `*`, groups, other declarators' commas), as clang's call return type keeps that sugar; or none.
+// chunks (a pointer's `*`, groups, other declarators' commas, an initialized declarator's `=`), as clang's call return
+// type keeps that sugar; or none.
 static uint32_t check_common_ignored_typedef(const Parser* parser, const CheckInput* input, uint32_t declaration)
 {
     const uint32_t count = parser->tokens.count < input->token_count ? parser->tokens.count : input->token_count;
@@ -299,7 +300,7 @@ static uint32_t check_common_ignored_typedef(const Parser* parser, const CheckIn
     {
         const uint8_t role = parser->tree.roles[up];
         const bool chunk = role == PARSE_ROLE_CLOSE_FUNCTION || role == PARSE_ROLE_CLOSE_CALL || role == PARSE_ROLE_CLOSE_GROUP ||
-                           role == PARSE_ROLE_CLOSE_ATTRIBUTE || role == PARSE_ROLE_COMMA;
+                           role == PARSE_ROLE_CLOSE_ATTRIBUTE || role == PARSE_ROLE_COMMA || role == PARSE_ROLE_ASSIGN;
         up = chunk ? parser->tree.parents[up] : up;
         steps = chunk ? steps : count;
     }
