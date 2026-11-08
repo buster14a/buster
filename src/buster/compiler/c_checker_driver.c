@@ -1982,30 +1982,84 @@ static CheckWarningSeverity check_driver_legacy_severity(Preprocessor* pp, const
     return severity;
 }
 
-// The reader's warning events to publish (#1447): clang's ActOnEndOfTranslationUnit gives no unused file-scope
-// declaration's warning once an error has occurred (`errors`), so a rejected unit's unused functions' and file-scope
-// objects' warnings, which complete at the unit's end, are left out of a copy in `scratch`. A unit without an error
-// publishes the events as they are, with no copy. Whether there was room.
-static bool check_driver_unit_end_warnings(const CheckWarningEvents* events, bool errors, Arena* scratch, CheckWarningEvents* view)
+// The reader's warning events to publish on a unit with errors (#1447), as clang leaves out those its errors suppress:
+// - ActOnEndOfTranslationUnit gives no unused file-scope declaration's warning once an error has occurred, so a rejected
+//   unit's unused functions' and file-scope objects' warnings, which complete at the unit's end, are left out;
+// - ActOnPopScope gives no unused-variable warning of a scope in which an error occurred (Scope's
+//   hasUnrecoverableErrorOccurred), from its `{` to its `}`, nested scopes' errors among them; a function body's scope is
+//   open from its definition's start, as ActOnStartOfFunctionDef handles the definition's declarator inside it.
+// `rejected` says the unit has an error; `errors`, where its reports locate some, counts them before each token (a prefix
+// count, check_driver_error_counts), else is NULL. A unit without an error publishes its events as they are, with no copy;
+// another publishes a copy in `scratch`. Whether there was room.
+static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarningEvents* events, bool rejected, const uint32_t* errors, Arena* scratch,
+                                           CheckWarningEvents* view)
 {
     *view = *events;
     bool valid = true;
-    if (errors && events->count != 0)
+    const uint32_t count = parser->tokens.count;
+    if (rejected && events->count != 0)
     {
         CheckWarningEvent* kept = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckWarningEvent, events->count);
         valid = kept != NULL;
-        uint32_t count = 0;
+        uint32_t total = 0;
         for (uint32_t i = 0; valid && i < events->count; i += 1)
         {
             const CheckWarningEvent* event = events->events + i;
             const bool unused = event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION;
-            kept[count] = *event;
-            count += !(unused && event->completion_kind == CHECK_WARNING_COMPLETE_TU_END);
+            const bool unit_end = unused && event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
+            const uint32_t close = unused && event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER ? event->completion : count;
+            // The scope's `{`, whose parent is its `}`: before the declaration, within the scope.
+            uint32_t open = close < count && event->token < close ? event->token : 0;
+            while (open > 0 && !(parser->tree.parents[open] == close && parser->tokens.kinds[open] == PARSE_KIND_L_BRACE))
+            {
+                open -= 1;
+            }
+            // A body's scope from its definition's start: after the previous declaration's `;` or body's `}`.
+            uint32_t start = open;
+            while (close < count && parser->tree.roles[open] == PARSE_ROLE_OPEN_BODY && start > 0 && parser->tokens.kinds[start - 1] != PARSE_KIND_SEMI &&
+                   parser->tree.roles[start - 1] != PARSE_ROLE_CLOSE_BODY)
+            {
+                start -= 1;
+            }
+            const bool scoped = errors != NULL && close < count && errors[close + 1] != errors[start];
+            kept[total] = *event;
+            total += !(unit_end || scoped);
         }
         view->events = valid ? kept : events->events;
-        view->count = valid ? count : events->count;
+        view->count = valid ? total : events->count;
     }
     return valid;
+}
+
+// The prefix count of the unit's errors' tokens (check_driver_rejected_warnings): its reader's reports, its graph's and the
+// driver's own. NULL without any, or without room.
+static uint32_t* check_driver_error_counts(const Parser* parser, const CheckInput* input, const CheckStream* stream, const CheckDriverDiagnostic* extra,
+                                           uint32_t extra_count, Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    const bool any = input->report_count != 0 || stream->report_count != 0 || extra_count != 0;
+    uint32_t* errors = any ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 2) : NULL;
+    if (errors != NULL)
+    {
+        memset(errors, 0, ((uint64_t)count + 2) * sizeof(uint32_t));
+        for (uint32_t i = 0; i < input->report_count; i += 1)
+        {
+            errors[(input->reports[i].token < count ? input->reports[i].token : count) + 1] += 1;
+        }
+        for (uint32_t i = 0; i < stream->report_count; i += 1)
+        {
+            errors[(stream->reports[i].token < count ? stream->reports[i].token : count) + 1] += 1;
+        }
+        for (uint32_t i = 0; i < extra_count; i += 1)
+        {
+            errors[(extra[i].token < count ? extra[i].token : count) + 1] += 1;
+        }
+        for (uint32_t t = 1; t < count + 2; t += 1)
+        {
+            errors[t] += errors[t - 1];
+        }
+    }
+    return errors;
 }
 
 // Each parameter has its own specifiers. Unlike a declaration's comma-separated declarators, a parameter cannot
@@ -3522,7 +3576,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         }
                         else if (phase == 0 && (kind == CHECK_INPUT_REDECLARATION || kind == CHECK_INPUT_CONFLICTING_TYPES) && token < count &&
                                  input->reports[index].detail > CHECK_REDECLARATION_GENERIC &&
-                                 input->reports[index].detail <= CHECK_REDECLARATION_NON_STATIC)
+                                 input->reports[index].detail <= CHECK_REDECLARATION_KIND)
                         {
                             const CheckInputReport* conflict = input->reports + index;
                             const uint32_t previous = conflict->note_token;
@@ -6019,10 +6073,14 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         }
                     }
                     CheckCommonShiftWarnings shift_warnings = { 0 };
-                    // Any error the unit has, whose unit-end warnings clang leaves out (check_driver_unit_end_warnings).
+                    // The unit's errors, whose warnings clang leaves out (check_driver_rejected_warnings): a preprocessing or parse
+                    // error counts at the unit's start, for the unit-end warnings alone.
                     const bool unit_errors = pp->errors != 0 || parse_failed || input.report_count != 0 || stream.report_count != 0 || additional_count != 0;
+                    const bool located = input.report_count != 0 || stream.report_count != 0 || additional_count != 0;
+                    const uint32_t* error_counts = located ? check_driver_error_counts(checking, &input, &stream, additional, additional_count, scratch) : NULL;
                     CheckWarningEvents input_warnings;
-                    const bool unit_end_ready = check_driver_unit_end_warnings(&input.warning_events, unit_errors, scratch, &input_warnings);
+                    const bool unit_end_ready = (!located || error_counts != NULL) &&
+                        check_driver_rejected_warnings(checking, &input.warning_events, unit_errors, error_counts, scratch, &input_warnings);
                     if (!unit_end_ready ||
                         !check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, quiet, scratch) ||
                         !check_driver_reports(checking, recovered, pp, publication_end, &input, &stream, &types, repairing ? &repair : NULL,

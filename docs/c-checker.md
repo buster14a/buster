@@ -3864,7 +3864,7 @@ a unit whose only errors are its preprocessor's:
 Its `result` still fails, and `-c` emits nothing. The asm and control
 diagnosis cutoffs skip recovered reports. As in clang, a unit with any error
 publishes no unit-end warning: no unused file-scope object's and no unused
-function's (`check_driver_unit_end_warnings`).
+function's (`check_driver_rejected_warnings`).
 
 A body that recovers an error goes to source order, as one with a report does.
 So does a top level, before its bodies are dealt to lanes. Error-free units
@@ -3884,10 +3884,42 @@ The fixtures cover each pass above, shared records, two errors in one list,
 missing names and a control error after a recovered error, block declarations,
 exclusions, `_Alignas`, a dropped `format`, and enumerators.
 
+Phase 2 covers redeclarations that conflict with a declaration of the same
+name: the visible one in `check_input_bind`'s first test, or its entity's
+linked one in the second (`int k = 1; int k = 2;`). Clang marks such a
+redeclaration invalid and leaves it out of its name's lookup. So the checker
+recovers its report and leaves the declaration unbound and unlinked: later
+uses find the earlier declaration (after `int a; float a;`, `&a` is an
+`int *`), and the unit goes on as in phase 1. A loader variable's
+redefinition keeps its note and still stops the reader.
+
+These errors take clang's wording and notes through
+`check_input_redeclaration_report` (`c_check_redefinition.c`, from
+`bde006626`). Phase 2 adds two variants to it, both with the note "previous
+definition is here", where the error used to read "conflicting declaration":
+
+- `CHECK_REDECLARATION_TYPEDEF`: "typedef redefinition with different types
+  ('N' vs 'O')";
+- `CHECK_REDECLARATION_KIND`: "redefinition of 'X' as different kind of
+  symbol".
+
+`check_driver_rejected_warnings` follows clang's `ActOnPopScope`: a scope in
+which an error occurred gives no unused-variable warning, nested scopes'
+errors included. Its extent runs from the scope's `{` to its `}`, or, for a
+function body, from the definition's start, since clang's
+`ActOnStartOfFunctionDef` handles the definition's declarator inside the
+body's scope. Unused parameters are still warned. A per-token prefix count of
+the unit's error reports answers each scope's question in constant time, and
+only a unit with errors builds it.
+
 The later phases are left:
 
-- **Invalid declarations.** A redeclaration conflict, an invalid initializer,
-  or a type attribute's error (`vector_size`, `mode`) still stops the reader.
+- **Invalid declarations.** Not covered by phase 2:
+  - a tag's redefinition (`struct S { … }` twice);
+  - an invalid initializer the reader reports;
+  - a type attribute's error (`vector_size`, `mode`).
+
+  These still stop the reader.
 - **Statements.** A second control error (`break`, then `continue`) still
   isn't reported. Neither are the runtime warnings (`-Wshift-count-overflow`,
   `-Wdivision-by-zero`) of any rejected unit, a unit with only a preprocessing
@@ -3896,6 +3928,8 @@ The later phases are left:
   source order instead.
 - **Shared `_Alignas`.** An `_Alignas` shared by several declarators gives its
   error once, where clang gives it for each.
+- **Unused `extern` locals.** A block's unused `extern` declaration gets no
+  warning, where clang gives one (on main too).
 
 ### What the lowering costs (#531)
 

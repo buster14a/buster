@@ -9133,6 +9133,8 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
         }
     }
+    // Whether the declaration conflicts with the visible one and is left out (below).
+    bool dropped = false;
     if (!overload && !versions && old != 0 && (reader->bindings.depth[old - 1] == reader->scope_count || linked_visible))
     {
         const uint32_t previous = reader->bindings.declaration[old - 1];
@@ -9153,7 +9155,12 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         {
             const CheckInputMessage message = kind == C_BINDING_FUNCTION && reader->declaration_kinds[previous] == kind && compatible == TYPE_ANSWER_NO && !library_redeclaration ?
                                               CHECK_INPUT_CONFLICTING_TYPES : CHECK_INPUT_REDECLARATION;
+            const uint32_t before = reader->output->report_count;
             check_input_redeclaration_report(reader, token, previous, compatible, repeatable, parameter_conflict, message);
+            // clang marks the redeclaration invalid and leaves it out of its name's lookup, which finds the visible
+            // declaration still (#1447's semantic recovery, phase 2): the report moves past, and the declaration isn't
+            // bound or linked.
+            dropped = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
         }
         else
         {
@@ -9188,7 +9195,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
         }
     }
-    if (!overload && !versions && check_input_linkage(reader->declaration_bits, token) != 0 && reader->output->report_count == 0)
+    if (!dropped && !overload && !versions && check_input_linkage(reader->declaration_bits, token) != 0 && reader->output->report_count == 0)
     {
         // Lexical scope restoration does not create a new externally linked entity. Keep its compatibility and
         // object identity for the translation unit, while only a visible declaration contributes to the source
@@ -9224,6 +9231,10 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 const CheckInputMessage message = kind == C_BINDING_FUNCTION && reader->declaration_kinds[previous] == kind && compatible == TYPE_ANSWER_NO && !library_redeclaration ?
                                                   CHECK_INPUT_CONFLICTING_TYPES : CHECK_INPUT_REDECLARATION;
                 check_input_redeclaration_report(reader, token, previous, compatible, true, parameter_conflict, message);
+                // Its entity's redeclaration is left out too (#1447, phase 2), but for a loader variable's, whose note
+                // follows below.
+                const bool loading = has_attributes && check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL;
+                dropped = !loading && reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
                 const bool loader = has_attributes &&
                     ((definition != 0 && check_input_attribute_of(check_input_attributes_at(reader->output, definition - 1), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL) ||
                      check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL);
@@ -9286,7 +9297,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 }
             }
         }
-        if (linked == 0 || !check_input_bit(reader->declaration_bits, linked - 1, BUSTER_CHECK_BITS_DEFINED))
+        if (!dropped && (linked == 0 || !check_input_bit(reader->declaration_bits, linked - 1, BUSTER_CHECK_BITS_DEFINED)))
         {
             reader->linked_declarations[name] = token + 1;
         }
@@ -9304,7 +9315,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             check_input_lane_refuse(reader, linked != 0 && composite != reader->linked_types[name], "a body's declaration with linkage changes its entity's type");
             check_input_lane_refuse(reader, (flags & CHECK_INPUT_FUNCTION_NAKED) != 0, "a body's declaration with linkage differs from the one it replaces");
         }
-        reader->linked_types[name] = composite;
+        reader->linked_types[name] = dropped ? reader->linked_types[name] : composite;
         // Attribute evaluation may publish a declaration's attributes after it binds. Retain its scope independently of
         // that publication, for check_input_attribute_merge_exclusions and the late masks. One without a visible
         // previous declaration records none: a later declaration that sees no other finds it, as clang's
@@ -9353,7 +9364,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     // Lazy library declarations have file scope. Their lexical cache can be restored and rebuilt, but a local
     // object declared after the first call is allowed to shadow them, unlike an ordinary block-scope implicit int.
     const uint32_t depth = reader->output->function_flags != NULL && (reader->output->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0 ? 0 : reader->scope_count;
-    if (c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, name, kind, token, point, depth) == 0)
+    if (!dropped && c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, name, kind, token, point, depth) == 0)
     {
         reader->output->resource = true;
     }
