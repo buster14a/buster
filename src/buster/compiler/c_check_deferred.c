@@ -120,6 +120,8 @@ struct CheckDeferredCut
     uint32_t constants;
     uint32_t intrinsic_declarations;
     uint32_t intrinsic_calls;
+    // The top level's recovered reports before the body (#1447): the merge puts the body's after them.
+    uint32_t recovered;
 };
 
 // One of the top level's updates of a name's linked declaration (an id + 1) and type, at `position`
@@ -180,6 +182,9 @@ struct CheckDeferredResult
     uint32_t vararg_count;
     CheckValue* constants;
     uint32_t constant_count;
+    // The errors the body recovered from (CheckInput.recovered_reports, #1447), in its lane's type ids.
+    CheckInputReport* recovered;
+    uint32_t recovered_count;
     TypeId predefined[BUSTER_PARSE_PREDECLARED_TYPEDEFS];
     // Why the body is for source order, when it is.
     const char* reason;
@@ -429,6 +434,7 @@ static void check_deferred_cut(CheckInputReader* reader, uint32_t opening)
             .constants = reader->cached_constant_count,
             .intrinsic_declarations = reader->output->intrinsic_declaration_count,
             .intrinsic_calls = reader->output->intrinsic_call_count,
+            .recovered = reader->output->recovered_count,
         };
         deferred->body_count += 1;
     }
@@ -1080,6 +1086,11 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     reader->cached_constant_count = top->cached_constant_count;
     reader->vararg_count = top->vararg_count;
     input->report_count = 0;
+    // The body's recovered reports, its own from none (#1447): the lane's input copied the top level's list.
+    input->recovered_reports = NULL;
+    input->recovered_count = 0;
+    input->recovered_capacity = 0;
+    reader->recovered_pending = 0;
     input->resource = false;
     input->string_count = top_input->string_count;
     input->region_count = top_input->region_count;
@@ -1249,6 +1260,8 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
         result->varargs = check_deferred_keep(arena, reader->varargs + top->vararg_count, result->vararg_count, sizeof(CheckInputVarargs), &kept);
         result->constant_count = reader->cached_constant_count - top->cached_constant_count;
         result->constants = check_deferred_keep(arena, reader->cached_constants + top->cached_constant_count, result->constant_count, sizeof(CheckValue), &kept);
+        result->recovered_count = input->recovered_count;
+        result->recovered = check_deferred_keep(arena, input->recovered_reports, input->recovered_count, sizeof(CheckInputReport), &kept);
         // The top level's VLAs the body's start changed: its parameters'.
         uint32_t changed = 0;
         for (uint32_t i = 0; i < top_input->vla_count; i += 1)
@@ -1483,6 +1496,60 @@ static bool check_deferred_warnings(CheckWarningBuffer* output, const CheckWarni
             valid = check_warning_append(output, &event, notes, event.note_count);
         }
         arena_pop_to(scratch, mark);
+    }
+    return valid;
+}
+
+// A recovered report in the merged table's ids (#1447): the TypeIds it holds, the type it names and a typed redeclaration's
+// prior type (c_check_redefinition.c), which its `value` holds. Tokens, declarations and names are the unit's.
+static CheckInputReport check_deferred_report(const CheckInputReport* report, const TypeReplayPart* part)
+{
+    CheckInputReport result = *report;
+    const bool redeclaration = result.message == CHECK_INPUT_REDECLARATION || result.message == CHECK_INPUT_CONFLICTING_TYPES;
+    const bool typed = redeclaration && (result.detail == CHECK_REDECLARATION_OBJECT_TYPE || result.detail == CHECK_REDECLARATION_OBJECT_TYPE_EXTERN ||
+                                         result.detail == CHECK_REDECLARATION_TYPEDEF);
+    result.type = check_deferred_type(part, result.type);
+    result.value = typed ? check_deferred_type(part, (TypeId)result.value) : result.value;
+    return result;
+}
+
+// The unit's recovered reports (#1447) in source order's order, which is the order its reader found them in: the top
+// level's before each body's opening, then the body's, and the top level's after the last body. Whether there was room.
+static bool check_deferred_recovered(const CheckDeferred* deferred, CheckInput* input, const TypeReplayPart* parts, Arena* arena)
+{
+    const uint32_t bodies = deferred->body_count;
+    uint64_t total = input->recovered_count;
+    for (uint32_t b = 0; b < bodies; b += 1)
+    {
+        total += deferred->results[b].recovered_count;
+    }
+    const bool any = total != input->recovered_count;
+    CheckInputReport* merged = any && total <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(arena, CheckInputReport, total) : NULL;
+    const bool valid = !any || merged != NULL;
+    if (valid)
+    {
+        uint32_t written = 0;
+        uint32_t top = 0;
+        for (uint32_t b = 0; b <= bodies; b += 1)
+        {
+            const uint32_t end = b < bodies ? deferred->cuts[b].recovered : input->recovered_count;
+            for (; top < end; top += 1)
+            {
+                input->recovered_reports[top] = check_deferred_report(input->recovered_reports + top, parts);
+                if (any)
+                {
+                    merged[written++] = input->recovered_reports[top];
+                }
+            }
+            const CheckDeferredResult* result = deferred->results + b;
+            for (uint32_t r = 0; b < bodies && r < result->recovered_count; r += 1)
+            {
+                merged[written++] = check_deferred_report(result->recovered + r, parts + 1 + b);
+            }
+        }
+        input->recovered_reports = any ? merged : input->recovered_reports;
+        input->recovered_capacity = any ? (uint32_t)total : input->recovered_capacity;
+        input->recovered_count = (uint32_t)total;
     }
     return valid;
 }
@@ -2403,8 +2470,16 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
     {
         valid = check_deferred_warnings(&warnings, &deferred->results[b].warning_events, &parts[1 + b], reader->scratch);
     }
+    valid = valid && check_deferred_recovered(deferred, input, parts, reader->arena);
     if (valid)
     {
+        // The reader's cursor over the waiting ones (CheckInputReader.recovered_pending), in the merged list: its first
+        // waiting one.
+        reader->recovered_pending = 0;
+        while (reader->recovered_pending < input->recovered_count && !input->recovered_reports[reader->recovered_pending].pending)
+        {
+            reader->recovered_pending += 1;
+        }
         if (intrinsics)
         {
             input->intrinsic_declarations = intrinsic_declarations;
@@ -2543,9 +2618,9 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     deferred->top.changes = 0;
     // A unit whose top level reported, that has overloadable functions, or that has #pragma clang section, whose settings
     // and conflicts read the walk's declarations in source order (c_check_section_input.c), is source order's.
-    bool valid = !deferred->unsupported && input->report_count == 0 && input->recovered_count == 0 && !input->resource && reader->bindings.valid && !deferred->top_changes.full &&
+    bool valid = !deferred->unsupported && input->report_count == 0 && !input->resource && reader->bindings.valid && !deferred->top_changes.full &&
                  input->overload_heads == 0 && input->sections == 0 && deferred->lanes != 0 && deferred->lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES;
-    deferred->reason = input->report_count != 0 || input->recovered_count != 0 ? "the top level reports an error" : input->overload_heads != 0 ? "overloadable functions" :
+    deferred->reason = input->report_count != 0 ? "the top level reports an error" : input->overload_heads != 0 ? "overloadable functions" :
                        input->sections != 0 ? "#pragma clang section" : !valid ? "the top level ran out of room" : 0;
     deferred->top_reader = reader;
     const uint64_t environment_begin = deferred->timing ? check_deferred_now() : 0;

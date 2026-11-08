@@ -168,8 +168,9 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "enumerator-from-initializer", "int x = sizeof(enum { A = 1 });\nint y = A;\nint f(void) { return A + x + y; }\n", true },
     // A typedef used as a type in a body and shadowed by an object in a later one, and one redeclared later.
     { "typedef-shadowed-later", "typedef int T;\nint f(void) { T x = 2; return x; }\nint g(void) { int T = 3; return T; }\nint h(void) { T y = 4; return y; }\n", true },
-    // The top level reports the redeclaration, and its walk stops there, as source order's: source order's.
-    { "typedef-redeclared-later", "typedef int T;\nint f(void) { T x = 2; return x; }\nint T;\n", false },
+    // The top level recovers the redeclaration's error after a body (#1447, phase 2), which leaves the typedef visible:
+    // merged, the error where source order's reader finds it.
+    { "typedef-redeclared-later", "typedef int T;\nint f(void) { T x = 2; return x; }\nint T;\n", true },
     // Tags completed, redeclared and shadowed around bodies.
     { "tags-around-bodies",
       "struct A;\nint f(struct A* a) { return a != 0; }\nstruct A { int x; };\n"
@@ -218,7 +219,8 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
       "int g(void){return second_missing();}\nint h(void){return third_missing();}\n", false },
     { "block-scope-extern-first", "int f(void) { extern int e; return e; }\nint g(void) { extern int e; return e + 1; }\n", false },
     { "block-scope-extern-adds-a-size", "extern int a[];\nint f(void) { extern int a[3]; return (int)sizeof a; }\nint g(void) { return 2; }\n", false },
-    { "block-scope-extern-conflicts", "int g = 3;\nint f(void) { extern long g; return (int)g; }\n", false },
+    // The body recovers the conflict's error (#1447, phase 2) and leaves the declaration unlinked: merged.
+    { "block-scope-extern-conflicts", "int g = 3;\nint f(void) { extern long g; return (int)g; }\n", true },
     { "block-scope-prototype-adds-parameters", "int h();\nint f(void) { int h(int); return h(1); }\nint h(int x) { return x; }\n", false },
     { "block-scope-alias-changes-definition-history", "int h(void);\nint f(void) { int h(void) __attribute__((alias(\"g\"))); return 0; }\n"
       "int g(void) { return 0; }\n", false },
@@ -320,6 +322,21 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
       "int middle(union V v) { return e(v); }\ntypedef union V W __attribute__((transparent_union));\nint last(void) { int x = 0; return e(&x); }\n", true },
     { "transparent-union-too-early", "union U;\nint first(void) { return 1; }\nunion U { int* p; long* q; };\nint d(union U u);\n"
       "int early(void) { int x = 0; return d(&x); }\ntypedef union U T __attribute__((transparent_union));\nint late(void) { int x = 0; return d(&x); }\n", true },
+    // Errors the reader recovers from (#1447) are carried by their bodies: merged, the top level's and the bodies' in
+    // the order source order's reader finds them. An attribute's in a body, in two bodies between the top level's, a
+    // shared attribute's once for each declarator, block-scope redeclarations naming types the bodies make (their
+    // TypeIds the merged table's), statements outside their loops, and a recovered error beside a body's report, which
+    // is source order's.
+    { "recovered-in-a-body", "int f(void) { int a __attribute__((aligned(3))) = 1; return a; }\nint g(void) { return 2; }\n", true },
+    { "recovered-between-the-top-levels",
+      "int t1 __attribute__((aligned(3)));\nint f(void) { int a __attribute__((aligned(5))); return 0; }\nint t2 __attribute__((aligned(7)));\n"
+      "int g(void) { int b __attribute__((aligned(9))); return 1; }\nint t3 __attribute__((aligned(11)));\nint h(void) { return 2; }\n", true },
+    { "recovered-shared-attribute", "int f(void) { __attribute__((aligned(3))) int a, b; return a + b; }\nint g(void) { return 2; }\n", true },
+    { "recovered-redeclarations-in-bodies",
+      "int f(void) { struct S { int x; } a; float a; a.x = 1; return a.x; }\n"
+      "int g(void) { typedef struct Q { int y; } T; typedef long T; T q = { 2 }; return q.y; }\nint h(void) { enum E { A } e; int e; return 0; }\n", true },
+    { "recovered-control", "int f(void) { break; return 0; }\nint g(void) { continue; return 1; }\nint h(void) { return 2; }\n", true },
+    { "recovered-beside-an-error", "int f(void) { int a __attribute__((aligned(3))); return 0; }\nint g(void) { int b[-1]; return 0; }\n", false },
     // A body whose walk reports an error is source order's, as is a unit whose top level does; a syntax error stops
     // before any reading, and an error the later phases find is merged like any other.
     { "error-in-a-body", "int f(void) { int a[-1]; return 0; }\nint g(void) { return 2; }\n", false },

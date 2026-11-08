@@ -2118,6 +2118,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     // The scalar path's walks act at no token the vector path's would skip (#529).
     equal = equal && left->visit_misses == 0 && right->visit_misses == 0 &&
             left->diagnostic_graph == right->diagnostic_graph && left->report_count == right->report_count && left->token_count == right->token_count &&
+            left->recovered_published == right->recovered_published && left->recovered_valid == right->recovered_valid &&
             left->string_count == right->string_count && left->region_count == right->region_count && left->vla_count == right->vla_count &&
             left->asm_count == right->asm_count && left->binding_event_count == right->binding_event_count &&
             left->parser_binding_event_count == right->parser_binding_event_count &&
@@ -2144,6 +2145,14 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     {
         equal = left->reports[report].token == right->reports[report].token && left->reports[report].message == right->reports[report].message &&
                 left->reports[report].pragma == right->reports[report].pragma && left->reports[report].subject == right->reports[report].subject;
+        // Every field that orders or spells a report, whose recovered ones a deferred reading merges (#1447).
+        const CheckInputReport* l = left->reports + report;
+        const CheckInputReport* r = right->reports + report;
+        equal = equal && l->completion == r->completion && l->suborder == r->suborder && l->attribute == r->attribute && l->detail == r->detail &&
+                l->value == r->value && l->type == r->type && l->type_spelling == r->type_spelling && l->note_token == r->note_token &&
+                l->note_kind == r->note_kind && l->multiversion == r->multiversion && l->specifier == r->specifier &&
+                l->specifier_type == r->specifier_type && l->sort == r->sort && l->repeated == r->repeated && l->recovered == r->recovered &&
+                l->pending == r->pending;
         if (equal && (left->reports[report].message == CHECK_INPUT_REDECLARATION || left->reports[report].message == CHECK_INPUT_CONFLICTING_TYPES))
         {
             const CheckInputReport* left_report = left->reports + report;

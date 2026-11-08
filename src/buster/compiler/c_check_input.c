@@ -2580,8 +2580,8 @@ static void check_input_report_multiversion(CheckInputReader* reader, uint32_t t
 
 // Moves the unit's reports from `from` on to its recovered reports (CheckInput.recovered_reports, #1447), so that they no
 // longer stop the reader: an error clang answers by dropping what it is about, which leaves its declaration valid. A lane's
-// input is private and its reports are source order's, so a lane that recovers one gives its body to source order. Whether
-// they moved: not where room ran out, which leaves them where they were.
+// list is its body's own, which the deferred merge puts in source order's place (check_deferred_recovered). Whether they
+// moved: not where room ran out, which leaves them where they were.
 static bool check_input_recover_reports(CheckInputReader* reader, uint32_t from)
 {
     CheckInput* input = reader->output;
@@ -2610,7 +2610,6 @@ static bool check_input_recover_reports(CheckInputReader* reader, uint32_t from)
             input->recovered_count += 1;
         }
         input->report_count = from;
-        check_input_lane_refuse(reader, reader->lane, "a body recovers from an error");
     }
     return room;
 }
