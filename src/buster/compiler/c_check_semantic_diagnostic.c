@@ -269,6 +269,182 @@ static uint32_t check_semantic_operand_spelling(const Parser* parser, const Chec
     return result;
 }
 
+// c_check_common_warnings.c's, included after this file.
+static uint32_t check_common_subtree_start(const Parser* parser, uint32_t root);
+
+// An operand's type as clang names it (#1447): an array's or a function's pointer (which the conversion made, so the
+// table has it); an operator's operand's converted to a value (`value`), unqualified, without its extended qualifiers,
+// where a conversion's source keeps its own.
+static TypeId check_semantic_value_type(const TypeTable* types, TypeId type, bool value_only)
+{
+    TypeId value = type != 0 && value_only ? type_unqualified(type) : type;
+    value = value != 0 && value_only && type_extended_qualifiers(types, value) != 0 ? type_unqualified(type_strip_aligned(types, value)) : value;
+    const uint8_t kind = value != 0 ? type_kind(types, type_strip_aligned(types, value)) : BUSTER_TYPE_KIND_NONE;
+    value = type_kind_is_array(kind) ? type_find_pointer(types, type_element(types, type_strip_aligned(types, value))) :
+            kind == BUSTER_TYPE_KIND_FUNCTION ? type_find_pointer(types, value) : value;
+    return value;
+}
+
+// clang's note at a called function's parameter (#1447, its "passing argument to parameter 'x' here"), where the callee is a
+// function's name: at the `argument`-th parameter's name in the declaration the name finds, or just past an unnamed one,
+// as clang places an abstract declarator's parameter.
+static void check_semantic_parameter_note(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t callee, uint32_t argument,
+                                          PPOutputDiagnosticNote* note, Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t declaration = callee < input->token_count && parser->tokens.kinds[callee] == PARSE_KIND_IDENTIFIER ? input->declarations[callee] : BUSTER_CHECK_NONE;
+    const bool function = declaration < input->token_count && input->declaration_kinds[declaration] == C_BINDING_FUNCTION && declaration + 1 < count &&
+                          parser->tokens.kinds[declaration + 1] == PARSE_KIND_L_PAREN;
+    const uint32_t close = function ? parser->tree.parents[declaration + 1] : 0;
+    // The parameter's tokens: from after the `(` or the comma before it, to its comma or the `)`, groups skipped.
+    uint32_t at = declaration + 2;
+    uint32_t first = at;
+    uint32_t end = at;
+    bool found = false;
+    for (uint32_t index = 0; function && !found && close < count && at <= close; index += 1)
+    {
+        first = at;
+        while (at < close && parser->tokens.kinds[at] != PARSE_KIND_COMMA)
+        {
+            const uint8_t kind = parser->tokens.kinds[at];
+            const bool open = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+            at = open && parser->tree.parents[at] > at && parser->tree.parents[at] < close ? parser->tree.parents[at] + 1 : at + 1;
+        }
+        end = at;
+        found = index == argument && end > first;
+        at += 1;
+    }
+    uint32_t name = BUSTER_CHECK_NONE;
+    for (uint32_t t = first; found && name == BUSTER_CHECK_NONE && t < end; t += 1)
+    {
+        // An attribute's arguments are operands too (address_space's name is one): the parameter's is the first
+        // operand identifier outside every attribute group.
+        bool attribute = false;
+        for (uint32_t at = t; !attribute && at < end;)
+        {
+            const uint32_t parent = parser->tree.parents[at];
+            const uint8_t role = parent < parser->tokens.count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
+            attribute = role == PARSE_ROLE_CLOSE_ATTRIBUTE || role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER ||
+                        role == PARSE_ROLE_CLOSE_ATTRIBUTE_LEFT || role == PARSE_ROLE_CLOSE_ATTRIBUTE_RIGHT ||
+                        role == PARSE_ROLE_CLOSE_ATTRIBUTE_LIST;
+            at = parent < parser->tokens.count && parent > at && parent < end ? parent : end;
+        }
+        name = !attribute && parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && parser->tree.roles[t] == PARSE_ROLE_OPERAND ? t : name;
+    }
+    if (found)
+    {
+        const String8 spelled = name != BUSTER_CHECK_NONE ? check_semantic_name(parser, pp, name) : (String8){ "", 0 };
+        *note = (PPOutputDiagnosticNote){
+            .token = parser->tokens.sources[name != BUSTER_CHECK_NONE ? name : end],
+            .message = spelled.length != 0 ? check_warning_text(scratch, "passing argument to parameter '%.*s' here", (int)spelled.length, spelled.pointer) :
+                                             "passing argument to parameter here",
+        };
+    }
+}
+
+// The address spaces' errors (#1447), worded as clang's: a conversion's "changes address space of pointer" (an assignment's,
+// an initialization's, a return's at its expression, an argument's) or of "nested pointer" one level down, and a
+// subtraction's or a conditional's pointers to spaces that don't overlap
+// (err_typecheck_op_on_nonoverlapping_address_space_pointers, its two spaces as clang prints them). An argument's has
+// clang's note at the called function's parameter (check_semantic_parameter_note).
+static const char* check_semantic_address_space(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location, PPOutputDiagnosticNote* note,
+                                                Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t node = report->node;
+    const uint32_t token = report->token;
+    const CheckOp op = graph->ops[node];
+    const char* result = NULL;
+    uint32_t from_node = BUSTER_CHECK_NONE;
+    TypeId from = 0;
+    TypeId to = 0;
+    const char* format = NULL;
+    const char* nested = report->diagnostic == CHECK_DIAG_ADDRESS_SPACE_NESTED ? "nested " : "";
+    if (report->diagnostic == CHECK_DIAG_ADDRESS_SPACE_OVERLAP)
+    {
+        const bool conditional = op == CHECK_OP_CONDITIONAL;
+        const uint32_t first = conditional ? graph->operand1[node] : graph->operand0[node];
+        const uint32_t second = conditional ? graph->operand2[node] : graph->operand1[node];
+        const String8 left = first < stream->count ? check_driver_warning_type(parser, pp, input, types, spell, scratch,
+                                                                                check_semantic_value_type(types, check_stream_type(stream, first), true),
+                                                                                check_semantic_operand_spelling(parser, input, first)) : (String8){ "", 0 };
+        const String8 right = second < stream->count ? check_driver_warning_type(parser, pp, input, types, spell, scratch,
+                                                                                  check_semantic_value_type(types, check_stream_type(stream, second), true),
+                                                                                  check_semantic_operand_spelling(parser, input, second)) : (String8){ "", 0 };
+        result = left.length != 0 && right.length != 0 ?
+                 check_warning_text(scratch, "%s operands of type  (%.*s and %.*s) which are pointers to non-overlapping address spaces",
+                                    conditional ? "conditional operator with the second and third" : "arithmetic operation with", (int)left.length, left.pointer,
+                                    (int)right.length, right.pointer) : NULL;
+        // A conditional's at its `?`, whose parent is the node's `:`.
+        uint32_t question = token;
+        while (conditional && question != 0 && question < parser->tokens.count &&
+               !(parser->tree.roles[question] == PARSE_ROLE_OPEN_TERNARY && parser->tree.parents[question] == token))
+        {
+            question -= 1;
+        }
+        *location = conditional && question < parser->tokens.count && parser->tree.roles[question] == PARSE_ROLE_OPEN_TERNARY ? question : token;
+    }
+    else if (op == CHECK_OP_ASSIGN)
+    {
+        from_node = graph->operand1[node];
+        to = graph->operand0[node] < stream->count ? check_stream_type(stream, graph->operand0[node]) : 0;
+        format = "assigning %.*s to %.*s changes address space of %spointer";
+    }
+    else if (op == CHECK_OP_INITIALIZE)
+    {
+        from_node = graph->operand0[node];
+        to = graph->types[node];
+        format = "initializing %.*s with an expression of type %.*s changes address space of %spointer";
+        for (uint32_t declaration = 0; declaration < input->token_count; declaration += 1)
+        {
+            if (check_sparse_get(input->initializer_nodes, declaration) == node)
+            {
+                *location = declaration;
+                break;
+            }
+        }
+    }
+    else if (op == CHECK_OP_CONVERT && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_RETURN)
+    {
+        from_node = graph->operand0[node];
+        to = graph->types[node];
+        format = "returning %.*s from a function with result type %.*s changes address space of %spointer";
+        *location = from_node < graph->count ? check_common_subtree_start(parser, graph->tokens[from_node]) : token;
+    }
+    else if (op == CHECK_OP_CALL && graph->argument_tokens != NULL)
+    {
+        const uint32_t offset = graph->argument_offsets[node];
+        uint32_t argument = BUSTER_CHECK_NONE;
+        for (uint32_t i = 0; argument == BUSTER_CHECK_NONE && i < graph->argument_counts[node]; i += 1)
+        {
+            argument = graph->argument_tokens[offset + i] == token ? i : argument;
+        }
+        const uint32_t callee = graph->operand0[node];
+        TypeId function = callee < stream->count ? type_strip_aligned(types, check_stream_type(stream, callee)) : 0;
+        function = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, function)) : function;
+        uint32_t parameter_count = 0;
+        const TypeId* parameters = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? type_parameters(types, function, &parameter_count) : NULL;
+        from_node = argument != BUSTER_CHECK_NONE ? graph->argument_nodes[offset + argument] : BUSTER_CHECK_NONE;
+        to = argument < parameter_count ? parameters[argument] : 0;
+        format = "passing %.*s to parameter of type %.*s changes address space of %spointer";
+        check_semantic_parameter_note(parser, pp, input, callee < graph->count ? graph->tokens[callee] : BUSTER_CHECK_NONE, argument, note, scratch);
+    }
+    if (format != NULL)
+    {
+        from = from_node < stream->count ? check_semantic_value_type(types, check_stream_type(stream, from_node), false) : 0;
+        const String8 source = from != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, from, check_semantic_operand_spelling(parser, input, from_node)) :
+                                           (String8){ "", 0 };
+        const String8 target = to != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, to, 0) : (String8){ "", 0 };
+        const bool initializing = op == CHECK_OP_INITIALIZE;
+        const String8 first = initializing ? target : source;
+        const String8 second = initializing ? source : target;
+        result = source.length != 0 && target.length != 0 ?
+                 check_warning_text(scratch, format, (int)first.length, first.pointer, (int)second.length, second.pointer, nested) : NULL;
+    }
+    return result != NULL ? result : check_driver_report_message(report);
+}
+
 // The switch keyword whose condition `close` closes, or BUSTER_CHECK_NONE: the one before the condition's `(`.
 static uint32_t check_semantic_switch(const Parser* parser, uint32_t close)
 {
@@ -459,6 +635,11 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                     };
                 }
             }
+        }
+        else if (report->diagnostic == CHECK_DIAG_ADDRESS_SPACE || report->diagnostic == CHECK_DIAG_ADDRESS_SPACE_OVERLAP ||
+                 report->diagnostic == CHECK_DIAG_ADDRESS_SPACE_NESTED)
+        {
+            result = check_semantic_address_space(parser, pp, input, stream, types, report, spell, location, note, scratch);
         }
         else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_CONVERT && token < parser->tokens.count &&
                  parser->tokens.kinds[token] == PARSE_KIND_RETURN && check_action_kind(types, graph->types[node]) == BUSTER_TYPE_KIND_VOID)

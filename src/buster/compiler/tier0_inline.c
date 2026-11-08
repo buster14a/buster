@@ -62,6 +62,24 @@
 #define BUSTER_TIER0_INLINE_MEANINGS 8
 
 // The meanings by kind (a CONST's is its class's: tier0_inline_meaning); one ZMM register for vpermb.
+// A copy or fill of a function's column, which an empty column may leave without storage: memcpy's and memset's pointers
+// must not be null even for no bytes.
+static void tier0_inline_copy(void* destination, const void* source, uint64_t bytes)
+{
+    if (bytes != 0)
+    {
+        memcpy(destination, source, bytes);
+    }
+}
+
+static void tier0_inline_fill(void* destination, int value, uint64_t bytes)
+{
+    if (bytes != 0)
+    {
+        memset(destination, value, bytes);
+    }
+}
+
 static const uint8_t tier0_inline_meanings[BUSTER_TYPED_KIND_LIMIT] = {
     [BUSTER_TYPED_LOCAL] = BUSTER_TIER0_INLINE_LOCAL,
     [BUSTER_TYPED_LOCAL_ADDRESS] = BUSTER_TIER0_INLINE_LOCAL,
@@ -632,8 +650,8 @@ static bool tier0_inline_plan(const Tier0InlineInput* input, bool vector, Arena*
     uint32_t* growth = plan->starts;
     if (valid)
     {
-        memset(plan->heads, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(growth, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        tier0_inline_fill(plan->heads, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        tier0_inline_fill(growth, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
     }
     for (uint32_t s = 0; valid && s < plan->site_count; s += 1)
     {
@@ -861,69 +879,69 @@ static bool tier0_inline_tables(const Tier0InlineInput* input, const Tier0Inline
     {
         // The caller's own.
         const uint32_t own = caller->local_count;
-        memcpy(local_classes, caller->local_classes, own);
-        memcpy(local_flags, caller->local_flags, own);
+        tier0_inline_copy(local_classes, caller->local_classes, own);
+        tier0_inline_copy(local_flags, caller->local_flags, own);
         if (plan->sizes)
         {
             if (caller->local_sizes != 0)
             {
-                memcpy(local_sizes, caller->local_sizes, (uint64_t)own * sizeof(uint32_t));
-                memcpy(local_alignments, caller->local_alignments, own);
+                tier0_inline_copy(local_sizes, caller->local_sizes, (uint64_t)own * sizeof(uint32_t));
+                tier0_inline_copy(local_alignments, caller->local_alignments, own);
             }
             else
             {
-                memset(local_sizes, 0, (uint64_t)own * sizeof(uint32_t));
-                memset(local_alignments, 0, own);
+                tier0_inline_fill(local_sizes, 0, (uint64_t)own * sizeof(uint32_t));
+                tier0_inline_fill(local_alignments, 0, own);
             }
         }
         const uint32_t own_rows = caller->call_count;
-        memcpy(call_targets, caller->call_targets, (uint64_t)own_rows * sizeof(SymbolId));
-        memcpy(call_first, caller->call_first, (uint64_t)own_rows * sizeof(uint32_t));
-        memcpy(call_argument_counts, caller->call_argument_counts, (uint64_t)own_rows * sizeof(uint32_t));
-        memcpy(call_variadic, caller->call_variadic, own_rows);
-        memcpy(calls, caller->calls, (uint64_t)own_rows * sizeof(AbiCall));
+        tier0_inline_copy(call_targets, caller->call_targets, (uint64_t)own_rows * sizeof(SymbolId));
+        tier0_inline_copy(call_first, caller->call_first, (uint64_t)own_rows * sizeof(uint32_t));
+        tier0_inline_copy(call_argument_counts, caller->call_argument_counts, (uint64_t)own_rows * sizeof(uint32_t));
+        tier0_inline_copy(call_variadic, caller->call_variadic, own_rows);
+        tier0_inline_copy(calls, caller->calls, (uint64_t)own_rows * sizeof(AbiCall));
         if (plan->result_objects)
         {
             if (caller->call_result_objects != 0)
             {
-                memcpy(call_result_objects, caller->call_result_objects, (uint64_t)own_rows * sizeof(uint32_t));
+                tier0_inline_copy(call_result_objects, caller->call_result_objects, (uint64_t)own_rows * sizeof(uint32_t));
             }
             else
             {
-                memset(call_result_objects, 0, (uint64_t)own_rows * sizeof(uint32_t));
+                tier0_inline_fill(call_result_objects, 0, (uint64_t)own_rows * sizeof(uint32_t));
             }
         }
         if (call_tails != 0)
         {
-            memcpy(call_tails, caller->call_tails, own_rows);
-            memset(call_tails + own_rows, 0, rows - own_rows);
+            tier0_inline_copy(call_tails, caller->call_tails, own_rows);
+            tier0_inline_fill(call_tails + own_rows, 0, rows - own_rows);
         }
         const uint32_t own_arguments = caller->argument_count;
-        memcpy(argument_locations, caller->argument_locations, (uint64_t)own_arguments * sizeof(AbiLocation));
-        memcpy(argument_classes, caller->argument_classes, own_arguments);
+        tier0_inline_copy(argument_locations, caller->argument_locations, (uint64_t)own_arguments * sizeof(AbiLocation));
+        tier0_inline_copy(argument_classes, caller->argument_classes, own_arguments);
         if (plan->argument_sizes)
         {
             if (caller->argument_sizes != 0)
             {
-                memcpy(argument_sizes, caller->argument_sizes, (uint64_t)own_arguments * sizeof(uint32_t));
+                tier0_inline_copy(argument_sizes, caller->argument_sizes, (uint64_t)own_arguments * sizeof(uint32_t));
             }
             else
             {
-                memset(argument_sizes, 0, (uint64_t)own_arguments * sizeof(uint32_t));
+                tier0_inline_fill(argument_sizes, 0, (uint64_t)own_arguments * sizeof(uint32_t));
             }
         }
         if (caller->operation_count != 0)
         {
-            memcpy(operations, caller->operations, (uint64_t)caller->operation_count * sizeof(Tier0Operation));
+            tier0_inline_copy(operations, caller->operations, (uint64_t)caller->operation_count * sizeof(Tier0Operation));
         }
         if (caller->x87_constant_count != 0)
         {
-            memcpy(x87_constants, caller->x87_constants, (uint64_t)caller->x87_constant_count * 2 * sizeof(uint64_t));
+            tier0_inline_copy(x87_constants, caller->x87_constants, (uint64_t)caller->x87_constant_count * 2 * sizeof(uint64_t));
         }
         if (caller->vector_constant_count != 0)
         {
-            memcpy(vector_constants, caller->vector_constants, (uint64_t)caller->vector_constant_count * 8 * sizeof(uint64_t));
-            memcpy(vector_constant_bytes, caller->vector_constant_bytes, caller->vector_constant_count);
+            tier0_inline_copy(vector_constants, caller->vector_constants, (uint64_t)caller->vector_constant_count * 8 * sizeof(uint64_t));
+            tier0_inline_copy(vector_constant_bytes, caller->vector_constant_bytes, caller->vector_constant_count);
         }
         // The temporary: a U64 value.
         if (plan->aggregates)
@@ -945,31 +963,31 @@ static bool tier0_inline_tables(const Tier0InlineInput* input, const Tier0Inline
             for (uint32_t level = 0; level < distinct->levels; level += 1)
             {
                 const uint64_t base = distinct->local_base + (uint64_t)level * count;
-                memcpy(local_classes + base, callee->local_classes, count);
-                memcpy(local_flags + base, callee->local_flags, count);
+                tier0_inline_copy(local_classes + base, callee->local_classes, count);
+                tier0_inline_copy(local_flags + base, callee->local_flags, count);
                 if (plan->sizes && callee->local_sizes != 0)
                 {
-                    memcpy(local_sizes + base, callee->local_sizes, (uint64_t)count * sizeof(uint32_t));
-                    memcpy(local_alignments + base, callee->local_alignments, count);
+                    tier0_inline_copy(local_sizes + base, callee->local_sizes, (uint64_t)count * sizeof(uint32_t));
+                    tier0_inline_copy(local_alignments + base, callee->local_alignments, count);
                 }
                 else if (plan->sizes)
                 {
-                    memset(local_sizes + base, 0, (uint64_t)count * sizeof(uint32_t));
-                    memset(local_alignments + base, 0, count);
+                    tier0_inline_fill(local_sizes + base, 0, (uint64_t)count * sizeof(uint32_t));
+                    tier0_inline_fill(local_alignments + base, 0, count);
                 }
             }
             if (callee->operation_count != 0)
             {
-                memcpy(operations + distinct->operation_base, callee->operations, (uint64_t)callee->operation_count * sizeof(Tier0Operation));
+                tier0_inline_copy(operations + distinct->operation_base, callee->operations, (uint64_t)callee->operation_count * sizeof(Tier0Operation));
             }
             if (callee->x87_constant_count != 0)
             {
-                memcpy(x87_constants + 2 * (uint64_t)distinct->x87_base, callee->x87_constants, (uint64_t)callee->x87_constant_count * 2 * sizeof(uint64_t));
+                tier0_inline_copy(x87_constants + 2 * (uint64_t)distinct->x87_base, callee->x87_constants, (uint64_t)callee->x87_constant_count * 2 * sizeof(uint64_t));
             }
             if (callee->vector_constant_count != 0)
             {
-                memcpy(vector_constants + 8 * (uint64_t)distinct->vector_base, callee->vector_constants, (uint64_t)callee->vector_constant_count * 8 * sizeof(uint64_t));
-                memcpy(vector_constant_bytes + distinct->vector_base, callee->vector_constant_bytes, callee->vector_constant_count);
+                tier0_inline_copy(vector_constants + 8 * (uint64_t)distinct->vector_base, callee->vector_constants, (uint64_t)callee->vector_constant_count * 8 * sizeof(uint64_t));
+                tier0_inline_copy(vector_constant_bytes + distinct->vector_base, callee->vector_constant_bytes, callee->vector_constant_count);
             }
         }
         // Each site's copy of its callee's call and argument rows, their arguments' and result objects' indices rebased.
@@ -981,10 +999,10 @@ static bool tier0_inline_tables(const Tier0InlineInput* input, const Tier0Inline
             const uint32_t count = callee->call_count;
             if (count != 0)
             {
-                memcpy(call_targets + base, callee->call_targets, (uint64_t)count * sizeof(SymbolId));
-                memcpy(call_argument_counts + base, callee->call_argument_counts, (uint64_t)count * sizeof(uint32_t));
-                memcpy(call_variadic + base, callee->call_variadic, count);
-                memcpy(calls + base, callee->calls, (uint64_t)count * sizeof(AbiCall));
+                tier0_inline_copy(call_targets + base, callee->call_targets, (uint64_t)count * sizeof(SymbolId));
+                tier0_inline_copy(call_argument_counts + base, callee->call_argument_counts, (uint64_t)count * sizeof(uint32_t));
+                tier0_inline_copy(call_variadic + base, callee->call_variadic, count);
+                tier0_inline_copy(calls + base, callee->calls, (uint64_t)count * sizeof(AbiCall));
             }
             for (uint32_t c = 0; c < count; c += 1)
             {
@@ -998,16 +1016,16 @@ static bool tier0_inline_tables(const Tier0InlineInput* input, const Tier0Inline
             const uint32_t arguments_count = callee->argument_count;
             if (arguments_count != 0)
             {
-                memcpy(argument_locations + site->argument_base, callee->argument_locations, (uint64_t)arguments_count * sizeof(AbiLocation));
-                memcpy(argument_classes + site->argument_base, callee->argument_classes, arguments_count);
+                tier0_inline_copy(argument_locations + site->argument_base, callee->argument_locations, (uint64_t)arguments_count * sizeof(AbiLocation));
+                tier0_inline_copy(argument_classes + site->argument_base, callee->argument_classes, arguments_count);
             }
             if (plan->argument_sizes && callee->argument_sizes != 0)
             {
-                memcpy(argument_sizes + site->argument_base, callee->argument_sizes, (uint64_t)arguments_count * sizeof(uint32_t));
+                tier0_inline_copy(argument_sizes + site->argument_base, callee->argument_sizes, (uint64_t)arguments_count * sizeof(uint32_t));
             }
             else if (plan->argument_sizes)
             {
-                memset(argument_sizes + site->argument_base, 0, (uint64_t)arguments_count * sizeof(uint32_t));
+                tier0_inline_fill(argument_sizes + site->argument_base, 0, (uint64_t)arguments_count * sizeof(uint32_t));
             }
         }
         g->local_classes = local_classes;
@@ -1274,9 +1292,9 @@ static bool tier0_inline_forward(Tier0Function* g, Tier0InlineColumns* columns, 
     uint32_t kept = count;
     if (valid)
     {
-        memset(targets, 0, ((uint64_t)count / 64 + 1) * sizeof(uint64_t));
-        memset(refs, 0, (uint64_t)locals * sizeof(uint32_t));
-        memset(covered, 0, (uint64_t)locals * sizeof(uint32_t));
+        tier0_inline_fill(targets, 0, ((uint64_t)count / 64 + 1) * sizeof(uint64_t));
+        tier0_inline_fill(refs, 0, (uint64_t)locals * sizeof(uint32_t));
+        tier0_inline_fill(covered, 0, (uint64_t)locals * sizeof(uint32_t));
         for (uint32_t e = 0; e < count; e += 1)
         {
             const uint32_t kind = g->kinds[e];

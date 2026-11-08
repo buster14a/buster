@@ -297,7 +297,7 @@ static void check_builtin_atomic_convert(TypeTable* table, const CheckBuiltinAto
             value->type = destination;
             value->category = CHECK_RVALUE;
             value->constant_kind = CHECK_CONSTANT_NONE;
-            value->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER | BUSTER_CHECK_NULL_POINTER);
+            value->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME | BUSTER_CHECK_NULL_POINTER);
         }
         else
         {

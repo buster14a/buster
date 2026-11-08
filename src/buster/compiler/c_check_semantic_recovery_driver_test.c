@@ -154,6 +154,60 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int visible_plain;\n"
         "void declare_visible_plain(void) { extern int visible_plain; (void)visible_plain; }\n_Thread_local int visible_plain;\n"
         "int *use_block_tls(void) { return &block_tls; }\nint *use_block_plain(void) { return &block_plain; }\n",
+        // Every declaration's failed initializer, not only the first's (#1447, phase 2): arrays, records and pointers, at
+        // file and block scope, a static object's braced conversion, and an error of the walk's between them.
+        "struct P { int x; int y; };\nint a[2] = 5;\nstruct P p = { .z = 1 };\nvoid f(void)\n{\n    int b[2] = 6;\n    struct P q = 3;\n"
+        "    char c[1] = 7;\n    (void)b; (void)q; (void)c;\n}\nstatic int *sp = { 1.5 };\nint n = undeclared;\nstruct P r = { 1, 2, 3 };\nint e[3] = 8;\n",
+        "int k;\nstatic int s1 = k;\nint a[2] = 5;\nstruct Q { char *p; } qs = { 4 };\nstatic struct Q qq = { 5L };\nint u(void) { int w; return 0; }\n",
+        // A pointer converted to int at file scope, each one's conversion and its "not a compile-time constant" (relayed
+        // from the type attributes' session).
+        "int x = \"str\";\nint y = \"two\";\nint z = 5;\nint w = \"three\";\n",
+        // An array of unknown size whose initializer is no list: clang's words by its element's literal, recovered, the
+        // array keeping its unknown size.
+        "int y[] = 5;\nchar c[] = 6;\nstruct S { int x; };\nstruct S sa[] = 3;\nshort ss[] = 4;\nunsigned short us[] = 4;\n"
+        "static int z[] = 2;\nvoid i(void) { int fine; }\nvoid h(void) { char loc[] = 1; int unused; }\nint a2[2] = 7;\n"
+        "int g(void) { return y[0] + c[0]; }\n",
+        // Its error after the initializer's own, none where the initializer names an undeclared identifier, and an extern
+        // array's without -Wextern-initializer; a parenthesized initializer, a cast and a scalar's compound literal are no
+        // list either (review on #1791).
+        "int u1[] = undecl_fn2();\nint u2[] = undecl;\nint u3[] = undecl + 1;\nint u4[] = sizeof(undecl2);\nextern int e[] = 7;\n"
+        "int h[] = (5);\nint i[] = (int)6;\nint j[] = (int){7};\nint n[] = 4, o[] = 5;\n",
+        // None where the initializer is no valid value: a missing name outside a statement expression or in its value, a
+        // missing member, a called non-function; one where a statement expression shields the name in an earlier
+        // statement; and an array's compound literal only a prefix of the initializer (second review on #1791).
+        "struct S { int a; };\nint f(void);\nint x;\nvoid g(void) { int u[] = ({ undecl; 5; }); }\n"
+        "void h(void) { int u[] = ({ int y = undecl2; 5; }); }\nvoid k(void) { int u[] = ({ sizeof(undecl3); 5; }); }\n"
+        "void n(void) { int u[] = ({ int z = ({ undecl8; 1; }); 5; }); }\nvoid q(void) { int u[] = ({ if (1) undecl10 = 2; 5; }); }\n"
+        "void r(void) { int u[] = (undecl11); }\nint v1[] = ((struct S){0}).nosuch;\nint v4[] = (int[2]){1,2} + x;\nint v6[] = undecl6 + 1;\n",
+        // A unit the reader rejects, whose retained graph ends at its first missing name: a later array's initializer has
+        // no node and keeps its error (third review on #1791).
+        "int c = undecl, d[] = 6;\nunknown_type z;\n",
+        "int c = undecl;\nint d[] = 6;\nint e[] = (5);\nint f2[] = undecl2 + 1;\nint g[] = (int)7;\nunknown_type z;\n",
+        // An enumerator whose name is another kind of the scope's (an object, a typedef, a parameter, a local): clang's
+        // "redefinition of 'K'" with its note at the earlier declaration, the enumerator dropped and the next implicit
+        // value restarting at 0, of int or of the fixed type (#1447).
+        "int K;\n"
+        "enum E { K, L };\n"
+        "int use(void) { return K + L + undeclared; }\n",
+        "enum E { A, B };\n"
+        "int A;\n"
+        "float B(void);\n"
+        "typedef int A2;\n"
+        "enum F { A2 };\n"
+        "int use(void) { return A + B; }\n",
+        "void f(int P)\n"
+        "{\n"
+        "    enum { P, Q } e;\n"
+        "    int x = Q;\n"
+        "    (void)e; (void)x;\n"
+        "}\n",
+        "int K;\n"
+        "enum E { J = 5, K, M };\n"
+        "_Static_assert(M == 0, \"m\");\n"
+        "typedef long T;\n"
+        "enum F : short { U = 7, T, V };\n"
+        "_Static_assert(V == 0 && sizeof(V) == 2, \"v\");\n"
+        "void w(void) { int loc; enum { loc, after } e; (void)e; (void)loc; }\n",
         // A block's, and clang's unused-variable warnings of no scope in which an error occurred (a body's from its
         // definition's start).
         "void f(int p)\n{\n    int x;\n    float x;\n    int y = 1;\n    long y = 2;\n    (void)y;\n    if (y = 2) {}\n}\n"

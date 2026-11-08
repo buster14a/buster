@@ -229,7 +229,7 @@ static void check_function_alias_print(CheckFunctionPrinter* output, uint32_t co
     const uint32_t qualifiers = type_qualifiers(type) & ~type_qualifiers(spelling->alias);
     if (qualifiers != 0)
     {
-        type_print_qualifiers(printer, qualifiers);
+        type_print_qualifiers(printer, qualifiers, 0);
         type_print_text(printer, " ");
     }
     if (spelling->alias_end == spelling->alias_first + 1)
@@ -370,7 +370,7 @@ static void check_function_print_step(CheckFunctionPrinter* output, TypePrintFra
         const uint32_t qualifiers = type_qualifiers(type);
         if (qualifiers != 0)
         {
-            type_print_qualifiers(printer, qualifiers);
+            type_print_qualifiers(printer, qualifiers, 0);
             type_print_text(printer, " ");
         }
         type_print_text(printer, kind == BUSTER_TYPE_KIND_STRUCT ? "struct " : kind == BUSTER_TYPE_KIND_UNION ? "union " : "enum ");

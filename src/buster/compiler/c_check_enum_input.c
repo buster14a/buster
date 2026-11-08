@@ -258,11 +258,14 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
                 const CheckInputMessage message = reader->bindings.kind[old - 1] == C_BINDING_ENUMERATOR ? CHECK_INPUT_ENUMERATOR_REDEFINITION : CHECK_INPUT_REDECLARATION;
                 const uint32_t before = reader->output->report_count;
                 check_input_report_subject(reader, name, message, reader->bindings.declaration[old - 1]);
-                const bool enumerator = message == CHECK_INPUT_ENUMERATOR_REDEFINITION && reader->output->report_count == before + 1 && !reader->output->resource;
-                if (enumerator)
+                const bool reported = reader->output->report_count == before + 1 && !reader->output->resource;
+                if (reported)
                 {
-                    // clang's note at the earlier enumerator (#1447): "previous definition is here". The enumerator is
-                    // dropped and the walk goes on (phase 2), its name still the earlier one's.
+                    // clang's note at the earlier declaration (#1447): "previous definition is here", an enumerator's or
+                    // any other name's of the scope (an object, a typedef, a parameter), whose error is clang's
+                    // "redefinition of 'K'". The enumerator is dropped and the walk goes on, its name still the earlier
+                    // one's.
+                    reader->output->reports[before].detail = message == CHECK_INPUT_REDECLARATION ? CHECK_REDECLARATION_DEFINITION : 0;
                     reader->output->reports[before].note_token = reader->bindings.declaration[old - 1];
                     reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
                     valid = check_input_recover_reports(reader, before);
@@ -343,13 +346,17 @@ static bool check_input_enum_complete(CheckInputReader* reader, CheckTagFrame* f
     // the mode's (check_input_enum_mode).
     const CheckInputAttribute* late_mode = !moded && reader->enum_fixed[tag] == BUSTER_CHECK_ENUM_NONE ? check_input_enum_mode(frame->attributes, frame->close) : NULL;
     // An error after which clang installs no type, an unknown or unsupported mode's, leaves the enum as one with no mode
-    // (#1447); one that still installs a type of no integer stops the reader.
+    // (#1447); one that still installs a floating type gives it the integer of its layout (check_input_mode_enum_integer),
+    // and a complex one stops the reader.
     const CheckInputAttributeRecovery late_recovery = late_mode != NULL ? check_input_attribute_recovery(reader, frame->attributes, (CheckInputAttribute*)late_mode) :
                                                       (CheckInputAttributeRecovery){ 0 };
     TypeId late_installed = 0;
-    const TypeId late_moded = late_mode != NULL ? check_input_attribute_mode(reader, frame->attributes, late_mode, frame->type, &late_installed) : 0;
-    const bool late_dropped = late_mode != NULL && late_moded == 0 && late_installed == frame->type &&
-                              check_input_attribute_recover(reader, frame->attributes, &late_recovery, 0, false, false);
+    const TypeId late_checked = late_mode != NULL ? check_input_attribute_mode(reader, frame->attributes, late_mode, frame->type, &late_installed) : 0;
+    const TypeId late_stand_in = late_mode != NULL && late_checked == 0 && late_installed != frame->type ? check_input_mode_enum_integer(reader->types, late_installed) : 0;
+    const bool late_recovered = late_mode != NULL && late_checked == 0 && (late_installed == frame->type || late_stand_in != 0) &&
+                                check_input_attribute_recover(reader, frame->attributes, &late_recovery, 0, false, false);
+    const bool late_dropped = late_recovered && late_installed == frame->type;
+    const TypeId late_moded = late_checked != 0 ? late_checked : late_recovered ? late_stand_in : 0;
     late_mode = late_dropped ? NULL : late_mode;
     valid &= late_mode == NULL || late_moded != 0;
     if (reader->enum_fixed[tag] != BUSTER_CHECK_ENUM_NONE && !moded)
