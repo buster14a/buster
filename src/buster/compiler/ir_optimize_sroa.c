@@ -433,7 +433,7 @@ static IrError ir_sroa_view(IrSroaWork* work, Arena* scratch, IrFunction* result
     }
     if (error == IR_OK)
     {
-        ir_debug_remap(f, &view, NULL, NULL);
+        ir_debug_remap(f, &view, NULL, NULL, NULL);
         for (uint32_t slot = 0; slot < f->slot_count; slot += 1)
         {
             view.slots[slot] = f->slots[slot];

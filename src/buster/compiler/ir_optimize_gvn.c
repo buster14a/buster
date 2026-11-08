@@ -889,7 +889,7 @@ static IrError ir_gvn_alias_view(IrGvnWork* work, Arena* scratch, IrFunction* re
     }
     if (error == IR_OK)
     {
-        ir_debug_remap(f, &view, NULL, NULL);
+        ir_debug_remap(f, &view, NULL, NULL, NULL);
         for (uint32_t k = 0; view.debug != NULL && k < view.debug->binding_count; k += 1)
         {
             IrDebugBinding* binding = view.debug->bindings + k;
@@ -897,6 +897,14 @@ static IrError ir_gvn_alias_view(IrGvnWork* work, Arena* scratch, IrFunction* re
             if (binding->kind == IR_DEBUG_BIND_VALUE)
             {
                 binding->value = ir_gvn_resolve(work->alias, binding->value);
+            }
+        }
+        for (uint32_t k = 0; view.debug != NULL && k < view.debug->region_count; k += 1)
+        {
+            IrDebugRegion* region = view.debug->regions + k;
+            if (region->kind == IR_DEBUG_BIND_VALUE)
+            {
+                region->value = ir_gvn_resolve(work->alias, region->value);
             }
         }
     }

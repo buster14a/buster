@@ -228,9 +228,15 @@ frame events as before.
 Value locations require concrete machine proof. Whole retained objects use a
 verified frame base and their actual physical storage; shared rows need an
 explicit single-block lifetime, complete initialization and overwrite bounds.
-Scalar parameters and locals whose assignments stay in the original entry
-source block can use exact literal bytes or SSA values established by the
-full CFG emitted-code certificate. The straight-line emitter also certifies
+Normal scalar parameters and locals can use exact literal bytes or SSA values
+established by the full CFG emitted-code certificate. Assignments in an entry
+source block with no incoming backedge use ordered events; other assignments
+require sparse source windows witnessed
+by real reads or stores and surviving exact block identities. Existing semantic
+phis can supply join and loop values from a register proved on every incoming
+edge. Memory-only phi entries and unwitnessed paths remain unavailable. Fresh
+block entries and repeated definitions discard older iteration copies before
+publishing current values. The straight-line emitter also certifies
 bounded integer kernels without calls, spills, rematerialization or
 transitions, checking actual operand ownership and exact kernel bytes after
 the allocation certificate. Decoded copies, compiler-row spills/reloads,
@@ -244,8 +250,9 @@ records the exact admission rules and gaps.
 `test-check-debug --cross-check` checks native and object-linked programs with
 `llvm-dwarfdump --verify` and GDB. Its Tier 1 fixtures read retained objects,
 shadowed names, loop values, snapshots and reassigned call results at explicit
-stops, including a computed straight-line local and the caller's frame while a
-callee is running. Default, scalar,
+stops, including a computed straight-line local, both branch arms and their
+join, three scalar loop iterations, and the caller's frame while a callee is
+running. Default, scalar,
 pre/post scheduling, frame-pointer and no-rematerialization variants compare
 values with native output and compare allocated bytes with a compile without
 `-g`; lane variants require deterministic complete files. Direct unit fixtures

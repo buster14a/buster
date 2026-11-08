@@ -164,17 +164,29 @@ Optimization can still remove a statement or move its instructions.
   certificate. Final scheduling shrinks that interval; a foreign overlapping
   frame write closes it. Repeated or interblock lifetimes remain unavailable
   for shared rows.
-- Scalar source bindings are supported when the original local has no escaped
-  address or volatile access and all its assignments are in the original
-  entry source block, without an edge back into that block. The binding names
-  the actual SSA result of its RHS, or an exact literal of its source width.
-  A checked machine definition establishes an SSA value only after its full
-  emitted sequence completes. For a call result this includes the return-value
-  copy. Copies, spills, reloads, clobbers and overlapping writes then update
-  the set of registers and compiler frame rows containing that value. The
-  machine CFG intersects those facts at every predecessor and reaches a fixed
-  point for loops before publishing ranges. A snapshot loaded from a source
+- Scalar source bindings require a normal scalar of at most eight bytes,
+  without an escaped address or volatile access. Assignments confined to the
+  original entry source block, with no edge back into that block, use ordered
+  assignment events. Other blocks use
+  sparse source windows witnessed by real local reads or direct assignments.
+  A window names the exact reaching SSA value or source-width literal, ends at
+  an assignment, lifetime or original block boundary, and requires a surviving
+  exact block map. SSA witnesses with an undefined reaching phi are omitted.
+  No debug-only read or phi is inserted to keep it available.
+  A checked machine definition establishes its SSA value only after the full
+  emitted sequence completes, including a call's return-value copy. Decoded
+  copies, spills, reloads, clobbers and overlapping writes then update its
+  concrete register and compiler-row carriers. A snapshot loaded from a source
   object keeps its own value identity when that object later changes.
+- A join or loop value can use an existing semantic phi. The complete
+  emitted-code certificate must prove its register at the defining block's
+  entry on every incoming edge, after successor-placed edge copies. Memory-only
+  phi entry carriers remain unavailable. Final scheduling cannot reopen a phi
+  register that a moved successor instruction has already overwritten. Each
+  fresh block entry and repeated machine definition invalidates older copies
+  of that static value, including private spills from an earlier iteration.
+  The machine CFG intersects facts at every predecessor and reaches a fixed
+  point before publishing ranges.
 - Ordinary scalar integer, pointer, `float` and `double` parameters can start
   in their ABI input registers, including at the exact function entry. An
   incoming stack parameter has no such seed. At a call instruction, only a
@@ -190,8 +202,11 @@ after that completion cannot resurrect a stale value. Assignment instructions
 themselves and unknown source spans are conservative gaps. Literal bindings
 use `DW_OP_implicit_value` with their exact source bytes. Values without a
 proved literal or concrete carrier, pieces of split values, and assignments
-outside the admitted source block do not receive a reconstructed value. They
-can still have a retained whole-object home where that separate proof applies.
+outside a witnessed source window do not receive a reconstructed value. Lost
+block identities and unwitnessed paths remain unavailable. These variables can
+still have a retained whole-object home where that separate proof applies.
+An earlier window also ends before every later assignment completion in its
+original block; a missing, unknown or hoisted later anchor can omit that window.
 
 The CFG emitter runs the full emitted-code certificate when source metadata is
 requested, including without `--verify`. Exact regenerated instruction kernels
@@ -219,8 +234,11 @@ The Tier 1 cross-check fixture compares debugger reads with native output for
 retained scalar parameters and locals, aggregate and pointer aliases, nested
 shadowing, loops, aligned storage, immutable snapshots, reassigned call
 results, ABI register parameters, literal values and a computed straight-line
-local. Stops inside a separate
-callee read the caller's frame, exercising suspended-call locations. The
+local. Additional scalar fixtures take no local addresses: both branch
+arms and their join require different exact assigned values, and a loop checks
+its counter, updated value and previous total through three iterations and the
+exit. Stops inside a separate callee read the caller's frame, exercising
+suspended-call locations. The
 suite runs default, scalar, pre-scheduled, post-scheduled, frame-pointer and
 no-rematerialization variants, plus objects linked by GNU ld, lld and
 `link-foreign`. For each native variant it compares the entry point and every

@@ -94,6 +94,16 @@ struct CheckTier1DebugValues
     uint32_t* binding_first;
     uint32_t* binding_order;
     uint32_t* binding_end;
+    uint32_t* region_first;
+    CheckTier1DebugSpan* regions;
+    uint64_t* region_events;
+    uint32_t region_event_count;
+    uint32_t* record_blocks;
+    uint32_t* fresh_first;
+    uint32_t* fresh_blocks;
+    uint32_t* phi_first;
+    uint32_t* phi_nodes;
+    const Tier1DebugPhi* phis;
     uint32_t* locals;
     uint32_t local_count;
     uint32_t* local_index;
@@ -110,6 +120,22 @@ struct CheckTier1DebugValues
     CheckTier1DebugValueLive live;
     bool machine;
 };
+
+static void check_tier1_debug_value_change(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live, uint32_t place, uint32_t value);
+static void check_tier1_debug_value_follow(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live, CheckTier1DebugValueTransfer transfer, bool vector);
+static void check_tier1_debug_value_boundary(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live, uint32_t record);
+
+static void check_tier1_debug_value_start(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live)
+{
+    *live = proof->live;
+    live->known_count = 0;
+    live->value_count = 0;
+    live->local_count = 0;
+    memset(proof->state, 0xff, (uint64_t)proof->carrier_count * 4);
+    memset(live->heads, 0xff, ((uint64_t)proof->value_count + 1) * 4);
+    memset(live->known_at, 0xff, (uint64_t)proof->carrier_count * 4);
+    memset(live->value_queued, 0, (uint64_t)proof->value_count + 1);
+}
 
 static uint32_t check_tier1_debug_value_width(uint32_t type)
 {
@@ -225,7 +251,11 @@ static CheckTier1DebugValueTransfer check_tier1_debug_value_transfer(const Check
     uint64_t written = 0;
     x86_instruction_effects_scalar(&record, &read, &written);
     const bool store = (written & BUSTER_X86_RESOURCE_MEMORY) != 0;
-    const bool based = record.mode == BUSTER_X86_MEMORY_BASE && record.rm == emitted->frame.base_register;
+    const bool based = record.mode == BUSTER_X86_MEMORY_BASE && record.rm == emitted->frame.base_register && record.form < X86_FORM_COUNT;
+    const bool frame_base = (record.mode & (BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_BASE)) == (BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_BASE) &&
+                            (record.rm == emitted->frame.base_register || record.rm == X86_REGISTER_RSP || record.rm == X86_REGISTER_RBP || record.rm == BUSTER_TIER1_FRAME_REALIGN_BASE);
+    const bool frame_index = (record.mode & (BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_INDEX)) == (BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_INDEX) &&
+                             (record.index == emitted->frame.base_register || record.index == X86_REGISTER_RSP || record.index == X86_REGISTER_RBP || record.index == BUSTER_TIER1_FRAME_REALIGN_BASE);
     if (proof->home_count != 0)
     {
         result.kill_memory = !body || ((written & BUSTER_X86_RESOURCE_GPR(emitted->frame.base_register)) != 0 && registers.control != BUSTER_X86_CONTROL_CALL);
@@ -237,8 +267,7 @@ static CheckTier1DebugValueTransfer check_tier1_debug_value_transfer(const Check
             result.memory_bytes = description->operand_bytes;
             result.kill_memory |= description->operand_bytes == 0;
         }
-        else if (store && (record.mode & BUSTER_X86_MODE_BASE) != 0 &&
-                 (record.rm == emitted->frame.base_register || record.rm == X86_REGISTER_RSP || record.rm == X86_REGISTER_RBP || record.rm == BUSTER_TIER1_FRAME_REALIGN_BASE))
+        else if (store && (frame_base || frame_index))
         {
             result.kill_memory = true;
         }
@@ -287,67 +316,6 @@ static CheckTier1DebugValueTransfer check_tier1_debug_value_transfer(const Check
         }
     }
     return result;
-}
-
-static void check_tier1_debug_value_step(const CheckTier1DebugValues* proof, CheckTier1DebugValueTransfer transfer, bool vector, uint32_t* state)
-{
-    const uint32_t copied = transfer.from < proof->carrier_count ? state[transfer.from] : BUSTER_IR_NONE;
-    if (BUSTER_VECTOR_PATH(vector))
-    {
-        for (uint32_t at = 0; at < 32; at += 16)
-        {
-            const __m512i before = _mm512_loadu_si512(state + at);
-            const __m512i after = _mm512_mask_mov_epi32(before, (__mmask16)(transfer.killed >> at), _mm512_set1_epi32(-1));
-            _mm512_storeu_si512(state + at, after);
-        }
-    }
-    else
-    {
-        uint32_t killed = transfer.killed;
-        while (killed != 0)
-        {
-            state[(uint32_t)__builtin_ctz(killed)] = BUSTER_IR_NONE;
-            killed &= killed - 1;
-        }
-    }
-    if (transfer.kill_memory)
-    {
-        memset(state + 32, 0xff, (uint64_t)proof->home_count * 4);
-    }
-    else
-    {
-        for (uint32_t h = 0; transfer.kill_addressable && h < proof->home_count; h += 1)
-        {
-            state[32 + h] = proof->homes[h].addressable ? BUSTER_IR_NONE : state[32 + h];
-        }
-        for (int64_t at = (int64_t)transfer.memory_at - 7; transfer.memory_bytes != 0 && at < (int64_t)transfer.memory_at + transfer.memory_bytes; at += 1)
-        {
-            const uint32_t home = check_tier1_debug_value_home(proof, at);
-            if (home != BUSTER_IR_NONE && at + proof->homes[home].bytes > transfer.memory_at)
-            {
-                state[32 + home] = BUSTER_IR_NONE;
-            }
-        }
-    }
-    const bool class = transfer.to >= 32 || (copied < proof->value_count && proof->floating[copied] == (transfer.to >= 16));
-    const bool fits = transfer.to < 32 || (transfer.to < proof->carrier_count && copied < proof->value_count && proof->widths[copied] <= proof->homes[transfer.to - 32].bytes);
-    if (copied < proof->value_count && transfer.to < proof->carrier_count && proof->widths[copied] <= transfer.bytes && class && fits)
-    {
-        state[transfer.to] = copied;
-    }
-    if (transfer.definition < proof->value_count && transfer.defined_at < 32 && proof->needed[transfer.definition] != 0)
-    {
-        state[transfer.defined_at] = transfer.definition;
-    }
-}
-
-static void check_tier1_debug_value_restore(const CheckTier1DebugValues* proof, const CheckTier1DebugValueBlock* block, uint32_t* state)
-{
-    memset(state, 0xff, (uint64_t)proof->carrier_count * 4);
-    for (uint32_t f = 0; f < block->count; f += 1)
-    {
-        state[block->facts[f].place] = block->facts[f].value;
-    }
 }
 
 static bool check_tier1_debug_value_meet(const CheckTier1DebugValues* proof, const uint32_t* state, bool vector, Arena* scratch, CheckTier1DebugValueBlock* block, bool* changed)
@@ -417,6 +385,8 @@ static bool check_tier1_debug_value_meet(const CheckTier1DebugValues* proof, con
     return valid;
 }
 
+#include "c_check_tier1_debug_regions.c"
+
 static bool check_tier1_debug_values(const Tier0Function* function, const IrFunction* ir, const Tier1EmitResult* emitted,
                                     const uint32_t* record_order, bool vector, Arena* scratch, CheckTier1DebugValues* result)
 {
@@ -426,9 +396,11 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
     const uint32_t locals = function->local_count;
     const uint32_t count = emitted->code.count;
     const uint32_t bindings = debug->binding_count;
+    const uint32_t regions = debug->region_count;
     CheckTier1DebugValues proof = { .function = function, .ir = ir, .value_count = nodes + parameters };
     bool valid = parameters <= UINT32_MAX - nodes && debug->binding_flags != NULL && (bindings == 0 || debug->bindings != NULL) &&
                  bindings <= (uint64_t)function->count + parameters && debug->first_block_end <= function->count &&
+                 regions <= function->count && (regions == 0 || debug->regions != NULL) &&
                  (count == 0 || (emitted->origins != NULL && emitted->code.records != NULL)) &&
                  (emitted->code.branch_count == 0 || (emitted->code.branches != NULL && emitted->code.targets != NULL));
     proof.widths = valid ? ir_allocate(scratch, (uint64_t)proof.value_count + 1, 1, &valid) : NULL;
@@ -439,6 +411,8 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
     proof.binding_first = valid ? ir_allocate(scratch, (uint64_t)locals + 1, 4, &valid) : NULL;
     proof.binding_order = valid ? ir_allocate(scratch, (uint64_t)bindings + 1, 4, &valid) : NULL;
     proof.binding_end = valid ? ir_allocate(scratch, (uint64_t)bindings + 1, 4, &valid) : NULL;
+    proof.region_first = valid ? ir_allocate(scratch, (uint64_t)locals + 1, 4, &valid) : NULL;
+    proof.regions = valid ? ir_allocate(scratch, (uint64_t)regions + 1, sizeof(CheckTier1DebugSpan), &valid) : NULL;
     proof.locals = valid ? ir_allocate(scratch, (uint64_t)locals + 1, 4, &valid) : NULL;
     proof.local_index = valid ? ir_allocate(scratch, (uint64_t)locals + 1, 4, &valid) : NULL;
     proof.events = valid ? ir_allocate(scratch, (uint64_t)bindings + 1, 4, &valid) : NULL;
@@ -451,6 +425,8 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
         memset(proof.initial, 0xff, ((uint64_t)parameters + 1) * 4);
         memset(proof.completion, 0xff, ((uint64_t)nodes + 1) * 4);
         memset(proof.binding_first, 0, ((uint64_t)locals + 1) * 4);
+        memset(proof.region_first, 0, ((uint64_t)locals + 1) * 4);
+        memset(proof.regions, 0, ((uint64_t)regions + 1) * sizeof(CheckTier1DebugSpan));
         memset(proof.local_index, 0xff, ((uint64_t)locals + 1) * 4);
         for (uint32_t v = 0; v < proof.value_count; v += 1)
         {
@@ -468,18 +444,19 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
         if (valid)
         {
             proof.binding_first[binding.local + 1] += 1;
-            if ((debug->binding_flags[binding.local] & BUSTER_IR_DEBUG_BIND_ENTRY) != 0)
+            if (debug->binding_flags[binding.local] != 0)
             {
+                const bool entry = debug->binding_flags[binding.local] == BUSTER_IR_DEBUG_BIND_ENTRY;
                 valid = binding.bytes != 0 && binding.bytes <= 8 && binding.bytes == tier0_class_bytes(function->local_classes[binding.local]) &&
                         binding.type == ir_typed_types[function->local_classes[binding.local]] &&
-                        (binding.entry == BUSTER_IR_NONE || binding.entry < debug->first_block_end) &&
+                        (!entry || binding.entry == BUSTER_IR_NONE || binding.entry < debug->first_block_end) &&
                         binding.bytes == check_tier1_debug_value_width(binding.type) &&
                         (binding.kind != IR_DEBUG_BIND_VALUE || (binding.value < nodes && ir->type[binding.value] == binding.type));
-                if (valid && binding.kind == IR_DEBUG_BIND_VALUE)
+                if (valid && entry && binding.kind == IR_DEBUG_BIND_VALUE)
                 {
                     proof.needed[binding.value] = 1;
                 }
-                if (valid && binding.entry != BUSTER_IR_NONE)
+                if (valid && entry && binding.entry != BUSTER_IR_NONE)
                 {
                     valid = proof.event_count == 0 || debug->bindings[proof.events[proof.event_count - 1]].entry < binding.entry;
                     proof.events[proof.event_count++] = b;
@@ -487,12 +464,39 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
             }
         }
     }
+    for (uint32_t k = 0; valid && k < regions; k += 1)
+    {
+        const IrDebugRegion region = debug->regions[k];
+        valid = region.local < locals && debug->binding_flags[region.local] == BUSTER_IR_DEBUG_BIND_REGIONS &&
+                region.begin < region.end && region.end <= region.block_end && region.block_end <= function->count &&
+                region.kind >= IR_DEBUG_BIND_VALUE && region.kind <= IR_DEBUG_BIND_UNAVAILABLE &&
+                (region.block < ir->block_count || (region.block == BUSTER_IR_NONE && region.kind == IR_DEBUG_BIND_UNAVAILABLE)) &&
+                (region.next == BUSTER_IR_NONE || (region.next < bindings && debug->bindings[region.next].local == region.local &&
+                 debug->bindings[region.next].entry >= region.end && debug->bindings[region.next].entry < region.block_end));
+        valid = valid && region.bytes == tier0_class_bytes(function->local_classes[region.local]) &&
+                region.type == ir_typed_types[function->local_classes[region.local]] && region.bytes != 0 &&
+                region.bytes == check_tier1_debug_value_width(region.type) &&
+                (region.kind == IR_DEBUG_BIND_VALUE ? region.value < nodes && ir->type[region.value] == region.type : region.value == BUSTER_IR_NONE);
+        valid = valid && (k == 0 || debug->regions[k - 1].local < region.local ||
+                         (debug->regions[k - 1].local == region.local && debug->regions[k - 1].end <= region.begin && debug->regions[k - 1].block_end <= region.block_end));
+        if (valid)
+        {
+            proof.region_first[region.local + 1] += 1;
+            if (region.kind == IR_DEBUG_BIND_VALUE)
+            {
+                proof.needed[region.value] = 1;
+            }
+        }
+    }
     for (uint32_t local = 0; valid && local < locals; local += 1)
     {
-        valid = (debug->binding_flags[local] & ~BUSTER_IR_DEBUG_BIND_ENTRY) == 0;
+        const uint32_t flags = debug->binding_flags[local];
+        valid = flags == 0 || flags == BUSTER_IR_DEBUG_BIND_ENTRY || flags == BUSTER_IR_DEBUG_BIND_REGIONS;
         proof.binding_first[local + 1] += proof.binding_first[local];
+        proof.region_first[local + 1] += proof.region_first[local];
         next[local] = proof.binding_first[local];
-        if ((debug->binding_flags[local] & BUSTER_IR_DEBUG_BIND_ENTRY) != 0 && proof.binding_first[local] != proof.binding_first[local + 1])
+        if ((flags == BUSTER_IR_DEBUG_BIND_ENTRY && proof.binding_first[local] != proof.binding_first[local + 1]) ||
+            (flags == BUSTER_IR_DEBUG_BIND_REGIONS && proof.region_first[local] != proof.region_first[local + 1]))
         {
             proof.local_index[local] = proof.local_count;
             proof.locals[proof.local_count++] = local;
@@ -512,7 +516,7 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
             const uint32_t after = debug->bindings[proof.binding_order[at]].entry;
             valid = after != BUSTER_IR_NONE && (before == BUSTER_IR_NONE || before < after);
         }
-        if (valid && local < parameters && first < end && (debug->binding_flags[local] & BUSTER_IR_DEBUG_BIND_ENTRY) != 0)
+        if (valid && local < parameters && first < end && debug->binding_flags[local] != 0)
         {
             const IrDebugBinding initial = debug->bindings[proof.binding_order[first]];
             valid = initial.entry == BUSTER_IR_NONE;
@@ -543,7 +547,7 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
         }
     }
     valid = valid && check_tier1_debug_value_homes(emitted, scratch, &proof);
-    valid = valid && bindings < UINT32_MAX - proof.carrier_count;
+    valid = valid && (uint64_t)bindings + regions < UINT32_MAX - proof.carrier_count && regions <= UINT32_MAX / 2;
     proof.transfers = valid ? ir_allocate(scratch, (uint64_t)count + 1, sizeof(CheckTier1DebugValueTransfer), &valid) : NULL;
     uint32_t* places = valid ? ir_allocate(scratch, (uint64_t)count + 1, 4, &valid) : NULL;
     uint32_t* definitions = valid ? ir_allocate(scratch, (uint64_t)count + 1, 4, &valid) : NULL;
@@ -617,6 +621,7 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
             }
         }
     }
+    valid = valid && check_tier1_debug_value_regions(&proof, emitted, places, record_order, cuts, vector, scratch);
     for (uint32_t local = 0; valid && local < locals; local += 1)
     {
         uint32_t limit = count;
@@ -669,7 +674,8 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
     proof.begins = valid ? ir_allocate(scratch, (uint64_t)proof.local_count + 1, 4, &valid) : NULL;
     proof.selected = valid ? ir_allocate(scratch, (uint64_t)proof.local_count + 1, 4, &valid) : NULL;
     proof.kill_first = valid ? ir_allocate(scratch, (uint64_t)count + 2, 4, &valid) : NULL;
-    proof.kills = valid ? ir_allocate(scratch, (uint64_t)bindings + 1, 4, &valid) : NULL;
+    valid = valid && (uint64_t)bindings + 2 * (uint64_t)regions <= UINT32_MAX;
+    proof.kills = valid ? ir_allocate(scratch, (uint64_t)bindings + 2 * (uint64_t)regions + 1, 4, &valid) : NULL;
     proof.live.heads = valid ? ir_allocate(scratch, (uint64_t)proof.value_count + 1, 4, &valid) : NULL;
     proof.live.next = valid ? ir_allocate(scratch, proof.carrier_count, 4, &valid) : NULL;
     proof.live.previous = valid ? ir_allocate(scratch, proof.carrier_count, 4, &valid) : NULL;
@@ -690,9 +696,18 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
         memset(proof.kill_first, 0, ((uint64_t)count + 2) * 4);
         for (uint32_t b = 0; b < bindings; b += 1)
         {
-            if (proof.local_index[debug->bindings[b].local] != BUSTER_IR_NONE && proof.binding_end[b] < count)
+            if (debug->binding_flags[debug->bindings[b].local] == BUSTER_IR_DEBUG_BIND_ENTRY && proof.binding_end[b] < count)
             {
                 proof.kill_first[proof.binding_end[b] + 1] += 1;
+            }
+        }
+        for (uint32_t k = 0; k < regions; k += 1)
+        {
+            const CheckTier1DebugSpan span = proof.regions[k];
+            if (span.begin < span.end)
+            {
+                proof.kill_first[span.begin + 1] += 1;
+                proof.kill_first[span.end + 1] += 1;
             }
         }
         for (uint32_t r = 0; r <= count; r += 1)
@@ -702,9 +717,19 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
         }
         for (uint32_t b = 0; b < bindings; b += 1)
         {
-            if (proof.local_index[debug->bindings[b].local] != BUSTER_IR_NONE && proof.binding_end[b] < count)
+            if (debug->binding_flags[debug->bindings[b].local] == BUSTER_IR_DEBUG_BIND_ENTRY && proof.binding_end[b] < count)
             {
                 proof.kills[places[proof.binding_end[b]]++] = proof.local_index[debug->bindings[b].local];
+            }
+        }
+        for (uint32_t k = 0; k < regions; k += 1)
+        {
+            const CheckTier1DebugSpan span = proof.regions[k];
+            if (span.begin < span.end)
+            {
+                const uint32_t local = proof.local_index[debug->regions[k].local];
+                proof.kills[places[span.begin]++] = local;
+                proof.kills[places[span.end]++] = local;
             }
         }
         memset(proof.blocks, 0, ((uint64_t)proof.block_count + 1) * sizeof(CheckTier1DebugValueBlock));
@@ -720,8 +745,12 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
     }
     if (valid && proof.machine)
     {
-        memset(proof.state, 0xff, (uint64_t)proof.carrier_count * 4);
-        memcpy(proof.state, seed, sizeof(seed));
+        CheckTier1DebugValueLive live;
+        check_tier1_debug_value_start(&proof, &live);
+        for (uint32_t reg = 0; reg < 32; reg += 1)
+        {
+            check_tier1_debug_value_change(&proof, &live, reg, seed[reg]);
+        }
         bool changed = false;
         valid = check_tier1_debug_value_meet(&proof, proof.state, vector, scratch, proof.blocks, &changed);
         memset(queued, 0, proof.block_count);
@@ -736,10 +765,19 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
             head = head + 1 == proof.block_count ? 0 : head + 1;
             pending -= 1;
             queued[block] = 0;
-            check_tier1_debug_value_restore(&proof, proof.blocks + block, proof.state);
+            while (live.known_count != 0)
+            {
+                check_tier1_debug_value_change(&proof, &live, live.known[live.known_count - 1], BUSTER_IR_NONE);
+            }
+            const CheckTier1DebugValueBlock incoming = proof.blocks[block];
+            for (uint32_t f = 0; f < incoming.count; f += 1)
+            {
+                check_tier1_debug_value_change(&proof, &live, incoming.facts[f].place, incoming.facts[f].value);
+            }
             for (uint32_t r = proof.first[block]; r < proof.first[block + 1]; r += 1)
             {
-                check_tier1_debug_value_step(&proof, proof.transfers[r], vector, proof.state);
+                check_tier1_debug_value_boundary(&proof, &live, r);
+                check_tier1_debug_value_follow(&proof, &live, proof.transfers[r], vector);
             }
             const uint32_t last = proof.first[block + 1] - 1;
             const uint32_t control = proof.transfers[last].control;
@@ -760,6 +798,11 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
                     }
                 }
             }
+            for (uint32_t k = 0; k < live.value_count; k += 1)
+            {
+                live.value_queued[live.changed_values[k]] = 0;
+            }
+            live.value_count = 0;
         }
     }
     *result = valid ? proof : (CheckTier1DebugValues){ 0 };
@@ -802,8 +845,11 @@ static void check_tier1_debug_value_range(const CheckTier1DebugValues* proof, ui
         }
         else
         {
-            const IrDebugBinding binding = proof->ir->debug->bindings[selected - proof->carrier_count];
-            *output = (EmittedLocalRange){ .value = binding.literal, .local = local, .begin = begin, .end = end, .value_bytes = binding.bytes };
+            const IrDebugInfo* debug = proof->ir->debug;
+            const uint32_t index = selected - proof->carrier_count;
+            const uint64_t value = index < debug->binding_count ? debug->bindings[index].literal : debug->regions[index - debug->binding_count].literal;
+            const uint8_t bytes = index < debug->binding_count ? debug->bindings[index].bytes : debug->regions[index - debug->binding_count].bytes;
+            *output = (EmittedLocalRange){ .value = value, .local = local, .begin = begin, .end = end, .value_bytes = bytes };
         }
     }
 }
@@ -919,10 +965,16 @@ static void check_tier1_debug_value_user(CheckTier1DebugValueLive* live, uint32_
 
 // The publication twin of value_step updates reverse lists only for the places actually written. Its input transfer
 // is the same decoded recipe used by the CFG proof. A memory-wide kill visits current facts, not every frame slot.
-static void check_tier1_debug_value_follow(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live, CheckTier1DebugValueTransfer transfer)
+static void check_tier1_debug_value_follow(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live, CheckTier1DebugValueTransfer transfer, bool vector)
 {
     const uint32_t copied = transfer.from < proof->carrier_count ? proof->state[transfer.from] : BUSTER_IR_NONE;
     uint32_t killed = transfer.killed;
+    if (BUSTER_VECTOR_PATH(vector))
+    {
+        const uint32_t low = _mm512_cmpneq_epi32_mask(_mm512_loadu_si512(proof->state), _mm512_set1_epi32(-1));
+        const uint32_t high = _mm512_cmpneq_epi32_mask(_mm512_loadu_si512(proof->state + 16), _mm512_set1_epi32(-1));
+        killed &= low | (high << 16);
+    }
     while (killed != 0)
     {
         check_tier1_debug_value_change(proof, live, (uint32_t)__builtin_ctz(killed), BUSTER_IR_NONE);
@@ -956,7 +1008,48 @@ static void check_tier1_debug_value_follow(const CheckTier1DebugValues* proof, C
     }
     if (transfer.definition < proof->value_count && transfer.defined_at < 32 && proof->needed[transfer.definition] != 0)
     {
+        // Reexecuting one static SSA definition starts a new dynamic value. Older copies, including a spill from
+        // a previous loop iteration, cannot become copies of the new result merely by retaining the same node ID.
+        while (live->heads[transfer.definition] != BUSTER_IR_NONE)
+        {
+            check_tier1_debug_value_change(proof, live, live->heads[transfer.definition], BUSTER_IR_NONE);
+        }
         check_tier1_debug_value_change(proof, live, transfer.defined_at, transfer.definition);
+    }
+}
+
+static void check_tier1_debug_value_boundary(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live, uint32_t record)
+{
+    for (uint32_t at = proof->fresh_first != NULL ? proof->fresh_first[record] : 0;
+         proof->fresh_first != NULL && at < proof->fresh_first[record + 1]; at += 1)
+    {
+        const uint32_t block = proof->fresh_blocks[at];
+        for (uint32_t node = proof->ir->block_offsets[block]; node < proof->ir->block_offsets[block + 1]; node += 1)
+        {
+            if (proof->needed[node] != 0 && proof->ir->op[node] != IR_PARAM)
+            {
+                while (live->heads[node] != BUSTER_IR_NONE)
+                {
+                    check_tier1_debug_value_change(proof, live, live->heads[node], BUSTER_IR_NONE);
+                }
+            }
+        }
+    }
+    for (uint32_t at = proof->phi_first != NULL ? proof->phi_first[record] : 0;
+         proof->phi_first != NULL && at < proof->phi_first[record + 1]; at += 1)
+    {
+        const uint32_t node = proof->phi_nodes[at];
+        while (live->heads[node] != BUSTER_IR_NONE)
+        {
+            check_tier1_debug_value_change(proof, live, live->heads[node], BUSTER_IR_NONE);
+        }
+    }
+    for (uint32_t at = proof->phi_first != NULL ? proof->phi_first[record] : 0;
+         proof->phi_first != NULL && at < proof->phi_first[record + 1]; at += 1)
+    {
+        const uint32_t node = proof->phi_nodes[at];
+        const Tier1DebugPhi phi = proof->phis[node];
+        check_tier1_debug_value_change(proof, live, phi.reg + (phi.class == BUSTER_TIER1_ALLOCATE_VECTOR ? 16u : 0u), node);
     }
 }
 
@@ -1015,26 +1108,21 @@ static uint64_t check_tier1_debug_value_ranges(const CheckTier1DebugValues* proo
     const uint32_t locals = proof->local_count;
     const uint32_t carriers = proof->carrier_count;
     const uint32_t values = proof->value_count;
-    CheckTier1DebugValueLive live = proof->live;
-    live.known_count = 0;
-    live.value_count = 0;
-    live.local_count = 0;
+    CheckTier1DebugValueLive live;
+    check_tier1_debug_value_start(proof, &live);
     uint64_t ranges = 0;
-    memset(proof->state, 0xff, (uint64_t)carriers * 4);
     memset(proof->winner, 0xff, ((uint64_t)values + 1) * 4);
     memset(proof->active, 0xff, ((uint64_t)locals + 1) * 4);
     memset(proof->selected, 0xff, ((uint64_t)locals + 1) * 4);
-    memset(live.heads, 0xff, ((uint64_t)values + 1) * 4);
     memset(live.users, 0xff, ((uint64_t)values + 1) * 4);
-    memset(live.known_at, 0xff, (uint64_t)carriers * 4);
     memset(live.user_value, 0xff, ((uint64_t)locals + 1) * 4);
-    memset(live.value_queued, 0, (uint64_t)values + 1);
     memset(live.local_queued, 0, (uint64_t)locals + 1);
     for (uint32_t k = 0; k < locals; k += 1)
     {
         check_tier1_debug_local_changed(&live, k);
     }
     uint32_t cursor = 0;
+    uint32_t region_cursor = 0;
     uint32_t assigning = BUSTER_IR_NONE;
     uint32_t previous_entry = BUSTER_IR_NONE;
     bool previous_source = false;
@@ -1052,6 +1140,10 @@ static uint64_t check_tier1_debug_value_ranges(const CheckTier1DebugValues* proo
         }
         for (uint32_t r = proof->first[block]; r < proof->first[block + 1]; r += 1)
         {
+            if (reached)
+            {
+                check_tier1_debug_value_boundary(proof, &live, r);
+            }
             const bool source = r >= body && r < epilogue && safe[r] != 0;
             const uint32_t entry = entries[r];
             if (r == 0 || entry != previous_entry || source != previous_source)
@@ -1069,6 +1161,15 @@ static uint64_t check_tier1_debug_value_ranges(const CheckTier1DebugValues* proo
                 check_tier1_debug_local_changed(&live, own);
                 assigning = own;
                 cursor = next;
+                const uint32_t next_region = check_tier1_debug_value_region_cursor(proof, entry, source);
+                const uint32_t region_begin = region_cursor < next_region ? region_cursor : next_region;
+                const uint32_t region_end = region_cursor < next_region ? next_region : region_cursor;
+                for (uint32_t at = region_begin; at < region_end; at += 1)
+                {
+                    const uint32_t region = (uint32_t)proof->region_events[at];
+                    check_tier1_debug_local_changed(&live, proof->local_index[debug->regions[region].local]);
+                }
+                region_cursor = next_region;
                 previous_entry = entry;
                 previous_source = source;
             }
@@ -1113,22 +1214,30 @@ static uint64_t check_tier1_debug_value_ranges(const CheckTier1DebugValues* proo
             {
                 const uint32_t k = live.changed_locals[at];
                 const uint32_t local = proof->locals[k];
-                uint32_t selected = source || local < proof->function->parameter_count ? check_tier1_debug_value_binding(proof, local, entry, source) : BUSTER_IR_NONE;
-                selected = selected < debug->binding_count && r < proof->binding_end[selected] ? selected : BUSTER_IR_NONE;
+                uint32_t selected = BUSTER_IR_NONE;
                 uint32_t value = BUSTER_IR_NONE;
                 uint32_t chosen = BUSTER_IR_NONE;
-                if (selected != BUSTER_IR_NONE)
+                if (debug->binding_flags[local] == BUSTER_IR_DEBUG_BIND_REGIONS)
                 {
-                    const IrDebugBinding binding = debug->bindings[selected];
-                    const bool initial = local < proof->function->parameter_count && binding.entry == BUSTER_IR_NONE;
-                    value = initial ? proof->initial[local] : binding.kind == IR_DEBUG_BIND_VALUE ? binding.value : BUSTER_IR_NONE;
-                    if (value < values)
+                    const uint32_t region = source ? check_tier1_debug_value_region(proof, local, r, entry) : BUSTER_IR_NONE;
+                    if (region != BUSTER_IR_NONE)
                     {
-                        chosen = proof->winner[value];
+                        const IrDebugRegion binding = debug->regions[region];
+                        selected = debug->binding_count + region;
+                        value = binding.kind == IR_DEBUG_BIND_VALUE ? binding.value : BUSTER_IR_NONE;
+                        chosen = value < values ? proof->winner[value] : binding.kind == IR_DEBUG_BIND_CONSTANT ? carriers + selected : BUSTER_IR_NONE;
                     }
-                    else if (!initial && binding.kind == IR_DEBUG_BIND_CONSTANT && source)
+                }
+                else
+                {
+                    selected = source || local < proof->function->parameter_count ? check_tier1_debug_value_binding(proof, local, entry, source) : BUSTER_IR_NONE;
+                    selected = selected < debug->binding_count && r < proof->binding_end[selected] ? selected : BUSTER_IR_NONE;
+                    if (selected != BUSTER_IR_NONE)
                     {
-                        chosen = carriers + selected;
+                        const IrDebugBinding binding = debug->bindings[selected];
+                        const bool initial = local < proof->function->parameter_count && binding.entry == BUSTER_IR_NONE;
+                        value = initial ? proof->initial[local] : binding.kind == IR_DEBUG_BIND_VALUE ? binding.value : BUSTER_IR_NONE;
+                        chosen = value < values ? proof->winner[value] : !initial && binding.kind == IR_DEBUG_BIND_CONSTANT && source ? carriers + selected : BUSTER_IR_NONE;
                     }
                 }
                 check_tier1_debug_value_user(&live, k, value);
@@ -1148,7 +1257,7 @@ static uint64_t check_tier1_debug_value_ranges(const CheckTier1DebugValues* proo
             live.local_count = 0;
             if (reached)
             {
-                check_tier1_debug_value_follow(proof, &live, proof->transfers[r]);
+                check_tier1_debug_value_follow(proof, &live, proof->transfers[r], vector);
             }
         }
     }

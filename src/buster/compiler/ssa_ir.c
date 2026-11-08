@@ -97,6 +97,7 @@ static bool ssa_ir_conflict(const IrFunction* f, const Arena* arena)
                              ssa_ir_owned(arena, f->debug->locals, f->slot_count, sizeof(uint32_t)) ||
                              ssa_ir_owned(arena, f->debug->scalars, f->debug->scalar_count, sizeof(IrDebugScalar)) ||
                              ssa_ir_owned(arena, f->debug->bindings, f->debug->binding_count, sizeof(IrDebugBinding)) ||
+                             ssa_ir_owned(arena, f->debug->regions, f->debug->region_count, sizeof(IrDebugRegion)) ||
                              ssa_ir_owned(arena, f->debug->binding_flags, f->debug->binding_flags != NULL ? f->debug->local_count : 0, 1)));
 }
 
@@ -702,6 +703,101 @@ static IrCheck ssa_ir_verify_output(const SsaIrWork* work, const IrFunction* f, 
 // function's faster path 35.32); every bound from 8,192 to 32,768 cells came within -0.28% to +0.26% of it.
 #define BUSTER_SSA_IR_VECTOR_CELLS (UINT64_C(1) << 14)
 
+// A real local read witnesses its exact reaching value, including an already semantic phi, without adding a read
+// or keeping a phi alive for debugging. Undef is not a wildcard: if any incoming path is indeterminate, a phi cannot
+// describe an initialized source value. Propagate that fact through phi users with a sparse reverse edge list.
+static IrError ssa_ir_debug_regions(SsaIrWork* work, IrFunction* output)
+{
+    const IrFunction* input = work->input;
+    IrError error = IR_OK;
+    if (output->debug != NULL && output->debug->region_count != 0)
+    {
+        const uint64_t mark = work->scratch->length;
+        uint64_t edges = 0;
+        for (uint32_t node = 0; node < output->instruction_count; node += 1)
+        {
+            edges += output->op[node] == IR_PHI ? output->b[node] : 0;
+        }
+        bool ok = edges <= UINT32_MAX;
+        uint32_t* offsets = ir_allocate(work->scratch, (uint64_t)output->instruction_count + 1, 4, &ok);
+        uint32_t* cursors = ir_allocate(work->scratch, output->instruction_count, 4, &ok);
+        uint32_t* users = ir_allocate(work->scratch, edges, 4, &ok);
+        uint32_t* queue = ir_allocate(work->scratch, output->instruction_count, 4, &ok);
+        uint8_t* unavailable = ir_allocate(work->scratch, output->instruction_count, 1, &ok);
+        if (ok)
+        {
+            uint32_t count = 0;
+            for (uint32_t node = 0; node < output->instruction_count; node += 1)
+            {
+                if (output->op[node] == IR_UNDEF)
+                {
+                    unavailable[node] = 1;
+                    queue[count++] = node;
+                }
+                for (uint32_t p = 0; output->op[node] == IR_PHI && p < output->b[node]; p += 1)
+                {
+                    offsets[output->extra[output->a[node] + p * 2 + 1] + 1] += 1;
+                }
+            }
+            for (uint32_t node = 0; node < output->instruction_count; node += 1)
+            {
+                offsets[node + 1] += offsets[node];
+                cursors[node] = offsets[node];
+            }
+            for (uint32_t node = 0; node < output->instruction_count; node += 1)
+            {
+                for (uint32_t p = 0; output->op[node] == IR_PHI && p < output->b[node]; p += 1)
+                {
+                    users[cursors[output->extra[output->a[node] + p * 2 + 1]]++] = node;
+                }
+            }
+            for (uint32_t at = 0; at < count; at += 1)
+            {
+                const uint32_t value = queue[at];
+                for (uint32_t p = offsets[value]; p < offsets[value + 1]; p += 1)
+                {
+                    const uint32_t user = users[p];
+                    if (!unavailable[user])
+                    {
+                        unavailable[user] = 1;
+                        queue[count++] = user;
+                    }
+                }
+            }
+            for (uint32_t k = 0; k < output->debug->region_count; k += 1)
+            {
+                const IrDebugRegion original = input->debug->regions[k];
+                IrDebugRegion* region = output->debug->regions + k;
+                if (original.kind == IR_DEBUG_BIND_VALUE && region->block != BUSTER_IR_NONE)
+                {
+                    region->value = ssa_ir_value(work, original.value);
+                    // A direct read of this local needs promotion's reaching-definition witness. A load from a
+                    // different escaped object can still be an ordinary RHS snapshot assigned to a private local.
+                    if (input->op[original.value] == IR_LOAD && input->op[input->a[original.value]] == IR_STACK_ADDR)
+                    {
+                        const uint32_t slot = input->a[input->a[original.value]];
+                        if (input->debug->locals[slot] == original.local && !work->ssa.promoted[slot])
+                        {
+                            region->value = BUSTER_IR_NONE;
+                        }
+                    }
+                    if (region->value != BUSTER_IR_NONE && unavailable[region->value])
+                    {
+                        region->value = BUSTER_IR_NONE;
+                    }
+                    region->kind = region->value == BUSTER_IR_NONE ? IR_DEBUG_BIND_UNAVAILABLE : IR_DEBUG_BIND_VALUE;
+                }
+            }
+        }
+        else
+        {
+            error = edges > UINT32_MAX ? IR_ERROR_LIMIT : IR_ERROR_MEMORY;
+        }
+        arena_pop_to(work->scratch, mark);
+    }
+    return error;
+}
+
 // `input_verified`: the caller's input is a function a full verification has passed since its last change (the
 // lowering's or GVN's result, #1379), whose verification promotion then doesn't repeat; every other caller's is verified.
 static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result, bool vector, SsaCheck* verified,
@@ -804,7 +900,7 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
         ssa_ir_fill(&work, &candidate);
         // Promoted loads/stores and newly synthesized phis have no instruction origin. Only an original instruction
         // retained by the constructor keeps one; surviving storage slots follow the constructor's exact compaction.
-        ir_debug_remap(input, &candidate, work.values, work.slots);
+        ir_debug_remap(input, &candidate, work.values, work.slots, work.blocks);
         for (uint32_t k = 0; candidate.debug != NULL && k < candidate.debug->binding_count; k += 1)
         {
             const IrDebugBinding original = input->debug->bindings[k];
@@ -824,7 +920,11 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
                 binding->kind = binding->value == BUSTER_IR_NONE ? IR_DEBUG_BIND_UNAVAILABLE : IR_DEBUG_BIND_VALUE;
             }
         }
-        check = ssa_ir_verify_output(&work, &candidate, vector);
+        check.error = ssa_ir_debug_regions(&work, &candidate);
+        if (check.error == IR_OK)
+        {
+            check = ssa_ir_verify_output(&work, &candidate, vector);
+        }
     }
     if (check.error == IR_OK)
     {

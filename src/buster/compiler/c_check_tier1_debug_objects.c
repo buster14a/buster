@@ -156,6 +156,7 @@ static bool check_tier1_debug_object_clips(const Tier0Function* function, const 
             x86_instruction_effects_scalar(&record, &read, &written);
             const bool complete = bytes != 0 && bytes <= 8 && description->operand_bytes == bytes &&
                                   record.mode == BUSTER_X86_MEMORY_BASE && record.rm == frame->base_register && record.index == 0 &&
+                                  record.form < X86_FORM_COUNT &&
                                   record.decorations == 0 && record.displacement == homes[local].displacement &&
                                   (written & BUSTER_X86_RESOURCE_MEMORY) != 0;
             if (complete && node > objects[slot].first && node < objects[slot].end)
@@ -243,7 +244,7 @@ static bool check_tier1_debug_object_clips(const Tier0Function* function, const 
             if (frame_write)
             {
                 const X86FormDescription* description = x86_form_description(record.form & (BUSTER_X86_FORM_FIXUP - 1));
-                const bool direct = record.mode == BUSTER_X86_MEMORY_BASE && record.index == 0;
+                const bool direct = record.mode == BUSTER_X86_MEMORY_BASE && record.index == 0 && record.form < X86_FORM_COUNT;
                 const uint32_t bytes = direct ? description->operand_bytes : 0;
                 const int64_t low = bytes != 0 ? record.displacement : INT32_MIN;
                 const int64_t high = bytes != 0 ? low + bytes : (int64_t)INT32_MAX + 1;

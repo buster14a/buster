@@ -425,6 +425,14 @@ static __attribute__((unused)) IrError tier1_schedule_ir_function(IrFunction* f,
                         binding->value = w.place[binding->value];
                     }
                 }
+                for (uint32_t k = 0; k < f->debug->region_count; k += 1)
+                {
+                    IrDebugRegion* region = f->debug->regions + k;
+                    if (region->kind == IR_DEBUG_BIND_VALUE)
+                    {
+                        region->value = w.place[region->value];
+                    }
+                }
             }
             memset(renamed, 0, ((uint64_t)f->extra_count / 64 + 1) * sizeof(uint64_t));
             for (uint32_t i = 0; i < n; i += 1)
@@ -469,7 +477,7 @@ static __attribute__((unused)) bool tier1_schedule_ir_copy(const IrFunction* f, 
                        ir_debug_create(arena, &copy, f->debug);
     if (ready)
     {
-        ir_debug_remap(f, &copy, NULL, NULL);
+        ir_debug_remap(f, &copy, NULL, NULL, NULL);
         memcpy(copy.op, f->op, n);
         memcpy(copy.type, f->type, n);
         memcpy(copy.flags, f->flags, n);
@@ -510,7 +518,8 @@ static __attribute__((unused)) bool tier1_schedule_ir_verify(const Tier1Schedule
         }
     }
     valid = valid && ((f->debug == NULL && scheduled->debug == NULL) ||
-                     (f->debug != NULL && scheduled->debug != NULL && f->debug->binding_count == scheduled->debug->binding_count));
+                     (f->debug != NULL && scheduled->debug != NULL && f->debug->binding_count == scheduled->debug->binding_count &&
+                      f->debug->region_count == scheduled->debug->region_count));
     for (uint32_t k = 0; valid && f->debug != NULL && k < f->debug->binding_count; k += 1)
     {
         const IrDebugBinding before = f->debug->bindings[k];
@@ -519,6 +528,15 @@ static __attribute__((unused)) bool tier1_schedule_ir_verify(const Tier1Schedule
         const uint32_t value = before.kind == IR_DEBUG_BIND_VALUE ? place[before.value] : BUSTER_IR_NONE;
         valid = before.local == after.local && before.entry == after.entry && before.literal == after.literal && before.kind == after.kind &&
                 before.bytes == after.bytes && before.type == after.type && after.anchor == anchor && after.value == value;
+    }
+    for (uint32_t k = 0; valid && f->debug != NULL && k < f->debug->region_count; k += 1)
+    {
+        const IrDebugRegion before = f->debug->regions[k];
+        const IrDebugRegion after = scheduled->debug->regions[k];
+        const uint32_t value = before.kind == IR_DEBUG_BIND_VALUE ? place[before.value] : BUSTER_IR_NONE;
+        valid = before.local == after.local && before.block == after.block && before.begin == after.begin && before.end == after.end &&
+                before.literal == after.literal && before.kind == after.kind && before.bytes == after.bytes && before.type == after.type &&
+                before.next == after.next && before.block_end == after.block_end && after.value == value;
     }
     for (uint32_t b = 0; valid && b < f->block_count; b += 1)
     {

@@ -2309,7 +2309,7 @@ static void ir_test_debug(IrTestTally* tally, Arena* memory, Arena* scratch)
         const uint64_t plain = memory->length;
         ir_test_expect(tally, ir_debug_create(memory, &function, NULL) && function.debug == NULL && memory->length == plain,
                        "absent source metadata allocated storage");
-        uint8_t binding_flags = BUSTER_IR_DEBUG_BIND_ENTRY;
+        uint8_t binding_flags[] = { BUSTER_IR_DEBUG_BIND_ENTRY, BUSTER_IR_DEBUG_BIND_REGIONS };
         IrDebugBinding binding =
         {
             .local = 0,
@@ -2320,13 +2320,17 @@ static void ir_test_debug(IrTestTally* tally, Arena* memory, Arena* scratch)
             .bytes = 8,
             .type = IR_I64,
         };
+        IrDebugRegion region = { .local = 1, .block = 0, .begin = 1, .end = 4, .block_end = 4, .value = 1, .next = BUSTER_IR_NONE,
+                                 .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 };
         const IrDebugInfo seed =
         {
             .entry_count = 4,
-            .local_count = 1,
+            .local_count = 2,
             .bindings = &binding,
             .binding_count = 1,
-            .binding_flags = &binding_flags,
+            .regions = &region,
+            .region_count = 1,
+            .binding_flags = binding_flags,
             .first_block_end = 4,
         };
         if (ir_debug_create(memory, &function, &seed))
@@ -2339,6 +2343,12 @@ static void ir_test_debug(IrTestTally* tally, Arena* memory, Arena* scratch)
             function.debug->bindings[0].value = function.instruction_count;
             ir_test_pair(tally, &function, scratch, NULL, false, "stale source assignment value accepted");
             function.debug->bindings[0].value = 1;
+            function.debug->regions[0].block = function.block_count;
+            ir_test_pair(tally, &function, scratch, NULL, false, "stale source region block accepted");
+            function.debug->regions[0].block = 0;
+            function.debug->regions[0].next = 0;
+            ir_test_pair(tally, &function, scratch, NULL, false, "source region accepted an unrelated next assignment");
+            function.debug->regions[0].next = BUSTER_IR_NONE;
             function.debug->instruction_count += 1;
             ir_test_pair(tally, &function, scratch, NULL, false, "stale instruction identity length accepted");
             function.debug->instruction_count -= 1;
@@ -2353,7 +2363,7 @@ static void ir_test_debug(IrTestTally* tally, Arena* memory, Arena* scratch)
             if (ir_debug_create(memory, &copy, function.debug))
             {
                 const uint32_t permutation[] = { 2, BUSTER_IR_NONE, 0 };
-                ir_debug_remap(&function, &copy, permutation, NULL);
+                ir_debug_remap(&function, &copy, permutation, NULL, NULL);
                 ir_test_expect(tally, copy.debug != function.debug && copy.debug->origins != origins && copy.debug->origins[0] == BUSTER_IR_NONE &&
                                copy.debug->origins[1] == BUSTER_IR_NONE && copy.debug->origins[2] == 1 && origins[0] == 1 && origins[1] == 3,
                                "source remap aliased input, retained a dropped origin or missed a permutation");
@@ -2361,6 +2371,15 @@ static void ir_test_debug(IrTestTally* tally, Arena* memory, Arena* scratch)
                                copy.debug->bindings[0].value == BUSTER_IR_NONE && copy.debug->bindings[0].anchor == BUSTER_IR_NONE &&
                                copy.debug->bindings[0].entry == 2 && function.debug->bindings[0].value == 1,
                                "a missing value map erased an assignment kill or reused a stale SSA identity");
+                ir_test_expect(tally, copy.debug->regions != function.debug->regions && copy.debug->regions[0].kind == IR_DEBUG_BIND_UNAVAILABLE &&
+                               copy.debug->regions[0].value == BUSTER_IR_NONE && copy.debug->regions[0].block == 0 &&
+                               copy.debug->regions[0].begin == 1 && copy.debug->regions[0].end == 4 && function.debug->regions[0].value == 1,
+                               "source region retained a missing value or aliased its original window");
+                const uint32_t removed_block[] = { BUSTER_IR_NONE };
+                ir_debug_remap(&function, &copy, NULL, NULL, removed_block);
+                ir_test_expect(tally, copy.debug->regions[0].block == BUSTER_IR_NONE && copy.debug->regions[0].kind == IR_DEBUG_BIND_UNAVAILABLE &&
+                               copy.debug->regions[0].value == BUSTER_IR_NONE,
+                               "a removed source block was redirected to another block's source region");
             }
             else
             {

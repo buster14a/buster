@@ -378,7 +378,7 @@ static IrError ir_licm_reorder(IrLicmWork* work, Arena* scratch, IrFunction* res
         {
             values[order[i]] = i;
         }
-        ir_debug_remap(f, &view, values, NULL);
+        ir_debug_remap(f, &view, values, NULL, NULL);
         uint32_t extra = 0;
         uint32_t call = 0;
         for (uint32_t out = 0; out < count; out += 1)

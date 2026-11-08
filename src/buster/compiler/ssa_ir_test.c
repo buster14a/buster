@@ -1084,7 +1084,13 @@ static void ssa_ir_test_debug(SsaIrTestTally* tally)
             { .literal = 17, .local = 0, .entry = 5, .value = BUSTER_IR_NONE, .anchor = 4, .kind = IR_DEBUG_BIND_CONSTANT, .bytes = 8, .type = IR_I64 },
             { .local = 0, .entry = 13, .value = 11, .anchor = 11, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
         };
-        uint8_t binding_flags[4] = { 0 };
+        uint8_t binding_flags[4] = { BUSTER_IR_DEBUG_BIND_REGIONS, BUSTER_IR_DEBUG_BIND_REGIONS, 0, 0 };
+        IrDebugRegion regions[] =
+        {
+            { .local = 0, .block = 1, .begin = 11, .end = 13, .block_end = 17, .value = 11, .next = 1, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+            { .local = 0, .block = 1, .begin = 14, .end = 17, .block_end = 17, .value = 11, .next = BUSTER_IR_NONE, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+            { .local = 1, .block = 1, .begin = 11, .end = 17, .block_end = 17, .value = 12, .next = BUSTER_IR_NONE, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+        };
         const IrDebugInfo seed =
         {
             .entry_count = 17,
@@ -1093,6 +1099,8 @@ static void ssa_ir_test_debug(SsaIrTestTally* tally)
             .scalar_count = 1,
             .bindings = bindings,
             .binding_count = BUSTER_ARRAY_LENGTH(bindings),
+            .regions = regions,
+            .region_count = BUSTER_ARRAY_LENGTH(regions),
             .binding_flags = binding_flags,
             .first_block_end = 11,
         };
@@ -1124,6 +1132,10 @@ static void ssa_ir_test_debug(SsaIrTestTally* tally)
             exact = exact && debug->binding_count == 2 && debug->bindings[0].anchor == 2 && debug->bindings[1].value == 2 &&
                     debug->bindings[1].anchor == 2 && debug->bindings[1].entry == 13 && debug->bindings[1].kind == IR_DEBUG_BIND_VALUE &&
                     debug->bindings != function.debug->bindings && debug->binding_flags != function.debug->binding_flags;
+            exact = exact && debug->region_count == 3 && debug->regions != function.debug->regions &&
+                    debug->regions[0].block == 1 && debug->regions[0].value == 2 && debug->regions[0].kind == IR_DEBUG_BIND_VALUE && debug->regions[0].next == 1 &&
+                    debug->regions[1].block == 1 && debug->regions[1].value == 2 && debug->regions[1].kind == IR_DEBUG_BIND_VALUE &&
+                    debug->regions[2].kind == IR_DEBUG_BIND_UNAVAILABLE && debug->regions[2].value == BUSTER_IR_NONE;
             for (uint32_t i = 0; exact && i < BUSTER_ARRAY_LENGTH(origins); i += 1)
             {
                 exact = debug->origins[i] == origins[i] && result->op[i] == function.op[origins[i]];
@@ -1146,6 +1158,123 @@ static void ssa_ir_test_debug(SsaIrTestTally* tally)
         ssa_ir_test_expect(tally, unchanged && check.error == IR_OK && plain.debug == NULL &&
                                  ssa_ir_test_identical(&plain, &promoted, &scratch) && ssa_ir_test_identical(&promoted, &twin, &scratch),
                            "source maps do not mutate the input or change executable SSA IR");
+    }
+    arena_release(&scratch);
+    arena_release(&twin_output);
+    arena_release(&output);
+    arena_release(&input);
+}
+
+static void ssa_ir_test_debug_regions(SsaIrTestTally* tally)
+{
+    Arena input = arena_reserve(1ull << 20);
+    Arena output = arena_reserve(1ull << 20);
+    Arena twin_output = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    for (uint32_t mode = 0; mode < 4; mode += 1)
+    {
+        const bool loop = (mode & 2u) != 0;
+        const bool undefined = (mode & 1u) != 0;
+        const IrSizes sizes = { .instruction_count = loop ? 12 : 13, .block_count = loop ? 4 : 6,
+                                .constant_count = 2, .parameter_count = 1, .slot_count = 1 };
+        IrFunction function = { 0 };
+        bool ready = ir_create(&input, &sizes, &function) == IR_OK;
+        if (ready)
+        {
+            function.result_type = IR_I64;
+            function.parameter_types[0] = IR_I1;
+            function.slots[0] = (IrSlot){ .size = 8, .alignment = 8, .type = IR_I64 };
+            function.constants[0].low = 11;
+            function.constants[1].low = 22;
+            ir_test_instruction(&function, 0, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&function, 1, IR_PARAM, IR_I1, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&function, 2, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            if (loop)
+            {
+                const uint32_t blocks[] = { 0, 5, 7, 10, 12 };
+                memcpy(function.block_offsets, blocks, sizeof(blocks));
+                ir_test_instruction(&function, 3, undefined ? IR_LIFETIME : IR_STORE, IR_VOID, 0, undefined ? 0 : 2, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 4, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 5, IR_LOAD, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 6, IR_CBR, IR_VOID, 1, 2, 3);
+                ir_test_instruction(&function, 7, IR_ADD, IR_I64, 5, 2, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 8, IR_STORE, IR_VOID, 0, 7, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 9, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 10, IR_LOAD, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 11, IR_RET, IR_VOID, 10, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            else
+            {
+                const uint32_t blocks[] = { 0, 5, 6, 8, 9, 11, 13 };
+                memcpy(function.block_offsets, blocks, sizeof(blocks));
+                ir_test_instruction(&function, 3, IR_CONST, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 4, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 5, IR_CBR, IR_VOID, 1, 2, 4);
+                ir_test_instruction(&function, 6, IR_STORE, IR_VOID, 0, 2, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 7, IR_BR, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 8, IR_UNREACHABLE, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 9, undefined ? IR_LIFETIME : IR_STORE, IR_VOID, 0, undefined ? 0 : 3, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 10, IR_BR, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 11, IR_LOAD, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 12, IR_RET, IR_VOID, 11, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            uint8_t flags[] = { BUSTER_IR_DEBUG_BIND_REGIONS };
+            IrDebugRegion regions[] =
+            {
+                { .local = 0, .block = loop ? 1 : 3, .begin = loop ? 5 : 8, .end = loop ? 7 : 9, .block_end = loop ? 7 : 9, .value = loop ? 5 : 2,
+                  .next = BUSTER_IR_NONE, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+                { .local = 0, .block = loop ? 3 : 5, .begin = loop ? 10 : 11, .end = (uint32_t)sizes.instruction_count, .block_end = (uint32_t)sizes.instruction_count, .value = loop ? 10 : 11,
+                  .next = BUSTER_IR_NONE, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+            };
+            const IrDebugInfo seed = { .entry_count = (uint32_t)sizes.instruction_count, .local_count = 1, .regions = regions,
+                                       .region_count = BUSTER_ARRAY_LENGTH(regions), .binding_flags = flags };
+            ready = ir_debug_create(&input, &function, &seed);
+            for (uint32_t node = 0; ready && node < function.instruction_count; node += 1)
+            {
+                function.debug->origins[node] = node;
+            }
+            if (ready)
+            {
+                function.debug->locals[0] = 0;
+            }
+        }
+        IrFunction promoted = { 0 };
+        IrFunction twin = { 0 };
+        ssa_ir_test_expect(tally, ready, "allocate initialized and undef-reaching source-region CFG fixtures");
+        if (ready && ssa_ir_test_promote(tally, &function, &output, &twin_output, &scratch, &promoted, &twin))
+        {
+            const IrFunction* versions[] = { &promoted, &twin };
+            for (uint32_t path = 0; path < BUSTER_ARRAY_LENGTH(versions); path += 1)
+            {
+                const IrFunction* result = versions[path];
+                const IrDebugInfo* debug = result->debug;
+                bool exact = debug != NULL && debug->region_count == 2 && ssa_ir_test_count(result, IR_PHI) == 1 && result->slot_count == 0;
+                for (uint32_t region = 0; exact && region < 2; region += 1)
+                {
+                    const IrDebugRegion actual = debug->regions[region];
+                    const bool deleted = !loop && region == 0;
+                    exact = actual.block == (deleted ? BUSTER_IR_NONE : loop ? region == 0 ? 1u : 3u : 4u);
+                    if (deleted || undefined)
+                    {
+                        exact = exact && actual.kind == IR_DEBUG_BIND_UNAVAILABLE && actual.value == BUSTER_IR_NONE;
+                    }
+                    else
+                    {
+                        exact = exact && actual.kind == IR_DEBUG_BIND_VALUE && actual.value < result->instruction_count && result->op[actual.value] == IR_PHI;
+                    }
+                }
+                ssa_ir_test_expect(tally, exact, "source regions follow exact join/loop phis and block maps, while undef-reaching or deleted regions remain unavailable");
+            }
+            IrFunction plain_input = function;
+            plain_input.debug = NULL;
+            IrFunction plain = { 0 };
+            const IrCheck check = ssa_ir_promote(&plain_input, &output, &scratch, &plain);
+            ssa_ir_test_expect(tally, check.error == IR_OK && ssa_ir_test_identical(&plain, &promoted, &scratch),
+                               "source-region witnesses create no extra reads, phis or liveness");
+        }
+        arena_pop_to(&twin_output, 0);
+        arena_pop_to(&output, 0);
+        arena_pop_to(&input, 0);
     }
     arena_release(&scratch);
     arena_release(&twin_output);
@@ -1790,6 +1919,7 @@ static int run_ssa_ir_tests(int argc, char** argv)
         SsaIrTestTally tally = {0};
         ssa_ir_test_memory(&tally);
         ssa_ir_test_debug(&tally);
+        ssa_ir_test_debug_regions(&tally);
         ssa_ir_test_lifetimes(&tally);
         ssa_ir_test_variable_operands(&tally);
         ssa_ir_test_failures(&tally);

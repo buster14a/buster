@@ -143,9 +143,11 @@ static void ir_gvn_test_debug_bindings(IrOptimizeTest* test, const IrFunction* s
     const uint64_t sm = scratch->length;
     IrFunction f = *source;
     IrDebugBinding binding = { .local = 1, .entry = 3, .value = 3, .anchor = 3, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 };
-    uint8_t flags[2] = { BUSTER_IR_DEBUG_BIND_ENTRY, BUSTER_IR_DEBUG_BIND_ENTRY };
+    uint8_t flags[2] = { BUSTER_IR_DEBUG_BIND_ENTRY, BUSTER_IR_DEBUG_BIND_REGIONS };
+    IrDebugRegion region = { .local = 1, .block = 0, .begin = 4, .end = f.instruction_count, .block_end = f.instruction_count, .value = 3, .next = BUSTER_IR_NONE,
+                             .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 };
     const IrDebugInfo seed = { .entry_count = f.instruction_count, .local_count = 2, .bindings = &binding, .binding_count = 1,
-                               .binding_flags = flags, .first_block_end = f.instruction_count };
+                               .regions = &region, .region_count = 1, .binding_flags = flags, .first_block_end = f.instruction_count };
     const bool created = ir_debug_create(input, &f, &seed);
     ir_optimize_test_expect(test, created, "GVN source assignment fixture allocation");
     for (uint32_t i = 0; created && i < f.instruction_count; i += 1)
@@ -166,6 +168,9 @@ static void ir_gvn_test_debug_bindings(IrOptimizeTest* test, const IrFunction* s
             const IrDebugBinding result = a.function.debug->bindings[0];
             ir_optimize_test_expect(test, a.function.debug->binding_count == 1 && result.kind == IR_DEBUG_BIND_VALUE && result.value < a.function.instruction_count &&
                                    result.anchor == result.value && a.function.op[result.value] == IR_ADD && a.function.debug->origins[result.value] == 2 &&
+                                   a.function.debug->region_count == 1 && a.function.debug->regions[0].kind == IR_DEBUG_BIND_VALUE &&
+                                   a.function.debug->regions[0].value == result.value && a.function.debug->regions[0].block == 0 &&
+                                   a.function.debug->regions[0].begin == 4 && f.debug->regions[0].value == 3 &&
                                    result.entry == 3 && f.debug->bindings[0].value == 3, "GVN removed duplicate source value follows its exact surviving representative");
         }
         else

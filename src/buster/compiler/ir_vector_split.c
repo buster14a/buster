@@ -555,6 +555,14 @@ static IrCheck ir_vector_split_path(const IrFunction* function, uint32_t piece_b
                     binding->value = ir_vector_split_piece(&work, binding->value, 0);
                 }
             }
+            for (uint32_t k = 0; check.error == IR_OK && split.debug != NULL && k < split.debug->region_count; k += 1)
+            {
+                IrDebugRegion* region = split.debug->regions + k;
+                if (region->kind == IR_DEBUG_BIND_VALUE)
+                {
+                    region->value = ir_vector_split_piece(&work, region->value, 0);
+                }
+            }
         }
         if (check.error == IR_OK)
         {

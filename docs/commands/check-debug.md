@@ -59,6 +59,15 @@ native result. Inlined callee locals must not appear as
 caller locals. The compile requires `--tier1 --tier1-strict --verify` and an
 actual inline expansion.
 
+The branch and assignment-loop fixtures keep scalars in the optimized value
+path without taking their addresses. Both branch arms have a checkpoint and
+another at their semantic-phi join: input 10 requires 32 on the left path and
+47 on the right. A loop with a parameter bound checks `(turn, value, total)`
+as `(0, 6, 0)`, `(1, 13, 6)` and `(2, 28, 19)`, then value 28 and total 47 at
+exit. Real scalar reads after the checkpoints keep each value relevant to the
+program; neither source names nor stale values from a preceding iteration can
+satisfy these positive checks.
+
 The bounded variant set covers default, scalar, pre/post scheduling,
 frame-pointer and no-rematerialization native builds, and a `-c -g` object
 linked by GNU ld, lld and `link-foreign`. Each native variant compares its
@@ -69,6 +78,9 @@ GDB must include Python support: a small command wrapper records each failed
 read and continues to the remaining checkpoints. The harness still requires
 every positive value, no read-error marker, successful GDB exit and the final
 completion marker, so a failed read cannot turn into a passing partial run.
+The scalar entry and literal checkpoints may resolve to the same PC after
+scheduling. The script compares the current PC with GDB's resolved source-line
+locations before continuing, so both value checks still run at that stop.
 
 The ordinary `test-check-debug` path includes byte-range grouping, malformed
 and overlapping intervals, encoded zero-width ranges, patchable entry shifts,
@@ -87,5 +99,11 @@ the sparse binding constructor and publisher, plus explicit private-row
 spill/reload, call, partial-overwrite and addressable-row cases. Assignment
 tables require full RHS completion, reject an interleaved foreign result
 overwrite, and forbid older source origins from reviving stale values.
+The freshness fixture also walks a concrete backedge twice, with old phi and
+RHS copies in private frame rows. Both rows must disappear at the new entry,
+the current phi must select its checked register, and the next RHS stays
+unavailable until its definition completes, while the source origin remains
+inside the same witnessed window. Reexecuting the definition independently
+must also remove its older same-ID spill.
 Full-emission certificate mutation tests live in
 `test-tier1-emit` ([the certificate command guide](tier1-certificate.md)).

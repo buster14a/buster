@@ -316,7 +316,7 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
         {
             values[order[i]] = i;
         }
-        ir_debug_remap(f, &view, values, NULL);
+        ir_debug_remap(f, &view, values, NULL, NULL);
         uint32_t extra = f->extra_count;
         for (uint32_t out = 0; out < count; out += 1)
         {

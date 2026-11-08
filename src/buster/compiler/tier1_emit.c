@@ -253,6 +253,19 @@ struct Tier1DebugDefinition
     uint8_t bytes;
 };
 
+// A scalar phi's register at its defining block's entry, after any successor-placed edge moves. This is an
+// assertion proved on every incoming edge by the complete emitted-code certificate, including coalesced copies.
+// Its record is an original machine boundary, not a source position or an allocator lifetime.
+typedef struct Tier1DebugPhi Tier1DebugPhi;
+struct Tier1DebugPhi
+{
+    uint32_t record;
+    uint32_t block;
+    uint8_t reg;
+    uint8_t class;
+    uint8_t bytes;
+};
+
 typedef struct Tier1EmitResult Tier1EmitResult;
 struct Tier1EmitResult
 {
@@ -348,6 +361,7 @@ struct Tier1EmitResult
     // With sources, one entry per IR node, present only after the complete emitted-code certificate succeeds.
     // Register classes use BUSTER_TIER1_ALLOCATE_GPR/VECTOR; only scalar low-byte values are represented here.
     Tier1DebugDefinition* debug_definitions;
+    Tier1DebugPhi* debug_phis;
 };
 
 typedef struct Tier1EmitTransitions Tier1EmitTransitions;
@@ -1927,14 +1941,16 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
         // shapes retain their existing reason and publish no definition claims; a refusal remains transactional.
         bool room = true;
         Tier1DebugDefinition* definitions = options->sources ? ir_allocate(output, plan->function->instruction_count, sizeof(Tier1DebugDefinition), &room) : NULL;
+        Tier1DebugPhi* phis = options->sources ? ir_allocate(output, plan->function->instruction_count, sizeof(Tier1DebugPhi), &room) : NULL;
         Tier1CertReport report = { 0 };
         Tier1CertEmittedStats stats = { 0 };
-        const Tier1CertEmittedReason reason = room ? tier1_certificate_emitted_check_debug(plan, &emitted, output, scratch, definitions, &report, &stats) : TIER1_CERT_EMITTED_CAPACITY;
+        const Tier1CertEmittedReason reason = room ? tier1_certificate_emitted_check_debug(plan, &emitted, output, scratch, definitions, phis, &report, &stats) : TIER1_CERT_EMITTED_CAPACITY;
         emitted.code_checked = true;
         emitted.code_reason = reason;
         emitted.code_edits = stats.edits + stats.edge_edits;
         emitted.code_originals = stats.originals;
         emitted.debug_definitions = reason == TIER1_CERT_EMITTED_OK ? definitions : NULL;
+        emitted.debug_phis = reason == TIER1_CERT_EMITTED_OK ? phis : NULL;
         if (reason >= TIER1_CERT_EMITTED_REFUSED)
         {
             tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CERTIFICATE, BUSTER_TIER1_EMIT_CODE_CERTIFICATE | reason);

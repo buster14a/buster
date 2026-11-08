@@ -180,6 +180,7 @@ static bool ir_inline_function_conflict(const IrFunction* function, const Arena*
         function->debug != NULL ? function->debug->locals : NULL,
         function->debug != NULL ? function->debug->scalars : NULL,
         function->debug != NULL ? function->debug->bindings : NULL,
+        function->debug != NULL ? function->debug->regions : NULL,
         function->debug != NULL ? function->debug->binding_flags : NULL,
     };
     const uint64_t counts[] = {
@@ -209,6 +210,7 @@ static bool ir_inline_function_conflict(const IrFunction* function, const Arena*
         function->debug != NULL ? (uint64_t)function->slot_count * sizeof(uint32_t) : 0,
         function->debug != NULL ? (uint64_t)function->debug->scalar_count * sizeof(IrDebugScalar) : 0,
         function->debug != NULL ? (uint64_t)function->debug->binding_count * sizeof(IrDebugBinding) : 0,
+        function->debug != NULL ? (uint64_t)function->debug->region_count * sizeof(IrDebugRegion) : 0,
         function->debug != NULL && function->debug->binding_flags != NULL ? function->debug->local_count : 0,
     };
     bool conflict = false;
@@ -1058,7 +1060,7 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
     {
         // Only the caller's identities survive this interface. Cloned callee slots and instructions remain unknown
         // until inline-instance identities are represented; they cannot inherit the caller's token or local number.
-        ir_debug_remap(source, &rewritten, values, NULL);
+        ir_debug_remap(source, &rewritten, values, NULL, NULL);
         rewritten.result_type = source->result_type;
         rewritten.symbol_count = source->symbol_count;
         if (source->constant_count != 0)

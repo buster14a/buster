@@ -891,6 +891,14 @@ static IrCheck ir_wide_split_path(const IrFunction* function, Arena* output, Are
                     binding->value = ir_wide_low(&work, binding->value);
                 }
             }
+            for (uint32_t k = 0; check.error == IR_OK && split.debug != NULL && k < split.debug->region_count; k += 1)
+            {
+                IrDebugRegion* region = split.debug->regions + k;
+                if (region->kind == IR_DEBUG_BIND_VALUE)
+                {
+                    region->value = ir_wide_low(&work, region->value);
+                }
+            }
         }
         if (check.error == IR_OK)
         {

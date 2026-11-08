@@ -60,6 +60,11 @@ requirements. [Command index](README.md).
   argument mutation preserves the result kernel but fails value-flow checking,
   proving that kernel matching alone cannot publish a debug value. Disabling
   source metadata must leave the emitted instruction and branch bytes unchanged.
+  The phi fixture uses a real critical-edge join with another value live
+  beside it, requiring a concrete copy into the phi's register. Swapping the
+  predecessor-associated phi operands or removing an actual copy into that
+  carrier must be refused. Ordinary definitions receive no phi claims, and
+  enabling source metadata must leave instructions and branch targets intact.
 
 - The emitter checks its allocations, and the CFG consumer's code, under
   `Tier1EmitOptions.certify`, which its tests and the driver's `--verify` set. A failure is the emission stage's
@@ -74,6 +79,11 @@ requirements. [Command index](README.md).
   claims, and refusals or resource failures retain the same transactional
   failure behavior. Debug metadata never substitutes allocator intervals for
   that machine proof.
+  Node-indexed phi claims describe only the defining block's checked register
+  after its leading edge moves. They remain candidates until the complete
+  checker has proved every predecessor's moves and simultaneous renames. The
+  final-PC consumer must still account for scheduling, later register writes
+  and fresh loop iterations before using a claim as a value location.
   The straight-line emitter's `tier1_debug_straight.c` has a separate bounded
   integer proof for source metadata: no calls, spills, rematerialization,
   fixed-register sequences or transitions, and one register fragment per

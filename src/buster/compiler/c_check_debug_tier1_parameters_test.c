@@ -100,10 +100,17 @@ static void check_debug_tier1_values_objects(CheckDebugTestTally* tally)
                                         "an indexed frame write has no disjoint-byte proof and closes the shared home");
     records[4].mode = BUSTER_X86_MEMORY_BASE;
     records[4].index = 0;
+    records[4].form = X86_FORM_MOV_RM32_R32 + BUSTER_X86_FORM_GS;
+    check_debug_tier1_values_object_case(tally, &function, &ir, &emitted, NULL, (CheckTier1DebugSpan){ 3, 5 }, overwritten, 1,
+                                        "a segmented frame write has no disjoint-byte proof despite its adjacent displacement");
+    records[4].form = X86_FORM_MOV_RM32_R32;
 
     records[2].form = X86_FORM_MOV_RM8_R8;
     check_debug_tier1_values_object_case(tally, &function, &ir, &emitted, NULL, (CheckTier1DebugSpan){ 0 }, NULL, 0,
                                         "a one-byte store does not initialize the four-byte source object");
+    records[2].form = X86_FORM_MOV_RM32_R32 + BUSTER_X86_FORM_FS;
+    check_debug_tier1_values_object_case(tally, &function, &ir, &emitted, NULL, (CheckTier1DebugSpan){ 0 }, NULL, 0,
+                                        "a segmented store does not initialize the source object at the same frame displacement");
     records[2].form = X86_FORM_MOV_RM32_R32;
     operands[3] = 4;
     check_debug_tier1_values_object_case(tally, &function, &ir, &emitted, NULL, (CheckTier1DebugSpan){ 0 }, NULL, 0,

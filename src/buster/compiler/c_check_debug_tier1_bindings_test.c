@@ -59,6 +59,124 @@ static void check_debug_tier1_values_binding_case(CheckDebugTestTally* tally, co
     }
 }
 
+// The static CFG meet alone can hide a stale-iteration bug by discarding a first-trip-absent row. Walk the concrete
+// backedge twice too: the same static phi/definition IDs have new dynamic values, while their old private spills
+// still contain the preceding iteration's bytes. All observed source PCs stay inside the same witnessed region.
+static void check_debug_tier1_values_fresh(CheckDebugTestTally* tally)
+{
+    const uint8_t classes[] = { BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I64 };
+    AbiLocation abi[] = { { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE } } };
+    const Tier0Function function = { .count = 32, .local_classes = classes, .local_count = 3, .parameters = abi, .parameter_count = 1 };
+    uint8_t operations[] = { IR_PARAM, IR_CONST, IR_BR, IR_PHI, IR_ADD, IR_ICMP, IR_CBR, IR_RET };
+    uint8_t types[] = { IR_I64, IR_I64, IR_VOID, IR_I64, IR_I64, IR_I1, IR_VOID, IR_VOID };
+    uint32_t blocks[] = { 0, 3, 7, 8 };
+    IrDebugBinding bindings[] = { { .local = 0, .entry = BUSTER_IR_NONE, .value = 0, .anchor = 0, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 } };
+    uint8_t flags[] = { BUSTER_IR_DEBUG_BIND_ENTRY, BUSTER_IR_DEBUG_BIND_REGIONS, BUSTER_IR_DEBUG_BIND_REGIONS };
+    IrDebugRegion regions[] = {
+        { .local = 1, .block = 1, .begin = 10, .end = 20, .block_end = 20, .value = 3, .next = BUSTER_IR_NONE, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+        { .local = 2, .block = 1, .begin = 10, .end = 20, .block_end = 20, .value = 4, .next = BUSTER_IR_NONE, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+    };
+    IrDebugInfo debug = { .bindings = bindings, .binding_count = 1, .binding_flags = flags, .first_block_end = 10, .regions = regions, .region_count = 2 };
+    IrFunction ir = { .op = operations, .type = types, .instruction_count = 8, .block_offsets = blocks, .block_count = 3, .debug = &debug };
+    X86Instruction records[] = {
+        { .form = X86_FORM_SUB_RM64_IMM8, .mode = BUSTER_X86_REGISTER_DIRECT, .rm = X86_REGISTER_RSP, .immediate = 32 },
+        { .form = X86_FORM_MOV_R64_RM64, .mode = BUSTER_X86_REGISTER_DIRECT, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDI },
+        { .form = X86_FORM_NOP },
+        { .form = X86_FORM_MOV_RM64_R64, .mode = BUSTER_X86_MEMORY_BASE, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP, .displacement = 8 },
+        { .form = X86_FORM_ADD_RM64_IMM8, .mode = BUSTER_X86_REGISTER_DIRECT, .rm = X86_REGISTER_RAX, .immediate = 1 },
+        { .form = X86_FORM_MOV_RM64_R64, .mode = BUSTER_X86_MEMORY_BASE, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP, .displacement = 16 },
+        { .form = X86_FORM_CMP_R64_RM64, .mode = BUSTER_X86_REGISTER_DIRECT, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDI },
+        { .form = X86_FORM_JNE_REL32 },
+        { .form = X86_FORM_ADD_RM64_IMM8, .mode = BUSTER_X86_REGISTER_DIRECT, .rm = X86_REGISTER_RSP, .immediate = 32 },
+        { .form = X86_FORM_RET },
+    };
+    uint32_t origins[] = {
+        tier1_origin(TIER1_ORIGIN_FRAME, 0), tier1_origin(TIER1_ORIGIN_NODE, 0), tier1_origin(TIER1_ORIGIN_NODE, 2),
+        tier1_origin(TIER1_ORIGIN_NODE, 3), tier1_origin(TIER1_ORIGIN_NODE, 4), tier1_origin(TIER1_ORIGIN_NODE, 4),
+        tier1_origin(TIER1_ORIGIN_NODE, 5), tier1_origin(TIER1_ORIGIN_NODE, 6), tier1_origin(TIER1_ORIGIN_FRAME, 1), tier1_origin(TIER1_ORIGIN_NODE, 7),
+    };
+    uint32_t branches[] = { 7 };
+    uint32_t targets[] = { 3 };
+    uint32_t block_records[] = { 0, 3, 8, 10 };
+    uint32_t physical[] = { 0, 1 };
+    int32_t offsets[] = { 8, 16 };
+    uint32_t sizes[] = { 8, 8, 0, 8, 8, 1, 0, 0 };
+    uint32_t value_nodes[] = { 3, 4 };
+    uint32_t spill_values[] = { 0, 1 };
+    Tier1DebugDefinition definitions[8];
+    Tier1DebugPhi phis[8];
+    for (uint32_t node = 0; node < ir.instruction_count; node += 1)
+    {
+        definitions[node] = (Tier1DebugDefinition){ .first = BUSTER_IR_NONE, .end = BUSTER_IR_NONE };
+        phis[node] = (Tier1DebugPhi){ .record = BUSTER_IR_NONE, .block = BUSTER_IR_NONE };
+    }
+    definitions[4] = (Tier1DebugDefinition){ .first = 4, .end = 5, .reg = X86_REGISTER_RAX, .class = BUSTER_TIER1_ALLOCATE_GPR, .bytes = 8 };
+    phis[3] = (Tier1DebugPhi){ .record = 3, .block = 1, .reg = X86_REGISTER_RAX, .class = BUSTER_TIER1_ALLOCATE_GPR, .bytes = 8 };
+    Tier1EmitResult emitted = {
+        .code = { .records = records, .count = BUSTER_ARRAY_LENGTH(records), .branches = branches, .targets = targets, .branch_count = 1 },
+        .origins = origins, .body_record = 1, .block_records = block_records, .general = true, .cfg_input = { .block_count = 3 },
+        .cfg = { .allocation = { .spill_count = 2, .spill_values = spill_values } },
+        .prepared = { .function = &ir, .sizes = sizes, .slot_columns = BUSTER_ARRAY_LENGTH(sizes) }, .value_nodes = value_nodes,
+        .frame = { .count = 2, .slot_count = 2, .slot = physical, .offset = offsets, .base_register = X86_REGISTER_RSP, .stack_adjust_bytes = 32, .payload_bytes = 32 },
+        .debug_definitions = definitions, .debug_phis = phis,
+    };
+    const uint32_t memory_phi = BUSTER_CHECK_DEBUG_VALUE_MEMORY(8);
+    const uint32_t memory_result = BUSTER_CHECK_DEBUG_VALUE_MEMORY(16);
+    const uint32_t expected[][BUSTER_ARRAY_LENGTH(records)] = {
+        { X86_REGISTER_RDI, X86_REGISTER_RDI, X86_REGISTER_RAX, X86_REGISTER_RDI, X86_REGISTER_RDI, X86_REGISTER_RDI, X86_REGISTER_RDI, X86_REGISTER_RDI, X86_REGISTER_RDI, X86_REGISTER_RDI },
+        { BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, X86_REGISTER_RAX, memory_phi, memory_phi, memory_phi, memory_phi, BUSTER_IR_NONE, BUSTER_IR_NONE },
+        { BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, X86_REGISTER_RAX, memory_result, memory_result, BUSTER_IR_NONE, BUSTER_IR_NONE },
+    };
+    const uint32_t entries[] = { 0, 1, 2, 15, 15, 15, 15, 15, 20, 21 };
+    const uint8_t safe[] = { 0, 1, 1, 1, 1, 1, 1, 1, 0, 0 };
+    check_debug_tier1_values_binding_case(tally, &function, &ir, &emitted, NULL, entries, safe, 8, expected[0],
+                                         "loop phi and result locations have exact carriers and initialization holes inside one witnessed source region");
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        _Alignas(64) uint8_t storage[32768] = { 0 };
+        Arena scratch = { .base = storage, .capacity = sizeof(storage) };
+        CheckTier1DebugValues proof = { 0 };
+        bool valid = check_tier1_debug_values(&function, &ir, &emitted, NULL, path != 0, &scratch, &proof);
+        check_debug_test_expect(tally, valid, "the dynamic backedge trace constructs the real bounded region and machine proof", "fresh phi and repeated definition identities");
+        if (valid)
+        {
+            CheckTier1DebugValueLive live = { 0 };
+            check_tier1_debug_value_start(&proof, &live);
+            memset(proof.winner, 0xff, ((uint64_t)proof.value_count + 1) * 4);
+            memset(live.users, 0xff, ((uint64_t)proof.value_count + 1) * 4);
+            check_tier1_debug_value_change(&proof, &live, X86_REGISTER_RDI, 0);
+            for (uint32_t r = 0; r < 3; r += 1)
+            {
+                check_tier1_debug_value_boundary(&proof, &live, r);
+                check_tier1_debug_value_follow(&proof, &live, proof.transfers[r], path != 0);
+            }
+            // Observe each loop PC before executing it, then take the actual backedge once. Registers/private
+            // rows use carrier IDs here (32 and 33); these winners are specified independently of the producer.
+            const uint32_t trace[] = { 3, 4, 5, 6, 7, 3, 4, 5, 6, 7 };
+            const uint32_t phi_winners[] = { X86_REGISTER_RAX, 32, 32, 32, 32, X86_REGISTER_RAX, 32, 32, 32, 32 };
+            const uint32_t result_winners[] = { BUSTER_IR_NONE, BUSTER_IR_NONE, X86_REGISTER_RAX, 33, 33, BUSTER_IR_NONE, BUSTER_IR_NONE, X86_REGISTER_RAX, 33, 33 };
+            for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(trace); k += 1)
+            {
+                const uint32_t r = trace[k];
+                check_tier1_debug_value_boundary(&proof, &live, r);
+                check_tier1_debug_value_winners(&proof, &live, false);
+                const bool regions_visible = check_tier1_debug_value_region(&proof, 1, r, 15) == 0 && check_tier1_debug_value_region(&proof, 2, r, 15) == 1;
+                const bool empty_old_rows = r != 3 || (proof.state[32] == BUSTER_IR_NONE && proof.state[33] == BUSTER_IR_NONE);
+                check_debug_test_expect(tally, regions_visible && empty_old_rows && proof.winner[3] == phi_winners[k] && proof.winner[4] == result_winners[k],
+                                        "a backedge starts fresh phi and RHS identities before any stale private row can win", "two concrete iterations with unchanged witnessed source origins");
+                check_tier1_debug_value_follow(&proof, &live, proof.transfers[r], path != 0);
+            }
+            // Isolate completion invalidation as well: no fresh-block boundary intervenes between the old spill
+            // and another execution of this checked definition. Its new register must beat no surviving old row.
+            check_tier1_debug_value_follow(&proof, &live, proof.transfers[4], path != 0);
+            check_tier1_debug_value_winners(&proof, &live, false);
+            check_debug_test_expect(tally, proof.state[33] == BUSTER_IR_NONE && proof.state[X86_REGISTER_RAX] == 4 && proof.winner[4] == X86_REGISTER_RAX &&
+                                    check_tier1_debug_value_region(&proof, 2, 5, 15) == 1,
+                                    "reexecuting a checked definition discards every older same-ID spill before publishing the new register", "ordinary definition freshness independent of block-entry clearing");
+        }
+    }
+}
+
 static void check_debug_tier1_values_bindings(CheckDebugTestTally* tally)
 {
     uint8_t classes[] = { BUSTER_TYPED_CLASS_I64 };
@@ -196,6 +314,7 @@ static void check_debug_tier1_values_bindings(CheckDebugTestTally* tally)
     emitted.debug_definitions = NULL;
     check_debug_tier1_values_binding_case(tally, &function, &ir, &emitted, NULL, sequence_entries, sequence_safe, 8, absent,
                                          "without a checked later RHS, old source origins cannot justify stale assignment ranges");
+    check_debug_tier1_values_fresh(tally);
 }
 
 #undef BUSTER_CHECK_DEBUG_VALUE_MEMORY

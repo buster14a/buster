@@ -2486,6 +2486,11 @@ static void ir_lower_test_sources(IrLowerTestTally* tally)
     ir_lower_test_entry(&stream, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_U64, 0);
     ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 23);
     ir_lower_test_entry(&stream, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, 5);
+    for (uint32_t read = 0; read < 2; read += 1)
+    {
+        ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, 5);
+        ir_lower_test_entry(&stream, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I32, 0);
+    }
     const uint32_t loop = stream.count;
     stream.values[branch] = loop;
     ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 5);
@@ -2554,10 +2559,16 @@ static void ir_lower_test_sources(IrLowerTestTally* tally)
                             described.op[debug->bindings[8].value] == IR_TRUNC;
             for (uint32_t local = 0; bindings && local < source.local_count; local += 1)
             {
-                const uint8_t admitted = local != 4 && local != 5 && local != 8 ? BUSTER_IR_DEBUG_BIND_ENTRY : 0;
+                const uint8_t admitted = local == 4 ? 0 : local == 5 || local == 8 ? BUSTER_IR_DEBUG_BIND_REGIONS : BUSTER_IR_DEBUG_BIND_ENTRY;
                 bindings = debug->binding_flags[local] == admitted;
             }
-            ir_lower_test_expect(tally, bindings, "assignment events lost an initial parameter, a later unknown write, or the branch/loop whole-local exclusion", 0, scalar);
+            ir_lower_test_expect(tally, bindings, "assignment events lost an initial parameter, a later unknown write, or the branch/loop admission distinction", 0, scalar);
+            const bool regions = debug->region_count == 2 && debug->regions[0].local == 5 && debug->regions[0].block == 2 &&
+                                 debug->regions[0].begin == branch + 3 && debug->regions[0].end == loop &&
+                                 debug->regions[0].kind == IR_DEBUG_BIND_CONSTANT && debug->regions[0].literal == 23 &&
+                                 debug->regions[1].local == 8 && debug->regions[1].block == 3 && debug->regions[1].begin == loop + 2 &&
+                                 debug->regions[1].end == loop + 4 && debug->regions[1].kind == IR_DEBUG_BIND_CONSTANT && debug->regions[1].literal == 5;
+            ir_lower_test_expect(tally, regions, "branch/loop assignments have disjoint block windows and repeated real reads share one witness", 0, scalar);
             const uint64_t required = plain_output.length;
             arena_pop_to(&output, 0);
             Arena bounded = output;
@@ -2580,10 +2591,79 @@ static void ir_lower_test_sources(IrLowerTestTally* tally)
         bool excluded = reentered_check.error == IR_OK && reentered.debug != NULL && reentered.debug->binding_count == 11;
         for (uint32_t local = 0; excluded && local < source.local_count; local += 1)
         {
-            excluded = reentered.debug->binding_flags[local] == (local == 0 ? BUSTER_IR_DEBUG_BIND_ENTRY : 0);
+            excluded = reentered.debug->binding_flags[local] == (local == 0 ? BUSTER_IR_DEBUG_BIND_ENTRY : local == 4 ? 0 : BUSTER_IR_DEBUG_BIND_REGIONS);
         }
-        ir_lower_test_expect(tally, excluded, "a backedge into the first source block excludes every written local", 0, scalar);
+        ir_lower_test_expect(tally, excluded, "a backedge into the first source block restricts written locals to witnessed regions", 0, scalar);
         stream.values[loop + 3] = loop;
+        arena_pop_to(&output, 0);
+    }
+    arena_release(&scratch);
+    arena_release(&plain_output);
+    arena_release(&output);
+}
+
+static void ir_lower_test_region_lifetimes(IrLowerTestTally* tally)
+{
+    IrLowerTestStream stream = { 0 };
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 11);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I64, 18);
+    for (uint32_t read = 0; read < 2; read += 1)
+    {
+        ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, 1);
+        ir_lower_test_entry(&stream, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0);
+    }
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 22);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 33);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_I64, 0);
+    const uint8_t classes[] = { BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I64 };
+    const uint8_t flags[] = { 0, 0 };
+    const AbiLocation parameter = { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS };
+    const uint32_t lifetime_entries[] = { 0, 12, 14, 18 };
+    const uint32_t lifetime_locals[] = { 1, 1 | BUSTER_TIER0_LIFETIME_END, 1, 1 | BUSTER_TIER0_LIFETIME_END };
+    const Tier0Function source = {
+        .kinds = stream.kinds, .classes = stream.classes, .values = stream.values, .count = stream.count,
+        .local_classes = classes, .local_flags = flags, .local_count = BUSTER_ARRAY_LENGTH(classes),
+        .parameters = &parameter, .parameter_count = 1,
+        .result = { .kind = BUSTER_ABI_RESULT_REGISTERS, .registers = { BUSTER_ABI_RAX, BUSTER_ABI_REGISTER_NONE } },
+        .lifetime_entries = lifetime_entries, .lifetime_locals = lifetime_locals, .lifetime_count = BUSTER_ARRAY_LENGTH(lifetime_entries),
+    };
+    Arena output = arena_reserve(1ull << 20);
+    Arena plain_output = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        IrFunction function = { 0 };
+        IrFunction plain = { 0 };
+        const IrCheck described = ir_lower_typed_target_pieces_sources(&source, IR_I64, 1, 0, &output, &scratch, &function, scalar != 0);
+        const IrCheck control = ir_lower_typed_target_pieces(&source, IR_I64, 1, 0, &plain_output, &scratch, &plain, scalar != 0);
+        bool exact = described.error == IR_OK && control.error == IR_OK && ir_lower_test_equal(&function, &plain) && function.debug != NULL &&
+                     function.debug->region_count == 4 && function.debug->binding_flags[0] == BUSTER_IR_DEBUG_BIND_ENTRY &&
+                     function.debug->binding_flags[1] == BUSTER_IR_DEBUG_BIND_REGIONS;
+        const uint32_t begins[] = { 2, 4, 10, 16 };
+        const uint32_t ends[] = { 4, 9, 12, 18 };
+        const uint64_t literals[] = { 11, 0, 22, 33 };
+        for (uint32_t k = 0; exact && k < BUSTER_ARRAY_LENGTH(begins); k += 1)
+        {
+            const IrDebugRegion region = function.debug->regions[k];
+            exact = region.local == 1 && region.block == (k == 0 ? 1u : 2u) && region.begin == begins[k] && region.end == ends[k] &&
+                    region.bytes == 8 && region.type == IR_I64 && region.next == (k == 1 ? 2u : k == 2 ? 3u : BUSTER_IR_NONE);
+            exact = exact && (k == 1 ? region.kind == IR_DEBUG_BIND_VALUE && region.value < function.instruction_count &&
+                             function.op[region.value] == IR_LOAD && function.debug->origins[region.value] == 4 :
+                             region.kind == IR_DEBUG_BIND_CONSTANT && region.literal == literals[k]);
+        }
+        ir_lower_test_expect(tally, exact, "source regions preserve read witnesses, exact next-assignment kills and lifetime gaps without changing IR", 0, scalar);
+        arena_pop_to(&plain_output, 0);
         arena_pop_to(&output, 0);
     }
     arena_release(&scratch);
@@ -4241,6 +4321,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         ir_simd_lower_tests(&tally);
         ir_lower_test_fixtures(&tally);
         ir_lower_test_sources(&tally);
+        ir_lower_test_region_lifetimes(&tally);
         ir_lower_test_cas_parameter(&tally);
         ir_lower_test_failures(&tally);
         ir_lower_test_local_roles(&tally);

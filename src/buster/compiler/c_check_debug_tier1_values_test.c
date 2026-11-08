@@ -183,6 +183,40 @@ static const char check_debug_tier1_values_source[] =
     "#line 900 \"dbg_tier1_values.c\"\n"
     "    return computed^(computed>>3);\n"
     "}\n"
+    "__attribute__((noinline)) int t1_branch(int choose,int input)\n"
+    "{\n"
+    "    int value=input+1;\n"
+    "    if (choose)\n"
+    "    {\n"
+    "        value=input*3+2;\n"
+    "        t1_checkpoint(8);\n"
+    "        printf(\"T1-BRANCH-LEFT %d\\n\",value);\n"
+    "    }\n"
+    "    else\n"
+    "    {\n"
+    "        value=input*5-3;\n"
+    "        t1_checkpoint(9);\n"
+    "        printf(\"T1-BRANCH-RIGHT %d\\n\",value);\n"
+    "    }\n"
+    "    t1_checkpoint(10);\n"
+    "    printf(\"T1-BRANCH-JOIN %d\\n\",value);\n"
+    "    return value+1;\n"
+    "}\n"
+    "__attribute__((noinline)) int t1_assignment_loop(int input,int limit)\n"
+    "{\n"
+    "    int value=input;\n"
+    "    int total=0;\n"
+    "    for (int turn=0;turn<limit;turn++)\n"
+    "    {\n"
+    "        value=value*2+turn;\n"
+    "        t1_checkpoint(11);\n"
+    "        printf(\"T1-ASSIGN-LOOP %d %d %d\\n\",turn,value,total);\n"
+    "        total+=value;\n"
+    "    }\n"
+    "    t1_checkpoint(12);\n"
+    "    printf(\"T1-ASSIGN-END %d %d\\n\",value,total);\n"
+    "    return total^value;\n"
+    "}\n"
     "int main(void)\n"
     "{\n"
     "    int failed=t1_values(10);\n"
@@ -196,6 +230,9 @@ static const char check_debug_tier1_values_source[] =
     "    printf(\"T1-CONSTANTS %d %d %llu\\n\",29,-5,18446744073709551600ULL);\n"
     "    failed|=t1_straight(10)!=36;\n"
     "    printf(\"T1-COMPUTED %d\\n\",3*10+2);\n"
+    "    failed|=t1_branch(1,10)!=33;\n"
+    "    failed|=t1_branch(0,10)!=48;\n"
+    "    failed|=t1_assignment_loop(3,3)!=51;\n"
     "    if (!failed) puts(\"T1-RUN-OK\");\n"
     "    return failed;\n"
     "}\n";
@@ -244,6 +281,14 @@ static const char* const check_debug_tier1_values_expected[] = {
     "T1-PARAMS 10 1000 2.50 3.75 41",
     "T1-CONSTANTS 29 -5 18446744073709551600",
     "T1-COMPUTED 32",
+    "T1-BRANCH-LEFT 32",
+    "T1-BRANCH-JOIN 32",
+    "T1-BRANCH-RIGHT 47",
+    "T1-BRANCH-JOIN 47",
+    "T1-ASSIGN-LOOP 0 6 0",
+    "T1-ASSIGN-LOOP 1 13 6",
+    "T1-ASSIGN-LOOP 2 28 19",
+    "T1-ASSIGN-END 28 47",
 };
 
 // Unlike the short-command helper, a checked command file neither drops commands at an argv limit nor accepts a
@@ -329,6 +374,38 @@ static const char check_debug_tier1_values_script[] =
     "t1-read printf \"GDB-T1-CONSTANTS %d %d %llu\\n\",literal,negative,(unsigned long long)literal_bits\n"
     "continue\n"
     "t1-read printf \"GDB-T1-COMPUTED %d\\n\",computed\n"
+    "continue\n"
+    "up\n"
+    "t1-read printf \"GDB-T1-BRANCH-LEFT %d\\n\",value\n"
+    "down\n"
+    "continue\n"
+    "up\n"
+    "t1-read printf \"GDB-T1-BRANCH-JOIN %d\\n\",value\n"
+    "down\n"
+    "continue\n"
+    "up\n"
+    "t1-read printf \"GDB-T1-BRANCH-RIGHT %d\\n\",value\n"
+    "down\n"
+    "continue\n"
+    "up\n"
+    "t1-read printf \"GDB-T1-BRANCH-JOIN %d\\n\",value\n"
+    "down\n"
+    "continue\n"
+    "up\n"
+    "t1-read printf \"GDB-T1-ASSIGN-LOOP %d %d %d\\n\",turn,value,total\n"
+    "down\n"
+    "continue\n"
+    "up\n"
+    "t1-read printf \"GDB-T1-ASSIGN-LOOP %d %d %d\\n\",turn,value,total\n"
+    "down\n"
+    "continue\n"
+    "up\n"
+    "t1-read printf \"GDB-T1-ASSIGN-LOOP %d %d %d\\n\",turn,value,total\n"
+    "down\n"
+    "continue\n"
+    "up\n"
+    "t1-read printf \"GDB-T1-ASSIGN-END %d %d\\n\",value,total\n"
+    "down\n"
     "continue\n"
     "printf \"GDB-T1-DONE\\n\"\n";
 

@@ -1383,7 +1383,7 @@ static bool ir_typed_debug_bindings(const Tier0Function* input, const IrTypedPla
                 const uint32_t local = (uint32_t)input->values[entry];
                 const uint8_t class = input->local_classes[local];
                 const bool scalar = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64;
-                flags[local] = entry < first_end && entry_once ? flags[local] : 0;
+                flags[local] = entry < first_end && entry_once ? flags[local] : flags[local] != 0 ? BUSTER_IR_DEBUG_BIND_REGIONS : 0;
                 entries[entry] = at;
                 bindings[at++] = (IrDebugBinding)
                 {
@@ -1432,6 +1432,221 @@ static bool ir_typed_debug_bindings(const Tier0Function* input, const IrTypedPla
     {
         arena_pop_to(output, mark);
     }
+    return ok;
+}
+
+typedef enum IrTypedDebugEventKind
+{
+    IR_TYPED_DEBUG_READ,
+    IR_TYPED_DEBUG_WRITE,
+    IR_TYPED_DEBUG_START,
+    IR_TYPED_DEBUG_END,
+} IrTypedDebugEventKind;
+
+typedef struct IrTypedDebugEvent IrTypedDebugEvent;
+struct IrTypedDebugEvent
+{
+    uint32_t entry;
+    uint32_t local;
+    uint32_t payload;
+    uint8_t kind;
+};
+
+static void ir_typed_debug_region_end(IrDebugRegion* regions, uint32_t capacity, uint32_t* count, IrDebugRegion region,
+                                      uint32_t end, uint32_t next, bool witnessed, bool* ok)
+{
+    if (*ok && witnessed && region.begin < end)
+    {
+        *ok = *count < capacity;
+        if (*ok)
+        {
+            region.end = end;
+            region.next = next;
+            regions[(*count)++] = region;
+        }
+    }
+}
+
+// Real LOCAL reads and direct assignments witness a source value only within their original typed block and
+// between writes/lifetime boundaries. A stable local counting pass groups these sparse events without a local by
+// block matrix. Repeated reads in one unchanged window choose one witness; no debug read is inserted into the IR.
+static bool ir_typed_debug_regions(const Tier0Function* input, const IrTypedPlan* plan, IrFunction* function, Arena* output, Arena* scratch)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    IrDebugInfo* debug = function->debug;
+    uint64_t event_count = 0;
+    uint32_t capacity = 0;
+    for (uint32_t entry = 0; entry < input->count; entry += 1)
+    {
+        const uint8_t kind = input->kinds[entry];
+        const bool access = kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
+        const uint32_t local = access ? (uint32_t)input->values[entry] : BUSTER_IR_NONE;
+        capacity += access && debug->binding_flags[local] == BUSTER_IR_DEBUG_BIND_REGIONS;
+    }
+    event_count = capacity;
+    for (uint32_t life = 0; life < input->lifetime_count; life += 1)
+    {
+        const uint32_t local = input->lifetime_locals[life] & ~BUSTER_TIER0_LIFETIME_END;
+        event_count += debug->binding_flags[local] == BUSTER_IR_DEBUG_BIND_REGIONS;
+    }
+    bool ok = event_count <= UINT32_MAX;
+    IrDebugRegion* regions = capacity != 0 ? ir_allocate(output, capacity, sizeof(IrDebugRegion), &ok) : NULL;
+    IrTypedDebugEvent* events = capacity != 0 ? ir_allocate(scratch, event_count, sizeof(IrTypedDebugEvent), &ok) : NULL;
+    uint32_t* order = capacity != 0 ? ir_allocate(scratch, event_count, 4, &ok) : NULL;
+    uint32_t* offsets = capacity != 0 ? ir_allocate(scratch, (uint64_t)input->local_count + 1, 4, &ok) : NULL;
+    uint32_t* cursors = capacity != 0 ? ir_allocate(scratch, input->local_count, 4, &ok) : NULL;
+    uint8_t* scoped = capacity != 0 ? ir_allocate(scratch, input->local_count, 1, &ok) : NULL;
+    uint32_t* reads = capacity != 0 ? ir_allocate(scratch, input->count, 4, &ok) : NULL;
+    uint32_t* writes = capacity != 0 ? ir_allocate(scratch, input->count, 4, &ok) : NULL;
+    uint32_t count = 0;
+    if (ok && capacity != 0)
+    {
+        memset(reads, 0xff, (uint64_t)input->count * 4);
+        memset(writes, 0xff, (uint64_t)input->count * 4);
+        for (uint32_t binding = 0; binding < debug->binding_count; binding += 1)
+        {
+            const uint32_t entry = debug->bindings[binding].entry;
+            if (entry != BUSTER_IR_NONE)
+            {
+                writes[entry] = binding;
+            }
+        }
+        for (uint32_t node = 0; node < function->instruction_count; node += 1)
+        {
+            if (function->op[node] == IR_LOAD && function->op[function->a[node]] == IR_STACK_ADDR)
+            {
+                const uint32_t local = function->a[function->a[node]];
+                const uint32_t entry = debug->origins[node];
+                if (local < input->local_count && entry < input->count && debug->binding_flags[local] == BUSTER_IR_DEBUG_BIND_REGIONS &&
+                    input->kinds[entry] == BUSTER_TYPED_LOCAL && input->values[entry] == local && function->type[node] == ir_typed_types[input->local_classes[local]])
+                {
+                    reads[entry] = node;
+                }
+            }
+        }
+        uint32_t at = 0;
+        uint32_t life = 0;
+        for (uint32_t entry = 0; entry < input->count; entry += 1)
+        {
+            while (life < input->lifetime_count && input->lifetime_entries[life] == entry)
+            {
+                const uint32_t encoded = input->lifetime_locals[life++];
+                const uint32_t local = encoded & ~BUSTER_TIER0_LIFETIME_END;
+                if (debug->binding_flags[local] == BUSTER_IR_DEBUG_BIND_REGIONS)
+                {
+                    scoped[local] = 1;
+                    events[at++] = (IrTypedDebugEvent){ .entry = entry, .local = local, .payload = BUSTER_IR_NONE,
+                                                      .kind = (encoded & BUSTER_TIER0_LIFETIME_END) != 0 ? IR_TYPED_DEBUG_END : IR_TYPED_DEBUG_START };
+                    offsets[local + 1] += 1;
+                }
+            }
+            const uint8_t kind = input->kinds[entry];
+            const bool access = kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
+            const uint32_t local = access ? (uint32_t)input->values[entry] : BUSTER_IR_NONE;
+            if (access && debug->binding_flags[local] == BUSTER_IR_DEBUG_BIND_REGIONS)
+            {
+                events[at++] = (IrTypedDebugEvent){ .entry = entry, .local = local,
+                                                  .payload = kind == BUSTER_TYPED_LOCAL ? reads[entry] : writes[entry],
+                                                  .kind = kind == BUSTER_TYPED_LOCAL ? IR_TYPED_DEBUG_READ : IR_TYPED_DEBUG_WRITE };
+                offsets[local + 1] += 1;
+            }
+        }
+        ok = at == event_count;
+        for (uint32_t local = 0; local < input->local_count; local += 1)
+        {
+            offsets[local + 1] += offsets[local];
+            cursors[local] = offsets[local];
+        }
+        for (uint32_t event = 0; event < at; event += 1)
+        {
+            order[cursors[events[event].local]++] = event;
+        }
+        for (uint32_t local = 0; ok && local < input->local_count; local += 1)
+        {
+            bool alive = scoped[local] == 0;
+            uint32_t event = offsets[local];
+            while (ok && event < offsets[local + 1])
+            {
+                const uint32_t first_event = event;
+                const uint32_t first_region = count;
+                const uint32_t block = plan->entry_blocks[events[order[event]].entry];
+                const uint32_t end = plan->block_firsts[block + 1];
+                IrDebugRegion region = {
+                    .local = local,
+                    .block = block + 1,
+                    .begin = plan->block_firsts[block],
+                    .block_end = end,
+                    .value = BUSTER_IR_NONE,
+                    .next = BUSTER_IR_NONE,
+                    .kind = IR_DEBUG_BIND_UNAVAILABLE,
+                    .bytes = (uint8_t)tier0_class_bytes(input->local_classes[local]),
+                    .type = ir_typed_types[input->local_classes[local]],
+                };
+                bool witnessed = false;
+                while (ok && event < offsets[local + 1] && events[order[event]].entry < end)
+                {
+                    const IrTypedDebugEvent current = events[order[event++]];
+                    if (current.kind == IR_TYPED_DEBUG_READ)
+                    {
+                        if (alive && (!witnessed || (region.kind == IR_DEBUG_BIND_UNAVAILABLE && current.payload != BUSTER_IR_NONE)))
+                        {
+                            region.value = current.payload;
+                            region.kind = current.payload != BUSTER_IR_NONE ? IR_DEBUG_BIND_VALUE : IR_DEBUG_BIND_UNAVAILABLE;
+                            witnessed = true;
+                        }
+                    }
+                    else if (current.kind == IR_TYPED_DEBUG_WRITE)
+                    {
+                        ir_typed_debug_region_end(regions, capacity, &count, region, current.entry, current.payload, alive && witnessed, &ok);
+                        const IrDebugBinding binding = debug->bindings[current.payload];
+                        region.begin = current.entry + 1;
+                        region.literal = binding.literal;
+                        region.value = binding.value;
+                        region.kind = binding.kind;
+                        witnessed = alive;
+                    }
+                    else
+                    {
+                        ir_typed_debug_region_end(regions, capacity, &count, region, current.entry, BUSTER_IR_NONE, alive && witnessed, &ok);
+                        alive = current.kind == IR_TYPED_DEBUG_START;
+                        region.begin = current.entry;
+                        region.value = BUSTER_IR_NONE;
+                        region.kind = IR_DEBUG_BIND_UNAVAILABLE;
+                        witnessed = false;
+                    }
+                }
+                ir_typed_debug_region_end(regions, capacity, &count, region, end, BUSTER_IR_NONE, alive && witnessed, &ok);
+                // Even across a lifetime gap, completing a later assignment must prevent an earlier source origin
+                // displaced by scheduling from reviving the old value. This reverse sweep visits each event once.
+                uint32_t reverse = event;
+                uint32_t next = BUSTER_IR_NONE;
+                for (uint32_t r = count; r > first_region; r -= 1)
+                {
+                    while (reverse > first_event && events[order[reverse - 1]].entry >= regions[r - 1].end)
+                    {
+                        const IrTypedDebugEvent later = events[order[--reverse]];
+                        if (later.kind == IR_TYPED_DEBUG_WRITE)
+                        {
+                            next = later.payload;
+                        }
+                    }
+                    regions[r - 1].next = next;
+                }
+            }
+        }
+    }
+    if (ok)
+    {
+        debug->regions = regions;
+        debug->region_count = count;
+        function->arena_bytes += output->length - output_mark;
+    }
+    else
+    {
+        arena_pop_to(output, output_mark);
+    }
+    arena_pop_to(scratch, scratch_mark);
     return ok;
 }
 
@@ -1746,6 +1961,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
                     candidate.debug->locals[local] = local;
                 }
                 check.error = ir_typed_debug_bindings(input, &plan, &candidate, output, scratch) &&
+                              ir_typed_debug_regions(input, &plan, &candidate, output, scratch) &&
                               ir_typed_debug_scalars(input, &plan, &candidate, output, scratch) ? IR_OK : IR_ERROR_MEMORY;
             }
             else

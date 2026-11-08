@@ -784,7 +784,7 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
     const bool bindings = debug->binding_flags != NULL;
     for (uint32_t local = 0; valid && bindings && local < locals; local += 1)
     {
-        if ((debug->binding_flags[local] & BUSTER_IR_DEBUG_BIND_ENTRY) != 0)
+        if ((debug->binding_flags[local] & (BUSTER_IR_DEBUG_BIND_ENTRY | BUSTER_IR_DEBUG_BIND_REGIONS)) != 0)
         {
             local_slots[local] = BUSTER_IR_NONE;
         }
