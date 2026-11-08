@@ -208,6 +208,17 @@ unchanged classifier and the same speedtest1 and five Lua inputs. Raw evidence
 belongs in `buster14a/buster-performance`; normal correctness tests do not
 establish that gate.
 
+`test-checker-driver`'s table-loop object oracle checks the one table-base LEA
+and its exact PC32 relocation, the adjacent MOVSXD/ADD/indirect-JMP dispatch,
+and an entry prefix that no direct or resolved table target can reenter. It
+resolves all four switch entries using their PC32 symbol, addend and slot
+offset, and requires each target to be an instruction boundary after the LEA.
+This covers placement where the loop closes through backward table entries
+and the dispatch follows the last backward direct branch. The semantic Clang
+comparison and all four scalar/rematerialization configurations remain checked.
+Controls reject repeated LEAs, a LEA after an initial branch, direct reentry,
+and indirect reentry from the second table entry, whose slot offset is nonzero.
+
 ## Address-arithmetic selection regressions
 
 `test-tier1-select` includes `tier1_address_arithmetic_test.c` (#1217) on
