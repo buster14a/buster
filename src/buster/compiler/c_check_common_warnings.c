@@ -1937,12 +1937,17 @@ static uint32_t check_common_full_expression_end(const Parser* parser, const Che
 static bool check_common_enum_cast_candidate(const Parser* parser, const CheckGraph* graph, const CheckStream* stream, const TypeTable* types,
                                              uint32_t source, TypeId target)
 {
+    // (The target's kind first: an enumeration's is rare, and the source is read only for one.)
     const uint8_t target_kind = type_kind(types, target);
-    const uint8_t source_kind = source < graph->count ? type_kind(types, check_stream_type(stream, source)) : BUSTER_TYPE_KIND_VOID;
-    return (target_kind == BUSTER_TYPE_KIND_ENUM || target_kind == BUSTER_TYPE_KIND_ALIGNED) && source < graph->count &&
-           (source_kind == BUSTER_TYPE_KIND_ENUM || source_kind == BUSTER_TYPE_KIND_ALIGNED || check_common_conversion_arms(graph, source) ||
-            (graph->ops[source] == CHECK_OP_VALUE && (check_stream_flags(stream, source) & BUSTER_CHECK_ICE) != 0 &&
-             graph->tokens[source] < parser->tokens.count && parser->tokens.kinds[graph->tokens[source]] == PARSE_KIND_IDENTIFIER));
+    bool result = false;
+    if (__builtin_expect(target_kind == BUSTER_TYPE_KIND_ENUM || target_kind == BUSTER_TYPE_KIND_ALIGNED, 0) && source < graph->count)
+    {
+        const uint8_t source_kind = type_kind(types, check_stream_type(stream, source));
+        result = source_kind == BUSTER_TYPE_KIND_ENUM || source_kind == BUSTER_TYPE_KIND_ALIGNED || check_common_conversion_arms(graph, source) ||
+                 (graph->ops[source] == CHECK_OP_VALUE && (check_stream_flags(stream, source) & BUSTER_CHECK_ICE) != 0 &&
+                  graph->tokens[source] < parser->tokens.count && parser->tokens.kinds[graph->tokens[source]] == PARSE_KIND_IDENTIFIER);
+    }
+    return result;
 }
 
 // Clang's conversion between different enumerations (#1447, CheckImplicitConversion's last case): `source`'s implicit
@@ -1950,7 +1955,7 @@ static bool check_common_enum_cast_candidate(const Parser* parser, const CheckGr
 // pruning) and to a root comma's result, warns at each leaf whose type, an enumerator's taken as its enumeration
 // (check_common_enum_coerced), is a named enumeration other than the target's named one. It is a plain Diag, published
 // as the full expression completes.
-static void check_common_enum_cast(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
+static __attribute__((noinline)) void check_common_enum_cast(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
                                    CheckWarningSpelling* spell, uint32_t source, TypeId target, uint32_t target_spelling, const uint32_t* parents,
                                    uint32_t at_once, Arena* scratch)
 {
