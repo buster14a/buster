@@ -97,6 +97,7 @@ static const char check_debug_tier1_values_source[] =
     "struct DebugRecord { int first; signed char small; int *pointer; };\n"
     "void t1_keep(int *, volatile int *, int *, struct DebugRecord *, int *, int **);\n"
     "void t1_mutate(int *, volatile int *, int *, struct DebugRecord *, int *, int **);\n"
+    "void t1_keep_scalar(volatile int *);\n"
     "void t1_keep_aligned(volatile int *);\n"
     "int t1_checkpoint(int);\n"
     "static inline __attribute__((always_inline)) int t1_inline(int value)\n"
@@ -113,15 +114,18 @@ static const char check_debug_tier1_values_source[] =
     "    int *pointer=&escaped;\n"
     "    volatile int shadow=11;\n"
     "    int promoted=escaped;\n"
+    "    int mutable_value=7;\n"
     "    int inlined=t1_inline(number);\n"
     "    t1_keep(&number,&frame,&escaped,&record,array,&pointer);\n"
-    "    t1_checkpoint(1);\n"
+    "    t1_keep_scalar(&shadow);\n"
+    "    mutable_value=t1_checkpoint(1);\n"
     "    printf(\"T1-BASE %d %d %d %d %d %d %d %d %d\\n\",number,frame,escaped,record.first,record.small,*record.pointer,array[2],*pointer,shadow);\n"
     "    t1_mutate(&number,&frame,&escaped,&record,array,&pointer);\n"
     "    t1_checkpoint(2);\n"
     "    printf(\"T1-MUTATED %d %d %d %d %d %d %d %d %d\\n\",number,frame,escaped,record.first,record.small,*record.pointer,array[2],*pointer,shadow);\n"
     "    {\n"
     "        volatile int shadow=99;\n"
+    "        t1_keep_scalar(&shadow);\n"
     "        t1_checkpoint(3);\n"
     "        printf(\"T1-INNER %d\\n\",shadow);\n"
     "    }\n"
@@ -131,11 +135,12 @@ static const char check_debug_tier1_values_source[] =
     "    for (int i=0;i<2;i++)\n"
     "    {\n"
     "        _Alignas(16) volatile int loop=70+i;\n"
+    "        t1_keep_scalar(&loop);\n"
     "        t1_checkpoint(5);\n"
     "        printf(\"T1-LOOP %d\\n\",loop);\n"
     "        total+=loop;\n"
     "    }\n"
-    "    return number!=15 || frame!=-12 || escaped!=37 || record.first!=51 || record.small!=-7 || *record.pointer!=37 || array[2]!=66 || *pointer!=37 || shadow!=11 || promoted!=17 || inlined!=12 || total!=141;\n"
+    "    return number!=15 || frame!=-12 || escaped!=37 || record.first!=51 || record.small!=-7 || *record.pointer!=37 || array[2]!=66 || *pointer!=37 || shadow!=11 || promoted!=17 || mutable_value!=101 || inlined!=12 || total!=141;\n"
     "}\n"
     "int t1_aligned(void)\n"
     "{\n"
@@ -147,19 +152,38 @@ static const char check_debug_tier1_values_source[] =
     "    printf(\"T1-ALIGNED %d %d\\n\",aligned[0],aligned[15]);\n"
     "    return aligned[0]+aligned[15];\n"
     "}\n"
+    "int t1_saved(long number)\n"
+    "{\n"
+    "    int result=t1_checkpoint(7);\n"
+    "    return (int)number+result;\n"
+    "}\n"
     "int t1_leaf(int number)\n"
     "{\n"
     "    volatile int leaf=number+3;\n"
     "#line 700 \"dbg_tier1_values.c\"\n"
     "    return leaf;\n"
     "}\n"
+    "int t1_global=41;\n"
+    "int t1_scalars(int number,long wide,float fraction,double precision,int *pointer)\n"
+    "{\n"
+    "    int literal=29;\n"
+    "    signed char negative=-5;\n"
+    "    unsigned long literal_bits=0xfffffffffffffff0UL;\n"
+    "    volatile int barrier=number;\n"
+    "#line 800 \"dbg_tier1_values.c\"\n"
+    "    return number+barrier+(int)wide+(int)fraction+(int)precision+*pointer+literal+negative+(int)(literal_bits&15);\n"
+    "}\n"
     "int main(void)\n"
     "{\n"
     "    int failed=t1_values(10);\n"
     "    failed|=t1_aligned()!=60;\n"
+    "    failed|=t1_saved(19)!=126;\n"
     "    int leaf=t1_leaf(8);\n"
     "    printf(\"T1-LEAF %d\\n\",leaf);\n"
     "    failed|=leaf!=11;\n"
+    "    failed|=t1_scalars(10,1000L,2.5f,3.75,&t1_global)!=1090;\n"
+    "    printf(\"T1-PARAMS %d %ld %.2f %.2f %d\\n\",10,1000L,2.5,3.75,t1_global);\n"
+    "    printf(\"T1-CONSTANTS %d %d %llu\\n\",29,-5,18446744073709551600ULL);\n"
     "    if (!failed) puts(\"T1-RUN-OK\");\n"
     "    return failed;\n"
     "}\n";
@@ -182,6 +206,10 @@ static const char check_debug_tier1_values_support[] =
     "    array[2]=66;\n"
     "    *pointer=escaped;\n"
     "}\n"
+    "void t1_keep_scalar(volatile int *value)\n"
+    "{\n"
+    "    t1_sink=*value;\n"
+    "}\n"
     "void t1_keep_aligned(volatile int *array)\n"
     "{\n"
     "    t1_sink=array[0]+array[15];\n"
@@ -201,6 +229,8 @@ static const char* const check_debug_tier1_values_expected[] = {
     "T1-LOOP 71",
     "T1-ALIGNED 29 31",
     "T1-LEAF 11",
+    "T1-PARAMS 10 1000 2.50 3.75 41",
+    "T1-CONSTANTS 29 -5 18446744073709551600",
 };
 
 // Unlike the short-command helper, a checked command file neither drops commands at an argv limit nor accepts a
@@ -212,6 +242,8 @@ static const char check_debug_tier1_values_script[] =
     "set debuginfod enabled off\n"
     "break *t1_checkpoint\n"
     "break dbg_tier1_values.c:700\n"
+    "break *t1_scalars\n"
+    "break dbg_tier1_values.c:800\n"
     "run\n"
     "up\n"
     "printf \"GDB-T1-BASE %d %d %d %d %d %d %d %d %d\\n\",number,frame,escaped,record.first,record.small,*record.pointer,array[2],*pointer,shadow\n"
@@ -245,7 +277,17 @@ static const char check_debug_tier1_values_script[] =
     "printf \"GDB-T1-ALIGNED %d %d\\n\",aligned[0],aligned[15]\n"
     "down\n"
     "continue\n"
+    "up\n"
+    "printf \"GDB-T1-CALL-ARGS-BEGIN\\n\"\n"
+    "info args\n"
+    "printf \"GDB-T1-CALL-ARGS-END\\n\"\n"
+    "down\n"
+    "continue\n"
     "printf \"GDB-T1-LEAF %d\\n\",leaf\n"
+    "continue\n"
+    "printf \"GDB-T1-PARAMS %d %ld %.2f %.2f %d\\n\",number,wide,fraction,precision,*pointer\n"
+    "continue\n"
+    "printf \"GDB-T1-CONSTANTS %d %d %llu\\n\",literal,negative,(unsigned long long)literal_bits\n"
     "continue\n"
     "printf \"GDB-T1-DONE\\n\"\n";
 
@@ -380,11 +422,20 @@ static void check_debug_tier1_values_read(CheckDebugTestTally* tally, const char
     const char* begin = transcript.pointer != NULL ? strstr(transcript.pointer, "GDB-T1-LOCALS-BEGIN\n") : NULL;
     const char* end = begin != NULL ? strstr(begin, "GDB-T1-LOCALS-END\n") : NULL;
     const char* promoted = begin != NULL ? strstr(begin, "promoted = <optimized out>") : NULL;
+    const char* mutable_value = begin != NULL ? strstr(begin, "mutable_value = <optimized out>") : NULL;
     const char* inline_only = begin != NULL ? strstr(begin, "inline_only") : NULL;
     check_debug_test_expect(tally, end != NULL && promoted != NULL && promoted < end && strstr(end, "type = int") != NULL,
                             "a promoted snapshot retains its name and type without inventing a location", report);
+    check_debug_test_expect(tally, end != NULL && mutable_value != NULL && mutable_value < end,
+                            "an unsupported reassignment advertises neither its stale constant nor its future call result in the suspended caller", report);
     check_debug_test_expect(tally, end != NULL && (inline_only == NULL || inline_only >= end),
                             "an inlined callee's local is not reported as a caller local", report);
+    const char* call_begin = transcript.pointer != NULL ? strstr(transcript.pointer, "GDB-T1-CALL-ARGS-BEGIN\n") : NULL;
+    const char* call_end = call_begin != NULL ? strstr(call_begin, "GDB-T1-CALL-ARGS-END\n") : NULL;
+    const char* saved = call_begin != NULL ? strstr(call_begin, "number = 19\n") : NULL;
+    const char* unavailable = call_begin != NULL ? strstr(call_begin, "number = <optimized out>\n") : NULL;
+    check_debug_test_expect(tally, call_end != NULL && ((saved != NULL && saved < call_end) || (unavailable != NULL && unavailable < call_end)),
+                            "a suspended caller's immutable parameter is recovered correctly from a preserved copy or explicitly unavailable", report);
 }
 
 static void check_debug_tier1_values_test(CheckDebugTestTally* tally, const char* directory, Arena* arena)

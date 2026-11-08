@@ -1337,8 +1337,11 @@ static bool ir_typed_debug_scalars(const Tier0Function* input, const IrTypedPlan
     {
         for (uint32_t local = 0; local < locals; local += 1)
         {
-            candidates[local].local = local;
-            candidates[local].entry = BUSTER_IR_NONE;
+            candidates[local] = (IrDebugScalar)
+            {
+                .local = local,
+                .entry = BUSTER_IR_NONE,
+            };
             // Every volatile/address-taken object stays a storage binding, never a cached value recipe.
             writes[local] = input->local_flags[local] != 0 ? 2 : 0;
         }

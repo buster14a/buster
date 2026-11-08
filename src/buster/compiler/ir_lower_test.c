@@ -2446,6 +2446,109 @@ static void ir_lower_test_entry(IrLowerTestStream* stream, uint8_t kind, uint8_t
     stream->count += 1;
 }
 
+static void ir_lower_test_sources(IrLowerTestTally* tally)
+{
+    IrLowerTestStream stream = { 0 };
+    const uint8_t local_classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I8,
+        BUSTER_TYPED_CLASS_F64,
+    };
+    const uint8_t local_flags[] = { 0, 0, 0, 0, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, 0, 0, 0 };
+    const AbiLocation parameters[] = {
+        { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
+        { .registers = { BUSTER_ABI_RSI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
+    };
+    const uint32_t assigned[] = { 2, 3, 6, 7, 4, 1, 3 };
+    const uint64_t literals[] = { 29, 11, 0xfb, UINT64_C(0x400c000000000000), 3, 17, 19 };
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(assigned); k += 1)
+    {
+        const uint32_t local = assigned[k];
+        ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, local_classes[local], literals[k]);
+        ir_lower_test_entry(&stream, BUSTER_TYPED_SET_LOCAL, local_classes[local], local);
+    }
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_U64, 18);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 23);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, 5);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
+    const Tier0Function source = {
+        .kinds = stream.kinds,
+        .classes = stream.classes,
+        .values = stream.values,
+        .count = stream.count,
+        .local_classes = local_classes,
+        .local_flags = local_flags,
+        .local_count = BUSTER_ARRAY_LENGTH(local_classes),
+        .parameters = parameters,
+        .parameter_count = BUSTER_ARRAY_LENGTH(parameters),
+        .result = { .kind = BUSTER_ABI_RESULT_REGISTERS, .registers = { BUSTER_ABI_RAX, BUSTER_ABI_REGISTER_NONE } },
+    };
+    Arena output = arena_reserve(1ull << 20);
+    Arena plain_output = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        IrFunction plain = { 0 };
+        IrFunction described = { 0 };
+        const IrCheck plain_check = ir_lower_typed_target_pieces(&source, IR_I64, 1, 0, &plain_output, &scratch, &plain, scalar != 0);
+        const uint64_t poisoned_bytes = 1ull << 18;
+        const uint64_t reused = scratch.length;
+        uint8_t* poison = arena_push(&scratch, poisoned_bytes, 1);
+        if (poison != NULL)
+        {
+            memset(poison, 0xa5, poisoned_bytes);
+        }
+        arena_pop_to(&scratch, reused);
+        const IrCheck debug_check = ir_lower_typed_target_pieces_sources(&source, IR_I64, 1, 0, &output, &scratch, &described, scalar != 0);
+        bool valid = ir_lower_test_expect(tally, poison != NULL && plain_check.error == IR_OK && debug_check.error == IR_OK && described.debug != NULL,
+                                          "source-aware lowering accepts the scalar admission fixture with poisoned reused scratch", 0, scalar);
+        if (valid)
+        {
+            valid = ir_lower_test_equal(&plain, &described) && plain.debug == NULL && described.debug->scalar_count == 4;
+            const IrDebugScalar expected[] = {
+                { .local = 0, .entry = BUSTER_IR_NONE, .kind = IR_DEBUG_PARAMETER, .bytes = 8 },
+                { .value = 29, .local = 2, .entry = 1, .kind = IR_DEBUG_CONSTANT, .bytes = 4 },
+                { .value = 0xfb, .local = 6, .entry = 5, .kind = IR_DEBUG_CONSTANT, .bytes = 1 },
+                { .value = UINT64_C(0x400c000000000000), .local = 7, .entry = 7, .kind = IR_DEBUG_CONSTANT, .bytes = 8 },
+            };
+            for (uint32_t k = 0; valid && k < BUSTER_ARRAY_LENGTH(expected); k += 1)
+            {
+                const IrDebugScalar actual = described.debug->scalars[k];
+                valid = actual.local == expected[k].local && actual.entry == expected[k].entry && actual.kind == expected[k].kind &&
+                        actual.bytes == expected[k].bytes && actual.value == expected[k].value;
+            }
+            for (uint32_t local = 0; valid && local < source.local_count; local += 1)
+            {
+                valid = described.debug->locals[local] == local;
+            }
+            ir_lower_test_expect(tally, valid, "debug admission changed IR, lost exact literal bits, or admitted a reassigned/addressed/conditional local", 0, scalar);
+            const uint64_t required = plain_output.length;
+            arena_pop_to(&output, 0);
+            Arena bounded = output;
+            bounded.capacity = required;
+            IrFunction sentinel = { .instruction_count = 123, .block_count = 17 };
+            const IrFunction before = sentinel;
+            const uint64_t scratch_mark = scratch.length;
+            const IrCheck refused = ir_lower_typed_target_pieces_sources(&source, IR_I64, 1, 0, &bounded, &scratch, &sentinel, scalar != 0);
+            ir_lower_test_expect(tally, refused.error == IR_ERROR_MEMORY && bounded.length == 0 && scratch.length == scratch_mark &&
+                                       memcmp(&before, &sentinel, sizeof(sentinel)) == 0,
+                                 "source sidecar exhaustion did not roll back the whole lowering", 0, scalar);
+        }
+        arena_pop_to(&output, 0);
+        arena_pop_to(&plain_output, 0);
+    }
+    arena_release(&scratch);
+    arena_release(&plain_output);
+    arena_release(&output);
+}
+
 static void ir_lower_test_objects(IrLowerTestTally* tally)
 {
     IrLowerTestStream stream =
@@ -4095,6 +4198,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         };
         ir_simd_lower_tests(&tally);
         ir_lower_test_fixtures(&tally);
+        ir_lower_test_sources(&tally);
         ir_lower_test_cas_parameter(&tally);
         ir_lower_test_failures(&tally);
         ir_lower_test_local_roles(&tally);

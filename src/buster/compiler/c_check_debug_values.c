@@ -744,8 +744,17 @@ static void check_debug_value_variable(CheckDebugValues* values, uint32_t token,
             }
             if (size != 0)
             {
-                const CheckDebugRangeClip clip = { .begin = location.begin, .end = location.end };
-                check_debug_value_range_clipped(values, body, parameter ? 0 : token, scope_end, expression, size, clip);
+                if (parameter)
+                {
+                    // Incoming parameter provenance can be proved before the first source statement. Its lexical
+                    // scope is the subprogram; the producer's machine ranges already exclude every unproven PC.
+                    check_debug_value_pair(&values->locations, location.begin, location.end, expression, size);
+                }
+                else
+                {
+                    const CheckDebugRangeClip clip = { .begin = location.begin, .end = location.end };
+                    check_debug_value_range_clipped(values, body, token, scope_end, expression, size, clip);
+                }
             }
         }
         debug_integer(&values->locations, 0, 1);

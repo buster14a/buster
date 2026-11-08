@@ -486,6 +486,12 @@ static IrError ir_sroa_view(IrSroaWork* work, Arena* scratch, IrFunction* result
             const uint32_t root = work->roots[i];
             if (work->dead[i] != 0 && work->refused[work->roots[f->a[i]]] == 0)
             {
+                if (view.debug != NULL)
+                {
+                    // Even without a split field, surviving lifetime markers can keep this now-unwritten slot.
+                    // Its bytes no longer represent every source assignment, so it cannot retain a whole home.
+                    view.debug->locals[work->roots[f->a[i]]] = BUSTER_IR_NONE;
+                }
                 view.op[i] = IR_LIFETIME;
                 view.flags[i] = 0;
                 view.alignment_log2[i] = 0;

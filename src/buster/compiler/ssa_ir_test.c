@@ -1023,6 +1023,123 @@ static void ssa_ir_test_memory(SsaIrTestTally* tally)
     arena_release(&execution);
 }
 
+static void ssa_ir_test_debug(SsaIrTestTally* tally)
+{
+    Arena input = arena_reserve(1ull << 20);
+    Arena output = arena_reserve(1ull << 20);
+    Arena twin_output = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    const IrSizes sizes =
+    {
+        .instruction_count = 17,
+        .block_count = 2,
+        .constant_count = 2,
+        .slot_count = 4,
+    };
+    IrFunction function = { 0 };
+    IrFunction promoted = { 0 };
+    IrFunction twin = { 0 };
+    bool ready = ssa_ir_test_expect(tally, ir_create(&input, &sizes, &function) == IR_OK, "allocate source-map promotion fixture");
+    if (ready)
+    {
+        function.result_type = IR_I64;
+        function.block_offsets[1] = 11;
+        function.block_offsets[2] = 17;
+        function.constants[0].low = 17;
+        function.constants[1].low = 9;
+        for (uint32_t slot = 0; slot < 4; slot += 1)
+        {
+            function.slots[slot] = (IrSlot)
+            {
+                .size = slot == 2 ? 4 : 8,
+                .alignment = slot == 2 ? 4 : 8,
+                .type = slot == 2 ? IR_I32 : IR_I64,
+                .flags = (slot & 1u) != 0 ? BUSTER_IR_SLOT_ADDRESS_TAKEN : 0,
+            };
+            ir_test_instruction(&function, slot, IR_STACK_ADDR, IR_PTR, slot, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        ir_test_instruction(&function, 4, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 5, IR_STORE, IR_VOID, 0, 4, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 6, IR_STORE, IR_VOID, 1, 4, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 7, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 8, IR_STORE, IR_VOID, 2, 7, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 9, IR_STORE, IR_VOID, 3, 4, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 10, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 11, IR_LOAD, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 12, IR_LOAD, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 13, IR_ADD, IR_I64, 11, 12, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 14, IR_LOAD, IR_I64, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 15, IR_ADD, IR_I64, 13, 14, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 16, IR_RET, IR_VOID, 15, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        IrDebugScalar literal =
+        {
+            .value = 17,
+            .local = 0,
+            .entry = 5,
+            .kind = IR_DEBUG_CONSTANT,
+            .bytes = 8,
+        };
+        const IrDebugInfo seed =
+        {
+            .entry_count = 17,
+            .local_count = 4,
+            .scalars = &literal,
+            .scalar_count = 1,
+        };
+        ready = ssa_ir_test_expect(tally, ir_debug_create(&input, &function, &seed), "allocate original source identities");
+        if (ready)
+        {
+            for (uint32_t i = 0; i < function.instruction_count; i += 1)
+            {
+                function.debug->origins[i] = i;
+            }
+            for (uint32_t slot = 0; slot < function.slot_count; slot += 1)
+            {
+                function.debug->locals[slot] = slot;
+            }
+        }
+    }
+    if (ready && ssa_ir_test_promote(tally, &function, &output, &twin_output, &scratch, &promoted, &twin))
+    {
+        const uint32_t origins[] = { 1, 3, 4, 6, 7, 9, 10, 12, 13, 14, 15, 16 };
+        const IrFunction* versions[] = { &promoted, &twin };
+        for (uint32_t path = 0; path < BUSTER_ARRAY_LENGTH(versions); path += 1)
+        {
+            const IrFunction* result = versions[path];
+            const IrDebugInfo* debug = result->debug;
+            bool exact = debug != NULL && result->instruction_count == BUSTER_ARRAY_LENGTH(origins) && result->slot_count == 2;
+            exact = exact && debug->locals[0] == 1 && debug->locals[1] == 3 && debug->scalar_count == 1 &&
+                    debug->scalars != function.debug->scalars && debug->scalars[0].local == 0 && debug->scalars[0].entry == 5 &&
+                    debug->scalars[0].value == 17 && debug->scalars[0].bytes == 8 && debug->scalars[0].kind == IR_DEBUG_CONSTANT;
+            for (uint32_t i = 0; exact && i < BUSTER_ARRAY_LENGTH(origins); i += 1)
+            {
+                exact = debug->origins[i] == origins[i] && result->op[i] == function.op[origins[i]];
+            }
+            ssa_ir_test_expect(tally, exact, "promotion remaps retained slots and origins without retaining removed stores or loads");
+        }
+        bool unchanged = true;
+        for (uint32_t i = 0; i < function.instruction_count; i += 1)
+        {
+            unchanged = unchanged && function.debug->origins[i] == i;
+        }
+        for (uint32_t slot = 0; slot < function.slot_count; slot += 1)
+        {
+            unchanged = unchanged && function.debug->locals[slot] == slot;
+        }
+        IrFunction plain_input = function;
+        plain_input.debug = NULL;
+        IrFunction plain = { 0 };
+        const IrCheck check = ssa_ir_promote(&plain_input, &output, &scratch, &plain);
+        ssa_ir_test_expect(tally, unchanged && check.error == IR_OK && plain.debug == NULL &&
+                                 ssa_ir_test_identical(&plain, &promoted, &scratch) && ssa_ir_test_identical(&promoted, &twin, &scratch),
+                           "source maps do not mutate the input or change executable SSA IR");
+    }
+    arena_release(&scratch);
+    arena_release(&twin_output);
+    arena_release(&output);
+    arena_release(&input);
+}
+
 static void ssa_ir_test_variable_operands(SsaIrTestTally* tally)
 {
     Arena input = arena_reserve(1ull << 24);
@@ -1659,6 +1776,7 @@ static int run_ssa_ir_tests(int argc, char** argv)
     {
         SsaIrTestTally tally = {0};
         ssa_ir_test_memory(&tally);
+        ssa_ir_test_debug(&tally);
         ssa_ir_test_lifetimes(&tally);
         ssa_ir_test_variable_operands(&tally);
         ssa_ir_test_failures(&tally);
