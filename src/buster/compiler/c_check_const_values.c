@@ -325,7 +325,8 @@ static TypeId check_const_plain(const TypeTable* types, TypeId type)
             result = 0;
             finished = true;
         }
-        else if (types->types.kind[index] == BUSTER_TYPE_KIND_ALIGNED || types->types.kind[index] == BUSTER_TYPE_KIND_ATOMIC)
+        else if (types->types.kind[index] == BUSTER_TYPE_KIND_ALIGNED || types->types.kind[index] == BUSTER_TYPE_KIND_QUALIFIED ||
+                 types->types.kind[index] == BUSTER_TYPE_KIND_ATOMIC)
         {
             result = types->types.base != NULL ? type_unqualified(types->types.base[index]) : 0;
         }
@@ -355,7 +356,7 @@ static bool check_const_eligible(const TypeTable* types, TypeId type)
         {
             result |= (type_qualifiers(type) & BUSTER_TYPE_CONST) != 0;
             const uint8_t kind = types->types.kind[index];
-            if (kind == BUSTER_TYPE_KIND_ALIGNED || type_kind_is_array(kind))
+            if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED || type_kind_is_array(kind))
             {
                 type = types->types.base != NULL ? types->types.base[index] : 0;
             }
@@ -382,7 +383,7 @@ static TypeId check_const_declared(const TypeTable* types, TypeId type)
         else
         {
             const uint8_t kind = type_kind(types, type);
-            if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ATOMIC)
+            if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED || kind == BUSTER_TYPE_KIND_ATOMIC)
             {
                 type = types->types.base != NULL ? types->types.base[type_index(type)] : 0;
             }

@@ -140,6 +140,10 @@ typedef enum CheckInputAttributeKind
     // where its attributes are read), its section's string `text`, which clang's handler checks once its subject takes it
     // (check_input_patchable_entry).
     CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY,
+    // clang's address-space qualifiers (#1447): GNU's address_space(N) and OpenCL's opencl_global and the rest, which C
+    // takes too, a qualifier of the type at the attribute's place (check_input_address_space). CheckInputAttribute.space is
+    // an OpenCL one's space (BUSTER_TYPE_SPACE_*), 0 for address_space's, whose value is its argument's.
+    CHECK_ATTRIBUTE_ADDRESS_SPACE,
 } CheckInputAttributeKind;
 
 typedef enum CheckInputAttributeError
@@ -303,6 +307,10 @@ struct CheckInputAttribute
     // took it (check_input_neon_vector), as ProcessDeclAttribute gives it to a valid attribute alone.
     uint8_t neon;
     bool neon_deprecated;
+    // An ADDRESS_SPACE record's OpenCL space (BUSTER_TYPE_SPACE_*, 0 for address_space's), and whether a declarator's chunk
+    // applied it to its pointer or its group's type, which the declarator's whole type then doesn't take (#1447).
+    uint8_t space;
+    bool space_applied;
 };
 
 // An availability attribute's arguments as clang's parser reads them (#1447, check_input_availability_parse): its platform's
@@ -407,6 +415,16 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     // places, its record's kind with CheckInputAttribute.neon, checked as HandleNeonVectorTypeAttr does (check_input_neon_vector).
     { "neon_vector_type", CHECK_ATTRIBUTE_EXT_VECTOR_TYPE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
     { "neon_polyvector_type", CHECK_ATTRIBUTE_EXT_VECTOR_TYPE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
+    // The address-space qualifiers (#1447), type attributes in vector_size's places, applied where clang's processTypeAttrs
+    // applies them (check_input_address_space); OpenCL's in the order of their spaces, BUSTER_TYPE_SPACE_GLOBAL's first.
+    { "address_space", CHECK_ATTRIBUTE_ADDRESS_SPACE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
+    { "opencl_global", CHECK_ATTRIBUTE_ADDRESS_SPACE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "opencl_local", CHECK_ATTRIBUTE_ADDRESS_SPACE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "opencl_constant", CHECK_ATTRIBUTE_ADDRESS_SPACE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "opencl_private", CHECK_ATTRIBUTE_ADDRESS_SPACE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "opencl_generic", CHECK_ATTRIBUTE_ADDRESS_SPACE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "opencl_global_device", CHECK_ATTRIBUTE_ADDRESS_SPACE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "opencl_global_host", CHECK_ATTRIBUTE_ADDRESS_SPACE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "transparent_union", CHECK_ATTRIBUTE_TRANSPARENT_UNION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "may_alias", CHECK_ATTRIBUTE_MAY_ALIAS, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "noderef", CHECK_ATTRIBUTE_NODEREF, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
@@ -543,6 +561,17 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "unsequenced", CHECK_ATTRIBUTE_UNSEQUENCED, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "reproducible", CHECK_ATTRIBUTE_REPRODUCIBLE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
 };
+
+// The rules' row of address_space, before OpenCL's spaces' (#1447).
+static uint32_t check_input_address_space_rule(void)
+{
+    uint32_t result = 0;
+    while (result < BUSTER_ARRAY_LENGTH(check_input_attribute_rules) && check_input_attribute_rules[result].kind != CHECK_ATTRIBUTE_ADDRESS_SPACE)
+    {
+        result += 1;
+    }
+    return result;
+}
 
 static bool check_input_spelling(CheckInputReader* reader, uint32_t token, const uint8_t** bytes, uint32_t* length);
 
@@ -1657,9 +1686,10 @@ static bool check_input_attribute_value(CheckInputReader* reader, CheckInputAttr
             valid = attribute->neon != 0 || (value > 0 && (uint64_t)value <= BUSTER_TYPE_MAX_VECTOR_BITS);
             error = CHECK_ATTRIBUTE_ERROR_VECTOR;
         }
-        else if (attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE)
+        else if (attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE || attribute->kind == CHECK_ATTRIBUTE_ADDRESS_SPACE)
         {
-            // Checked with its element type (check_input_vector_size, #147), as clang's BuildVectorType checks it.
+            // Checked with its element type (check_input_vector_size, #147), as clang's BuildVectorType checks it; an
+            // address space where its type takes it (check_input_address_space, #1447).
             valid = true;
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_REGPARM)
@@ -3775,6 +3805,13 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             attributes->error_first = attribute.first;
             attributes->error_end = attribute.end;
         }
+        else if (valid && rule != 0 && known && standard && rule->kind == CHECK_ATTRIBUTE_ADDRESS_SPACE)
+        {
+            // C23's spellings of the address spaces (#1447), which slide from a declaration to its specifiers with clang's
+            // deprecation warning as the NEON vectors' do: refused by name.
+            check_input_attribute_error(reader, attributes, attribute.name_token, attribute.end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+            valid = false;
+        }
         else if (valid && rule != 0 && known)
         {
             attribute.kind = rule->kind;
@@ -3782,6 +3819,13 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             attribute.neon = rule->kind != CHECK_ATTRIBUTE_EXT_VECTOR_TYPE ? 0u :
                              check_input_attribute_equal(name, "neon_vector_type") ? BUSTER_TYPE_FLAG_NEON :
                              check_input_attribute_equal(name, "neon_polyvector_type") ? BUSTER_TYPE_FLAG_NEON_POLY : 0u;
+            // An OpenCL address space's (#1447), by its row's place after address_space's.
+            attribute.space = rule->kind == CHECK_ATTRIBUTE_ADDRESS_SPACE ? (uint8_t)(rule - check_input_attribute_rules - check_input_address_space_rule()) : 0u;
+            // OpenCL's device and host parts of its global space, which clang's parser warns are deprecated.
+            if (attribute.space == BUSTER_TYPE_SPACE_GLOBAL_DEVICE || attribute.space == BUSTER_TYPE_SPACE_GLOBAL_HOST)
+            {
+                check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES, CHECK_WARNING_EVENT_ADDRESS_SPACE_DEPRECATED);
+            }
             reader->cleanup_attributes |= rule->kind == CHECK_ATTRIBUTE_CLEANUP;
             reader->weak_attributes |= rule->kind == CHECK_ATTRIBUTE_WEAK || rule->kind == CHECK_ATTRIBUTE_WEAKREF;
             const bool late_kind = check_input_attribute_late_kind(&attribute);
@@ -3834,6 +3878,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             // (diagnose_if's and enable_if's too: their arguments name the function's parameters, which a generic handler's
             // reading of them wouldn't find; clang's count is its error first, #1447.)
             const bool type_attribute = conditional || rule->kind == CHECK_ATTRIBUTE_NORETURN || rule->kind == CHECK_ATTRIBUTE_PACKED || rule->kind == CHECK_ATTRIBUTE_MAY_ALIAS ||
+                                        rule->kind == CHECK_ATTRIBUTE_ADDRESS_SPACE ||
                                         rule->kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION || rule->kind == CHECK_ATTRIBUTE_NULLABILITY ||
                                         rule->kind == CHECK_ATTRIBUTE_SENTINEL ||
                                         (rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_call(name) == CHECK_CALL_NO_CALLER_SAVED);
@@ -4383,6 +4428,61 @@ static bool check_input_vector_size(CheckInputReader* reader, CheckInputAttribut
     return valid;
 }
 
+// An address-space attribute applied to `type` (#1447), as clang's HandleAddressSpaceTypeAttribute applies it: a function
+// type's error; address_space's argument's (no integer constant, negative, past BUSTER_TYPE_SPACE_MAX_TARGET); then a
+// type that has another space already, "multiple address spaces specified for type", or that space, -Wduplicate-decl-
+// specifier's warning. Each error is at the attribute, and gives 0; else the type with the space (type_extend), an
+// array's on its element.
+static TypeId check_input_address_space(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute, TypeId type)
+{
+    TypeTable* types = reader->types;
+    const bool function = type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_FUNCTION;
+    const int64_t value = attribute->value;
+    const uint32_t space = attribute->space != 0 ? attribute->space : BUSTER_TYPE_SPACE_TARGET + (uint32_t)value;
+    const CheckInputMessage argument = attribute->space != 0 ? CHECK_INPUT_UNSUPPORTED :
+                                       !attribute->resolved ? CHECK_INPUT_ADDRESS_SPACE_CONSTANT :
+                                       value < 0 ? CHECK_INPUT_ADDRESS_SPACE_NEGATIVE :
+                                       value > (int64_t)BUSTER_TYPE_SPACE_MAX_TARGET ? CHECK_INPUT_ADDRESS_SPACE_TOO_HIGH : CHECK_INPUT_UNSUPPORTED;
+    const uint32_t old = function || argument != CHECK_INPUT_UNSUPPORTED ? 0 : type_address_space(type_object_qualifiers(types, type));
+    const CheckInputMessage message = function ? CHECK_INPUT_ADDRESS_SPACE_FUNCTION : argument != CHECK_INPUT_UNSUPPORTED ? argument :
+                                      old != 0 && old != space ? CHECK_INPUT_ADDRESS_SPACE_MULTIPLE : CHECK_INPUT_UNSUPPORTED;
+    TypeId result = 0;
+    if (message != CHECK_INPUT_UNSUPPORTED)
+    {
+        if (attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+        {
+            check_input_report_argument(reader, attribute->first, message, 0);
+            attributes->error = CHECK_ATTRIBUTE_ERROR_SUBJECT;
+            attributes->error_first = attribute->first;
+            attributes->error_end = attribute->end;
+        }
+    }
+    else
+    {
+        if (old == space)
+        {
+            check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_DUPLICATE_DECL_SPECIFIER, CHECK_WARNING_EVENT_ADDRESS_SPACE_IDENTICAL);
+        }
+        result = check_input_type_result(reader, type_extend(types, type, space));
+    }
+    return result;
+}
+
+// A declarator chunk's address spaces (#1447): those among `attributes` from `first`, which the chunk applies to its own
+// type and the declarator's whole type then doesn't (CheckInputAttribute.space_applied). The list's count where there is
+// one, else `first`.
+static uint32_t check_input_spaces_claim(CheckInputAttributes* attributes, uint32_t first)
+{
+    bool found = false;
+    for (uint32_t a = first; a < attributes->count; a += 1)
+    {
+        const bool space = attributes->records[a].kind == CHECK_ATTRIBUTE_ADDRESS_SPACE;
+        attributes->records[a].space_applied |= space;
+        found |= space;
+    }
+    return found ? attributes->count : first;
+}
+
 // neon_vector_type's and neon_polyvector_type's checks of its element type `element` and its count (#1447), as clang's
 // HandleNeonVectorTypeAttr makes them on x86-64, after its count's and its argument's (check_input_attribute_value): an
 // element of none of isPermittedNeonBaseType's builtin types (signed char, short, int, long, long long, each unsigned
@@ -4445,7 +4545,7 @@ static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAtt
         {
             TypeId function = result;
             uint8_t kind = type_kind(reader->types, function);
-            while (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED)
+            while (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED)
             {
                 function = reader->types->types.base[type_index(function)];
                 kind = type_kind(reader->types, function);
@@ -4483,6 +4583,16 @@ static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAtt
                 valid = result != 0;
             }
             error = CHECK_ATTRIBUTE_ERROR_VECTOR;
+        }
+        else if (attribute->kind == CHECK_ATTRIBUTE_ADDRESS_SPACE)
+        {
+            // Its place's type: the specifiers', or the whole declarator's after its name; one a chunk applied is its
+            // pointer's or its group's (check_input_declarator_step, #1447).
+            if (!attribute->space_applied)
+            {
+                result = check_input_address_space(reader, attributes, attribute, result);
+                valid = result != 0;
+            }
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_ALIGNED || attribute->kind == CHECK_ATTRIBUTE_ALIGNAS)
         {
@@ -4762,7 +4872,7 @@ static bool check_input_attribute_function_wrapped(const TypeTable* types, TypeI
     while (wrapped)
     {
         const uint8_t kind = type_kind(types, function);
-        wrapped = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED;
+        wrapped = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED;
         function = wrapped ? types->types.base[type_index(function)] : function;
     }
     return type != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION;
@@ -4779,7 +4889,7 @@ static void check_input_attribute_conventions(CheckInputReader* reader, CheckInp
     while (wrapped)
     {
         const uint8_t kind = type_kind(reader->types, function);
-        wrapped = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED;
+        wrapped = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED;
         function = wrapped ? reader->types->types.base[type_index(function)] : function;
     }
     const bool is_function = type_kind(reader->types, function) == BUSTER_TYPE_KIND_FUNCTION;
@@ -4840,7 +4950,7 @@ static inline __attribute__((always_inline)) TypeId check_input_attribute_abi_wi
         while (wrapped)
         {
             const uint8_t kind = type_kind(reader->types, function);
-            wrapped = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED;
+            wrapped = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED;
             if (wrapped)
             {
                 function = reader->types->types.base[type_index(function)];
@@ -5010,6 +5120,7 @@ static bool check_input_attribute_multiversion_allowed(CheckInputMultiversionKin
         case CHECK_ATTRIBUTE_MODE:
         case CHECK_ATTRIBUTE_VECTOR_SIZE:
         case CHECK_ATTRIBUTE_EXT_VECTOR_TYPE:
+        case CHECK_ATTRIBUTE_ADDRESS_SPACE:
         case CHECK_ATTRIBUTE_TRANSPARENT_UNION:
         case CHECK_ATTRIBUTE_ALIGN_VALUE:
         // Attributes whose subjects aren't functions; their own checks report a bad subject.
@@ -7586,7 +7697,8 @@ static bool check_input_attribute_after_kind(CheckInputReader* reader, const Che
     const bool excluded = attribute->keyword || check_input_attribute_late_kind(attribute) || kind == CHECK_ATTRIBUTE_UNKNOWN || kind == CHECK_ATTRIBUTE_PACKED ||
                           kind == CHECK_ATTRIBUTE_MS_STRUCT || kind == CHECK_ATTRIBUTE_GCC_STRUCT ||
                           kind == CHECK_ATTRIBUTE_ALIGNAS || kind == CHECK_ATTRIBUTE_MODE || kind == CHECK_ATTRIBUTE_VECTOR_SIZE ||
-                          kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE || kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION || kind == CHECK_ATTRIBUTE_ALIAS ||
+                          kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE || kind == CHECK_ATTRIBUTE_ADDRESS_SPACE || kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION ||
+                          kind == CHECK_ATTRIBUTE_ALIAS ||
                           kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_ASM_LABEL ||
                           kind == CHECK_ATTRIBUTE_CALLING_CONVENTION || kind == CHECK_ATTRIBUTE_NORETURN || kind == CHECK_ATTRIBUTE_OVERLOADABLE ||
                           kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES || kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||

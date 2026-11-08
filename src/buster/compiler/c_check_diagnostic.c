@@ -133,6 +133,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wuser-defined-warnings", NULL, "user-defined warning" },
     { "-Wfunction-multiversion", NULL, "CPU list contains duplicate entries; attribute ignored" },
     { "-Wunused-result", "-Wunused-value", "ignoring return value of function declared with 'warn_unused_result' attribute" },
+    { "-Wduplicate-decl-specifier", NULL, "multiple identical address spaces specified for type" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

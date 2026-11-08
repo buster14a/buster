@@ -182,7 +182,36 @@ typedef uint32_t TypeId;
 #define BUSTER_TYPE_KIND_STRUCT 16
 #define BUSTER_TYPE_KIND_UNION 17
 #define BUSTER_TYPE_KIND_ENUM 18
-#define BUSTER_TYPE_KIND_COUNT 19
+// clang's extended qualifiers (#1447): its base type, unqualified, with an address space and a garbage collection
+// qualifier (extent, a word of BUSTER_TYPE_SPACE_* and BUSTER_TYPE_GC_*), part of the type's identity as const is. Its size,
+// alignment, code and completeness are its base's, and the readers look through it as through ALIGNED
+// (type_strip_aligned). Its base is never ALIGNED, QUALIFIED, an array (an array's element takes the qualifiers, as
+// clang's canonical types have them) or a function; an ALIGNED type's base may be QUALIFIED.
+#define BUSTER_TYPE_KIND_QUALIFIED 19
+#define BUSTER_TYPE_KIND_COUNT 20
+// The kinds that the readers look through: their base is the type, with their qualifiers.
+#define BUSTER_TYPE_WRAPPER_KINDS ((1u << BUSTER_TYPE_KIND_ALIGNED) | (1u << BUSTER_TYPE_KIND_QUALIFIED))
+
+// A QUALIFIED type's word. The address space is clang's LangAS as C on x86-64 has it: 0 the default, then OpenCL's
+// (opencl_global to opencl_global_host, which C takes as attributes), then a target's `address_space(N)` as
+// BUSTER_TYPE_SPACE_TARGET + N, N at most BUSTER_TYPE_SPACE_MAX_TARGET. The garbage collection qualifier is objc_gc's
+// weak or strong.
+#define BUSTER_TYPE_SPACE_DEFAULT 0u
+#define BUSTER_TYPE_SPACE_GLOBAL 1u
+#define BUSTER_TYPE_SPACE_LOCAL 2u
+#define BUSTER_TYPE_SPACE_CONSTANT 3u
+#define BUSTER_TYPE_SPACE_PRIVATE 4u
+#define BUSTER_TYPE_SPACE_GENERIC 5u
+#define BUSTER_TYPE_SPACE_GLOBAL_DEVICE 6u
+#define BUSTER_TYPE_SPACE_GLOBAL_HOST 7u
+#define BUSTER_TYPE_SPACE_TARGET 16u
+// clang's limit, "address space is larger than the maximum supported": 2^23 less its LangAS enumerators.
+#define BUSTER_TYPE_SPACE_MAX_TARGET 8388580u
+#define BUSTER_TYPE_SPACE_MASK 0xffffffu
+#define BUSTER_TYPE_GC_SHIFT 24
+#define BUSTER_TYPE_GC_MASK (3u << BUSTER_TYPE_GC_SHIFT)
+#define BUSTER_TYPE_GC_WEAK (1u << BUSTER_TYPE_GC_SHIFT)
+#define BUSTER_TYPE_GC_STRONG (2u << BUSTER_TYPE_GC_SHIFT)
 
 // Flags. The first two are part of a derived type's key. Functions additionally use the record-only DEFINED bit for
 // BUSTER_TYPE_FLAG_FUNCTION_INFO, which is part of their key; pointers retain a function's convention through their base
@@ -727,13 +756,26 @@ static __attribute__((unused)) TypeFunctionABI type_function_abi_kind(const Type
 // A function's parameter's ABI (ORDINARY past its parameters); whether any of them isn't ORDINARY.
 static __attribute__((unused)) TypeParameterABI type_parameter_abi(const TypeTable* table, TypeId function, uint32_t parameter);
 static __attribute__((unused)) bool type_function_has_parameter_abis(const TypeTable* table, TypeId function);
-// The type without ALIGNED at its top: its base, with the ALIGNED type's qualifiers.
+// The type without ALIGNED and QUALIFIED at its top: its base, with the type's qualifiers. The extended qualifiers it
+// drops are type_extended_qualifiers'.
 static __attribute__((unused)) TypeId type_strip_aligned(const TypeTable* table, TypeId type);
+// The type without ALIGNED at its top, but with its extended qualifiers: what a typedef's name may name.
+static __attribute__((unused)) TypeId type_strip_alignment(const TypeTable* table, TypeId type);
+// A type's extended qualifiers (#1447): its QUALIFIED word, under an ALIGNED; 0 for none.
+static __attribute__((unused)) uint32_t type_extended_qualifiers(const TypeTable* table, TypeId type);
+// The same of an array's innermost element, which takes an array's (clang's getAddressSpace of an array type).
+static __attribute__((unused)) uint32_t type_object_qualifiers(const TypeTable* table, TypeId type);
+// The address space of a word, and whether a pointer to `to` may point to `from`'s (clang's isAddressSpaceSupersetOf,
+// as C on x86-64 has it).
+static __attribute__((unused)) uint32_t type_address_space(uint32_t word);
+static __attribute__((unused)) bool type_space_includes(uint32_t to, uint32_t from);
 
 // The derived types, hash-consed: the same request gets the same TypeId, and so does an equal structure built in
 // another order. Each returns 0, with last_error saying why, if the request breaks one of clang's rules (TypeError)
 // or the table is full. The batch gives each request what the one-at-a-time constructors would, in request order.
 static __attribute__((unused)) TypeId type_pointer(TypeTable* table, TypeId pointee);
+// The pointer to `pointee` where the table has it already (a diagnostic's reader names a decayed array's), else 0.
+static __attribute__((unused)) TypeId type_find_pointer(const TypeTable* table, TypeId pointee);
 static __attribute__((unused)) TypeId type_array(TypeTable* table, TypeId element, uint64_t length);
 static __attribute__((unused)) TypeId type_incomplete_array(TypeTable* table, TypeId element);
 // expression is the caller's id for the size expression; 0 is [*].
@@ -764,6 +806,12 @@ static __attribute__((unused)) TypeId type_vector_size(TypeTable* table, TypeId 
 static __attribute__((unused)) TypeId type_machine_mode(TypeTable* table, TypeId base, String8 mode);
 static __attribute__((unused)) TypeId type_atomic(TypeTable* table, TypeId value);
 static __attribute__((unused)) TypeId type_aligned(TypeTable* table, TypeId base, uint32_t alignment_log2);
+// `type` with extended qualifiers `word` (BUSTER_TYPE_SPACE_*, BUSTER_TYPE_GC_*): the fields word sets replace the
+// type's, an array's element takes them, and an ALIGNED type keeps its alignment over them. A word of 0 is the type.
+// A function type takes none (TYPE_ERROR_OPERAND): clang's "function type may not be qualified" is its callers'.
+static __attribute__((unused)) TypeId type_extend(TypeTable* table, TypeId type, uint32_t word);
+// `type` without its extended qualifiers (the fields `mask` names), an array's element's too.
+static __attribute__((unused)) TypeId type_unextend(TypeTable* table, TypeId type, uint32_t mask);
 static __attribute__((unused)) TypeId type_bit_int(TypeTable* table, uint32_t width, bool is_unsigned);
 // _Complex of a builtin element is a builtin type; of a _BitInt, a derived one. It takes every element the usual
 // arithmetic conversions make: the front end refuses the declarations clang refuses (BUSTER_TYPE_COMPLEX_SPELLABLE).
@@ -1338,14 +1386,29 @@ static TypeId type_qualify(const TypeTable* table, TypeId type, uint32_t qualifi
     return result;
 }
 
-// The index whose size, code and completeness a type has: an ALIGNED type's base's. As in type_strip_aligned, an
-// aligned type is rare, which the hint says (#1175; never, among sqlite3.c's 244 thousand lookups).
+// The index under a wrapper: an ALIGNED type's base's, then a QUALIFIED one's.
+static __attribute__((noinline)) uint32_t type_unwrapped_index(const TypeTable* table, uint32_t index)
+{
+    uint32_t result = index;
+    if (table->types.kind[result] == BUSTER_TYPE_KIND_ALIGNED)
+    {
+        result = table->types.base[result] >> BUSTER_TYPE_INDEX_SHIFT;
+    }
+    if (table->types.kind[result] == BUSTER_TYPE_KIND_QUALIFIED)
+    {
+        result = table->types.base[result] >> BUSTER_TYPE_INDEX_SHIFT;
+    }
+    return result;
+}
+
+// The index whose size, code and completeness a type has: an ALIGNED or QUALIFIED type's base's. As in
+// type_strip_aligned, a wrapper is rare, which the hint says (#1175; never, among sqlite3.c's 244 thousand lookups).
 static uint32_t type_resolved_index(const TypeTable* table, TypeId type)
 {
     uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
-    if (__builtin_expect(table->types.kind[index] == BUSTER_TYPE_KIND_ALIGNED, 0))
+    if (__builtin_expect((BUSTER_TYPE_WRAPPER_KINDS >> table->types.kind[index] & 1) != 0, 0))
     {
-        index = table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT;
+        index = type_unwrapped_index(table, index);
     }
     return index;
 }
@@ -1355,9 +1418,15 @@ static uint64_t type_size(const TypeTable* table, TypeId type)
     return table->types.size[type_resolved_index(table, type)];
 }
 
+// An ALIGNED type's own alignment; a QUALIFIED one's base's, which may be a tag completed later.
 static uint32_t type_alignment_log2(const TypeTable* table, TypeId type)
 {
-    return table->types.alignment_log2[type >> BUSTER_TYPE_INDEX_SHIFT];
+    uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
+    if (__builtin_expect(table->types.kind[index] == BUSTER_TYPE_KIND_QUALIFIED, 0))
+    {
+        index = table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT;
+    }
+    return table->types.alignment_log2[index];
 }
 
 static uint64_t type_alignment(const TypeTable* table, TypeId type)
@@ -1376,8 +1445,18 @@ static uint8_t type_arithmetic_code(const TypeTable* table, TypeId type)
 }
 
 // Inlined everywhere: without the hint, clang put the rare aligned case on the path and jumped around it, 6% of the
-// taken branches of sqlite3.c's -fsyntax-only (#880).
+// taken branches of sqlite3.c's -fsyntax-only (#880). One test of the kind covers both wrappers (#1447).
 static TypeId type_strip_aligned(const TypeTable* table, TypeId type)
+{
+    TypeId result = type;
+    if (__builtin_expect((BUSTER_TYPE_WRAPPER_KINDS >> type_kind(table, type) & 1) != 0, 0))
+    {
+        result = (TypeId)type_unwrapped_index(table, type >> BUSTER_TYPE_INDEX_SHIFT) << BUSTER_TYPE_INDEX_SHIFT | type_qualifiers(type);
+    }
+    return result;
+}
+
+static TypeId type_strip_alignment(const TypeTable* table, TypeId type)
 {
     TypeId result = type;
     if (__builtin_expect(type_kind(table, type) == BUSTER_TYPE_KIND_ALIGNED, 0))
@@ -1387,9 +1466,46 @@ static TypeId type_strip_aligned(const TypeTable* table, TypeId type)
     return result;
 }
 
+static uint32_t type_extended_qualifiers(const TypeTable* table, TypeId type)
+{
+    uint32_t result = 0;
+    if (__builtin_expect((BUSTER_TYPE_WRAPPER_KINDS >> type_kind(table, type) & 1) != 0, 0))
+    {
+        uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
+        index = table->types.kind[index] == BUSTER_TYPE_KIND_ALIGNED ? table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT : index;
+        result = table->types.kind[index] == BUSTER_TYPE_KIND_QUALIFIED ? (uint32_t)table->types.extent[index] : 0;
+    }
+    return result;
+}
+
+static uint32_t type_address_space(uint32_t word)
+{
+    return word & BUSTER_TYPE_SPACE_MASK;
+}
+
+// Equal spaces; OpenCL's generic includes every space but constant, and global its device and host parts. (The
+// default space and a target's, 0 among them, include no other: clang keeps them apart in C.)
+static bool type_space_includes(uint32_t to, uint32_t from)
+{
+    return to == from || (to == BUSTER_TYPE_SPACE_GENERIC && from != BUSTER_TYPE_SPACE_CONSTANT) ||
+           (to == BUSTER_TYPE_SPACE_GLOBAL && (from == BUSTER_TYPE_SPACE_GLOBAL_DEVICE || from == BUSTER_TYPE_SPACE_GLOBAL_HOST));
+}
+
 static bool type_kind_is_array(uint8_t kind)
 {
     return kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY;
+}
+
+static uint32_t type_object_qualifiers(const TypeTable* table, TypeId type)
+{
+    TypeId current = type;
+    TypeId stripped = type_strip_aligned(table, current);
+    while (type_kind_is_array(type_kind(table, stripped)))
+    {
+        current = table->types.base[type_index(stripped)];
+        stripped = type_strip_aligned(table, current);
+    }
+    return type_extended_qualifiers(table, current);
 }
 
 // Whether the x86-64 psABI aligns a variable of `type` to at least 16 bytes (§3.1.2, clang's large arrays in
@@ -1446,10 +1562,10 @@ static uint8_t type_inherited_flags(const TypeTable* table, TypeId type)
 // The slot key's bit for an extent of 2^32 or more, which the slot can't hold whole.
 #define BUSTER_TYPE_SLOT_WIDE 0x8000u
 // The kinds whose base's qualifiers go in the derived type's TypeId: arrays (C's arrays of qualified elements are
-// qualified arrays, as clang's canonical types have them) and ALIGNED.
+// qualified arrays, as clang's canonical types have them), ALIGNED and QUALIFIED.
 #define BUSTER_TYPE_HOISTING_KINDS                                                                                     \
     ((1ull << BUSTER_TYPE_KIND_ARRAY) | (1ull << BUSTER_TYPE_KIND_INCOMPLETE_ARRAY) | (1ull << BUSTER_TYPE_KIND_VARIABLE_ARRAY) | \
-     (1ull << BUSTER_TYPE_KIND_ALIGNED))
+     (1ull << BUSTER_TYPE_KIND_ALIGNED) | (1ull << BUSTER_TYPE_KIND_QUALIFIED))
 // The kinds that are hash-consed: every derived kind, and COMPLEX (only a complex _BitInt isn't a builtin type).
 #define BUSTER_TYPE_HASHED_KINDS                                                                                       \
     (BUSTER_TYPE_HOISTING_KINDS | (1ull << BUSTER_TYPE_KIND_POINTER) | (1ull << BUSTER_TYPE_KIND_FUNCTION) |              \
@@ -1854,7 +1970,8 @@ static TypeError type_check_derivation(const TypeTable* table, uint8_t kind, uin
         {
             result = TYPE_ERROR_OPERAND;
         }
-        else if (type_qualifiers(base) != 0 || type_kind_is_array(value_kind) || value_kind == BUSTER_TYPE_KIND_FUNCTION || value_kind == BUSTER_TYPE_KIND_ATOMIC ||
+        else if (type_qualifiers(base) != 0 || type_extended_qualifiers(table, base) != 0 || type_kind_is_array(value_kind) || value_kind == BUSTER_TYPE_KIND_FUNCTION ||
+                 value_kind == BUSTER_TYPE_KIND_ATOMIC ||
                  value_kind == BUSTER_TYPE_KIND_BIT_INT || !type_is_complete(table, base))
         {
             result = TYPE_ERROR_ATOMIC;
@@ -1879,6 +1996,28 @@ static TypeError type_check_derivation(const TypeTable* table, uint8_t kind, uin
             properties->code = type_arithmetic_code(table, base);
             properties->flags = BUSTER_TYPE_FLAG_COMPLETE | type_inherited_flags(table, base);
         }
+    }
+    else if (kind == BUSTER_TYPE_KIND_QUALIFIED)
+    {
+        // A normalized request (type_extend): an unqualified base that is no wrapper, array or function, and a word
+        // of a space clang has and weak or strong.
+        const uint8_t base_kind = type_kind(table, base);
+        const uint32_t space = (uint32_t)extent & BUSTER_TYPE_SPACE_MASK;
+        const uint32_t gc = (uint32_t)extent & BUSTER_TYPE_GC_MASK;
+        if (flags != 0 || extent == 0 || extent > UINT32_MAX || (extent & ~(uint64_t)(BUSTER_TYPE_SPACE_MASK | BUSTER_TYPE_GC_MASK)) != 0 ||
+            gc == BUSTER_TYPE_GC_MASK || (space > BUSTER_TYPE_SPACE_GLOBAL_HOST && space < BUSTER_TYPE_SPACE_TARGET) ||
+            space > BUSTER_TYPE_SPACE_TARGET + BUSTER_TYPE_SPACE_MAX_TARGET || type_qualifiers(base) != 0 || base_kind == BUSTER_TYPE_KIND_ALIGNED ||
+            base_kind == BUSTER_TYPE_KIND_QUALIFIED || type_kind_is_array(base_kind) || base_kind == BUSTER_TYPE_KIND_FUNCTION)
+        {
+            result = TYPE_ERROR_OPERAND;
+        }
+        // Its base's properties where they are known, for the readers of the columns (layout reads a member's, which
+        // only a garbage collection qualifier's pointer can be); the accessors read an incomplete tag's later.
+        const bool complete = result == TYPE_ERROR_NONE && type_is_complete(table, base);
+        properties->size = complete ? type_size(table, base) : 0;
+        properties->alignment_log2 = complete ? (uint8_t)type_alignment_log2(table, base) : 0;
+        properties->code = result == TYPE_ERROR_NONE ? type_arithmetic_code(table, base) : 0;
+        properties->flags = type_inherited_flags(table, base) | (complete ? BUSTER_TYPE_FLAG_COMPLETE : 0);
     }
     else if (kind == BUSTER_TYPE_KIND_ALIGNED)
     {
@@ -2087,6 +2226,16 @@ static TypeId type_derive(TypeTable* table, uint8_t kind, uint8_t flags, TypeId 
     return result;
 }
 
+static TypeId type_find_pointer(const TypeTable* table, TypeId pointee)
+{
+    // A pointer to a function points to it unqualified, as type_derive normalizes it.
+    const TypeId base = type_kind(table, pointee) == BUSTER_TYPE_KIND_FUNCTION ? type_unqualified(pointee) : pointee;
+    const uint64_t hash = type_key_hash(BUSTER_TYPE_KIND_POINTER, 0, base, 0, 0);
+    uint32_t slot = 0;
+    const uint32_t index = type_is_valid(table, pointee) ? type_index_find(table, type_slot_key(BUSTER_TYPE_KIND_POINTER, 0, 0, hash), base, 0, 0, hash, &slot) : 0;
+    return (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
+}
+
 static TypeId type_pointer(TypeTable* table, TypeId pointee)
 {
     return type_derive(table, BUSTER_TYPE_KIND_POINTER, 0, pointee, 0);
@@ -2149,6 +2298,80 @@ static TypeId type_atomic(TypeTable* table, TypeId value)
 static TypeId type_aligned(TypeTable* table, TypeId base, uint32_t alignment_log2)
 {
     return type_derive(table, BUSTER_TYPE_KIND_ALIGNED, 0, base, alignment_log2);
+}
+
+// The array at `depth` levels of arrays below `type` (unqualified, an array at each level above).
+static TypeId type_array_level(const TypeTable* table, TypeId type, uint32_t depth)
+{
+    TypeId result = type;
+    for (uint32_t d = 0; d < depth; d += 1)
+    {
+        result = table->types.base[type_index(result)];
+    }
+    return result;
+}
+
+// type_extend's and type_unextend's: the type's extended qualifiers less `mask`, with `word`'s. The array levels are
+// made again outward from the element, each found again from the top, so that no level needs memory (arrays of
+// arrays are few levels deep).
+static TypeId type_requalify(TypeTable* table, TypeId type, uint32_t word, uint32_t mask)
+{
+    TypeId result = 0;
+    if (!type_is_valid(table, type))
+    {
+        type_set_error(table, TYPE_ERROR_OPERAND);
+    }
+    else
+    {
+        const uint32_t qualifiers = type_qualifiers(type);
+        TypeId top = type_unqualified(type);
+        const bool aligned = type_kind(table, top) == BUSTER_TYPE_KIND_ALIGNED;
+        const uint32_t alignment_log2 = aligned ? (uint32_t)table->types.extent[type_index(top)] : 0;
+        top = aligned ? table->types.base[type_index(top)] : top;
+        uint32_t depth = 0;
+        TypeId element = top;
+        while (type_kind_is_array(type_kind(table, element)))
+        {
+            element = table->types.base[type_index(element)];
+            depth += 1;
+        }
+        const bool qualified = type_kind(table, element) == BUSTER_TYPE_KIND_QUALIFIED;
+        const uint32_t old = qualified ? (uint32_t)table->types.extent[type_index(element)] : 0;
+        const uint32_t merged = (old & ~mask) | word;
+        element = qualified ? table->types.base[type_index(element)] : element;
+        if (merged == old)
+        {
+            result = type;
+        }
+        else if (type_kind(table, element) == BUSTER_TYPE_KIND_FUNCTION)
+        {
+            type_set_error(table, TYPE_ERROR_OPERAND);
+        }
+        else
+        {
+            result = merged == 0 ? element : type_derive(table, BUSTER_TYPE_KIND_QUALIFIED, 0, element, merged);
+            for (uint32_t level = depth; result != 0 && level-- > 0;)
+            {
+                const TypeId array = type_array_level(table, top, level);
+                const uint32_t index = type_index(array);
+                result = type_derive(table, table->types.kind[index], table->types.flags[index] & BUSTER_TYPE_FLAG_KEY, result, table->types.extent[index]);
+            }
+            result = result != 0 && aligned ? type_aligned(table, result, alignment_log2) : result;
+            result = result != 0 ? result | qualifiers : 0;
+        }
+    }
+    return result;
+}
+
+static TypeId type_extend(TypeTable* table, TypeId type, uint32_t word)
+{
+    const uint32_t mask = ((word & BUSTER_TYPE_SPACE_MASK) != 0 ? BUSTER_TYPE_SPACE_MASK : 0) | ((word & BUSTER_TYPE_GC_MASK) != 0 ? BUSTER_TYPE_GC_MASK : 0);
+    return type_requalify(table, type, word, mask);
+}
+
+static TypeId type_unextend(TypeTable* table, TypeId type, uint32_t mask)
+{
+    return type_requalify(table, type, 0, mask);
 }
 
 static TypeId type_bit_int(TypeTable* table, uint32_t width, bool is_unsigned)
@@ -2883,7 +3106,9 @@ static TypeError type_check_member(const TypeTable* table, const TypeMember* mem
     {
         const uint8_t kind = type_kind(table, type_strip_aligned(table, member->type));
         const bool bit_field = member->bit_width != BUSTER_TYPE_NOT_BIT_FIELD;
-        if (kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_VOID || (table->types.flags[type_index(member->type)] & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) != 0)
+        // A member with extended qualifiers is clang's "field may not be qualified with an address space" (#1447).
+        if (kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_VOID || (table->types.flags[type_index(member->type)] & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) != 0 ||
+            type_address_space(type_object_qualifiers(table, member->type)) != 0)
         {
             result = TYPE_ERROR_MEMBER;
         }
@@ -3594,7 +3819,7 @@ static uint32_t type_layout_ms_alignment(const TypeLayoutColumns* columns, uint3
 {
     const uint32_t alignment = columns->alignment_log2[index];
     uint32_t element = index;
-    while (columns->kind[element] == BUSTER_TYPE_KIND_ALIGNED || columns->kind[element] == BUSTER_TYPE_KIND_ARRAY)
+    while (columns->kind[element] == BUSTER_TYPE_KIND_ALIGNED || columns->kind[element] == BUSTER_TYPE_KIND_QUALIFIED || columns->kind[element] == BUSTER_TYPE_KIND_ARRAY)
     {
         element = type_index(columns->base[element]);
     }
@@ -5069,7 +5294,12 @@ static bool type_merge_shallow(const TypeTable* table, TypeId left, TypeId right
     const uint8_t right_kind = type_kind(table, r);
     bool result = true;
     *leaf = true;
-    if (l == r)
+    if (__builtin_expect(type_extended_qualifiers(table, left) != type_extended_qualifiers(table, right), 0))
+    {
+        // clang's mergeTypes: the address spaces must be one, and in C the garbage collection qualifiers too.
+        result = false;
+    }
+    else if (l == r)
     {
         result = true;
     }
@@ -5322,7 +5552,11 @@ static TypeAnswer type_canonical_compare(const TypeTable* table, TypeId left, Ty
                 const TypeId l = type_strip_aligned(table, frame->left);
                 const TypeId r = type_strip_aligned(table, frame->right);
                 TypeId answer = 0;
-                if (l == r)
+                if (type_extended_qualifiers(table, frame->left) != type_extended_qualifiers(table, frame->right))
+                {
+                    same = false;
+                }
+                else if (l == r)
                 {
                     same = true;
                 }
@@ -5837,13 +6071,24 @@ static void type_print_space(TypePrinter* printer)
     }
 }
 
-// AppendTypeQualList, in C99 and later (restrict spelled as such).
-static void type_print_qualifiers(TypePrinter* printer, uint32_t qualifiers)
+// Qualifiers::print: AppendTypeQualList, in C99 and later (restrict spelled as such), then the extended qualifiers
+// (#1447): an OpenCL address space by its keyword, a target's as its attribute, and the garbage collection qualifier.
+static void type_print_qualifiers(TypePrinter* printer, uint32_t qualifiers, uint32_t extended)
 {
     const char* names[3] = {
         "const",
         "volatile",
         "restrict",
+    };
+    static const char* const spaces[] = {
+        "",
+        "__global",
+        "__local",
+        "__constant",
+        "__private",
+        "__generic",
+        "__global_device",
+        "__global_host",
     };
     bool first = true;
     for (uint32_t i = 0; i < 3; i += 1)
@@ -5854,6 +6099,28 @@ static void type_print_qualifiers(TypePrinter* printer, uint32_t qualifiers)
             type_print_text(printer, names[i]);
             first = false;
         }
+    }
+    const uint32_t space = type_address_space(extended);
+    if (space != BUSTER_TYPE_SPACE_DEFAULT)
+    {
+        type_print_text(printer, first ? "" : " ");
+        if (space >= BUSTER_TYPE_SPACE_TARGET)
+        {
+            type_print_text(printer, "__attribute__((address_space(");
+            type_print_number(printer, space - BUSTER_TYPE_SPACE_TARGET);
+            type_print_text(printer, ")))");
+        }
+        else
+        {
+            type_print_text(printer, spaces[space < sizeof(spaces) / sizeof(spaces[0]) ? space : 0]);
+        }
+        first = false;
+    }
+    const uint32_t gc = extended & BUSTER_TYPE_GC_MASK;
+    if (gc != 0)
+    {
+        type_print_text(printer, first ? "" : " ");
+        type_print_text(printer, gc == BUSTER_TYPE_GC_WEAK ? "__weak" : "__strong");
     }
 }
 
@@ -6231,10 +6498,15 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
     }
     else if (frame.operation == BUSTER_TYPE_PRINT_BEFORE)
     {
+        // The level as a typedef's name may name it (its extended qualifiers kept), and as its kind prints it.
+        const TypeId spelled = type_strip_alignment(table, frame.type);
         const TypeId type = type_strip_aligned(table, frame.type);
         const TypeId unqualified = type_unqualified(type);
+        const uint32_t extended = type_extended_qualifiers(table, frame.type);
         uint32_t whole = UINT32_MAX;
-        const uint32_t sugar = type_print_sugar(printer, type, &whole);
+        uint32_t sugar = type_print_sugar(printer, spelled, &whole);
+        // A typedef's name under extended qualifiers prints after them (`__attribute__((address_space(1))) T`).
+        const bool outside = sugar == UINT32_MAX && extended != 0 && (sugar = type_print_sugar(printer, type, &whole)) != UINT32_MAX;
         // Group exactly the levels whose matching AFTER frame sees a nonempty placeholder.
         const uint32_t parentheses = !printer->after_empty ? type_print_parentheses(printer, type, sugar != UINT32_MAX) : 0;
         if (parentheses != 0)
@@ -6257,9 +6529,10 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
             // A typedef's name is the specifier. When it covers the level itself, it covers its qualifiers too;
             // under outside qualifiers (`const P`), clang prints them before it, as for an ordinary specifier (#992).
             const uint32_t covered = printer->names->alias_covered != 0 ? printer->names->alias_covered[sugar] : 0;
-            if (whole == UINT32_MAX && (type_qualifiers(type) & ~covered) != 0)
+            const uint32_t outer = whole == UINT32_MAX ? type_qualifiers(type) & ~covered : 0;
+            if (outer != 0 || outside)
             {
-                type_print_qualifiers(printer, type_qualifiers(type) & ~covered);
+                type_print_qualifiers(printer, outer, outside ? extended : 0);
                 type_print_text(printer, " ");
             }
             const String8 alias = printer->names->alias_names[sugar];
@@ -6270,13 +6543,13 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         {
             const uint32_t qualifiers = type_qualifiers(type);
             const bool prefix = type_print_can_prefix(table, type);
-            if (prefix && qualifiers != 0)
+            if (prefix && (qualifiers | extended) != 0)
             {
-                type_print_qualifiers(printer, qualifiers);
+                type_print_qualifiers(printer, qualifiers, extended);
                 type_print_text(printer, " ");
             }
-            const bool after = !prefix && qualifiers != 0;
-            type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE_END, type, printer->empty, after, 0);
+            const bool after = !prefix && (qualifiers | extended) != 0;
+            type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE_END, spelled, printer->empty, after, 0);
             if (after)
             {
                 printer->empty = false;
@@ -6289,7 +6562,7 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
     {
         if (frame.after)
         {
-            type_print_qualifiers(printer, type_qualifiers(frame.type));
+            type_print_qualifiers(printer, type_qualifiers(frame.type), type_extended_qualifiers(table, frame.type));
             if (!frame.saved)
             {
                 type_print_text(printer, " ");
@@ -6301,9 +6574,10 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
     {
         // An aliased level's name already covers its own declarator suffix (`A` for `int[4]`, `P` for `int *`),
         // including under another level's qualifiers (#992).
+        const TypeId spelled = type_strip_alignment(table, frame.type);
         const TypeId type = type_strip_aligned(table, frame.type);
         const TypeId unqualified = type_unqualified(type);
-        const bool aliased = type_print_aliased(printer, type, frame.step);
+        const bool aliased = type_print_aliased(printer, spelled, frame.step) || (spelled != type && type_print_aliased(printer, type, frame.step));
         const uint32_t parentheses = !printer->empty ? type_print_parentheses(printer, type, aliased) : 0;
         for (uint32_t i = 0; i < parentheses; i += 1)
         {

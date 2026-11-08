@@ -447,7 +447,7 @@ static uint32_t abi_benchmark_dependencies(const TypeTable* table, uint32_t inde
 {
     const uint8_t kind = table->types.kind[index];
     uint32_t result = 0;
-    if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ATOMIC)
+    if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED || kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ATOMIC)
     {
         dependencies[0] = table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT;
         result = 1;
