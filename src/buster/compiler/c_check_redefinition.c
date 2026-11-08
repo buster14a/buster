@@ -14,6 +14,10 @@ typedef enum CheckRedeclarationKind
     CHECK_REDECLARATION_PARAMETER,
     CHECK_REDECLARATION_STATIC,
     CHECK_REDECLARATION_NON_STATIC,
+    // A typedef's redefinition with another type (#1447, phase 2): "typedef redefinition with different types ('N' vs 'O')".
+    CHECK_REDECLARATION_TYPEDEF,
+    // A name redeclared as another kind of entity (#1447, phase 2): "redefinition of 'X' as different kind of symbol".
+    CHECK_REDECLARATION_KIND,
 } CheckRedeclarationKind;
 
 // Whether the declaration of `token`, a declarator's name, says extern or __private_extern__: a storage-class specifier
@@ -71,7 +75,14 @@ static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t 
         const uint32_t current_definition = reader->definition_origins != NULL ? reader->definition_origins[token] : 0;
         const bool object = kind == C_BINDING_OBJECT;
         const bool function = kind == C_BINDING_FUNCTION;
-        if (same_kind && same_tls && (object || function))
+        // Another kind of entity's, and a typedef's of another type (#1447, phase 2): clang's notes say "definition" for
+        // both.
+        if (!same_kind || (kind == C_BINDING_TYPEDEF && compatible == TYPE_ANSWER_NO))
+        {
+            detail = same_kind ? CHECK_REDECLARATION_TYPEDEF : CHECK_REDECLARATION_KIND;
+            note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
+        }
+        else if (same_kind && same_tls && (object || function))
         {
             if (object && compatible == TYPE_ANSWER_NO)
             {

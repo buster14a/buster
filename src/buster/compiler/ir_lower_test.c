@@ -2446,6 +2446,231 @@ static void ir_lower_test_entry(IrLowerTestStream* stream, uint8_t kind, uint8_t
     stream->count += 1;
 }
 
+static void ir_lower_test_sources(IrLowerTestTally* tally)
+{
+    IrLowerTestStream stream = { 0 };
+    const uint8_t local_classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I8,
+        BUSTER_TYPED_CLASS_F64,
+        BUSTER_TYPED_CLASS_I32,
+    };
+    const uint8_t local_flags[] = { 0, 0, 0, 0, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, 0, 0, 0, 0 };
+    const AbiLocation parameters[] = {
+        { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
+        { .registers = { BUSTER_ABI_RSI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
+    };
+    const uint32_t assigned[] = { 2, 3, 6, 7, 4, 1, 3 };
+    const uint64_t literals[] = { 29, 11, 0xfb, UINT64_C(0x400c000000000000), 3, 17, 19 };
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(assigned); k += 1)
+    {
+        const uint32_t local = assigned[k];
+        if (k + 1 == BUSTER_ARRAY_LENGTH(assigned))
+        {
+            ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+            ir_lower_test_entry(&stream, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
+        }
+        else
+        {
+            ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, local_classes[local], literals[k]);
+        }
+        ir_lower_test_entry(&stream, BUSTER_TYPED_SET_LOCAL, local_classes[local], local);
+    }
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+    const uint32_t branch = stream.count;
+    ir_lower_test_entry(&stream, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_U64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 23);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, 5);
+    for (uint32_t read = 0; read < 2; read += 1)
+    {
+        ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, 5);
+        ir_lower_test_entry(&stream, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I32, 0);
+    }
+    const uint32_t loop = stream.count;
+    stream.values[branch] = loop;
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 5);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, 8);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_U64, loop);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
+    const Tier0Function source = {
+        .kinds = stream.kinds,
+        .classes = stream.classes,
+        .values = stream.values,
+        .count = stream.count,
+        .local_classes = local_classes,
+        .local_flags = local_flags,
+        .local_count = BUSTER_ARRAY_LENGTH(local_classes),
+        .parameters = parameters,
+        .parameter_count = BUSTER_ARRAY_LENGTH(parameters),
+        .result = { .kind = BUSTER_ABI_RESULT_REGISTERS, .registers = { BUSTER_ABI_RAX, BUSTER_ABI_REGISTER_NONE } },
+    };
+    Arena output = arena_reserve(1ull << 20);
+    Arena plain_output = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        IrFunction plain = { 0 };
+        IrFunction described = { 0 };
+        const IrCheck plain_check = ir_lower_typed_target_pieces(&source, IR_I64, 1, 0, &plain_output, &scratch, &plain, scalar != 0);
+        const uint64_t poisoned_bytes = 1ull << 18;
+        const uint64_t reused = scratch.length;
+        uint8_t* poison = arena_push(&scratch, poisoned_bytes, 1);
+        if (poison != NULL)
+        {
+            memset(poison, 0xa5, poisoned_bytes);
+        }
+        arena_pop_to(&scratch, reused);
+        const IrCheck debug_check = ir_lower_typed_target_pieces_sources(&source, IR_I64, 1, 0, &output, &scratch, &described, scalar != 0);
+        bool valid = ir_lower_test_expect(tally, poison != NULL && plain_check.error == IR_OK && debug_check.error == IR_OK && described.debug != NULL,
+                                          "source-aware lowering accepts the scalar admission fixture with poisoned reused scratch", 0, scalar);
+        if (valid)
+        {
+            valid = ir_lower_test_equal(&plain, &described) && plain.debug == NULL && described.debug->scalar_count == 4;
+            const IrDebugScalar expected[] = {
+                { .local = 0, .entry = BUSTER_IR_NONE, .kind = IR_DEBUG_PARAMETER, .bytes = 8 },
+                { .value = 29, .local = 2, .entry = 1, .kind = IR_DEBUG_CONSTANT, .bytes = 4 },
+                { .value = 0xfb, .local = 6, .entry = 5, .kind = IR_DEBUG_CONSTANT, .bytes = 1 },
+                { .value = UINT64_C(0x400c000000000000), .local = 7, .entry = 7, .kind = IR_DEBUG_CONSTANT, .bytes = 8 },
+            };
+            for (uint32_t k = 0; valid && k < BUSTER_ARRAY_LENGTH(expected); k += 1)
+            {
+                const IrDebugScalar actual = described.debug->scalars[k];
+                valid = actual.local == expected[k].local && actual.entry == expected[k].entry && actual.kind == expected[k].kind &&
+                        actual.bytes == expected[k].bytes && actual.value == expected[k].value;
+            }
+            for (uint32_t local = 0; valid && local < source.local_count; local += 1)
+            {
+                valid = described.debug->locals[local] == local;
+            }
+            ir_lower_test_expect(tally, valid, "debug admission changed IR, lost exact literal bits, or admitted a reassigned/addressed/conditional local", 0, scalar);
+            const IrDebugInfo* debug = described.debug;
+            bool bindings = debug->binding_count == 11 && debug->first_block_end == branch + 1 &&
+                            debug->bindings[0].local == 0 && debug->bindings[0].entry == BUSTER_IR_NONE && debug->bindings[0].kind == IR_DEBUG_BIND_VALUE &&
+                            described.op[debug->bindings[0].value] == IR_PARAM && described.a[debug->bindings[0].value] == 0 &&
+                            debug->bindings[3].local == 3 && debug->bindings[3].entry == 3 && debug->bindings[3].kind == IR_DEBUG_BIND_CONSTANT && debug->bindings[3].literal == 11 &&
+                            debug->bindings[8].local == 3 && debug->bindings[8].entry == 14 && debug->bindings[8].kind == IR_DEBUG_BIND_VALUE &&
+                            described.op[debug->bindings[8].value] == IR_TRUNC;
+            for (uint32_t local = 0; bindings && local < source.local_count; local += 1)
+            {
+                const uint8_t admitted = local == 4 ? 0 : local == 5 || local == 8 ? BUSTER_IR_DEBUG_BIND_REGIONS : BUSTER_IR_DEBUG_BIND_ENTRY;
+                bindings = debug->binding_flags[local] == admitted;
+            }
+            ir_lower_test_expect(tally, bindings, "assignment events lost an initial parameter, a later unknown write, or the branch/loop admission distinction", 0, scalar);
+            const bool regions = debug->region_count == 2 && debug->regions[0].local == 5 && debug->regions[0].block == 2 &&
+                                 debug->regions[0].begin == branch + 3 && debug->regions[0].end == loop &&
+                                 debug->regions[0].kind == IR_DEBUG_BIND_CONSTANT && debug->regions[0].literal == 23 &&
+                                 debug->regions[1].local == 8 && debug->regions[1].block == 3 && debug->regions[1].begin == loop + 2 &&
+                                 debug->regions[1].end == loop + 4 && debug->regions[1].kind == IR_DEBUG_BIND_CONSTANT && debug->regions[1].literal == 5;
+            ir_lower_test_expect(tally, regions, "branch/loop assignments have disjoint block windows and repeated real reads share one witness", 0, scalar);
+            const uint64_t required = plain_output.length;
+            arena_pop_to(&output, 0);
+            Arena bounded = output;
+            bounded.capacity = required;
+            IrFunction sentinel = { .instruction_count = 123, .block_count = 17 };
+            const IrFunction before = sentinel;
+            const uint64_t scratch_mark = scratch.length;
+            const IrCheck refused = ir_lower_typed_target_pieces_sources(&source, IR_I64, 1, 0, &bounded, &scratch, &sentinel, scalar != 0);
+            ir_lower_test_expect(tally, refused.error == IR_ERROR_MEMORY && bounded.length == 0 && scratch.length == scratch_mark &&
+                                       memcmp(&before, &sentinel, sizeof(sentinel)) == 0,
+                                 "source sidecar exhaustion did not roll back the whole lowering", 0, scalar);
+        }
+        arena_pop_to(&output, 0);
+        arena_pop_to(&plain_output, 0);
+        // The first typed block can itself be a loop header. Its assignments are not one-time definitions merely
+        // because their entry numbers precede the first control transfer; an unchanged incoming parameter still is.
+        stream.values[loop + 3] = 0;
+        IrFunction reentered = { 0 };
+        const IrCheck reentered_check = ir_lower_typed_target_pieces_sources(&source, IR_I64, 1, 0, &output, &scratch, &reentered, scalar != 0);
+        bool excluded = reentered_check.error == IR_OK && reentered.debug != NULL && reentered.debug->binding_count == 11;
+        for (uint32_t local = 0; excluded && local < source.local_count; local += 1)
+        {
+            excluded = reentered.debug->binding_flags[local] == (local == 0 ? BUSTER_IR_DEBUG_BIND_ENTRY : local == 4 ? 0 : BUSTER_IR_DEBUG_BIND_REGIONS);
+        }
+        ir_lower_test_expect(tally, excluded, "a backedge into the first source block restricts written locals to witnessed regions", 0, scalar);
+        stream.values[loop + 3] = loop;
+        arena_pop_to(&output, 0);
+    }
+    arena_release(&scratch);
+    arena_release(&plain_output);
+    arena_release(&output);
+}
+
+static void ir_lower_test_region_lifetimes(IrLowerTestTally* tally)
+{
+    IrLowerTestStream stream = { 0 };
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 11);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I64, 18);
+    for (uint32_t read = 0; read < 2; read += 1)
+    {
+        ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, 1);
+        ir_lower_test_entry(&stream, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0);
+    }
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 22);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 33);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_I64, 0);
+    const uint8_t classes[] = { BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I64 };
+    const uint8_t flags[] = { 0, 0 };
+    const AbiLocation parameter = { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS };
+    const uint32_t lifetime_entries[] = { 0, 12, 14, 18 };
+    const uint32_t lifetime_locals[] = { 1, 1 | BUSTER_TIER0_LIFETIME_END, 1, 1 | BUSTER_TIER0_LIFETIME_END };
+    const Tier0Function source = {
+        .kinds = stream.kinds, .classes = stream.classes, .values = stream.values, .count = stream.count,
+        .local_classes = classes, .local_flags = flags, .local_count = BUSTER_ARRAY_LENGTH(classes),
+        .parameters = &parameter, .parameter_count = 1,
+        .result = { .kind = BUSTER_ABI_RESULT_REGISTERS, .registers = { BUSTER_ABI_RAX, BUSTER_ABI_REGISTER_NONE } },
+        .lifetime_entries = lifetime_entries, .lifetime_locals = lifetime_locals, .lifetime_count = BUSTER_ARRAY_LENGTH(lifetime_entries),
+    };
+    Arena output = arena_reserve(1ull << 20);
+    Arena plain_output = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        IrFunction function = { 0 };
+        IrFunction plain = { 0 };
+        const IrCheck described = ir_lower_typed_target_pieces_sources(&source, IR_I64, 1, 0, &output, &scratch, &function, scalar != 0);
+        const IrCheck control = ir_lower_typed_target_pieces(&source, IR_I64, 1, 0, &plain_output, &scratch, &plain, scalar != 0);
+        bool exact = described.error == IR_OK && control.error == IR_OK && ir_lower_test_equal(&function, &plain) && function.debug != NULL &&
+                     function.debug->region_count == 4 && function.debug->binding_flags[0] == BUSTER_IR_DEBUG_BIND_ENTRY &&
+                     function.debug->binding_flags[1] == BUSTER_IR_DEBUG_BIND_REGIONS;
+        const uint32_t begins[] = { 2, 4, 10, 16 };
+        const uint32_t ends[] = { 4, 9, 12, 18 };
+        const uint64_t literals[] = { 11, 0, 22, 33 };
+        for (uint32_t k = 0; exact && k < BUSTER_ARRAY_LENGTH(begins); k += 1)
+        {
+            const IrDebugRegion region = function.debug->regions[k];
+            exact = region.local == 1 && region.block == (k == 0 ? 1u : 2u) && region.begin == begins[k] && region.end == ends[k] &&
+                    region.bytes == 8 && region.type == IR_I64 && region.next == (k == 1 ? 2u : k == 2 ? 3u : BUSTER_IR_NONE);
+            exact = exact && (k == 1 ? region.kind == IR_DEBUG_BIND_VALUE && region.value < function.instruction_count &&
+                             function.op[region.value] == IR_LOAD && function.debug->origins[region.value] == 4 :
+                             region.kind == IR_DEBUG_BIND_CONSTANT && region.literal == literals[k]);
+        }
+        ir_lower_test_expect(tally, exact, "source regions preserve read witnesses, exact next-assignment kills and lifetime gaps without changing IR", 0, scalar);
+        arena_pop_to(&plain_output, 0);
+        arena_pop_to(&output, 0);
+    }
+    arena_release(&scratch);
+    arena_release(&plain_output);
+    arena_release(&output);
+}
+
 static void ir_lower_test_objects(IrLowerTestTally* tally)
 {
     IrLowerTestStream stream =
@@ -4095,6 +4320,8 @@ static int run_ir_lower_tests(int argc, char** argv)
         };
         ir_simd_lower_tests(&tally);
         ir_lower_test_fixtures(&tally);
+        ir_lower_test_sources(&tally);
+        ir_lower_test_region_lifetimes(&tally);
         ir_lower_test_cas_parameter(&tally);
         ir_lower_test_failures(&tally);
         ir_lower_test_local_roles(&tally);

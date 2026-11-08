@@ -445,6 +445,30 @@ static const CheckDriverDefaultWarningFixture check_driver_shift_count_fixtures[
         .options = { "-Wall" },
         .warnings = 4,
     },
+    // A statement expression's statements warn where clang builds them (#1447): between what its enclosing expression built
+    // before it and after it, its last value once.
+    {
+        .name = "a statement expression's statements warn between its enclosing expression's operands",
+        .source = "int f(int x){int a=x/0+({int t=1/0;x%0;})+(x<<33);int b=({x<<34;})+x/0;int c=({int y=({2/0;3;});y/0;})+(x<<35);"
+                  "int d=({char ch=300;ch;})+x/0;int e=({x,1;})+1/0;x/0,({x<<36;});return a+b+c+d+e;}\n",
+        .warnings = 18,
+    },
+    {
+        .name = "a statement expression's last value warns once",
+        .source = "int g(int x){return ({x/0;})+(1<<32);}int h(int x){return ({x/0;});}void k(int x){({x/0;});({1;x%0;});}\n",
+        .warnings = 8,
+    },
+    {
+        .name = "a statement expression's conditions warn before their bodies and its later statements",
+        .source = "int f(int x){int c=({if(1/0)x<<34;for(;x/0;){}5;})+6/0;if(({x/0;})+8/0)return 1;return c+({x/0;});}\n",
+        .warnings = 8,
+    },
+    {
+        .name = "statement expressions' order under -Wall",
+        .source = "unsigned u;int g(int);int f(int x){int j=({u<x;1;})+({g(1);x/0;});return j+x/0+({int t=1/0;x%0;});}\n",
+        .options = { "-Wall" },
+        .warnings = 6,
+    },
     {
         .name = "unused-value suppression keeps the reordered counts",
         .source = "int f(int x){return (x,1.5)?x<<32:0;}int g(int x){if(1/0)return x<<32;return 0;}\n",

@@ -308,13 +308,13 @@ features:
   configurations must give clang's `__has_builtin`, and `__has_constexpr_builtin`
   wherever its constant evaluator folds, and buster's table's gates must match
   clang's (the builtin targets check). Its plain library names are pinned to
-  Clang 23.1.4, CI's reference: a different release prints
-  `expected clang 23.1.4, found …`, and only the plain names that release's
-  table is known to classify differently (the named list
-  `cbuiltin_library_table_differences`: 23.1.5's `strlcat` and `strlcpy`) are
-  skipped, so every version-independent answer and every difference no named
-  release explains is still checked, and a fixture reruns the check under a
-  fake clang 23.1.5 so the skip path is exercised under the reference too,
+  Clang 23.1.4's official build, CI's reference: a different build prints
+  `expected clang 23.1.4, found …`, and only the plain names that build's
+  vendor is known to classify differently (the named list
+  `cbuiltin_library_table_differences`: Debian's and Ubuntu's packages drop
+  `strlcat` and `strlcpy`) are skipped, so every version-independent answer and
+  every difference no named build explains is still checked, and a fixture
+  reruns the check under a fake Ubuntu clang 23.1.6 so the skip path is exercised under the reference too,
   reaching the real clang through a path with a space, quotes and `$;*`
   (`clang_release_wrapper`);
 - buster's own headers (`src/buster/include`) against clang's, for each header,

@@ -271,6 +271,8 @@ static bool check_tier1_frame(const Tier1EmitResult* emitted, uint32_t count, ui
     return valid;
 }
 
+#include "c_check_tier1_debug.c"
+
 static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
                                              bool rematerialize, bool gvn, bool certify, bool sources, Arena* output, EmittedCode* code,
                                              CheckTier1Counts* counts, const CheckTier1Fault* fault)
@@ -286,7 +288,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED)
     {
         // A vector wider than the target moves whole is taken, and split below (#1624).
-        const IrCheck check = ir_lower_typed_target_pieces(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered, scalar);
+        const IrCheck check = sources ? ir_lower_typed_target_pieces_sources(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered, scalar) :
+                                       ir_lower_typed_target_pieces(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered, scalar);
         outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
         stage = outcome.stage;
@@ -465,6 +468,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .symbol_access = function->symbol_access,
             .symbol_count = function->symbol_count,
             .certify = certify,
+            .sources = sources,
         };
         uint32_t node = BUSTER_IR_NONE;
         Tier1EmitError error = tier1_emit_function(&plan, &options, lane->allowed, &lane->steps[1], scratch, &emitted, &node);
@@ -499,12 +503,9 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     LinkReference* references = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)emitted.reference_count + 1) : 0;
     // Each label's first record, where the emission defines its symbol (#789).
     uint32_t* labels = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)emitted.label_count + 1) : 0;
-    // Its frame's events (#1056), and with -g its source events: the body's start and the epilogue's (EmittedCode's).
+    // Its frame's events (#1056); with -g, source/storage ranges are published only after final record scheduling.
     EmissionFrameEvent* frames = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, EmissionFrameEvent, (uint64_t)emitted.frame_event_count + 1) : 0;
-    uint32_t* source_records = stage == CHECK_TIER1_COMPILED && sources ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, 2) : 0;
-    uint32_t* source_origins = stage == CHECK_TIER1_COMPILED && sources ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, 1) : 0;
-    if (stage == CHECK_TIER1_COMPILED && (records == 0 || branches == 0 || targets == 0 || references == 0 || labels == 0 || frames == 0 ||
-                                          (sources && (source_records == 0 || source_origins == 0))))
+    if (stage == CHECK_TIER1_COMPILED && (records == 0 || branches == 0 || targets == 0 || references == 0 || labels == 0 || frames == 0))
     {
         arena_pop_to(output, mark);
         outcome = check_tier1_failure(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_OUTPUT, BUSTER_IR_NONE, 0);
@@ -559,8 +560,10 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         // --tier1-schedule=post (#172): each block's records reordered, within the cuts the code's columns and events
         // make; the body's start and the epilogue's are cuts with or without -g, so that -g doesn't change the code.
         CheckTier1ScheduleResult scheduled = { .verified = true, .ready = true };
+        uint32_t* record_order = NULL;
         if (lane->schedule == BUSTER_CHECK_TIER1_SCHEDULE_POST)
         {
+            record_order = sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)selected->count + 1) : NULL;
             const uint32_t anchors[2] = { emitted.body_record, epilogue };
             const CheckTier1ScheduleCode schedule = {
                 .records = records,
@@ -576,17 +579,15 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
                 .frame_count = emitted.frame_event_count,
                 .anchors = anchors,
                 .anchor_count = 2,
+                .record_order = record_order,
             };
-            scheduled = check_tier1_schedule_code(scratch, &schedule, !scalar, certify);
+            scheduled = sources && record_order == NULL ? (CheckTier1ScheduleResult){ 0 } : check_tier1_schedule_code(scratch, &schedule, !scalar, certify || sources);
             counts->schedule_blocks = scheduled.blocks;
             counts->schedule_moved = scheduled.moved;
         }
-        if (sources)
-        {
-            source_records[0] = emitted.body_record;
-            source_records[1] = epilogue;
-            source_origins[0] = BUSTER_EMISSION_NO_ORIGIN;
-        }
+        CheckTier1Debug debug = { 0 };
+        const bool debug_ready = !sources || !published || !scheduled.ready || !scheduled.verified ||
+                                 check_tier1_debug(function, ir, &emitted, record_order, epilogue, !scalar, output, scratch, &debug);
         *code = (EmittedCode){
             .records = records,
             .count = selected->count,
@@ -597,9 +598,12 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .reference_count = emitted.reference_count,
             .label_records = labels,
             .label_count = emitted.label_count,
-            .source_records = source_records,
-            .source_origins = source_origins,
-            .source_count = sources ? 1 : 0,
+            .local_count = sources ? function->local_count : 0,
+            .local_ranges = debug.local_ranges,
+            .local_range_count = debug.local_range_count,
+            .source_records = debug.source_records,
+            .source_origins = debug.source_origins,
+            .source_count = debug.source_count,
             .frames = emitted.frame_event_count != 0 ? frames : 0,
             .frame_count = emitted.frame_event_count,
             .frame_status = EMITTED_FRAME_DESCRIBED,
@@ -610,7 +614,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         const bool framed = emitted.frame_event_count != 0;
         counts->open_frames = framed && !closed;
         counts->return_tails = !framed ? 0 : closed ? emitted.exit_count - 1 : emitted.exit_count;
-        outcome = !scheduled.ready ? check_tier1_failure(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_SCHEDULE, BUSTER_IR_NONE, 0) :
+        outcome = !debug_ready ? check_tier1_failure(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_OUTPUT, BUSTER_IR_NONE, 0) :
+                  !scheduled.ready ? check_tier1_failure(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_SCHEDULE, BUSTER_IR_NONE, 0) :
                                      check_tier1_step(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_PUBLICATION,
                                                       !published            ? BUSTER_CHECK_TIER1_FRAME_PUBLICATION :
                                                       !scheduled.verified ? BUSTER_CHECK_TIER1_SCHEDULE : 0,

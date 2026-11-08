@@ -332,6 +332,10 @@ static IrError ir_licm_reorder(IrLicmWork* work, Arena* scratch, IrFunction* res
         view.call_count = calls;
         error = ok ? IR_OK : IR_ERROR_MEMORY;
     }
+    if (error == IR_OK && !ir_debug_create(scratch, &view, f->debug))
+    {
+        error = IR_ERROR_MEMORY;
+    }
     if (error == IR_OK)
     {
         for (uint32_t b = 0; b < f->block_count; b += 1)
@@ -374,11 +378,17 @@ static IrError ir_licm_reorder(IrLicmWork* work, Arena* scratch, IrFunction* res
         {
             values[order[i]] = i;
         }
+        ir_debug_remap(f, &view, values, NULL, NULL);
         uint32_t extra = 0;
         uint32_t call = 0;
         for (uint32_t out = 0; out < count; out += 1)
         {
             const uint32_t i = order[out];
+            if (view.debug != NULL && work->destination[i] != work->ir.cfg.instruction_blocks[i])
+            {
+                // The hoisted computation may execute before its original lexical block is entered.
+                view.debug->origins[out] = BUSTER_IR_NONE;
+            }
             const uint32_t mask = ir_value_mask(f, i);
             view.op[out] = f->op[i];
             view.type[out] = f->type[i];

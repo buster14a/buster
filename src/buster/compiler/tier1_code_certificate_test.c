@@ -716,6 +716,333 @@ static void tier1_code_certificate_compile(Tier1EmitTest* test, bool vector, boo
     arena_pop_to(&test->input, 0);
 }
 
+// Debug definitions use the same complete code proof even when --verify is absent. Reuse the call fixture with RAX
+// excluded from allocation, forcing its result into another register only after the ABI result copy completes.
+// Mutate the actual copy's bytes and its origin, not a fabricated definition descriptor.
+static void tier1_code_certificate_debug(Tier1EmitTest* test, bool vector)
+{
+    IrFunction function = { 0 };
+    uint32_t call = BUSTER_IR_NONE;
+    const bool created = tier1_code_certificate_function(&test->input, &function, &call);
+    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    IrDominance dominance = { 0 };
+    const bool dominated = valid && tier1_terminal_dominance(test, &function, vector, &dominance);
+    Tier1SelectPlan plan = { 0 };
+    uint32_t node = BUSTER_IR_NONE;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const Tier1EmitOptions options = {
+        .register_mask = (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDI),
+        .vector = vector,
+        .sources = true,
+    };
+    Tier1EmitResult emitted = { 0 };
+    const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+    const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK && emitted.debug_definitions != NULL;
+    tier1_emit_test_expect(test, certified, "source metadata obtains a complete emitted-code proof without requesting the allocation verifier");
+    uint32_t call_record = UINT32_MAX;
+    for (uint32_t r = 0; certified && r < emitted.code.count; r += 1)
+    {
+        if (emitted.origins[r] == tier1_origin(TIER1_ORIGIN_NODE, call) && (emitted.code.records[r].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_CALL_REL32)
+        {
+            call_record = r;
+        }
+    }
+    const Tier1DebugDefinition definition = certified ? emitted.debug_definitions[call] : (Tier1DebugDefinition){ .first = UINT32_MAX, .end = UINT32_MAX };
+    const bool bounded = certified && call_record < emitted.code.count && definition.first == call_record && definition.end == call_record + 2 && definition.end <= emitted.code.count;
+    const X86Instruction called = bounded ? emitted.code.records[call_record] : (X86Instruction){ 0 };
+    const X86Instruction copied = bounded ? emitted.code.records[call_record + 1] : (X86Instruction){ 0 };
+    const bool completed = bounded && definition.bytes == 8 && definition.class == BUSTER_TIER1_ALLOCATE_GPR && definition.reg < 16 && definition.reg != X86_REGISTER_RAX &&
+                           copied.form == X86_FORM_MOV_R64_RM64 && copied.mode == BUSTER_X86_REGISTER_DIRECT && copied.reg == definition.reg && copied.rm == X86_REGISTER_RAX;
+    tier1_emit_test_expect(test, completed, "a scalar call result is defined only after its actual ABI result copy, never at the suspended call's PC");
+    bool absent = certified;
+    for (uint32_t n = 0; absent && n < function.instruction_count; n += 1)
+    {
+        if (function.op[n] == IR_PARAM || function.op[n] == IR_RET)
+        {
+            absent = emitted.debug_definitions[n].first == UINT32_MAX && emitted.debug_definitions[n].end == UINT32_MAX;
+        }
+    }
+    tier1_emit_test_expect(test, absent, "entry parameters and returns do not acquire fabricated scalar definition kernels");
+    Tier1EmitOptions plain_options = options;
+    plain_options.sources = false;
+    Tier1EmitResult plain = { 0 };
+    const Tier1EmitError plain_error = planned ? tier1_emit_function(&plan, &plain_options, test->allowed, &test->output, &test->scratch, &plain, &node) : TIER1_EMIT_INVALID;
+    const bool same = certified && plain_error == TIER1_EMIT_OK && plain.debug_definitions == NULL && plain.origins == NULL &&
+                      plain.code.count == emitted.code.count && plain.code.branch_count == emitted.code.branch_count && plain.reference_count == emitted.reference_count &&
+                      memcmp(plain.code.records, emitted.code.records, (uint64_t)plain.code.count * sizeof(X86Instruction)) == 0 &&
+                      memcmp(plain.code.branches, emitted.code.branches, (uint64_t)plain.code.branch_count * 4) == 0 &&
+                      memcmp(plain.code.targets, emitted.code.targets, (uint64_t)plain.code.branch_count * 4) == 0 &&
+                      memcmp(plain.references, emitted.references, (uint64_t)plain.reference_count * sizeof(LinkReference)) == 0;
+    tier1_emit_test_expect(test, same, "proving debug definitions without --verify changes no instructions, branches or symbolic references");
+    bool room = completed;
+    Tier1DebugDefinition* candidates = room ? ir_allocate(&test->input, function.instruction_count, sizeof(Tier1DebugDefinition), &room) : NULL;
+    tier1_emit_test_expect(test, room, "the call definition fixture supplies candidate storage for real emitted-code mutations");
+    for (uint32_t mutant = 0; room && mutant < 4; mutant += 1)
+    {
+        const uint32_t at = call_record + 1;
+        const uint32_t origin = emitted.origins[at];
+        switch (mutant)
+        {
+            case 0: emitted.code.records[at].form = X86_FORM_MOV_R32_RM32; break;
+            case 1: emitted.code.records[at].rm = X86_REGISTER_RDX; break;
+            case 2: emitted.origins[at] = tier1_origin(TIER1_ORIGIN_NODE, call + 1); break;
+            case 3: emitted.code.records[call_record].form = X86_FORM_NOP; break;
+        }
+        const uint64_t output_mark = test->output.length;
+        const uint64_t scratch_mark = test->scratch.length;
+        Tier1CertEmittedStats stats = { 0 };
+        const Tier1CertEmittedReason reason = tier1_certificate_emitted_check_debug(&plan, &emitted, &test->output, &test->scratch, candidates, NULL, NULL, &stats);
+        tier1_emit_test_expect(test, reason >= TIER1_CERT_EMITTED_REFUSED && test->output.length == output_mark && test->scratch.length == scratch_mark,
+                               "wrong result width, wrong value, shifted completion origin and a missing call cannot prove debug definitions");
+        emitted.code.records[at] = copied;
+        emitted.origins[at] = origin;
+        emitted.code.records[call_record] = called;
+    }
+    const uint32_t position = 2 * (emitted.cfg_input.block_count - function.block_count) + 2 * call + 1;
+    const uint32_t moves = tier1_origin(TIER1_ORIGIN_MOVE, position);
+    bool argument_checked = false;
+    for (uint32_t r = 0; room && !argument_checked && r < call_record; r += 1)
+    {
+        const X86Instruction record = emitted.code.records[r];
+        const bool argument = emitted.origins[r] == moves && record.form == X86_FORM_MOV_R64_RM64 && record.mode == BUSTER_X86_REGISTER_DIRECT &&
+                              (record.reg == X86_REGISTER_RDI || record.reg == X86_REGISTER_RSI) && record.reg != record.rm;
+        if (argument)
+        {
+            emitted.code.records[r].reg = record.rm;
+            Tier1CertEmittedStats stats = { 0 };
+            const Tier1CertEmittedReason reason = tier1_certificate_emitted_check_debug(&plan, &emitted, &test->output, &test->scratch, candidates, NULL, NULL, &stats);
+            tier1_emit_test_expect(test, reason == TIER1_CERT_EMITTED_CHECK && candidates[call].first == definition.first && candidates[call].end == definition.end,
+                                   "a matching call-result kernel is still refused when the full certificate finds a stale argument value");
+            emitted.code.records[r] = record;
+            argument_checked = true;
+        }
+    }
+    tier1_emit_test_expect(test, argument_checked, "the debug definition's full value-flow refusal mutates an actual call argument move");
+    arena_pop_to(&test->output, 0);
+    arena_pop_to(&test->scratch, 0);
+    arena_pop_to(&test->input, 0);
+}
+
+static void tier1_code_certificate_debug_straight(Tier1EmitTest* test, bool vector)
+{
+    for (uint32_t alias = 0; alias < 2; alias += 1)
+    {
+        const IrSizes sizes = { .instruction_count = alias ? 3 : 5, .block_count = 1, .parameter_count = alias ? 1 : 2 };
+        IrFunction function = { 0 };
+        bool valid = ir_create(&test->input, &sizes, &function) == IR_OK;
+        if (valid)
+        {
+            function.result_type = IR_I64;
+            function.incoming = (AbiCall){ .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .integer_registers = (uint8_t)sizes.parameter_count };
+            function.block_offsets[1] = sizes.instruction_count;
+            function.parameter_types[0] = IR_I64;
+            tier1_emit_test_node(&function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE);
+            if (alias)
+            {
+                tier1_emit_test_node(&function, 1, IR_COPY, IR_I64, 0, BUSTER_IR_NONE);
+                tier1_emit_test_node(&function, 2, IR_RET, IR_VOID, 1, BUSTER_IR_NONE);
+            }
+            else
+            {
+                function.parameter_types[1] = IR_I64;
+                tier1_emit_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE);
+                tier1_emit_test_node(&function, 2, IR_XOR, IR_I64, 0, 1);
+                tier1_emit_test_node(&function, 3, IR_SUB, IR_I64, 2, 0);
+                tier1_emit_test_node(&function, 4, IR_RET, IR_VOID, 3, BUSTER_IR_NONE);
+            }
+        }
+        valid = valid && ir_verify_scalar(&function, &test->scratch, NULL).error == IR_OK;
+        IrDominance dominance = { 0 };
+        valid = valid && tier1_terminal_dominance(test, &function, vector, &dominance);
+        Tier1SelectPlan plan = { 0 };
+        uint32_t error_node = BUSTER_IR_NONE;
+        valid = valid && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &error_node) == TIER1_SELECT_OK;
+        Tier1EmitOptions options = {
+            .register_mask = alias ? 1u << X86_REGISTER_RDI : (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDI),
+            .vector = vector,
+            .sources = true,
+        };
+        Tier1EmitResult emitted = { 0 };
+        valid = valid && tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &error_node) == TIER1_EMIT_OK;
+        valid = valid && !emitted.general && emitted.certified && emitted.debug_definitions != NULL && emitted.body_record == 0;
+        const uint32_t value = alias ? 1 : 2;
+        const Tier1DebugDefinition definition = valid ? emitted.debug_definitions[value] : (Tier1DebugDefinition){ .first = BUSTER_IR_NONE, .end = BUSTER_IR_NONE };
+        const bool proven = valid && (alias ? emitted.code.node_first[1] == emitted.code.node_first[2] && definition.first == BUSTER_IR_NONE && definition.end == BUSTER_IR_NONE :
+                                     definition.first == emitted.code.node_first[2] && definition.end == emitted.code.node_first[3] && definition.first < definition.end && definition.bytes == 8);
+        tier1_emit_test_expect(test, proven, alias ? "an actual vanished straight-line copy retains operand ownership but invents no definition records" :
+                                                  "straight-line scalar definitions have complete checked kernels and actual operand owners");
+        options.sources = false;
+        Tier1EmitResult plain = { 0 };
+        const bool plain_ok = valid && tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &plain, &error_node) == TIER1_EMIT_OK;
+        tier1_emit_test_expect(test, plain_ok && plain.debug_definitions == NULL && plain.origins == NULL && plain.code.count == emitted.code.count &&
+                               memcmp(plain.code.records, emitted.code.records, (uint64_t)plain.code.count * sizeof(X86Instruction)) == 0,
+                               "straight-line source proofs leave every emitted instruction unchanged");
+        options.sources = true;
+        if (proven && !alias)
+        {
+            const uint64_t mark = test->output.length;
+            Tier1EmitResult candidate = emitted;
+            const X86Instruction saved = emitted.code.records[definition.first];
+            emitted.code.records[definition.first] = (X86Instruction){ .form = X86_FORM_NOP };
+            const Tier1EmitError corrupted = tier1_debug_straight(&plan, &options, &test->output, &candidate);
+            tier1_emit_test_expect(test, corrupted == TIER1_EMIT_CERTIFICATE && candidate.debug_definitions == NULL,
+                                   "a wrong concrete straight-line kernel refuses every definition claim");
+            emitted.code.records[definition.first] = saved;
+            arena_pop_to(&test->output, mark);
+
+            // Keep every kernel exactly regenerated, but make xor's output overwrite p0 before sub reads p0.
+            // Matching destination fragments and direct-register claims cannot substitute for this operand check.
+            uint8_t registers[5];
+            uint8_t fragments[8];
+            X86Instruction records[32];
+            uint32_t origins[32];
+            uint32_t first[6];
+            bool matched = emitted.allocation.fragment_count <= BUSTER_ARRAY_LENGTH(fragments);
+            memcpy(registers, emitted.allocation.value_registers, sizeof(registers));
+            if (matched)
+            {
+                memcpy(fragments, emitted.allocation.registers, emitted.allocation.fragment_count);
+            }
+            registers[2] = registers[0];
+            for (uint32_t interval = 0; matched && interval < emitted.prepared.allocation.count; interval += 1)
+            {
+                if (emitted.prepared.allocation.values[interval] == 2)
+                {
+                    fragments[emitted.allocation.fragment_offsets[interval]] = registers[2];
+                }
+            }
+            uint32_t count = 0;
+            for (uint32_t node = 0; matched && node < function.instruction_count; node += 1)
+            {
+                first[node] = count;
+                if (!plan.covered[node])
+                {
+                    const Tier1SelectHoles holes = tier1_select_holes(&plan, registers, node);
+                    const Tier1SelectRecords kernel = tier1_select_expand(&holes);
+                    matched = !kernel.overflowed && !kernel.requested && kernel.count <= BUSTER_ARRAY_LENGTH(records) - count;
+                    for (uint32_t r = 0; matched && r < kernel.count; r += 1)
+                    {
+                        records[count] = kernel.records[r];
+                        origins[count++] = tier1_origin(TIER1_ORIGIN_NODE, node);
+                    }
+                }
+            }
+            first[5] = count;
+            candidate = emitted;
+            candidate.allocation.value_registers = registers;
+            candidate.allocation.registers = fragments;
+            candidate.code.records = records;
+            candidate.code.node_first = first;
+            candidate.code.count = count;
+            candidate.origins = origins;
+            const Tier1EmitError ownership = matched ? tier1_debug_straight(&plan, &options, &test->output, &candidate) : TIER1_EMIT_INVALID;
+            tier1_emit_test_expect(test, matched && ownership == TIER1_EMIT_CERTIFICATE && candidate.debug_definitions == NULL,
+                                   "exactly regenerated straight-line kernels cannot prove a live operand overwritten by another SSA value");
+            arena_pop_to(&test->output, mark);
+        }
+        arena_pop_to(&test->output, 0);
+        arena_pop_to(&test->scratch, 0);
+        arena_pop_to(&test->input, 0);
+    }
+}
+
+// The existing pressure/critical-edge fixture joins two different values. Its scalar phi is usable only after
+// every incoming edge's actual copies and predecessor-associated renames pass the full code check.
+static void tier1_code_certificate_debug_phis(Tier1EmitTest* test, bool vector)
+{
+    IrFunction function = { 0 };
+    bool valid = tier1_dropped_function(&test->input, &function);
+    if (valid)
+    {
+        // Keep the entry's parameter live beside the joined value. They cannot share one destination register on
+        // the other incoming path, so at least one predecessor must make a real copy into the phi's carrier.
+        function.extra[1] = 1;
+        const uint32_t last = function.instruction_count - 1;
+        tier1_emit_test_node(&function, last, IR_ADD, IR_I64, function.block_offsets[3], 1);
+        tier1_emit_test_node(&function, function.instruction_count, IR_RET, IR_VOID, last, BUSTER_IR_NONE);
+        function.instruction_count += 1;
+        function.block_offsets[4] = function.instruction_count;
+    }
+    valid = valid && ir_verify_scalar(&function, &test->scratch, NULL).error == IR_OK;
+    IrDominance dominance = { 0 };
+    valid = valid && tier1_terminal_dominance(test, &function, vector, &dominance);
+    Tier1SelectPlan plan = { 0 };
+    uint32_t error_node = BUSTER_IR_NONE;
+    valid = valid && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &error_node) == TIER1_SELECT_OK;
+    Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .sources = true };
+    Tier1EmitResult emitted = { 0 };
+    valid = valid && tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &error_node) == TIER1_EMIT_OK;
+    valid = valid && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK && emitted.debug_phis != NULL &&
+            emitted.cfg_input.phi_count == 1 && emitted.cfg_input.phi_operand_offsets[1] == 2;
+    const uint32_t joined = valid ? function.block_offsets[3] : BUSTER_IR_NONE;
+    const uint32_t block = valid ? emitted.cfg_input.block_count - function.block_count + 3 : 0;
+    uint32_t lead = valid ? emitted.block_records[block] : 0;
+    const uint32_t end = valid ? emitted.block_records[block + 1] : 0;
+    while (valid && lead < end && tier1_cert_emitted_kind(emitted.origins[lead]) == TIER1_ORIGIN_EDGE &&
+           emitted.cfg_input.successors[emitted.origins[lead] & BUSTER_TIER1_ORIGIN_PAYLOAD] == block)
+    {
+        lead += 1;
+    }
+    const Tier1DebugPhi phi = valid ? emitted.debug_phis[joined] : (Tier1DebugPhi){ .record = BUSTER_IR_NONE, .block = BUSTER_IR_NONE };
+    tier1_emit_test_expect(test, valid && phi.record == lead && phi.record < end && phi.block == 3 && phi.bytes == 8 &&
+                           phi.class == BUSTER_TIER1_ALLOCATE_GPR && phi.reg < 16,
+                           "a scalar join receives its actual checked entry register after all predecessor copies and phi renames");
+    bool absent = valid;
+    for (uint32_t node = 0; absent && node < function.instruction_count; node += 1)
+    {
+        absent = node == joined || (emitted.debug_phis[node].record == BUSTER_IR_NONE && emitted.debug_phis[node].block == BUSTER_IR_NONE);
+    }
+    tier1_emit_test_expect(test, absent, "ordinary definitions and parameters do not acquire fabricated phi-entry claims");
+    options.sources = false;
+    Tier1EmitResult plain = { 0 };
+    const bool plain_ok = valid && tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &plain, &error_node) == TIER1_EMIT_OK;
+    tier1_emit_test_expect(test, plain_ok && plain.debug_phis == NULL && plain.origins == NULL && plain.code.count == emitted.code.count &&
+                           plain.code.branch_count == emitted.code.branch_count &&
+                           memcmp(plain.code.records, emitted.code.records, (uint64_t)plain.code.count * sizeof(X86Instruction)) == 0 &&
+                           memcmp(plain.code.branches, emitted.code.branches, (uint64_t)plain.code.branch_count * 4) == 0 &&
+                           memcmp(plain.code.targets, emitted.code.targets, (uint64_t)plain.code.branch_count * 4) == 0,
+                           "checked phi locations change no allocated instruction or control-flow bytes");
+    bool room = valid;
+    Tier1DebugDefinition* definitions = room ? ir_allocate(&test->input, function.instruction_count, sizeof(Tier1DebugDefinition), &room) : NULL;
+    Tier1DebugPhi* phis = room ? ir_allocate(&test->input, function.instruction_count, sizeof(Tier1DebugPhi), &room) : NULL;
+    tier1_emit_test_expect(test, room, "the phi checker mutation fixture supplies bounded private candidate storage");
+    if (room)
+    {
+        const uint64_t output_mark = test->output.length;
+        const uint64_t scratch_mark = test->scratch.length;
+        const uint32_t swapped[] = { emitted.cfg_input.phi_operands[1], emitted.cfg_input.phi_operands[0] };
+        Tier1EmitResult candidate = emitted;
+        candidate.cfg_input.phi_operands = swapped;
+        Tier1CertEmittedStats stats = { 0 };
+        const Tier1CertEmittedReason reason = tier1_certificate_emitted_check_debug(&plan, &candidate, &test->output, &test->scratch, definitions, phis, NULL, &stats);
+        tier1_emit_test_expect(test, reason >= TIER1_CERT_EMITTED_REFUSED && test->output.length == output_mark && test->scratch.length == scratch_mark,
+                               "swapping a join's predecessor values cannot certify the unchanged concrete edge copies");
+        uint32_t changed = 0;
+        for (uint32_t r = 0; r < emitted.code.count; r += 1)
+        {
+            const uint32_t origin = emitted.origins[r];
+            const bool edge = tier1_cert_emitted_kind(origin) == TIER1_ORIGIN_EDGE;
+            const uint32_t e = origin & BUSTER_TIER1_ORIGIN_PAYLOAD;
+            const X86Instruction saved = emitted.code.records[r];
+            const bool copy = (saved.form == X86_FORM_MOV_R64_RM64 || saved.form == X86_FORM_MOV_RM64_R64) && saved.mode == BUSTER_X86_REGISTER_DIRECT && saved.reg != saved.rm;
+            const uint32_t destination = saved.form == X86_FORM_MOV_R64_RM64 ? saved.reg : saved.rm;
+            if (edge && emitted.cfg_input.successors[e] == block && copy && destination == phi.reg)
+            {
+                emitted.code.records[r].reg = saved.rm;
+                const Tier1CertEmittedReason missing = tier1_certificate_emitted_check_debug(&plan, &emitted, &test->output, &test->scratch, definitions, phis, NULL, &stats);
+                tier1_emit_test_expect(test, missing >= TIER1_CERT_EMITTED_REFUSED && test->output.length == output_mark && test->scratch.length == scratch_mark,
+                                       "omitting an actual phi edge copy cannot publish a successful join-value proof");
+                emitted.code.records[r] = saved;
+                changed += 1;
+            }
+        }
+        tier1_emit_test_expect(test, changed != 0, "the phi mutation fixture exercises an actual copied predecessor");
+    }
+    arena_pop_to(&test->output, 0);
+    arena_pop_to(&test->scratch, 0);
+    arena_pop_to(&test->input, 0);
+}
+
 static void tier1_code_certificate_saved(Tier1EmitTest* test, bool vector, Tier1CodeCertificateCounts* counts)
 {
     IrFunction function;
@@ -1083,6 +1410,9 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
     }
     for (uint32_t variant = 0; variant < 2; variant += 1)
     {
+        tier1_code_certificate_debug(test, variant != 0);
+        tier1_code_certificate_debug_straight(test, variant != 0);
+        tier1_code_certificate_debug_phis(test, variant != 0);
         tier1_code_certificate_saved(test, variant != 0, &counts);
     }
     for (uint32_t variant = 0; variant < 2; variant += 1)

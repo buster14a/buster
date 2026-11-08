@@ -268,6 +268,10 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
         view.extra_count = (uint32_t)extras;
         error = ok ? IR_OK : IR_ERROR_MEMORY;
     }
+    if (error == IR_OK && !ir_debug_create(output, &view, f->debug))
+    {
+        error = IR_ERROR_MEMORY;
+    }
     if (error == IR_OK)
     {
         // Never remap extra in place: a phi's values, a call's arguments and a switch's block/constant indices may
@@ -312,11 +316,18 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
         {
             values[order[i]] = i;
         }
+        ir_debug_remap(f, &view, values, NULL, NULL);
         uint32_t extra = f->extra_count;
         for (uint32_t out = 0; out < count; out += 1)
         {
             const uint32_t i = order[out];
             const uint32_t block = work->cfg.instruction_blocks[i];
+            if (view.debug != NULL && work->arms[block] != 0)
+            {
+                // These former arm instructions now execute speculatively in the join. Their lexical scope cannot
+                // be advertised unconditionally just because their expression's original token remains known.
+                view.debug->origins[out] = BUSTER_IR_NONE;
+            }
             const uint32_t mask = ir_value_mask(f, i);
             view.op[out] = f->op[i];
             view.type[out] = f->type[i];

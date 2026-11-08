@@ -53,6 +53,21 @@ typedef enum EmittedFrameStatus
     EMITTED_FRAME_MEMORY,
 } EmittedFrameStatus;
 
+// An optional source object's proven storage, at record boundaries in final scheduling order. The range is
+// half-open; its local is the original typed function's local, never an allocator value or a compacted IR slot.
+// No range means unavailable. A producer must exclude frame transitions and shared-storage lifetime holes.
+typedef struct EmittedLocalRange EmittedLocalRange;
+struct EmittedLocalRange
+{
+    Tier0Home home;
+    uint64_t value;
+    uint32_t local;
+    uint32_t begin;
+    uint32_t end;
+    // Zero selects the storage home; 1..8 select these exact low bytes as an implicit scalar value.
+    uint8_t value_bytes;
+};
+
 typedef struct EmittedCode EmittedCode;
 struct EmittedCode
 {
@@ -68,6 +83,8 @@ struct EmittedCode
     uint32_t label_count;
     const Tier0Home* local_homes;
     uint32_t local_count;
+    const EmittedLocalRange* local_ranges;
+    uint32_t local_range_count;
     const uint32_t* source_records;
     const uint32_t* source_origins;
     uint32_t source_count;

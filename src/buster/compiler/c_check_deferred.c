@@ -2543,9 +2543,9 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     deferred->top.changes = 0;
     // A unit whose top level reported, that has overloadable functions, or that has #pragma clang section, whose settings
     // and conflicts read the walk's declarations in source order (c_check_section_input.c), is source order's.
-    bool valid = !deferred->unsupported && input->report_count == 0 && !input->resource && reader->bindings.valid && !deferred->top_changes.full &&
+    bool valid = !deferred->unsupported && input->report_count == 0 && input->recovered_count == 0 && !input->resource && reader->bindings.valid && !deferred->top_changes.full &&
                  input->overload_heads == 0 && input->sections == 0 && deferred->lanes != 0 && deferred->lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES;
-    deferred->reason = input->report_count != 0 ? "the top level reports an error" : input->overload_heads != 0 ? "overloadable functions" :
+    deferred->reason = input->report_count != 0 || input->recovered_count != 0 ? "the top level reports an error" : input->overload_heads != 0 ? "overloadable functions" :
                        input->sections != 0 ? "#pragma clang section" : !valid ? "the top level ran out of room" : 0;
     deferred->top_reader = reader;
     const uint64_t environment_begin = deferred->timing ? check_deferred_now() : 0;

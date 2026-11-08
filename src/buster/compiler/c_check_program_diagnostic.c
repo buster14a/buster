@@ -242,7 +242,7 @@ static void check_program_case_conflicts(CheckProgram* program, const Parser* pa
 }
 
 // before_token is exclusive; NONE supplies no additional cutoff. Only successful dependency closures before
-// every existing report are eligible. True means scanning completed, even if result contains a C constraint
+// every existing reader report are eligible. True means scanning completed, even if result contains a C constraint
 // diagnostic. False means unusable inputs or resource failure. No output is published and scratch is restored.
 static bool check_program_diagnose(CheckProgramDiagnostic* result, const CheckInput* input, const CheckStream* stream,
                                    const Parser* parser, const TypeTable* types, uint32_t before_token, Arena* scratch)
@@ -269,13 +269,12 @@ static bool check_program_diagnose(CheckProgramDiagnostic* result, const CheckIn
     cutoff = before_token < cutoff ? before_token : cutoff;
     for (uint32_t i = valid ? input->diagnostic_report_count : 0; valid && i < input->report_count; i += 1)
     {
-        const uint32_t position = input->reports[i].completion != 0 ? input->reports[i].completion : input->reports[i].token;
+        // A recovered report (#1447) ends nothing: its declaration stayed valid.
+        const uint32_t position = input->reports[i].recovered ? cutoff : input->reports[i].completion != 0 ? input->reports[i].completion : input->reports[i].token;
         cutoff = position < cutoff ? position : cutoff;
     }
-    for (uint32_t i = 0; valid && i < stream->report_count; i += 1)
-    {
-        cutoff = stream->reports[i].token < cutoff ? stream->reports[i].token : cutoff;
-    }
+    // Not the graph's reports: an expression's error ends nothing but what reads it (#1447's semantic recovery, phase 3),
+    // which `complete` declines, as clang checks a switch's cases whatever its statements' errors.
     uint8_t* complete = valid && stream->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, stream->count) : 0;
     uint32_t capacity = 0;
     for (uint32_t token = 0; valid && token < cutoff; token += 1)
