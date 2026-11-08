@@ -5092,12 +5092,27 @@ static bool check_input_address_is_weak(const CheckInputReader* reader, uint32_t
 
 // BUSTER_CHECK_NONNULL_ADDRESS for a declaration's address, or 0 when the address may be null or is not an object.
 // An enumerator is an integer. A weak attribute or pragma at or before `use` can resolve to a null pointer.
-// An identifier leaf that names an enumerator or a variable of an enumeration type marks the unit (CheckInput.enum_operands);
-// an aligned typedef's variable, whose own kind hides its type's, marks it too.
-static void check_input_note_enum(const CheckInputReader* reader, bool enumeration, TypeId type)
+// Whether the identifier `token` is, through parentheses, an operand of an operator whose usual arithmetic conversions may
+// mix enumerations: an arithmetic, bitwise, comparison, conditional or assignment operator's.
+static bool check_input_enum_operand(const Parser* parser, uint32_t token)
+{
+    uint32_t parent = parser->tree.parents[token];
+    for (uint32_t steps = 0; parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_GROUP && steps < parser->tokens.count; steps += 1)
+    {
+        parent = parser->tree.parents[parent];
+    }
+    const uint8_t role = parent < parser->tokens.count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
+    return role == PARSE_ROLE_MULTIPLICATIVE || role == PARSE_ROLE_ADDITIVE || role == PARSE_ROLE_RELATIONAL || role == PARSE_ROLE_EQUALITY ||
+           role == PARSE_ROLE_BITWISE_AND || role == PARSE_ROLE_BITWISE_XOR || role == PARSE_ROLE_BITWISE_OR || role == PARSE_ROLE_ASSIGN ||
+           role == PARSE_ROLE_OPEN_TERNARY || role == PARSE_ROLE_CLOSE_TERNARY;
+}
+
+// An identifier leaf at `token` that names an enumerator or a variable of an enumeration type (an aligned typedef's
+// variable too, whose own kind hides its type's) as such an operator's operand marks the unit (CheckInput.enum_operands).
+static void check_input_note_enum(const CheckInputReader* reader, uint32_t token, bool enumeration, TypeId type)
 {
     const uint8_t kind = type_kind(reader->types, type);
-    if (enumeration || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_ALIGNED)
+    if ((enumeration || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_ALIGNED) && check_input_enum_operand(reader->parser, token))
     {
         reader->output->enum_operands = true;
     }
@@ -11221,7 +11236,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 const TypeId type = check_input_expression_type(reader, token);
                 const uint32_t declaration = reader->output->declarations[token];
                 const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
-                check_input_note_enum(reader, enumeration, type);
+                check_input_note_enum(reader, token, enumeration, type);
                 const CheckConstexprValue* constant = (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0 ?
                     check_input_constexpr_find(reader, declaration) : 0;
                 if (constant != 0)

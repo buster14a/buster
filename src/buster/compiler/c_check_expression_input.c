@@ -567,7 +567,7 @@ static void check_input_identifier_entry(const CheckInputReader* reader, uint32_
     const bool enumeration = type != 0 && reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
     if (type != 0)
     {
-        check_input_note_enum(reader, enumeration, type);
+        check_input_note_enum(reader, token, enumeration, type);
     }
     const uint64_t category = enumeration ? CHECK_RVALUE : type != 0 && type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE;
     const uint64_t flags = (enumeration ? BUSTER_CHECK_ICE : 0) |
@@ -643,10 +643,11 @@ static uint32_t check_input_expression_identifiers(const CheckInputReader* reade
         const __mmask16 in_register = _mm512_mask_test_epi32_mask(typed, bits, _mm512_set1_epi32(BUSTER_CHECK_BITS_REGISTER));
         registers |= in_register;
         // An enumerator or an enumeration's variable marks the unit (check_input_note_enum, its twin).
-        if ((enumeration | _mm512_mask_cmpeq_epi32_mask(typed, type_kinds, _mm512_set1_epi32(BUSTER_TYPE_KIND_ENUM)) |
-             _mm512_mask_cmpeq_epi32_mask(typed, type_kinds, _mm512_set1_epi32(BUSTER_TYPE_KIND_ALIGNED))) != 0)
+        __mmask16 enums = enumeration | _mm512_mask_cmpeq_epi32_mask(typed, type_kinds, _mm512_set1_epi32(BUSTER_TYPE_KIND_ENUM)) |
+                          _mm512_mask_cmpeq_epi32_mask(typed, type_kinds, _mm512_set1_epi32(BUSTER_TYPE_KIND_ALIGNED));
+        for (; enums != 0 && !reader->output->enum_operands; enums &= (__mmask16)(enums - 1))
         {
-            reader->output->enum_operands = true;
+            reader->output->enum_operands = check_input_enum_operand(reader->parser, found[at + (uint32_t)__builtin_ctz(enums)]);
         }
         const __mmask16 has_object = _mm512_mask_test_epi32_mask(typed, objects, objects);
         const __mmask16 nonnull = has_object & ~enumeration;
