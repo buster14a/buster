@@ -95,11 +95,15 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum E { A, B };\nenum E { C, A };\nint g(void) { return C + B; }\n"
         "void k(void)\n{\n    struct L { int a; };\n    { struct L { int b; }; }\n    struct L { int c; } v;\n    int unused;\n    v.c = 0;\n}\n"
         "void m(void) { int quiet; }\n",
+        // The note is at the definition when a forward declaration or a use comes first (review on #1788).
+        "struct S;\nstruct S { int a; };\nstruct S { int b; };\nstruct S { int c; };\nstruct T x;\nstruct T { int a; };\n"
+        "struct T { int b; };\nenum E *pe;\nenum E { A };\nenum E { B };\n"
+        "void f(void) { struct L *p; struct L { int a; }; struct L { int b; }; (void)p; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
-    // The tag redefinitions, the last two fixtures, are gnu17's alone: C23 allows a compatible one and words an
+    // The tag redefinitions, the last three fixtures, are gnu17's alone: C23 allows a compatible one and words an
     // incompatible one otherwise (N3037), which the checker doesn't model yet.
-    const uint32_t before_c23 = BUSTER_ARRAY_LENGTH(fixtures) - 2;
+    const uint32_t before_c23 = BUSTER_ARRAY_LENGTH(fixtures) - 3;
     static const char* const options[] = { NULL, "-Wall", "-ferror-limit=2", "-w" };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);

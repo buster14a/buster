@@ -3818,12 +3818,15 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
         {
             const uint32_t before = reader->output->report_count;
             const uint32_t old = reader->bindings.declaration[previous - 1];
+            // The note is at the definition, which a forward declaration or a use may precede (`struct S; struct S { … };`).
+            const uint32_t defined_at = check_input_tag_definition_name(reader, earlier, old);
+            const uint32_t noted = defined_at != BUSTER_CHECK_NONE ? defined_at : old;
             check_input_report_subject(reader, declaration, CHECK_INPUT_REDECLARATION, old);
             if (reader->output->report_count == before + 1 && !reader->output->resource)
             {
                 CheckInputReport* report = reader->output->reports + before;
                 report->detail = CHECK_REDECLARATION_DEFINITION;
-                report->note_token = old;
+                report->note_token = noted;
                 report->note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
             }
             valid = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
