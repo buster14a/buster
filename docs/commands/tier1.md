@@ -24,7 +24,12 @@ requirements. [Command index](README.md).
   direct scalar calls preserve live caller registers and publish symbolic CALL
   references. Byte/word memory and integer conversions
   use canonical 32-bit storage; terminal chains retain explicit traps or empty
-  self-loops. Every other function, general CFGs with loops and phis, goes
+  self-loops. Integer comparisons fold single-use loads at their original
+  access width when the final consumer's memory-order proof permits it
+  (#1218), including exact immediate comparisons through zero/sign extension.
+  `test-tier1-select` checks guard-page boundaries, predicates, address aliases
+  and access-order refusals; `test-tier1-emit` checks frame-object comparisons,
+  realignment and fused branches. Every other function, general CFGs with loops and phis, goes
   through `tier1_emit_cfg.c` (#140): `tier1_cfg.c` allocates it and its edges
   move values, before a jump, at a successor's start or in a split critical
   edge's stub. A straight line whose allocation can't place a value (an evicted
