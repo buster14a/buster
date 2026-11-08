@@ -3934,35 +3934,6 @@ struct CheckCommonRootOrder
     bool skipping;
 };
 
-// The statement expression whose statements hold root `node`'s, or BUSTER_CHECK_NONE: the parse tree's climb from the root's
-// token to a block's `}` that a group's `)` closes right after, the statement expression's, whose node is that `)`'s, short
-// of the function's body.
-static uint32_t check_common_inner_owner(const Parser* parser, const CheckInput* input, uint32_t node)
-{
-    const CheckGraph* graph = &input->graph;
-    const uint32_t count = parser->tokens.count;
-    uint32_t owner = BUSTER_CHECK_NONE;
-    bool climbing = true;
-    uint32_t at = graph->tokens[node];
-    for (uint32_t steps = 0; climbing && at < count && steps < count; steps += 1)
-    {
-        const uint8_t role = parser->tree.roles[at];
-        const bool closed = role == PARSE_ROLE_CLOSE_BLOCK && at + 1 < count && parser->tokens.kinds[at + 1] == PARSE_KIND_R_PAREN &&
-                            parser->tree.roles[at + 1] == PARSE_ROLE_CLOSE_GROUP;
-        const uint32_t value = closed && at + 1 < input->token_count ? input->token_nodes[at + 1] : BUSTER_CHECK_NONE;
-        if (value < graph->count && graph->ops[value] == CHECK_OP_STATEMENT_VALUE && value > node)
-        {
-            owner = value;
-            climbing = false;
-        }
-        climbing &= role != PARSE_ROLE_CLOSE_BODY && role != PARSE_ROLE_OPEN_BODY;
-        const uint32_t parent = parser->tree.parents[at];
-        climbing &= parent != at;
-        at = parent;
-    }
-    return owner;
-}
-
 // The roots of statement expressions' statements that the arithmetic scan takes where it enters their statement expression
 // (#1447, check_common_inner_push): clang builds a statement expression's statements, queueing their runtime warnings,
 // between what its enclosing expression built before it and after it, where the roots' order, the node order, has them
@@ -3970,35 +3941,47 @@ static uint32_t check_common_inner_owner(const Parser* parser, const CheckInput*
 // is marked BUSTER_CHECK_EMITTED_DISPLACED, which the roots' order skips, and its statement expression and the nodes up to its
 // enclosing root reach the arithmetic scan. Their count, as keys of the statement expression's node and the root (a displaced
 // one's operand, the place check_common_displaced_roots gives it, so that its order among the statements is the same),
-// sorted, in `*sorted`. Only a unit with a statement expression climbs the parse tree, a root at a time: the scalar walk
-// stays for that rare unit, and the vector scan for the operator spares every other unit (check_common_next_op).
+// sorted, in `*sorted`. The vector scan finds the statement expressions (check_common_next_op), and each one's walk back over
+// its own nodes, a parse-tree climb each, is scalar: it visits no node outside a statement expression but the one it stops
+// at, so that a unit with few pays for their nodes alone (SQLite's, whose headers' macros have some, +0.0x% instructions).
 static uint32_t check_common_inner_roots(const Parser* parser, const CheckInput* input, const CheckStream* stream, const uint32_t* parents,
                                          const uint8_t* evaluated, uint8_t* reach, uint8_t* emitted, uint64_t* items, uint64_t* temporary,
                                          uint64_t** sorted, bool vector)
 {
     static const CheckOp values[] = { CHECK_OP_STATEMENT_VALUE };
     const CheckGraph* graph = &input->graph;
+    const uint32_t tokens = parser->tokens.count;
     const CheckCommonOps ops = check_common_ops(values, BUSTER_ARRAY_LENGTH(values));
     CheckCommonScan scan = { 0 };
-    const bool any = input->token_nodes != NULL && check_common_next_op(graph, &ops, &scan, vector) < graph->count;
     uint32_t count = 0;
-    CheckCommonScan roots = { 0 };
-    for (uint32_t node = any ? check_common_next_root(parents, graph->count, &roots, vector) : graph->count; node < graph->count;
-         node = check_common_next_root(parents, graph->count, &roots, vector))
+    // Inner statement expressions first, in node order, so that a root is its innermost one's.
+    for (uint32_t value = parser->tree.depths != NULL ? check_common_next_op(graph, &ops, &scan, vector) : graph->count; value < graph->count;
+         value = check_common_next_op(graph, &ops, &scan, vector))
     {
-        const uint32_t owner = check_common_inner_owner(parser, input, node);
-        uint32_t enclosing = owner;
-        for (uint32_t steps = 0; enclosing < graph->count && parents[enclosing] < graph->count && steps < graph->count; steps += 1)
+        // The statement expression's block's `}`, which a group's `)`, its node's token, closes right after.
+        const uint32_t close = graph->tokens[value];
+        const uint32_t brace = close != 0 && close < tokens ? close - 1 : BUSTER_CHECK_NONE;
+        uint32_t enclosing = value;
+        for (uint32_t steps = 0; parents[enclosing] < graph->count && steps < graph->count; steps += 1)
         {
             enclosing = parents[enclosing];
         }
-        if (owner < graph->count && evaluated[owner] != 0 && enclosing < graph->count && evaluated[enclosing] != 0 &&
-            stream->diagnostics[enclosing] == CHECK_DIAG_NONE && (emitted[node] & BUSTER_CHECK_EMITTED_DISPLACED) == 0)
+        if (brace < tokens && parser->tree.roles[brace] == PARSE_ROLE_CLOSE_BLOCK && evaluated[value] != 0 && evaluated[enclosing] != 0 &&
+            stream->diagnostics[enclosing] == CHECK_DIAG_NONE)
         {
-            const uint32_t place = check_common_displaced_root(parser, graph, parents, node) ? graph->operand0[node] : node;
-            emitted[node] |= BUSTER_CHECK_EMITTED_DISPLACED;
-            items[count++] = (uint64_t)owner << 32 | place;
-            for (uint32_t at = owner; at < graph->count && (reach[at] & BUSTER_CHECK_REACH_ARITHMETIC) == 0; at = parents[at])
+            // Its statements' nodes come just before its own, their tokens under its `}`: the walk back from it stops at the
+            // first node outside, so that it visits its own nodes alone, and a unit's statement expressions their own.
+            const uint32_t depth = parser->tree.depths[brace];
+            for (uint32_t node = value; node-- > 0 && check_common_token_below(parser, graph->tokens[node], brace, depth);)
+            {
+                if (parents[node] == BUSTER_CHECK_NONE && (emitted[node] & BUSTER_CHECK_EMITTED_DISPLACED) == 0)
+                {
+                    const uint32_t place = check_common_displaced_root(parser, graph, parents, node) ? graph->operand0[node] : node;
+                    emitted[node] |= BUSTER_CHECK_EMITTED_DISPLACED;
+                    items[count++] = (uint64_t)value << 32 | place;
+                }
+            }
+            for (uint32_t at = value; at < graph->count && (reach[at] & BUSTER_CHECK_REACH_ARITHMETIC) == 0; at = parents[at])
             {
                 reach[at] |= BUSTER_CHECK_REACH_ARITHMETIC;
             }
