@@ -4012,8 +4012,11 @@ What clang 23 does with each is followed:
   integer type), which the type table doesn't hold. Such an enum gets the
   signed integer of that type's size and alignment
   (`check_input_mode_enum_integer`: `HF` a `short`, `SF` an `int`, `DF` a
-  `long`, `XF` and `TF` an `__int128`), which gives it clang's layout. A
-  complex mode, whose alignment no integer has, still stops the reader.
+  `long`, `XF` and `TF` an `__int128`), which gives it clang's layout. Its
+  conversions are clang's too: a floating value converts into it silently,
+  since `-Wliteral-conversion` takes no enumeration target, and an integer
+  gets `-Wconstant-conversion` at the integer's width. A complex mode, whose
+  alignment no integer has, still stops the reader.
 
 In each case the declaration stays valid and the attribute is ignored, as in
 phase 1.

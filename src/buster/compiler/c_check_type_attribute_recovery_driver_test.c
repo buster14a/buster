@@ -117,6 +117,11 @@ static void check_test_driver_type_attribute_recovery(CheckTest* test, const cha
         "_Static_assert(sizeof(enum F) == 8 && _Alignof(enum F) == 8, \"eight\");\nenum F f = C;\nstruct Z *s = &f;\n"
         "enum __attribute__((mode(XF))) G { D };\n_Static_assert(sizeof(enum G) == 16 && _Alignof(enum G) == 16, \"sixteen\");\n"
         "enum __attribute__((mode(HF))) I { I0 };\n_Static_assert(sizeof(enum I) == 2, \"hf\");\nint k = C << 40;\nstruct Z *t = (enum I *)0;\n",
+        // Conversions into such an enum: a floating value's silent (no -Wliteral-conversion on an enumeration target), an
+        // integer's -Wconstant-conversion at its integer's width, as clang's; no other error, so the common warnings run.
+        "enum __attribute__((mode(SF))) E { A };\nenum E e = 2.5;\nenum E g = 5000000000;\nenum E h = 1e20;\n"
+        "void f(enum E x, double d) { enum E y = d; x = 3.5; e = 1ll << 40; (void)x; (void)y; }\n"
+        "enum F { B } __attribute__((mode(DF)));\nenum F k = 1e30;\nenum F m = 1ll << 40;\nint after = B + A;\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     static const char* const options[] = { NULL, "-Wall", "-ferror-limit=2", "-w" };
