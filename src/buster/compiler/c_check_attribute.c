@@ -121,6 +121,8 @@ typedef enum CheckInputAttributeKind
     // #1361: conservative object-size compatibility, without hidden ABI arguments.
     CHECK_ATTRIBUTE_PASS_OBJECT_SIZE,
     CHECK_ATTRIBUTE_PASS_DYNAMIC_OBJECT_SIZE,
+    // The Swift parameter attributes (#1447), a parameter's ABI in its function's type: its value a TypeParameterABI.
+    CHECK_ATTRIBUTE_PARAMETER_ABI,
     CHECK_ATTRIBUTE_DIAGNOSE_IF,
     CHECK_ATTRIBUTE_ENABLE_IF,
     CHECK_ATTRIBUTE_SELECTANY,
@@ -205,6 +207,10 @@ typedef enum CheckInputCallingConvention
     // no_caller_saved_registers (#147): clang's function type bit beside the convention, a System V function's here
     // (TYPE_FUNCTION_ABI_NO_CALLER_SAVED), so that with System V's convention it is this one (check_input_convention_merge).
     CHECK_CALL_NO_CALLER_SAVED,
+    // clang's CC_IntelOclBicc, CC_Swift and CC_SwiftAsync (#1447).
+    CHECK_CALL_INTEL_OCL,
+    CHECK_CALL_SWIFT,
+    CHECK_CALL_SWIFT_ASYNC,
     CHECK_CALL_IGNORED_X86_32,
 } CheckInputCallingConvention;
 
@@ -423,6 +429,9 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "preserve_all", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "preserve_none", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "no_caller_saved_registers", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "intel_ocl_bicc", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "swiftcall", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "swiftasynccall", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     // Other targets' conventions (#147), which x86-64's checkCallingConvention warns of and ignores; pcs's count and string
     // are checked where it meets a function or a tag, as clang's CheckCallingConvAttr checks them
     // (check_input_attribute_pcs); the kernels' are declarations' attributes, of functions alone.
@@ -467,6 +476,10 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "overloadable", CHECK_ATTRIBUTE_OVERLOADABLE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "pass_object_size", CHECK_ATTRIBUTE_PASS_OBJECT_SIZE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
     { "pass_dynamic_object_size", CHECK_ATTRIBUTE_PASS_DYNAMIC_OBJECT_SIZE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
+    { "swift_indirect_result", CHECK_ATTRIBUTE_PARAMETER_ABI, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "swift_error_result", CHECK_ATTRIBUTE_PARAMETER_ABI, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "swift_context", CHECK_ATTRIBUTE_PARAMETER_ABI, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "swift_async_context", CHECK_ATTRIBUTE_PARAMETER_ABI, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "diagnose_if", CHECK_ATTRIBUTE_DIAGNOSE_IF, CHECK_ATTRIBUTE_CONDITION_STRINGS, 3, 4 },
     { "enable_if", CHECK_ATTRIBUTE_ENABLE_IF, CHECK_ATTRIBUTE_CONDITION_STRINGS, 2, 2 },
     { "flatten", CHECK_ATTRIBUTE_FLATTEN, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
@@ -776,6 +789,19 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_CALLBACK_MULTIPLE,
     CHECK_ARGUMENT_SWIFT_ASYNC_KIND,
     CHECK_ARGUMENT_SWIFT_ASYNC_BLOCK,
+    // The Swift parameter attributes' errors (#1447, clang's SemaSwift::AddParameterABIAttr and checkExtParameterInfos), each
+    // with the parameter's ABI (TypeParameterABI) in the number's low bits: its type's, "must have pointer type" (with
+    // BUSTER_CHECK_SWIFT_POINTER_POINTER, "pointer to unqualified pointer type"), the type CheckInputReport.type; its
+    // function's convention's, swiftcall or swiftasynccall (swiftcall's alone with BUSTER_CHECK_SWIFT_ONLY); an indirect
+    // result's after another parameter; an error result's not after a context; and two ABIs on one parameter, with the
+    // earlier's ABI in the number's second byte.
+    CHECK_ARGUMENT_SWIFT_PARAMETER_TYPE,
+    CHECK_ARGUMENT_SWIFT_PARAMETER_CONVENTION,
+    CHECK_ARGUMENT_SWIFT_INDIRECT_FIRST,
+    CHECK_ARGUMENT_SWIFT_ERROR_AFTER_CONTEXT,
+    CHECK_ARGUMENT_SWIFT_PARAMETER_CONFLICT,
+    // A function without a prototype of a convention that takes no variadic call (clang's err_cconv_knr).
+    CHECK_ARGUMENT_NO_PROTOTYPE_CONVENTION,
     CHECK_ARGUMENT_ERROR_DOMAIN,
     CHECK_ARGUMENT_DUPLICATE_ASPECT,
     CHECK_ARGUMENT_DIFFERENT_ARGUMENTS,
@@ -1496,13 +1522,35 @@ static bool check_input_unevaluated_strings(CheckInputReader* reader, uint32_t f
     return refused != BUSTER_CHECK_NONE;
 }
 
+#define BUSTER_CHECK_SWIFT_POINTER_POINTER 0x10u
+#define BUSTER_CHECK_SWIFT_ONLY 0x10u
+
+// clang's spelling of a parameter's ABI (getParameterABISpelling).
+static const char* check_input_parameter_abi_name(uint32_t abi)
+{
+    const char* result = abi == TYPE_PARAMETER_ABI_SWIFT_INDIRECT_RESULT ? "swift_indirect_result" : abi == TYPE_PARAMETER_ABI_SWIFT_ERROR_RESULT ? "swift_error_result" :
+                         abi == TYPE_PARAMETER_ABI_SWIFT_CONTEXT ? "swift_context" : abi == TYPE_PARAMETER_ABI_SWIFT_ASYNC_CONTEXT ? "swift_async_context" : "";
+    return result;
+}
+
+static TypeParameterABI check_input_parameter_abi(String8 name)
+{
+    const TypeParameterABI result = check_input_attribute_equal(name, "swift_indirect_result") ? TYPE_PARAMETER_ABI_SWIFT_INDIRECT_RESULT :
+                                    check_input_attribute_equal(name, "swift_error_result") ? TYPE_PARAMETER_ABI_SWIFT_ERROR_RESULT :
+                                    check_input_attribute_equal(name, "swift_context") ? TYPE_PARAMETER_ABI_SWIFT_CONTEXT :
+                                    check_input_attribute_equal(name, "swift_async_context") ? TYPE_PARAMETER_ABI_SWIFT_ASYNC_CONTEXT : TYPE_PARAMETER_ABI_ORDINARY;
+    return result;
+}
+
 // clang's name of a calling convention (FunctionType::getNameForCallConv): on x86-64 Linux, sysv_abi's and those it
 // hasn't (which it takes for the default, CHECK_CALL_IGNORED_X86_32) are cdecl's.
 static const char* check_input_convention_name(uint32_t call)
 {
     const char* result = call == CHECK_CALL_MICROSOFT ? "ms_abi" : call == CHECK_CALL_VECTOR ? "vectorcall" : call == CHECK_CALL_REG ? "regcall" :
                          call == CHECK_CALL_PRESERVE_MOST ? "preserve_most" : call == CHECK_CALL_PRESERVE_ALL ? "preserve_all" :
-                         call == CHECK_CALL_PRESERVE_NONE ? "preserve_none" : call == CHECK_CALL_NO_CALLER_SAVED ? "no_caller_saved_registers" : "cdecl";
+                         call == CHECK_CALL_PRESERVE_NONE ? "preserve_none" : call == CHECK_CALL_NO_CALLER_SAVED ? "no_caller_saved_registers" :
+                         call == CHECK_CALL_INTEL_OCL ? "intel_ocl_bicc" : call == CHECK_CALL_SWIFT ? "swiftcall" :
+                         call == CHECK_CALL_SWIFT_ASYNC ? "swiftasynccall" : "cdecl";
     return result;
 }
 
@@ -1561,6 +1609,18 @@ static CheckInputCallingConvention check_input_attribute_call(String8 name)
     else if (check_input_attribute_equal(name, "no_caller_saved_registers"))
     {
         result = CHECK_CALL_NO_CALLER_SAVED;
+    }
+    else if (check_input_attribute_equal(name, "intel_ocl_bicc"))
+    {
+        result = CHECK_CALL_INTEL_OCL;
+    }
+    else if (check_input_attribute_equal(name, "swiftcall"))
+    {
+        result = CHECK_CALL_SWIFT;
+    }
+    else if (check_input_attribute_equal(name, "swiftasynccall"))
+    {
+        result = CHECK_CALL_SWIFT_ASYNC;
     }
     return result;
 }
@@ -3965,6 +4025,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                 attributes->calling_convention = check_input_convention_merge(attributes->calling_convention, call);
                 attribute.value = call;
             }
+            else if (attribute.kind == CHECK_ATTRIBUTE_PARAMETER_ABI)
+            {
+                attribute.value = check_input_parameter_abi(name);
+            }
             attributes->packed |= attribute.kind == CHECK_ATTRIBUTE_PACKED;
             // The walk's section events start at the first section attribute (CheckInputReader.section_record_from).
             reader->section_record_from = attribute.kind == CHECK_ATTRIBUTE_SECTION && attribute.first < reader->section_record_from ? attribute.first :
@@ -4485,7 +4549,8 @@ static uint32_t check_input_abi_call(TypeFunctionABI abi)
     const uint32_t result = abi == TYPE_FUNCTION_ABI_MICROSOFT ? CHECK_CALL_MICROSOFT : abi == TYPE_FUNCTION_ABI_VECTOR ? CHECK_CALL_VECTOR :
                             abi == TYPE_FUNCTION_ABI_REG ? CHECK_CALL_REG : abi == TYPE_FUNCTION_ABI_PRESERVE_MOST ? CHECK_CALL_PRESERVE_MOST :
                             abi == TYPE_FUNCTION_ABI_PRESERVE_ALL ? CHECK_CALL_PRESERVE_ALL : abi == TYPE_FUNCTION_ABI_PRESERVE_NONE ? CHECK_CALL_PRESERVE_NONE :
-                            abi == TYPE_FUNCTION_ABI_NO_CALLER_SAVED ? CHECK_CALL_NO_CALLER_SAVED : CHECK_CALL_SYSV;
+                            abi == TYPE_FUNCTION_ABI_NO_CALLER_SAVED ? CHECK_CALL_NO_CALLER_SAVED : abi == TYPE_FUNCTION_ABI_INTEL_OCL ? CHECK_CALL_INTEL_OCL :
+                            abi == TYPE_FUNCTION_ABI_SWIFT ? CHECK_CALL_SWIFT : abi == TYPE_FUNCTION_ABI_SWIFT_ASYNC ? CHECK_CALL_SWIFT_ASYNC : CHECK_CALL_SYSV;
     return result;
 }
 
@@ -4497,7 +4562,9 @@ static TypeFunctionABI check_input_attribute_requested_abi(const CheckInputAttri
                                    call == CHECK_CALL_PRESERVE_MOST ? TYPE_FUNCTION_ABI_PRESERVE_MOST :
                                    call == CHECK_CALL_PRESERVE_ALL ? TYPE_FUNCTION_ABI_PRESERVE_ALL :
                                    call == CHECK_CALL_PRESERVE_NONE ? TYPE_FUNCTION_ABI_PRESERVE_NONE :
-                                   call == CHECK_CALL_NO_CALLER_SAVED ? TYPE_FUNCTION_ABI_NO_CALLER_SAVED : TYPE_FUNCTION_ABI_INVALID;
+                                   call == CHECK_CALL_NO_CALLER_SAVED ? TYPE_FUNCTION_ABI_NO_CALLER_SAVED :
+                                   call == CHECK_CALL_INTEL_OCL ? TYPE_FUNCTION_ABI_INTEL_OCL : call == CHECK_CALL_SWIFT ? TYPE_FUNCTION_ABI_SWIFT :
+                                   call == CHECK_CALL_SWIFT_ASYNC ? TYPE_FUNCTION_ABI_SWIFT_ASYNC : TYPE_FUNCTION_ABI_INVALID;
     return result;
 }
 
@@ -4560,6 +4627,117 @@ static uint8_t check_input_attribute_abi_origin(CheckInputReader* reader, CheckI
         }
     }
     return result;
+}
+
+// A parameter's Swift ABI (#1447, CHECK_ATTRIBUTE_PARAMETER_ABI), from its declaration's attribute lists (its specifiers'
+// and its declarator's, in order), as clang's SemaSwift::AddParameterABIAttr gives it to the parameter: an attribute whose
+// type its ABI doesn't take is its error, at its name, and gives none ("must have pointer type": swift_context's,
+// swift_async_context's and swift_indirect_result's; "pointer to unqualified pointer type": swift_error_result's); one of
+// another ABI than an earlier one's is "A and 'B' attributes are not compatible", with its note at the earlier one; one of the
+// same, nothing. `adjusted` is the parameter's type as its function takes it, `declared` as it is declared there (with its
+// qualifiers and typedef, whose declaration is `spelling`), which the error prints. *token is the attribute's first token
+// (BUSTER_CHECK_NONE for none); the result is false after an error.
+static bool check_input_swift_parameter(CheckInputReader* reader, CheckInputAttributes* const* lists, uint32_t list_count, TypeId adjusted, TypeId declared,
+                                        uint32_t spelling, uint8_t* abi, uint32_t* token)
+{
+    const TypeTable* types = reader->types;
+    bool valid = true;
+    const CheckInputAttribute* kept = NULL;
+    for (uint32_t list = 0; list < list_count; list += 1)
+    {
+        CheckInputAttributes* attributes = lists[list];
+        for (uint32_t a = 0; valid && attributes != NULL && a < attributes->count; a += 1)
+        {
+            const CheckInputAttribute* attribute = attributes->records + a;
+            if (attribute->kind == CHECK_ATTRIBUTE_PARAMETER_ABI && !attribute->ignored)
+            {
+                const uint32_t value = (uint32_t)attribute->value;
+                const TypeId stripped = type_strip_aligned(types, adjusted);
+                const bool pointer = type_kind(types, stripped) == BUSTER_TYPE_KIND_POINTER;
+                const TypeId pointee = pointer ? types->types.base[type_index(stripped)] : 0;
+                // (swift_error_result's pointee: a pointer without qualifiers of its own, clang's hasLocalQualifiers.)
+                const bool pointer_pointer = pointer && type_qualifiers(pointee) == 0 && type_kind(types, type_strip_aligned(types, pointee)) == BUSTER_TYPE_KIND_POINTER;
+                const bool error_result = value == TYPE_PARAMETER_ABI_SWIFT_ERROR_RESULT;
+                if (kept != NULL && kept->value != attribute->value)
+                {
+                    const uint32_t before = reader->output->report_count;
+                    check_input_attribute_argument_error(reader, attributes, attribute, attribute->name_token, CHECK_ARGUMENT_SWIFT_PARAMETER_CONFLICT,
+                                                         value | (uint32_t)kept->value << 8);
+                    if (reader->output->report_count > before)
+                    {
+                        reader->output->reports[before].note_token = kept->name_token;
+                        reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE;
+                    }
+                    valid = false;
+                }
+                else if (kept == NULL && !(error_result ? pointer_pointer : pointer))
+                {
+                    const uint32_t before = reader->output->report_count;
+                    check_input_attribute_argument_error(reader, attributes, attribute, attribute->name_token, CHECK_ARGUMENT_SWIFT_PARAMETER_TYPE,
+                                                         value | (error_result ? BUSTER_CHECK_SWIFT_POINTER_POINTER : 0));
+                    if (reader->output->report_count > before)
+                    {
+                        reader->output->reports[before].type = declared;
+                        reader->output->reports[before].type_spelling = spelling;
+                    }
+                    valid = false;
+                }
+                else if (kept == NULL)
+                {
+                    kept = attribute;
+                }
+            }
+        }
+    }
+    *abi = kept != NULL && valid ? (uint8_t)kept->value : TYPE_PARAMETER_ABI_ORDINARY;
+    *token = kept != NULL && valid ? kept->first : BUSTER_CHECK_NONE;
+    return valid;
+}
+
+// A function type's parameters' Swift ABIs against its convention and their order (#1447, clang's checkExtParameterInfos):
+// swift_indirect_result and swift_context of a swiftcall or swiftasynccall function, and swift_error_result of a swiftcall
+// one (swift_async_context of any: clang's switch checks no convention of it); an indirect result first or after another, and an error result just after a
+// context. Each error is at its parameter (`places`, its name or where an unnamed one's would be); `attributes` are each
+// parameter's attribute's first token, the report's. Whether there was none.
+static bool check_input_swift_parameters(CheckInputReader* reader, TypeId function, const uint32_t* places, const uint32_t* attributes, uint32_t count)
+{
+    const TypeTable* types = reader->types;
+    const TypeFunctionABI convention = type_function_abi_kind(types, function);
+    const bool swift = convention == TYPE_FUNCTION_ABI_SWIFT;
+    const bool either = swift || convention == TYPE_FUNCTION_ABI_SWIFT_ASYNC;
+    bool valid = true;
+    for (uint32_t i = 0; type_function_has_parameter_abis(types, function) && i < count; i += 1)
+    {
+        const TypeParameterABI abi = type_parameter_abi(types, function, i);
+        const TypeParameterABI previous = i != 0 ? type_parameter_abi(types, function, i - 1) : TYPE_PARAMETER_ABI_ORDINARY;
+        const bool error_result = abi == TYPE_PARAMETER_ABI_SWIFT_ERROR_RESULT;
+        uint32_t error = BUSTER_CHECK_NONE;
+        uint32_t number = abi;
+        if (abi != TYPE_PARAMETER_ABI_ORDINARY && abi != TYPE_PARAMETER_ABI_SWIFT_ASYNC_CONTEXT && !(error_result ? swift : either))
+        {
+            error = CHECK_ARGUMENT_SWIFT_PARAMETER_CONVENTION;
+            number |= error_result ? BUSTER_CHECK_SWIFT_ONLY : 0;
+        }
+        const uint32_t order = abi == TYPE_PARAMETER_ABI_SWIFT_INDIRECT_RESULT && i != 0 && previous != TYPE_PARAMETER_ABI_SWIFT_INDIRECT_RESULT ?
+                               CHECK_ARGUMENT_SWIFT_INDIRECT_FIRST :
+                               error_result && previous != TYPE_PARAMETER_ABI_SWIFT_CONTEXT ? CHECK_ARGUMENT_SWIFT_ERROR_AFTER_CONTEXT : BUSTER_CHECK_NONE;
+        // (clang gives both, the convention's first.)
+        for (uint32_t pass = 0; pass < 2; pass += 1)
+        {
+            const uint32_t kind = pass == 0 ? error : order;
+            if (kind != BUSTER_CHECK_NONE)
+            {
+                const uint32_t before = reader->output->report_count;
+                check_input_report_argument(reader, places[i], CHECK_INPUT_ATTRIBUTE_ARGUMENT, kind | (pass == 0 ? number : abi) << 8);
+                if (reader->output->report_count > before)
+                {
+                    reader->output->reports[before].attribute = attributes[i];
+                }
+                valid = false;
+            }
+        }
+    }
+    return valid;
 }
 
 // Whether `type` is a function or wraps one in pointers, arrays and aligned typedefs, where a calling convention applies.
@@ -4671,8 +4849,8 @@ static inline __attribute__((always_inline)) TypeId check_input_attribute_abi_wi
             // System V's convention on a no_caller_saved_registers function's type keeps the bit (check_input_convention_merge).
             const TypeFunctionABI kept = previous == TYPE_FUNCTION_ABI_NO_CALLER_SAVED && abi == TYPE_FUNCTION_ABI_SYSV ? previous : abi;
             result = previous == TYPE_FUNCTION_ABI_SYSV || previous == kept || replace_wrapped_abi ?
-                     type_function_abi(reader->types, type_return(reader->types, function), parameters, count,
-                                       reader->types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_KEY, kept) : 0;
+                     type_function_like(reader->types, type_return(reader->types, function), parameters, count,
+                                        reader->types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_KEY, kept, function) : 0;
             if (previous == TYPE_FUNCTION_ABI_SYSV || previous == kept || replace_wrapped_abi)
             {
                 result = check_input_type_result(reader, result);
@@ -4711,7 +4889,8 @@ static inline __attribute__((always_inline)) TypeId check_input_attribute_abi_wi
                 {
                     check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_RESOURCE);
                 }
-                else if (result == 0 && (attribute->value == CHECK_CALL_VECTOR || attribute->value == CHECK_CALL_REG) &&
+                else if (result == 0 && (attribute->value == CHECK_CALL_VECTOR || attribute->value == CHECK_CALL_REG || attribute->value == CHECK_CALL_SWIFT ||
+                                         attribute->value == CHECK_CALL_SWIFT_ASYNC) &&
                          (reader->types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_VARIADIC) != 0)
                 {
                     // vectorcall and regcall take no variadic function (#147, clang's supportsVariadicCall): its error.

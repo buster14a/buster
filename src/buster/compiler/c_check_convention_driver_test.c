@@ -2,18 +2,21 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // The calling conventions other than System V's (#137, #147) by the driver against clang, on original fixtures. clang
-// 23 compiles ms_abi, vectorcall, regcall and preserve_none on x86-64 Linux with argument registers of their own, and
-// preserve_most and preserve_all with System V's arguments but more registers kept by the callee; the backend compiles
-// System V's, and preserve_most's and preserve_all's definitions with Tier 0's preserving frame (#1447). So -c must
-// refuse, by both paths and naming the convention, a definition and a call of each of the first four, directly and
-// through a pointer, where clang compiles every one of them; a definition of a preserve_most or preserve_all function
-// must compile, and so must a call of one, which keeps whatever a System V caller expects, and run: the callees built by
-// clang, the callers by each path, values live across the calls, as clang's build of both runs. The preserving frames
+// 23 compiles ms_abi, vectorcall, regcall and preserve_none on x86-64 Linux with argument registers of their own,
+// swiftcall and swiftasynccall with Swift's lowering, swifterror's register and swifttailcc's frame (#1447), and
+// preserve_most, preserve_all and intel_ocl_bicc with System V's arguments but more registers kept by the callee; the
+// backend compiles System V's, and preserve_most's, preserve_all's and intel_ocl_bicc's definitions with Tier 0's
+// preserving frame (#1447). So -c must refuse, by both paths and naming the convention, a definition and a call of each of
+// the first six, directly and through a pointer, where clang compiles every one of them; a definition of a preserve_most,
+// preserve_all or intel_ocl_bicc function must compile, and so must a call of one, which keeps whatever a System V caller
+// expects, and run: the callees built by clang, the callers by each path, values live across the calls, as clang's build
+// of both runs; and an intel_ocl_bicc call on an AVX-512 target, whose callee keeps fewer general registers, is refused. The preserving frames
 // themselves are check_test_driver_preserving_frames'. Include after c_check_common_driver_test.c.
 
 static void check_test_driver_conventions(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    static const char* const conventions[] = { "ms_abi", "vectorcall", "regcall", "preserve_none", "preserve_most", "preserve_all" };
+    static const char* const conventions[] = { "ms_abi", "vectorcall", "regcall", "preserve_none", "swiftcall", "swiftasynccall", "preserve_most", "preserve_all",
+                                               "intel_ocl_bicc" };
     char path[512];
     char object[512];
     snprintf(path, sizeof(path), "%s/convention.c", directory);
@@ -21,7 +24,7 @@ static void check_test_driver_conventions(CheckTest* test, const char* clang, co
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(conventions); c += 1)
     {
         // The definition, a direct call and a call through a pointer, each a unit of its own.
-        const bool callable = c >= 4;
+        const bool callable = c >= 6;
         char sources[3][512];
         snprintf(sources[0], sizeof(sources[0]), "int __attribute__((%s)) f(int x, long y) { return x - (int)y; }\n", conventions[c]);
         snprintf(sources[1], sizeof(sources[1]), "int __attribute__((%s)) f(int x, long y);\nint g(int n) { return f(n, 2) + n; }\n", conventions[c]);
@@ -57,12 +60,20 @@ static void check_test_driver_conventions(CheckTest* test, const char* clang, co
         "int printf(const char*, ...);\n"
         "static long mix(long a, long b) { return a * 31 + b; }\n"
         "long __attribute__((preserve_most)) most(long a, int b, double c) { printf(\"most %ld %d %.1f\\n\", a, b, c); return mix(a, b) + (long)c; }\n"
-        "double __attribute__((preserve_all)) all(double a, long b) { printf(\"all %.1f %ld\\n\", a, b); return a * 2 + (double)mix(b, 3); }\n";
+        "double __attribute__((preserve_all)) all(double a, long b) { printf(\"all %.1f %ld\\n\", a, b); return a * 2 + (double)mix(b, 3); }\n"
+        "typedef float v4 __attribute__((vector_size(16)));\n"
+        "v4 __attribute__((intel_ocl_bicc)) ocl(long a, v4 x, double d, v4 y) { printf(\"ocl %ld %.1f %.1f %.1f\\n\", a, x[1], y[2], d); return x * y + (float)(d + (double)a); }\n";
     static const char callers[] =
         "#include <stdio.h>\n"
         "long __attribute__((preserve_most)) most(long a, int b, double c);\n"
         "double __attribute__((preserve_all)) all(double a, long b);\n"
+        "typedef float v4 __attribute__((vector_size(16)));\n"
+        "v4 __attribute__((intel_ocl_bicc)) ocl(long a, v4 x, double d, v4 y);\n"
         "int main(void) {\n"
+        "    v4 (__attribute__((intel_ocl_bicc)) *q)(long, v4, double, v4) = ocl;\n"
+        "    v4 acc = { 0, 0, 0, 0 };\n"
+        "    for (int i = 1; i < 4; i++) { v4 x = { i, i + 1, i + 2, i + 3 }; v4 y = { 2, 3, 4, 5 }; double live = i * 0.25; acc += ocl(i, x, live, y) + q(-i, y, 1.0, x) + (float)live; }\n"
+        "    printf(\"%.1f %.1f %.1f %.1f\\n\", acc[0], acc[1], acc[2], acc[3]);\n"
         "    long (__attribute__((preserve_most)) *p)(long, int, double) = most;\n"
         "    long total = 0; double sum = 0;\n"
         "    for (int i = 1; i < 6; i++) { long kept = i * 7; double held = i * 0.5; total += most(kept, i, held) + p(i, -i, 1.5) + kept;\n"
@@ -101,11 +112,53 @@ static void check_test_driver_conventions(CheckTest* test, const char* clang, co
         char ran[1024] = { 0 };
         char description[2400];
         const bool running = linked_ok && check_test_driver_capture(linked, ran, sizeof(ran));
-        snprintf(description, sizeof(description), "conventions: the %s path's calls of clang's preserve_most and preserve_all callees run as clang's build: %s against %s",
+        snprintf(description, sizeof(description), "conventions: the %s path's calls of clang's preserve_most, preserve_all and intel_ocl_bicc callees run as clang's build: %s against %s",
                  p == 1 ? "scalar" : "vector", running ? ran : "(nothing)", expected);
         check_test_expect(test, running && strcmp(ran, expected) == 0, description);
         unlink(caller_object);
         unlink(linked);
+    }
+    // A function of another convention with a swift_async_context parameter, which clang takes and LLVM passes in r14, a
+    // location Tier 0 hasn't: its definition and a call of it are refused by name (#1447).
+    static const char* const async_sources[] = {
+        "long f(void *__attribute__((swift_async_context)) c, long x) { return (long)c + x; }\n",
+        "long f(void *__attribute__((swift_async_context)) c, long x);\nlong g(void *p) { return f(p, 3); }\n",
+    };
+    for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(async_sources); a += 1)
+    {
+        const bool async_written = parse_test_write(path, async_sources[a], strlen(async_sources[a]));
+        char* async_reference[] = { (char*)clang, "-std=gnu17", "-O0", "-c", path, "-o", object, NULL };
+        const int async_clang = async_written ? check_test_driver_spawn(async_reference, &text) : -1;
+        free(text);
+        for (uint32_t p = 0; async_written && p < 2; p += 1)
+        {
+            char* arguments[] = { (char*)executable, "-std=gnu17", "-c", path, "-o", object, p == 1 ? "--scalar" : NULL, NULL };
+            const int status = check_test_driver_spawn(arguments, &text);
+            char description[1024];
+            snprintf(description, sizeof(description), "conventions: %s of a function with a swift_async_context parameter by the %s path is refused by name (status %d, clang %d: %s)",
+                     a == 0 ? "a definition" : "a call", p == 1 ? "scalar" : "vector", status, async_clang, text != NULL ? text : "");
+            check_test_expect(test, async_clang == 0 && status == 1 && text != NULL &&
+                                        strstr(text, "unsupported: functions with a swift_async_context parameter") != NULL, description);
+            free(text);
+        }
+    }
+    // An intel_ocl_bicc call on an AVX-512 target, whose callee keeps rbx, rsi, r14 and r15 of the general registers alone
+    // (LLVM's CSR_64_Intel_OCL_BI_AVX512), is refused by name, where clang compiles it (#1447).
+    static const char wide_call[] = "int __attribute__((intel_ocl_bicc)) f(int x);\nint g(int n) { return f(n) + n; }\n";
+    const bool wide_written = parse_test_write(path, wide_call, sizeof(wide_call) - 1);
+    char* reference_call[] = { (char*)clang, "-std=gnu17", "-O0", "-march=x86-64-v4", "-c", path, "-o", object, NULL };
+    const int wide_clang = wide_written ? check_test_driver_spawn(reference_call, &text) : -1;
+    free(text);
+    for (uint32_t p = 0; wide_written && p < 2; p += 1)
+    {
+        char* arguments[] = { (char*)executable, "-std=gnu17", "-march=x86-64-v4", "-c", path, "-o", object, p == 1 ? "--scalar" : NULL, NULL };
+        const int status = check_test_driver_spawn(arguments, &text);
+        char description[1024];
+        snprintf(description, sizeof(description), "conventions: an intel_ocl_bicc call on an AVX-512 target by the %s path is refused by name (status %d, clang %d: %s)",
+                 p == 1 ? "scalar" : "vector", status, wide_clang, text != NULL ? text : "");
+        check_test_expect(test, wide_clang == 0 && status == 1 && text != NULL &&
+                                    strstr(text, "unsupported: calls of intel_ocl_bicc functions on an AVX-512 target") != NULL, description);
+        free(text);
     }
     unlink(callee_path);
     unlink(caller_path);
@@ -113,6 +166,150 @@ static void check_test_driver_conventions(CheckTest* test, const char* clang, co
     unlink(reference);
     unlink(path);
     unlink(object);
+}
+
+// intel_ocl_bicc, swiftcall and swiftasynccall and the Swift parameter attributes (#1447) in the checker, by the driver
+// against clang, on original fixtures: each unit's whole output, with -Wall, must be clang's by both paths, in its language
+// mode. The conventions' spellings in types (intel_ocl_bicc's canonical "inteloclbicc", a Swift parameter's ABI before its
+// type), their conflicts on one function and across redeclarations (clang's err_cconv_change, with or without a first
+// explicit convention, and its note), pointer conversions between them, the Swift conventions' variadic and K&R
+// functions' errors (err_cconv_knr: a declaration's, not a definition's, a typedef's or one after a prototype's), and the
+// parameter attributes' subjects, types, conventions, order and conflicts (SemaSwift::AddParameterABIAttr and
+// checkExtParameterInfos), with the cases clang takes.
+static void check_test_driver_convention_diagnostics(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    typedef struct CheckConventionUnit CheckConventionUnit;
+    struct CheckConventionUnit
+    {
+        const char* source;
+        const char* standard;
+    };
+    static const CheckConventionUnit units[] = {
+        { "void __attribute__((swiftasynccall)) f(int __attribute__((swift_async_context)) a);\n", "-std=gnu17" },
+        { "void __attribute__((swiftasynccall)) f(int __attribute__((swift_async_context)) a);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context(1))) c);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context(1))) c);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context, swift_async_context)) c);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context, swift_async_context)) c);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall(1))) f(void);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall(1))) f(void);\n", "-std=gnu23" },
+        { "void f(void *__attribute__((swift_context)) c);\n", "-std=gnu17" },
+        { "void f(void *__attribute__((swift_context)) c);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(int __attribute__((swift_context)) c);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(int __attribute__((swift_context)) c);\n", "-std=gnu23" },
+        { "void __attribute__((swiftasynccall)) f(void *__attribute__((swift_context)) c, void **__attribute__((swift_error_result)) e);\n", "-std=gnu17" },
+        { "void __attribute__((swiftasynccall)) f(void *__attribute__((swift_context)) c, void **__attribute__((swift_error_result)) e);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(void **__attribute__((swift_error_result)) e);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(void **__attribute__((swift_error_result)) e);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c, int x, void **__attribute__((swift_error_result)) e);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c, int x, void **__attribute__((swift_error_result)) e);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c, void *const *__attribute__((swift_error_result)) e);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c, void *const *__attribute__((swift_error_result)) e);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c, void *__attribute__((swift_error_result)) e);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c, void *__attribute__((swift_error_result)) e);\n", "-std=gnu23" },
+        { "void f(int *__attribute__((swift_indirect_result)) r);\n", "-std=gnu17" },
+        { "void f(int *__attribute__((swift_indirect_result)) r);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(int x, int *__attribute__((swift_indirect_result)) r);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(int x, int *__attribute__((swift_indirect_result)) r);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(int __attribute__((swift_indirect_result)) r);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(int __attribute__((swift_indirect_result)) r);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f();\n", "-std=gnu17" },
+        { "void __attribute__((swiftasynccall)) f();\n", "-std=gnu17" },
+        { "void __attribute__((vectorcall)) f();\n", "-std=gnu17" },
+        { "void __attribute__((swiftasynccall)) f(void);\nvoid (__attribute__((swiftcall)) *p)(void) = f;\n", "-std=gnu17" },
+        { "void __attribute__((swiftasynccall)) f(void);\nvoid (__attribute__((swiftcall)) *p)(void) = f;\n", "-std=gnu23" },
+        { "void __attribute__((intel_ocl_bicc)) f(void);\nvoid (*p)(void) = f;\n", "-std=gnu17" },
+        { "void __attribute__((intel_ocl_bicc)) f(void);\nvoid (*p)(void) = f;\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c, void **__attribute__((swift_error_result)) e);\nvoid (*p)(void *, void **) = f;\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c, void **__attribute__((swift_error_result)) e);\nvoid (*p)(void *, void **) = f;\n", "-std=gnu23" },
+        { "void __attribute__((intel_ocl_bicc)) f(int);\nvoid __attribute__((swiftcall)) f(int);\n", "-std=gnu17" },
+        { "void __attribute__((intel_ocl_bicc)) f(int);\nvoid __attribute__((swiftcall)) f(int);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(void);\nvoid __attribute__((swiftasynccall)) f(void);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(void);\nvoid __attribute__((swiftasynccall)) f(void);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall, intel_ocl_bicc)) f(void);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall, intel_ocl_bicc)) f(void);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(int, ...);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(int, ...);\n", "-std=gnu23" },
+        { "void __attribute__((swiftasynccall)) f(int, ...);\n", "-std=gnu17" },
+        { "void __attribute__((swiftasynccall)) f(int, ...);\n", "-std=gnu23" },
+        { "void f(void *c) __attribute__((swiftcall));\n", "-std=gnu17" },
+        { "void f(void *c) __attribute__((swiftcall));\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(int c[__attribute__((swift_context)) 3]);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(int c[__attribute__((swift_context)) 3]);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_async_context)) c);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_async_context)) c);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c, void **__attribute__((swift_error_result)) e);\nvoid __attribute__((swiftasynccall)) g(void *__attribute__((swift_async_context)) a, int *__attribute__((swift_indirect_result)) r);\nvoid __attribute__((intel_ocl_bicc)) h(int);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c, void **__attribute__((swift_error_result)) e);\nvoid __attribute__((swiftasynccall)) g(void *__attribute__((swift_async_context)) a, int *__attribute__((swift_indirect_result)) r);\nvoid __attribute__((intel_ocl_bicc)) h(int);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c);\nvoid (__attribute__((swiftcall)) *p)(void *) = 0;\nint same = __builtin_types_compatible_p(__typeof__(f), __typeof__(f));\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c);\nvoid (__attribute__((swiftcall)) *p)(void *) = 0;\nint same = __builtin_types_compatible_p(__typeof__(f), __typeof__(f));\n", "-std=gnu23" },
+        { "void __attribute__((swiftasynccall)) f(void *__attribute__((swift_context)) c);\n", "-std=gnu17" },
+        { "void __attribute__((swiftasynccall)) f(void *__attribute__((swift_context)) c);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c, void **__attribute__((swift_error_result)) e) { (void)c;\n(void)e;\n}\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c, void **__attribute__((swift_error_result)) e) { (void)c;\n(void)e;\n}\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context, swift_context)) c);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context, swift_context)) c);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(int *__attribute__((swift_indirect_result)) a, int *__attribute__((swift_indirect_result)) b, int x);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(int *__attribute__((swift_indirect_result)) a, int *__attribute__((swift_indirect_result)) b, int x);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(void);\nvoid __attribute__((swiftcall)) f();\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f() {}\n", "-std=gnu17" },
+        { "void __attribute__((intel_ocl_bicc)) f();\n", "-std=gnu17" },
+        { "typedef void __attribute__((swiftcall)) T();\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c, void *__attribute__((swift_context)) d);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c, void *__attribute__((swift_context)) d);\n", "-std=gnu23" },
+        { "void __attribute__((intel_ocl_bicc)) f(int, ...);\n", "-std=gnu17" },
+        { "void __attribute__((intel_ocl_bicc)) f(int, ...);\n", "-std=gnu23" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c, int **__attribute__((swift_error_result)) e);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c, int **__attribute__((swift_error_result)) e);\n", "-std=gnu23" },
+        { "typedef void __attribute__((swiftcall)) T(void *__attribute__((swift_context)) c);\nT f;\nvoid __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c);\n", "-std=gnu17" },
+        { "typedef void __attribute__((swiftcall)) T(void *__attribute__((swift_context)) c);\nT f;\nvoid __attribute__((swiftcall)) f(void *__attribute__((swift_context)) c);\n", "-std=gnu23" },
+        { "struct S { int __attribute__((swift_context)) x;\n};\n", "-std=gnu17" },
+        { "struct S { int __attribute__((swift_context)) x;\n};\n", "-std=gnu23" },
+        { "void __attribute__((swift_indirect_result)) *f(void);\n", "-std=gnu17" },
+        { "void __attribute__((swift_indirect_result)) *f(void);\n", "-std=gnu23" },
+        { "int __attribute__((swift_context)) v;\n", "-std=gnu17" },
+        { "int __attribute__((swift_context)) v;\n", "-std=gnu23" },
+        { "void f(int);\nvoid __attribute__((swiftcall)) f(int);\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(int);\nvoid f(int);\nvoid __attribute__((intel_ocl_bicc)) f(int);\n", "-std=gnu17" },
+        { "void __attribute__((ms_abi)) f(int);\nvoid __attribute__((preserve_most)) f(int);\n", "-std=gnu17" },
+        { "void __attribute__((regcall)) f();\n", "-std=gnu17" },
+        { "void __attribute__((swiftcall)) f(int, ...);\nvoid __attribute__((intel_ocl_bicc)) g(int, ...);\n", "-std=gnu17" },
+        // swift_async_context of any convention, which clang's checkExtParameterInfos doesn't check (#1743's review).
+        { "void f(void *c __attribute__((swift_async_context)));\nvoid __attribute__((ms_abi)) g(void *__attribute__((swift_async_context)) c);\n"
+          "void __attribute__((intel_ocl_bicc)) h(void *__attribute__((swift_async_context)) c, int x);\nlong k(void *__attribute__((swift_async_context)) c) { return (long)c; }\n", "-std=gnu17" },
+        { "void f(void *c __attribute__((swift_async_context)));\nvoid __attribute__((preserve_most)) g(int x, void *__attribute__((swift_async_context)) c);\n", "-std=gnu23" },
+    };
+    enum { LINES = 16384 };
+    char* expected_lines = malloc(LINES);
+    char* actual_lines = malloc(LINES);
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/convention-diagnostics.c", directory);
+    for (uint32_t unit = 0; expected_lines != NULL && actual_lines != NULL && unit < BUSTER_ARRAY_LENGTH(units); unit += 1)
+    {
+        const bool made = parse_test_write(source, units[unit].source, strlen(units[unit].source));
+        char* arguments[] = { (char*)clang, (char*)units[unit].standard, "-Wall", "-fsyntax-only", "-fno-caret-diagnostics", source, NULL, NULL };
+        char* expected = NULL;
+        const int oracle = made ? check_test_driver_spawn(arguments, &expected) : -1;
+        const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
+        char description[4096];
+        snprintf(description, sizeof(description), "convention diagnostics %u: clang's lines read", unit);
+        check_test_expect(test, made && lines, description);
+        for (uint32_t scalar = 0; lines && scalar < 2; scalar += 1)
+        {
+            arguments[0] = (char*)executable;
+            arguments[6] = scalar != 0 ? "--scalar" : NULL;
+            char* actual = NULL;
+            const int status = check_test_driver_spawn(arguments, &actual);
+            const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
+            snprintf(description, sizeof(description), "convention diagnostics %u (%s %s), %s: status %d (clang %d), lines\n%s(clang\n%s)", unit, units[unit].standard,
+                     units[unit].source, scalar != 0 ? "scalar" : "vector", status, oracle, actual_lines, expected_lines);
+            check_test_expect(test, same && (status != 0) == (oracle != 0), description);
+            free(actual);
+        }
+        free(expected);
+    }
+    free(expected_lines);
+    free(actual_lines);
+    unlink(source);
 }
 
 // Tier 0's preserving frames (#147, #1447: Tier0Function.preserve_general and the rest), by each path: preserve_most's
@@ -177,6 +374,19 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "#define EVERY_WIDTH ALL_WIDTH\n"
         "#define EVERY_VECTORS 0xffffu\n"
         "#define EVERY_MASKS 0u\n"
+        "#endif\n"
+        "// intel_ocl_bicc's (#1447, LLVM's CSR_64_Intel_OCL_BI and its _AVX and _AVX512): xmm8 to xmm15, whole YMMs with AVX,\n"
+        "// and with AVX-512 rsi, zmm16 to zmm31 and k4 to k7 past System V's callee-saved general registers.\n"
+        "#ifdef __AVX512F__\n"
+        "#define OCL_WIDTH 64\n"
+        "#define OCL_VECTORS 0xffff0000u\n"
+        "#define OCL_MASKS 0xf0u\n"
+        "#define OCL_GENERAL (1u << 6)\n"
+        "#else\n"
+        "#define OCL_WIDTH ALL_WIDTH\n"
+        "#define OCL_VECTORS 0xff00u\n"
+        "#define OCL_MASKS 0u\n"
+        "#define OCL_GENERAL 0u\n"
         "#endif\n"
         "static State last;\n"
         "static const char* names[16] = { \"rax\", \"rcx\", \"rdx\", \"rbx\", \"rsp\", \"rbp\", \"rsi\", \"rdi\", \"r8\", \"r9\", \"r10\", \"r11\", \"r12\", \"r13\", \"r14\", \"r15\" };\n"
@@ -265,6 +475,9 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "long every_var(long n, ...);\n"
         "void every_observe(long a, long b);\n"
         "long every_cdecl(long a, long b);\n"
+        "long ocl(long a, long b);\n"
+        "long ocl_calls(long a, long b);\n"
+        "double ocl_double(double a, double b);\n"
         "extern int depth_seen;\n"
         "int main(void)\n"
         "{\n"
@@ -303,6 +516,11 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "    bad |= every_var(3, 10L, 20L, 12L) != 42 || every_double(2.0, 3.0) != 7.0;\n"
         "    // cdecl before the bit, which is still its type (#1639's review).\n"
         "    bad |= check(\"every_cdecl\", (void*)every_cdecl, every_set & ~1u, EVERY_VECTORS, EVERY_WIDTH, EVERY_MASKS, 40, 2, &r) || r != 42;\n"
+        "    // intel_ocl_bicc's System V callee-saved registers and its own, but a result's.\n"
+        "    const uint32_t ocl_set = 1u << 3 | 1u << 5 | 0xf000u | OCL_GENERAL;\n"
+        "    bad |= check(\"ocl\", (void*)ocl, ocl_set, OCL_VECTORS, OCL_WIDTH, OCL_MASKS, 40, 2, &r) || r != 42;\n"
+        "    bad |= check(\"ocl_calls\", (void*)ocl_calls, ocl_set, OCL_VECTORS, OCL_WIDTH, OCL_MASKS, 40, 2, &r) || r != 126;\n"
+        "    bad |= check(\"ocl_double\", (void*)ocl_double, ocl_set, OCL_VECTORS, OCL_WIDTH, OCL_MASKS, 1, 2, &r) || ocl_double(2.0, 3.0) != 7.0;\n"
         "    Pair p = most_pair(5, 3);\n"
         "    bad |= p.a != 8 || p.b != 2 || all_double(2.0, 3.0) != 7.0;\n"
         "    printf(bad ? \"FAILED\\n\" : \"ok\\n\");\n"
@@ -337,7 +555,10 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "__attribute__((no_caller_saved_registers)) long every_aligned(long a, long b) { _Alignas(64) char x[64]; __builtin_memset(x, (int)a, 64); printf(\"\"); return x[63] + b; }\n"
         "__attribute__((no_caller_saved_registers)) long every_var(long n, ...) { va_list ap; va_start(ap, n); long s = 0; for (long i = 0; i < n; i++) s += va_arg(ap, long); va_end(ap); return s; }\n"
         "__attribute__((no_caller_saved_registers)) void every_observe(long a, long b) { (void)a; (void)b; observe(); }\n"
-        "__attribute__((cdecl, no_caller_saved_registers)) long every_cdecl(long a, long b) { char buf[64]; __builtin_snprintf(buf, sizeof buf, \"%f\", 2.5); return a + b; }\n";
+        "__attribute__((cdecl, no_caller_saved_registers)) long every_cdecl(long a, long b) { char buf[64]; __builtin_snprintf(buf, sizeof buf, \"%f\", 2.5); return a + b; }\n"
+        "__attribute__((intel_ocl_bicc)) long ocl(long a, long b) { double x = (double)a * 0.5; return (long)(x * 2) + b; }\n"
+        "__attribute__((intel_ocl_bicc)) long ocl_calls(long a, long b) { char buf[64]; __builtin_snprintf(buf, sizeof buf, \"%f %ld\", 1.5, a); return helper(a, b); }\n"
+        "__attribute__((intel_ocl_bicc)) double ocl_double(double a, double b) { char buf[64]; __builtin_snprintf(buf, sizeof buf, \"%f\", a); return a * b + 1.0; }\n";
     static const struct
     {
         const char* name;
@@ -354,6 +575,8 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
           "unsupported: __builtin_eh_return in a function with no_caller_saved_registers" },
         { "no_caller_saved_registers' __builtin_setjmp", "void *buf[5];\n__attribute__((no_caller_saved_registers)) int f(void) { return __builtin_setjmp(buf); }\n",
           "unsupported: __builtin_setjmp in a function with no_caller_saved_registers" },
+        { "intel_ocl_bicc's __builtin_setjmp", "void *buf[5];\n__attribute__((intel_ocl_bicc)) int f(void) { return __builtin_setjmp(buf); }\n",
+          "unsupported: __builtin_setjmp in a function of the intel_ocl_bicc calling convention" },
     };
     char harness_path[512];
     char callee_path[512];
