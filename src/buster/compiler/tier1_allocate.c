@@ -42,6 +42,8 @@
 #define BUSTER_TIER1_ALLOCATE_REMATERIALIZE 2
 #define BUSTER_TIER1_ALLOCATE_REQUIRED 1
 #define BUSTER_TIER1_ALLOCATE_NO_REGISTER UINT8_MAX
+// A hinted value's last place, where the scan with required uses left it in memory: no register to follow.
+#define BUSTER_TIER1_ALLOCATE_MEMORY_HINT 0xfeu
 
 typedef struct Tier1FixedIntervals Tier1FixedIntervals;
 struct Tier1FixedIntervals
@@ -217,7 +219,10 @@ static uint8_t tier1_allocation_spill_kind(const Tier1AllocationInput* input, ui
 static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval)
 {
     const uint32_t value = last != 0 ? columns->hint_values[interval] : UINT32_MAX;
-    return value != UINT32_MAX ? last[value] : UINT8_MAX;
+    // A hinted interval whose own value already had a place, in an interval earlier in layout, keeps it: a loop's header
+    // after its body takes the register the body gave its phi, not its operand's.
+    const uint8_t own = value != UINT32_MAX ? last[columns->values[interval]] : UINT8_MAX;
+    return own != UINT8_MAX ? own : value != UINT32_MAX ? last[value] : UINT8_MAX;
 }
 
 static inline __attribute__((always_inline)) bool tier1_allocate_scan(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* allowed, uint8_t* regs, uint32_t* split, uint8_t* kinds, uint8_t* last)
@@ -388,7 +393,7 @@ static bool tier1_allocation_required_at(const Tier1AllocationInput* input, uint
 // Reload at required uses, with the same next-use eviction rule as the simpler scan. All values needed at the
 // current position are pinned before processing any one event, so input order cannot evict a simultaneous operand.
 // Each start/use creates at most two transitions (its own and its victim's), bounding the temporary piece capacity.
-static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* use_intervals, const uint32_t* allowed, uint8_t* regs, uint32_t* begins, uint8_t* kinds, Tier1AllocationPieces* pieces, uint8_t* last)
+static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* use_intervals, const uint32_t* allowed, const uint32_t* weights, uint8_t* regs, uint32_t* begins, uint8_t* kinds, Tier1AllocationPieces* pieces, uint8_t* last)
 {
     // As in tier1_allocate_scan: column pointers in registers, and registers freed at end events. An evicted interval
     // has no register (regs is UINT8_MAX) until a required use reloads it, so the active[r] check guards its end.
@@ -429,8 +434,15 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             const bool required = tier1_allocation_required_at(&columns, interval, position);
             const uint32_t free = ~occupied & allowed[interval];
             const uint8_t follow = tier1_allocation_value_hint(&columns, last, interval);
+            const bool recomputed = tier1_allocation_spill_kind(&columns, interval) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+            // A value with no use in its interval holds no register there where it would be recomputed, or where its
+            // value was in memory last: edges move it where a successor wants it in one.
+            const bool idle = !use_event && !required && columns.use_offsets[interval] == columns.use_offsets[interval + 1] && (recomputed || follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT);
             uint32_t chosen = UINT32_MAX;
-            if (free != 0)
+            if (idle)
+            {
+            }
+            else if (free != 0)
             {
                 chosen = (uint32_t)__builtin_ctz(free);
                 if (columns.hints != 0 && columns.hints[interval] != UINT8_MAX && ((free >> columns.hints[interval]) & 1) != 0)
@@ -444,17 +456,25 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             }
             else
             {
+                // The victim: a recomputable value first, then the farthest next use, then the fewest uses.
                 uint32_t farthest = tier1_allocation_next_use(&columns, interval, position);
+                bool cheapest = recomputed;
+                uint32_t lightest = weights[columns.values[interval]];
                 for (uint32_t r = 0; r < 32; r += 1)
                 {
                     const uint32_t victim = active[r];
                     if (((allowed[interval] >> r) & 1) != 0 && victim != UINT32_MAX && !tier1_allocation_required_at(&columns, victim, position))
                     {
                         const uint32_t next = tier1_allocation_next_use(&columns, victim, position);
-                        if ((required && chosen == UINT32_MAX) || next > farthest)
+                        const bool cheap = tier1_allocation_spill_kind(&columns, victim) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+                        const uint32_t weight = weights[columns.values[victim]];
+                        const bool better = (cheap && !cheapest) || (cheap == cheapest && (next > farthest || (next == farthest && weight < lightest)));
+                        if ((required && chosen == UINT32_MAX) || better)
                         {
                             chosen = r;
                             farthest = next;
+                            cheapest = cheap;
+                            lightest = weight;
                         }
                     }
                 }
@@ -465,6 +485,10 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
                     begins[victim] = position;
                     kinds[victim] = tier1_allocation_spill_kind(&columns, victim);
                     regs[victim] = UINT8_MAX;
+                    if (last != 0 && kinds[victim] == BUSTER_TIER1_ALLOCATE_SPILL)
+                    {
+                        last[columns.values[victim]] = BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
+                    }
                 }
                 else if (required)
                 {
@@ -483,6 +507,10 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
                 {
                     last[columns.values[interval]] = (uint8_t)chosen;
                 }
+            }
+            else if (last != 0 && !use_event && !recomputed)
+            {
+                last[columns.values[interval]] = BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
             }
         }
     }
@@ -711,6 +739,8 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
     // With hint_values, each value's most recently assigned register.
     uint8_t* value_last = 0;
     uint32_t* use_intervals = 0;
+    // With required uses, each value's uses over all its intervals: the scan's tie-break between equally distant ones.
+    uint32_t* value_weights = 0;
     Tier1AllocationPieces pieces = { 0 };
     bool extended[BUSTER_TIER1_ALLOCATE_CLASSES] = { false };
     uint32_t event_count = 0;
@@ -768,10 +798,11 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
         if (error == TIER1_ALLOCATION_OK && columns.use_required != 0)
         {
             use_intervals = arena_push_array(arena, columns.use_count, sizeof(uint32_t), 4);
+            value_weights = arena_push_array(arena, (uint64_t)columns.value_count + 1, sizeof(uint32_t), 4);
             pieces.pieces = arena_push_array(arena, fragment_capacity, sizeof(Tier1AllocationPiece), _Alignof(Tier1AllocationPiece));
             pieces.heads = arena_push_array(arena, columns.count, sizeof(uint32_t), 4);
             pieces.tails = arena_push_array(arena, columns.count, sizeof(uint32_t), 4);
-            if (use_intervals == 0 || pieces.pieces == 0 || pieces.heads == 0 || pieces.tails == 0)
+            if (use_intervals == 0 || value_weights == 0 || pieces.pieces == 0 || pieces.heads == 0 || pieces.tails == 0)
             {
                 error = TIER1_ALLOCATION_CAPACITY;
             }
@@ -780,6 +811,10 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
     if (error == TIER1_ALLOCATION_OK)
     {
         memset(buckets, 0, ((uint64_t)columns.position_count + 2) * sizeof(uint32_t));
+        if (value_weights != 0)
+        {
+            memset(value_weights, 0, ((uint64_t)columns.value_count + 1) * sizeof(uint32_t));
+        }
         memset(value_seen, 0, columns.value_count);
         memset(value_active_end, 0, (uint64_t)columns.value_count * sizeof(uint32_t));
         memset(allocation.value_registers, UINT8_MAX, columns.value_count);
@@ -796,6 +831,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
             {
                 pieces.heads[i] = UINT32_MAX;
                 pieces.tails[i] = UINT32_MAX;
+                value_weights[columns.values[i]] += columns.use_offsets[i + 1] - columns.use_offsets[i];
                 for (uint32_t use = columns.use_offsets[i]; use < columns.use_offsets[i + 1]; use += 1)
                 {
                     use_intervals[use] = i;
@@ -917,7 +953,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
                 if (columns.use_required != 0)
                 {
                     extended[class] = true;
-                    assigned = tier1_allocate_scan_uses(input, class, events, event_count, use_intervals, allowed, regs, split, kinds, &pieces, hinted ? value_last : 0);
+                    assigned = tier1_allocate_scan_uses(input, class, events, event_count, use_intervals, allowed, value_weights, regs, split, kinds, &pieces, hinted ? value_last : 0);
                 }
                 else
                 {

@@ -42,7 +42,9 @@ static bool tier1_allocation_test_hinted_levels(const Tier1AllocationInput* inpu
                         r = (uint8_t)__builtin_ctz(fresh);
                     }
                     const uint32_t hinted = input->hint_values[i];
-                    const uint8_t follow = hinted != UINT32_MAX ? last[hinted] : UINT8_MAX;
+                    // A hinted interval's own value's register from an earlier interval first, then the hinted value's.
+                    const uint8_t own = hinted != UINT32_MAX ? last[input->values[i]] : UINT8_MAX;
+                    const uint8_t follow = own != UINT8_MAX ? own : hinted != UINT32_MAX ? last[hinted] : UINT8_MAX;
                     uint32_t holder = UINT32_MAX;
                     for (uint32_t k = height + 1; follow != UINT8_MAX && k < 33; k += 1)
                     {

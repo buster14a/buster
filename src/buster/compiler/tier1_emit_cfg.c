@@ -3722,8 +3722,40 @@ static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const T
         }
     }
     uint32_t* allowed = ok ? ir_allocate(output, (uint64_t)input->value_count + 1, 4, &ok) : 0;
+    // Each phi web's root (a phi and its operands, joined), and whether a member of the root's web crosses a call: the
+    // whole web then takes callee-saved registers, so that a loop's back edge can keep its phi's register.
+    uint32_t* parents = ok ? ir_allocate(scratch, (uint64_t)input->value_count + 1, 4, &ok) : 0;
+    uint8_t* crossed = ok ? ir_allocate(scratch, (uint64_t)input->value_count + 1, 1, &ok) : 0;
+    for (uint32_t v = 0; ok && v < input->value_count; v += 1)
+    {
+        parents[v] = v;
+        crossed[v] = 0;
+    }
+    for (uint32_t k = 0; ok && k < input->phi_count; k += 1)
+    {
+        uint32_t a = input->phi_values[k];
+        while (parents[a] != a)
+        {
+            parents[a] = parents[parents[a]];
+            a = parents[a];
+        }
+        for (uint32_t o = input->phi_operand_offsets[k]; o < input->phi_operand_offsets[k + 1]; o += 1)
+        {
+            uint32_t b = input->phi_operands[o];
+            while (b != BUSTER_TIER1_CFG_NONE && parents[b] != b)
+            {
+                parents[b] = parents[parents[b]];
+                b = parents[b];
+            }
+            if (b != BUSTER_TIER1_CFG_NONE && b != a)
+            {
+                parents[b] = a;
+            }
+        }
+    }
     uint32_t crossing = 0;
     const uint32_t caller = input->registers[0];
+    for (uint32_t pass = 0; ok && pass < 2; pass += 1)
     for (uint32_t v = 0; ok && v < input->value_count; v += 1)
     {
         const uint32_t node = emitted->value_nodes[v];
@@ -3749,9 +3781,16 @@ static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const T
         // too, in a callee-saved register from the entry on, it would hold one for the whole entry block, which spilled
         // more than its saves around the calls there cost (on speedtest1, a slower run). A parameter the first
         // allocation already freed (tier1_emit_cfg_function) stays free, the entry's moves bringing it.
+        uint32_t root = v;
+        while (parents[root] != root)
+        {
+            root = parents[root];
+        }
+        crossed[root] |= pass == 0 && crosses;
+        crosses = crossed[root] != 0;
         const uint32_t defined = input->definition_registers != 0 ? input->definition_registers[v] : 0;
         allowed[v] = general ? (crosses ? callee : caller) | defined : input->allowed_registers[v];
-        crossing += general && crosses;
+        crossing += pass == 1 && general && crosses;
     }
     Tier1EmitError error = ok || callee == 0 ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
     if (error == TIER1_EMIT_OK && crossing != 0)

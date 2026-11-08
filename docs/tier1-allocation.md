@@ -152,7 +152,10 @@ order. A CFG's per-block ranges do exactly that at a block's start, so
 the interval takes where it is free; `tier1_cfg.c` hints each range a value
 enters a block with to the value itself, each phi to an operand, and a value
 a phi takes along a back edge (defined after the phi) to the phi, which has its
-register by then, so that the back edge moves nothing for it. The common
+register by then, so that the back edge moves nothing for it. A hinted
+interval whose own value already had a register, in an interval earlier in the
+order, takes that one first: a loop's header laid out after its body keeps the
+register the body gave its phi rather than its operand's (#1216). The common
 path takes the hinted register from the level above that holds it, which then
 holds the register the rule would have taken, or as a fresh one, which makes a
 register taken from the current level fresh again. Every level from the current
@@ -211,7 +214,13 @@ physical-register count. An interval frees its register at its end event,
 unless an eviction gave that register to another interval (the scan's
 `active[r] == interval` check). It honors available-register hints, then evicts an
 unpinned active interval whose next use is farther away. Without use columns,
-the end position is the conservative next-use estimate. A value without a
+the end position is the conservative next-use estimate. With `use_required`
+(#1216), the victim is a rematerializable interval first, then the farthest
+next use, then, at equal distance, the value with fewer uses over all its
+intervals; and an interval with no use of its own, starting where it is not
+required, takes no register where it would be rematerialized or where its value
+was last in its slot. A CFG's edges move it where a successor wants it in a
+register, instead of the range holding one through a loop's other paths. A value without a
 register gets a spill/rematerialization fragment. An eviction closes its
 register prefix. With `use_required`, it reenters a register at its next
 required use, potentially evicting another value, and can be split again.
