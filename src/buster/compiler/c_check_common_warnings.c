@@ -1001,6 +1001,8 @@ static uint32_t check_common_emission_subtree_start(CheckCommonEmission* emissio
 #define BUSTER_CHECK_EMITTED_SHIFT_COUNT 0x04u
 // A source comma's left-operand marker, already run by the arithmetic scan (check_common_arithmetic_own).
 #define BUSTER_CHECK_EMITTED_COMMA_MARKER 0x20u
+// A root the walks take where its operand stands (check_common_displaced_roots), skipped where it stands.
+#define BUSTER_CHECK_EMITTED_DISPLACED 0x40u
 
 // What a node's subtree holds for check_common_emit_root's walks, a bit each, in CheckCommonEmission.reach: a node whose
 // own frame or comma stages may warn (check_common_own_candidate), a division by zero or shift by a constant, a comparison where
@@ -3177,45 +3179,35 @@ static bool check_common_displaced_root(const Parser* parser, const CheckGraph* 
 
 // The displaced roots (check_common_displaced_root), each its operand's node above its own, in their operands' order
 // (c_bindings_sort's stable radix sort of the operands, through `temporary`): their count, the sorted keys in `*sorted`,
-// and their nodes in node order in `nodes`, which the root order skips where they stand. At most half the graph's nodes
-// are displaced: each has an operand and a node between them. The vector path tests 16 nodes at a time: the wrapper
-// operators (a lane permute of the set's words), no parent, and an operand before the node's predecessor; the scalar
-// path, its twin, tests each node.
-static uint32_t check_common_displaced_roots(const Parser* parser, const CheckGraph* graph, const uint32_t* parents, uint64_t* items, uint64_t* temporary,
-                                             uint32_t* nodes, const uint64_t** sorted, bool vector)
+// each root marked BUSTER_CHECK_EMITTED_DISPLACED in `emitted`, which the root order skips where it stands. At most half
+// the graph's nodes are displaced: each has an operand and a node between them. They are found from the parser's
+// closers, a statement's condition's `)` (its node the token's) and a for clause's `)` (the discard of its increment's
+// value, the node of the token its last token climbs to), 64 roles at a time on the vector path (check_common_next_token), every token on its twin.
+static uint32_t check_common_displaced_roots(const Parser* parser, const CheckInput* input, const uint32_t* parents, uint8_t* emitted, uint64_t* items,
+                                             uint64_t* temporary, const uint64_t** sorted, bool vector)
 {
-    static const CheckOp wrappers[] = { CHECK_OP_CONDITION, CHECK_OP_POSITIVE, CHECK_OP_CAST };
-    const CheckCommonOps set = check_common_ops(wrappers, BUSTER_ARRAY_LENGTH(wrappers));
+    static const uint8_t closers[] = { PARSE_ROLE_CLOSE_CONDITION, PARSE_ROLE_CLOSE_FOR };
+    const CheckGraph* graph = &input->graph;
+    const uint32_t tokens = input->token_nodes != NULL && input->token_count < parser->tokens.count ? input->token_count : parser->tokens.count;
+    CheckCommonScan scan = { 0 };
     uint32_t count = 0;
-    uint32_t node = 0;
-    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-    for (; !BUSTER_SCALAR_PATH(!vector) && graph->count - node >= 16; node += 16)
+    for (uint32_t token = input->token_nodes != NULL ? check_common_next_token(parser, tokens, BUSTER_CHECK_NONE, closers, BUSTER_ARRAY_LENGTH(closers), &scan, vector) :
+                                                       tokens;
+         token < tokens; token = check_common_next_token(parser, tokens, BUSTER_CHECK_NONE, closers, BUSTER_ARRAY_LENGTH(closers), &scan, vector))
     {
-        const __m512i ops = _mm512_loadu_si512(graph->ops + node);
-        const uint32_t wrapped = check_common_op_lanes(&set, ops, (__mmask16)0xffff);
-        const __mmask16 root = _mm512_mask_cmpeq_epi32_mask((__mmask16)wrapped, _mm512_loadu_si512(parents + node), _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
-        // operand + 1 < node, unsigned: an absent operand (BUSTER_CHECK_NONE) wraps to 0 and fails, as it must.
-        const __m512i next = _mm512_add_epi32(_mm512_loadu_si512(graph->operand0 + node), _mm512_set1_epi32(1));
-        const __m512i at = _mm512_add_epi32(_mm512_set1_epi32((int)node), lanes);
-        uint32_t selected = _mm512_mask_cmplt_epu32_mask(root, next, at) &
-                            _mm512_mask_cmpneq_epi32_mask(root, next, _mm512_setzero_si512());
-        for (; selected != 0; selected &= selected - 1)
+        const uint8_t role = parser->tree.roles[token];
+        // A for clause's increment is the `)`'s child its last token climbs to; an empty one's last token is the `;`.
+        uint32_t increment = role == PARSE_ROLE_CLOSE_FOR && token != 0 && parser->tokens.kinds[token - 1] != PARSE_KIND_SEMI ? token - 1 : BUSTER_CHECK_NONE;
+        for (uint32_t steps = 0; increment < token && parser->tree.parents[increment] != token && steps < token; steps += 1)
         {
-            // (A cast's `for` role is the one test left to the lanes found.)
-            const uint32_t displaced = node + (uint32_t)__builtin_ctz(selected);
-            const uint32_t token = graph->tokens[displaced];
-            if (graph->ops[displaced] != CHECK_OP_CAST || (token < parser->tokens.count && parser->tree.roles[token] == PARSE_ROLE_CLOSE_FOR))
-            {
-                nodes[count] = displaced;
-                items[count++] = ((uint64_t)graph->operand0[displaced] << 32) | displaced;
-            }
+            const uint32_t up = parser->tree.parents[increment];
+            increment = up < token && up != increment ? up : BUSTER_CHECK_NONE;
         }
-    }
-    for (; node < graph->count; node += 1)
-    {
-        if (check_common_displaced_root(parser, graph, parents, node))
+        const uint32_t value = role == PARSE_ROLE_CLOSE_CONDITION ? input->token_nodes[token] : increment < tokens ? input->token_nodes[increment] : BUSTER_CHECK_NONE;
+        const uint32_t node = value < graph->count && role == PARSE_ROLE_CLOSE_FOR ? parents[value] : value;
+        if (node < graph->count && check_common_displaced_root(parser, graph, parents, node) && (emitted[node] & BUSTER_CHECK_EMITTED_DISPLACED) == 0)
         {
-            nodes[count] = node;
+            emitted[node] |= BUSTER_CHECK_EMITTED_DISPLACED;
             items[count++] = ((uint64_t)graph->operand0[node] << 32) | node;
         }
     }
@@ -3234,19 +3226,15 @@ struct CheckCommonRootOrder
     const uint64_t* displaced;
     uint32_t displaced_count;
     uint32_t displaced_at;
-    // The displaced roots in node order, and the next one the natural order skips.
-    const uint32_t* skipped;
-    uint32_t skipped_at;
+    // The displaced roots' marks (BUSTER_CHECK_EMITTED_DISPLACED), which the natural order skips.
+    const uint8_t* emitted;
 };
 
 static uint32_t check_common_root_order_next(const CheckGraph* graph, const uint32_t* parents, CheckCommonRootOrder* order, bool vector)
 {
-    // Both orders rise: a natural root is displaced when it is the next of the node-ordered list.
-    while (order->natural < graph->count && order->skipped_at < order->displaced_count && order->skipped[order->skipped_at] <= order->natural)
+    while (order->natural < graph->count && order->displaced_count != 0 && (order->emitted[order->natural] & BUSTER_CHECK_EMITTED_DISPLACED) != 0)
     {
-        const bool skip = order->skipped[order->skipped_at] == order->natural;
-        order->skipped_at += 1;
-        order->natural = skip ? check_common_next_root(parents, graph->count, &order->roots, vector) : order->natural;
+        order->natural = check_common_next_root(parents, graph->count, &order->roots, vector);
     }
     const bool moved = order->displaced_at < order->displaced_count && (uint32_t)(order->displaced[order->displaced_at] >> 32) < order->natural;
     const uint32_t result = moved ? (uint32_t)order->displaced[order->displaced_at] : order->natural;
@@ -3335,16 +3323,14 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         const uint32_t displaced_capacity = graph->count / 2 + 1;
         uint64_t* displaced = CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, displaced_capacity);
         uint64_t* displaced_temporary = displaced != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, displaced_capacity) : NULL;
-        uint32_t* displaced_nodes = displaced_temporary != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, displaced_capacity) : NULL;
-        if (displaced_nodes == NULL)
+        if (displaced_temporary == NULL)
         {
             check_common_exhausted(pp);
         }
         const uint64_t* displaced_sorted = displaced;
-        const uint32_t displaced_count = displaced_nodes != NULL ?
-                                         check_common_displaced_roots(parser, graph, facts->parents, displaced, displaced_temporary, displaced_nodes, &displaced_sorted,
-                                                                      vector) : 0;
-        CheckCommonRootOrder order = { .displaced = displaced_sorted, .displaced_count = displaced_count, .skipped = displaced_nodes };
+        const uint32_t displaced_count = displaced_temporary != NULL ?
+                                         check_common_displaced_roots(parser, input, facts->parents, emitted, displaced, displaced_temporary, &displaced_sorted, vector) : 0;
+        CheckCommonRootOrder order = { .displaced = displaced_sorted, .displaced_count = displaced_count, .emitted = emitted };
         order.natural = check_common_next_root(facts->parents, graph->count, &order.roots, vector);
         for (uint32_t node = check_common_root_order_next(graph, facts->parents, &order, vector); node < graph->count && !pp->fatal;
              node = check_common_root_order_next(graph, facts->parents, &order, vector))
