@@ -314,6 +314,9 @@ struct CheckProgram
     // (#1282, c_check_tier1_inline.c) expands the calls of a defined function of internal linkage with the first and not
     // the second: the x86 intrinsics' wrappers.
     uint8_t* object_inline;
+    // Whether any declaration of a function has returns_twice. Whole-object call initializers (#1549) use this to
+    // retain their separate result object in bodies that may reenter them. Null where no declaration has it.
+    uint8_t* object_returns_twice;
     // GNU's alias, ifunc and weakref attributes (#147, check_program_aliases): an entry per object a file-scope declaration
     // gives one, in object order; null in a unit without one, the usual one. A selection shares them, but for their states
     // (BUSTER_CHECK_PROGRAM_ALIAS_*, a byte each), which are each program's: its own references and selection decide them.
@@ -537,6 +540,7 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_NOINLINE 32u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_INTERRUPT 64u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_REALIGN 128u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE 256u
 // CheckProgram.object_inline's bits.
 #define BUSTER_CHECK_PROGRAM_INLINE_ALWAYS 1u
 #define BUSTER_CHECK_PROGRAM_INLINE_NEVER 2u
@@ -545,7 +549,8 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 // attribute (CheckProgram.object_naked), a target or target_clones attribute (CheckProgramTargetEvents), one of a
 // callee's that code generation's check of target features reads, always_inline, flatten or noreturn (#775,
 // CheckProgram.attribute_keys), an alias, ifunc or weakref attribute (#147, CheckProgram.aliases), and x86's interrupt
-// (#147, CheckProgram.object_interrupt) and force_align_arg_pointer (#1447, CheckProgram.object_realign).
+// (#147, CheckProgram.object_interrupt), force_align_arg_pointer (#1447, CheckProgram.object_realign), and
+// returns_twice (#1549, CheckProgram.object_returns_twice).
 static uint32_t check_program_attribute_bits(const CheckInputAttributes* attributes)
 {
     uint32_t bits = 0;
@@ -563,7 +568,8 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
         const uint32_t inlining = kind == CHECK_ATTRIBUTE_ALWAYS_INLINE ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALWAYS_INLINE : kind == CHECK_ATTRIBUTE_NOINLINE ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_NOINLINE : 0;
         const uint32_t interrupt = kind == CHECK_ATTRIBUTE_INTERRUPT && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_INTERRUPT : 0;
         const uint32_t realign = kind == CHECK_ATTRIBUTE_FORCE_ALIGN_ARG_POINTER ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_REALIGN : 0;
-        bits |= attribute->ignored ? 0 : bit | inlining | interrupt | realign;
+        const uint32_t twice = kind == CHECK_ATTRIBUTE_RETURNS_TWICE && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE : 0;
+        bits |= attribute->ignored ? 0 : bit | inlining | interrupt | realign | twice;
     }
     return bits;
 }
@@ -3159,6 +3165,23 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
             {
                 program->object_inline[object] |= (uint8_t)(((inlining & BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALWAYS_INLINE) != 0 ? BUSTER_CHECK_PROGRAM_INLINE_ALWAYS : 0) |
                                                             ((inlining & BUSTER_CHECK_PROGRAM_ATTRIBUTE_NOINLINE) != 0 ? BUSTER_CHECK_PROGRAM_INLINE_NEVER : 0));
+            }
+        }
+        if ((function_attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE) != 0)
+        {
+            // Keep the fact by object: a later redeclaration need not repeat the earlier one's attribute records.
+            if (program->object_returns_twice == NULL && room)
+            {
+                program->object_returns_twice = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, (uint64_t)count + 1);
+                room = program->object_returns_twice != NULL;
+                if (room)
+                {
+                    memset(program->object_returns_twice, 0, (uint64_t)count + 1);
+                }
+            }
+            if (room)
+            {
+                program->object_returns_twice[object] = 1;
             }
         }
         if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED) != 0)
