@@ -3882,11 +3882,19 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
                 const CheckInputAttribute* mode = check_input_enum_mode(own, BUSTER_CHECK_NONE);
                 if (valid && mode != NULL)
                 {
-                    const TypeId moded = check_input_attribute_mode(reader, own, mode, type);
-                    valid = moded != 0 && type_enum_complete(reader->types, type, moded, own->alignment_log2);
+                    const CheckInputAttributeRecovery recovery = check_input_attribute_recovery(reader, own, (CheckInputAttribute*)mode);
+                    TypeId installed = 0;
+                    const TypeId moded = check_input_attribute_mode(reader, own, mode, type, &installed);
+                    // An error after which clang installs no type, an unknown or unsupported mode's (#1447): the enum goes on
+                    // without it, as one with no mode. One that still installs a type of no integer stops the reader.
+                    const bool dropped = moded == 0 && installed == type && check_input_attribute_recover(reader, own, &recovery, 0, false, false);
+                    valid = dropped || (moded != 0 && type_enum_complete(reader->types, type, moded, own->alignment_log2));
                     reader->output->resource |= moded != 0 && !valid && reader->types->last_error == TYPE_ERROR_FULL;
-                    reader->tag_completions[tag] = i;
-                    reader->enum_fixed[tag] = BUSTER_CHECK_ENUM_MODED;
+                    if (!dropped)
+                    {
+                        reader->tag_completions[tag] = i;
+                        reader->enum_fixed[tag] = BUSTER_CHECK_ENUM_MODED;
+                    }
                 }
             }
             reader->declared_types[declaration] = type;
@@ -5362,7 +5370,15 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
             .error_first = saved_first,
             .error_end = saved_end,
         };
+        // An alignment's, which each later declarator gives again (CheckInputAttributeRepeat), as it was made.
+        const bool alignment = !valid && (attribute->kind == CHECK_ATTRIBUTE_ALIGNED || attribute->kind == CHECK_ATTRIBUTE_ALIGNAS) &&
+                               reader->output->report_count == before + 1;
+        const CheckInputReport made = alignment ? reader->output->reports[before] : (CheckInputReport){ 0 };
         const bool dropped = !valid && check_input_attribute_errors_recover(reader, &parsed, &recovery, 0);
+        if (dropped && alignment)
+        {
+            check_input_attribute_repeat_add(reader, &parsed, &made);
+        }
         if (dropped)
         {
             // (At the first record, `i` wraps to UINT32_MAX, which the loop's step takes back to 0.)
@@ -5379,6 +5395,8 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
     {
         const CheckInputAttributes empty = { 0 };
         valid = check_input_attribute_merge(reader, *attributes != 0 ? *attributes : &empty, &parsed, combined);
+        // (A list's groups are joined before its declarators take it.)
+        combined->repeats = *attributes != 0 && parsed.repeats != NULL ? check_input_attribute_repeats_join(reader, (*attributes)->repeats, parsed.repeats) : combined->repeats;
         *attributes = combined;
     }
     return valid;

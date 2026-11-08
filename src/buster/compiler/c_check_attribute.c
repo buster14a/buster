@@ -377,6 +377,21 @@ struct CheckInputAttributes
     // processes the declaration's attributes, after its type's (#147, check_input_attribute_type_warnings): an unknown
     // one's (after its first token), another language's or a type name's declaration attribute's (at it, so one before).
     uint32_t unknown_first;
+    // The errors of alignments the list's reader dropped (#1447, CheckInputAttributeRepeat), which its later declarators
+    // give again; or NULL. The list's copies share them.
+    struct CheckInputAttributeRepeat* repeats;
+};
+
+// An aligned's or _Alignas's error of its value that the reader recovered and dropped its record for (#1447): clang's
+// handleAlignedAttr runs for each declarator, so each declarator after the first one that took the list gives `report`
+// again (check_input_attribute_repeats). `declarator` is that first one's key (its name, or its declarator's end), 0
+// before it; `next` is the list's next.
+typedef struct CheckInputAttributeRepeat CheckInputAttributeRepeat;
+struct CheckInputAttributeRepeat
+{
+    const struct CheckInputReport* report;
+    CheckInputAttributeRepeat* next;
+    uint32_t declarator;
 };
 
 typedef struct CheckInputAttributeRule CheckInputAttributeRule;
@@ -1392,8 +1407,54 @@ static bool check_input_attribute_merge(CheckInputReader* reader, const CheckInp
         output->calling_convention = check_input_convention_merge(output->calling_convention, suffix->calling_convention);
         output->unknown_first = output->unknown_first == 0 || (suffix->unknown_first != 0 && suffix->unknown_first < output->unknown_first) ?
                                 suffix->unknown_first : output->unknown_first;
+        // The common one's repeats, which its other declarators share; a declarator's own list has one declarator, which
+        // gives none (check_input_attribute_repeats).
+        output->repeats = output->repeats != NULL ? output->repeats : suffix->repeats;
     }
     return valid;
+}
+
+// The repeats of `first` then `second` (#1447, CheckInputAttributeRepeat), for a list that joins one's records and then
+// the other's before any declarator has taken them: `first`'s copied where both have some. NULL where room ran out.
+static CheckInputAttributeRepeat* check_input_attribute_repeats_join(CheckInputReader* reader, CheckInputAttributeRepeat* first, CheckInputAttributeRepeat* second)
+{
+    CheckInputAttributeRepeat* result = second;
+    CheckInputAttributeRepeat** link = &result;
+    bool room = true;
+    for (const CheckInputAttributeRepeat* repeat = first; room && repeat != NULL; repeat = repeat->next)
+    {
+        CheckInputAttributeRepeat* copy = arena_push(reader->arena, sizeof(CheckInputAttributeRepeat), 8);
+        room = copy != NULL;
+        if (room)
+        {
+            *copy = (CheckInputAttributeRepeat){ .report = repeat->report, .next = second };
+            *link = copy;
+            link = &copy->next;
+        }
+    }
+    reader->output->resource |= !room;
+    return room ? result : NULL;
+}
+
+// A recovered error of an aligned's or _Alignas's value (#1447): its report (`report`, as it was made) kept on the list as
+// one of its repeats (CheckInputAttributeRepeat), after the ones it has. Whether there was room.
+static bool check_input_attribute_repeat_add(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputReport* report)
+{
+    CheckInputReport* copy = arena_push(reader->arena, sizeof(CheckInputReport), 8);
+    CheckInputAttributeRepeat* repeat = copy != NULL ? arena_push(reader->arena, sizeof(CheckInputAttributeRepeat), 8) : NULL;
+    reader->output->resource |= repeat == NULL;
+    if (repeat != NULL)
+    {
+        *copy = *report;
+        *repeat = (CheckInputAttributeRepeat){ .report = copy };
+        CheckInputAttributeRepeat** link = &attributes->repeats;
+        while (*link != NULL)
+        {
+            link = &(*link)->next;
+        }
+        *link = repeat;
+    }
+    return repeat != NULL;
 }
 
 static uint32_t check_input_attribute_after_group(const Parser* parser, uint32_t token, uint32_t end)
@@ -3496,8 +3557,10 @@ struct CheckInputAttributeRecovery
 
 // Whether an attribute's error is one clang's handleDeclAttribute gives and then returns from without adding the attribute,
 // which leaves the declaration valid: its arguments' (their values, counts, strings and parameter indices), its subject's
-// and a mutual exclusion's. Others stop the reader as before: an undeclared name's, a pragma's, conflicting calling
-// conventions' (a type's, which clang makes invalid) and a list's place (its parser's).
+// and a mutual exclusion's; and a vector type's element or size, which clang's HandleVectorSizeAttr and
+// HandleNeonVectorTypeAttr give and then leave the type as it was (check_input_attribute_type). Others stop the reader as
+// before: an undeclared name's, a pragma's, conflicting calling conventions' (a type's, which clang makes invalid) and a
+// list's place (its parser's).
 static bool check_input_attribute_recoverable(const CheckInputReport* report)
 {
     const CheckInputMessage message = report->message;
@@ -3506,7 +3569,10 @@ static bool check_input_attribute_recoverable(const CheckInputReport* report)
                            message == CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS || message == CHECK_INPUT_ATTRIBUTE_EXCLUSION ||
                            message == CHECK_INPUT_ATTRIBUTE_ANNOTATE_STRING || message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT ||
                            message == CHECK_INPUT_ATTRIBUTE_INT_OR_BOOL || message == CHECK_INPUT_ATTRIBUTE_TYPES;
-    return attribute && report->pragma == 0;
+    const bool vector = message == CHECK_INPUT_VECTOR_ELEMENT || message == CHECK_INPUT_VECTOR_BIT_INT || message == CHECK_INPUT_VECTOR_CONSTANT ||
+                        message == CHECK_INPUT_VECTOR_NEGATIVE || message == CHECK_INPUT_VECTOR_TOO_LARGE || message == CHECK_INPUT_VECTOR_ZERO ||
+                        message == CHECK_INPUT_VECTOR_MULTIPLE;
+    return (attribute || vector) && report->pragma == 0;
 }
 
 // Whether the errors an attribute's reading or handler gave since `recovery` moved past (#1447): each is one clang gives and
@@ -4427,8 +4493,12 @@ static uint32_t check_input_mode_width(String8 mode, bool* integer, bool* comple
 // a C mode; a vector of it by the mode's count, or the base vector's bytes. The declaration's qualifiers are dropped, as
 // clang's setType drops them. clang's errors at the attribute, in its order, else 0: an unknown mode, a vector mode of an
 // enumeration, a base of no integer or floating type, a mode of the other kind, an unsupported width, and a complex mode
-// of a vector.
-static TypeId check_input_attribute_mode(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute, TypeId base)
+// of a vector. With an error, `installed` (where not NULL) is the type clang's AddModeAttr installs all the same (#1447): a
+// mode of the other kind, or of a base of no integer or floating type, still gives the mode's type, which takes its base's
+// signedness where it is an integer and a base vector's bytes; else (another error, or a complex mode of a vector, clang's
+// second error then) the base, which clang keeps.
+static TypeId check_input_attribute_mode(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute, TypeId base,
+                                         TypeId* installed)
 {
     TypeTable* types = reader->types;
     String8 rest = { 0 };
@@ -4485,21 +4555,24 @@ static TypeId check_input_attribute_mode(CheckInputReader* reader, CheckInputAtt
     {
         error = CHECK_ARGUMENT_UNSUPPORTED_MODE;
     }
-    else if (complex_mode && vector_base && vector_count == 0)
+    // clang diagnoses the base and goes on to build the mode's type (AddModeAttr): a complex mode of a vector is its error
+    // after, the base's error's, with the base kept.
+    const bool mismatch = error == CHECK_ARGUMENT_MODE_PRIMITIVE || error == CHECK_ARGUMENT_MODE_TYPE;
+    const bool built = error == CHECK_ARGUMENT_COUNT || (mismatch && result != 0);
+    const bool complex_vector = built && complex_mode && vector_base && vector_count == 0;
+    error = complex_vector && !mismatch ? CHECK_ARGUMENT_MODE_COMPLEX_VECTOR : error;
+    TypeId moded = 0;
+    if (built && !complex_vector)
     {
-        error = CHECK_ARGUMENT_MODE_COMPLEX_VECTOR;
-    }
-    if (error == CHECK_ARGUMENT_COUNT)
-    {
-        result = complex_mode ? check_input_type_result(reader, type_complex(types, result)) : result;
+        moded = complex_mode ? check_input_type_result(reader, type_complex(types, result)) : result;
         // The base vector's elements' bytes, not its rounded storage's, in as many of the new elements.
         const uint64_t count = vector_count != 0 ? vector_count :
-                               vector_base && result != 0 ? type_size(types, element) * types->types.extent[type_index(old)] / type_size(types, result) : 0;
-        if (result != 0 && (vector_count != 0 || vector_base))
+                               vector_base && moded != 0 ? type_size(types, element) * types->types.extent[type_index(old)] / type_size(types, moded) : 0;
+        if (moded != 0 && (vector_count != 0 || vector_base))
         {
-            result = count != 0 && count <= UINT32_MAX ? check_input_type_result(reader, type_vector(types, result, (uint32_t)count, false)) : 0;
+            moded = count != 0 && count <= UINT32_MAX ? check_input_type_result(reader, type_vector(types, moded, (uint32_t)count, false)) : 0;
         }
-        error = result == 0 && !reader->output->resource ? CHECK_ARGUMENT_MODE_TYPE : error;
+        error = moded == 0 && !reader->output->resource && error == CHECK_ARGUMENT_COUNT ? CHECK_ARGUMENT_MODE_TYPE : error;
     }
     if (error != CHECK_ARGUMENT_COUNT)
     {
@@ -4509,16 +4582,17 @@ static TypeId check_input_attribute_mode(CheckInputReader* reader, CheckInputAtt
         {
             check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES, CHECK_WARNING_EVENT_VECTOR_MODE);
         }
-        const bool unsupported = result == 0 && width != 0 && (error == CHECK_ARGUMENT_MODE_PRIMITIVE || error == CHECK_ARGUMENT_MODE_TYPE);
-        result = 0;
+        const bool unsupported = result == 0 && width != 0 && mismatch;
         check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, error, attribute->argument_first - attribute->first);
-        if (unsupported)
+        // AddModeAttr diagnoses the base, then still asks the target for the mode. An unavailable target type therefore
+        // produces a second error at the same attribute, in that order; so does a complex mode of a vector.
+        const bool second = unsupported || (complex_vector && mismatch);
+        if (second)
         {
-            // AddModeAttr diagnoses the base, then still asks the target for the mode. An unavailable target type
-            // therefore produces a second error at the same attribute, in that order.
             CheckInputAttributes following = { 0 };
             const uint32_t before = reader->output->report_count;
-            check_input_attribute_argument_error(reader, &following, attribute, attribute->first, CHECK_ARGUMENT_UNSUPPORTED_MODE,
+            check_input_attribute_argument_error(reader, &following, attribute, attribute->first,
+                                                  unsupported ? CHECK_ARGUMENT_UNSUPPORTED_MODE : CHECK_ARGUMENT_MODE_COMPLEX_VECTOR,
                                                   attribute->argument_first - attribute->first);
             if (reader->output->report_count > before)
             {
@@ -4526,7 +4600,11 @@ static TypeId check_input_attribute_mode(CheckInputReader* reader, CheckInputAtt
             }
         }
     }
-    return result;
+    if (installed != NULL)
+    {
+        *installed = error == CHECK_ARGUMENT_COUNT ? moded : mismatch && moded != 0 ? moded : base;
+    }
+    return error == CHECK_ARGUMENT_COUNT ? moded : 0;
 }
 
 // vector_size's checks of its element type `element` and its size, as clang's BuildVectorType makes them, in its order
@@ -4646,26 +4724,48 @@ static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAtt
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_MODE)
         {
-            result = check_input_attribute_mode(reader, attributes, attribute, result);
-            valid = result != 0;
+            const CheckInputAttributeRecovery recovery = check_input_attribute_recovery(reader, attributes, attribute);
+            TypeId installed = 0;
+            const TypeId moded = check_input_attribute_mode(reader, attributes, attribute, result, &installed);
+            // An error clang gives and goes on from, with the type it installs all the same (#1447). The specifiers' is each
+            // declarator's in clang (AddModeAttr runs for each), which the later ones give again (CheckInputAttributeRepeat).
+            const uint32_t made_count = reader->output->report_count - recovery.reports;
+            CheckInputReport made[2] = { 0 };
+            for (uint32_t r = 0; deduced && r < made_count && r < 2; r += 1)
+            {
+                made[r] = reader->output->reports[recovery.reports + r];
+            }
+            valid = moded != 0 || (installed != 0 && check_input_attribute_recover(reader, attributes, &recovery, 0, false, false));
+            for (uint32_t r = 0; deduced && moded == 0 && valid && r < made_count && r < 2; r += 1)
+            {
+                check_input_attribute_repeat_add(reader, attributes, made + r);
+            }
+            result = moded != 0 ? moded : valid ? installed : 0;
             error = CHECK_ATTRIBUTE_ERROR_MODE;
         }
-        else if (attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE && !check_input_vector_size(reader, attributes, attribute, result))
+        else if (attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE || (attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE && attribute->neon != 0 && attribute->resolved))
         {
-            valid = false;
+            // A vector's error leaves the type as it was, clang's HandleVectorSizeAttr's and HandleNeonVectorTypeAttr's (#1447).
+            const CheckInputAttributeRecovery recovery = check_input_attribute_recovery(reader, attributes, attribute);
+            const bool checked = attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE ? check_input_vector_size(reader, attributes, attribute, result) :
+                                 check_input_neon_vector(reader, attributes, attribute, result);
+            const bool recovered = !checked && check_input_attribute_recover(reader, attributes, &recovery, 0, false, false);
+            valid = checked || recovered;
+            if (checked)
+            {
+                result = attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE ? type_vector_size(reader->types, result, (uint64_t)attribute->value) :
+                         type_vector_kind(reader->types, result, (uint32_t)attribute->value, attribute->neon);
+                result = check_input_type_result(reader, result);
+                valid = result != 0;
+            }
+            error = CHECK_ATTRIBUTE_ERROR_VECTOR;
         }
-        else if (attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE && attribute->neon != 0 && attribute->resolved &&
-                 !check_input_neon_vector(reader, attributes, attribute, result))
-        {
-            valid = false;
-        }
-        else if (attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE || attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE)
+        else if (attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE)
         {
             valid = attribute->resolved;
             if (valid)
             {
-                result = attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE ? type_vector_size(reader->types, result, (uint64_t)attribute->value) :
-                         attribute->neon != 0 ? type_vector_kind(reader->types, result, (uint32_t)attribute->value, attribute->neon) :
+                result = attribute->neon != 0 ? type_vector_kind(reader->types, result, (uint32_t)attribute->value, attribute->neon) :
                          type_vector(reader->types, result, (uint32_t)attribute->value, true);
                 result = check_input_type_result(reader, result);
                 valid = result != 0;
@@ -7209,6 +7309,26 @@ static bool check_input_interrupt_handler(CheckInputReader* reader, CheckInputAt
     return rule == UINT32_MAX;
 }
 
+// A declarator's run of its list's repeats (#1447, CheckInputAttributeRepeat), `declarator` its key: the first declarator
+// that takes them has their reports already; each other one gives them again, as clang's handler does for each
+// declarator, completing where the reader's waiting errors of its own list do (before `completion`, the subject checks').
+static void check_input_attribute_repeats(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t declarator, uint32_t completion)
+{
+    CheckInput* output = reader->output;
+    for (CheckInputAttributeRepeat* repeat = attributes != NULL && declarator != 0 ? attributes->repeats : NULL; repeat != NULL; repeat = repeat->next)
+    {
+        const bool again = repeat->declarator != 0 && repeat->declarator != declarator;
+        repeat->declarator = repeat->declarator != 0 ? repeat->declarator : declarator;
+        if (again && output->report_count < output->report_capacity && !output->resource)
+        {
+            const CheckInputAttributeRecovery recovery = check_input_attribute_recovery(reader, attributes, NULL);
+            output->reports[output->report_count++] = *repeat->report;
+            check_input_attribute_errors_recover(reader, attributes, &recovery, completion > 1 ? completion - 1 : completion);
+        }
+        output->resource |= again && output->report_count >= output->report_capacity;
+    }
+}
+
 static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t declaration, TypeId type, uint32_t begin,
                                            uint32_t name)
 {
@@ -7243,6 +7363,7 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
     {
         reader->recovered_pending += 1;
     }
+    check_input_attribute_repeats(reader, attributes, name != BUSTER_CHECK_NONE ? name : completion, completion);
     CheckInputAttributeRecovery recovery = { 0 };
     // The condition first takes the last attribute's errors past, where it can (#1447): the body leaves an attribute at
     // several `continue`s.
