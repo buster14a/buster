@@ -206,6 +206,16 @@ share storage without a value rewrite corrupting a block ID or metadata.
 Existing IR phis are preserved even if dead-edge removal makes them trivial;
 the core's trivial/SCC cleanup applies to the newly constructed local phis.
 
+Before assigning instruction IDs, the adapter orders each block's new phis by
+their original local ID (#1395). The vector constructor discovers them in local
+order, while the independent predecessor-reading constructor can discover them
+in first-read order. Canonical publication keeps those choices from changing
+later register allocation and object bytes. Already ordered prefixes need no
+additional allocation; otherwise stable counting passes by local and block use
+linear scratch, which is released before filling the output. The constructors
+and their cleanup are unchanged. `test-ssa-ir` compares complete serialized
+loop outputs as well as executing both forms against the memory interpretation.
+
 The adapter checks reachable input uses against the shared dominator tree and
 verifies the rebuilt function with both shared IR verifiers. It borrows the
 analysis's `preorder` and `subtree_end` intervals for input checks and remaps

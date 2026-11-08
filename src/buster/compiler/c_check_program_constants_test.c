@@ -117,6 +117,26 @@ static const struct
       "int c=__builtin_issignaling(__builtin_nans(\"\"))+2*__builtin_isnan(__builtin_nanf16(\"\"))+4*__builtin_isinf(__builtin_inff128())+"
       "8*__builtin_issignaling(__builtin_nansf128(\"1\"))+16*__builtin_issignaling((double)__builtin_nansf(\"\"));"
       "return (int)(x^(unsigned)c);}" },
+    // Folded invalid operations and NaN operands of float, double and long double (#1473), in static data and in code:
+    // clang's APFloat gives an invalid operation the positive canonical NaN and keeps the first NaN operand, quieted,
+    // where the host's SSE and x87 give their negative NaN and may take either operand.
+    { "float-constants-invalid-arithmetic",
+      BUSTER_CHECK_TEST_FLOAT_CONSTANTS_HASH
+      "static double d[]={__builtin_inf()+-__builtin_inf(),__builtin_inf()-__builtin_inf(),0.0*__builtin_inf(),0.0/0.0,"
+      "-__builtin_inf()/__builtin_inf(),-(__builtin_inf()-__builtin_inf()),1.0-(-__builtin_nan(\"5\")),-__builtin_nan(\"1\")+__builtin_nan(\"2\"),"
+      "__builtin_nans(\"4\")*-__builtin_nan(\"2\"),__builtin_nan(\"2\")/__builtin_nans(\"4\")};"
+      "static float f[]={__builtin_inff()+-__builtin_inff(),0.0f*-__builtin_inff(),0.0f/0.0f,2.0f*-__builtin_nanf(\"7\"),"
+      "__builtin_nanf(\"3\")-__builtin_nansf(\"1\")};"
+      "static long double l[]={__builtin_infl()+-__builtin_infl(),0.0L*__builtin_infl(),0.0L/0.0L,1.0L-(-__builtin_nanl(\"9\")),"
+      "-__builtin_nanl(\"1\")+__builtin_nanl(\"2\")};"
+      "int tested(int n){unsigned x=2166136261u;"
+      "double e=((double)__builtin_inff()/-1.0)+(0.5- -(double)__builtin_inff());"
+      "double c[]={__builtin_inf()+-__builtin_inf(),0.0/0.0,1.0+-__builtin_nan(\"6\"),__builtin_nan(\"1\")*-__builtin_nan(\"2\")};"
+      "float g=__builtin_inff()*0.0f;long double m=__builtin_infl()-__builtin_infl();"
+      "x=hash(x,d,sizeof d);x=hash(x,f,sizeof f);for(unsigned i=0;i<sizeof l/sizeof*l;i++)x=hash(x,&l[i],10);"
+      "x=hash(x,&e,8);x=hash(x,c,sizeof c);x=hash(x,&g,4);x=hash(x,&m,10);"
+      "int s=__builtin_signbit(e)+2*__builtin_signbit(g)+4*__builtin_signbit(m);"
+      "return (int)(x^(unsigned)n^(unsigned)s);}" },
 };
 
 static __attribute__((noinline)) void check_test_float_constant_runs(CheckTest* test, const char* clang)

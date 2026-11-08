@@ -125,8 +125,9 @@ measures admission, not SIMD lanes or instructions.
 ## Assignment
 
 Both paths validate and count-sort position events. End events precede starts
-at the same position. The common path, `tier1_allocate`'s, applies to a class
-whose ranges all have its full register mask and whose maximum pressure fits.
+at the same position. Both production entry points use the same assignment
+policy (#1395), including on a baseline host: the common path applies to a
+class whose ranges all have its full register mask and whose maximum pressure fits.
 It walks the class's events in order, with one register per pressure level:
 - an end at level d deposits its interval's register there;
 - the next start at level d takes it, the most recent end that no other start
@@ -138,7 +139,11 @@ two are matched, and the one pass assigns every register. This uses at most
 maximum pressure registers, including arbitrary input order and noncontiguous
 physical masks. `test-tier1-allocation` compares these registers with an
 independent implementation of the same rule, which walks positions without the
-event sort.
+event sort. Scalar production keeps its scalar fixed-range filtering kernels,
+but it no longer selects a different allocation policy. The former scalar
+policy remains `tier1_allocate_scan_reference`, a test oracle that sends every
+class through the independent scan. Its valid assignments can differ from the
+production paths' identical assignments.
 
 The rule alone gives values that end and restart at one position each other's
 registers: ends deposit downward in input order and starts take upward in input
@@ -178,7 +183,9 @@ left every output the same and made the whole call faster on the 9700X:
 | large-fit | 2,048 | 114 | 53 | 172 | 61 |
 | large-pressure | 16,384 | 232 | 118 | 231 | 118 |
 
-These are `benchmark-tier1-allocation`'s cycles per interval: medians of five
+These historical results predate #1395's common production assignment policy;
+the scalar column used the scan on every class. They are
+`benchmark-tier1-allocation`'s cycles per interval: medians of five
 processes, pinned to CPU 2, before and after the change, with the same ratios
 after 100 ms of scalar work. The scalar column also has the scan's end-event
 expiry below, and large-pressure, which is overfull, takes the scan on both
@@ -214,8 +221,8 @@ at most `2*intervals`. Dense spill ids are assigned in input-interval order.
 This is not yet the complete Wimmer/Franz implementation: it lacks inactive
 interval lookahead across holes, loop-aware split placement, vector spill
 region selection/recoloring, and automatic machine-constraint interval
-construction. Input holes are independent ranges, and the scalar twin is a
-validity oracle, not a proof of optimum constrained coloring.
+construction. Input holes are independent ranges, and the independent scan
+reference is a validity oracle, not a proof of optimum constrained coloring.
 
 ## Transitions and parallel moves
 
@@ -859,6 +866,14 @@ Empty intervals are invalid; an empty function is valid. Optional absent use
 columns require zero use count. Capacity failure is distinct from invalid
 input and impossible register constraints.
 
+Both production paths allocate a temporary column of the class's end/start
+events: eight bytes per input interval, plus alignment. Scalar production now
+needs that column too (#1395); the independent scan reference does not. This
+raises the scalar path's temporary capacity requirement without changing the
+retained output layout. Fixed-range filtering can still need different scratch
+on the two hosts. No new throughput measurement is claimed for this policy
+change.
+
 ## Validation and measurements
 
 `test-tier1-allocation [--seed N] [--count N]` checks arbitrary input order,
@@ -876,8 +891,18 @@ exercises indexed capacity rollback after an existing arena prefix. The 8,192
 nonoverlapping fixed/value interval fixture checks every resulting register
 without invoking the deliberately quadratic allocation verifier.
 
-`tier1_allocate_expiry_test.c` adds literal traces, on both entry points and
-every class, which run even with `--count 0`:
+Generated cases and hinted ranges compare both production paths' complete
+fragment, register, spill and pressure results. Both also pass the interval,
+occupancy and allocation-certificate checks, as does the independent scan
+reference. The position-walking level-rule oracles run on baseline hosts too.
+The literal hint trace distinguishes the policies: without value hints both
+production paths swap the two adjacent ranges' registers, while the independent
+scan keeps them; with hints all three keep them. `test-checker-driver` adds a
+parameter-free leaf with volatile loads to the #1395 whole-object comparison,
+so unrestricted allocation is covered independently of loop phi ordering.
+
+`tier1_allocate_expiry_test.c` adds literal traces, on both production entry
+points, the scan reference and every class, which run even with `--count 0`:
 - an evicted interval's old end while its successor still holds the register;
 - a reload of the same value into another register before its original end,
   which must free that current register;
