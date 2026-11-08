@@ -162,10 +162,51 @@ each with one `cmp`/`test` and no `setcc`; missing functions fail the test.
 Failed commands and execution are fatal, and failure artifacts are retained.
 CI builds the supervisor with its configured sanitizer flags as well.
 
-This regression is not #1218's program-performance acceptance. Folding memory
-operands and changing block layout are separate work; the speedtest1/Lua
-compare-and-branch counts and 9700X runtime evidence remain necessary before
-closing the issue. No runtime improvement is inferred from the peephole alone.
+This regression is not #1218's program-performance acceptance. The
+speedtest1/Lua compare-and-branch counts and 9700X runtime evidence remain
+necessary before closing the issue. No runtime improvement is inferred from
+the peephole alone.
+
+## Block placement and critical-edge fall-through (#1218)
+
+The C driver's final Tier 1 optimization enables `BUSTER_IR_OPTIMIZE_LAYOUT`.
+The shared optimizer's default options leave it off. `ir_optimize_layout.c`
+orders surviving blocks into fall-through chains during the existing rewrite,
+before selection, allocation and final SSA verification. Entry remains first.
+Unconditional edges take priority over conditional ones, natural-loop back
+edges over ordinary incoming edges, and existing adjacency breaks equal
+priorities. A cycle loses one fall-through link, preferring to keep its loop
+back edge. This can place a loop's body before its test while retaining the
+entry jump to the test. No instruction crosses a control-flow edge.
+
+The rewrite's existing maps rename values, phi inputs and predecessor IDs,
+direct and switch targets, call arguments, and computed-goto labels. ABI
+records, vector constants and machine rows retain their established ownership.
+The emitter and certificates still consume contiguous blocks and monotonically
+ordered records. When both conditional edges need move stubs, the emitter puts
+the stub targeting the next physical block last, allowing its moves to fall
+through without an additional jump.
+
+`test-ir-optimize` exercises all 16 combinations of SCCP, dead-code removal,
+CFG cleanup and layout on the existing semantic fixtures, including loops,
+phis, switches, labels, calls and volatile effects. New fixtures cover reversed
+chains of 0 through 65 blocks with forward SSA references and call argument
+lists, irreducible control flow, moved aggregate calls and vector payloads.
+The scalar/vector results must match, independently interpreted behavior must
+agree, and every chain jump must target the following block. Retained-analysis
+tests rebuild CFG and dominance after layout. `test-tier1-emit` additionally
+checks both critical-edge stub orientations with actual native execution.
+
+The ordering is a static heuristic, not a profile. Its compile-time cost and
+program run time need locked 9700X measurements. The staged rank kernel follows
+the optimizer's resolved scalar/vector path: its existing AUTO heuristic
+selects scalar for the recorded corpus functions, while forced-vector tests
+check the exact twin. That SCCP heuristic is not a measured layout crossover.
+#1218's <=1.3x Clang `-O2`
+dynamic compare/branch count remains a separate measured gate, using #1189's
+unchanged classifier and the same speedtest1 and five Lua inputs. Raw evidence
+belongs in `buster14a/buster-performance`; normal correctness tests do not
+establish that gate.
 
 ## Address-arithmetic selection regressions
 

@@ -862,7 +862,7 @@ static void ir_optimize_test_entry_phi(IrOptimizeTest* test, Arena* input, Arena
         ir_optimize_test_instruction(&f, 3, IR_BR, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         const IrCheck verified = ir_verify(&f, scratch, 0);
         ir_optimize_test_expect(test, verified.error == IR_ERROR_PHI && verified.instruction == 0, "shared IR rejects phi with unreachable entry predecessor");
-        for (uint32_t passes = 0; passes < 8; passes += 1)
+        for (uint32_t passes = 0; passes < 16; passes += 1)
         {
             for (uint32_t scalar = 0; scalar < 2; scalar += 1)
             {
@@ -1057,7 +1057,7 @@ static void ir_optimize_test_records(IrOptimizeTest* test, Arena* input, Arena* 
         IrFunction f = { 0 };
         const bool created = kind < 3 ? ir_optimize_test_labels(input, &f, kind) : ir_optimize_test_aggregate_call(input, &f);
         ir_optimize_test_expect(test, created && ir_verify(&f, scratch, 0).error == IR_OK, "labels and ABI records fixtures verify");
-        for (uint32_t passes = 0; created && passes < 8; passes += 1)
+        for (uint32_t passes = 0; created && passes < 16; passes += 1)
         {
             ir_optimize_test_compare(test, &f, vector, scalar, scratch, passes);
         }
@@ -1175,7 +1175,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             IrFunction function = { 0 };
             const bool created = ir_optimize_test_diamond(&input, &function, kind);
             ir_optimize_test_expect(test, created, "diamond fixture allocation");
-            for (uint32_t passes = 0; created && passes < 8; passes += 1)
+            for (uint32_t passes = 0; created && passes < 16; passes += 1)
             {
                 ir_optimize_test_compare(test, &function, &vector, &scalar, &scratch, passes);
             }
@@ -1184,7 +1184,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
         IrFunction loop = { 0 };
         const bool loop_created = ir_optimize_test_loop(&input, &loop);
         ir_optimize_test_expect(test, loop_created, "loop fixture allocation");
-        for (uint32_t passes = 0; loop_created && passes < 8; passes += 1)
+        for (uint32_t passes = 0; loop_created && passes < 16; passes += 1)
         {
             ir_optimize_test_compare(test, &loop, &vector, &scalar, &scratch, passes);
         }
@@ -1194,7 +1194,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             IrFunction effects = { 0 };
             const bool effects_created = ir_optimize_test_effects(&input, &effects, kind != 0);
             ir_optimize_test_expect(test, effects_created, "effects fixture allocation");
-            for (uint32_t passes = 0; effects_created && passes < 8; passes += 1)
+            for (uint32_t passes = 0; effects_created && passes < 16; passes += 1)
             {
                 ir_optimize_test_compare(test, &effects, &vector, &scalar, &scratch, passes);
             }
@@ -1202,7 +1202,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             IrFunction switch_function = { 0 };
             const bool switch_created = ir_optimize_test_switch(&input, &switch_function, kind != 0);
             ir_optimize_test_expect(test, switch_created, "switch fixture allocation");
-            for (uint32_t passes = 0; switch_created && passes < 8; passes += 1)
+            for (uint32_t passes = 0; switch_created && passes < 16; passes += 1)
             {
                 ir_optimize_test_compare(test, &switch_function, &vector, &scalar, &scratch, passes);
             }
@@ -1213,6 +1213,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             if (jumps_created)
             {
                 ir_optimize_test_compare(test, &jumps, &vector, &scalar, &scratch, 7);
+                ir_optimize_test_compare(test, &jumps, &vector, &scalar, &scratch, 15);
             }
             arena_pop_to(&input, 0);
         }
@@ -1244,6 +1245,7 @@ static void ir_optimize_text_tests(IrOptimizeTest* test);
 static int ir_optimize_text_print_fixtures(void);
 
 #include "ir_optimize_simd_test.c"
+#include "ir_optimize_layout_test.c"
 #include "ir_if_convert_test.c"
 
 static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
@@ -1279,6 +1281,7 @@ static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
         ir_optimize_test_folds(&test);
         ir_optimize_test_fold_guards(&test);
         ir_optimize_test_ir(&test);
+        ir_optimize_test_layout(&test);
         ir_optimize_test_simd(&test);
         ir_if_convert_tests(&test);
         ir_optimize_text_tests(&test);
