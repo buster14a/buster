@@ -52,6 +52,8 @@ struct CheckDeferredExpressions
     CheckInputReader* reader;
     CheckDeferredExpressionPart* parts;
     uint32_t* order;
+    // One result per constant-context group, published after the worker round joins.
+    uint8_t* context_valid;
     uint32_t count;
     uint32_t group_size;
 };
@@ -278,17 +280,31 @@ static bool check_deferred_binding_answers(CheckDeferred* deferred, CheckInputRe
 
 // A context writes only its initializer/case/assertion's span, wholly inside the same body's token interval. Worker
 // warning suppressions touch only those token bytes; the shared count and interval index are restored after the join.
+// A static assertion's message also spells strings into scratch (#1761): each worker must use its own lane's arena,
+// and report resource failures only after the join, never through the shared reader.
 static void check_deferred_context_lane(void* argument)
 {
     CheckDeferredExpressions* run = argument;
+    CheckDeferredArenas* arenas = run->deferred->memory.lanes + lane_index();
     const uint32_t bodies = run->deferred->body_count;
     const uint32_t group_size = run->group_size;
     const uint32_t groups = run->count;
     for (uint64_t g = lane_take(groups); g < groups; g = lane_take(groups))
     {
+        const uint64_t mark = arenas->scratch.length;
+        CheckInput input = *run->reader->output;
+        CheckInputReader reader = *run->reader;
+        CheckInputReport report;
+        reader.output = &input;
+        reader.scratch = &arenas->scratch;
+        input.reports = &report;
+        input.report_count = 0;
+        input.report_capacity = 1;
         const uint32_t b = (uint32_t)g * group_size;
         const uint32_t end = bodies - b < group_size ? bodies : b + group_size;
-        check_input_constant_contexts_range(run->reader, run->deferred->cuts[b].opening, run->deferred->cuts[end - 1].closing + 1);
+        check_input_constant_contexts_range(&reader, run->deferred->cuts[b].opening, run->deferred->cuts[end - 1].closing + 1);
+        run->context_valid[g] = !input.resource && input.report_count == 0;
+        arena_pop_to(&arenas->scratch, mark);
     }
 }
 
@@ -298,13 +314,22 @@ static bool check_deferred_constant_contexts(CheckDeferred* deferred, CheckInput
     bool used = !deferred->unsupported && lanes > 1 && reader->output->report_count == 0 && !reader->output->resource;
     if (used)
     {
+        const uint64_t mark = reader->scratch->length;
         const uint32_t group_size = check_deferred_post_group(deferred->body_count, lanes);
         const uint32_t groups = (deferred->body_count + group_size - 1) / group_size;
-        CheckDeferredExpressions run = { .deferred = deferred, .reader = reader, .group_size = group_size, .count = groups };
+        uint8_t* passed = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, groups);
+        CheckDeferredExpressions run = { .deferred = deferred, .reader = reader, .context_valid = passed, .group_size = group_size, .count = groups };
         reader->parallel_warning_ranges = true;
-        used = check_deferred_lanes_run(deferred, BUSTER_CHECK_DEFERRED_ROUND_CONTEXTS, lanes, check_deferred_context_lane, &run);
+        used = passed != NULL && check_deferred_lanes_run(deferred, BUSTER_CHECK_DEFERRED_ROUND_CONTEXTS, lanes, check_deferred_context_lane, &run);
         reader->parallel_warning_ranges = false;
-        if (used)
+        bool valid = used;
+        for (uint32_t g = 0; valid && g < groups; g += 1)
+        {
+            valid &= passed[g] != 0;
+        }
+        deferred->expression_retry |= used && !valid;
+        reader->output->resource |= used && !valid;
+        if (valid)
         {
             // No per-token worker writes were counted, and the index may summarize the pre-round warning bits.
             // Rebuild once with the existing SIMD/scalar byte counter, before the ordered top-level gaps run.
@@ -329,6 +354,7 @@ static bool check_deferred_constant_contexts(CheckDeferred* deferred, CheckInput
                 memset(reader->warning_index, 0xff, (uint64_t)reader->warning_index_base * 2 * sizeof(uint16_t));
             }
         }
+        arena_pop_to(reader->scratch, mark);
     }
     return used;
 }

@@ -71,6 +71,25 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
       "unsigned long g(int n){return 18446744073709551615-n;}\n"
       "unsigned long h(int n){return sizeof(a)+9223372036854775809+n;}\n"
       "unsigned long k(int n){return sizeof(a)+18446744073709551615-n;}\n", true },
+    // #1761: block-scope assertion messages spell strings during the parallel constant-context round.
+    // Many independent bodies and nested assertions exercise per-lane scratch push/pop under TSan.
+    { "postmerge-context-message-scratch",
+      "int context_message_0(void){_Static_assert(1,\"outer 0\");_Static_assert(sizeof(int)>=2,\"size 0\");{_Static_assert(1,\"inner 0\");}_Static_assert(1,\"escaped \\\\n 0\");return 0;}\n"
+      "int context_message_1(void){_Static_assert(1,\"outer 1\");_Static_assert(sizeof(int)>=2,\"size 1\");{_Static_assert(1,\"inner 1\");}_Static_assert(1,\"escaped \\\\n 1\");return 1;}\n"
+      "int context_message_2(void){_Static_assert(1,\"outer 2\");_Static_assert(sizeof(int)>=2,\"size 2\");{_Static_assert(1,\"inner 2\");}_Static_assert(1,\"escaped \\\\n 2\");return 2;}\n"
+      "int context_message_3(void){_Static_assert(1,\"outer 3\");_Static_assert(sizeof(int)>=2,\"size 3\");{_Static_assert(1,\"inner 3\");}_Static_assert(1,\"escaped \\\\n 3\");return 3;}\n"
+      "int context_message_4(void){_Static_assert(1,\"outer 4\");_Static_assert(sizeof(int)>=2,\"size 4\");{_Static_assert(1,\"inner 4\");}_Static_assert(1,\"escaped \\\\n 4\");return 4;}\n"
+      "int context_message_5(void){_Static_assert(1,\"outer 5\");_Static_assert(sizeof(int)>=2,\"size 5\");{_Static_assert(1,\"inner 5\");}_Static_assert(1,\"escaped \\\\n 5\");return 5;}\n"
+      "int context_message_6(void){_Static_assert(1,\"outer 6\");_Static_assert(sizeof(int)>=2,\"size 6\");{_Static_assert(1,\"inner 6\");}_Static_assert(1,\"escaped \\\\n 6\");return 6;}\n"
+      "int context_message_7(void){_Static_assert(1,\"outer 7\");_Static_assert(sizeof(int)>=2,\"size 7\");{_Static_assert(1,\"inner 7\");}_Static_assert(1,\"escaped \\\\n 7\");return 7;}\n"
+      "int context_message_8(void){_Static_assert(1,\"outer 8\");_Static_assert(sizeof(int)>=2,\"size 8\");{_Static_assert(1,\"inner 8\");}_Static_assert(1,\"escaped \\\\n 8\");return 8;}\n"
+      "int context_message_9(void){_Static_assert(1,\"outer 9\");_Static_assert(sizeof(int)>=2,\"size 9\");{_Static_assert(1,\"inner 9\");}_Static_assert(1,\"escaped \\\\n 9\");return 9;}\n"
+      "int context_message_10(void){_Static_assert(1,\"outer 10\");_Static_assert(sizeof(int)>=2,\"size 10\");{_Static_assert(1,\"inner 10\");}_Static_assert(1,\"escaped \\\\n 10\");return 10;}\n"
+      "int context_message_11(void){_Static_assert(1,\"outer 11\");_Static_assert(sizeof(int)>=2,\"size 11\");{_Static_assert(1,\"inner 11\");}_Static_assert(1,\"escaped \\\\n 11\");return 11;}\n"
+      "int context_message_12(void){_Static_assert(1,\"outer 12\");_Static_assert(sizeof(int)>=2,\"size 12\");{_Static_assert(1,\"inner 12\");}_Static_assert(1,\"escaped \\\\n 12\");return 12;}\n"
+      "int context_message_13(void){_Static_assert(1,\"outer 13\");_Static_assert(sizeof(int)>=2,\"size 13\");{_Static_assert(1,\"inner 13\");}_Static_assert(1,\"escaped \\\\n 13\");return 13;}\n"
+      "int context_message_14(void){_Static_assert(1,\"outer 14\");_Static_assert(sizeof(int)>=2,\"size 14\");{_Static_assert(1,\"inner 14\");}_Static_assert(1,\"escaped \\\\n 14\");return 14;}\n"
+      "int context_message_15(void){_Static_assert(1,\"outer 15\");_Static_assert(sizeof(int)>=2,\"size 15\");{_Static_assert(1,\"inner 15\");}_Static_assert(1,\"escaped \\\\n 15\");return 15;}\n", true },
     { "postmerge-leaf-boundaries",
       "int use(const char*);int f(int n){int a[]={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};while(n>0){if(n==2)break;n--;continue;}return a[n&7]+use(__func__);}\n"
       "int g(int n){int a[]={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};return a[n&15]+use(\"second\");}\n"
