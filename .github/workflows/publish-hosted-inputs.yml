@@ -1,0 +1,86 @@
+name: Publish hosted release-input mirror
+
+# Mirrors the exact, SHA-256-verified release inputs of tools/ci/hosted-tools.lock to GHCR (#1768). Only reviewed
+# default-branch code runs here: no pull_request trigger, and a dispatch on any other ref publishes nothing. The
+# printed manifest digest becomes the consumer pin only through a reviewed pull request (docs/hosted-toolchain.md).
+on:
+  push:
+    branches: [main]
+    paths:
+      - tools/ci/hosted-tools.lock
+      - tools/ci/hosted-release.sh
+      - .github/workflows/publish-hosted-inputs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buster-publish-hosted-inputs
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish verified inputs to GHCR
+    if: github.ref == 'refs/heads/main' && github.repository_id == '1421805693'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the reviewed default-branch revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check acquisition, mirror and installation fixtures
+        run: bash tests/ci/hosted-tools.sh
+
+      - name: Restore pinned release inputs
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/hosted-release-inputs
+          key: hosted-inputs-v1-linux-x64-${{ hashFiles('tools/ci/hosted-tools.lock') }}
+
+      # Verified from the original upstream URLs (or the cache), never from the mirror being published.
+      - name: Acquire and verify the original inputs
+        env:
+          BUSTER_HOSTED_MIRROR: 'off'
+        run: bash tools/ci/hosted-release.sh prepare "$RUNNER_TEMP/hosted-release-inputs"
+
+      - name: Publish blobs and manifest; read the manifest back by digest
+        id: publish
+        env:
+          BUSTER_MIRROR_PUSH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          pin=$(bash tools/ci/hosted-release.sh publish "$RUNNER_TEMP/hosted-release-inputs")
+          printf 'pin=%s\n' "$pin" >> "$GITHUB_OUTPUT"
+          {
+              printf '## Hosted release-input mirror\n\n'
+              printf 'Published from `%s`. To promote it, replace the `mirror` line of `tools/ci/hosted-tools.lock` in a reviewed PR with:\n\n' "$GITHUB_SHA"
+              printf '```text\n%s\n```\n\n' "$pin"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Consumers read anonymously. A private package is reported, not fatal: consumers fall back to upstream until
+      # the owner makes it public, and the pin should not be promoted before then.
+      - name: Check anonymous public reads of the publication
+        env:
+          PIN: ${{ steps.publish.outputs.pin }}
+        run: |
+          set -euo pipefail
+          sed "s|^mirror .*|$PIN|" tools/ci/hosted-tools.lock > "$RUNNER_TEMP/public.lock"
+          BUSTER_HOSTED_LOCK="$RUNNER_TEMP/public.lock" bash tools/ci/hosted-release.sh get llvm-license "$RUNNER_TEMP/public-read/llvm-license" 2> "$RUNNER_TEMP/public-read.log"
+          cat "$RUNNER_TEMP/public-read.log"
+          if grep -q 'component=llvm-license source=mirror verified=true' "$RUNNER_TEMP/public-read.log"; then
+              printf 'Anonymous read: **public**.\n' >> "$GITHUB_STEP_SUMMARY"
+          else
+              printf '::warning::The mirror is not anonymously readable; make the package public before pinning it.\n'
+              printf 'Anonymous read: **not available**; make the package public before promoting the pin.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -171,7 +171,8 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   change is implied by that instrumentation boundary;
   the named UCNs' errors and notes (`pp_test_named_ucns`, #1447): each case's lines as written for it, by both
   kernels, and with `--clang` as clang's (clang reads one within an identifier silently); 40,000 in one identifier,
-  no error, and 40,000 misspelled ones in a row, each an error found by a loose binary search, each within 10 s
+  no error, and 40,000 misspelled ones in a row, each an error found by a loose binary search, each
+  within 10 s ordinarily (30 s under ThreadSanitizer, to account for instrumentation overhead)
   (`pp_test_named_ucn_scaling`); and a name no character has, or its trigraph's `??/`, across the edges of the
   64-byte chunks, the 4 KB words of refinement's backslash bitmap and 4 KB windows, by both kernels, whole and a
   window at a time (`pp_test_named_ucn_boundaries`);

@@ -1,0 +1,10 @@
+# buster-hosted-inputs-v1 linux-x86_64 ubuntu-26.04
+# name version sha256 upstream-url; installed layout is owned by the setup scripts.
+# mirror REGISTRY/REPOSITORY sha256:MANIFEST pins a reviewed GHCR publication of these exact bytes (docs/hosted-toolchain.md).
+mirror ghcr.io/buster14a/buster-hosted-inputs unpublished
+llvm 23.1.4 efdd1dbd089b99bfcfcde7b8eb1236163f2e88df5a981cca4f783ec9cb5e0378 https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.4/LLVM-23.1.4-Linux-X64.tar.zst
+llvm-license 23.1.4 8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee https://raw.githubusercontent.com/llvm/llvm-project/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/llvm/LICENSE.TXT
+cmake 4.4.3 d6c83076c575bc00b823522ac974bda66d0af05d6ddc30e739c12385cf32c6cc https://github.com/Kitware/CMake/releases/download/v4.4.3/cmake-4.4.3-linux-x86_64.tar.gz
+ninja 1.13.2 5749cbc4e668273514150a80e387a957f933c6ed3f5f11e03fb30955e2bbead6 https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-linux.zip
+mold 3.0.0 6c90d4a474c7c0409dfb575be03a5345878ac14fdba18de8b40fa58c60121189 https://github.com/rui314/mold/releases/download/v3.0.0/mold-3.0.0-x86_64-linux.tar.gz
+wild 0.10.0 641265506a7c06cfb03181b8916ab663ec8407855db6d4db7f8450667d105283 https://github.com/wild-linker/wild/releases/download/0.10.0/wild-linker-0.10.0-x86_64-unknown-linux-gnu.tar.gz
