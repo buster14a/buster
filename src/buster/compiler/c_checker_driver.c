@@ -701,6 +701,38 @@ static uint32_t check_driver_publication_position(const Parser* parser, const Pr
 // Clang defers runtime-behavior warnings until the function is complete, including the lookahead after its closing
 // brace. Required constant evaluation diagnoses immediately instead. Follow only proven parser parents for a
 // sparse warning; no clean unit acquires a token-wide completion column.
+// The end of the file-scope declarator initializer `token` is in (#1447), or BUSTER_CHECK_NONE: the parse tree's climb
+// reaches the declarator's `=` from its right, past a brace initializer's `}` or a scalar one's root, whose graph node's
+// end it is, outside a function body and an enumeration (whose values clang evaluates as constants, warning of no count).
+// An assignment's `=` shares the role; outside a function, one is only in an unevaluated operand, which warns of none.
+static uint32_t check_driver_file_initializer_end(const Parser* parser, const CheckInput* input, uint32_t token)
+{
+    uint32_t end = BUSTER_CHECK_NONE;
+    uint32_t child = BUSTER_CHECK_NONE;
+    bool outside = true;
+    uint32_t at = token;
+    for (uint32_t steps = 0; outside && at < parser->tokens.count && steps < parser->tokens.count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[at];
+        outside = role != PARSE_ROLE_CLOSE_BODY && role != PARSE_ROLE_CLOSE_ENUM && role != PARSE_ROLE_OPEN_BODY;
+        const uint32_t parent = parser->tree.parents[at];
+        const bool top = parent >= parser->tokens.count || parent == at;
+        if (child == BUSTER_CHECK_NONE && !top && at > parent && parser->tokens.kinds[parent] == PARSE_KIND_EQUAL)
+        {
+            child = at;
+        }
+        at = top ? parser->tokens.count : parent;
+    }
+    if (outside && child != BUSTER_CHECK_NONE)
+    {
+        const uint32_t node = child < input->token_count && input->token_nodes != NULL ? input->token_nodes[child] : BUSTER_CHECK_NONE;
+        end = parser->tree.roles[child] == PARSE_ROLE_CLOSE_INITIALIZER ? child + 1u :
+              node < input->graph.count && input->graph.source_positions != NULL && input->graph.source_positions[node] <= parser->tokens.count ?
+              input->graph.source_positions[node] : BUSTER_CHECK_NONE;
+    }
+    return end;
+}
+
 static uint32_t check_driver_warning_position(const Parser* parser, const Preprocessor* pp, const CheckInput* input, const CheckRepair* repair,
                                               const uint64_t* completions, uint32_t completion_count, uint32_t token, uint32_t warning, uint32_t publication_end,
                                               const Parser* original, PPDiagnosticPhase* phase)
@@ -749,7 +781,17 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
             parent = parser->tree.parents[parent];
         }
     }
-    if (!completed && (warning & runtime) != 0 && (constant & warning) == 0)
+    const uint32_t counts = CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW;
+    const uint32_t declarator = !completed && (warning & counts) != 0 ?
+                                check_driver_file_initializer_end(parser, input, token) : BUSTER_CHECK_NONE;
+    if (declarator != BUSTER_CHECK_NONE)
+    {
+        // A file-scope initializer's folded shift count (#1447): clang's DiagRuntimeBehavior queues it to the declarator's
+        // end, after that initializer's literal conversions and before its constant conversions.
+        boundary = declarator;
+        *phase = PP_DIAGNOSTIC_RUNTIME;
+    }
+    else if (!completed && (warning & runtime) != 0 && (constant & warning) == 0)
     {
         const uint32_t expression = token < input->token_count && input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
         const bool eager = warning == CHECK_WARNING_INTEGER_OVERFLOW && expression < input->graph.count && input->graph.source_positions != NULL &&

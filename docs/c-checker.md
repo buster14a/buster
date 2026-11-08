@@ -4410,6 +4410,45 @@ type, which the lowering needs, so the action marks it
 `BUSTER_CHECK_CONVERT_ATOMIC` wherever it strips `_Atomic`: assignments,
 initializations, brace elements, returns and prototype arguments.
 
+A brace initializer's integer constants warn of their constant conversions too
+(#1447), in the reverse initializer order clang's `AnalyzeImplicitConversions`
+work list gives them. A plan whose part may change its constant
+(`CheckInitializer.changed_integers`, a superset made as its parts append) is
+the only one whose parts the walk reads for them. Clang's `DiagRuntimeBehavior`
+queues them where the full expression completes, after the runtime warnings its
+values queued as they were built, so a plan's constant conversions
+(`check_common_initializer_integers`) follow the roots of its values, inside a
+function at the body's end and never in unreachable code. A constant that fills
+a signed target's width exactly (`128` to `signed char`, clang's
+`isSameWidthConstantConversion`) is clang's `Diag` instead, reported at once
+with the literal conversions (`check_common_same_width`), scalar or listed, and
+never into a character element of a brace list, which clang takes for an array
+initialization. At file scope clang queues a declarator's runtime warnings to
+its end: its shift counts (`check_driver_file_initializer_end`) and constant
+conversions publish there in `PP_DIAGNOSTIC_RUNTIME`, after its literal
+conversions. Still separate: `-Wbitfield-constant-conversion`'s truncation into
+a bit-field, and a same-width conversion in unreachable code, which clang still
+reports.
+
+Clang's `DiagnoseIntInBoolContext` follows every conversion to `_Bool` (#1447,
+`check_common_int_in_bool`): the operands of `!`, `&&` and `||` and the
+conditions of statements and conditionals (`CheckBoolLikeConversion`, the
+operand itself and never a conditional's arms), and an initializer's,
+assignment's, return's or argument's conversion, whose conditional arms and
+comma result carry it. Its implicit conversions passed, a `<<` of a literal 0,
+or of two literals, always evaluates to one truth, which clang's evaluation
+gives (a count past the width shifts by the width less one, a negative one
+shifts right); any other signed `<<` is `-Wint-in-bool-context`'s, in `-Wmost`
+and so `-Wall`. A conditional whose two arms are integer literals of its own
+type, not both 0 or 1, and both nonzero always evaluates to true, at its
+condition's first token. A literal is clang's `IntegerLiteral`: a number, under
+at most a unary minus, with no parentheses. The always-forms are
+`-Wtautological-constant-compare`'s, on by default, under
+`-Wtautological-compare` and `-Wmost`. Clang's `Diag` reports them at once, as
+a literal conversion, in unreachable code and short-circuited operands too, and
+a brace initializer's in its reverse order; the walks' candidates test the
+operand's operator before any type.
+
 The graph's passes share their facts, `check_common_facts`, which give each
 node its parent, whether another node uses its value, whether it is evaluated,
 and its reach: a bit each for whether its subtree holds a node whose own

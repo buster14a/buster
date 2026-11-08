@@ -96,6 +96,10 @@ enum
     // names of one mangling, and a cpu_dispatch function's body.
     CHECK_WARNING_ID_FUNCTION_MULTIVERSION = 99,
     CHECK_WARNING_ID_UNUSED_RESULT = 100,
+    // A signed `<<` converted to _Bool (#1447, clang's DiagnoseIntInBoolContext): -Wint-in-bool-context, in -Wmost and so
+    // -Wall. Its constant forms, and a conditional of integer constants, are -Wtautological-constant-compare's, on by default.
+    CHECK_WARNING_ID_INT_IN_BOOL_CONTEXT = 101,
+    CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE = 102,
     CHECK_WARNING_ID_COUNT,
 };
 
