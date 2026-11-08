@@ -1112,6 +1112,10 @@ typedef struct CheckCommonEmission
     Arena* scratch;
     // The unit's marks of discarded calls' results (c_check_ignored_result.c), or null.
     CheckCommonIgnored* ignored;
+    // The statement expressions' inner roots the arithmetic scan takes where it enters them (check_common_inner_roots): keys
+    // of each one's statement expression's node and its place, sorted, `inner_count` of them.
+    uint64_t* inner;
+    uint32_t inner_count;
 } CheckCommonEmission;
 
 // Whether `token` is in the subtree of `root`, whose node depth is `depth`: its parent chain reaches `root` before a token
@@ -1197,6 +1201,8 @@ static uint32_t check_common_emission_subtree_start(CheckCommonEmission* emissio
 #define BUSTER_CHECK_EMIT_ARGUMENT 15u
 #define BUSTER_CHECK_EMIT_PROMOTED_ARGUMENT 16u
 #define BUSTER_CHECK_EMIT_CONVERSIONS 17u
+// A root's whole visit (check_common_root_frames), for a statement expression's inner root (check_common_inner_roots).
+#define BUSTER_CHECK_EMIT_ROOT 18u
 
 // A count scan must not claim ordinary tree ownership: the latter also publishes unrelated warning families.
 // Keep these facts in the existing per-node byte, with publication claimed only after an eligible count visit.
@@ -1208,10 +1214,14 @@ static uint32_t check_common_emission_subtree_start(CheckCommonEmission* emissio
 #define BUSTER_CHECK_EMITTED_LITERAL_CONTEXT 0x10u
 // A source comma's left-operand marker, already run by the arithmetic scan (check_common_arithmetic_own).
 #define BUSTER_CHECK_EMITTED_COMMA_MARKER 0x20u
-// A root the walks take where its operand stands (check_common_displaced_roots), skipped where it stands.
+// A root the walks take where its operand stands (check_common_displaced_roots), or where its statement expression stands
+// (check_common_inner_roots), skipped where it stands.
 #define BUSTER_CHECK_EMITTED_DISPLACED 0x40u
+// A node the arithmetic scan has entered: a statement expression's last value is its statement's root's and its
+// enclosing root's too, and is scanned once.
+#define BUSTER_CHECK_EMITTED_ARITHMETIC_SCAN 0x80u
 
-// What a node's subtree holds for check_common_emit_root's walks, a bit each, in CheckCommonEmission.reach: a node whose
+// What a node's subtree holds for check_common_root_push's walks, a bit each, in CheckCommonEmission.reach: a node whose
 // own frame or comma stages may warn (check_common_candidate_bits), a division by zero or shift by a constant, a comparison where
 // -Wsign-compare may warn (check_common_enabled). Each counts evaluated or not: a comma's operands and a root's expression
 // run their own frames either way, and the scans test evaluation themselves. A frame of a subtree without its walk's bit
@@ -1229,6 +1239,7 @@ static uint32_t check_common_emission_subtree_start(CheckCommonEmission* emissio
 
 static void check_common_emit_push(CheckCommonEmission* emission, uint32_t node, uint8_t kind);
 static void check_common_emit_run(CheckCommonEmission* emission);
+static inline __attribute__((always_inline)) void check_common_root_frames(CheckCommonEmission* emission, uint32_t node);
 static void check_common_own(CheckCommonEmission* emission, uint32_t node);
 
 // The `expr, 0` idiom: a literal integer 0 result stays silent — it exists to sequence the left operand's
@@ -2424,6 +2435,43 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
     }
 }
 
+// The ROOT frames of statement expression `node`'s inner roots (check_common_inner_roots), pushed backwards so that they
+// run in their places' order. A key's place is its root, or a displaced root's operand, whose reader the root is. The sort
+// by statement expression keeps the roots' order within one, where a displaced root's place comes before roots ahead of
+// it: the statement expression's keys, as few as its statements, are put in their places' order here, the one time the
+// scan enters it.
+static void check_common_inner_push(CheckCommonEmission* emission, uint32_t node)
+{
+    uint32_t first = 0;
+    uint32_t last = emission->inner_count;
+    while (first < last)
+    {
+        const uint32_t middle = first + (last - first) / 2;
+        const bool before = (uint32_t)(emission->inner[middle] >> 32) < node;
+        first = before ? middle + 1 : first;
+        last = before ? last : middle;
+    }
+    uint32_t end = first;
+    while (end < emission->inner_count && (uint32_t)(emission->inner[end] >> 32) == node)
+    {
+        const uint64_t key = emission->inner[end];
+        uint32_t at = end;
+        while (at > first && emission->inner[at - 1] > key)
+        {
+            emission->inner[at] = emission->inner[at - 1];
+            at -= 1;
+        }
+        emission->inner[at] = key;
+        end += 1;
+    }
+    for (uint32_t i = end; i > first; i -= 1)
+    {
+        const uint32_t place = (uint32_t)emission->inner[i - 1];
+        const uint32_t reader = emission->parents[place];
+        check_common_emit_push(emission, reader < emission->input->graph.count ? reader : place, BUSTER_CHECK_EMIT_ROOT);
+    }
+}
+
 // The worklist's frames replaying what recursion did: CONVERSIONS visits implicit conversions in reverse
 // operand order before the runtime checks, TREE gates and marks, CHILDREN pushes operands and arguments,
 // OWN runs the node's checks or a conditional's arm emissions, COMMA/TAIL/END run a comma's stages,
@@ -2576,11 +2624,18 @@ static void check_common_emit_run(CheckCommonEmission* emission)
                 break;
             case BUSTER_CHECK_EMIT_ARITHMETIC_SCAN:
             case BUSTER_CHECK_EMIT_SIGN_SCAN:
-                if (node < graph->count && (emission->evaluated == NULL || emission->evaluated[node] != 0))
+                if (node < graph->count && (emission->evaluated == NULL || emission->evaluated[node] != 0) &&
+                    (kind != BUSTER_CHECK_EMIT_ARITHMETIC_SCAN || (emission->emitted[node] & BUSTER_CHECK_EMITTED_ARITHMETIC_SCAN) == 0))
                 {
+                    emission->emitted[node] |= kind == BUSTER_CHECK_EMIT_ARITHMETIC_SCAN ? BUSTER_CHECK_EMITTED_ARITHMETIC_SCAN : 0u;
                     check_common_emit_push(emission, node,
                                            kind == BUSTER_CHECK_EMIT_ARITHMETIC_SCAN ? BUSTER_CHECK_EMIT_ARITHMETIC_OWN : BUSTER_CHECK_EMIT_SIGN_OWN);
                     check_common_emit_kids(emission, node, 3, kind);
+                    if (kind == BUSTER_CHECK_EMIT_ARITHMETIC_SCAN && emission->inner_count != 0 && graph->ops[node] == CHECK_OP_STATEMENT_VALUE)
+                    {
+                        // A statement expression's statements, built before its value is read, each a whole root's visit.
+                        check_common_inner_push(emission, node);
+                    }
                 }
                 else if (node < graph->count && kind == BUSTER_CHECK_EMIT_ARITHMETIC_SCAN &&
                          (emission->reach[node] & BUSTER_CHECK_REACH_DETACHED) != 0)
@@ -2590,6 +2645,9 @@ static void check_common_emit_run(CheckCommonEmission* emission)
                 break;
             case BUSTER_CHECK_EMIT_ARITHMETIC_OWN:
                 check_common_arithmetic_own(emission, node);
+                break;
+            case BUSTER_CHECK_EMIT_ROOT:
+                check_common_root_frames(emission, node);
                 break;
             case BUSTER_CHECK_EMIT_SIGN_OWN:
                 check_common_sign_own(emission, node);
@@ -2642,7 +2700,8 @@ static bool check_common_marker_candidate(const CheckGraph* graph, uint32_t expr
 // The deferred warnings one evaluated expression root produces, in clang's order: arithmetic warnings, reverse-order
 // implicit conversions, the deep subtree and discard marker, the root's own warning, and sign comparisons.
 // The worklist drains before returning, so each push is the calls it replaces in reverse.
-static void check_common_emit_root(CheckCommonEmission* emission, uint32_t node)
+// A root's walks' frames, pushed to run next.
+static void check_common_root_push(CheckCommonEmission* emission, uint32_t node)
 {
     const CheckGraph* graph = &emission->input->graph;
     const uint32_t expr = check_common_discarded(emission->parser, graph, node);
@@ -2674,7 +2733,69 @@ static void check_common_emit_root(CheckCommonEmission* emission, uint32_t node)
     {
         check_common_emit_push(emission, node, BUSTER_CHECK_EMIT_ARITHMETIC_SCAN);
     }
+}
+
+static void check_common_emit_root(CheckCommonEmission* emission, uint32_t node)
+{
+    check_common_root_push(emission, node);
     check_common_emit_run(emission);
+}
+
+// A root's visit in the roots' order, its walks' frames pushed to run next (#1447): a discarded call's result at once, an
+// unevaluated statement's comma's, conditional's or selection's call, then its walks, or its statement's unused-value
+// marker alone where it reaches nothing, or a dead root's detached static-selection arms.
+// Always inlined, as the roots' loop's body it was (#1447); hot caller: check_common_graph_warnings, once per root.
+static inline __attribute__((always_inline)) void check_common_root_frames(CheckCommonEmission* emission, uint32_t node)
+{
+    const Parser* parser = emission->parser;
+    const CheckGraph* graph = &emission->input->graph;
+    const CheckStream* stream = emission->stream;
+    const uint32_t* parents = emission->parents;
+    const uint8_t* evaluated = emission->evaluated;
+    uint8_t* emitted = emission->emitted;
+    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    const uint32_t expr = check_common_discarded(parser, graph, node);
+    const CheckOp expr_op = expr != node && expr < graph->count && parents[node] == BUSTER_CHECK_NONE &&
+                            stream->diagnostics[node] == CHECK_DIAG_NONE ? graph->ops[expr] : CHECK_OP_COUNT;
+    if (expr_op != CHECK_OP_COUNT && check_common_ignored_op(expr_op))
+    {
+        check_common_ignored_statement(emission, expr);
+    }
+    else if ((expr_op == CHECK_OP_CONDITIONAL || expr_op == CHECK_OP_COMMA || expr_op == CHECK_OP_SELECT) && evaluated[node] == 0 &&
+             check_common_discarded_place(parser, graph->tokens[expr]))
+    {
+        // An unevaluated statement's comma, conditional or selection, which no walk reaches: its value's call.
+        check_common_unused_unevaluated(emission, expr);
+    }
+    const CheckCommonShiftExtra* extra = check_common_shift_extra_root(emission->shift_extras, node);
+    if (parents[node] == BUSTER_CHECK_NONE && (evaluated[node] != 0 || (emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0) &&
+        (emitted[node] & BUSTER_CHECK_EMITTED_TREE) == 0 && stream->diagnostics[node] == CHECK_DIAG_NONE)
+    {
+        const bool comma = expr < graph->count && graph->ops[expr] == CHECK_OP_COMMA;
+        if (emission->reach[node] != 0 || comma)
+        {
+            check_common_root_push(emission, node);
+        }
+        else if (vector && evaluated[node] != 0 && check_common_marker_candidate(graph, expr))
+        {
+            // A root that reaches nothing: its walk's frames would find no own warning and no subtree to enter
+            // (its reach holds its expression's own bit), so that the statement's unused-value marker alone
+            // may warn, as the walk would run it, before the walk's marks.
+            check_common_stmt_marker(emission, expr);
+            emitted[expr] |= BUSTER_CHECK_EMITTED_TREE;
+            emitted[node] |= BUSTER_CHECK_EMITTED_TREE;
+        }
+        else if (check_common_marker_candidate(graph, expr))
+        {
+            check_common_root_push(emission, node);
+        }
+    }
+    else if (parents[node] == BUSTER_CHECK_NONE && stream->diagnostics[node] == CHECK_DIAG_NONE && extra == NULL)
+    {
+        // A dead ordinary owner still supplies a source position for its detached arms. Enter only their
+        // sparse edges, so their warnings precede later live operands without reviving ordinary dead code.
+        check_common_emit_reach(emission, node, BUSTER_CHECK_EMIT_DETACHED_SCAN, BUSTER_CHECK_REACH_DETACHED);
+    }
 }
 
 // A pass's walk over the items its own test needs first (check_common_next_token, check_common_next_op and
@@ -4357,13 +4478,73 @@ struct CheckCommonRootOrder
     uint32_t displaced_at;
     // Where the last root taken stands: its node, or a displaced root's operand.
     uint32_t position;
-    // The displaced roots' marks (BUSTER_CHECK_EMITTED_DISPLACED), which the natural order skips.
+    // The displaced roots' marks (BUSTER_CHECK_EMITTED_DISPLACED), which the natural order skips where any root is displaced or
+    // inner (`skipping`).
     const uint8_t* emitted;
+    bool skipping;
 };
+
+// The roots of statement expressions' statements that the arithmetic scan takes where it enters their statement expression
+// (#1447, check_common_inner_push): clang builds a statement expression's statements, queueing their runtime warnings,
+// between what its enclosing expression built before it and after it, where the roots' order, the node order, has them
+// first. A root is taken so where its statement expression is evaluated in an enclosing root the walks take, and then each
+// is marked BUSTER_CHECK_EMITTED_DISPLACED, which the roots' order skips, and its statement expression and the nodes up to its
+// enclosing root reach the arithmetic scan. Their count, as keys of the statement expression's node and the root (a displaced
+// one's operand, the place check_common_displaced_roots gives it, so that its order among the statements is the same),
+// sorted, in `*sorted`. The reader's list of statement expressions finds them, and each one's walk back over its own nodes,
+// a parse-tree climb each, is scalar: it visits no node outside a statement expression but the one it stops at, so that a
+// unit with few pays for their nodes alone.
+static uint32_t check_common_inner_roots(const Parser* parser, const CheckInput* input, const CheckStream* stream, const uint32_t* parents,
+                                         const uint8_t* evaluated, uint8_t* reach, uint8_t* emitted, uint64_t* items, uint64_t* temporary,
+                                         uint64_t** sorted, bool vector)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t tokens = parser->tokens.count;
+    uint32_t count = 0;
+    // The reader's statement expressions (CheckInput.regions), each opened before those it holds: backwards, inner ones come
+    // first, so that a root is its innermost one's. A unit without one reads nothing.
+    for (uint32_t region = parser->tree.depths != NULL && input->token_nodes != NULL ? input->region_count : 0; region-- > 0;)
+    {
+        // The statement expression's node, its `)`'s, and its block's `}`, which that `)` closes right after.
+        const uint32_t close = input->regions[region].closing;
+        const uint32_t value = close < input->token_count ? input->token_nodes[close] : BUSTER_CHECK_NONE;
+        const uint32_t brace = close != 0 && close < tokens ? close - 1 : BUSTER_CHECK_NONE;
+        const bool statement = value < graph->count && graph->ops[value] == CHECK_OP_STATEMENT_VALUE && brace < tokens &&
+                               parser->tree.roles[brace] == PARSE_ROLE_CLOSE_BLOCK && evaluated[value] != 0;
+        uint32_t enclosing = value;
+        for (uint32_t steps = 0; statement && parents[enclosing] < graph->count && steps < graph->count; steps += 1)
+        {
+            enclosing = parents[enclosing];
+        }
+        if (statement && evaluated[enclosing] != 0 &&
+            stream->diagnostics[enclosing] == CHECK_DIAG_NONE)
+        {
+            // Its statements' nodes come just before its own, their tokens under its `}`: the walk back from it stops at the
+            // first node outside, so that it visits its own nodes alone, and a unit's statement expressions their own.
+            const uint32_t depth = parser->tree.depths[brace];
+            for (uint32_t node = value; node-- > 0 && check_common_token_below(parser, graph->tokens[node], brace, depth);)
+            {
+                if (parents[node] == BUSTER_CHECK_NONE && (emitted[node] & BUSTER_CHECK_EMITTED_DISPLACED) == 0)
+                {
+                    const uint32_t place = check_common_displaced_root(parser, graph, parents, node) ? graph->operand0[node] : node;
+                    emitted[node] |= BUSTER_CHECK_EMITTED_DISPLACED;
+                    items[count++] = (uint64_t)value << 32 | place;
+                }
+            }
+            for (uint32_t at = value; at < graph->count && (reach[at] & BUSTER_CHECK_REACH_ARITHMETIC) == 0; at = parents[at])
+            {
+                reach[at] |= BUSTER_CHECK_REACH_ARITHMETIC;
+            }
+        }
+    }
+    const uint32_t varying = graph->count != 0 ? UINT32_MAX >> __builtin_clz(graph->count) : 0;
+    *sorted = count != 0 ? c_bindings_sort(items, temporary, count, vector, varying) : items;
+    return count;
+}
 
 static uint32_t check_common_root_order_next(const CheckGraph* graph, const uint32_t* parents, CheckCommonRootOrder* order, bool vector)
 {
-    while (order->natural < graph->count && order->displaced_count != 0 && (order->emitted[order->natural] & BUSTER_CHECK_EMITTED_DISPLACED) != 0)
+    while (order->natural < graph->count && order->skipping && (order->emitted[order->natural] & BUSTER_CHECK_EMITTED_DISPLACED) != 0)
     {
         order->natural = check_common_next_root(parents, graph->count, &order->roots, vector);
     }
@@ -4517,9 +4698,22 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             check_common_exhausted(pp);
         }
         const uint64_t* displaced_sorted = displaced;
+        // A statement expression's inner roots first, which the displaced roots then leave alone. Each holds a node of its own,
+        // so that a graph's nodes bound their count as they do the displaced roots'.
+        uint64_t* inner = displaced_temporary != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, graph->count) : NULL;
+        uint64_t* inner_temporary = inner != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, graph->count) : NULL;
+        if (displaced_temporary != NULL && inner_temporary == NULL)
+        {
+            check_common_exhausted(pp);
+        }
+        uint64_t* inner_sorted = inner;
+        emission.inner_count = inner_temporary != NULL ? check_common_inner_roots(parser, input, stream, facts->parents, facts->evaluated, facts->reach, emitted,
+                                                                                   inner, inner_temporary, &inner_sorted, vector) : 0;
+        emission.inner = inner_sorted;
         const uint32_t displaced_count = displaced_temporary != NULL ?
                                          check_common_displaced_roots(parser, input, parents, emitted, displaced, displaced_temporary, &displaced_sorted, vector) : 0;
-        CheckCommonRootOrder order = { .displaced = displaced_sorted, .displaced_count = displaced_count, .emitted = emitted };
+        CheckCommonRootOrder order = { .displaced = displaced_sorted, .displaced_count = displaced_count, .emitted = emitted,
+                                       .skipping = displaced_count != 0 || emission.inner_count != 0 };
         order.natural = check_common_next_root(parents, graph->count, &order.roots, vector);
         // An initializer's plan (its key's first node) emits before the first root at or after that node, a displaced root
         // standing at its operand (CheckCommonRootOrder.position), as main's walk of the roots goes on unchanged between
@@ -4561,48 +4755,9 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                 }
                 next_init = initializer < initializer_count ? (uint32_t)(initializers[initializer] >> 32) : UINT32_MAX;
             }
-            const uint32_t expr = check_common_discarded(parser, graph, node);
-            const CheckOp expr_op = expr != node && expr < graph->count && facts->parents[node] == BUSTER_CHECK_NONE &&
-                                    stream->diagnostics[node] == CHECK_DIAG_NONE ? graph->ops[expr] : CHECK_OP_COUNT;
-            if (expr_op != CHECK_OP_COUNT && check_common_ignored_op(expr_op))
+            check_common_root_frames(&emission, node);
+            if (emission.work_count != 0)
             {
-                check_common_ignored_statement(&emission, expr);
-            }
-            else if ((expr_op == CHECK_OP_CONDITIONAL || expr_op == CHECK_OP_COMMA || expr_op == CHECK_OP_SELECT) && facts->evaluated[node] == 0 &&
-                     check_common_discarded_place(parser, graph->tokens[expr]))
-            {
-                // An unevaluated statement's comma, conditional or selection, which no walk reaches: its value's call.
-                check_common_unused_unevaluated(&emission, expr);
-            }
-            const CheckCommonShiftExtra* extra = check_common_shift_extra_root(&shift_extras, node);
-            if (parents[node] == BUSTER_CHECK_NONE && (evaluated[node] != 0 || (emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0) &&
-                (emitted[node] & BUSTER_CHECK_EMITTED_TREE) == 0 && stream->diagnostics[node] == CHECK_DIAG_NONE)
-            {
-                const uint32_t expr = check_common_discarded(parser, graph, node);
-                const bool comma = expr < graph->count && graph->ops[expr] == CHECK_OP_COMMA;
-                if (reach[node] != 0 || comma)
-                {
-                    check_common_emit_root(&emission, node);
-                }
-                else if (vector && evaluated[node] != 0 && check_common_marker_candidate(graph, expr))
-                {
-                    // A root that reaches nothing: its walk's frames would find no own warning and no subtree to enter
-                    // (its reach holds its expression's own bit), so that the statement's unused-value marker alone
-                    // may warn, as the walk would run it, before the walk's marks.
-                    check_common_stmt_marker(&emission, expr);
-                    emitted[expr] |= BUSTER_CHECK_EMITTED_TREE;
-                    emitted[node] |= BUSTER_CHECK_EMITTED_TREE;
-                }
-                else if (check_common_marker_candidate(graph, expr))
-                {
-                    check_common_emit_root(&emission, node);
-                }
-            }
-            else if (parents[node] == BUSTER_CHECK_NONE && stream->diagnostics[node] == CHECK_DIAG_NONE && extra == NULL)
-            {
-                // A dead ordinary owner still supplies a source position for its detached arms. Enter only their
-                // sparse edges, so their warnings precede later live operands without reviving ordinary dead code.
-                check_common_emit_reach(&emission, node, BUSTER_CHECK_EMIT_DETACHED_SCAN, BUSTER_CHECK_REACH_DETACHED);
                 check_common_emit_run(&emission);
             }
         }
