@@ -191,6 +191,11 @@ typedef uint32_t TypeId;
 #define BUSTER_TYPE_FLAG_VARIADIC 0x01
 #define BUSTER_TYPE_FLAG_PROTOTYPE 0x02
 #define BUSTER_TYPE_FLAG_KEY 0x03
+// A VECTOR's key flags (#1447): clang's NEON vectors (neon_vector_type, neon_polyvector_type), a vector kind of their
+// own, which spells and mangles otherwise but is compatible with GNU's of the same element and count, as clang's
+// areCompatVectorTypes has it on x86-64.
+#define BUSTER_TYPE_FLAG_NEON 0x01
+#define BUSTER_TYPE_FLAG_NEON_POLY 0x02
 // A complete object type: its size and alignment are known (a variable length array's size only at run time).
 #define BUSTER_TYPE_FLAG_COMPLETE 0x04
 #define BUSTER_TYPE_FLAG_VARIABLY_MODIFIED 0x08
@@ -748,6 +753,8 @@ static __attribute__((unused)) TypeId type_function_like(TypeTable* table, TypeI
 // A vector of `count` elements; ext chooses clang's ext_vector_type over GNU's vector_size (type_vector_size converts
 // the latter's size in bytes).
 static __attribute__((unused)) TypeId type_vector(TypeTable* table, TypeId element, uint32_t count, bool ext);
+// A GNU vector of `count` elements with key flags `kind`: 0, BUSTER_TYPE_FLAG_NEON or BUSTER_TYPE_FLAG_NEON_POLY (#1447).
+static __attribute__((unused)) TypeId type_vector_kind(TypeTable* table, TypeId element, uint32_t count, uint8_t kind);
 static __attribute__((unused)) TypeId type_vector_size(TypeTable* table, TypeId element, uint64_t bytes);
 // GNU mode replaces a declaration's type, including its existing qualifiers and aligned typedef wrappers, as
 // clang does. This is NOT a qualifier-preserving derivation; the checker owns any later declaration qualifiers.
@@ -1819,7 +1826,9 @@ static TypeError type_check_derivation(const TypeTable* table, uint8_t kind, uin
     {
         const TypeId element = type_unqualified(base);
         const bool ext = kind == BUSTER_TYPE_KIND_EXT_VECTOR;
-        if (flags != 0 || extent == 0 || extent > UINT32_MAX || !type_vector_element_is_valid(table, element, ext))
+        // A NEON vector's kind (#1447) is a GNU vector's flag alone, of one kind at a time.
+        const bool neon = !ext && (flags == BUSTER_TYPE_FLAG_NEON || flags == BUSTER_TYPE_FLAG_NEON_POLY);
+        if ((flags != 0 && !neon) || extent == 0 || extent > UINT32_MAX || !type_vector_element_is_valid(table, element, ext))
         {
             result = TYPE_ERROR_VECTOR;
         }
@@ -2101,6 +2110,11 @@ static TypeId type_variable_array(TypeTable* table, TypeId element, uint32_t exp
 static TypeId type_vector(TypeTable* table, TypeId element, uint32_t count, bool ext)
 {
     return type_derive(table, ext ? BUSTER_TYPE_KIND_EXT_VECTOR : BUSTER_TYPE_KIND_VECTOR, 0, element, count);
+}
+
+static TypeId type_vector_kind(TypeTable* table, TypeId element, uint32_t count, uint8_t kind)
+{
+    return type_derive(table, BUSTER_TYPE_KIND_VECTOR, kind, element, count);
 }
 
 // GNU's vector_size(bytes), as clang's BuildVectorType counts its elements: bytes must be a multiple of the element's
@@ -2496,8 +2510,11 @@ static TypeId type_machine_mode(TypeTable* table, TypeId base, String8 mode)
                 }
                 else
                 {
-                    // clang's mode produces a GNU vector even when the old type was an ext_vector_type.
-                    result = type_vector(table, result, (uint32_t)vector_count, false);
+                    // clang's mode produces a GNU vector even when the old type was an ext_vector_type; of an old vector's
+                    // elements (no vector mode), its kind, which a NEON vector's flags are (#1447, handleModeAttr).
+                    const uint8_t neon = vector_base && !vector_mode && kind == BUSTER_TYPE_KIND_VECTOR ?
+                                         table->types.flags[type_index(stripped)] & (BUSTER_TYPE_FLAG_NEON | BUSTER_TYPE_FLAG_NEON_POLY) : 0;
+                    result = type_vector_kind(table, result, (uint32_t)vector_count, neon);
                 }
             }
             if (result != 0)
@@ -6099,6 +6116,15 @@ static void type_print_before_kind(TypePrinter* printer, TypeId type)
         type_print_push(printer, BUSTER_TYPE_PRINT_FUNCTION_END, type, printer->empty, false, 0);
         printer->empty = false;
         printer->after_empty = false;
+        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, printer->step + 1);
+    }
+    else if (kind == BUSTER_TYPE_KIND_VECTOR && (table->types.flags[index] & (BUSTER_TYPE_FLAG_NEON | BUSTER_TYPE_FLAG_NEON_POLY)) != 0)
+    {
+        // A NEON vector (#1447), as clang's printVectorBefore spells it: its attribute, then its element.
+        const bool poly = (table->types.flags[index] & BUSTER_TYPE_FLAG_NEON_POLY) != 0;
+        type_print_text(printer, poly ? "__attribute__((neon_polyvector_type(" : "__attribute__((neon_vector_type(");
+        type_print_number(printer, table->types.extent[index]);
+        type_print_text(printer, "))) ");
         type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, printer->step + 1);
     }
     else if (kind == BUSTER_TYPE_KIND_VECTOR)

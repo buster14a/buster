@@ -6647,6 +6647,95 @@ arguments against the function. The checker now gives these as clang does.
     attributes' C23
     spellings, which apply to other types than GNU's (clang 23 crashes on
     `[[clang::objc_gc(weak)]]`).
+  - `diagnose_as_builtin` (`check_input_attribute_diagnose_builtin`,
+    `c_check_attribute_checks_input.c`), clang's handleDiagnoseAsBuiltinAttr:
+    its first argument names a builtin function, as getBuiltinID finds one: a
+    name no declaration hides of one of the catalogue's builtins the language
+    has (`__builtin_memcpy`, `__builtin_ia32_pause`), but a library
+    function's, or the unit's declaration of a library function that is its
+    builtin (`check_input_checks_library`); any other argument, a name in
+    parentheses too, is "'diagnose_as_builtin' attribute requires parameter 1
+    to be a builtin function" at its expression's place. Its builtin's
+    parameters, its prototype decoded past any custom checking
+    (`__builtin_va_start` takes one), must be as many as its other arguments
+    ("references function '__builtin_memcpy', which takes exactly 3
+    arguments"), each an index read as checkUInt32Argument reads it (not a
+    constant: "requires parameter N to be an integer constant"; wider than 32
+    bits: the value's error at it; -1 is 4294967295) of one of the function's
+    parameters ("references parameter 4, but the function 'f' has only 3
+    parameters"; a function without a prototype has none) whose canonical
+    unqualified type is that builtin parameter's, else "parameter types do
+    not match", at the index, naming the parameter's type as its declarator
+    spells it and the builtin's as clang's declaration of it does
+    (`cbuiltin_library_spell_parameter`: `'__size_t' (aka 'unsigned long')`,
+    `'const char *restrict _Nonnull'` for a nonnull one). Refused by name are
+    the cases whose diagnostics are clang's own elsewhere: an undeclared
+    library function's name (its implicit declaration's), a builtin's name in
+    another expression (`&__builtin_abs`), a redeclared builtin, a builtin
+    parameter's type the spelling doesn't cover (a vector's, `FILE`'s); an
+    index of 0, on which clang 23 crashes; and more than 32 arguments. A
+    definition's identifier list compares its parameters by their declarations'
+    types, the promoted prototype's standing aside, as clang's ParmVarDecl
+    types do. It changes nothing else here: the
+    `-Wfortify-source` warnings clang gives the function's calls, as it gives
+    them a builtin's, the checker makes for no call.
+
+  clang's NEON vectors (#1447), `neon_vector_type(N)` and
+  `neon_polyvector_type(N)`, are vectors on x86-64 too: GNU vectors of a kind
+  of their own (`BUSTER_TYPE_FLAG_NEON` and `BUSTER_TYPE_FLAG_NEON_POLY`, a
+  vector's key flags in the type table, `type_vector_kind`), laid out, passed
+  and computed as a GNU vector of their element and count, with which they are
+  compatible (areCompatVectorTypes: assignments, redeclarations,
+  `__builtin_types_compatible_p`, and an arithmetic operation's type the
+  right operand's, as CheckVectorOperands takes it), but spelled as clang
+  spells them (`'__attribute__((neon_vector_type(4))) int' (vector of 4 'int'
+  values)`) and mangled as its x86-64 mangler mangles them
+  (`_Z1f17__simd128_int32_t`; it has no name for `long`'s, refused). They take
+  ext_vector_type's places (its record's kind, `CheckInputAttribute.neon`),
+  with HandleNeonVectorTypeAttr's checks in its order
+  (`check_input_neon_vector`): one argument, an integer constant ("'X'
+  attribute requires an integer constant"), an element of one of
+  isPermittedNeonBaseType's builtin types ("invalid vector element type 'T'":
+  signed char, short, int, long, long long, each unsigned too, `__fp16`,
+  `__bf16`, float and double; a polynomial vector's signed char, short and
+  long long alone, AArch32's, as x86-64's triple takes them), and a vector of
+  64 or 128 bits ("Neon vector size must be 64 or 128 bits"), its count
+  truncated to 32 bits and its width computed in 32 bits as clang computes
+  them (`neon_vector_type(4294967300)` of int is 4 ints). A mode attribute
+  keeps an old NEON vector's kind (handleModeAttr). A C23 `clang::` spelling
+  slides to the specifiers' type from the declaration's place
+  (slidesFromDeclToDeclSpecLegacyBehavior) with -Wdeprecated-attributes'
+  "applying attribute 'clang::neon_vector_type' to a declaration is
+  deprecated; apply it to the type instead": one before the declaration (or a
+  parameter's) as clang warns before applying it, one after a declarator's
+  name once its type took it (CheckInputAttribute.neon_deprecated). A
+  statement's is its error alone, and one in a tag's own list (`struct
+  [[clang::neon_vector_type(4)]] S`) is ProcessDeclAttribute's "cannot be
+  applied to a declaration" after a count's error, as `btf_type_tag`'s now are
+  too.
+
+  The type qualifiers' attributes stay refused by name (#1447): GNU's
+  `address_space(N)`, the OpenCL address spaces (`opencl_global`,
+  `opencl_local`, `opencl_constant`, `opencl_private`, `opencl_generic`,
+  `opencl_global_device`, `opencl_global_host`), which clang 23 takes in C as
+  address spaces too (`'__global int *'`, the last two with -Wdeprecated-attributes'
+  "''opencl_global_device'' attribute is deprecated and may be removed in a
+  future version of Clang"), and `objc_gc(weak)` and `objc_gc(strong)` (`int
+  *__weak`). Each is one of clang's Qualifiers that is part of a type's
+  identity, which a TypeId's three qualifier bits don't hold: making them a
+  type's needs an extended qualifier's record that the table's consumers see
+  through as they see through ALIGNED, and the conversions' checks with
+  clang's words ("assigning to 'int *' from '__attribute__((address_space(1)))
+  int *' changes address space of pointer", "automatic variable qualified with
+  an address space", "multiple address spaces specified for type", a pointer
+  subtraction's and a conditional's "pointers to non-overlapping address
+  spaces"), where the checker's pointer conversions mostly say "incompatible
+  operand or conversion types"; clang also spells a type whose attribute a
+  user's macro wrote by the macro's name (MacroQualifiedType: `'AS1 int *'`).
+  Code generation then needs `%gs`, `%fs` and `%ss` memory operands for
+  address spaces 256, 257 and 258 (`__seg_gs`, `__seg_fs`), which clang's
+  -O0 code uses (`mov %gs:0x10,%eax`); any other address space is the default
+  one's code on x86-64.
 
   Other targets' calling conventions (`aarch64_sve_pcs`,
   `aarch64_vector_pcs`, `m68k_rtd`, `pcs`) are conventions x86-64 hasn't, as
@@ -7190,7 +7279,11 @@ arguments against the function. The checker now gives these as clang does.
     `objc_ownership` with a count's error warns and errs for the first
     declarator alone, and a TCB function's call clang declares implicitly
     with an error (C99 and later) has no `-Wtcb-enforcement` warning after
-    it.
+    it. `address_space` and OpenCL's address spaces are refused (see above).
+    `diagnose_as_builtin`'s calls have no `-Wfortify-source` warnings, as no
+    call has. A C23 NEON vector attribute after a typedef's or a tag's name
+    gets the deprecation warning where clang's error is "cannot be applied to
+    a declaration", as `btf_type_tag`'s does.
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
   counts and five rows, and conflicting conventions on a function and on
   another type (`c_check_attribute_test.c`). `test-checker-driver` compares
@@ -7249,7 +7342,11 @@ arguments against the function. The checker now gives these as clang does.
   `c_check_attribute_checks_driver_test.c` compares the whole output of the
   checks-only attributes (#1447) in their valid uses, wrong subjects and wrong
   arguments, TCB calls, availability's merges and the Objective-C pointer
-  attributes' types, with the warnings' options and GNU C89's implicit calls.
+  attributes' types, with the warnings' options and GNU C89's implicit calls;
+  `diagnose_as_builtin`'s builtins, counts, indices and types; and the NEON
+  vectors' elements, sizes, places, compatibility with GNU vectors, mode and
+  spellings. `test-checker`'s program fixtures run NEON vectors' code
+  (`neon-vectors`).
 
 ## diagnose_if and enable_if (#1447)
 

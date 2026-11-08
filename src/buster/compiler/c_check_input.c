@@ -4899,11 +4899,13 @@ static bool check_input_ownership_indices(CheckInputReader* reader, const CheckI
 }
 
 // Whether a generic attribute's integer arguments are its handler's parameter indices, evaluated where it is read (#1447,
-// CheckInputAttribute.constants): 1 for callback's (any argument but a lone name), 2 for swift_async's (its second), else 0.
+// CheckInputAttribute.constants): 1 for callback's (any argument but a lone name), 2 for swift_async's (its second), 3 for
+// diagnose_as_builtin's (each after its first, in 32 bits as clang's checkUInt32Argument reads them), else 0.
 static uint32_t check_input_checked_indices(CheckInputReader* reader, const CheckInputAttribute* attribute)
 {
     const String8 name = check_input_attribute_name(reader, attribute->name);
-    return check_input_attribute_equal(name, "callback") ? 1u : check_input_attribute_equal(name, "swift_async") && attribute->argument_count == 2 ? 2u : 0u;
+    return check_input_attribute_equal(name, "callback") ? 1u : check_input_attribute_equal(name, "swift_async") && attribute->argument_count == 2 ? 2u :
+           check_input_attribute_equal(name, "diagnose_as_builtin") ? 3u : 0u;
 }
 
 // A type argument's type (#147, CheckInputAttribute.argument_type): a C23 attribute's lone typedef name, which its tokens
@@ -5039,6 +5041,7 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
                 int64_t value = 0;
                 bool wide = false;
                 const bool constant = which == 1 ? !lone && check_input_constant_u32(reader, first, stop, &value, &wide) :
+                                      which == 3 ? argument != 0 && check_input_constant_u32(reader, first, stop, &value, &wide) :
                                       argument == 1 && check_input_constant_ice(reader, first, stop, &value);
                 attribute->argument_values[argument] = value;
                 attribute->constants |= constant ? 1u << argument : 0u;
