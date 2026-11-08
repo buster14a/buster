@@ -183,8 +183,28 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // A statement expression has its own inner scope; its error is also within the enclosing for scope.
         "void compound(void) { for (int j = ({ int k; 0; }); ; ) break; int x; float x; }\n"
         "void compound_error(void) { for (int j = ({ int k; int x; float x; 0; }); ; ) break; }\n",
+        // A repeated enumerator, dropped: the next one's implicit value restarts at 0 (of int, or of a fixed type), and
+        // an enum left with none is unsigned int's.
+        "enum A { X = 5 };\nenum B { Y = 3, X, Z };\n_Static_assert(Z == 0, \"z\");\n"
+        "enum C : long { P };\nenum D : char { Q = 7, P, R };\n_Static_assert(R == 0 && sizeof(R) == 1, \"r\");\n"
+        "enum E { M = -1 };\nenum F { M };\n_Static_assert(sizeof(enum F) == 4 && (enum F)-1 > 0, \"u\");\nint x = undeclared;\n",
+        // A tag defined again in its scope, whose body becomes an anonymous tag's: later uses of the name find the first
+        // definition, and the second's enumerators are still declared (a repeated one with its own note).
+        "struct S { int a; };\nstruct S { long b; };\nunion U { int a; };\nunion U { char c; } u2;\n"
+        "typedef struct T { int x; } T;\nstruct T { int y; } t2;\n"
+        "int f(void) { struct S s; union U u; s.a = 1; u.c = 1; return s.a + t2.y + undeclared; }\n",
+        "enum E { A, B };\nenum E { C, A };\nint g(void) { return C + B; }\n"
+        "void k(void)\n{\n    struct L { int a; };\n    { struct L { int b; }; }\n    struct L { int c; } v;\n    int unused;\n    v.c = 0;\n}\n"
+        "void m(void) { int quiet; }\n",
+        // The note is at the definition when a forward declaration or a use comes first (review on #1788).
+        "struct S;\nstruct S { int a; };\nstruct S { int b; };\nstruct S { int c; };\nstruct T x;\nstruct T { int a; };\n"
+        "struct T { int b; };\nenum E *pe;\nenum E { A };\nenum E { B };\n"
+        "void f(void) { struct L *p; struct L { int a; }; struct L { int b; }; (void)p; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
+    // The tag redefinitions, the last three fixtures, are gnu17's alone: C23 allows a compatible one and words an
+    // incompatible one otherwise (N3037), which the checker doesn't model yet.
+    const uint32_t before_c23 = BUSTER_ARRAY_LENGTH(fixtures) - 3;
     static const char* const options[] = { NULL, "-Wall", "-ferror-limit=2", "-w" };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);
@@ -196,7 +216,8 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
     {
         snprintf(source, sizeof(source), "%s/semantic-recovery-%u.c", directory, f);
         const bool made = parse_test_write(source, fixtures[f], strlen(fixtures[f]));
-        for (uint32_t s = 0; made && s < BUSTER_ARRAY_LENGTH(standards); s += 1)
+        const uint32_t standard_count = f >= before_c23 ? 1u : (uint32_t)BUSTER_ARRAY_LENGTH(standards);
+        for (uint32_t s = 0; made && s < standard_count; s += 1)
         {
             for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(options); o += 1)
             {
