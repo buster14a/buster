@@ -26,12 +26,12 @@ static bool check_input_enum_successor(CheckInputReader* reader, const CheckTagF
     bool valid = true;
     *value = (CheckValue)
     {
-        .type = frame->count == 0 ? BUSTER_TYPE_INT : frame->enumerator_type,
+        .type = frame->count == 0 || frame->restart ? BUSTER_TYPE_INT : frame->enumerator_type,
         .category = CHECK_RVALUE,
         .flags = BUSTER_CHECK_ICE,
         .constant_kind = CHECK_CONSTANT_INTEGER,
     };
-    if (frame->count != 0)
+    if (frame->count != 0 && !frame->restart)
     {
         valid = check_action_integer_type(reader->types, value->type, &width, &sign);
         if (valid)
@@ -104,7 +104,7 @@ static bool check_input_enum_fixed_value(CheckInputReader* reader, const CheckTa
         const unsigned __int128 mask = check_action_mask(width);
         const unsigned __int128 maximum = sign ? mask >> 1 : mask;
         const unsigned __int128 previous = frame->enumerator & mask;
-        valid = frame->count == 0 || previous != maximum;
+        valid = frame->count == 0 || frame->restart || previous != maximum;
         next = previous + 1;
         *value = (CheckValue)
         {
@@ -112,7 +112,7 @@ static bool check_input_enum_fixed_value(CheckInputReader* reader, const CheckTa
             .category = CHECK_RVALUE,
             .flags = BUSTER_CHECK_ICE,
             .constant_kind = CHECK_CONSTANT_INTEGER,
-            .integer = frame->count == 0 ? 0 : (previous + 1) & mask,
+            .integer = frame->count == 0 || frame->restart ? 0 : (previous + 1) & mask,
         };
     }
     value->type = moded ? value->type : underlying;
@@ -256,7 +256,19 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
             if (!valid)
             {
                 const CheckInputMessage message = reader->bindings.kind[old - 1] == C_BINDING_ENUMERATOR ? CHECK_INPUT_ENUMERATOR_REDEFINITION : CHECK_INPUT_REDECLARATION;
+                const uint32_t before = reader->output->report_count;
                 check_input_report_subject(reader, name, message, reader->bindings.declaration[old - 1]);
+                const bool enumerator = message == CHECK_INPUT_ENUMERATOR_REDEFINITION && reader->output->report_count == before + 1 && !reader->output->resource;
+                if (enumerator)
+                {
+                    // clang's note at the earlier enumerator (#1447): "previous definition is here". The enumerator is
+                    // dropped and the walk goes on (phase 2), its name still the earlier one's.
+                    reader->output->reports[before].note_token = reader->bindings.declaration[old - 1];
+                    reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
+                    valid = check_input_recover_reports(reader, before);
+                    frame->dropped |= valid;
+                    frame->restart |= valid;
+                }
             }
             else
             {
@@ -295,6 +307,7 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
                     frame->enumerator = bits;
                     frame->enumerator_type = value.type;
                     frame->count += 1;
+                    frame->restart = false;
                 }
             }
         }
@@ -324,7 +337,7 @@ static bool check_input_enum_complete(CheckInputReader* reader, CheckTagFrame* f
     const bool packed = frame->attributes != 0 && frame->attributes->packed;
     const uint8_t alignment = frame->attributes != 0 ? frame->attributes->alignment_log2 : 0;
     const uint32_t tag = reader->types->types.index[type_index(frame->type)];
-    bool valid = frame->count != 0;
+    bool valid = frame->count != 0 || frame->dropped;
     const bool moded = reader->enum_fixed[tag] == BUSTER_CHECK_ENUM_MODED;
     // A mode after its body (#147): clang's ActOnEnumBody applies the enum's attributes before it takes a type, and takes
     // the mode's (check_input_enum_mode).

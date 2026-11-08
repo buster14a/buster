@@ -3948,6 +3948,22 @@ and preprocessing lookahead order remain intact. Units without an unused for
 initializer allocate no staging buffer. Reader and Clang differential fixtures
 cover braced/unbraced bodies, nested loops, if/else and do/while tails, statement
 expressions, shared completion tokens and errors before, inside and after a loop.
+Two more redefinitions recover as clang's `ActOnTag` and `ActOnEnumConstant`
+do:
+
+- **A tag defined again in its own scope** (`struct S { … }` twice, or an enum
+  without a fixed type listed twice) gives "redefinition of 'S'" at the name,
+  noting the earlier definition. Its body is read as an anonymous tag's, so the
+  name's later uses find the first definition, and a repeated enumerator in it
+  is reported as below. This is before C23 only: C23 allows a compatible
+  redefinition and words an incompatible one otherwise (N3037), which the
+  checker doesn't model, and still refuses with its generic error.
+- **A repeated enumerator** gives "redefinition of enumerator 'A'" with its
+  note at the earlier one, and is dropped (`CheckTagFrame.dropped`). As in
+  clang, whose next `CheckEnumConstant` sees no previous constant, the next
+  implicit value restarts at 0 of `int` or of the fixed type
+  (`CheckTagFrame.restart`), and an enum left with no enumerator is
+  complete as `unsigned int`.
 
 Phase 3 covers statements after an error:
 
@@ -4031,9 +4047,9 @@ compares fixtures of graph, control, asm and reader errors with clang.
 The later phases are left:
 
 - **Invalid declarations.** Not covered by phase 2:
-  - a tag's redefinition (`struct S { … }` twice);
   - an invalid initializer the reader reports;
-  - a type attribute's error (`vector_size`, `mode`).
+  - a type attribute's error (`vector_size`, `mode`);
+  - C23's incompatible tag redefinitions (above).
 
   These still stop the reader.
 - **Errors outside the bodies, and a body's own warnings.** A rejected unit's
@@ -4047,8 +4063,6 @@ The later phases are left:
   source order instead.
 - **Shared `_Alignas`.** An `_Alignas` shared by several declarators gives its
   error once, where clang gives it for each.
-- **Unused `extern` locals.** A block's unused `extern` declaration gets no
-  warning, where clang gives one (on main too).
 
 ### What the lowering costs (#531)
 
@@ -4427,8 +4441,14 @@ the completion, so they follow Clang's after-function order; a redeclaration
 inherits an earlier `unused` or `used` attribute. A file-scope variable's
 unused warning is given only in the main file, as Clang leaves a header's
 file-scope variables alone because every unit that includes the header shares
-them. The graph pass adds `-Wunused-but-set-parameter` for a parameter a
-statement assignment writes and no read uses.
+them. A block's declaration with linkage (an `extern` object, any function
+declaration) is never unused: clang's semantic context for it is the
+translation unit, not the function, so `ShouldDiagnoseUnusedDecl` passes it
+by. A use through it uses the outer declaration with linkage it redeclares,
+so `static int s; void f(void) { extern int s; (void)s; }` leaves `s` used.
+A block's own `static`, `register` and automatic objects can be unused. The
+graph pass adds `-Wunused-but-set-parameter` for a parameter a statement
+assignment writes and no read uses.
 
 Each uses the shared warning policy, so a default or group option, a
 `#pragma clang diagnostic` change and `-Werror` promotion behave as the other

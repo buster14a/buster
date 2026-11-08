@@ -204,6 +204,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_MS_STRUCT_ALIGNMENT: result = "ms_struct bit-field storage with non-power-of-two size is not supported"; break;
         case CHECK_INPUT_INTERRUPT_HANDLER: result = "x86-64 'interrupt' attribute only applies to functions that have a 'void' return type"; break;
         case CHECK_INPUT_INTERRUPT_CALLED: result = "interrupt service routine cannot be called directly"; break;
+        case CHECK_INPUT_BLOCK_EXTERN_INITIALIZER: result = "declaration of block scope identifier with linkage cannot have an initializer"; break;
         case CHECK_INPUT_DIAGNOSE_IF_ERROR: result = "diagnose_if attribute error"; break;
         case CHECK_INPUT_ENABLE_IF_CALL: result = "no matching function for call"; break;
         case CHECK_INPUT_ENABLE_IF_ADDRESS: result = "cannot take address of function because it has one or more non-tautological enable_if conditions"; break;
@@ -3802,9 +3803,10 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                 }
                             }
                         }
-                        else if (phase == 0 && (kind == CHECK_INPUT_REDECLARATION || kind == CHECK_INPUT_CONFLICTING_TYPES) && token < count &&
-                                 input->reports[index].detail > CHECK_REDECLARATION_GENERIC &&
-                                 input->reports[index].detail <= CHECK_REDECLARATION_KIND)
+                        else if (phase == 0 && token < count &&
+                                 (((kind == CHECK_INPUT_REDECLARATION || kind == CHECK_INPUT_CONFLICTING_TYPES) &&
+                                   input->reports[index].detail > CHECK_REDECLARATION_GENERIC && input->reports[index].detail <= CHECK_REDECLARATION_KIND) ||
+                                  (kind == CHECK_INPUT_ENUMERATOR_REDEFINITION && input->reports[index].note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION)))
                         {
                             const CheckInputReport* conflict = input->reports + index;
                             const uint32_t previous = conflict->note_token;

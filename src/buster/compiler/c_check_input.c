@@ -272,6 +272,9 @@ typedef enum CheckInputMessage
     // (CheckCpuDispatchError), `attribute` a CPU's token the message names, `value` 1 for cpu_dispatch's option, and a note
     // at `note_token` where it has one.
     CHECK_INPUT_CPU_DISPATCH,
+    // A block's extern declaration with an initializer, at its name (#1447): clang's "declaration of block scope identifier
+    // with linkage cannot have an initializer".
+    CHECK_INPUT_BLOCK_EXTERN_INITIALIZER,
 } CheckInputMessage;
 
 // CHECK_INPUT_INTERRUPT_HANDLER's details: the rule x86's handler finds broken (its result isn't void; it hasn't one or two
@@ -3806,7 +3809,33 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
         const uint32_t defined_tag = defined != 0 && type_kind(reader->types, defined) == kind ? reader->types->types.index[type_index(defined)] : 0;
         const bool redefinition = defined_tag != 0 && (kind == BUSTER_TYPE_KIND_ENUM && reader->enum_fixed[defined_tag] != BUSTER_CHECK_ENUM_NONE ?
                                                        reader->enum_fixed[defined_tag] == BUSTER_CHECK_ENUM_LISTED : type_is_complete(reader->types, defined));
-        if (valid && previous != 0 && !redefinition && (same_scope || (!body && !forward)))
+        // A record or an enum without a fixed type defined again in its own scope (#1447, phase 2): clang's ActOnTag reports
+        // "redefinition of 'S'" at the name with a note at the earlier definition, then reads the body as an anonymous
+        // tag's, so the later uses of the name find the first. The report is recovered: the walk goes on. C23 allows a
+        // compatible redefinition and words an incompatible one otherwise (N3037), which the checker refuses as before.
+        const TypeId earlier = valid && same_scope && body && !fixed && !redefinition && parser->language.standard < 2023 ? reader->declared_types[reader->bindings.declaration[previous - 1]] : 0;
+        const uint32_t earlier_tag = earlier != 0 && type_kind(reader->types, earlier) == kind ? reader->types->types.index[type_index(earlier)] : 0;
+        const bool again = earlier_tag != 0 && (kind != BUSTER_TYPE_KIND_ENUM || reader->enum_fixed[earlier_tag] == BUSTER_CHECK_ENUM_NONE) &&
+                           type_is_complete(reader->types, earlier);
+        if (again)
+        {
+            const uint32_t before = reader->output->report_count;
+            const uint32_t old = reader->bindings.declaration[previous - 1];
+            // The note is at the definition, which a forward declaration or a use may precede (`struct S; struct S { … };`).
+            const uint32_t defined_at = check_input_tag_definition_name(reader, earlier, old);
+            const uint32_t noted = defined_at != BUSTER_CHECK_NONE ? defined_at : old;
+            check_input_report_subject(reader, declaration, CHECK_INPUT_REDECLARATION, old);
+            if (reader->output->report_count == before + 1 && !reader->output->resource)
+            {
+                CheckInputReport* report = reader->output->reports + before;
+                report->detail = CHECK_REDECLARATION_DEFINITION;
+                report->note_token = noted;
+                report->note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
+            }
+            valid = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
+        }
+        const bool anonymous = redefinition || again;
+        if (valid && previous != 0 && !anonymous && (same_scope || (!body && !forward)))
         {
             const uint32_t old = reader->bindings.declaration[previous - 1];
             type = reader->declared_types[old];
@@ -3826,7 +3855,7 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
         }
         else if (valid)
         {
-            type = check_input_type_result(reader, type_tag(reader->types, kind, redefinition ? 0 : name));
+            type = check_input_type_result(reader, type_tag(reader->types, kind, anonymous ? 0 : name));
             valid = type != 0;
             if (valid)
             {
@@ -3863,7 +3892,7 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
             reader->declared_types[declaration] = type;
             reader->declaration_kinds[declaration] = C_BINDING_TAG_KIND;
             reader->output->declarations[declaration] = declaration;
-            if (valid && name != 0 && !redefinition && c_bindings_declare(&reader->bindings, C_BINDING_TAG, name, C_BINDING_TAG_KIND, declaration, i, depth) == 0)
+            if (valid && name != 0 && !anonymous && c_bindings_declare(&reader->bindings, C_BINDING_TAG, name, C_BINDING_TAG_KIND, declaration, i, depth) == 0)
             {
                 reader->output->resource = true;
                 valid = false;
@@ -6898,6 +6927,10 @@ struct CheckTagFrame
     uint32_t count;
     unsigned __int128 enumerator;
     TypeId enumerator_type;
+    // An enumerator of its list dropped as a redefinition (#1447, phase 2), and whether the next one's implicit value
+    // restarts: clang's ActOnEnumConstant gives none, so the next is valued as a list's first (LastEnumConstDecl null).
+    bool dropped;
+    bool restart;
     bool wide_enumerators;
     uint32_t negative_bits;
     uint32_t positive_bits;
@@ -8759,7 +8792,11 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                                                          kind == PARSE_KIND_L_BRACE ? i : BUSTER_CHECK_NONE);
                 }
             }
-            valid &= file || storage != C_NAME_EXTERN || !initialized;
+            if (valid && !file && storage == C_NAME_EXTERN && initialized)
+            {
+                check_input_report(reader, name, CHECK_INPUT_BLOCK_EXTERN_INITIALIZER);
+                valid = false;
+            }
             valid &= check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, initialized, thread_local);
             if (valid && reader->cleanup_attributes && attributes != 0)
             {
