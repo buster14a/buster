@@ -269,6 +269,18 @@ static uint32_t check_semantic_operand_spelling(const Parser* parser, const Chec
     return result;
 }
 
+// The switch keyword whose condition `close` closes, or BUSTER_CHECK_NONE: the one before the condition's `(`.
+static uint32_t check_semantic_switch(const Parser* parser, uint32_t close)
+{
+    uint32_t open = close;
+    while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == close))
+    {
+        open -= 1;
+    }
+    const bool found = open != 0 && parser->tokens.kinds[open - 1] == PARSE_KIND_SWITCH && parser->tree.parents[open - 1] == close;
+    return found ? open - 1 : BUSTER_CHECK_NONE;
+}
+
 // `note`, where the message has one (its message NULL where not): a const variable's "declared const here" (#147).
 static const char* check_semantic_expression(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             const TypeTable* types, const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location,
@@ -297,6 +309,17 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const String8 name = check_semantic_name(parser, pp, token + 1);
             *location = token + 1;
             result = type.length != 0 ? check_warning_text(scratch, "no member named '%.*s' in %.*s", (int)name.length, name.pointer, (int)type.length, type.pointer) : NULL;
+        }
+        else if (report->diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED && op == CHECK_OP_POSITIVE && operand_type != 0 && graph->tokens[node] < parser->tokens.count &&
+                 parser->tree.roles[graph->tokens[node]] == PARSE_ROLE_CLOSE_CONDITION && graph->tokens[node] != 0 &&
+                 check_semantic_switch(parser, graph->tokens[node]) != BUSTER_CHECK_NONE)
+        {
+            // A switch's condition of no arithmetic type, which its promotion (a unary plus) refuses: clang's
+            // err_typecheck_statement_requires_integer at the switch (#1447), as check_semantic_constraint's.
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_type, check_input_operand_type_spelling(input, parser, operand));
+            *location = check_semantic_switch(parser, graph->tokens[node]);
+            result = type.length != 0 ? check_warning_text(scratch, "statement requires expression of integer type (%.*s invalid)", (int)type.length, type.pointer) :
+                                        NULL;
         }
         else if (report->diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED && op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT &&
                  operand_type != 0 && !check_action_steppable(types, operand_type))
@@ -512,6 +535,109 @@ static const char* check_semantic_control(Preprocessor* pp, const TypeTable* typ
                 text[--at] = '-';
             }
             result = check_warning_text(scratch, "duplicate case value '%s'", text + at);
+        }
+    }
+    return check_semantic_text(pp, result);
+}
+
+// One of check_program_diagnose_all's constraint errors in clang's words: a switch condition's type spelled as clang
+// spells it, with its typedef's name first (#1447).
+static const char* check_semantic_constraint(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                             const CheckProgramConstraint* constraint, Arena* scratch)
+{
+    const char* result = NULL;
+    if (constraint->failure.message == CHECK_PROGRAM_MESSAGE_CONDITION)
+    {
+        CheckWarningSpelling spell = { 0 };
+        // The condition's own expression, through the implicit conversions its switch makes of it (its promotion, the
+        // unary plus at its closing parenthesis).
+        uint32_t node = constraint->node;
+        for (uint32_t steps = 0; steps < 4 && node < input->graph.count &&
+             (input->graph.ops[node] == CHECK_OP_CONVERT || input->graph.ops[node] == CHECK_OP_CONDITION ||
+              (input->graph.ops[node] == CHECK_OP_POSITIVE && input->graph.tokens[node] < parser->tokens.count &&
+               parser->tree.roles[input->graph.tokens[node]] == PARSE_ROLE_CLOSE_CONDITION)); steps += 1)
+        {
+            node = input->graph.operand0[node];
+        }
+        const uint32_t spelling = node < input->graph.count ? check_input_operand_type_spelling(input, parser, node) : 0;
+        const String8 type = check_driver_warning_type(parser, pp, input, types, &spell, scratch, constraint->failure.type, spelling);
+        result = type.length != 0 ? check_warning_text(scratch, "statement requires expression of integer type (%.*s invalid)", (int)type.length, type.pointer) :
+                                    NULL;
+        result = check_semantic_text(pp, result);
+    }
+    else
+    {
+        result = check_semantic_control(pp, types, CHECK_PROGRAM_INVALID, &constraint->failure, scratch);
+    }
+    return result;
+}
+
+// One of check_asms_diagnose_all's statement errors in clang's words (#1447), with an incomplete tag's note at its
+// declaring name (`note`, whose message is null where there's none).
+static const char* check_semantic_asm(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                      const CheckAsmFailure* failure, PPOutputDiagnosticNote* note, Arena* scratch)
+{
+    CheckWarningSpelling spell = { 0 };
+    const CheckInputAsm* assembly = input->asm_statements + failure->statement;
+    const CheckAsmOperand* operand = assembly->operands + failure->operand;
+    const bool output = failure->operand < assembly->output_count;
+    const int constraint_length = (int)operand->constraint.length;
+    const char* constraint = (const char*)operand->constraint.bytes;
+    const String8 type = failure->type != 0 ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, failure->type,
+                                                                        check_input_operand_type_spelling(input, parser, operand->node)) : (String8){ 0 };
+    const char* result = NULL;
+    *note = (PPOutputDiagnosticNote){ 0 };
+    switch (failure->error)
+    {
+        case CHECK_ASM_ERROR_GENERIC: result = "invalid assembly operand or constraint"; break;
+        case CHECK_ASM_ERROR_OUTPUT_LVALUE: result = "invalid lvalue in asm output"; break;
+        case CHECK_ASM_ERROR_CAST: result = "invalid use of a cast in an inline asm context requiring an lvalue [-Winvalid-gnu-asm-cast]"; break;
+        case CHECK_ASM_ERROR_INPUT_LVALUE: result = check_warning_text(scratch, "invalid lvalue in asm input for constraint '%.*s'", constraint_length, constraint); break;
+        case CHECK_ASM_ERROR_BIT_FIELD:
+            result = check_warning_text(scratch, "reference to a bit-field in asm %s with a memory constraint '%.*s'", output ? "input" : "output", constraint_length,
+                                        constraint);
+            break;
+        case CHECK_ASM_ERROR_BIT_INT:
+            result = type.length != 0 ? check_warning_text(scratch, "invalid type %.*s in asm %s", (int)type.length, type.pointer, output ? "input" : "output") : NULL;
+            break;
+        case CHECK_ASM_ERROR_VOID:
+            result = type.length != 0 ? check_warning_text(scratch, "invalid type %.*s in asm input for constraint '%.*s'", (int)type.length, type.pointer,
+                                                           constraint_length, constraint) : NULL;
+            break;
+        case CHECK_ASM_ERROR_INCOMPLETE:
+        {
+            result = type.length != 0 ? check_warning_text(scratch, "dereference of pointer to incomplete type %.*s", (int)type.length, type.pointer) : NULL;
+            // The tag's declaring name: its first token that declares a tag of this type.
+            TypeId bare = type_unqualified(type_strip_aligned(types, failure->type));
+            const uint8_t kind = type_kind(types, bare);
+            const bool tag = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM;
+            const uint32_t name = tag ? types->tags.name[types->types.index[type_index(bare)]] : 0;
+            uint32_t declared = BUSTER_CHECK_NONE;
+            for (uint32_t t = 0; name != 0 && declared == BUSTER_CHECK_NONE && t < input->token_count; t += 1)
+            {
+                declared = parser->tokens.names[t] == name && input->declarations[t] == t && input->declaration_kinds[t] == C_BINDING_TAG_KIND &&
+                           type_unqualified(input->declared_types[t]) == bare ? t : BUSTER_CHECK_NONE;
+            }
+            const String8 named = declared != BUSTER_CHECK_NONE ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, bare, 0) : (String8){ "", 0 };
+            if (named.length != 0)
+            {
+                *note = (PPOutputDiagnosticNote){
+                    .token = declared,
+                    .message = check_warning_text(scratch, "forward declaration of %.*s", (int)named.length, named.pointer),
+                };
+            }
+            break;
+        }
+        case CHECK_ASM_ERROR_TIED:
+        {
+            const uint32_t tied = operand->match < assembly->output_count ? assembly->operands[operand->match].node : BUSTER_CHECK_NONE;
+            const String8 output_type = failure->output_type != 0 ?
+                check_driver_warning_type(parser, pp, input, types, &spell, scratch, failure->output_type, check_input_operand_type_spelling(input, parser, tied)) :
+                (String8){ 0 };
+            result = type.length != 0 && output_type.length != 0 ?
+                check_warning_text(scratch, "unsupported inline asm: input with type %.*s matching output with type %.*s", (int)type.length, type.pointer,
+                                   (int)output_type.length, output_type.pointer) : NULL;
+            break;
         }
     }
     return check_semantic_text(pp, result);

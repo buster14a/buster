@@ -681,7 +681,31 @@ struct CheckDriverDiagnostic
     // musttail return's for each cleanup scope it leaves, a braced static subobject's non-constant value after its
     // conversion's (#147).
     bool repeated;
+    // A note at `note_token`, where `note` isn't null: a duplicate case's previous case (#1447).
+    uint32_t note_token;
+    const char* note;
 };
+
+// Room for `more` diagnostics after the `count` of `*list`, which `*capacity` holds: a bigger list in `arena` with them
+// copied, where it hasn't. False, and the list as it was, where the arena has none.
+static bool check_driver_additional_room(CheckDriverDiagnostic** list, uint32_t* capacity, uint32_t count, uint64_t more, Arena* arena)
+{
+    bool result = (uint64_t)count + more <= *capacity;
+    // (With room for the few single diagnostics the driver adds after a list.)
+    if (!result && (uint64_t)count + more + 8 <= UINT32_MAX)
+    {
+        const uint32_t grown = (uint32_t)(count + more + 8);
+        CheckDriverDiagnostic* pushed = BUSTER_ARENA_PUSH_ARRAY(arena, CheckDriverDiagnostic, grown);
+        if (pushed != NULL)
+        {
+            memcpy(pushed, *list, (uint64_t)count * sizeof(**list));
+            *list = pushed;
+            *capacity = grown;
+            result = true;
+        }
+    }
+    return result;
+}
 
 // The warnings a token has, as check_driver_reports sorts and walks them: a key whose high half is the token, then the
 // flags of its warnings and of those the source doesn't ignore, 16 bits each (the per-token warnings' flags are below
@@ -840,6 +864,43 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
 
 #include "c_check_warning_render.c"
 #include "c_check_semantic_diagnostic.c"
+
+// Each failing asm statement's error (check_asms_diagnose_all, #1447) in clang's words, after the unit's `*count`
+// additional diagnostics, before `before`; false where the diagnosis lists none, for the caller's generic one.
+static bool check_driver_asm_errors(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
+                                    uint32_t before, CheckDriverDiagnostic** additional, uint32_t* capacity, uint32_t* count, Arena* output, Arena* scratch)
+{
+    CheckAsmDiagnostic diagnostic = { 0 };
+    const bool result = check_asms_diagnose_all(&diagnostic, input, stream, types, before, output, scratch) && diagnostic.failure_count != 0 &&
+                        check_driver_additional_room(additional, capacity, *count, diagnostic.failure_count, output);
+    for (uint32_t i = 0; result && i < diagnostic.failure_count; i += 1)
+    {
+        const CheckAsmFailure* failure = diagnostic.failures + i;
+        PPOutputDiagnosticNote note = { 0 };
+        const char* message = check_semantic_asm(parser, pp, input, types, failure, &note, output);
+        // A cast's at the lvalue it casts, or at the `(` of the cast that changes its value.
+        const CheckGraph* graph = &input->graph;
+        uint32_t located = failure->token;
+        if (failure->error == CHECK_ASM_ERROR_CAST && failure->node < graph->count)
+        {
+            located = graph->tokens[failure->node];
+            const uint32_t close = located;
+            while (graph->ops[failure->node] == CHECK_OP_CAST && located != 0 &&
+                   !(parser->tokens.kinds[located] == PARSE_KIND_L_PAREN && parser->tree.parents[located] == close))
+            {
+                located -= 1;
+            }
+        }
+        (*additional)[(*count)++] = (CheckDriverDiagnostic){
+            .token = located,
+            .message = message,
+            .position = failure->token,
+            .note_token = note.message != NULL ? note.token : BUSTER_CHECK_NONE,
+            .note = note.message,
+        };
+    }
+    return result;
+}
 #include "c_check_literal_diagnostic.c"
 #include "c_check_common_warnings.c"
 
@@ -3991,6 +4052,11 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1, "%s", message);
                         }
+                        else if (phase == 2 && extra[index].note != NULL && extra[index].note_token < count)
+                        {
+                            const PPOutputDiagnosticNote note = { .token = parser->tokens.sources[extra[index].note_token], .message = extra[index].note };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1, "%s", message);
+                        }
                         else
                         {
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s", message);
@@ -5965,6 +6031,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     CheckDriverDiagnostic fallback[5] = { 0 };
                     CheckDriverDiagnostic* pushed = BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverDiagnostic, 5 + (uint64_t)musttails.count);
                     CheckDriverDiagnostic* additional = pushed != NULL ? pushed : fallback;
+                    uint32_t additional_capacity = pushed != NULL ? 5 + musttails.count : 5;
                     uint32_t additional_count = 0;
                     if (pushed == NULL || !musttails_checked)
                     {
@@ -6003,7 +6070,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     }
                     if (expression_valid && !repairing && initializer_warning_storage)
                     {
-                        if (!check_asms_run(&asms, &input, &stream, &types, output_arena, scratch))
+                        if (!check_asms_run(&asms, &input, &stream, &types, output_arena, scratch) &&
+                            (asms.status == CHECK_ASM_RESOURCE ||
+                             !check_driver_asm_errors(checking, pp, &input, &stream, &types, BUSTER_CHECK_NONE, &additional, &additional_capacity, &additional_count,
+                                                      output_arena, scratch)))
                         {
                             additional[additional_count++] = (CheckDriverDiagnostic){ asms.token,
                                 asms.status == CHECK_ASM_RESOURCE ? "assembly operand checking capacity exhausted" : "invalid assembly operand or constraint", asms.token };
@@ -6079,8 +6149,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         CheckAsmDiagnostic assembly = { 0 };
                         const uint32_t before = repairing ? repair.record_begin : BUSTER_CHECK_NONE;
-                        const bool asm_diagnosed = check_asms_diagnose(&assembly, &input, &stream, &types, before, scratch);
-                        if ((asm_diagnosed && assembly.status != CHECK_ASM_OK) || assembly.status == CHECK_ASM_RESOURCE)
+                        const bool listed = check_driver_asm_errors(checking, pp, &input, &stream, &types, before, &additional, &additional_capacity, &additional_count,
+                                                                    output_arena, scratch);
+                        const bool asm_diagnosed = !listed && check_asms_diagnose(&assembly, &input, &stream, &types, before, scratch);
+                        if (!listed && ((asm_diagnosed && assembly.status != CHECK_ASM_OK) || assembly.status == CHECK_ASM_RESOURCE))
                         {
                             additional[additional_count++] = (CheckDriverDiagnostic){ assembly.token,
                                 assembly.status == CHECK_ASM_RESOURCE ? "assembly operand checking capacity exhausted" : "invalid assembly operand or constraint", assembly.token };
@@ -6119,8 +6191,24 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         CheckProgramDiagnostic control = { 0 };
                         const uint32_t control_before = repairing ? repair.record_begin : BUSTER_CHECK_NONE;
-                        const bool control_diagnosed = check_program_diagnose(&control, &input, &stream, checking, &types, control_before, scratch);
-                        if ((control_diagnosed && control.status != CHECK_PROGRAM_OK) || control.status == CHECK_PROGRAM_RESOURCE)
+                        const bool control_diagnosed = check_program_diagnose_all(&control, &input, &stream, checking, &types, control_before, output_arena, scratch);
+                        // Every constraint error, in clang's words and order, with its previous case's note (#1447).
+                        const bool listed = control_diagnosed && control.constraint_count != 0 &&
+                                            check_driver_additional_room(&additional, &additional_capacity, additional_count, control.constraint_count, output_arena);
+                        for (uint32_t c = 0; listed && c < control.constraint_count; c += 1)
+                        {
+                            const CheckProgramConstraint* constraint = control.constraints + c;
+                            additional[additional_count++] = (CheckDriverDiagnostic){
+                                .token = constraint->token,
+                                .message = check_semantic_constraint(checking, pp, &input, &types, constraint, output_arena),
+                                .position = constraint->position,
+                                .completion = constraint->position < tokens ? constraint->position + 1u : tokens,
+                                .repeated = true,
+                                .note_token = constraint->previous,
+                                .note = constraint->previous != BUSTER_CHECK_NONE ? "previous case defined here" : NULL,
+                            };
+                        }
+                        if (!listed && ((control_diagnosed && control.status != CHECK_PROGRAM_OK) || control.status == CHECK_PROGRAM_RESOURCE))
                         {
                             additional[additional_count++] = (CheckDriverDiagnostic){ control.token,
                                 check_semantic_control(pp, &types, control.status, &control.failure, scratch), control.position,
@@ -6198,8 +6286,29 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         check_program(&program, checking, program_input, &stream, &types, program_options, output_arena, scratch);
                     if (program_diagnostics && !program_checked)
                     {
-                        const char* message = check_semantic_control(pp, &types, program.status, &program.failure, scratch);
-                        check_driver_diagnose(checking, pp, program.token, message);
+                        // A constraint error's unit gives every one, as the diagnosis of a rejected unit does (#1447).
+                        CheckProgramDiagnostic control = { 0 };
+                        const bool listed = program.status == CHECK_PROGRAM_INVALID &&
+                                            check_program_diagnose_all(&control, program_input, &stream, checking, &types, BUSTER_CHECK_NONE, output_arena, scratch) &&
+                                            control.constraint_count != 0;
+                        for (uint32_t c = 0; listed && c < control.constraint_count; c += 1)
+                        {
+                            const CheckProgramConstraint* constraint = control.constraints + c;
+                            const char* message = check_semantic_constraint(checking, pp, program_input, &types, constraint, output_arena);
+                            const uint32_t publication = check_driver_publication_position(checking, pp, constraint->position < tokens ? constraint->position + 1u : tokens,
+                                                                                           publication_end);
+                            const PPOutputDiagnosticNote note = {
+                                .token = constraint->previous < tokens ? checking->tokens.sources[constraint->previous] : 0,
+                                .message = "previous case defined here",
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, checking->tokens.sources[constraint->token], publication, &note,
+                                                        constraint->previous < tokens ? 1u : 0u, "%s", message);
+                        }
+                        if (!listed)
+                        {
+                            const char* message = check_semantic_control(pp, &types, program.status, &program.failure, scratch);
+                            check_driver_diagnose(checking, pp, program.token, message);
+                        }
                         result = 1;
                     }
                     check_driver_x86_reports(checking, recovered, pp, &input, &stream, &types, quiet);

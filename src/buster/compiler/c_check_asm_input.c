@@ -1142,20 +1142,146 @@ static CheckAsmStatus check_asm_operand(CheckAsmCheckedOperand* result, const Ch
     return checked.diagnostic == CHECK_DIAG_RESOURCE ? CHECK_ASM_RESOURCE : valid ? CHECK_ASM_OK : CHECK_ASM_INVALID;
 }
 
+// Why an operand fails, by clang's checks (Sema::ActOnGCCAsmStmt), whose words the driver gives it (#1447).
+typedef enum CheckAsmError
+{
+    // One clang has no words of ours for: "invalid assembly operand or constraint".
+    CHECK_ASM_ERROR_GENERIC,
+    // An output that isn't a modifiable lvalue: "invalid lvalue in asm output".
+    CHECK_ASM_ERROR_OUTPUT_LVALUE,
+    // A memory-only input that isn't an lvalue: "invalid lvalue in asm input for constraint 'C'".
+    CHECK_ASM_ERROR_INPUT_LVALUE,
+    // A bit-field of a constraint that allows memory: "reference to a bit-field in asm input|output with a memory
+    // constraint 'C'", clang's words of an output naming an input and of an input an output.
+    CHECK_ASM_ERROR_BIT_FIELD,
+    // A _BitInt's: "invalid type 'T' in asm input|output", with the same exchange.
+    CHECK_ASM_ERROR_BIT_INT,
+    // A void input of a constraint that allows a register: "invalid type 'void' in asm input for constraint 'C'".
+    CHECK_ASM_ERROR_VOID,
+    // An incomplete type's: "dereference of pointer to incomplete type 'T'", noted at a tag's forward declaration.
+    CHECK_ASM_ERROR_INCOMPLETE,
+    // An input whose type its output's doesn't take, checked after every operand's own: "unsupported inline asm: input
+    // with type 'T' matching output with type 'U'".
+    CHECK_ASM_ERROR_TIED,
+    // An output that is a cast of an lvalue (GNU's lvalue cast), which clang reports at its operand through the casts
+    // that don't change its value and goes on: "invalid use of a cast in an inline asm context requiring an lvalue
+    // [-Winvalid-gnu-asm-cast]".
+    CHECK_ASM_ERROR_CAST,
+} CheckAsmError;
+
+// One statement's error (check_asms_diagnose_all): clang gives a statement's first, and returns, but after a cast's.
+typedef struct CheckAsmFailure CheckAsmFailure;
+struct CheckAsmFailure
+{
+    uint32_t token;
+    uint32_t statement;
+    uint32_t operand;
+    // The node whose place a cast's error takes: the outermost cast that changes the value, or the lvalue it casts.
+    uint32_t node;
+    CheckAsmError error;
+    // The operand's type, and for a tied input its output's.
+    TypeId type;
+    TypeId output_type;
+};
+
 typedef struct CheckAsmDiagnostic CheckAsmDiagnostic;
 struct CheckAsmDiagnostic
 {
     CheckAsmStatus status;
     uint32_t token;
+    // check_asms_diagnose_all's: each failing statement's error, in statement order.
+    const CheckAsmFailure* failures;
+    uint32_t failure_count;
 };
+
+// Why an operand check_asm_operand refuses fails: its type and clang's first check of those it fails, an output's
+// (a memory constraint's bit-field, a _BitInt, a modifiable lvalue's completeness then itself), or an input's (a memory
+// constraint's bit-field, a memory-only constraint's lvalue, a register's void, a _BitInt, a complete type), and a
+// tie's last. Cold: only a refused operand's.
+static CheckAsmError check_asm_operand_error(const CheckInput* input, const CheckStream* stream, TypeTable* types, uint32_t statement, uint32_t operand,
+                                             TypeId* type, TypeId* output_type, uint32_t* place)
+{
+    const CheckGraph* graph = &input->graph;
+    const CheckInputAsm* assembly = input->asm_statements + statement;
+    const CheckAsmOperand* source = assembly->operands + operand;
+    const CheckValue value = check_stream_value(stream, source->node);
+    const uint8_t kind = check_action_kind(types, type_strip_aligned(types, value.type));
+    const bool write = (source->flags & CHECK_ASM_WRITE) != 0;
+    const bool allows_memory = (source->flags & CHECK_ASM_MEMORY) != 0;
+    const bool memory_only = allows_memory && (source->flags & (CHECK_ASM_REGISTER | CHECK_ASM_IMMEDIATE)) == 0;
+    const bool bit_field = (value.flags & BUSTER_CHECK_BIT_FIELD) != 0;
+    const CheckContext context = check_graph_context(&input->graph, source->node, false);
+    const bool complete = kind == BUSTER_TYPE_KIND_VOID || check_context_source_complete(types, value.type, &context);
+    CheckAsmError result = CHECK_ASM_ERROR_GENERIC;
+    *type = value.type;
+    *output_type = 0;
+    if (allows_memory && bit_field)
+    {
+        result = CHECK_ASM_ERROR_BIT_FIELD;
+    }
+    else if (write && kind == BUSTER_TYPE_KIND_BIT_INT)
+    {
+        result = CHECK_ASM_ERROR_BIT_INT;
+    }
+    else if (write && graph->ops[source->node] == CHECK_OP_CAST && graph->operand0[source->node] < stream->count &&
+             check_stream_value(stream, graph->operand0[source->node]).category == CHECK_LVALUE)
+    {
+        // Through the casts to the same type, or between integers and pointers of one width (IgnoreParenNoopCasts).
+        uint32_t at = source->node;
+        bool through = true;
+        for (uint32_t steps = 0; through && steps < graph->count && graph->ops[at] == CHECK_OP_CAST && graph->operand0[at] < stream->count; steps += 1)
+        {
+            const TypeId cast = type_unqualified(type_strip_aligned(types, check_stream_type(stream, at)));
+            const TypeId operand_type = type_unqualified(type_strip_aligned(types, check_stream_type(stream, graph->operand0[at])));
+            const uint8_t cast_kind = check_action_kind(types, cast);
+            const uint8_t operand_kind = check_action_kind(types, operand_type);
+            uint32_t width = 0;
+            bool sign = false;
+            const bool cast_scalar = cast_kind == BUSTER_TYPE_KIND_POINTER || check_action_integer_type(types, cast, &width, &sign);
+            const bool operand_scalar = operand_kind == BUSTER_TYPE_KIND_POINTER || check_action_integer_type(types, operand_type, &width, &sign);
+            through = cast == operand_type || (cast_scalar && operand_scalar && type_size(types, cast) == type_size(types, operand_type));
+            at = through ? graph->operand0[at] : at;
+        }
+        *place = at;
+        result = CHECK_ASM_ERROR_CAST;
+    }
+    else if (write)
+    {
+        result = value.category == CHECK_LVALUE && !complete && kind != BUSTER_TYPE_KIND_VOID ? CHECK_ASM_ERROR_INCOMPLETE : CHECK_ASM_ERROR_OUTPUT_LVALUE;
+    }
+    else if (memory_only && value.category != CHECK_LVALUE)
+    {
+        result = CHECK_ASM_ERROR_INPUT_LVALUE;
+    }
+    else if (!memory_only && kind == BUSTER_TYPE_KIND_VOID)
+    {
+        result = CHECK_ASM_ERROR_VOID;
+    }
+    else if (kind == BUSTER_TYPE_KIND_BIT_INT)
+    {
+        result = CHECK_ASM_ERROR_BIT_INT;
+    }
+    else if (!complete)
+    {
+        result = CHECK_ASM_ERROR_INCOMPLETE;
+    }
+    else if ((source->flags & CHECK_ASM_MATCH) != 0 && source->match < assembly->output_count && assembly->operands[source->match].node < stream->count)
+    {
+        result = CHECK_ASM_ERROR_TIED;
+        *output_type = check_stream_type(stream, assembly->operands[source->match].node);
+    }
+    return result;
+}
 
 // Diagnose only complete original statements before the caller's cutoff and every existing input error (a graph's error
 // declines only the statements whose operands read it).
 // Clang elaborates every operand before checking asm constraints, so an unresolved later operand in the same
 // statement takes precedence. Checked dependency closures and matching output roots are required; missing or
 // tainted roots are declined. True means the scan completed, even on a semantic error. Nothing is published.
-static bool check_asms_diagnose(CheckAsmDiagnostic* result, const CheckInput* input, const CheckStream* stream,
-                                TypeTable* types, uint32_t before_token, Arena* scratch)
+// `output`, when given, takes the list of each failing statement's error (CheckAsmDiagnostic.failures, #1447): its
+// first operand's by clang's order, the operands' own checks before their ties'.
+static bool check_asms_diagnose_all(CheckAsmDiagnostic* result, const CheckInput* input, const CheckStream* stream,
+                                    TypeTable* types, uint32_t before_token, Arena* output, Arena* scratch)
 {
     *result = (CheckAsmDiagnostic){ .token = BUSTER_CHECK_NONE };
     const uint64_t mark = scratch != NULL ? scratch->length : 0;
@@ -1163,7 +1289,7 @@ static bool check_asms_diagnose(CheckAsmDiagnostic* result, const CheckInput* in
     if (valid)
     {
         valid = !input->resource && stream->status == CHECK_STATUS_OK && stream->count == input->graph.count &&
-                (input->report_count == 0 || (input->diagnostic_graph && input->reports != NULL)) &&
+                (input->report_count == 0 || ((input->diagnostic_graph || input->recovered_valid) && input->reports != NULL)) &&
                 (stream->report_count == 0 || stream->reports != NULL) && (input->asm_count == 0 || input->asm_statements != NULL) &&
                 (stream->count == 0 || (check_stream_has_values(stream) && stream->diagnostics != NULL && input->graph.tokens != NULL &&
                  input->graph.ops != NULL && input->graph.operand0 != NULL && input->graph.operand1 != NULL && input->graph.operand2 != NULL));
@@ -1221,9 +1347,23 @@ static bool check_asms_diagnose(CheckAsmDiagnostic* result, const CheckInput* in
         }
         complete[node] = checked;
     }
+    // Each operand's at most, as a statement's casts give one each.
+    uint64_t operands = 0;
+    for (uint32_t statement = 0; valid && output != NULL && statement < input->asm_count; statement += 1)
+    {
+        operands += (uint64_t)input->asm_statements[statement].output_count + input->asm_statements[statement].input_count;
+    }
+    CheckAsmFailure* failures = valid && output != NULL && operands != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckAsmFailure, operands) : NULL;
+    if (valid && output != NULL && operands != 0 && failures == NULL)
+    {
+        valid = false;
+        result->status = CHECK_ASM_RESOURCE;
+    }
     for (uint32_t statement = 0; valid && statement < input->asm_count; statement += 1)
     {
         const CheckInputAsm* assembly = input->asm_statements + statement;
+        CheckAsmFailure tied = { .token = BUSTER_CHECK_NONE };
+        bool ended = false;
         for (uint32_t operand = 0; valid && operand < assembly->output_count + assembly->input_count; operand += 1)
         {
             const CheckAsmOperand* source = assembly->operands + operand;
@@ -1244,14 +1384,50 @@ static bool check_asms_diagnose(CheckAsmDiagnostic* result, const CheckInput* in
                     result->token = source->opening + 1;
                     valid = status != CHECK_ASM_RESOURCE;
                 }
+                if (valid && failures != NULL && status != CHECK_ASM_OK && !ended)
+                {
+                    CheckAsmFailure found = {
+                        .token = source->opening + 1,
+                        .statement = statement,
+                        .operand = operand,
+                        .node = source->node,
+                    };
+                    found.error = check_asm_operand_error(input, stream, types, statement, operand, &found.type, &found.output_type, &found.node);
+                    // A cast's error doesn't end the statement; its others' do, but a tie's, which waits for them.
+                    if (found.error == CHECK_ASM_ERROR_CAST)
+                    {
+                        failures[result->failure_count++] = found;
+                    }
+                    else if (found.error != CHECK_ASM_ERROR_TIED)
+                    {
+                        failures[result->failure_count++] = found;
+                        ended = true;
+                    }
+                    else if (tied.token == BUSTER_CHECK_NONE)
+                    {
+                        tied = found;
+                    }
+                }
             }
         }
+        if (failures != NULL && !ended && tied.token != BUSTER_CHECK_NONE)
+        {
+            failures[result->failure_count++] = tied;
+        }
     }
+    result->failures = valid ? failures : NULL;
+    result->failure_count = valid ? result->failure_count : 0;
     if (scratch != NULL)
     {
         arena_pop_to(scratch, mark);
     }
     return valid;
+}
+
+static bool check_asms_diagnose(CheckAsmDiagnostic* result, const CheckInput* input, const CheckStream* stream,
+                                TypeTable* types, uint32_t before_token, Arena* scratch)
+{
+    return check_asms_diagnose_all(result, input, stream, types, before_token, NULL, scratch);
 }
 
 static bool check_asms_run(CheckAsms* result, const CheckInput* input, const CheckStream* stream, TypeTable* types, Arena* output, Arena* scratch)
