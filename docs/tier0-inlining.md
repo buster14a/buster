@@ -392,3 +392,122 @@ documents a local always_inline function as a difference (`inlined`). Once
 callees are dropped, its Tier 0 objects define what clang's do. The reason stays
 for `--tier0-no-inline`, and for the callees that keep a call, which clang's
 code would also call.
+
+## What the first version leaves, and later steps
+
+What each `k_adds` intrinsic costs after the first version, counted from the
+current code's patterns:
+
+- **The call is gone:** the call and return, the callee's prologue, frame
+  realignment and epilogue, the ABI's moves into `rdi`, `ymm0` and `ymm1`, and
+  the saves of the caller's values around the call (`(%rsp)` in `k_adds`).
+- **The objects are not:**
+  - the caller's argument temporaries;
+  - each parameter's binding (a `LOAD` of the argument's 32 bytes into the
+    vector stack's slot, a `SET_LOCAL` into the parameter's object), and its
+    read back;
+  - the callee's result object, and the binding's copy of it into the caller's
+    result object.
+
+That is roughly half of today's instructions per intrinsic, against clang
+-O0's 11 or 12 (its `k_adds` is 46 for four). The measurements below decide
+it. Three later steps take the objects out, each its own pull request:
+
+1. **Argument objects forwarded.** A vector argument's entries are the
+   lowering's temporary `t` (`SET_LOCAL t` of the value, then `LOCAL_ADDRESS t`
+   as the argument). Where the callee only reads its parameter `p` whole
+   (`LOCAL p` of its class: never written, its address never taken), the
+   binding is dropped, and the copy's `LOCAL p` reads `t` instead, through a
+   per-local remap rather than one base. Finding each argument's root entry
+   takes the stream's depths, which Tier 0 already works out 64 entries at a
+   time (`tier0_compile`'s effects and depths), so the splice can share that
+   pass.
+2. **Result objects forwarded.** The callee's `RETURN` operand is
+   `LOCAL_ADDRESS r` of the temporary its last statement filled. The copy
+   writes the caller's `R` in place of `r`, through the same remap, and the
+   result binding goes.
+3. **More callees:** multiple `RETURN`s (each a binding and a `JUMP` to the
+   copy's end, which `tier0_validate` checks at the join), results in memory
+   (the caller's `R`'s address for the hidden pointer), and structs of more than
+   256 bytes (a `COPY` in pieces).
+
+With the first two, an intrinsic's copy is about clang -O0's: its operands'
+loads, the operation and a store, each through Tier 0's vector slots. Keeping
+Tier 0's vector values in registers, rather than in a slot per depth (#780),
+would be the next cut. That is a Tier 0 change for every vector program, not
+this one's, and needs its own issue.
+
+## Tests
+
+- **`test-tier0-inline`** (new, `tier0_inline_test.c`):
+  - callers and callees from `tier0_generate.c`'s programs, with some of their
+    callees marked inlinable: both paths' streams byte for byte, `tier0_validate`
+    of each, and each program run natively with and without the splice on the
+    generator's eight inputs, which must give the same results and globals;
+  - hand-written fixtures for every row of the binding and result tables,
+    forwarding and its near misses, nested callees, a cycle, the depth bound, a
+    callee of every refused kind (each keeping its calls), a target the caller
+    lacks, and a callee shared by sites inside a loop and inside another site's
+    arguments;
+  - every column's end at a `PROT_NONE` page, and a lane short of scratch: each
+    failure must keep the caller's `F` and count its kept calls.
+- **`test-checker-driver`:** #1282's inlining fixture (intrinsics, a struct
+  helper and a `noinline` function) at Tier 0 too, by each path, with and
+  without `--tier0-no-inline`, against clang -O0's run. A fixture with
+  `-march` variants checks that a callee of a feature the caller lacks keeps
+  its call, and gives clang's error where clang does.
+- **`test-check-lanes`**, **`--id-order`** and **`test-c-testsuite`:** the
+  outputs are one lane's, any identifier order's and the scalar path's, as now.
+- **`--symbols`:** a corpus's local always_inline functions match clang -O0's
+  objects (no `inlined` difference) but under `--tier0-no-inline`.
+- **`test-x86-intrinsics`:** unchanged. Its cases take each intrinsic's address,
+  which keeps the wrapper.
+- **`test-check-debug --cross-check`:** a program of intrinsics by `-g`: gdb's
+  steps and backtraces, and `llvm-dwarfdump --verify`.
+
+## Measurements
+
+On the 9700X, under the lock, CPU 2, a `znver5` build, before and after:
+
+- #1398's four kernels at Tier 0 against clang -O0 and -O2: each step's effect,
+  with and without `--tier0-no-inline`.
+- Compile time, by `measure-compile`, the `--time-stages` laps and a new
+  inlining lap: `sqlite3.c` (no callee; must not move) and the compiler's
+  `main.c` at `-march=znver5` (thousands of sites). The splice and the second
+  validation against the Tier 0 work that the calls' code no longer needs.
+- `main.c`'s object: its size, and the callees it no longer defines.
+- The self-built compiler (`tools/ci/selfhost.c`'s build): `benchmark-lexer`,
+  `benchmark-refinement` and `benchmark-files` through it against the
+  clang-built one, as the issue suggests. This is the number the issue is
+  about.
+- The splice's own kernels: `benchmark-tier0-inline [--only vector|scalar]
+  [--after-scalar MS]`, ns and cycles per copied entry, on `main.c`'s callers.
+
+The record goes to buster-performance, as AGENTS.md asks.
+
+## Plan
+
+1. **The splice** (`tier0_inline.c`, its twin, `test-tier0-inline` and its
+   benchmark): standalone, used by no driver yet.
+2. **The emission:** the shared inline table, the per-lane expansion cache, the
+   code epoch's splice, `--tier0-no-inline`, the driver fixtures, and the
+   measurements above.
+3. **Dropping callees**, with the `--symbols` changes.
+4. **Forwarding** argument and result objects (later steps 1 and 2), each
+   measured.
+5. **More callees** (later step 3), as the corpora need them.
+
+## Open questions
+
+- **Tier 1 for such bodies instead?** The issue offers routing a body with
+  always_inline sites to Tier 1, which inlines them already. Tier 0 is the
+  default because it compiles fast, and a body of intrinsics is common in the
+  repository's own code. Tier 1 compiles it several times slower and refuses
+  more. This design keeps such bodies in Tier 0. The measurements give the
+  numbers to revisit that.
+- **External always_inline functions.** Clang inlines those too and still
+  emits them. #1282 takes only internal ones. Taking external ones changes
+  nothing in the splice, but should change both tiers together.
+- **One schedule or two.** #1282's schedule holds every part's stream until the
+  code epoch. If that shows in `main.c`'s peak resident set, a callee-only
+  lowering round is the alternative (see "Where it runs in the emission").
