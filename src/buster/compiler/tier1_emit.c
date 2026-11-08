@@ -110,6 +110,9 @@ struct Tier1EmitOptions
     bool omit_leaf_frame_pointer;
     bool vector;
     bool rematerialize;
+    // Retain each record's IR origin for source/debug publication, without changing allocation or code generation.
+    // The CFG certificate also asks for origins, independently of this opt-in.
+    bool sources;
     // How each symbol below `symbol_count` is reached (Tier0Function.symbol_access's BUSTER_TIER0_ACCESS_*: directly,
     // through its GOT slot, or a thread-local's from the thread pointer, #141), for its address (IR_SYMBOL_ADDR). Null
     // reaches every symbol directly.
@@ -306,9 +309,9 @@ struct Tier1EmitResult
     bool certified;
     uint64_t certificate_facts;
     uint64_t certificate_edits;
-    // #939: with Tier1EmitOptions.certify, the CFG consumer's records' origins (Tier1Origin and its payload) and values,
-    // each block's first record (and the records' count after them) and each split edge's stub's first (UINT32_MAX for
-    // an edge without a stub), which the certificate of its code decodes (tier1_certificate_emitted.c); null otherwise.
+    // #939/#1114: both consumers' record origins (Tier1Origin and its payload), with sources or the CFG certificate.
+    // Values, each block's first record (and the records' count after them) and each split edge's stub's first
+    // (UINT32_MAX for an edge without a stub) belong to the CFG certificate alone; null otherwise.
     uint32_t* origins;
     uint32_t* origin_values;
     uint32_t* block_records;
@@ -632,12 +635,18 @@ static uint32_t tier1_origin(Tier1Origin kind, uint32_t payload)
 
 static void tier1_emit_mark(Tier1EmitBuffer* buffer, uint32_t origin, uint32_t value)
 {
-    for (uint32_t r = buffer->marked; buffer->origins != 0 && r < buffer->count; r += 1)
+    uint32_t* const origins = buffer->origins;
+    uint32_t* const values = buffer->origin_values;
+    const uint32_t count = buffer->count;
+    for (uint32_t r = buffer->marked; origins != 0 && r < count; r += 1)
     {
-        buffer->origins[r] = origin;
-        buffer->origin_values[r] = value;
+        origins[r] = origin;
+        if (values != NULL)
+        {
+            values[r] = value;
+        }
     }
-    buffer->marked = buffer->count;
+    buffer->marked = count;
 }
 
 static bool tier1_emit_append(Tier1EmitBuffer* buffer, X86Instruction instruction)
@@ -1494,7 +1503,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     return error;
 }
 
-static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool vector, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
+static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool vector, bool sources, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
 {
     const uint32_t count = plan->function->instruction_count;
     // The nodes of fixed-register rules, whose sequences and saves take records past their share (tier1_emit_prepare's).
@@ -1518,6 +1527,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
         code->node_first = ir_allocate(output, (uint64_t)count + 1, 4, &ok);
         code->branches = ir_allocate(output, branch_capacity, 4, &ok);
         code->targets = ir_allocate(output, branch_capacity, 4, &ok);
+        result->origins = sources ? ir_allocate(output, capacity, 4, &ok) : NULL;
         if (result->prepared.call_count != 0)
         {
             result->references = ir_allocate(output, result->prepared.call_count, sizeof(LinkReference), &ok);
@@ -1713,6 +1723,35 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
         code->error_node = BUSTER_IR_NONE;
         code->arena_bytes = output->length - output_mark;
         result->transition_scratch_bytes = scratch->length - scratch_mark;
+        if (sources)
+        {
+            // A straight chain has no edge stubs or entry copies: node_first already partitions its records.
+            // Populate once after emission so a compile without -g adds no work to the record-emission loops.
+            uint32_t* const origins = result->origins;
+            const uint32_t* const first = code->node_first;
+            for (uint32_t r = 0; r < result->body_record; r += 1)
+            {
+                origins[r] = tier1_origin(TIER1_ORIGIN_FRAME, 0);
+            }
+            for (uint32_t node = 0; node < count; node += 1)
+            {
+                for (uint32_t r = first[node]; r < first[node + 1]; r += 1)
+                {
+                    origins[r] = tier1_origin(TIER1_ORIGIN_NODE, node);
+                }
+            }
+            for (uint32_t e = 0; e < result->frame_event_count; e += 1)
+            {
+                const EmissionFrameEvent event = result->frame_events[e];
+                if (event.kind == EMISSION_FRAME_REMEMBER_STATE)
+                {
+                    for (uint32_t r = event.at.boundary; r < code->count; r += 1)
+                    {
+                        origins[r] = tier1_origin(TIER1_ORIGIN_FRAME, 1);
+                    }
+                }
+            }
+        }
     }
     return error;
 }
@@ -1875,7 +1914,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     }
     if (error == TIER1_EMIT_OK && chain)
     {
-        error = tier1_emit_records(plan, allowed_forms, BUSTER_VECTOR_PATH(options->vector), output, scratch, &emitted, error_node);
+        error = tier1_emit_records(plan, allowed_forms, BUSTER_VECTOR_PATH(options->vector), options->sources, output, scratch, &emitted, error_node);
     }
     if (arguments)
     {

@@ -1593,6 +1593,10 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
     {
         error = ir_create(output, &sizes, &candidate);
     }
+    if (error == IR_OK && !ir_debug_create(output, &candidate, f->debug))
+    {
+        error = IR_ERROR_MEMORY;
+    }
     if (error == IR_OK)
     {
         candidate.result_type = f->result_type;
@@ -1790,6 +1794,19 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
             }
         }
         candidate.block_offsets[candidate.block_count] = candidate.instruction_count;
+        ir_debug_remap(f, &candidate, values, NULL);
+        if (candidate.debug != NULL)
+        {
+            // SCCP can retain a floating operation's effects immediately before its folded constant. Both records
+            // originate in that operation; neither new node is inferred from a neighboring instruction's source.
+            for (uint32_t i = 0; i < f->instruction_count; i += 1)
+            {
+                if (values[i] != BUSTER_IR_NONE && work->states[i] == IROPT_CONSTANT && ir_optimize_simd_effect(f, i))
+                {
+                    candidate.debug->origins[values[i] - 1] = f->debug->origins[i];
+                }
+            }
+        }
         work->statistics.removed_instructions = f->instruction_count > candidate.instruction_count ? f->instruction_count - candidate.instruction_count : 0;
         work->statistics.removed_blocks = f->block_count - candidate.block_count;
         *result = candidate;

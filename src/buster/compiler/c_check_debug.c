@@ -61,6 +61,18 @@ struct CheckDebugValueSpan
     uint32_t token;
 };
 
+// Final function-relative byte locations, grouped by source local through location_first[local..local + 1].
+// These are separate from lexical source spans: a value's storage and its visibility must both cover a PC.
+typedef struct CheckDebugLocation CheckDebugLocation;
+struct CheckDebugLocation
+{
+    Tier0Home home;
+    uint64_t value;
+    uint32_t begin;
+    uint32_t end;
+    uint8_t value_bytes;
+};
+
 typedef struct CheckDebugBody CheckDebugBody;
 struct CheckDebugBody
 {
@@ -68,8 +80,11 @@ struct CheckDebugBody
     const Tier0Home* homes;
     const uint8_t* classes;
     const CheckDebugValueSpan* spans;
+    const CheckDebugLocation* locations;
+    const uint32_t* location_first;
     uint32_t local_count;
     uint32_t span_count;
+    uint32_t location_count;
 };
 
 typedef struct CheckProgramRows CheckProgramRows;

@@ -91,7 +91,11 @@ static bool ssa_ir_conflict(const IrFunction* f, const Arena* arena)
         ssa_ir_owned(arena, f->parameter_types, f->parameter_count, 1) ||
         ssa_ir_owned(arena, f->labels, f->label_count, 4) ||
         ssa_ir_owned(arena, f->abi_calls, f->abi_call_count, sizeof(IrAbiCall)) ||
-        ssa_ir_owned(arena, f->passed, f->passed_count, sizeof(IrPassed));
+        ssa_ir_owned(arena, f->passed, f->passed_count, sizeof(IrPassed)) ||
+        (f->debug != NULL && (ssa_ir_owned(arena, f->debug, 1, sizeof(IrDebugInfo)) ||
+                             ssa_ir_owned(arena, f->debug->origins, f->instruction_count, sizeof(uint32_t)) ||
+                             ssa_ir_owned(arena, f->debug->locals, f->slot_count, sizeof(uint32_t)) ||
+                             ssa_ir_owned(arena, f->debug->scalars, f->debug->scalar_count, sizeof(IrDebugScalar))));
 }
 
 static IrError ssa_ir_error(SsaError error)
@@ -789,9 +793,16 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     {
         check.error = ir_create(output, &work.sizes, &candidate);
     }
+    if (check.error == IR_OK && !ir_debug_create(output, &candidate, input->debug))
+    {
+        check.error = IR_ERROR_MEMORY;
+    }
     if (check.error == IR_OK)
     {
         ssa_ir_fill(&work, &candidate);
+        // Promoted loads/stores and newly synthesized phis have no instruction origin. Only an original instruction
+        // retained by the constructor keeps one; surviving storage slots follow the constructor's exact compaction.
+        ir_debug_remap(input, &candidate, work.values, work.slots);
         check = ssa_ir_verify_output(&work, &candidate, vector);
     }
     if (check.error == IR_OK)

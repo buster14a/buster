@@ -409,6 +409,14 @@ static __attribute__((unused)) IrError tier1_schedule_ir_function(IrFunction* f,
                     word_columns[c][i] = words[w.order[i]];
                 }
             }
+            if (f->debug != NULL)
+            {
+                memcpy(words, f->debug->origins, (uint64_t)n * sizeof(uint32_t));
+                for (uint32_t i = 0; i < n; i += 1)
+                {
+                    f->debug->origins[i] = words[w.order[i]];
+                }
+            }
             memset(renamed, 0, ((uint64_t)f->extra_count / 64 + 1) * sizeof(uint64_t));
             for (uint32_t i = 0; i < n; i += 1)
             {
@@ -448,9 +456,11 @@ static __attribute__((unused)) bool tier1_schedule_ir_copy(const IrFunction* f, 
     copy.b = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, n + 1);
     copy.c = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, n + 1);
     copy.extra = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)f->extra_count + 1);
-    const bool ready = copy.op != 0 && copy.type != 0 && copy.flags != 0 && copy.alignment_log2 != 0 && copy.a != 0 && copy.b != 0 && copy.c != 0 && copy.extra != 0;
+    const bool ready = copy.op != 0 && copy.type != 0 && copy.flags != 0 && copy.alignment_log2 != 0 && copy.a != 0 && copy.b != 0 && copy.c != 0 && copy.extra != 0 &&
+                       ir_debug_create(arena, &copy, f->debug);
     if (ready)
     {
+        ir_debug_remap(f, &copy, NULL, NULL);
         memcpy(copy.op, f->op, n);
         memcpy(copy.type, f->type, n);
         memcpy(copy.flags, f->flags, n);
@@ -501,6 +511,8 @@ static __attribute__((unused)) bool tier1_schedule_ir_verify(const Tier1Schedule
             valid = i >= first && i < end && (!tier1_schedule_ir_barrier(f, o) || i == o);
             valid = valid && scheduled->op[i] == f->op[o] && scheduled->type[i] == f->type[o] && scheduled->flags[i] == f->flags[o] &&
                     scheduled->alignment_log2[i] == f->alignment_log2[o];
+            valid = valid && ((f->debug == NULL && scheduled->debug == NULL) ||
+                             (f->debug != NULL && scheduled->debug != NULL && scheduled->debug->origins[i] == f->debug->origins[o]));
             const uint64_t count = valid ? ir_operand_count(f, o) : 0;
             valid = valid && ir_operand_count(scheduled, i) == count;
             for (uint32_t p = 0; valid && p < count; p += 1)

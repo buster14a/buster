@@ -1368,6 +1368,7 @@ static void check_debug_test_unparsed(CheckDebugTestTally* tally, const char* di
 static void check_unwind_test_driver(CheckDebugTestTally* tally, const char* directory, Arena* arena);
 
 #include "c_check_debug_values_test.c"
+#include "c_check_debug_tier1_values_test.c"
 
 static int run_check_debug_tests(int argc, char** argv)
 {
@@ -1412,6 +1413,7 @@ static int run_check_debug_tests(int argc, char** argv)
         const bool initialized = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize();
         check_debug_test_expect(&tally, initialized, "initialize the backend", 0);
         check_debug_values_test_descriptors(&tally);
+        check_debug_tier1_values_locations(&tally);
         check_debug_test_rows(&tally);
         check_debug_test_keep(&tally);
         check_debug_test_sources(&tally, directory, programs);
@@ -1423,6 +1425,7 @@ static int run_check_debug_tests(int argc, char** argv)
             check_debug_test_units(&tally, directory, &arena);
             check_debug_test_objects(&tally, directory, &arena);
             check_debug_values_test(&tally, directory, &arena);
+            check_debug_tier1_values_test(&tally, directory, &arena);
             check_debug_test_library_main(&tally, directory, &arena);
             check_unwind_test_driver(&tally, directory, &arena);
         }

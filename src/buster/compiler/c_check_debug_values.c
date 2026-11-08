@@ -366,13 +366,34 @@ static void check_debug_value_pair(DebugWriter* out, uint32_t begin, uint32_t en
     }
 }
 
+typedef struct CheckDebugRangeClip CheckDebugRangeClip;
+struct CheckDebugRangeClip
+{
+    uint32_t begin;
+    uint32_t end;
+    bool list;
+};
+
+static void check_debug_value_pair_clipped(DebugWriter* out, uint32_t begin, uint32_t end, const uint8_t* expression, uint32_t bytes, CheckDebugRangeClip clip)
+{
+    begin = begin < clip.begin ? clip.begin : begin;
+    end = end > clip.end ? clip.end : end;
+    if (begin < end)
+    {
+        check_debug_value_pair(out, begin, end, expression, bytes);
+    }
+}
+
 // The list by every span of the function, keeping those whose token lies in [first, last]: check_debug_value_range's
 // twin and test oracle, and its path where the spans have no index.
-static void check_debug_value_range_scan(const CheckDebugBody* source, DebugWriter* out, uint32_t body, uint32_t first, uint32_t last, const uint8_t* expression,
-                                         uint32_t bytes)
+static void check_debug_value_range_scan_clipped(const CheckDebugBody* source, DebugWriter* out, uint32_t body, uint32_t first, uint32_t last,
+                                                const uint8_t* expression, uint32_t bytes, CheckDebugRangeClip clip)
 {
-    debug_integer(out, 1, 1); // DW_RLE/DW_LLE_base_addressx
-    debug_uleb(out, body);
+    if (clip.list)
+    {
+        debug_integer(out, 1, 1); // DW_RLE/DW_LLE_base_addressx
+        debug_uleb(out, body);
+    }
     uint32_t begin = 0;
     uint32_t end = 0;
     const uint32_t count = source->span_count;
@@ -382,7 +403,7 @@ static void check_debug_value_range_scan(const CheckDebugBody* source, DebugWrit
         const bool keep = s < count && span.token >= first && span.token <= last;
         if (begin < end && (!keep || span.begin != end))
         {
-            check_debug_value_pair(out, begin, end, expression, bytes);
+            check_debug_value_pair_clipped(out, begin, end, expression, bytes, clip);
             begin = end;
         }
         if (keep)
@@ -391,7 +412,17 @@ static void check_debug_value_range_scan(const CheckDebugBody* source, DebugWrit
             end = span.end;
         }
     }
-    debug_integer(out, 0, 1);
+    if (clip.list)
+    {
+        debug_integer(out, 0, 1);
+    }
+}
+
+static void check_debug_value_range_scan(const CheckDebugBody* source, DebugWriter* out, uint32_t body, uint32_t first, uint32_t last,
+                                         const uint8_t* expression, uint32_t bytes)
+{
+    const CheckDebugRangeClip clip = { .end = UINT32_MAX, .list = true };
+    check_debug_value_range_scan_clipped(source, out, body, first, last, expression, bytes, clip);
 }
 
 // The leaves of the token tree over `segments` runs: the next power of two at or past it.
@@ -454,22 +485,51 @@ struct CheckDebugValueWalk
     uint32_t begin;
     uint32_t end;
     uint32_t after;
+    CheckDebugRangeClip clip;
 };
 
 // The kept spans [start, stop), in the scan's state machine: spans outside the scope before them end the pair, and so does
 // each address break among them, which `breaks` reaches without visiting the spans between.
 static void check_debug_value_walk(CheckDebugValueWalk* walk, const CheckDebugValueSpan* spans, const uint32_t* breaks, uint32_t start, uint32_t stop)
 {
+    // The token index can select one long monotonic run. Restrict that run by PC before walking its address gaps;
+    // otherwise many small optimized-location ranges would each revisit every gap in the function.
+    if (walk->clip.begin != 0)
+    {
+        uint32_t low = start;
+        uint32_t high = stop;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            const bool before = spans[middle].end <= walk->clip.begin;
+            low = before ? middle + 1 : low;
+            high = before ? high : middle;
+        }
+        start = low;
+    }
+    if (walk->clip.end != UINT32_MAX)
+    {
+        uint32_t low = start;
+        uint32_t high = stop;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            const bool before = spans[middle].begin < walk->clip.end;
+            low = before ? middle + 1 : low;
+            high = before ? high : middle;
+        }
+        stop = low;
+    }
     if (start != walk->after && walk->begin < walk->end)
     {
-        check_debug_value_pair(walk->out, walk->begin, walk->end, walk->expression, walk->bytes);
+        check_debug_value_pair_clipped(walk->out, walk->begin, walk->end, walk->expression, walk->bytes, walk->clip);
         walk->begin = walk->end;
     }
     for (uint32_t i = start; i < stop;)
     {
         if (walk->begin < walk->end && spans[i].begin != walk->end)
         {
-            check_debug_value_pair(walk->out, walk->begin, walk->end, walk->expression, walk->bytes);
+            check_debug_value_pair_clipped(walk->out, walk->begin, walk->end, walk->expression, walk->bytes, walk->clip);
             walk->begin = walk->end;
         }
         walk->begin = walk->begin == walk->end ? spans[i].begin : walk->begin;
@@ -485,16 +545,19 @@ static void check_debug_value_walk(CheckDebugValueWalk* walk, const CheckDebugVa
 // whole; a leaf's run holds the scope's spans as one range, found by two binary searches. Each range is walked from address
 // break to address break, in the scan's state machine (check_debug_value_walk), so the bytes are the scan's, in time for
 // the tree's nodes the scope's bounds cut through and its pairs rather than for every span.
-static void check_debug_value_range_indexed(const CheckDebugBody* source, const uint32_t* breaks, const uint32_t* segments, uint32_t segment_count,
+static void check_debug_value_range_indexed_clipped(const CheckDebugBody* source, const uint32_t* breaks, const uint32_t* segments, uint32_t segment_count,
                                             const uint32_t* tree, uint32_t leaves, DebugWriter* out, uint32_t body, uint32_t first, uint32_t last,
-                                            const uint8_t* expression, uint32_t bytes)
+                                            const uint8_t* expression, uint32_t bytes, CheckDebugRangeClip clip)
 {
     const CheckDebugValueSpan* spans = source->spans;
     const uint32_t* minima = tree;
     const uint32_t* maxima = tree + 2 * (uint64_t)leaves;
-    debug_integer(out, 1, 1); // DW_RLE/DW_LLE_base_addressx
-    debug_uleb(out, body);
-    CheckDebugValueWalk walk = { .out = out, .expression = expression, .bytes = bytes };
+    if (clip.list)
+    {
+        debug_integer(out, 1, 1); // DW_RLE/DW_LLE_base_addressx
+        debug_uleb(out, body);
+    }
+    CheckDebugValueWalk walk = { .out = out, .expression = expression, .bytes = bytes, .clip = clip };
     // The tree's nodes left to visit, left first: a node and its right sibling's at most at each of its 32 levels.
     uint32_t stack[66];
     uint32_t depth = source->span_count != 0 ? 1 : 0;
@@ -510,9 +573,13 @@ static void check_debug_value_range_indexed(const CheckDebugBody* source, const 
         const uint32_t level = 31 - (uint32_t)__builtin_clz(node);
         const uint32_t width = leaves >> level;
         const uint32_t leaf = node * width - leaves;
+        const uint32_t end_leaf = leaf + width < segment_count ? leaf + width : segment_count;
+        if (leaf >= end_leaf || spans[segments[leaf]].begin >= clip.end || spans[segments[end_leaf] - 1].end <= clip.begin)
+        {
+            continue;
+        }
         if (minima[node] >= first && maxima[node] <= last)
         {
-            const uint32_t end_leaf = leaf + width < segment_count ? leaf + width : segment_count;
             check_debug_value_walk(&walk, spans, breaks, segments[leaf], segments[end_leaf]);
         }
         else if (node < leaves)
@@ -546,12 +613,24 @@ static void check_debug_value_range_indexed(const CheckDebugBody* source, const 
     }
     if (walk.begin < walk.end)
     {
-        check_debug_value_pair(out, walk.begin, walk.end, expression, bytes);
+        check_debug_value_pair_clipped(out, walk.begin, walk.end, expression, bytes, clip);
     }
-    debug_integer(out, 0, 1);
+    if (clip.list)
+    {
+        debug_integer(out, 0, 1);
+    }
 }
 
-static void check_debug_value_range(CheckDebugValues* values, uint32_t body, uint32_t first, uint32_t last, const uint8_t* expression, uint32_t bytes)
+static void check_debug_value_range_indexed(const CheckDebugBody* source, const uint32_t* breaks, const uint32_t* segments, uint32_t segment_count,
+                                           const uint32_t* tree, uint32_t leaves, DebugWriter* out, uint32_t body, uint32_t first, uint32_t last,
+                                           const uint8_t* expression, uint32_t bytes)
+{
+    const CheckDebugRangeClip clip = { .end = UINT32_MAX, .list = true };
+    check_debug_value_range_indexed_clipped(source, breaks, segments, segment_count, tree, leaves, out, body, first, last, expression, bytes, clip);
+}
+
+static void check_debug_value_range_clipped(CheckDebugValues* values, uint32_t body, uint32_t first, uint32_t last, const uint8_t* expression,
+                                           uint32_t bytes, CheckDebugRangeClip clip)
 {
     const CheckDebugBody* source = values->rows->values + body;
     DebugWriter* out = expression != NULL ? &values->locations : &values->ranges;
@@ -563,13 +642,19 @@ static void check_debug_value_range(CheckDebugValues* values, uint32_t body, uin
     }
     if (values->span_breaks != NULL)
     {
-        check_debug_value_range_indexed(source, values->span_breaks, values->span_segments, values->span_segment_count, values->span_tree, values->span_leaves,
-                                        out, body, first, last, expression, bytes);
+        check_debug_value_range_indexed_clipped(source, values->span_breaks, values->span_segments, values->span_segment_count, values->span_tree, values->span_leaves,
+                                                out, body, first, last, expression, bytes, clip);
     }
     else
     {
-        check_debug_value_range_scan(source, out, body, first, last, expression, bytes);
+        check_debug_value_range_scan_clipped(source, out, body, first, last, expression, bytes, clip);
     }
+}
+
+static void check_debug_value_range(CheckDebugValues* values, uint32_t body, uint32_t first, uint32_t last, const uint8_t* expression, uint32_t bytes)
+{
+    const CheckDebugRangeClip clip = { .end = UINT32_MAX, .list = true };
+    check_debug_value_range_clipped(values, body, first, last, expression, bytes, clip);
 }
 
 static uint32_t check_debug_home_expression(Tier0Home home, uint8_t class, bool indirect, uint8_t* bytes)
@@ -609,7 +694,9 @@ static void check_debug_value_variable(CheckDebugValues* values, uint32_t token,
     uint8_t expression[16];
     const uint32_t bytes = source != NULL && id < source->local_count ?
                            check_debug_home_expression(source->homes[id], source->classes[id], source->bindings[id].indirect, expression) : 0;
-    const uint32_t abbreviation = defined ? CHECK_DEBUG_GLOBAL : bytes != 0 ? (parameter ? CHECK_DEBUG_PARAMETER : CHECK_DEBUG_LOCAL) :
+    const bool ranged = source != NULL && id < source->local_count && source->location_first != NULL &&
+                        source->location_first[id] < source->location_first[id + 1];
+    const uint32_t abbreviation = defined ? CHECK_DEBUG_GLOBAL : bytes != 0 || ranged ? (parameter ? CHECK_DEBUG_PARAMETER : CHECK_DEBUG_LOCAL) :
                                   local ? (parameter ? CHECK_DEBUG_UNAVAILABLE_PARAMETER : CHECK_DEBUG_UNAVAILABLE_LOCAL) : CHECK_DEBUG_UNAVAILABLE_GLOBAL;
     debug_uleb(&values->info, abbreviation);
     debug_string(&values->info, check_debug_name(values, values->parser->tokens.names[token]));
@@ -628,6 +715,40 @@ static void check_debug_value_variable(CheckDebugValues* values, uint32_t token,
         }
         values->address_count += 1;
         debug_integer(&values->info, 0, 8);
+    }
+    else if (ranged)
+    {
+        check_debug_value_field(values, BUSTER_NATIVE_DEBUG_LOCLISTS, values->locations.size);
+        debug_integer(&values->locations, 1, 1); // DW_LLE_base_addressx
+        debug_uleb(&values->locations, body);
+        const uint32_t begin = source->location_first[id];
+        const uint32_t end = source->location_first[id + 1];
+        const CheckDebugLocation* locations = source->locations;
+        const uint8_t class = source->classes[id];
+        const bool indirect = source->bindings[id].indirect;
+        for (uint32_t r = begin; r < end; r += 1)
+        {
+            const CheckDebugLocation location = locations[r];
+            uint32_t size = 0;
+            if (location.value_bytes != 0)
+            {
+                DebugWriter constant = { .bytes = expression };
+                debug_integer(&constant, 0x9e, 1); // DW_OP_implicit_value: literal bytes, never an address
+                debug_uleb(&constant, location.value_bytes);
+                debug_integer(&constant, location.value, location.value_bytes);
+                size = (uint32_t)constant.size;
+            }
+            else
+            {
+                size = check_debug_home_expression(location.home, class, indirect, expression);
+            }
+            if (size != 0)
+            {
+                const CheckDebugRangeClip clip = { .begin = location.begin, .end = location.end };
+                check_debug_value_range_clipped(values, body, parameter ? 0 : token, scope_end, expression, size, clip);
+            }
+        }
+        debug_integer(&values->locations, 0, 1);
     }
     else if (bytes != 0)
     {

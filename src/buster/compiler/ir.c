@@ -305,6 +305,40 @@ struct IrSizes
 };
 
 typedef struct IrFunction IrFunction;
+typedef enum IrDebugScalarKind
+{
+    IR_DEBUG_PARAMETER = 1,
+    IR_DEBUG_CONSTANT,
+} IrDebugScalarKind;
+
+// Immutable whole values proven by the original typed replay, not rediscovered after optimization. A constant's
+// entry is its initializing store's completion point in the first source block; a parameter has no such entry.
+typedef struct IrDebugScalar IrDebugScalar;
+struct IrDebugScalar
+{
+    uint64_t value;
+    uint32_t local;
+    uint32_t entry;
+    uint8_t kind;
+    uint8_t bytes;
+};
+
+// Optional source identities (#1114), separate from the instruction/slot columns that execution consumes. An origin
+// is a typed-stream entry; a local is its original typed local. NONE means generated/unknown, never a nearby source.
+// Rewriters keep the original bounds and rebuild the current lengths before their old arenas can be retired.
+typedef struct IrDebugInfo IrDebugInfo;
+struct IrDebugInfo
+{
+    uint32_t* origins;
+    uint32_t* locals;
+    uint32_t instruction_count;
+    uint32_t slot_count;
+    uint32_t entry_count;
+    uint32_t local_count;
+    IrDebugScalar* scalars;
+    uint32_t scalar_count;
+};
+
 struct IrFunction
 {
     uint8_t* op;
@@ -367,6 +401,7 @@ struct IrFunction
     // Tier0Function.incoming_variadic): the overflow area starts stack_bytes past the incoming stack arguments.
     bool variadic;
     AbiCall incoming;
+    IrDebugInfo* debug;
     // Exact bytes charged to the arena, alignment gaps included; excludes this view and optional derived arrays.
     uint64_t arena_bytes;
 };
@@ -740,6 +775,86 @@ static IrError ir_create(Arena* arena, const IrSizes* sizes, IrFunction* result)
         }
     }
     return error;
+}
+
+// Allocate a fresh sidecar for a derived function. A source-less pipeline allocates and initializes nothing here.
+// New instructions and slots start without identities; the transformation fills only the mappings it proves.
+static bool ir_debug_create(Arena* arena, IrFunction* function, const IrDebugInfo* source)
+{
+    const uint64_t mark = arena->length;
+    bool ok = true;
+    IrDebugInfo* debug = NULL;
+    if (source != NULL)
+    {
+        debug = ir_allocate(arena, 1, sizeof(IrDebugInfo), &ok);
+        uint32_t* origins = ir_allocate(arena, function->instruction_count, sizeof(uint32_t), &ok);
+        uint32_t* locals = ir_allocate(arena, function->slot_count, sizeof(uint32_t), &ok);
+        IrDebugScalar* scalars = ir_allocate(arena, source->scalar_count, sizeof(IrDebugScalar), &ok);
+        if (ok)
+        {
+            *debug = (IrDebugInfo){
+                .origins = origins,
+                .locals = locals,
+                .instruction_count = function->instruction_count,
+                .slot_count = function->slot_count,
+                .entry_count = source->entry_count,
+                .local_count = source->local_count,
+                .scalars = scalars,
+                .scalar_count = source->scalar_count,
+            };
+            if (function->instruction_count != 0)
+            {
+                memset(origins, 0xff, (uint64_t)function->instruction_count * sizeof(uint32_t));
+            }
+            if (function->slot_count != 0)
+            {
+                memset(locals, 0xff, (uint64_t)function->slot_count * sizeof(uint32_t));
+            }
+            if (source->scalar_count != 0)
+            {
+                memcpy(scalars, source->scalars, (uint64_t)source->scalar_count * sizeof(IrDebugScalar));
+            }
+        }
+    }
+    if (ok)
+    {
+        function->debug = debug;
+        function->arena_bytes += arena->length - mark;
+    }
+    else
+    {
+        arena_pop_to(arena, mark);
+    }
+    return ok;
+}
+
+// The old-to-new instruction and slot maps belong to the transformation. A null map means unchanged numbering;
+// NONE removes that identity. Call only after a fresh sidecar was allocated for the result.
+static void ir_debug_remap(const IrFunction* source, IrFunction* result, const uint32_t* instructions, const uint32_t* slots)
+{
+    if (source->debug != NULL && result->debug != NULL)
+    {
+        const uint32_t* const origins = source->debug->origins;
+        const uint32_t* const locals = source->debug->locals;
+        uint32_t* const rewritten_origins = result->debug->origins;
+        uint32_t* const rewritten_locals = result->debug->locals;
+        for (uint32_t i = 0; i < source->instruction_count; i += 1)
+        {
+            const uint32_t out = instructions != NULL ? instructions[i] : i;
+            if (out != BUSTER_IR_NONE)
+            {
+                rewritten_origins[out] = origins[i];
+            }
+        }
+        for (uint32_t s = 0; s < source->slot_count; s += 1)
+        {
+            const uint32_t out = slots != NULL ? slots[s] : s;
+            if (out != BUSTER_IR_NONE)
+            {
+                rewritten_locals[out] = locals[s];
+            }
+        }
+    }
 }
 
 typedef enum IrRule
@@ -1237,6 +1352,38 @@ static IrCheck ir_check_shape(const IrFunction* f)
     if (check.error == IR_OK && ((f->vector_constant_count != 0 && f->vector_constants == NULL) || (f->row_count != 0 && f->rows == NULL)))
     {
         check.error = IR_ERROR_STRUCTURE;
+    }
+    const IrDebugInfo* const debug = f->debug;
+    if (check.error == IR_OK && debug != NULL && (debug->instruction_count != n || debug->slot_count != f->slot_count ||
+        (n != 0 && debug->origins == NULL) || (f->slot_count != 0 && debug->locals == NULL) || debug->scalar_count > debug->local_count ||
+        (debug->scalar_count != 0 && debug->scalars == NULL)))
+    {
+        check.error = IR_ERROR_METADATA;
+    }
+    for (uint32_t i = 0; check.error == IR_OK && debug != NULL && i < n; i += 1)
+    {
+        if (debug->origins[i] != BUSTER_IR_NONE && debug->origins[i] >= debug->entry_count)
+        {
+            check = ir_check(IR_ERROR_METADATA, i, debug->origins[i]);
+        }
+    }
+    for (uint32_t s = 0; check.error == IR_OK && debug != NULL && s < f->slot_count; s += 1)
+    {
+        if (debug->locals[s] != BUSTER_IR_NONE && debug->locals[s] >= debug->local_count)
+        {
+            check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, s);
+        }
+    }
+    for (uint32_t s = 0; check.error == IR_OK && debug != NULL && s < debug->scalar_count; s += 1)
+    {
+        const IrDebugScalar scalar = debug->scalars[s];
+        const bool kind = scalar.kind == IR_DEBUG_PARAMETER ? scalar.local < f->parameter_count && scalar.entry == BUSTER_IR_NONE :
+                          scalar.kind == IR_DEBUG_CONSTANT && scalar.entry < debug->entry_count;
+        if (!kind || scalar.local >= debug->local_count || (s != 0 && scalar.local <= debug->scalars[s - 1].local) ||
+            (scalar.bytes != 1 && scalar.bytes != 2 && scalar.bytes != 4 && scalar.bytes != 8))
+        {
+            check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, s);
+        }
     }
     if (check.error == IR_OK && (f->block_offsets[0] != 0 || f->block_offsets[f->block_count] != n))
     {

@@ -175,6 +175,10 @@ static bool ir_inline_function_conflict(const IrFunction* function, const Arena*
         function->labels,
         function->abi_calls,
         function->passed,
+        function->debug,
+        function->debug != NULL ? function->debug->origins : NULL,
+        function->debug != NULL ? function->debug->locals : NULL,
+        function->debug != NULL ? function->debug->scalars : NULL,
     };
     const uint64_t counts[] = {
         sizeof(*function),
@@ -198,6 +202,10 @@ static bool ir_inline_function_conflict(const IrFunction* function, const Arena*
         (uint64_t)function->label_count * 4,
         (uint64_t)function->abi_call_count * sizeof(IrAbiCall),
         (uint64_t)function->passed_count * sizeof(IrPassed),
+        function->debug != NULL ? sizeof(IrDebugInfo) : 0,
+        function->debug != NULL ? (uint64_t)function->instruction_count * sizeof(uint32_t) : 0,
+        function->debug != NULL ? (uint64_t)function->slot_count * sizeof(uint32_t) : 0,
+        function->debug != NULL ? (uint64_t)function->debug->scalar_count * sizeof(IrDebugScalar) : 0,
     };
     bool conflict = false;
     for (uint32_t i = 0; !conflict && i < sizeof(pointers) / sizeof(pointers[0]); i += 1)
@@ -1038,8 +1046,15 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
     {
         error = ir_create(output, &sizes, &rewritten);
     }
+    if (error == IR_OK && !ir_debug_create(output, &rewritten, source->debug))
+    {
+        error = IR_ERROR_MEMORY;
+    }
     if (error == IR_OK)
     {
+        // Only the caller's identities survive this interface. Cloned callee slots and instructions remain unknown
+        // until inline-instance identities are represented; they cannot inherit the caller's token or local number.
+        ir_debug_remap(source, &rewritten, values, NULL);
         rewritten.result_type = source->result_type;
         rewritten.symbol_count = source->symbol_count;
         if (source->constant_count != 0)

@@ -1296,23 +1296,129 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_labels(IrTypedSin
 // logic stays in one C body, and both scalar/vector paths use these same two instantiations.
 #define BUSTER_IR_TYPED_EMIT_NAME ir_typed_count_function
 #define BUSTER_IR_TYPED_EMIT_COUNT 1
+#define BUSTER_IR_TYPED_EMIT_SOURCES 0
 #include "ir_lower_emit.c"
+#undef BUSTER_IR_TYPED_EMIT_SOURCES
 #undef BUSTER_IR_TYPED_EMIT_COUNT
 #undef BUSTER_IR_TYPED_EMIT_NAME
 
 #define BUSTER_IR_TYPED_EMIT_NAME ir_typed_emit_function
 #define BUSTER_IR_TYPED_EMIT_COUNT 0
+#define BUSTER_IR_TYPED_EMIT_SOURCES 0
 #include "ir_lower_emit.c"
+#undef BUSTER_IR_TYPED_EMIT_SOURCES
+#undef BUSTER_IR_TYPED_EMIT_COUNT
+#undef BUSTER_IR_TYPED_EMIT_NAME
+
+#define BUSTER_IR_TYPED_EMIT_NAME ir_typed_emit_sources_function
+#define BUSTER_IR_TYPED_EMIT_COUNT 0
+#define BUSTER_IR_TYPED_EMIT_SOURCES 1
+#include "ir_lower_emit.c"
+#undef BUSTER_IR_TYPED_EMIT_SOURCES
 #undef BUSTER_IR_TYPED_EMIT_COUNT
 #undef BUSTER_IR_TYPED_EMIT_NAME
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Entry points
 
+// Whole values whose identity needs no later SSA reconstruction. A parameter must never be assigned or exposed by
+// address. A literal local must have exactly one initializing store in the first source block, before its control
+// transfer or any incoming label. That store dominates every later source entry. The debug consumer still restricts
+// its ranges to origins after the retained completion entry; a constant is not available before initialization.
+static bool ir_typed_debug_scalars(const Tier0Function* input, const IrTypedPlan* plan, IrFunction* function, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    bool ok = true;
+    const uint32_t locals = input->local_count;
+    IrDebugScalar* candidates = ir_allocate(scratch, locals, sizeof(IrDebugScalar), &ok);
+    uint8_t* writes = ir_allocate(scratch, locals, 1, &ok);
+    const uint32_t first_end = plan->block_count != 0 ? plan->block_firsts[1] : 0;
+    if (ok)
+    {
+        for (uint32_t local = 0; local < locals; local += 1)
+        {
+            candidates[local].local = local;
+            candidates[local].entry = BUSTER_IR_NONE;
+            // Every volatile/address-taken object stays a storage binding, never a cached value recipe.
+            writes[local] = input->local_flags[local] != 0 ? 2 : 0;
+        }
+        const uint8_t* const kinds = input->kinds;
+        const uint64_t* const values = input->values;
+        for (uint32_t entry = 0; entry < input->count; entry += 1)
+        {
+            const uint8_t kind = kinds[entry];
+            const bool store = kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
+            const bool addressed = kind == BUSTER_TYPED_LOCAL_ADDRESS;
+            const bool exchange = kind == BUSTER_TYPED_ATOMIC_CAS;
+            if (store || addressed || exchange)
+            {
+                const uint32_t local = exchange ? (uint32_t)(values[entry] >> BUSTER_TYPED_CAS_LOCAL_SHIFT) : (uint32_t)values[entry];
+                candidates[local].entry = writes[local] == 0 ? entry : candidates[local].entry;
+                writes[local] = addressed || exchange || writes[local] != 0 ? 2 : 1;
+            }
+        }
+        for (uint32_t local = 0; local < input->parameter_count; local += 1)
+        {
+            const uint8_t class = input->local_classes[local];
+            if (writes[local] == 0 && class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64)
+            {
+                candidates[local].kind = IR_DEBUG_PARAMETER;
+                candidates[local].bytes = (uint8_t)tier0_class_bytes(class);
+            }
+        }
+        for (uint32_t node = 0; node < function->instruction_count; node += 1)
+        {
+            if (function->op[node] == IR_STORE && function->op[function->a[node]] == IR_STACK_ADDR)
+            {
+                const uint32_t local = function->a[function->a[node]];
+                const uint32_t value = function->b[node];
+                if (local >= input->parameter_count && local < locals && writes[local] == 1 && candidates[local].entry < first_end &&
+                    function->debug->origins[node] == candidates[local].entry && function->op[value] == IR_CONST)
+                {
+                    const uint8_t class = input->local_classes[local];
+                    if (class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64 && function->type[value] == ir_typed_types[class])
+                    {
+                        const uint8_t bytes = (uint8_t)tier0_class_bytes(class);
+                        const IrConstant constant = function->constants[function->a[value]];
+                        candidates[local].kind = IR_DEBUG_CONSTANT;
+                        candidates[local].bytes = bytes;
+                        candidates[local].value = bytes == 8 ? constant.low : constant.low & ((UINT64_C(1) << (bytes * 8)) - 1);
+                    }
+                }
+            }
+        }
+        uint32_t count = 0;
+        for (uint32_t local = 0; local < locals; local += 1)
+        {
+            count += candidates[local].kind != 0;
+        }
+        IrDebugScalar* scalars = ir_allocate(output, count, sizeof(IrDebugScalar), &ok);
+        if (ok)
+        {
+            uint32_t at = 0;
+            for (uint32_t local = 0; local < locals; local += 1)
+            {
+                if (candidates[local].kind != 0)
+                {
+                    scalars[at++] = candidates[local];
+                }
+            }
+            function->debug->scalars = scalars;
+            function->debug->scalar_count = count;
+            function->arena_bytes += output->length - mark;
+        }
+    }
+    if (!ok)
+    {
+        arena_pop_to(output, mark);
+    }
+    return ok;
+}
+
 // `pieces`: a vector wider than the target moves whole (ir_typed_vector_piece) is taken as its pieces' moves would be, for
 // a caller that splits it into them before selection (#1624, ir_vector_split.c); otherwise it is refused.
 static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector, uint64_t target_features,
-                                          bool pieces)
+                                          bool pieces, bool sources)
 {
     (void)vector;
 
@@ -1508,11 +1614,31 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         }
         const IrSizes sizes = ir_typed_count_function(input, result_type, &plan, scratch, ops, types, stack, classes, 0);
         check.error = ir_create(output, &sizes, &candidate);
+        if (check.error == IR_OK && sources)
+        {
+            const IrDebugInfo source = { .entry_count = input->count, .local_count = input->local_count };
+            check.error = ir_debug_create(output, &candidate, &source) ? IR_OK : IR_ERROR_MEMORY;
+        }
         if (check.error == IR_OK)
         {
-            ir_typed_emit_function(input, result_type, &plan, scratch, ops, types, stack, classes, &candidate);
+            if (sources)
+            {
+                ir_typed_emit_sources_function(input, result_type, &plan, scratch, ops, types, stack, classes, &candidate);
+                for (uint32_t local = 0; local < input->local_count; local += 1)
+                {
+                    candidate.debug->locals[local] = local;
+                }
+                check.error = ir_typed_debug_scalars(input, &plan, &candidate, output, scratch) ? IR_OK : IR_ERROR_MEMORY;
+            }
+            else
+            {
+                ir_typed_emit_function(input, result_type, &plan, scratch, ops, types, stack, classes, &candidate);
+            }
             candidate.symbol_count = symbol_count;
-            check = BUSTER_VECTOR_PATH(vector) ? ir_verify(&candidate, scratch, 0) : ir_verify_scalar(&candidate, scratch, 0);
+            if (check.error == IR_OK)
+            {
+                check = BUSTER_VECTOR_PATH(vector) ? ir_verify(&candidate, scratch, 0) : ir_verify_scalar(&candidate, scratch, 0);
+            }
         }
     }
     if (check.error == IR_OK)
@@ -1530,7 +1656,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
 // Preserve scalar clients of the internal path as well as the public entry points.
 static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, vector, 0, false);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, vector, 0, false, false);
 }
 
 // The legacy typed stream erases pointer categories into U64, so its i64 values
@@ -1549,13 +1675,13 @@ static __attribute__((unused)) IrCheck ir_lower_typed(const Tier0Function* input
 #if !BUSTER_HOST_VECTOR
     return ir_lower_typed_scalar(input, result_type, symbol_count, output, scratch, result);
 #else
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, true, 0, false);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, true, 0, false, false);
 #endif
 }
 
 static __attribute__((unused)) IrCheck ir_lower_typed_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, 0, false);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, 0, false, false);
 }
 
 // Output features are explicit. The old entry points intentionally grant none: a vector producer must retain its
@@ -1563,12 +1689,12 @@ static __attribute__((unused)) IrCheck ir_lower_typed_scalar(const Tier0Function
 // unsupported forms from missing target features on IR_ERROR_UNSUPPORTED.
 static __attribute__((unused)) IrCheck ir_lower_typed_target(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, BUSTER_HOST_VECTOR != 0, target_features, false);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, BUSTER_HOST_VECTOR != 0, target_features, false, false);
 }
 
 static __attribute__((unused)) IrCheck ir_lower_typed_target_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, target_features, false);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, target_features, false, false);
 }
 
 // The C driver's --tier1 (#1624): ir_lower_typed_target, but a vector wider than the target moves whole is taken, for
@@ -1576,5 +1702,13 @@ static __attribute__((unused)) IrCheck ir_lower_typed_target_scalar(const Tier0F
 static __attribute__((unused)) IrCheck ir_lower_typed_target_pieces(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch,
                                                                     IrFunction* result, bool scalar)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, !scalar && BUSTER_HOST_VECTOR != 0, target_features, true);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, !scalar && BUSTER_HOST_VECTOR != 0, target_features, true, false);
+}
+
+// The same code-producing replay, with optional source identity columns. The ordinary entry points keep their
+// source-less instantiation, so collecting these identities adds no per-entry work to a compile without -g.
+static __attribute__((unused)) IrCheck ir_lower_typed_target_pieces_sources(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch,
+                                                                            IrFunction* result, bool scalar)
+{
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, !scalar && BUSTER_HOST_VECTOR != 0, target_features, true, true);
 }

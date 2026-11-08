@@ -2300,6 +2300,64 @@ static void ir_test_switch_collision_family(IrTestTally* tally, Arena* memory, A
 #include "ir_simd_execute.c"
 #include "ir_simd_test.c"
 
+static void ir_test_debug(IrTestTally* tally, Arena* memory, Arena* scratch)
+{
+    const uint64_t mark = memory->length;
+    IrFunction function = { 0 };
+    if (ir_test_simple(memory, &function))
+    {
+        const uint64_t plain = memory->length;
+        ir_test_expect(tally, ir_debug_create(memory, &function, NULL) && function.debug == NULL && memory->length == plain,
+                       "absent source metadata allocated storage");
+        const IrDebugInfo seed = { .entry_count = 4, .local_count = 0 };
+        if (ir_debug_create(memory, &function, &seed))
+        {
+            ir_test_expect(tally, function.debug->origins[0] == BUSTER_IR_NONE && function.debug->origins[2] == BUSTER_IR_NONE,
+                           "new debug identities did not begin unavailable");
+            function.debug->origins[0] = 1;
+            function.debug->origins[1] = 3;
+            ir_test_pair(tally, &function, scratch, NULL, true, "valid source identities rejected");
+            function.debug->instruction_count += 1;
+            ir_test_pair(tally, &function, scratch, NULL, false, "stale instruction identity length accepted");
+            function.debug->instruction_count -= 1;
+            function.debug->origins[1] = seed.entry_count;
+            ir_test_pair(tally, &function, scratch, NULL, false, "out-of-range typed origin accepted");
+            function.debug->origins[1] = 3;
+            uint32_t* origins = function.debug->origins;
+            function.debug->origins = NULL;
+            ir_test_pair(tally, &function, scratch, NULL, false, "missing source identity column accepted");
+            function.debug->origins = origins;
+            IrFunction copy = function;
+            if (ir_debug_create(memory, &copy, function.debug))
+            {
+                const uint32_t permutation[] = { 2, BUSTER_IR_NONE, 0 };
+                ir_debug_remap(&function, &copy, permutation, NULL);
+                ir_test_expect(tally, copy.debug != function.debug && copy.debug->origins != origins && copy.debug->origins[0] == BUSTER_IR_NONE &&
+                               copy.debug->origins[1] == BUSTER_IR_NONE && copy.debug->origins[2] == 1 && origins[0] == 1 && origins[1] == 3,
+                               "source remap aliased input, retained a dropped origin or missed a permutation");
+            }
+            else
+            {
+                ir_test_expect(tally, false, "source remap allocation failed");
+            }
+            const IrFunction before = function;
+            Arena exhausted = *memory;
+            exhausted.capacity = exhausted.length;
+            ir_test_expect(tally, !ir_debug_create(&exhausted, &function, &seed) && exhausted.length == memory->length &&
+                           memcmp(&before, &function, sizeof(function)) == 0, "failed source allocation changed the function or arena");
+        }
+        else
+        {
+            ir_test_expect(tally, false, "source identity allocation failed");
+        }
+    }
+    else
+    {
+        ir_test_expect(tally, false, "source identity fixture allocation failed");
+    }
+    arena_pop_to(memory, mark);
+}
+
 static int run_ir_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -2341,6 +2399,7 @@ static int run_ir_tests(int argc, char** argv)
             memset(prefix, 0xa5, 19);
             ir_test_allocations(&tally, &memory, &scratch);
             ir_test_basic(&tally, &memory, &scratch);
+            ir_test_debug(&tally, &memory, &scratch);
             ir_test_complete_memory(&tally, &memory);
             ir_test_phi(&tally, &memory, &scratch);
             ir_test_entry_phi(&tally, &memory, &scratch);
