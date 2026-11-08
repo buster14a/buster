@@ -872,6 +872,28 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .name = "a statement expression decaying from a variable array stays unevaluated",
         .source = "void g(int n) {\n    char vv[n][n];\n    (void)sizeof(({ 3; vv[0]; }));\n    (void)sizeof(({ 4; vv; }));\n}\n",
     },
+    {
+        // -Wsign-compare's operands keep their declared typedef's spelling (#1100): a parameter's typedef, a cast's,
+        // and sizeof's `__size_t`, each with clang's (aka) of what the sugar hides; the same sugar survives the
+        // operands' shared-type arithmetic.
+        .name = "sign-compare operands keep their typedef spelling",
+        .source = "typedef int wchar_t;\ntypedef unsigned long size_t;\ntypedef int myint;\n"
+                  "int s1(wchar_t wc) { return wc < 0xffU; }\n"
+                  "int s2(int n) { int a[4]; return n >= sizeof a / sizeof a[0]; }\n"
+                  "int s3(int n, size_t m) { return n < m; }\n"
+                  "int s4(myint n, unsigned u) { return n < u; }\n",
+        .options = { "-Wsign-compare" },
+        .warnings = 4,
+    },
+    {
+        // A format argument keeps its declared typedef's spelling (#1100), with the (aka) of what it hides.
+        .name = "format arguments keep their typedef spelling",
+        .source = "typedef unsigned long size_t;\ntypedef long ptrdiff_t;\ntypedef int wchar_t;\n"
+                  "int printf(const char*,...);\n"
+                  "void f(size_t m, ptrdiff_t d, wchar_t *w) { printf(\"%u\", m); printf(\"%u\", d); printf(\"%d\", w); }\n",
+        .options = { "-Wformat" },
+        .warnings = 3,
+    },
 };
 
 static void check_test_driver_warning_fixtures(CheckTest* test, const char* clang, const char* executable, const char* directory,

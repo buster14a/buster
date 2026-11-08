@@ -160,11 +160,73 @@ static void check_common_report_published(const Parser* parser, Preprocessor* pp
                                         note_count, scratch);
 }
 
+// An operand's typedef-specifier declaration for its warning spelling (#1100): the BUSTER_CHECK_NONE sentinel where
+// the operand is a sizeof or an alignof — clang spells that result `__size_t` — else the typedef naming its cast's
+// own type or its declaration's specifier, through parentheses, dereferences and subscripts to the named object.
+// An arithmetic operand whose sides spell one type the same way keeps it, as clang's usual conversions keep the
+// common sugar; any other operand spells its type without sugar. `depth` bounds the walk statically.
+static uint32_t check_common_operand_spelling(const Parser* parser, const CheckInput* input, const CheckGraph* graph, uint32_t node, uint32_t depth)
+{
+    uint32_t result = 0;
+    if (node < graph->count && depth <= 16)
+    {
+        const CheckOp op = graph->ops[node];
+        const uint32_t token = graph->tokens[node];
+        if (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF)
+        {
+            result = BUSTER_CHECK_NONE;
+        }
+        else if (op == CHECK_OP_CAST && token < parser->tokens.count && parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST)
+        {
+            // A cast's own type name is the operand's specifier (#992): `(size_t)4`'s `size_t` is itself the
+            // typedef-name use, so its resolution is the specifier's declaration — no declaration to scan back
+            // from as a named object's would.
+            uint32_t open = token;
+            while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == token))
+            {
+                open -= 1;
+            }
+            for (uint32_t type_name = open + 1; result == 0 && type_name < token; type_name += 1)
+            {
+                const uint32_t resolved = parser->tokens.kinds[type_name] == PARSE_KIND_IDENTIFIER && input->declarations != 0 ?
+                                          input->declarations[type_name] : 0;
+                if (resolved != 0 && resolved < input->token_count && input->declaration_kinds != 0 &&
+                    input->declaration_kinds[resolved] == C_BINDING_TYPEDEF)
+                {
+                    result = resolved;
+                }
+            }
+        }
+        else if (op == CHECK_OP_VALUE || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT || op == CHECK_OP_CONVERT)
+        {
+            result = check_common_operand_spelling(parser, input, graph, graph->operand0[node], depth + 1);
+        }
+        else if ((op >= CHECK_OP_ADD && op <= CHECK_OP_SHIFT_RIGHT) || (op >= CHECK_OP_BIT_AND && op <= CHECK_OP_BIT_XOR))
+        {
+            // clang's usual arithmetic conversions keep the operands' common sugar: `sizeof a / sizeof a[0]`'s
+            // division is a `__size_t` again, while a mixed conversion spells the result without it.
+            const uint32_t left = check_common_operand_spelling(parser, input, graph, graph->operand0[node], depth + 1);
+            if (left != 0)
+            {
+                const uint32_t right = check_common_operand_spelling(parser, input, graph, graph->operand1[node], depth + 1);
+                result = right == left ? left : 0;
+            }
+        }
+        else if (token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && input->declarations != 0)
+        {
+            const uint32_t declaration = input->declarations[token];
+            result = declaration != 0 && declaration != BUSTER_CHECK_NONE && declaration < input->token_count ?
+                     check_input_typedef_spelling(input, parser, declaration) : 0;
+        }
+    }
+    return result;
+}
+
 // A type's spelling with clang's decayed type for a format argument: an array prints as a pointer to its element.
 static String8 check_common_type_text(const Parser* parser, Preprocessor* pp, const CheckInput* input, TypeTable* types, CheckWarningSpelling* spell,
-                                      Arena* scratch, TypeId type)
+                                      Arena* scratch, TypeId type, uint32_t spelling)
 {
-    String8 result = check_driver_warning_type(parser, pp, input, types, spell, scratch, type, 0);
+    String8 result = check_driver_warning_type(parser, pp, input, types, spell, scratch, type, spelling);
     const TypeId stripped = type != 0 ? type_strip_aligned(types, type) : 0;
     if (stripped != 0 && type_kind_is_array(type_kind(types, type_unqualified(stripped))) && result.length != 0)
     {
@@ -1395,9 +1457,11 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
         if (integer && !unsigned_operands && left_signed != right_signed && !constant_suppressed && (left_signed ? left_width <= right_width : right_width <= left_width))
         {
             const String8 left_name = check_driver_warning_type(parser, emission->pp, emission->input, types, emission->spell, scratch,
-                                                                check_stream_type(stream, left), 0);
+                                                                check_stream_type(stream, left),
+                                                                check_common_operand_spelling(parser, emission->input, graph, left, 0));
             const String8 right_name = check_driver_warning_type(parser, emission->pp, emission->input, types, emission->spell, scratch,
-                                                                 check_stream_type(stream, right), 0);
+                                                                 check_stream_type(stream, right),
+                                                                 check_common_operand_spelling(parser, emission->input, graph, right, 0));
             if (left_name.length != 0 && right_name.length != 0)
             {
                 const char* message = check_warning_text(scratch, "comparison of integers of different signs: %.*s and %.*s",
@@ -3724,7 +3788,8 @@ static void check_common_format_report_type(const Parser* parser, Preprocessor* 
 {
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
     const TypeId type = check_common_format_argument_type(graph, stream, types, offset, argument);
-    const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type);
+    const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type,
+                                                  check_common_operand_spelling(parser, input, graph, argument_node, 0));
     const uint32_t at_token = argument_node < graph->count ? check_common_argument_start(parser, graph->tokens[argument_node]) : format_token;
     if (actual.length != 0)
     {
@@ -3749,7 +3814,8 @@ static void check_common_format_width_report(const Parser* parser, Preprocessor*
 {
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
     const TypeId type = check_common_format_argument_type(graph, stream, types, offset, argument);
-    const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type);
+    const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type,
+                                                  check_common_operand_spelling(parser, input, graph, argument_node, 0));
     if (actual.length != 0)
     {
         const char* message = check_warning_text(scratch, "field %s should have type 'int', but argument has type %.*s",
