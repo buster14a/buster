@@ -3228,7 +3228,7 @@ static bool check_common_floating_kind(const TypeTable* types, TypeId type)
 // for an enumeration converted to its floating target. Only a unit where an enumerator or an enumeration's variable is
 // named as such an operator's operand (CheckInput.enum_operands) is scanned: an enumeration operand that is only a
 // member, a call's result or a cast's is not looked for without one.
-static void check_common_enum_arithmetic(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
+static __attribute__((noinline)) void check_common_enum_arithmetic(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
                                          CheckWarningSpelling* spell, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
