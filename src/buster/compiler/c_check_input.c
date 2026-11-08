@@ -40,6 +40,9 @@ typedef enum CheckInputMessage
     CHECK_INPUT_DIRECT_INITIALIZER_DEDUCED,
     // A field designator that names no member of the record in CheckInputReport.type.
     CHECK_INPUT_INITIALIZER_MEMBER,
+    // An array initialized by a compound literal of another array type (#1447, GNU's extension): the array's type in
+    // CheckInputReport.type, the literal's in its value.
+    CHECK_INPUT_ARRAY_LITERAL_MISMATCH,
     // #pragma clang section's errors and section type conflicts, each with its message (CheckInputSections.diagnostics).
     CHECK_INPUT_SECTION,
     // #pragma clang optimize's errors, each with its message (CheckInputOptimizePragmas.diagnostics).
@@ -334,6 +337,7 @@ static const char* const check_input_messages[] =
     "array initializer must be an initializer list or string literal",
     "initializer for a variable with deduced type contains multiple expressions",
     "field designator does not name a member of the record type",
+    "cannot initialize array with array of another type",
     "invalid '#pragma clang section' or section type conflict",
     "invalid '#pragma clang optimize'",
     "cannot jump from this goto statement to its label",
