@@ -3912,19 +3912,6 @@ body's scope. Unused parameters are still warned. A per-token prefix count of
 the unit's error reports answers each scope's question in constant time, and
 only a unit with errors builds it.
 
-The later phases are left:
-
-- **Invalid declarations.** Not covered by phase 2:
-  - a tag's redefinition (`struct S { … }` twice);
-  - an invalid initializer the reader reports;
-  - a type attribute's error (`vector_size`, `mode`).
-
-  These still stop the reader.
-- **Statements.** A second control error (`break`, then `continue`) still
-  isn't reported. Neither are the runtime warnings (`-Wshift-count-overflow`,
-  `-Wdivision-by-zero`) of any rejected unit, a unit with only a preprocessing
-  error included.
-
 Phase 3 covers statements after an error:
 
 - **Control errors.** A `break` or `continue` outside its loop is clang's
@@ -3956,8 +3943,12 @@ diagnose paths give one generic message, not clang's wording.
 
 The later phases are left:
 
-- **Invalid declarations.** A tag's redefinition, an invalid initializer, or a
-  type attribute's error (`vector_size`, `mode`) still stops the reader.
+- **Invalid declarations.** Not covered by phase 2:
+  - a tag's redefinition (`struct S { … }` twice);
+  - an invalid initializer the reader reports;
+  - a type attribute's error (`vector_size`, `mode`).
+
+  These still stop the reader.
 - **Units with a graph's or a reader's error.** These, other than a recovered
   one, still don't reach `check_program`. They get none of its diagnostics:
   the common warnings, their runtime warnings included. The asm and control
