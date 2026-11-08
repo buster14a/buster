@@ -82,7 +82,7 @@ requirements. [Command index](README.md).
   [--uncounted]` (`helpers_measure.c`) builds the primitives' kernels and
   speedtest1 by Tier 0 and `--tier1`, each with and without
   `--helper-forms=all`, checks their outputs alike, and times their compiles and
-  runs as whole processes in rotating rounds beside each object's helper calls,
+  runs as whole processes in a Williams design's order beside each object's helper calls,
   executable bytes and Tier 1's spill and call stores and loads; the 9700X job
   runs it under the `helpers` gate (the guide's "Paired measurements"). The x86
   builtins whose instructions no Tier 0 row takes (`rdtsc`, `pause`, `xgetbv`,
@@ -97,15 +97,19 @@ requirements. [Command index](README.md).
   `-ffreestanding` say, declared implicitly with their prototypes as clang
   declares them; `test-checker --program-library` and `test-checker-driver`
   check them against clang (the guide's "Library builtins"). The plain table is
-  pinned to Clang 23.1.4, CI's reference release: its GNU library builtins
-  include `strlcat` and `strlcpy`, which 23.1.5's table drops. The preprocessor
-  and checker oracles compare `clang --version` with it, report
-  `expected clang 23.1.4, found …` when another release is found, and skip only
-  the plain names the found release is known to classify differently (the named
-  list `cbuiltin_library_table_differences`: 23.1.5's `strlcat` and `strlcpy`),
-  a difference no named release explains still failing. A fixture reruns the
-  comparisons under a fake clang 23.1.5, so CI's reference release exercises the
-  skip path too; the fake's script quotes the clang it forwards to, which it
+  pinned to Clang 23.1.4's official build, CI's reference: its GNU library
+  builtins include `strlcat` and `strlcpy`, as every upstream 23.x release's
+  do. Debian's and Ubuntu's clang packages (apt.llvm.org's too, which cloud
+  containers have) drop both with
+  `debian/patches/23-strlcpy_strlcat_warning_removed.diff`, in every release.
+  The preprocessor and checker oracles compare `clang --version` with the
+  reference, report `expected clang 23.1.4, found …` (`found Ubuntu 23.1.6`)
+  when another build is found, and skip only the plain names that build's
+  vendor is known to classify differently (the named list
+  `cbuiltin_library_table_differences`: Debian's and Ubuntu's `strlcat` and
+  `strlcpy`), a difference no named build explains still failing. A fixture
+  reruns the comparisons under a fake Ubuntu clang 23.1.6, so CI's reference
+  build exercises the skip path too; the fake's script quotes the clang it forwards to, which it
   reaches through a path with a space and the shell's metacharacters. The floating
   classifications past the first ones (`isnormal` to `isfpclass`, `signbitf`,
   `signbitl` and `canonicalize`: `c_check_builtin_float.c`,

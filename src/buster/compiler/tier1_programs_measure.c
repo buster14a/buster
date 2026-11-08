@@ -3,7 +3,7 @@
 
 //
 // measure-tier1-programs (#138, #1189): the programs Tier 1 is measured by against clang -O2, each built by this
-// compiler's Tier 0 and --tier1, clang -O0 and -O2, and tcc, then run as whole processes in a rotating order.
+// compiler's Tier 0 and --tier1, clang -O0 and -O2, and tcc, then run as whole processes in a Williams design's order.
 //
 //   build/compiler measure-tier1-programs --clang PATH [--tcc PATH] --sqlite DIR --speedtest DIR --lua DIR --scripts DIR
 //                                         [--runs N] [--warmups N] [--directory DIR] [--keep] [--uncounted]
@@ -26,7 +26,7 @@
 // output by every build must be clang -O0's byte for byte.
 //
 // Then --runs rounds (11), after --warmups (1) in which every build runs every program once: each round runs every
-// (build, program) pair once, in an order that rotates by round (profile_ab_tree's), pinned where the caller pins this
+// (build, program) pair once, in a Williams design's order (profile_ab_tree's), pinned where the caller pins this
 // process (taskset), every run's wall time from its exec's release to wait4's return and its user cycles and
 // instructions (profile_time_one: perf_event_open from its exec, all its threads). Every run must exit with status 0
 // and be counted (but with --uncounted, for a host without the counters). It prints a line per run, warm-ups among

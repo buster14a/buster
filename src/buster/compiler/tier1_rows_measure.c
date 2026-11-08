@@ -3,7 +3,7 @@
 
 //
 // measure-tier1-rows (#1283): vector code by Tier 0 and Tier 1, where machine rows (#141, tier1_emit_cfg_row) run it, with
-// the moves Tier 1 writes around its rows counted, as whole processes in a rotating order; with --base, against another
+// the moves Tier 1 writes around its rows counted, as whole processes in a Williams design's order; with --base, against another
 // compiler's --tier1 (the main branch's, for a pull request's numbers against it).
 //
 //   build/compiler measure-tier1-rows --clang PATH [--base COMPILER] [--src DIR] [--lexer FILE]... [--march ARCH]
@@ -29,10 +29,10 @@
 // printed.
 //
 // Then --runs rounds (11), after --warmups (1) in which every build runs every program once, as measure-tier1-programs
-// times its programs (profile_time_one, in an order that rotates by round, pinned where the caller pins this process): a
-// `tier1-rows-run` line per run, then every pair's medians, then a table by program and metric of the builds' medians
-// and --tier1 against Tier 0 and against --base's. DIR is a new directory under --directory ($TMPDIR, or /tmp), removed
-// at the end unless --keep.
+// times its programs (profile_time_one, in a Williams design's order by round (profile_ab_tree's), pinned where the
+// caller pins this process): a `tier1-rows-run` line per run, then every pair's medians, then a table by program and
+// metric of the builds' medians and --tier1 against Tier 0 and against --base's. DIR is a new directory under
+// --directory ($TMPDIR, or /tmp), removed at the end unless --keep.
 
 #define BUSTER_TIER1_ROWS_BUILDS 4
 #define BUSTER_TIER1_ROWS_PROGRAMS 3

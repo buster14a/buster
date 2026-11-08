@@ -6,9 +6,9 @@
 // -ffreestanding, whose diagnostics must be clang's line for line; that calls of strlcat and strlcpy refer to the
 // library's symbols rather than folding; programs that call library functions declared so, fold plain declarations'
 // calls or not as those options say, and abort, which must run as clang's builds do. The plain names are pinned to
-// BUSTER_CLANG_REFERENCE_VERSION: a found clang of another release reports both versions, and the implicit comparisons
-// skip only the names its library-builtin table classifies differently (clang 23.1.5 drops 23.1.4's strlcat and
-// strlcpy). Include after c_check_fortify_driver_test.c, whose runner it takes.
+// BUSTER_CLANG_REFERENCE_VERSION's official build: a found clang of another build reports both, and the implicit
+// comparisons skip only the names its library-builtin table is known to classify differently (Debian's and Ubuntu's
+// packages drop strlcat and strlcpy). Include after c_check_fortify_driver_test.c, whose runner it takes.
 
 // The lines of a compiler's diagnostics that implicit declarations make (clang's ext_implicit_lib_function_decl and its
 // C99 form, the header's note, and the ordinary implicit declarations' and undeclared identifiers' errors), in order,
@@ -67,9 +67,9 @@ static void check_test_library_difference(const char* a, const char* b, char* di
 }
 
 // The plain library names whose __has_builtin answer under a configuration differs between the found clang and buster's
-// table and that the found release's table is known to classify differently (cbuiltin_library_table_differs: clang
-// 23.1.5 drops 23.1.4's strlcat and strlcpy): those are the names the configuration's comparisons skip when the found
-// release isn't the reference, since the answer is the release's table's. A difference no named release explains is no
+// table and that the found build's table is known to classify differently (cbuiltin_library_table_differs: Debian's and
+// Ubuntu's packages drop strlcat and strlcpy): those are the names the configuration's comparisons skip when the found
+// build isn't the reference, since the answer is the build's table's. A difference no named build explains is no
 // skip's — it stays in the comparisons and fails. `pinned` has one entry per plain name, `names` lists them, and the
 // result is false when clang's probe doesn't run.
 static bool check_test_library_pinned(const char* clang, const char* standard, const char* first, const char* second, const char* probe,
@@ -180,7 +180,7 @@ static bool check_test_library_pinned(const char* clang, const char* standard, c
 // "call" either way. Each configuration's lines must be clang's, and its status, by both paths: some lines, but none
 // where -Wno-implicit-function-declaration turns the diagnostics off (`quiet`). The configurations include strlcat's and
 // strlcpy's -fno-builtin-NAME gate and C89's silent ordinary implicit declaration, whose library wording depends on the
-// release: when the found clang isn't the reference, the names it is known to classify differently are left out and
+// build: when the found clang isn't the reference, the names it is known to classify differently are left out and
 // reported.
 static void check_test_library_implicit(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -666,7 +666,7 @@ static void check_test_library_runs(CheckTest* test, const char* clang, const ch
             "-Wno-error=implicit-function-declaration",
         },
         {
-            // strlcat and strlcpy are GNU library builtins in 23.1.4's table and plain C89 implicit calls in 23.1.5's:
+            // strlcat and strlcpy are GNU library builtins in upstream's table and plain C89 implicit calls in Debian's:
             // both compile a call of the named function, which the run's result checks. Local definitions keep the run
             // off the host's C library, which only has the names since glibc 2.38.
             "strlcat and strlcpy calls reach their functions",
@@ -773,25 +773,25 @@ static void check_test_library_runs(CheckTest* test, const char* clang, const ch
     }
 }
 
-// The non-reference release path under a fake clang (#1131): a wrapper script reports 23.1.5 and answers its
-// library-builtin questions as that release's table does (no strlcat or strlcpy, which its -fno-builtin-NAME options
+// The non-reference build path under a fake clang (#1131): a wrapper script reports an Ubuntu build and answers its
+// library-builtin questions as Debian's patched table does (no strlcat or strlcpy, which -fno-builtin-NAME options
 // give), so the implicit comparisons under it must pass while leaving out only those names — every other name's
 // diagnostics still compare. It reaches the configured clang through a path with a space and the shell's
 // metacharacters (clang_release_wrapper), as a --clang path may have. CI's clang is the reference, whose own run skips
-// nothing and can't reach this path.
+// nothing and can't reach this path otherwise.
 static void check_test_library_release(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     char wrapper[512];
     char trampoline[1024];
     char folder[768];
-    const bool written = clang_release_wrapper(directory, clang, "23.1.5", "-fno-builtin-strlcat -fno-builtin-strlcpy", wrapper, sizeof(wrapper), trampoline,
-                                               sizeof(trampoline), folder, sizeof(folder));
+    const bool written = clang_release_wrapper(directory, clang, "Ubuntu clang version 23.1.6 (fake)", "-fno-builtin-strlcat -fno-builtin-strlcpy", wrapper,
+                                               sizeof(wrapper), trampoline, sizeof(trampoline), folder, sizeof(folder));
     check_test_expect(test, written, "library release: the fake clang is written");
     char version[64] = "";
-    // The wrapper isn't the reference: the check must say so with both releases, which enables the release's known
+    // The wrapper isn't the reference: the check must say so with both builds, which enables the build's known
     // differences below.
-    const bool detected = written && !clang_reference_report(wrapper, version, sizeof(version)) && strcmp(version, "23.1.5") == 0;
-    check_test_expect(test, detected, "library release: the fake clang reports 23.1.5 to the reference check");
+    const bool detected = written && !clang_reference_report(wrapper, version, sizeof(version)) && strcmp(version, "Ubuntu 23.1.6") == 0;
+    check_test_expect(test, detected, "library release: the fake clang reports Ubuntu 23.1.6 to the reference check");
     const bool reference = check_driver_clang_reference;
     char saved_version[sizeof(check_driver_clang_version)];
     memcpy(saved_version, check_driver_clang_version, sizeof(saved_version));

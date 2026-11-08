@@ -6,7 +6,7 @@
 // --functions, 200) with -c and the options after `--` (the CI step's frozen headers and predefines; their paths
 // absolute, as the processes run in the program's directory), as whole processes of --executable (this compiler by
 // default), by each of --lanes' counts (1,2,4,8 by default), --runs times each (5 by default) after a warm-up, in
-// time-runs' rotated order (profile_time_runs, which prints each run and each count's medians). Then each count against
+// time-runs' order of a Williams design (profile_time_runs, which prints each run and each count's medians). Then each count against
 // the first's: how many times faster its wall time is, and how many times more system time it took. Lanes that
 // serialize on the kernel (#1128: the address space's lock, which arena reservations, commits and discards take) raise
 // the system time, where the wall time on a busy machine may hide it. Fails if a process fails or the program can't be

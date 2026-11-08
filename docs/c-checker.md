@@ -132,17 +132,20 @@ borrows the prior declaration's diagnostic fact, not its closed-block type.
 `-fno-builtin` and exact `-fno-builtin-NAME` options disable this treatment
 for plain library names, but do not disable explicit `__builtin_` spellings.
 `-fbuiltin` reverses the global disabling option; freestanding mode separately
-disables library builtins, matching the pinned Clang 23.1.4 oracle. That
-release's table has `strlcat` and `strlcpy` as GNU library builtins, in GNU
-C89's warning and GNU C99's and later modes' error alike; 23.1.5's table drops
-them, so the oracle compares `clang --version` with 23.1.4, prints both
-releases when they differ, and skips only the plain names the found release is
-known to classify differently (the named list `cbuiltin_library_table_differences`:
-23.1.5's `strlcat` and `strlcpy`), a difference no named release explains still
-failing. Calls of `strlcat` and `strlcpy` are plain calls in every mode, by
-both paths: neither is one of the plain names buster folds. A recognized
-library declaration can still be formed in C23 when its diagnostic is
-suppressed; an unknown C23 name cannot acquire the removed `int ()` fallback.
+disables library builtins, matching the pinned Clang 23.1.4 oracle. Its
+official build's table has `strlcat` and `strlcpy` as GNU library builtins, in
+GNU C89's warning and GNU C99's and later modes' error alike, as every upstream
+23.x release's does; Debian's and Ubuntu's clang packages (apt.llvm.org's too)
+drop them with `debian/patches/23-strlcpy_strlcat_warning_removed.diff`, so the
+oracle compares `clang --version` with 23.1.4's official build, prints both
+builds when they differ (`found Ubuntu 23.1.6`), and skips only the plain names
+the found build's vendor is known to classify differently (the named list
+`cbuiltin_library_table_differences`: Debian's and Ubuntu's `strlcat` and
+`strlcpy`), a difference no named build explains still failing. Calls of
+`strlcat` and `strlcpy` are plain calls in every mode, by both paths: neither
+is one of the plain names buster folds. A recognized library declaration can
+still be formed in C23 when its diagnostic is suppressed; an unknown C23 name
+cannot acquire the removed `int ()` fallback.
 
 `test-checker-driver --executable PATH` compares the original #804 fixtures
 against external Clang through syntax-only checking, object publication and
