@@ -3929,6 +3929,35 @@ do:
   (`CheckTagFrame.restart`), and an enum left with no enumerator is
   complete as `unsigned int`.
 
+Phase 3 covers statements after an error:
+
+- **Control errors.** A `break` or `continue` outside its loop is clang's
+  invalid statement: the reader recovers its report, so a second one is
+  reported too, and the unit takes the valid path above. `check_program`
+  writes no control entry for it.
+- **Flushed bodies.** Clang's `AnalysisBasedWarnings::IssueWarnings` runs at a
+  body's end. Once the unit has an error by then, it builds no CFG: the body
+  gets no analysis warning (`-Wreturn-type`, `-Wuninitialized`), and every
+  runtime-behavior warning it queued is given, reachable or not.
+  `check_driver_flushed_bodies` marks those bodies' tokens, by the first error's
+  publication position (`check_driver_first_error`, `-Wreturn-type`'s too).
+  In them `check_common_flush` evaluates every node but `sizeof`'s and
+  `_Alignof`'s operands: unreachable statements, a constant or decided
+  condition's other arm, short circuits and a static selection's other arms.
+  It is one pass after both paths' evaluation, so the twins stay identical.
+  A body before the error, and file scope, keep their reachability.
+- **Graph errors.** An expression's error no longer cuts the asm and control
+  diagnosis (`check_asms_diagnose`, `check_program_diagnose`) of statements
+  that don't read it; `complete` declines those that do. Clang checks each asm
+  operand even when another one of its statement is in error.
+
+Error-free units take none of this: the flushed marks need an error, the
+uninitialized pass reads them only when there are some, and the diagnose
+paths run only on a rejected unit. `c_check_statement_recovery_driver_test.c`,
+in the same section, compares its fixtures as above. The asm and control
+errors after a graph's error are compared by place and severity alone: those
+diagnose paths give one generic message, not clang's wording.
+
 The later phases are left:
 
 - **Invalid declarations.** Not covered by phase 2:
@@ -3937,10 +3966,11 @@ The later phases are left:
   - C23's incompatible tag redefinitions (above).
 
   These still stop the reader.
-- **Statements.** A second control error (`break`, then `continue`) still
-  isn't reported. Neither are the runtime warnings (`-Wshift-count-overflow`,
-  `-Wdivision-by-zero`) of any rejected unit, a unit with only a preprocessing
-  error included.
+- **Units with a graph's or a reader's error.** These, other than a recovered
+  one, still don't reach `check_program`. They get none of its diagnostics:
+  the common warnings, their runtime warnings included. The asm and control
+  diagnose paths give only the unit's first error, in generic words, and a
+  duplicate case has no "previous case" note on either path.
 - **Lanes.** Bodies don't carry their recovered reports; they fall back to
   source order instead.
 - **Shared `_Alignas`.** An `_Alignas` shared by several declarators gives its

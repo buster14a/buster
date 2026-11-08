@@ -1559,10 +1559,12 @@ static void check_driver_visibility_report(const Parser* parser, Preprocessor* p
     }
 }
 
-static void check_driver_return_reports(const Parser* parser, const Parser* original, Preprocessor* pp, const CheckProgram* program, CheckWarningSeverity baseline, bool quiet)
+// The publication position of the unit's first error so far, its phase's too (PP_DIAGNOSTIC_PHASE_COUNT a source position),
+// or UINT64_MAX: its preprocessor's records, the checker's reports published among them, and the original parse's errors.
+static uint64_t check_driver_first_error(const Parser* original, const Preprocessor* pp)
 {
     uint64_t first_error = UINT64_MAX;
-    for (const PPDiagnosticRecord* record = pp->diagnostic_first; !quiet && record != NULL && pp->errors != 0; record = record->next)
+    for (const PPDiagnosticRecord* record = pp->diagnostic_first; record != NULL && pp->errors != 0; record = record->next)
     {
         if (record->severity == PP_SEVERITY_ERROR || record->severity == PP_SEVERITY_FATAL || record->severity == PP_SEVERITY_DEFERRED_ERROR)
         {
@@ -1571,7 +1573,7 @@ static void check_driver_return_reports(const Parser* parser, const Parser* orig
             first_error = position < first_error ? position : first_error;
         }
     }
-    for (uint32_t i = 0; !quiet && i < original->diagnostic_count; i += 1)
+    for (uint32_t i = 0; i < original->diagnostic_count; i += 1)
     {
         const ParseDiagnostic* diagnostic = original->diagnostics + i;
         if (diagnostic->error)
@@ -1581,6 +1583,53 @@ static void check_driver_return_reports(const Parser* parser, const Parser* orig
             first_error = position < first_error ? position : first_error;
         }
     }
+    return first_error;
+}
+
+// Whether clang ends the body whose `}` is `close` after the unit's first error (`first_error`, check_driver_first_error):
+// its AnalysisBasedWarnings::IssueWarnings, at the body's end, where -Wreturn-type's place is, then finds an uncompilable
+// error, builds no CFG and gives no analysis warning (-Wreturn-type, -Wuninitialized), but every runtime-behavior one the
+// body queued (#1447's semantic recovery, phase 3, check_common_flush).
+static bool check_driver_body_flushed(const Parser* original, Preprocessor* pp, uint32_t close, uint64_t first_error)
+{
+    const uint32_t publication = check_driver_publication_position(original, pp, close + 1u, pp->output.count);
+    return (uint64_t)publication * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_RETURN >= first_error;
+}
+
+// The tokens of the program's bodies clang ends after the unit's first error (check_driver_body_flushed), from each one's
+// `{` to its `}`, in `scratch`; or null: in a unit with no error, or no such body, which is every error-free unit's case and
+// costs it nothing past the preprocessor's error count and the original parse's.
+static const uint8_t* check_driver_flushed_bodies(const Parser* parser, const Parser* original, Preprocessor* pp, const CheckProgram* program,
+                                                  Arena* scratch)
+{
+    const uint64_t first_error = pp->errors != 0 || original->diagnostic_count != 0 ? check_driver_first_error(original, pp) : UINT64_MAX;
+    uint8_t* flushed = NULL;
+    for (uint32_t b = 0; first_error != UINT64_MAX && b < program->body_count; b += 1)
+    {
+        const uint32_t opening = program->bodies[b].opening;
+        const uint32_t close = opening < parser->tokens.count ? parser->tree.parents[opening] : BUSTER_CHECK_NONE;
+        if (close < parser->tokens.count && close > opening && check_driver_body_flushed(original, pp, close, first_error))
+        {
+            if (flushed == NULL)
+            {
+                flushed = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, parser->tokens.count);
+                if (flushed != NULL)
+                {
+                    memset(flushed, 0, parser->tokens.count);
+                }
+            }
+            if (flushed != NULL)
+            {
+                memset(flushed + opening, 1, (uint64_t)close - opening + 1);
+            }
+        }
+    }
+    return flushed;
+}
+
+static void check_driver_return_reports(const Parser* parser, const Parser* original, Preprocessor* pp, const CheckProgram* program, CheckWarningSeverity baseline, bool quiet)
+{
+    const uint64_t first_error = quiet ? UINT64_MAX : check_driver_first_error(original, pp);
     for (uint32_t b = 0; !quiet && !pp->fatal && b < program->body_count; b += 1)
     {
         const CheckProgramBody* body = program->bodies + b;
@@ -6173,7 +6222,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         check_driver_return_reports(checking, recovered, pp, &program, baseline, quiet);
                         if (!quiet)
                         {
-                            check_driver_common_warnings(checking, pp, &input, &stream, &types, &program, &shift_warnings, scratch);
+                            // (The scratch's flushed marks go with the common warnings' own, which give it back past them.)
+                            const uint64_t flushed_mark = scratch->length;
+                            const uint8_t* flushed = check_driver_flushed_bodies(checking, recovered, pp, &program, scratch);
+                            check_driver_common_warnings(checking, pp, &input, &stream, &types, &program, flushed, &shift_warnings, scratch);
+                            arena_pop_to(scratch, flushed_mark);
                         }
                     }
                     result = pp->errors != 0 ? 1 : result;

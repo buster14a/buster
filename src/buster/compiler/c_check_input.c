@@ -10294,6 +10294,10 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                     if (!reader->output->resource && reader->output->report_count > first)
                     {
                         reader->output->reports[first].completion = i + 1u;
+                        // Clang's statement is invalid and the rest of the body and unit are checked (#1447's semantic
+                        // recovery, phase 3): the error moves to the recovered reports, so that it doesn't stop the reader
+                        // and a later one (a `continue` after a `break`) is reported too.
+                        check_input_recover_reports(reader, first);
                     }
                 }
                 reader->ignored[i] = true;
