@@ -1723,14 +1723,16 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
     },
     {
         // Clang's Sema gives -Wself-assign as it builds each assignment, so it sorts among the statement's other warnings
-        // by place, in unreachable code and in a conditional's or a _Generic's unselected arm too.
+        // by place, in unreachable code and in a conditional's or a _Generic's unselected arm too, and before the condition's
+        // -Wparentheses at one assignment; types other than int's are spelled.
         .name = "self-assignments in source order among other warnings",
         .source = "void f(int x) { x = x; if (x); }\nvoid g(int x) { x = x; int y = 1 << 40; (void)y; }\n"
                   "void h(int x) { if (0) x = x; return; x = x; }\nvoid k(int x) { x = x; if (x); int y = 0 ? (x = x) : 1; (void)y; }\n"
-                  "int m(int x) { return (x = x) + _Generic(x, int: 1, default: (x = x)); }\n",
+                  "int m(int x) { return (x = x) + _Generic(x, int: 1, default: (x = x)); }\n"
+                  "float fl(float x) { x = x; return x; }\nint *pt(int *p) { p = p; return p; }\nvoid q(int x) { if (x = x) return; }\n",
         .options = { "-Wself-assign" },
-        .warnings = 11,
-        .notes = 2,
+        .warnings = 15,
+        .notes = 4,
     },
 };
 

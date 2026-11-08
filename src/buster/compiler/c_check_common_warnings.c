@@ -2080,7 +2080,8 @@ static void check_common_self_assigns(const Parser* parser, Preprocessor* pp, co
                 !check_common_from_macro(parser, pp, graph->tokens[graph->operand0[node]]) &&
                 !check_common_from_macro(parser, pp, graph->tokens[graph->operand1[node]]))
             {
-                const uint64_t mark = scratch->length;
+                // (No mark around it: the type's spelling and the unevaluated contexts' memo, which these build lazily, are the
+                // passes', which check_driver_common_warnings gives back after them.)
                 const String8 type_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, left_value.type, 0);
                 if (type_name.length != 0)
                 {
@@ -2089,7 +2090,6 @@ static void check_common_self_assigns(const Parser* parser, Preprocessor* pp, co
                     check_common_report_evaluated(parser, pp, input, token, token, PP_DIAGNOSTIC_SEMANTIC, CHECK_WARNING_ID_SELF_ASSIGN, true, message,
                                                   NULL, 0, scratch);
                 }
-                arena_pop_to(scratch, mark);
             }
         }
     }
@@ -8613,7 +8613,6 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
         .uninitialized = check_common_enabled(pp, input, CHECK_WARNING_ID_UNINITIALIZED, true) ||
                          check_common_enabled(pp, input, CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER, true),
     };
-    check_common_parentheses(parser, pp, input, stream, types, scratch);
     check_common_empty_bodies(parser, pp, input, scratch);
     check_common_dangling_else(parser, pp, input, scratch);
     check_common_switches(parser, pp, input, stream, types, &spell, program, scratch);
@@ -8622,7 +8621,10 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     {
         check_common_exhausted(pp);
     }
+    // At one assignment, clang's -Wself-assign is given as Sema builds it, before the condition that reads it gives
+    // -Wparentheses.
     check_common_self_assigns(parser, pp, input, stream, types, &spell, &facts, scratch);
+    check_common_parentheses(parser, pp, input, stream, types, scratch);
     check_common_graph_warnings(parser, pp, input, stream, types, &spell, &facts, program, shifts, scratch);
     check_common_return_stack(parser, pp, input, stream, types, scratch);
     if (enabled.uninitialized)
