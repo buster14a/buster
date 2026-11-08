@@ -26,7 +26,8 @@ static void check_test_cached_ancestors(CheckTest* test)
             const uint32_t draw = check_test_random(test);
             original[token] = draw % (size + 2);
             roles[token] = draw % 7 == 0 ? PARSE_ROLE_TERMINATOR : draw % 7 == 1 ? PARSE_ROLE_CLOSE_BLOCK :
-                           draw % 7 == 2 ? PARSE_ROLE_CLOSE_BODY : draw % 7 == 3 ? PARSE_ROLE_CLOSE_COMPOUND_BODY : PARSE_ROLE_CLOSE_STRUCT;
+                           draw % 7 == 2 ? PARSE_ROLE_CLOSE_BODY : draw % 7 == 3 ? PARSE_ROLE_CLOSE_COMPOUND_BODY :
+                           draw % 7 == 4 ? PARSE_ROLE_CLOSE_FOR : PARSE_ROLE_CLOSE_STRUCT;
         }
         for (uint32_t scope = 0; scope < 2; scope += 1)
         {
@@ -41,7 +42,7 @@ static void check_test_cached_ancestors(CheckTest* test)
                 {
                     seen[at] = true;
                     const uint8_t role = roles[at];
-                    const bool match = scope ? role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_COMPOUND_BODY :
+                    const bool match = scope ? role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_COMPOUND_BODY || role == PARSE_ROLE_CLOSE_FOR :
                                                role == PARSE_ROLE_TERMINATOR;
                     if (match)
                     {
@@ -146,6 +147,11 @@ static void check_test_warning_reader(CheckTest* test)
         { "int*p;int f(void){return sizeof(p<2);}\n", CHECK_WARNING_ID_ORDERED_POINTER_INTEGER, 1 },
         { "void f(int n){int a=1,b=2;{struct S{int m;} x={3},y={4};}for(int i=0,j=0;i<n;i++){} }\n", CHECK_WARNING_ID_UNUSED_VARIABLE, 5 },
         { "static int a=1,b=2;void f(void){int x=3,y=4;{int z=5,w=6;}}\n", CHECK_WARNING_ID_UNUSED_VARIABLE, 6 },
+        { "void f(void){for(int j;;)break;}\n", CHECK_WARNING_ID_UNUSED_VARIABLE, 1 },
+        { "void f(int n){for(int j;;)if(n)break;else continue;}\n", CHECK_WARNING_ID_UNUSED_VARIABLE, 1 },
+        { "void f(int n){for(int i;;)for(int j;;){if(n)break;}}\n", CHECK_WARNING_ID_UNUSED_VARIABLE, 2 },
+        { "void f(void){for(int j;;)do{break;}while(0);}\n", CHECK_WARNING_ID_UNUSED_VARIABLE, 1 },
+        { "void f(void){for(int j=({int k;0;});;)break;}\n", CHECK_WARNING_ID_UNUSED_VARIABLE, 2 },
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
@@ -184,6 +190,7 @@ static void check_test_warning_reader(CheckTest* test)
                     if (cases[c].id == CHECK_WARNING_ID_UNUSED_VARIABLE)
                     {
                         uint32_t expected = BUSTER_CHECK_NONE;
+                        uint32_t for_scope = BUSTER_CHECK_WARNING_NO_SOURCE;
                         const bool local = check_sparse_get(input.declaration_bodies, event->token) < parser.tokens.count;
                         for (uint32_t at = event->token, steps = 0; local && at < parser.tokens.count && steps < parser.tokens.count; steps += 1)
                         {
@@ -194,14 +201,26 @@ static void check_test_warning_reader(CheckTest* test)
                             }
                             at = parent;
                             const uint8_t role = parser.tree.roles[at];
-                            if (role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_COMPOUND_BODY)
+                            if (role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_COMPOUND_BODY || role == PARSE_ROLE_CLOSE_FOR)
                             {
                                 expected = at;
+                                for_scope = role == PARSE_ROLE_CLOSE_FOR ? at : BUSTER_CHECK_WARNING_NO_SOURCE;
                                 break;
                             }
                         }
+                        // Independent of the reader's subtree-end column: the final descendant belongs to the whole
+                        // loop, including an unbraced control's else/while tail, not merely its header or first brace.
+                        for (uint32_t token = for_scope < parser.tokens.count ? for_scope + 1 : parser.tokens.count; token < parser.tokens.count; token += 1)
+                        {
+                            uint32_t ancestor = token;
+                            for (uint32_t steps = 0; ancestor < parser.tokens.count && ancestor != for_scope && steps < parser.tokens.count; steps += 1)
+                            {
+                                ancestor = parser.tree.parents[ancestor];
+                            }
+                            expected = ancestor == for_scope ? token : expected;
+                        }
                         completions &= event->completion == expected && event->completion_kind ==
-                            (expected < parser.tokens.count ? CHECK_WARNING_COMPLETE_AFTER_DELIMITER : CHECK_WARNING_COMPLETE_TU_END);
+                            (expected < parser.tokens.count ? CHECK_WARNING_COMPLETE_AFTER_DELIMITER : CHECK_WARNING_COMPLETE_TU_END) && event->payload.token == for_scope;
                     }
                 }
             }

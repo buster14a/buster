@@ -527,11 +527,36 @@ static void check_test_real_nan_actions(CheckTest* test, TypeTable* table)
     }
 }
 
+// A narrower NaN's top-aligned payload cannot be held in the compact quad representation. Never emit
+// a folded quad with misplaced payload bits or an unquieted signaling NaN.
+static void check_test_quad_narrow_nan_refusal(CheckTest* test, TypeTable* table)
+{
+    const TypeId formats[] = { BUSTER_TYPE_FLOAT16, BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_LONG_DOUBLE };
+    const CheckOp operations[] = { CHECK_OP_CAST, CHECK_OP_INITIALIZE };
+    const long double values[] = { __builtin_nanl("1"), -__builtin_nansl(""), __builtin_nanl("0x1234") };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(formats); i += 1)
+    {
+        for (uint32_t j = 0; j < BUSTER_ARRAY_LENGTH(operations); j += 1)
+        {
+            for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(values); k += 1)
+            {
+                const CheckAction action = { .op = operations[j], .operands = { check_test_float(formats[i], values[k]) },
+                                             .type = BUSTER_TYPE_FLOAT128 };
+                const CheckActionResult result = check_test_action(test, table, action);
+                check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.fault == CHECK_FAULT_UNSUPPORTED_CONSTANT &&
+                                       result.value.constant_kind == CHECK_CONSTANT_NONE,
+                                  "narrow NaN to quad refuses an unrepresentable folded payload");
+            }
+        }
+    }
+}
+
 static __attribute__((noinline)) void check_test_fp_actions(CheckTest* test, TypeTable* table)
 {
     check_test_pragma_extensions(test);
     check_test_fp_action_guards(test, table);
     check_test_fp_action_values(test, table);
+    check_test_quad_narrow_nan_refusal(test, table);
     check_test_half_encodings(test);
     check_test_half_constant_actions(test, table);
     check_test_half_constant_graph(test, table);

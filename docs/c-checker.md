@@ -3252,10 +3252,17 @@ What the lowering covers past scalars (#145's programs):
   folds it to a constant zero of its type where its operand has no effect
   (`check_lower_quad_constant` writes a folded constant's bits), and after the
   operand where it has (`check_lower_aggregate_zero`).
-  The checker folds no `__float128` constant (`check_action_float_supported`):
-  a static one with an initializer is refused as not constant, and the `q`
-  suffix's literals as invalid. An increment or a decrement (#147) is
-  `__addtf3`'s or `__subtf3`'s of a constant 1.0, as clang -O0's is
+  The checker folds a `__float128` constant where its value survives the long
+  double storage exactly: a `q`/`Q` literal whose binary128 rounding is exact
+  in long double (the literal reader's rule), and an integer or narrower
+  floating constant whose conversion is exact. A static one with such an
+  initializer is written as 16 binary128 bytes; a value that would round
+  through long double, such as `0.1Q` or a 128-bit integer with more than 64
+  significant bits, is still refused as not constant. Narrower-format NaNs
+  converted to `__float128` are also refused as constants: the current compact
+  representation cannot preserve their widened payloads. An increment or a
+  decrement (#147) is `__addtf3`'s or `__subtf3`'s of a constant 1.0, as clang
+  -O0's is
   (`check_lower_quad_update_emit`, a postfix one's value a copy of the object
   before it). `test-checker`'s `float128` program, against clang -O0's build of
   it, has each of them, clean under clang's UBSan on every input.
@@ -3903,15 +3910,44 @@ definition is here", where the error used to read "conflicting declaration":
 - `CHECK_REDECLARATION_KIND`: "redefinition of 'X' as different kind of
   symbol".
 
+Thread-local redeclarations use the same type and linkage precedence (#1784):
+an incompatible object type is reported even when thread-local storage also
+differs, followed by static/non-static linkage conflicts and duplicate local
+declarations. Otherwise a storage mismatch says "thread-local declaration of
+'X' follows non-thread-local declaration", or its reverse. That diagnostic
+notes the visible prior declaration, with its declaration/definition note;
+object type conflicts still note the latest prior declaration of the entity,
+including one from another block. The checks that reject and recover the
+declaration are unchanged. The semantic-recovery fixtures cover both storage
+directions, extern and static combinations, and subsequent declarations and
+uses under the same Clang comparison matrix.
+The distinct recovery behavior of a TLS-only mismatch is tracked in
+[#1786](https://github.com/buster14a/buster/issues/1786): Clang keeps that
+declaration in its chain, while the reader currently drops it. This diagnostic
+fix does not claim parity for subsequent conflicts of that same entity or a
+second initializer diagnostic on an already-defined object.
+
 `check_driver_rejected_warnings` follows clang's `ActOnPopScope`: a scope in
 which an error occurred gives no unused-variable warning, nested scopes'
-errors included. Its extent runs from the scope's `{` to its `}`, or, for a
-function body, from the definition's start, since clang's
+errors included. Its extent runs from the scope's `{` to its `}`, from a
+for initializer's opening parenthesis through the whole loop statement, or,
+for a function body, from the definition's start, since clang's
 `ActOnStartOfFunctionDef` handles the definition's declarator inside the
 body's scope. Unused parameters are still warned. A per-token prefix count of
 the unit's error reports answers each scope's question in constant time, and
 only a unit with errors builds it.
 
+For-initializer warnings retain the header's closing parenthesis as a scope
+anchor and the parser subtree's final token as their completion (#1784).
+An error after the loop therefore cannot suppress its warning; an error inside
+the loop can. Nested loops and a loop's braced body can finish at the same
+token, so from the first unused for initializer the reader stages its remaining
+unused warnings privately and stably orders their scope anchors from inner to
+outer with the existing binding radix sort. Declaration order within a scope
+and preprocessing lookahead order remain intact. Units without an unused for
+initializer allocate no staging buffer. Reader and Clang differential fixtures
+cover braced/unbraced bodies, nested loops, if/else and do/while tails, statement
+expressions, shared completion tokens and errors before, inside and after a loop.
 Two more redefinitions recover as clang's `ActOnTag` and `ActOnEnumConstant`
 do:
 

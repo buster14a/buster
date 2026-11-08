@@ -33,6 +33,11 @@ static __attribute__((noinline)) void check_test_float_constant_sources(CheckTes
           .source = "static const __float128 q[] = { __builtin_inff128(), -__builtin_nanf128(\"5\"), __builtin_nansf128(\"\") };\n"
                     "static _Float16 h = __builtin_nansf16(\"1\");\nstruct S { double d; __float128 q; _Float16 h; } s = { __builtin_nans(\"\"), "
                     "__builtin_huge_valf128(), __builtin_inff16() };\nconst __float128* p = q;\n" },
+        { .name = "float constants: exact __float128 initializers",
+          .source = "static __float128 a = 0;\nstatic __float128 b = 1.5;\nstatic __float128 c = 1.5q;\n"
+                    "static __float128 d = 0.1;\nstatic __float128 e = 1.5L;\nstatic __float128 f = 18446744073709551615ULL;\n"
+                    "static __float128 g = (__int128)1 << 100;\n"
+                    "int tested(void){return (int)(a+b+c+d+e+(f!=0)+(g!=0));}\n" },
         { .name = "float constants: an integer's payload", .source = "double f(void)\n{\nreturn __builtin_nans(1);\n}\n", .rejected = true },
         { .name = "float constants: nansf16 without its payload", .source = "_Float16 f(void)\n{\nreturn __builtin_nansf16();\n}\n",
           .rejected = true },
@@ -105,6 +110,18 @@ static const struct
       "int tested(int n){unsigned x=2166136261u;x=hash(x,d,sizeof d);x=hash(x,f,sizeof f);x=hash(x,h,sizeof h);x=hash(x,q,sizeof q);"
       "for(unsigned i=0;i<sizeof l/sizeof*l;i++)x=hash(x,&l[i],10);x=hash(x,&s.d,8);x=hash(x,&s.q,16);x=hash(x,&s.h,2);x=hash(x,&s.f,4);"
       "return (int)(x^(unsigned)n);}" },
+    { "float-constants-quad-initializers",
+      BUSTER_CHECK_TEST_FLOAT_CONSTANTS_HASH
+      "static __float128 q[]={0,1.5,-1.5,1.5q,1.5Q,0.1,0.1f,1.5L,18446744073709551615ULL,-9223372036854775807LL,(__int128)1<<100};"
+      "int tested(int n){unsigned x=2166136261u;x=hash(x,q,sizeof q);return (int)(x^(unsigned)n);}" },
+    // Narrow NaNs are not folded into the compact quad representation. Runtime conversion must still
+    // quiet signaling inputs and put their payloads in the target format's high fraction bits.
+    { "float-constants-narrow-nan-to-quad-runtime",
+      BUSTER_CHECK_TEST_FLOAT_CONSTANTS_HASH
+      "__float128 f(int n){switch(n&3){case 0:return (__float128)__builtin_nans(\"\");"
+      "case 1:return (__float128)__builtin_nan(\"1\");case 2:return (__float128)-__builtin_nansf(\"\");"
+      "default:return (__float128)__builtin_nanl(\"0x1234\");}}"
+      "int tested(int n){__float128 q=f(n);return (int)hash(2166136261u,&q,sizeof q);}" },
     { "float-constants-in-code",
       BUSTER_CHECK_TEST_FLOAT_CONSTANTS_HASH
       "int tested(int n){unsigned x=2166136261u;int k=n&3;"

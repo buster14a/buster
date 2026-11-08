@@ -84,6 +84,13 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
         {
             result = check_warning_text(scratch, "redefinition of '%.*s' as different kind of symbol", (int)name.length, name.pointer);
         }
+        else if (report->detail == CHECK_REDECLARATION_THREAD_LOCAL || report->detail == CHECK_REDECLARATION_NON_THREAD_LOCAL)
+        {
+            const char* format = report->detail == CHECK_REDECLARATION_THREAD_LOCAL ?
+                                 "thread-local declaration of '%.*s' follows non-thread-local declaration" :
+                                 "non-thread-local declaration of '%.*s' follows thread-local declaration";
+            result = check_warning_text(scratch, format, (int)name.length, name.pointer);
+        }
         else if (report->detail > CHECK_REDECLARATION_GENERIC && report->detail <= CHECK_REDECLARATION_NON_STATIC)
         {
             const char* format = report->detail == CHECK_REDECLARATION_FUNCTION_TYPE ? "conflicting types for '%.*s'" :
