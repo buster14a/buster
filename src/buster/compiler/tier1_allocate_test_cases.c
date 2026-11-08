@@ -78,7 +78,8 @@ static bool tier1_allocation_test_occupancy(const Tier1AllocationInput* input, c
 
 static bool tier1_allocation_test_equal(const Tier1AllocationInput* input, const Tier1Allocation* a, const Tier1Allocation* b)
 {
-    bool same = a->fragment_count == b->fragment_count && a->spill_count == b->spill_count && a->vector_intervals == b->vector_intervals && a->scalar_intervals == b->scalar_intervals;
+    bool same = a->fragment_count == b->fragment_count && a->interval_count == b->interval_count && a->spill_count == b->spill_count && a->splits == b->splits &&
+                a->vector_intervals == b->vector_intervals && a->scalar_intervals == b->scalar_intervals && memcmp(a->peak_pressure, b->peak_pressure, sizeof(a->peak_pressure)) == 0;
     if (same)
     {
         same = memcmp(a->fragment_offsets, b->fragment_offsets, ((uint64_t)input->count + 1) * 4) == 0 && memcmp(a->starts, b->starts, (uint64_t)a->fragment_count * 4) == 0 && memcmp(a->ends, b->ends, (uint64_t)a->fragment_count * 4) == 0;
@@ -208,20 +209,24 @@ static void tier1_allocation_test_generated(Tier1AllocationTestTally* tally, Are
         };
         Tier1Allocation vector = { 0 };
         Tier1Allocation scalar = { 0 };
+        Tier1Allocation scan = { 0 };
         Tier1Allocation again = { 0 };
         const Tier1AllocationError vector_error = tier1_allocate(&input, arena, &vector);
         const Tier1AllocationError scalar_error = tier1_allocate_scalar(&input, arena, &scalar);
+        const Tier1AllocationError scan_error = tier1_allocate_scan_reference(&input, arena, &scan);
         const Tier1AllocationError again_error = tier1_allocate(&input, arena, &again);
-        const bool produced = vector_error == TIER1_ALLOCATION_OK && scalar_error == TIER1_ALLOCATION_OK && again_error == TIER1_ALLOCATION_OK;
-        tier1_allocation_test_expect(tally, produced || (input.use_required != 0 && vector_error == TIER1_ALLOCATION_CONSTRAINT && scalar_error == vector_error && again_error == vector_error), "generated allocation or explicit simultaneous-use conflict");
+        const bool produced = vector_error == TIER1_ALLOCATION_OK && scalar_error == TIER1_ALLOCATION_OK && scan_error == TIER1_ALLOCATION_OK && again_error == TIER1_ALLOCATION_OK;
+        tier1_allocation_test_expect(tally, produced || (input.use_required != 0 && vector_error == TIER1_ALLOCATION_CONSTRAINT && scalar_error == vector_error && scan_error == vector_error && again_error == vector_error), "generated allocation or explicit simultaneous-use conflict");
         if (produced)
         {
-            tier1_allocation_test_expect(tally, tier1_allocation_verify(&input, &vector) && tier1_allocation_verify(&input, &scalar), "independent interval verifier");
-            tier1_allocation_test_expect(tally, tier1_allocation_test_occupancy(&input, &vector) && tier1_allocation_test_occupancy(&input, &scalar), "position occupancy oracle");
+            tier1_allocation_test_expect(tally, tier1_allocation_verify(&input, &vector) && tier1_allocation_verify(&input, &scalar) && tier1_allocation_verify(&input, &scan), "independent interval verifier");
+            tier1_allocation_test_expect(tally, tier1_allocation_test_occupancy(&input, &vector) && tier1_allocation_test_occupancy(&input, &scalar) && tier1_allocation_test_occupancy(&input, &scan), "position occupancy oracle");
+            tier1_allocation_test_expect(tally, tier1_allocation_test_equal(&input, &vector, &scalar), "host paths choose identical fragments, registers and spills");
             tier1_allocation_test_expect(tally, tier1_allocation_test_equal(&input, &vector, &again), "deterministic repeat");
             tier1_allocation_test_expect(tally, vector.vector_intervals + vector.scalar_intervals == count, "fallback accounting");
+            tier1_allocation_test_expect(tally, scan.vector_intervals == 0 && scan.scalar_intervals == count, "the independent reference always uses the scan");
             // Without fixed ranges every interval has its class's full mask, so a class that fits is colored.
-            for (uint32_t class = 0; BUSTER_HOST_VECTOR && !constrained && class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
+            for (uint32_t class = 0; !constrained && class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
             {
                 uint8_t reference[96];
                 if (tier1_allocation_test_levels(&input, class, reference))
@@ -237,9 +242,7 @@ static void tier1_allocation_test_generated(Tier1AllocationTestTally* tally, Are
             }
             if (sparse)
             {
-                tier1_allocation_test_expect(tally, vector.spill_count == 0 &&
-                                                    vector.vector_intervals == (BUSTER_HOST_VECTOR ? count : 0) &&
-                                                    vector.scalar_intervals == (BUSTER_HOST_VECTOR ? 0 : count), "pressure-fitting reuse chains");
+                tier1_allocation_test_expect(tally, vector.spill_count == 0 && vector.vector_intervals == count && vector.scalar_intervals == 0, "pressure-fitting reuse chains");
             }
         }
         arena_pop_to(arena, saved);
@@ -433,7 +436,7 @@ static void tier1_allocation_test_fixed_sparse(Tier1AllocationTestTally* tally, 
     };
     Tier1Allocation output = { 0 };
     valid = valid && tier1_allocate(&input, arena, &output) == TIER1_ALLOCATION_OK &&
-            output.vector_intervals == (BUSTER_HOST_VECTOR ? count : 0) && output.scalar_intervals == (BUSTER_HOST_VECTOR ? 0 : count) &&
+            output.vector_intervals == count && output.scalar_intervals == 0 &&
             output.spill_count == 0 && output.fragment_count == count;
     for (uint32_t i = 0; valid && i < count; i += 1)
     {

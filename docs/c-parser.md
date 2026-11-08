@@ -9,6 +9,13 @@ didn't have, which lets the vector path take only code the scalar parser would
 accept with the same tree. `compiler file.c` runs the preprocessor and the
 parser; nothing is written yet.
 
+The default uses the vector path only on hosts with the full vector instruction
+set. Other host builds and `--scalar` use the scalar parser directly, without
+the vector protocol's workspaces or fallback pass (#1369). The kernel twins
+remain test and benchmark entry points. A vector fallback that requests a
+whole-unit retry still resets the typedef meanings before the scalar parse;
+a directly selected scalar parse prepares them only once.
+
 Salter's [operator fragments](c-parser-fragments.md), the alternative output
 that #104–#107 measured end to end against the postorder, read beside the
 checker's tree walk, lost: the parser keeps the postorder.

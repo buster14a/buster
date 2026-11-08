@@ -5,7 +5,8 @@
 // its liveness adapter supplies half-open ranges in loop-contiguous machine order. This is not a second IR.
 // tier1_allocate builds position events, colors unrestricted classes by LIFO reuse in event order (each start takes
 // the register of the most recent end at its pressure level), and defers constrained or overfull classes to
-// tier1_allocate_scan. The scalar twin always uses that scan.
+// tier1_allocate_scan. The scalar production twin uses the same assignment policy with scalar fixed-range filtering;
+// tier1_allocate_scan_reference retains the independent scan for tests. Host ISA changes kernels, not register choices.
 // tier1_allocation_verify independently checks fragments, interference and fixed ranges. tier1_resolve_moves orders
 // edge/phi assignments, breaking cycles with a caller-reserved location. No function emits spill machine code.
 //
@@ -684,7 +685,9 @@ static bool tier1_allocation_filter_fixed(const Tier1AllocationInput* input, Are
 
 // The allocator, compiled twice (tier1_allocate_impl): `hinted`, a constant, says whether the input has hint_values.
 // Without them the body has no hint code at all, so that an input without hints runs the code it ran before them.
-static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate_body(const Tier1AllocationInput* input, Arena* arena, bool vector, bool hinted, Tier1Allocation* result)
+// Both production paths color regular classes; `color` is false only for the independent scan reference. The production
+// class-event column is eight temporary bytes per interval on either host, independent of `vector`'s filtering kernels.
+static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate_body(const Tier1AllocationInput* input, Arena* arena, bool vector, bool color, bool hinted, Tier1Allocation* result)
 {
     (void)vector;
 
@@ -754,7 +757,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
                 error = TIER1_ALLOCATION_CAPACITY;
             }
         }
-        if (error == TIER1_ALLOCATION_OK && BUSTER_VECTOR_PATH(vector))
+        if (error == TIER1_ALLOCATION_OK && color)
         {
             class_events = arena_push_array(arena, (uint64_t)columns.count * 2, sizeof(uint32_t), 4);
             if (class_events == 0)
@@ -871,7 +874,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
         }
         for (uint32_t class = 0; error == TIER1_ALLOCATION_OK && class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
         {
-            bool regular = BUSTER_VECTOR_PATH(vector);
+            bool regular = color;
             uint32_t class_count = 0;
             uint32_t class_event_count = 0;
             int32_t live = 0;
@@ -894,7 +897,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
                     {
                         allocation.peak_pressure[class] = (uint32_t)live;
                     }
-                    if (BUSTER_VECTOR_PATH(vector))
+                    if (color)
                     {
                         class_events[class_event_count] = events[e];
                     }
@@ -1018,12 +1021,12 @@ static __attribute__((noinline)) Tier1AllocationError tier1_allocate_hinted(cons
     {
         valid = input->hint_values[i] == UINT32_MAX || input->hint_values[i] < input->value_count;
     }
-    return valid ? tier1_allocate_body(input, arena, vector, true, result) : TIER1_ALLOCATION_INVALID;
+    return valid ? tier1_allocate_body(input, arena, vector, true, true, result) : TIER1_ALLOCATION_INVALID;
 }
 
 static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1Allocation* result)
 {
-    return input != 0 && input->hint_values != 0 ? tier1_allocate_hinted(input, arena, vector, result) : tier1_allocate_body(input, arena, vector, false, result);
+    return input != 0 && input->hint_values != 0 ? tier1_allocate_hinted(input, arena, vector, result) : tier1_allocate_body(input, arena, vector, true, false, result);
 }
 
 static __attribute__((unused)) Tier1AllocationError tier1_allocate_scalar(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result);
@@ -1040,6 +1043,27 @@ static __attribute__((unused)) Tier1AllocationError tier1_allocate(const Tier1Al
 static __attribute__((unused)) Tier1AllocationError tier1_allocate_scalar(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result)
 {
     return tier1_allocate_impl(input, arena, false, result);
+}
+
+// The former scalar policy, independent of regular-class coloring: every class takes the constrained scan, and fixed
+// ranges use the scalar cross-product. Tests retain it as a validity oracle, not as a production host policy (#1395).
+static __attribute__((unused)) Tier1AllocationError tier1_allocate_scan_reference(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result)
+{
+    Tier1AllocationError error = TIER1_ALLOCATION_INVALID;
+    if (input != 0 && input->hint_values != 0)
+    {
+        bool valid = true;
+        for (uint32_t i = 0; valid && i < input->count && input->count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS; i += 1)
+        {
+            valid = input->hint_values[i] == UINT32_MAX || input->hint_values[i] < input->value_count;
+        }
+        error = valid ? tier1_allocate_body(input, arena, false, false, true, result) : TIER1_ALLOCATION_INVALID;
+    }
+    else
+    {
+        error = tier1_allocate_body(input, arena, false, false, false, result);
+    }
+    return error;
 }
 
 static __attribute__((unused)) bool tier1_allocation_location(const Tier1AllocationInput* input, const Tier1Allocation* allocation, uint32_t interval, uint32_t position, Tier1AllocationLocation* result)

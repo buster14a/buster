@@ -482,7 +482,7 @@ static CheckConditionBuild check_condition_build(CheckInputReader* reader, Check
     if (valid && attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF && check_input_attribute_argument(attribute, 2, &type_first, &type_end))
     {
         const uint32_t string = check_condition_string(parser, type_first, type_end);
-        valid = check_input_attribute_string(reader, string, type_end - (string - type_first), &type_text);
+        valid = check_input_attribute_string(reader, string, type_end - (string - type_first), false, &type_text);
         condition->kind = check_input_attribute_equal(type_text, "error") ? CHECK_CONDITION_ERROR : CHECK_CONDITION_WARNING;
     }
     // The names, a function parameter's first.
