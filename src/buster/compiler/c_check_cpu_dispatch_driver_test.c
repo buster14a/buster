@@ -291,6 +291,7 @@ static void check_test_cpu_dispatch_objects(CheckTest* test, const char* clang, 
         char* text = NULL;
         const bool compiled = check_test_driver_spawn(arguments, &text) == 0;
         free(text);
+        text = NULL;
         char* link[] = { (char*)clang, debug_object, "-o", debug_program, NULL };
         const bool linked = compiled && check_test_driver_spawn(link, &text) == 0;
         free(text);
