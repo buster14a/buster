@@ -55,6 +55,13 @@ static const CheckDriverDefaultWarningFixture check_driver_bitfield_fixtures[] =
         .warnings = 18,
     },
     {
+        .name = "an initializer's truncation stands at its value's grouping parenthesis",
+        .source = "struct S { int b : 3; int c : 3; };\nstruct S g1 = { (9) };\nstruct S g2 = { ((9)), (1 << 4) };\n"
+                  "struct S g3 = { .b = (9), .c = 9 };\nstruct T { struct S s; } g4 = { { (9) } };\nstruct S g5[2] = { [0 ... 1] = { (9) } };\n"
+                  "int f(void) { struct S l = (struct S){ (9), -(9) }; return l.b; }\nstruct S g6 = { -(9), (int)9 };\n",
+        .warnings = 12,
+    },
+    {
         .name = "initializers keep their ordinary constant conversions",
         .source = "struct S { unsigned char c : 4; signed char d : 2; signed char e : 8; int i : 3; unsigned char f : 8; };\n"
                   "struct S g = { 300, 200, 200, 9, 256 };\nvoid f(void) {\n    struct S t = { 300, 200, 200, 9, 256 };\n    (void)t;\n}\n",

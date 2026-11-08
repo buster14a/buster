@@ -4236,8 +4236,8 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
     const uint32_t end = check_common_sparse_get(input->initializer_ends, declaration);
     emission->at_once = end <= parser->tokens.count ? end : BUSTER_CHECK_NONE;
     // Its constants its bit-fields truncate (#1447): clang's CheckBitFieldInitialization's Diag, as each member is initialized,
-    // so in initializer order, before the full expression's conversions, at each value's first token, in unreachable code and
-    // unevaluated operands too.
+    // so in initializer order, before the full expression's conversions, at each value's first token (its grouping parenthesis,
+    // if any), in unreachable code and unevaluated operands too.
     for (uint32_t p = 0; p < plan->count && !pp->fatal; p += 1)
     {
         const CheckInitPart* part = plan->parts + p;
@@ -4248,7 +4248,7 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
             check_common_initializer_bitfield(input, stream, emission->types, part, &original, &truncated))
         {
             check_common_bitfield_warning(parser, pp, input, stream, emission->types, emission->spell, root, part->bit_width, original, truncated,
-                                          check_common_emission_subtree_start(emission, graph->tokens[root]), emission->at_once, true, emission->scratch);
+                                          part->token, emission->at_once, true, emission->scratch);
         }
     }
     for (uint32_t p = plan->count; p != 0 && !pp->fatal; p -= 1)
