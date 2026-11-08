@@ -106,14 +106,17 @@ must be exactly the expected one:
 - `branch-misses`: records mispredicted, predicted and neither, fields that
   aren't records, the load bias and the disassembly's instructions, and
   10,000 branches, which grow its table;
-- `ab`: the rotating order, and runs that succeed, fail and can't start, with
+- `ab`: the order of a Williams design (#1311) for 1 to 17 trees, each
+  tree at every place and after every other equally often over the period,
+  and runs that succeed, fail and can't start, with
   two argument lists, and through a lock (`env`) pinned to an allowed CPU.
 - `time-runs`: shell commands that log their order, which must be the
-  warm-ups' then each run's rotated one, statuses kept as the first warm-up's
+  warm-ups' then each run's row of the design, statuses kept as the first warm-up's
   (0 and 3), one that changes after it (a failure per run), and an executable
   that can't start; copies (#509) of scripts given as two builds of two
-  placements, which log their tags and paths: the slots' order, placement by
-  placement and build by build, then copy by copy, the copies' names, and
+  placements, which log their tags and paths: the warm-up in the slots'
+  order (placement by placement and build by build, then copy by copy), the
+  runs in the design's first two rows, the copies' names, and
   nothing left after the run, nor after a copy that fails; and the builds'
   comparison on values worked out by hand, with placements and copies,
   without either, and with more placements than the reference's.
@@ -123,7 +126,7 @@ ARGUMENT... [-- ARGUMENT...]...`, `time-runs [--runs N] [--warmups N]
 [--after-scalar MS] [--copies N] [--directory PATH] [--executable PATH |
 --build NAME PATH]... --list ARGUMENT... [--list ARGUMENT...]...` (whole
 processes of this executable, or of each build's placements, from fresh
-copies with `--copies`, in rotated order, with their wall time, rusage, peak
+copies with `--copies`, in a Williams design's order, with their wall time, rusage, peak
 resident set, page faults and user cycles and instructions, and the builds
 compared over their placements and copies; under `ab`), `hot-loops FUNCTION DISASSEMBLY SAMPLES
 [--loops N]`, `label-spills FUNCTION TAG INPUT.s OUTPUT.s`, `spill-report

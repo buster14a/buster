@@ -58,15 +58,16 @@ The noise sets which comparison to use.
   ```
 
   Each TREE is a checkout with its own `build/compiler` (or an executable), and each `--` starts an argument list. Every
-  round runs every list on every tree, the trees in an order that rotates by round, each run pinned to `--cpu` and
-  through `--lock`, which takes the lock for that run alone, so a CI job can take it between two runs; don't run `ab`
+  round runs every list on every tree, the trees in the order of a round of a Williams design (each follows each other
+  equally often over its period: n rounds for n trees when n is even, 2n when it is odd; #1311), each run pinned to
+  `--cpu` and through `--lock`, which takes the lock for that run alone, so a CI job can take it between two runs; don't run `ab`
   itself under the lock. The output is each run's, after a heading (`== round 3 tree ../mine config [...]`); it exits
   with status 1 if a run fails. For a small difference, time one loop (`--only`, about 0.1 s a run) over 15 rounds,
   and look at an outlier with `perf stat` before believing it.
 - **Whole drivers: `time-runs` under `ab`.** A change to a phase that a few percent of a compile takes has to show in
   the whole driver, a fresh process each time, startup, page faults and teardown included (#335). `time-runs` runs
-  this executable once per argument list in each run, the lists in an order that rotates by run, after one warm-up
-  each, and reports every process's wall time (fork to `wait4`), user and system time, peak resident set and page
+  this executable once per argument list in each run, the lists in the order of that run's row of a Williams design,
+  after one warm-up each, and reports every process's wall time (fork to `wait4`), user and system time, peak resident set and page
   faults, then each list's medians:
 
   ```sh
@@ -98,8 +99,10 @@ The noise sets which comparison to use.
   `--build NAME PATH`, the first build the reference, and `--copies N` runs each executable from N copies made fresh
   in a directory of their own (`--directory`, by default `$TMPDIR` or `/tmp`, tmpfs on the 9700X, so that nothing is
   written back while the runs are timed), each path the same length, so that `argv[0]` puts every process's stack at
-  the same offset (#445). Every run takes every build's placements and copies once, the builds alternating, in an
-  order that rotates by run, and each process's user cycles and instructions are counted from its exec, all its
+  the same offset (#445). Every run takes every build's placements and copies once, in the order of that run's row of
+  a Williams design over them all, so that each process follows every other build's as often as its own's (#1311: a
+  rotation, which kept one cyclic order, ran the merge after main 645 times out of 650, and main's prediction state
+  moved the floor by 1 to 2.4%), and each process's user cycles and instructions are counted from its exec, all its
   threads, as `perf stat` counts them:
 
   ```sh

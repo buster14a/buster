@@ -11,8 +11,9 @@
 // -o DIR/stages.o, whose report (c_check_clock.c) says where its time went; and with --reference, PATH on ARGUMENT...
 // -o DIR/reference.o (`tcc` with `-c ...`, say), a name without a slash looked up in PATH as a shell does; or with
 // --variant, this executable on OPTION ARGUMENT... -o DIR/reference.o (#172's `--variant --tier1-schedule=post`). The warm-ups run in that order, then `--runs` rounds (11) in an order
-// that rotates by round (profile_ab_tree's), so that no compile always follows the same one. Each process's wall time
-// is from fork to wait4's return. Its rusage peak includes pre-exec memory and can include waited descendants;
+// of a Williams design by round (profile_ab_tree's), so that each compile follows each other equally often. Each
+// process's wall time is from fork to wait4's return. Its rusage peak includes pre-exec memory and can include waited
+// descendants;
 // it is not an executable-only peak. Only --time-stages supplies a separate approximate post-exec RSS report.
 // It prints every run, each compile's medians with their ranges, what --time-stages costs (its median against the
 // default's), the default against the reference, and each stage's median, its range and its share of the median
