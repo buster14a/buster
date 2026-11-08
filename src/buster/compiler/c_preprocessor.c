@@ -1730,6 +1730,9 @@ typedef enum PPDiagnosticPhase
     // A declarator's completed type precedes declaration-attribute checks at the same parser boundary.
     PP_DIAGNOSTIC_TYPE,
     PP_DIAGNOSTIC_SEMANTIC,
+    // A file-scope declarator's queued runtime warnings (clang's DiagRuntimeBehavior outside a function): its shift
+    // counts and constant conversions, after its literal conversions at the same declarator end.
+    PP_DIAGNOSTIC_RUNTIME,
     PP_DIAGNOSTIC_PHASE_COUNT,
 } PPDiagnosticPhase;
 

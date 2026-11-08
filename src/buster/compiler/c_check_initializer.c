@@ -82,6 +82,10 @@ struct CheckInitializer
     // A value part whose source is floating (#147): the only plans whose literal conversions the common warnings read
     // (check_common_initializer_roots), so that they never visit the others' parts.
     bool floating_values;
+    // A value part whose integer constant its integer target holds as neither a signed nor an unsigned value, or whose
+    // conditional or comma may carry one (#1447, check_init_changed_integer): the other plans the common warnings read, for
+    // their constant conversions.
+    bool changed_integers;
 };
 
 static __attribute__((unused)) bool check_initializer_run(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
@@ -474,6 +478,49 @@ static CheckContext check_init_context(const CheckInitWalker* walker, uint32_t n
     return context;
 }
 
+// Whether a value part may change its integer constant's value in its conversion (#1447, -Wconstant-conversion): a
+// constant outside the range a narrower integer target holds, a superset of the common warnings' test
+// (check_common_conversion_changes), a conditional or a comma, whose arms carry the conversion, or a `<<` converted to _Bool.
+static bool check_init_changed_integer(const CheckInitWalker* walker, const CheckInitPart* part)
+{
+    const CheckStream* stream = walker->stream;
+    uint32_t source_width = 0;
+    uint32_t target_width = 0;
+    bool source_signed = false;
+    bool target_signed = false;
+    bool result = false;
+    if (part->kind == CHECK_INIT_VALUE && stream != NULL && part->node < stream->count &&
+        check_action_integer_type(walker->types, part->conversion.type, &target_width, &target_signed))
+    {
+        const CheckOp op = walker->graph != NULL && part->node < walker->graph->count ? walker->graph->ops[part->node] : CHECK_OP_COUNT;
+        const bool boolean = type_unqualified(type_strip_aligned(walker->types, part->conversion.type)) == BUSTER_TYPE_BOOL;
+        if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA || (boolean && op == CHECK_OP_SHIFT_LEFT))
+        {
+            // Arms carry the conversion; a `<<` converted to _Bool is DiagnoseIntInBoolContext's (#1447).
+            result = true;
+        }
+        else if (boolean)
+        {
+            result = false;
+        }
+        else if (check_stream_constant_kind(stream, part->node) == CHECK_CONSTANT_INTEGER &&
+                 check_action_integer_type(walker->types, check_stream_type(stream, part->node), &source_width, &source_signed) &&
+                 target_width < source_width && target_width < 128)
+        {
+            const CheckValue value = check_stream_value(stream, part->node);
+            const unsigned __int128 mask = check_action_mask(source_width);
+            const unsigned __int128 bits = value.integer & mask;
+            const bool negative = source_signed && source_width != 0 && ((bits >> (source_width - 1)) & 1) != 0;
+            const unsigned __int128 magnitude = negative ? (~bits & mask) + 1 : bits;
+            // Negative values down to -2^(w-1) fit either target; others up to 2^(w-1) - 1 a signed one and up to 2^w - 1 an
+            // unsigned one. Only an outside value may change.
+            const unsigned __int128 half = (unsigned __int128)1 << (target_width - 1);
+            result = negative ? magnitude > half : magnitude > (target_signed ? half - 1 : check_action_mask(target_width));
+        }
+    }
+    return result;
+}
+
 static void check_init_append(CheckInitWalker* walker, const CheckInitPart* part)
 {
     if (!walker->infer && walker->result->status == CHECK_INIT_OK)
@@ -493,6 +540,7 @@ static void check_init_append(CheckInitWalker* walker, const CheckInitPart* part
             walker->result->count += 1;
             walker->result->floating_values |= part->kind == CHECK_INIT_VALUE && walker->stream != NULL && part->node < walker->stream->count &&
                                                check_action_kind(walker->types, check_stream_type(walker->stream, part->node)) == BUSTER_TYPE_KIND_FLOATING;
+            walker->result->changed_integers |= check_init_changed_integer(walker, part);
         }
     }
 }

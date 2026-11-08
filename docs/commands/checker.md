@@ -232,6 +232,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   in an unselected statement expression. Retained runtime constant-fold warnings join the count traversal without being
   rendered or counted twice, preserving their order with new runtime warnings and discarded expressions;
   required-constant warnings and groups collected before a failed program keep their original publication.
+  `c_check_int_in_bool_driver_test.c` (#1447) compares clang's `-Wint-in-bool-context` and the
+  `-Wtautological-constant-compare` forms of a `<<` or a conditional converted to `_Bool` (`docs/c-checker.md`)
+  with complete pinned-Clang output at each policy, both paths and with `-c`.
   `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both
   shift directions, narrow promotions, 128-bit and bit-precise widths, compound assignments, side effects, macros
   and warning policy. The shared default-warning harness covers syntax checking and object publication through
