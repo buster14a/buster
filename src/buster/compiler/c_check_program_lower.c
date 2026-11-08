@@ -15512,6 +15512,8 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
         static const CheckLowerRuntime model[3] = { CHECK_LOWER_RUNTIME_CPU_INDICATOR_INIT, CHECK_LOWER_RUNTIME_CPU_MODEL, CHECK_LOWER_RUNTIME_CPU_FEATURES2 };
         for (uint32_t m = 0; program->cpu_groups[g].dispatch != 0 && m < 3; m += 1)
         {
+            // The unit's own declaration of the name is the symbol, as a call's would be (check_lower_runtime).
+            lowered->runtime_symbols[model[m]] = lowered->runtime_symbols[model[m]] == 0 ? shared->declared_runtimes[model[m]] : lowered->runtime_symbols[model[m]];
             if (lowered->runtime_symbols[model[m]] == 0)
             {
                 lowered->runtime_symbols[model[m]] = (SymbolId)((uint64_t)program->symbol_count + lowered->helpers.count + lowered->initializers.count + lowered->runtime_symbol_count + 1);

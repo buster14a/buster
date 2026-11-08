@@ -206,16 +206,15 @@ static SymbolId check_program_body_symbol(const CheckProgram* program, uint32_t 
 }
 
 // The features a version's body is compiled with beside the unit's (clang compiles a copy for each CPU of its list, each
-// with that CPU's): those every CPU of its list has, comma-separated, in `output`, as a target attribute's text.
-static String8 check_program_cpu_version_features(const CheckProgram* program, const CheckInputAttribute* attribute, Arena* output)
+// with that CPU's): those every CPU of its list has, comma-separated, as a target attribute's text, written to `text`,
+// which has room for `capacity` bytes (the first CPU's features' length is enough). Returns its length.
+static uint64_t check_program_cpu_features_write(const CheckProgram* program, const CheckInputAttribute* attribute, char* text, uint64_t capacity)
 {
     int32_t rows[BUSTER_CHECK_PROGRAM_CPU_LIST];
     const uint32_t count = check_program_cpu_rows(program, attribute, rows, BUSTER_CHECK_PROGRAM_CPU_LIST);
     const char* first = count != 0 ? check_cpu_dispatch_rows[rows[0]].features : "";
-    const uint64_t capacity = strlen(first) + 1;
-    char* text = BUSTER_ARENA_PUSH_ARRAY(output, char, capacity);
     uint64_t length = 0;
-    for (const char* item = first; text != NULL && *item != 0;)
+    for (const char* item = first; *item != 0;)
     {
         const char* end = strchr(item, ',');
         const uint64_t item_length = end != NULL ? (uint64_t)(end - item) : strlen(item);
@@ -232,7 +231,7 @@ static String8 check_program_cpu_version_features(const CheckProgram* program, c
             }
             everywhere = found;
         }
-        if (everywhere)
+        if (everywhere && length + item_length + 1 <= capacity)
         {
             if (length != 0)
             {
@@ -243,7 +242,16 @@ static String8 check_program_cpu_version_features(const CheckProgram* program, c
         }
         item = end != NULL ? end + 1 : item + item_length;
     }
-    return (String8){ .pointer = text, .length = text != NULL ? length : 0 };
+    return length;
+}
+
+// check_program_cpu_features_write's text in `output`.
+static String8 check_program_cpu_version_features(const CheckProgram* program, const CheckInputAttribute* attribute, Arena* output)
+{
+    const uint64_t capacity = BUSTER_CHECK_PROGRAM_CPU_FEATURES;
+    char* text = BUSTER_ARENA_PUSH_ARRAY(output, char, capacity);
+    const uint64_t length = text != NULL ? check_program_cpu_features_write(program, attribute, text, capacity) : 0;
+    return (String8){ .pointer = text, .length = length };
 }
 
 // A version's mangled name for the CPU of `row`: the function's name, a period and the CPU's mangling character (none

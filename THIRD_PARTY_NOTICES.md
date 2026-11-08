@@ -252,6 +252,9 @@ Paths below are relative to the repository root. "Default" means
 | `tools/generate_attribute_arguments.c` | Original generator of `c_check_attribute_arguments.inc` (#147); Default. It reads `clang-tblgen`'s generated output at run time and copies no clang code; its rules follow `ParseAttributeArgsCommon` and `ParseGNUAttributeArgs` in `clang/lib/Parse/ParseDecl.cpp` at `llvmorg-23.1.5` (sha256 `6e3c14424367c206a57ccac384941545fcece46b99fd8c32b347955a2a698a63`), read for their rules. |
 | `parse_scalar_attribute_string_error` and the bounded attribute type-name recovery in `src/buster/compiler/c_parser.c` | Original parser diagnostic adapters for #1447; Default. The string-slot lookup reuses the generated LLVM argument and subject/fact rows above without changing their notices. Recovery follows the external Clang 23.1.4 diagnostic oracle; no LLVM implementation is copied. |
 | `tools/generate_attribute_subjects.c` | Original generator of `c_check_attribute_subjects.inc`, with its map of clang's subject predicates to C declarations; Default. It reads `clang-tblgen`'s generated output at run time and copies no clang code. |
+| `src/buster/compiler/c_check_cpu_dispatch.inc` | Derived LLVM data, not first-party: the processors clang's `cpu_specific` and `cpu_dispatch` take, with their mangling characters, CPU-model masks and features, generated from LLVM `llvmorg-23.1.4`'s `X86TargetParser.cpp` and `X86TargetParser.def`; Apache-2.0 WITH LLVM-exception ([LICENSES/LLVM.txt](LICENSES/LLVM.txt)), as its header says. "clang's CPU dispatch table (#1447)" below has its inputs and procedure. |
+| `tools/generate_x86_cpu_dispatch.c` | Original generator of `c_check_cpu_dispatch.inc` (#1447); Default. It reads LLVM's sources at run time, evaluates their feature-set expressions and copies no LLVM code. |
+| `src/buster/compiler/c_check_cpu_dispatch.c`, `src/buster/compiler/c_check_program_cpu_dispatch.c`, `src/buster/compiler/c_check_cpu_dispatch_driver_test.c` | Original checks and code generation of clang's `cpu_specific` and `cpu_dispatch` multiversioning, and their tests (#1447); Default. The rules follow LLVM `llvmorg-23.1.4`'s `handleCPUSpecificAttr` in `clang/lib/Sema/SemaDeclAttr.cpp` (sha256 `6b0452504d5520bd6eff41e3b68f23fa57ab69c704f266d8da82b54a79bf8839`), `CheckMultiVersionFunction` and its helpers and `ActOnFinishFunctionBody`'s dispatcher warning in `clang/lib/Sema/SemaDecl.cpp` (sha256 `9b2119593e60f6bda8aaa020f6ed77fbcd13325f30a904210a3624aa07fc7bdd`), `CheckFallThroughForBody` in `clang/lib/Sema/AnalysisBasedWarnings.cpp` (sha256 `9ad92316fb41ab7dd6a68abecc0f0d2b39959d849331843bb21f0d7da2ab13af`), `emitCPUDispatchDefinition` in `clang/lib/CodeGen/CodeGenModule.cpp` (sha256 `047ac9ad37cfafb2e930cec0fd089dafed8d8aaaf2575532649526c4287bee8e`), `EmitX86MultiVersionResolver` and `FormX86ResolverCondition` in `clang/lib/CodeGen/CodeGenFunction.cpp` (sha256 `419ddade7e8d0119bbf6aba786bf06095bcd3fe78bf05d4fba859dbbf9b6e465`) and `EmitX86CpuSupports` in `clang/lib/CodeGen/TargetBuiltins/X86.cpp` (sha256 `3f76a3d9cbc959070addd4b49e1dd2548cc07502c8f9668621fc6d081cf9f0fb`), read for their rules and written again in C; the diagnostics' texts are clang's, from `clang/include/clang/Basic/DiagnosticSemaKinds.td` at the same tag (sha256 `72ffb52ee210258c53fcbbe0b22ae8a07bff37096ad5524d92a6bfbf9891285c`). The resolver's instructions are original. No LLVM code is copied. clang runs externally as the tests' oracle. |
 | `src/buster/compiler/c_check_os_log_input.c` | Original os_log format reader and buffer layout (#148); Default. The rules follow LLVM `llvmorg-23.1.5`'s `clang/lib/AST/PrintfFormatString.cpp` (sha256 `8878ffdfa8a657010bdbfd1db1a225f99b4b125cd6c3d91c4074377cf3036323`), `clang/lib/AST/FormatString.cpp` (sha256 `ee0b5d7fb398cd015be4f0e56f4d365a21bd78edc35459fc36da385c3adcb248`), `clang/lib/AST/OSLog.cpp` (sha256 `f864111811074e880806e80aeab1fb1dafdaf9751620b2ea599ea184c13584f9`), `clang/include/clang/AST/OSLog.h` (sha256 `fc4208d7c46463d44d637c11c95715306927588c394cf2c68cd2ff57689caadd`), and `BuiltinOSLogFormat` in `clang/lib/Sema/SemaChecking.cpp` and `emitBuiltinOSLogFormat` in `clang/lib/CodeGen/CGBuiltin.cpp` at the same tag, read for their rules and written again in C; no LLVM code is copied. clang runs externally as the tests' oracle. |
 | `src/buster/compiler/c_check_alloc_token_input.c` | Original allocation-token inference, type naming and hashing for `__builtin_infer_alloc_token` (#148); Default. The rules follow LLVM `llvmorg-23.1.5`'s `clang/lib/AST/InferAlloc.cpp` (sha256 `a23adc952e610432832635ff515fdcd0cb4f77a37fb0b779e8539dcf2c2cf594`) and `llvm/lib/Support/AllocToken.cpp` (sha256 `4cc44c97ee14394d6c0b3e1bdf8dd9642cee014c28a6cb7bd67a234081236d9e`), read for their rules and written again in C. The hash is SipHash-2-4 as Aumasson and Bernstein published it, under the 16-byte key of `getStableSipHash` in `llvm/lib/Support/SipHash.cpp` at the same tag (sha256 `20662e3d8e1149a7d09f651d70671c237b298283492fdc26900bc1730f09f1b8`), Apache-2.0 WITH LLVM-exception ([LICENSES/LLVM.txt](LICENSES/LLVM.txt)); no other LLVM code is copied. clang runs externally as the tests' oracle. |
 | `src/buster/compiler/c_check_availability_input.c` | Original checks of `__builtin_available`'s specs and its unguarded uses (#148); Default. The rules follow LLVM `llvmorg-23.1.5`'s `ParseAvailabilitySpec`, `ParseAvailabilityCheckExpr` and `CheckAvailabilitySpecList` in `clang/lib/Parse/ParseExpr.cpp` (sha256 `63d587d720445975e20be22431dabd6dc61bbd4aa6db6200a3d9e22ecd0af477`), `ParseVersionTuple` in `clang/lib/Parse/ParseDecl.cpp` (sha256 `6e3c14424367c206a57ccac384941545fcece46b99fd8c32b347955a2a698a63`), `ActOnObjCAvailabilityCheckExpr` in `clang/lib/Sema/SemaExprObjC.cpp` (sha256 `7ea6d8351ffcc1489228738560fec473e467db5de4ee5d264f48506a9acb666e`), `DiagnoseUnguardedAvailability` in `clang/lib/Sema/SemaAvailability.cpp` (sha256 `ea871b3ceebf54fc2da5fc7ca1629f31b4f94fcf2e894fd931902b6f3b79d1a6`) and `validateAnyAppleOSVersion` in `clang/include/clang/AST/Availability.h` (sha256 `72a7ede3cb22ac6b10b9274335800a9810c4fa492593bd4c25672019e73f6506`), read for their rules and written again in C; the platforms' names are those of `AvailabilityAttr`'s `getPrettyPlatformName` and `canonicalizePlatformName` in `clang/include/clang/Basic/Attr.td` at the same tag (sha256 `6014bff340878cf3c656bf3d1ccae64cfd33615d8245c4c5472d10ffd4dc6a1d`), names only, and the diagnostics' texts are clang's, from `DiagnosticParseKinds.td` and `DiagnosticSemaKinds.td` there. No LLVM code is copied. clang runs externally as the tests' oracle. |
@@ -674,6 +677,52 @@ LLVM Project's `Apache-2.0 WITH LLVM-exception` terms, whose text is
   (`check_test_cpu_model_runs` in `c_check_library_driver_test.c`). It checks
   every row's test against clang's code over every bit and value of the
   model. Its use as an oracle copies none of its code.
+
+### clang's CPU dispatch table (#1447)
+
+`src/buster/compiler/c_check_cpu_dispatch.inc` is derived LLVM data, not
+first-party material: the processor names clang's `cpu_specific` and
+`cpu_dispatch` attributes take (`X86TargetInfo::validateCPUSpecificCPUDispatch`),
+each with its mangling character (`CPUSpecificManglingCharacter`), the mask of
+libgcc's CPU model a resolver tests it with (`llvm::X86::getCpuSupportsMask` of
+its features that `validateCpuSupports` takes) and its features
+(`getCPUSpecificCPUDispatchFeatures`, `llvm::X86::getFeaturesForCPU`). It keeps
+the LLVM Project's `Apache-2.0 WITH LLVM-exception` terms, whose text is
+[LICENSES/LLVM.txt](LICENSES/LLVM.txt), and its header says so.
+
+- **Inputs:** LLVM `llvmorg-23.1.4` (commit
+  `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`):
+  `llvm/lib/TargetParser/X86TargetParser.cpp`, sha256
+  `4ee870468b01b104e04dd08375285f790888f3428d41f3994236e49330c8b721`, and
+  `llvm/include/llvm/TargetParser/X86TargetParser.def`, sha256
+  `cc59e275156d08b658cf23bc950237ee288a54477b16c08b4cbb00242fa60f50` (the same
+  bytes as apt.llvm.org's `llvm-23-dev` 1:23.1.5 installs).
+- **Rows taken:** each `ProcessorDefs` row whose name is a C identifier, in its
+  order: its name, its mangling character (0 where it is `'\0'`) and its
+  feature set, an expression of the file's `constexpr FeatureBitset` constants
+  that the generator evaluates; the `.def`'s `X86_FEATURE` and
+  `X86_FEATURE_COMPAT` rows give the features' names, in their order, and the
+  `COMPAT` rows' ABI values the masks. `64bit` is left out of the features, as
+  `getFeaturesForCPU` leaves it out. Nothing else of either file is copied.
+- **Generator:** `tools/generate_x86_cpu_dispatch.c`, which is original project
+  code under the default terms. It was run as:
+
+  ```sh
+  cc -std=c17 -O2 -Wall -Wextra -Werror tools/generate_x86_cpu_dispatch.c -o build/generate_x86_cpu_dispatch
+  build/generate_x86_cpu_dispatch --self-test
+  build/generate_x86_cpu_dispatch X86TargetParser.def X86TargetParser.cpp "llvm-project llvmorg-23.1.4, commit 7a941dfb2877a0b8cf30323fefa85ad019e0b0f5" "$(sha256sum X86TargetParser.def | cut -d' ' -f1)" "$(sha256sum X86TargetParser.cpp | cut -d' ' -f1)" > c_check_cpu_dispatch.inc.new
+  ```
+
+  The generator succeeds only when it has read both inputs whole, evaluated
+  every feature set and processor row, and written and flushed the whole
+  table. `--self-test` checks this against synthetic inputs, a write to
+  `/dev/full`, an unknown feature in an expression and a malformed row. The
+  output's sha256 is
+  `ec89b0b786f3739bde700a0f0425677f9020dd13ed90673e4d98bfcc428f3738`, 105 rows.
+- **Oracle:** clang runs externally in `test-checker-driver`
+  (`c_check_cpu_dispatch_driver_test.c`): its objects' symbols, and its
+  resolver's choice over 28 CPU models, against this compiler's. Its use as an
+  oracle copies none of its code.
 
 ### Clang's attribute subjects (#147)
 

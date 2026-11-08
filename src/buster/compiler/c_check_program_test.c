@@ -931,7 +931,10 @@ static bool check_test_program_object(Link* link, const char* path, Arena* scrat
     return valid;
 }
 
-// The oracle's source: each global the checked object defines renamed oracle_NAME, then the program, in `text`.
+// The oracle's source: each global the checked object defines (strong or weak) renamed oracle_NAME, then the program, in
+// `text`. A name
+// that is no identifier (a cpu_specific version's f.M, #1447) is no macro's: the source's own name renames it, as clang
+// mangles the renamed function's versions after it.
 static bool check_test_program_oracle(const Link* link, const char* source, char** text, size_t* length)
 {
     *text = 0;
@@ -941,7 +944,15 @@ static bool check_test_program_oracle(const Link* link, const char* source, char
     for (SymbolId symbol = 1; valid && symbol < link->symbols.count; symbol += 1)
     {
         const uint8_t flags = link->symbols.flags[symbol];
-        if ((flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL && link->symbols.atom[symbol] != 0)
+        const NameId spelled = link->symbols.name[symbol];
+        bool identifier = spelled != 0;
+        for (uint32_t i = 0; identifier && i < link->names.length[spelled]; i += 1)
+        {
+            const uint8_t c = link->names.bytes[spelled][i];
+            identifier = c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+        }
+        const uint8_t binding = flags & BUSTER_LINK_SYMBOL_BINDING;
+        if ((binding == BUSTER_LINK_SYMBOL_GLOBAL || binding == BUSTER_LINK_SYMBOL_WEAK) && link->symbols.atom[symbol] != 0 && identifier)
         {
             const NameId name = link->symbols.name[symbol];
             valid = fprintf(file, "#define %.*s oracle_%.*s\n", (int)link->names.length[name], link->names.bytes[name],
@@ -1792,6 +1803,12 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
         for (uint32_t k = 0; k < program->alias_count; k += 1)
         {
             expected[program->aliases[k].object] |= program->aliases[k].kind != CHECK_PROGRAM_WEAKREF;
+        }
+        // A cpu_dispatch group's f.ifunc and f, which the unit defines at its resolver (#1447).
+        for (uint32_t g = 0; g < program->cpu_group_count; g += 1)
+        {
+            expected[program->cpu_groups[g].reference] |= program->cpu_groups[g].dispatch != 0;
+            expected[program->cpu_groups[g].dispatch] |= program->cpu_groups[g].dispatch != 0;
         }
     }
     for (uint32_t path = 0; same && path < 2; path += 1)
@@ -4252,6 +4269,17 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "int sum(r,q)register unsigned r;struct P q;{return q.x*10+q.y+(int)r;}int count();int count(){return 7;}"
             "int tested(int n){struct P q={n,3};return add(n,7)*3+at(\"abcdef\",n&3)+sum((unsigned)n,q)+count()+add(n,(char)n);}",
             "kr-definitions", clang);
+        // clang's cpu_specific and cpu_dispatch (#1447): versions of one CPU, of two and of none (generic), their
+        // dispatcher's resolver (weak IFUNCs f.ifunc and f), and a static group's, each called through the resolver.
+        check_test_program_source(test,
+            "__attribute__((cpu_specific(generic))) int scaled(int n){return n+1;}"
+            "__attribute__((cpu_specific(core_2_duo_ssse3, atom))) int scaled(int n){return n*2;}"
+            "__attribute__((cpu_specific(haswell))) int scaled(int n){return n*3;}"
+            "__attribute__((cpu_dispatch(generic, core_2_duo_ssse3, haswell))) int scaled(int n);"
+            "static __attribute__((cpu_specific(generic))) int local(int n){return n-1;}"
+            "static __attribute__((cpu_dispatch(generic))) int local(int n);"
+            "int tested(int n){return scaled(n)*10+local(n);}",
+            "cpu-dispatch-versions", clang);
         // #659: the ABI receives promoted values; reads, writes and addresses in the body use the declared objects.
         // The integer and SSE banks both overflow onto the stack, and the aggregate result reserves the hidden prefix.
         check_test_program_source(test,
