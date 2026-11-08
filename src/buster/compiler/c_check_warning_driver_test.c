@@ -66,6 +66,27 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 2,
     },
     {
+        // A return's or a prototype argument's _Atomic destination too, for either warning, beside the int, char and
+        // plain parameter ones that still warn (review on #1453).
+        .name = "conversion warnings skip atomic returns and arguments",
+        .source = "_Atomic int f(void) { return 3.5; }\n_Atomic int gpar(_Atomic int);\nvoid h(void) { gpar(3.5); }\n"
+                  "_Atomic char g(void) { return 300; }\nvoid gc(_Atomic char);\nvoid kc(void) { gc(300); }\n"
+                  "struct S { int i; _Atomic int m; };\nvoid k(void) { struct S t; t.m = 3.5; t.m = 5000000000LL; (void)t; }\n"
+                  "int fi(void) { return 2.5; }\nvoid pi(int);\nvoid hp(void) { pi(2.5); }\nchar fc(void) { return 300; }\n",
+        .warnings = 3,
+    },
+    {
+        // An enumeration takes -Wconstant-conversion by its integer type's range, though not -Wliteral-conversion, in
+        // every position (review on #1453). (A brace element takes neither yet: #1759.)
+        .name = "constant conversions to enumerations",
+        .source = "enum Small : signed char { X };\nenum Small e = 300;\nenum Small rs(void) { return 300; }\n"
+                  "void ca(enum Small);\nvoid cc(void) { ca(300); }\n"
+                  "void as(void) { enum Small s; s = 300; (void)s; }\nenum FB : _Bool { FA };\nenum FB fb = 2;\n"
+                  "enum E { A, B };\nenum E ee = 5000000000LL;\nenum Small lit = 2.5;\n",
+        .warnings = 6,
+        .c23 = true,
+    },
+    {
         .name = "floating literal assignment return and call conversions",
         .source = "int f(void){int a;a=1.5;return -2.5;}\nvoid g(int);void h(void){g(3.5);}\n",
         .warnings = 3,

@@ -35,6 +35,28 @@ static void check_test_driver_redefinitions(CheckTest* test, const char* clang, 
         "extern int b;\nextern double b;\n",
         // Its note is the entity's latest earlier declaration, another block's out of scope.
         "int y;\nvoid f(void) { extern int y; }\nvoid g(void) { extern double y; }\n",
+        "int v;\nvoid f(void) { extern int v; }\ndouble v;\n",
+        // A function's is the declaration its lookup finds, never another block's (review on #1453).
+        "int fn(int);\nvoid f(void) { extern int fn(int); }\nvoid g(void) { extern double fn(int); }\n",
+        "int fn(int);\nvoid f(void) { extern int fn(int); }\ndouble fn(int);\n",
+        "int fn(int);\nint fn(int);\ndouble fn(int);\n",
+        "int fn(int);\nvoid f(void) { extern int fn(int); extern double fn(int); }\n",
+        // Extern is read from the specifiers, whatever its declarator's chunks or its specifiers' spelling.
+        "extern int a[];\nextern char a[];\n",
+        "int b[3];\nextern int b[5];\n",
+        "int q[2];\nextern int q[2][3];\n",
+        "int a[2];\nvoid f(void) { extern int a[3]; }\n",
+        "int *p[2];\nextern int (*p)[2];\n",
+        "int a3[] = {1};\nextern char a3[];\n",
+        "extern int z, a2[];\nextern int z, a2[2];\nextern char a2[];\n",
+        "struct S { int x; } c;\nextern struct S2 { int y; } c;\n",
+        "union U { int i; } u;\nextern union U2 { int j; } u;\n",
+        "enum EE { Q } en;\nextern enum EF { R } en;\n",
+        "struct S { int x; };\nstruct S c;\nextern struct T *c;\n",
+        "double d;\nextern _Alignas(8) int d;\n",
+        "int e;\nextern _BitInt(8) e;\n",
+        "int g;\nstruct { int m; } extern g;\n",
+        "typedef int T;\nT x;\nvoid f(void) { extern int x; }\nvoid g(void) { extern double x; }\n",
     };
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/redefinition.c", directory);

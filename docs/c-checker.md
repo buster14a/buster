@@ -4398,6 +4398,15 @@ as clang delays it to the declaration's end. Where these warnings may report
 (unreachable code and short-circuited operands, but not `sizeof`'s operand) is
 unchanged.
 
+The value warnings follow the target's type as clang's `CheckImplicitConversion`
+does (`check_common_conversion_target`). `-Wliteral-conversion` takes a builtin
+target alone, so never an enumeration, while `-Wconstant-conversion` takes an
+enumeration by its integer type's range (`enum Small : signed char e = 300;`).
+An `_Atomic` destination takes neither. Its conversion is to the atomic's value
+type, which the lowering needs, so the action marks it
+`BUSTER_CHECK_CONVERT_ATOMIC` wherever it strips `_Atomic`: assignments,
+initializations, brace elements, returns and prototype arguments.
+
 The graph's passes share their facts, `check_common_facts`, which give each
 node its parent, whether another node uses its value, whether it is evaluated,
 and its reach: a bit each for whether its subtree holds a node whose own

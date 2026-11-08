@@ -289,8 +289,9 @@ typedef enum CheckDiagnostic
 #define BUSTER_CHECK_CONVERT_CAST 0x40u
 #define BUSTER_CHECK_CONVERT_NULL 0x80u
 #define BUSTER_CHECK_CONVERT_TRANSPARENT_UNION 0x100u
-// An initializer element's destination is an _Atomic object (#1447): the conversion is to its value type, which its type
-// says, so that the conversion warnings, which clang gives no atomic destination, can still tell (c_check_initializer.c).
+// The destination is an _Atomic object (#1447): an assignment's, an initialization's or initializer element's, a return's
+// or a prototype argument's. The conversion is to its value type, so this says what the type no longer does, for the
+// conversion value warnings, which clang gives no atomic destination (c_check_common_warnings.c).
 #define BUSTER_CHECK_CONVERT_ATOMIC 0x200u
 
 #define CHECK_WARNING_DISCARDED_QUALIFIERS 0x01u
@@ -2346,6 +2347,7 @@ static inline __attribute__((always_inline)) void check_action_assignment(TypeTa
     }
     if (type_is_valid(table, target))
     {
+        const bool atomic = check_action_kind(table, target) == BUSTER_TYPE_KIND_ATOMIC && check_action_kind(table, source.type) != BUSTER_TYPE_KIND_ATOMIC;
         target = check_action_kind(table, source.type) == BUSTER_TYPE_KIND_ATOMIC ? type_unqualified(type_strip_aligned(table, target))
                                                                                : type_conversion_operand(table, target);
         const bool void_return = action->op == CHECK_OP_CONVERT && check_action_kind(table, target) == BUSTER_TYPE_KIND_VOID &&
@@ -2356,7 +2358,8 @@ static inline __attribute__((always_inline)) void check_action_assignment(TypeTa
         }
         else
         {
-            const uint32_t conversion = BUSTER_CHECK_CONVERT_ASSIGNMENT | (check_action_kind(table, target) == BUSTER_TYPE_KIND_POINTER && check_action_null(table, &source, action->context.extensions) ? BUSTER_CHECK_CONVERT_NULL : 0);
+            const uint32_t conversion = BUSTER_CHECK_CONVERT_ASSIGNMENT | (check_action_kind(table, target) == BUSTER_TYPE_KIND_POINTER && check_action_null(table, &source, action->context.extensions) ? BUSTER_CHECK_CONVERT_NULL : 0) |
+                                        (atomic ? BUSTER_CHECK_CONVERT_ATOMIC : 0);
             check_action_conversion(table, &source, target, conversion, &result->conversions[slot], action->node);
             result->value = source;
             result->value.category = CHECK_RVALUE;
@@ -2697,6 +2700,7 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
                 {
                     destination = BUSTER_TYPE_DOUBLE;
                 }
+                const bool atomic = check_action_kind(table, destination) == BUSTER_TYPE_KIND_ATOMIC && check_action_kind(table, value.type) != BUSTER_TYPE_KIND_ATOMIC;
                 if (check_action_kind(table, value.type) != BUSTER_TYPE_KIND_ATOMIC)
                 {
                     destination = type_conversion_operand(table, destination);
@@ -2720,7 +2724,7 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
                 else
                 {
                     const uint32_t conversion = (parameter ? BUSTER_CHECK_CONVERT_ASSIGNMENT : destination != value.type ? BUSTER_CHECK_CONVERT_PROMOTION : 0) |
-                                                (transparent ? BUSTER_CHECK_CONVERT_TRANSPARENT_UNION : 0);
+                                                (transparent ? BUSTER_CHECK_CONVERT_TRANSPARENT_UNION : 0) | (atomic ? BUSTER_CHECK_CONVERT_ATOMIC : 0);
                     check_action_conversion(table, &value, destination, conversion, &converted.conversions[0], action->node);
                 }
                 if (converted.diagnostic != CHECK_DIAG_NONE)
