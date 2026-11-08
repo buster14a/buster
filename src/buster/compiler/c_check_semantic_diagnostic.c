@@ -317,7 +317,19 @@ static void check_semantic_parameter_note(const Parser* parser, Preprocessor* pp
     uint32_t name = BUSTER_CHECK_NONE;
     for (uint32_t t = first; found && name == BUSTER_CHECK_NONE && t < end; t += 1)
     {
-        name = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && parser->tree.roles[t] == PARSE_ROLE_OPERAND ? t : name;
+        // An attribute's arguments are operands too (address_space's name is one): the parameter's is the first
+        // operand identifier outside every attribute group.
+        bool attribute = false;
+        for (uint32_t at = t; !attribute && at < end;)
+        {
+            const uint32_t parent = parser->tree.parents[at];
+            const uint8_t role = parent < parser->tokens.count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
+            attribute = role == PARSE_ROLE_CLOSE_ATTRIBUTE || role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER ||
+                        role == PARSE_ROLE_CLOSE_ATTRIBUTE_LEFT || role == PARSE_ROLE_CLOSE_ATTRIBUTE_RIGHT ||
+                        role == PARSE_ROLE_CLOSE_ATTRIBUTE_LIST;
+            at = parent < parser->tokens.count && parent > at && parent < end ? parent : end;
+        }
+        name = !attribute && parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && parser->tree.roles[t] == PARSE_ROLE_OPERAND ? t : name;
     }
     if (found)
     {
@@ -331,9 +343,10 @@ static void check_semantic_parameter_note(const Parser* parser, Preprocessor* pp
 }
 
 // The address spaces' errors (#1447), worded as clang's: a conversion's "changes address space of pointer" (an assignment's,
-// an initialization's, a return's at its expression, an argument's), and a subtraction's or a conditional's pointers to
-// spaces that don't overlap (err_typecheck_op_on_nonoverlapping_address_space_pointers, its two spaces as clang prints
-// them). An argument's has clang's note at the called function's parameter (check_semantic_parameter_note).
+// an initialization's, a return's at its expression, an argument's) or of "nested pointer" one level down, and a
+// subtraction's or a conditional's pointers to spaces that don't overlap
+// (err_typecheck_op_on_nonoverlapping_address_space_pointers, its two spaces as clang prints them). An argument's has
+// clang's note at the called function's parameter (check_semantic_parameter_note).
 static const char* check_semantic_address_space(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                                 const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location, PPOutputDiagnosticNote* note,
                                                 Arena* scratch)
@@ -347,6 +360,7 @@ static const char* check_semantic_address_space(const Parser* parser, Preprocess
     TypeId from = 0;
     TypeId to = 0;
     const char* format = NULL;
+    const char* nested = report->diagnostic == CHECK_DIAG_ADDRESS_SPACE_NESTED ? "nested " : "";
     if (report->diagnostic == CHECK_DIAG_ADDRESS_SPACE_OVERLAP)
     {
         const bool conditional = op == CHECK_OP_CONDITIONAL;
@@ -375,13 +389,13 @@ static const char* check_semantic_address_space(const Parser* parser, Preprocess
     {
         from_node = graph->operand1[node];
         to = graph->operand0[node] < stream->count ? check_stream_type(stream, graph->operand0[node]) : 0;
-        format = "assigning %.*s to %.*s changes address space of pointer";
+        format = "assigning %.*s to %.*s changes address space of %spointer";
     }
     else if (op == CHECK_OP_INITIALIZE)
     {
         from_node = graph->operand0[node];
         to = graph->types[node];
-        format = "initializing %.*s with an expression of type %.*s changes address space of pointer";
+        format = "initializing %.*s with an expression of type %.*s changes address space of %spointer";
         for (uint32_t declaration = 0; declaration < input->token_count; declaration += 1)
         {
             if (check_sparse_get(input->initializer_nodes, declaration) == node)
@@ -395,7 +409,7 @@ static const char* check_semantic_address_space(const Parser* parser, Preprocess
     {
         from_node = graph->operand0[node];
         to = graph->types[node];
-        format = "returning %.*s from a function with result type %.*s changes address space of pointer";
+        format = "returning %.*s from a function with result type %.*s changes address space of %spointer";
         *location = from_node < graph->count ? check_common_subtree_start(parser, graph->tokens[from_node]) : token;
     }
     else if (op == CHECK_OP_CALL && graph->argument_tokens != NULL)
@@ -413,7 +427,7 @@ static const char* check_semantic_address_space(const Parser* parser, Preprocess
         const TypeId* parameters = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? type_parameters(types, function, &parameter_count) : NULL;
         from_node = argument != BUSTER_CHECK_NONE ? graph->argument_nodes[offset + argument] : BUSTER_CHECK_NONE;
         to = argument < parameter_count ? parameters[argument] : 0;
-        format = "passing %.*s to parameter of type %.*s changes address space of pointer";
+        format = "passing %.*s to parameter of type %.*s changes address space of %spointer";
         check_semantic_parameter_note(parser, pp, input, callee < graph->count ? graph->tokens[callee] : BUSTER_CHECK_NONE, argument, note, scratch);
     }
     if (format != NULL)
@@ -426,7 +440,7 @@ static const char* check_semantic_address_space(const Parser* parser, Preprocess
         const String8 first = initializing ? target : source;
         const String8 second = initializing ? source : target;
         result = source.length != 0 && target.length != 0 ?
-                 check_warning_text(scratch, format, (int)first.length, first.pointer, (int)second.length, second.pointer) : NULL;
+                 check_warning_text(scratch, format, (int)first.length, first.pointer, (int)second.length, second.pointer, nested) : NULL;
     }
     return result != NULL ? result : check_driver_report_message(report);
 }
@@ -599,7 +613,8 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                 }
             }
         }
-        else if (report->diagnostic == CHECK_DIAG_ADDRESS_SPACE || report->diagnostic == CHECK_DIAG_ADDRESS_SPACE_OVERLAP)
+        else if (report->diagnostic == CHECK_DIAG_ADDRESS_SPACE || report->diagnostic == CHECK_DIAG_ADDRESS_SPACE_OVERLAP ||
+                 report->diagnostic == CHECK_DIAG_ADDRESS_SPACE_NESTED)
         {
             result = check_semantic_address_space(parser, pp, input, stream, types, report, spell, location, note, scratch);
         }

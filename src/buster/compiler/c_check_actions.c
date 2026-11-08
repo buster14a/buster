@@ -287,6 +287,9 @@ typedef enum CheckDiagnostic
     CHECK_DIAG_ADDRESS_SPACE,
     // A pointer subtraction's or a conditional's pointers to address spaces neither of which includes the other (#1447).
     CHECK_DIAG_ADDRESS_SPACE_OVERLAP,
+    // A pointer to pointers whose levels' address spaces differ (#1447): clang's "changes address space of nested
+    // pointer", worded by the conversion (c_check_semantic_diagnostic.c).
+    CHECK_DIAG_ADDRESS_SPACE_NESTED,
 } CheckDiagnostic;
 
 #define BUSTER_CHECK_CONVERT_LVALUE 0x01u
@@ -1219,23 +1222,37 @@ static uint64_t check_action_sign_key(const TypeTable* table, TypeId type)
 }
 
 // clang's rule for pointers to pointers: pointees that reach one canonical type through as many pointer levels on
-// both sides differ only in their levels' qualifiers (char ** to const char **), which it warns about.
-static bool check_action_nested_qualifiers(const TypeTable* table, TypeId left, TypeId right, CheckActionResult* result)
+// both sides differ only in their levels' qualifiers (char ** to const char **), which it warns about — but an address
+// space the target's doesn't include at any level the walk reaches is clang's "changes address space of nested
+// pointer" error, whether or not the levels' types otherwise agree.
+static bool check_action_nested_qualifiers(const TypeTable* table, TypeId left, TypeId right, CheckActionResult* result, bool strict)
 {
     TypeId l = type_strip_aligned(table, left);
     TypeId r = type_strip_aligned(table, right);
     const bool nested = type_kind(table, l) == BUSTER_TYPE_KIND_POINTER && type_kind(table, r) == BUSTER_TYPE_KIND_POINTER;
+    bool space_conflict = false;
     while (type_kind(table, l) == BUSTER_TYPE_KIND_POINTER && type_kind(table, r) == BUSTER_TYPE_KIND_POINTER)
     {
-        l = type_strip_aligned(table, type_element(table, l));
-        r = type_strip_aligned(table, type_element(table, r));
+        const TypeId le = type_element(table, l);
+        const TypeId re = type_element(table, r);
+        space_conflict |= !type_space_includes(type_address_space(type_object_qualifiers(table, le)),
+                                               type_address_space(type_object_qualifiers(table, re)));
+        l = type_strip_aligned(table, le);
+        r = type_strip_aligned(table, re);
     }
     const TypeAnswer answer = nested ? type_same_canonical(table, type_unqualified(l), type_unqualified(r)) : TYPE_ANSWER_NO;
     if (answer == TYPE_ANSWER_FULL)
     {
         check_action_diagnose(result, CHECK_DIAG_RESOURCE, 0);
     }
-    return answer == TYPE_ANSWER_YES;
+    else if (space_conflict)
+    {
+        if (!strict)
+        {
+            check_action_diagnose(result, CHECK_DIAG_ADDRESS_SPACE_NESTED, UINT32_MAX);
+        }
+    }
+    return answer == TYPE_ANSWER_YES && !space_conflict;
 }
 
 // check_action_assignable_mode's pointees of other extended qualifiers (#1447), as clang's compatiblyIncludes takes them:
@@ -1320,7 +1337,7 @@ static inline __attribute__((always_inline)) bool check_action_pointer_assignabl
         // In C the signedness warning takes precedence over a compatible qualifier discard.
         warning = CHECK_WARNING_POINTER_SIGN;
     }
-    else if (result->diagnostic == CHECK_DIAG_NONE && check_action_nested_qualifiers(table, to, from, result))
+    else if (result->diagnostic == CHECK_DIAG_NONE && check_action_nested_qualifiers(table, to, from, result, strict))
     {
         accepted = true;
         warning = CHECK_WARNING_DISCARDED_QUALIFIERS;

@@ -30,6 +30,7 @@ static const char* check_driver_action_message(CheckDiagnostic diagnostic)
         case CHECK_DIAG_UNSUPPORTED: result = "expression is not yet supported by the type checker"; break;
         case CHECK_DIAG_ADDRESS_SPACE: result = "conversion changes address space of pointer"; break;
         case CHECK_DIAG_ADDRESS_SPACE_OVERLAP: result = "pointers to non-overlapping address spaces"; break;
+        case CHECK_DIAG_ADDRESS_SPACE_NESTED: result = "conversion changes address space of nested pointer"; break;
         case CHECK_DIAG_NONE: break;
     }
     return result;

@@ -9725,7 +9725,8 @@ static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputRe
 {
     TypeTable* types = reader->types;
     const uint64_t mark = reader->scratch->length;
-    TypeId deduced = type_adjust_parameter(types, initializer);
+    // The initializer's value has no extended qualifiers or alignment of its own (#1447): a deduced type drops them.
+    TypeId deduced = type_strip_aligned(types, type_adjust_parameter(types, initializer));
     TypeId declared_level = declared;
     CheckC23AutoLevel* top = 0;
     TypeId result = 0;

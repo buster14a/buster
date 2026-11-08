@@ -212,6 +212,66 @@ static const CheckDriverDefaultWarningFixture check_driver_address_space_fixture
         .errors = 1,
     },
     {
+        // clang's "changes address space of nested pointer": a level's space differing under pointers is an error,
+        // where a level's const only warns.
+        .name = "nested pointer address spaces",
+        .source = "__attribute__((address_space(1))) int **pp;\n"
+                  "__attribute__((address_space(2))) int **qq;\n"
+                  "__attribute__((address_space(1))) int **pp2;\n"
+                  "const int **cp;\n"
+                  "int **plain;\n"
+                  "void f(void) {\n"
+                  "  pp = qq;\n"
+                  "  plain = pp;\n"
+                  "  pp = plain;\n"
+                  "  pp = pp2;\n"
+                  "  cp = plain;\n"
+                  "}\n",
+        .errors = 3,
+        .warnings = 1,
+    },
+    {
+        // The nested space error reaches levels the walk compares: a depth mismatch below it stays clang's
+        // incompatible-pointer-types, a base-type one under a reached space still names the space, and the
+        // argument's note names the parameter, not an attribute's argument.
+        .name = "nested pointer address spaces at mismatched depths",
+        .source = "__attribute__((address_space(1))) int ***deep;\n"
+                  "__attribute__((address_space(1))) int **mid;\n"
+                  "__attribute__((address_space(1))) int **ai;\n"
+                  "double **dp;\n"
+                  "struct S { int x; } **sp;\n"
+                  "int **ip;\n"
+                  "void take(__attribute__((address_space(2))) int **p);\n"
+                  "void f(void) {\n"
+                  "  deep = mid;\n"
+                  "  ai = dp;\n"
+                  "  ai = sp;\n"
+                  "  deep = ip;\n"
+                  "  take(ai);\n"
+                  "}\n",
+        .errors = 5,
+        .notes = 1,
+    },
+    {
+        // A value has no address space: a deduced type drops the initializer's, while a pointer's keeps its pointee's.
+        .name = "a deduced type has no address space",
+        .source = "__attribute__((address_space(1))) int a;\n"
+                  "void f(void) {\n"
+                  "  __auto_type b = a;\n"
+                  "  int *p = &b;\n"
+                  "  __auto_type c = &a;\n"
+                  "  __attribute__((address_space(1))) int *q = c;\n"
+                  "}\n",
+    },
+    {
+        // String literals initialize arrays of an address space's character, sized and unsized, braced too.
+        .name = "string literals into address-space arrays",
+        .source = "__attribute__((address_space(1))) char a[] = \"hi\";\n"
+                  "__attribute__((address_space(1))) char b[4] = \"hi\";\n"
+                  "__attribute__((address_space(1))) char c[] = {\"hi\"};\n"
+                  "__attribute__((address_space(1))) char d[2][3] = {\"ab\", \"cd\"};\n",
+    },
+    {
         // OpenCL's generic includes every space but constant, global its device and host parts; a
         // conditional's result drops its operands' spaces unless they are one type (its type in a later error's words);
         // comparisons and casts of any spaces.
