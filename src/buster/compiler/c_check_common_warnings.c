@@ -3173,19 +3173,41 @@ static bool check_common_displaced_root(const CheckGraph* graph, const uint32_t*
 }
 
 // The displaced roots (check_common_displaced_root), each its operand's node above its own, in their operands' order
-// (c_bindings_sort's stable radix sort of the operands, through `temporary`): their count, and the sorted keys in `*sorted`.
-// At most half the graph's nodes are displaced: each has an operand and a node between them.
-static uint32_t check_common_displaced_roots(const CheckGraph* graph, const uint32_t* parents, uint64_t* items, uint64_t* temporary,
+// (c_bindings_sort's stable radix sort of the operands, through `temporary`): their count, the sorted keys in `*sorted`,
+// and their nodes in node order in `nodes`, which the root order skips where they stand. At most half the graph's nodes
+// are displaced: each has an operand and a node between them. The vector path tests 16 nodes at a time: the wrapper
+// operators (a lane permute of the set's words), no parent, and an operand before the node's predecessor; the scalar
+// path, its twin, tests each node.
+static uint32_t check_common_displaced_roots(const CheckGraph* graph, const uint32_t* parents, uint64_t* items, uint64_t* temporary, uint32_t* nodes,
                                              const uint64_t** sorted, bool vector)
 {
     static const CheckOp wrappers[] = { CHECK_OP_CONDITION, CHECK_OP_POSITIVE, CHECK_OP_CAST };
     const CheckCommonOps set = check_common_ops(wrappers, BUSTER_ARRAY_LENGTH(wrappers));
-    CheckCommonScan scan = { 0 };
     uint32_t count = 0;
-    for (uint32_t node = check_common_next_op(graph, &set, &scan, vector); node < graph->count; node = check_common_next_op(graph, &set, &scan, vector))
+    uint32_t node = 0;
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    for (; !BUSTER_SCALAR_PATH(!vector) && graph->count - node >= 16; node += 16)
+    {
+        const __m512i ops = _mm512_loadu_si512(graph->ops + node);
+        const uint32_t wrapped = check_common_op_lanes(&set, ops, (__mmask16)0xffff);
+        const __mmask16 root = _mm512_mask_cmpeq_epi32_mask((__mmask16)wrapped, _mm512_loadu_si512(parents + node), _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
+        // operand + 1 < node, unsigned: an absent operand (BUSTER_CHECK_NONE) wraps to 0 and fails, as it must.
+        const __m512i next = _mm512_add_epi32(_mm512_loadu_si512(graph->operand0 + node), _mm512_set1_epi32(1));
+        const __m512i at = _mm512_add_epi32(_mm512_set1_epi32((int)node), lanes);
+        uint32_t selected = _mm512_mask_cmplt_epu32_mask(root, next, at) &
+                            _mm512_mask_cmpneq_epi32_mask(root, next, _mm512_setzero_si512());
+        for (; selected != 0; selected &= selected - 1)
+        {
+            const uint32_t displaced = node + (uint32_t)__builtin_ctz(selected);
+            nodes[count] = displaced;
+            items[count++] = ((uint64_t)graph->operand0[displaced] << 32) | displaced;
+        }
+    }
+    for (; node < graph->count; node += 1)
     {
         if (check_common_displaced_root(graph, parents, node))
         {
+            nodes[count] = node;
             items[count++] = ((uint64_t)graph->operand0[node] << 32) | node;
         }
     }
@@ -3204,13 +3226,19 @@ struct CheckCommonRootOrder
     const uint64_t* displaced;
     uint32_t displaced_count;
     uint32_t displaced_at;
+    // The displaced roots in node order, and the next one the natural order skips.
+    const uint32_t* skipped;
+    uint32_t skipped_at;
 };
 
 static uint32_t check_common_root_order_next(const CheckGraph* graph, const uint32_t* parents, CheckCommonRootOrder* order, bool vector)
 {
-    while (order->natural < graph->count && order->displaced_count != 0 && check_common_displaced_root(graph, parents, order->natural))
+    // Both orders rise: a natural root is displaced when it is the next of the node-ordered list.
+    while (order->natural < graph->count && order->skipped_at < order->displaced_count && order->skipped[order->skipped_at] <= order->natural)
     {
-        order->natural = check_common_next_root(parents, graph->count, &order->roots, vector);
+        const bool skip = order->skipped[order->skipped_at] == order->natural;
+        order->skipped_at += 1;
+        order->natural = skip ? check_common_next_root(parents, graph->count, &order->roots, vector) : order->natural;
     }
     const bool moved = order->displaced_at < order->displaced_count && (uint32_t)(order->displaced[order->displaced_at] >> 32) < order->natural;
     const uint32_t result = moved ? (uint32_t)order->displaced[order->displaced_at] : order->natural;
@@ -3299,14 +3327,16 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         const uint32_t displaced_capacity = graph->count / 2 + 1;
         uint64_t* displaced = CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, displaced_capacity);
         uint64_t* displaced_temporary = displaced != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, displaced_capacity) : NULL;
-        if (displaced_temporary == NULL)
+        uint32_t* displaced_nodes = displaced_temporary != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, displaced_capacity) : NULL;
+        if (displaced_nodes == NULL)
         {
             check_common_exhausted(pp);
         }
         const uint64_t* displaced_sorted = displaced;
-        const uint32_t displaced_count = displaced_temporary != NULL ?
-                                         check_common_displaced_roots(graph, facts->parents, displaced, displaced_temporary, &displaced_sorted, vector) : 0;
-        CheckCommonRootOrder order = { .displaced = displaced_sorted, .displaced_count = displaced_count };
+        const uint32_t displaced_count = displaced_nodes != NULL ?
+                                         check_common_displaced_roots(graph, facts->parents, displaced, displaced_temporary, displaced_nodes, &displaced_sorted,
+                                                                      vector) : 0;
+        CheckCommonRootOrder order = { .displaced = displaced_sorted, .displaced_count = displaced_count, .skipped = displaced_nodes };
         order.natural = check_common_next_root(facts->parents, graph->count, &order.roots, vector);
         for (uint32_t node = check_common_root_order_next(graph, facts->parents, &order, vector); node < graph->count && !pp->fatal;
              node = check_common_root_order_next(graph, facts->parents, &order, vector))
