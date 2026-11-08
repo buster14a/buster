@@ -1,0 +1,148 @@
+name: Hosted release-input outage drill
+
+# Rehearses the source outages of tools/ci/hosted-release.sh on real hosted runners (#1767, #1768), with no Actions
+# cache: upstream down (the pinned GHCR mirror must supply every input), the mirror down (upstream must rebuild the same
+# installed tree), and both down (preparation must fail within its bound). A host is taken down through /etc/hosts, so
+# every request to it is refused. The weekly run also catches a pinned mirror publication that has gone missing.
+on:
+  pull_request:
+    paths:
+      - tools/ci/hosted-release.sh
+      - tools/ci/hosted-tools.lock
+      - tools/ci/install-hosted-tools.sh
+      - tools/ci/setup-build-tools.sh
+      - .github/workflows/hosted-inputs-drill.yml
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buster-hosted-inputs-drill-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  outage:
+    name: Hosted inputs with ${{ matrix.down }} down
+    if: github.repository_id == '1421805693'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        down: [upstream, mirror, both]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the triggering revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install the extraction tools
+        run: sudo apt-get install --yes --no-install-recommends zstd
+
+      - name: Take the ${{ matrix.down }} source down
+        env:
+          DOWN: ${{ matrix.down }}
+        run: |
+          set -euo pipefail
+          upstream='github.com objects.githubusercontent.com release-assets.githubusercontent.com raw.githubusercontent.com'
+          mirror='ghcr.io pkg-containers.githubusercontent.com'
+          case "$DOWN" in upstream) hosts=$upstream ;; mirror) hosts=$mirror ;; both) hosts="$upstream $mirror" ;; esac
+          for host in $hosts; do
+              printf '127.0.0.1 %s\n::1 %s\n' "$host" "$host" | sudo tee -a /etc/hosts > /dev/null
+          done
+          for host in $hosts; do
+              if curl --silent --max-time 10 --output /dev/null "https://$host/"; then
+                  echo "::error::$host is still reachable"
+                  exit 1
+              fi
+          done
+
+      - name: Prepare the inputs with no cache
+        id: prepare
+        run: |
+          set -euo pipefail
+          start=$SECONDS
+          status=0
+          bash tools/ci/hosted-release.sh prepare "$RUNNER_TEMP/inputs" 2> >(tee "$RUNNER_TEMP/prepare.log" >&2) || status=$?
+          sleep 1
+          printf 'status=%s\nseconds=%s\n' "$status" "$((SECONDS - start))" >> "$GITHUB_OUTPUT"
+
+      - name: Check the outcome and the sources used
+        env:
+          DOWN: ${{ matrix.down }}
+          STATUS: ${{ steps.prepare.outputs.status }}
+          SECONDS_TAKEN: ${{ steps.prepare.outputs.seconds }}
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/prepare.log"
+          components='llvm llvm-license cmake ninja mold wild'
+          case "$DOWN" in
+              upstream)
+                  [ "$STATUS" = 0 ] || { echo '::error::preparation failed with only upstream down'; exit 1; }
+                  for name in $components; do grep -q "component=$name source=mirror verified=true" "$log" || { echo "::error::$name did not come from the mirror"; exit 1; }; done
+                  ! grep -q 'source=upstream' "$log" || { echo '::error::preparation contacted upstream'; exit 1; }
+                  ;;
+              mirror)
+                  [ "$STATUS" = 0 ] || { echo '::error::preparation failed with only the mirror down'; exit 1; }
+                  grep -q 'source=mirror unavailable reason=transport stage=token' "$log" || { echo '::error::the mirror outage was not reported'; exit 1; }
+                  for name in $components; do grep -q "component=$name version=[0-9.]* source=upstream" "$log" || { echo "::error::$name did not fall back to upstream"; exit 1; }; done
+                  ;;
+              both)
+                  [ "$STATUS" != 0 ] || { echo '::error::preparation succeeded with no source'; exit 1; }
+                  [ ! -e "$RUNNER_TEMP/inputs" ] || { echo '::error::a failed preparation was published'; exit 1; }
+                  # One mirror attempt (token) plus one bounded upstream sequence for the first component.
+                  [ "$SECONDS_TAKEN" -le 420 ] || { echo "::error::failure took ${SECONDS_TAKEN}s, beyond the 420 s bound"; exit 1; }
+                  ;;
+          esac
+          printf '| %s down | exit %s | %s s |\n' "$DOWN" "$STATUS" "$SECONDS_TAKEN" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install, probe and inventory the tree
+        if: matrix.down != 'both'
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/tree"
+          BUSTER_HOSTED_RELEASES="$RUNNER_TEMP/inputs" bash tools/ci/install-hosted-tools.sh "$root"
+          llvm=$(echo "$root"/llvm-*)
+          printf 'int main(void) { return 0; }\n' > "$RUNNER_TEMP/probe.c"
+          "$llvm/bin/clang" -fuse-ld=lld "$RUNNER_TEMP/probe.c" -o "$RUNNER_TEMP/probe-lld" && "$RUNNER_TEMP/probe-lld"
+          "$llvm/bin/clang" --ld-path="$root/bin/ld.mold" "$RUNNER_TEMP/probe.c" -o "$RUNNER_TEMP/probe-mold" && "$RUNNER_TEMP/probe-mold"
+          "$root/bin/wild" --version
+          "$root"/build-tools/*/bin/cmake --version
+          "$root"/build-tools/*/bin/ninja --version
+          # Type, mode, path and link target of every entry, then every regular file's contents.
+          (cd "$root" && find . -printf '%y %m %p %l\n' | LC_ALL=C sort && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$RUNNER_TEMP/inventory-${{ matrix.down }}.txt"
+          wc -l "$RUNNER_TEMP/inventory-${{ matrix.down }}.txt"
+
+      - name: Keep the inventory and the log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hosted-inputs-drill-${{ matrix.down }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/prepare.log
+            ${{ runner.temp }}/inventory-*.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+  same-tree:
+    name: Mirror and upstream install the same tree
+    needs: outage
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: hosted-inputs-drill-*-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/drill
+      - name: Compare the inventories
+        shell: bash
+        run: |
+          set -euo pipefail
+          diff "$RUNNER_TEMP"/drill/hosted-inputs-drill-upstream-*/inventory-upstream.txt "$RUNNER_TEMP"/drill/hosted-inputs-drill-mirror-*/inventory-mirror.txt
+          printf 'Mirror and upstream trees are identical: %s entries.\n' "$(wc -l < "$RUNNER_TEMP"/drill/hosted-inputs-drill-upstream-*/inventory-upstream.txt)" | tee -a "$GITHUB_STEP_SUMMARY"
