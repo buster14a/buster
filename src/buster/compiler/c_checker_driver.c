@@ -686,15 +686,17 @@ struct CheckDriverDiagnostic
     const char* note;
 };
 
-// Room for `more` diagnostics after the `count` of `*list`, which `*capacity` holds: a bigger list in `arena` with them
-// copied, where it hasn't. False, and the list as it was, where the arena has none.
+// Room for `more` diagnostics after the `count` of `*list`, which `*capacity` holds, and for the few single ones the
+// driver adds after a list (BUSTER_CHECK_DRIVER_ADDITIONAL_SINGLES): a bigger list in `arena` with them copied, where it
+// hasn't. False, and the list as it was, where the arena has none.
+#define BUSTER_CHECK_DRIVER_ADDITIONAL_SINGLES 8u
 static bool check_driver_additional_room(CheckDriverDiagnostic** list, uint32_t* capacity, uint32_t count, uint64_t more, Arena* arena)
 {
-    bool result = (uint64_t)count + more <= *capacity;
-    // (With room for the few single diagnostics the driver adds after a list.)
-    if (!result && (uint64_t)count + more + 8 <= UINT32_MAX)
+    const uint64_t needed = (uint64_t)count + more + BUSTER_CHECK_DRIVER_ADDITIONAL_SINGLES;
+    bool result = needed <= *capacity;
+    if (!result && needed <= UINT32_MAX)
     {
-        const uint32_t grown = (uint32_t)(count + more + 8);
+        const uint32_t grown = (uint32_t)needed;
         CheckDriverDiagnostic* pushed = BUSTER_ARENA_PUSH_ARRAY(arena, CheckDriverDiagnostic, grown);
         if (pushed != NULL)
         {
@@ -1727,6 +1729,93 @@ static void check_driver_return_reports(const Parser* parser, const Parser* orig
             }
         }
     }
+}
+
+// A rejected unit's common warnings (#1447): clang's for the bodies its errors don't reach. The bodies that hold one of
+// `errors` (tokens) are left out of a second reading of the unit (check_input_selected, as -flazy-system-headers' bodies
+// are), whose program, where it is valid, gives the -Wreturn-type and common warnings of the others: what clang gives of
+// them, the bodies after the unit's first error flushed (check_driver_flushed_bodies). Its other warnings are the first
+// reading's, which the caller published. Nothing where an error lies outside every body, or the reading isn't valid. Only
+// a rejected unit pays for it; the type table, input and program are its own, and the arenas' pushes stay to the unit's end.
+static void check_driver_rejected_common(const Parser* parser, const Parser* original, Preprocessor* pp, const uint32_t* errors, uint32_t error_count,
+                                         bool scalar, bool return_warning, CheckWarningSeverity return_baseline, CheckCommonShiftWarnings* shifts,
+                                         Arena* arena, Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t body_count = 0;
+    for (uint32_t token = 0; token < count; token += 1)
+    {
+        body_count += parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY;
+    }
+    CBodyRange* ranges = body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CBodyRange, body_count) : NULL;
+    uint8_t* mask = ranges != NULL ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
+    uint32_t found = 0;
+    bool valid = mask != NULL && error_count != 0 && c_environment_bodies(&parser->tree, count, ranges, body_count, &found) && found == body_count;
+    if (valid)
+    {
+        memset(mask, 0, (uint64_t)count + 1);
+    }
+    for (uint32_t e = 0; valid && e < error_count; e += 1)
+    {
+        // The body whose tokens hold the error: the last one to begin at or before it.
+        const uint32_t token = errors[e];
+        uint32_t low = 0;
+        uint32_t high = body_count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            const bool before = ranges[middle].begin <= token;
+            low = before ? middle + 1 : low;
+            high = before ? high : middle;
+        }
+        valid = low != 0 && token < ranges[low - 1].end;
+        if (valid)
+        {
+            memset(mask + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
+        }
+    }
+    valid = valid && check_lazy_mask_valid(parser, mask);
+    const TypeCapacity capacity = {
+        .types = count <= (1u << 27) ? count * 4 + 64 : 0,
+        .parameters = count,
+        .tags = count,
+        .members = count,
+    };
+    const uint64_t type_bytes = type_capacity_bytes(capacity);
+    const uint64_t index_bytes = type_index_capacity_bytes(capacity);
+    Arena type_arena = valid ? arena_reserve_small(type_bytes, type_bytes) : (Arena){ 0 };
+    Arena index_arena = valid ? arena_reserve_small(index_bytes, BUSTER_TYPE_INDEX_SMALL_BYTES) : (Arena){ 0 };
+    TypeTable types = { 0 };
+    valid = valid && capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
+    CheckInput input = { 0 };
+    valid = valid && check_input_selected(&input, parser, pp, &types, arena, scratch, mask) && !input.resource && (input.report_count == 0 || input.recovered_valid);
+    const CheckOptions check_options = { .scalar = scalar };
+    CheckStream stream = { 0 };
+    valid = valid && check_graph_run(&types, &input.graph, arena, scratch, &check_options, &stream) && stream.report_count == 0 &&
+            check_input_packed_finalize(&input, parser, &types, &stream, scratch) && check_input_warning_graph(&input, parser, &types, &stream, arena, scratch);
+    CheckAsms asms = { 0 };
+    CheckInitializers initializers = { 0 };
+    valid = valid && check_asms_run(&asms, &input, &stream, &types, arena, scratch) &&
+            check_initializers_run_events(&initializers, &input, &stream, parser, &types, arena, scratch, NULL, NULL);
+    const CheckProgramOptions program_options = check_request_program_options(pp, (CheckProgramOptions){
+        .initializers = &initializers,
+        .asms = &asms,
+        .scalar = scalar,
+        .return_warnings = return_warning,
+        .noreturn_warnings = true,
+    });
+    CheckProgram program;
+    valid = valid && check_program(&program, parser, &input, &stream, &types, program_options, arena, scratch);
+    if (valid)
+    {
+        check_driver_return_reports(parser, original, pp, &program, return_baseline, false);
+        const uint64_t flushed_mark = scratch->length;
+        const uint8_t* flushed = check_driver_flushed_bodies(parser, original, pp, &program, scratch);
+        check_driver_common_warnings(parser, pp, &input, &stream, &types, &program, flushed, shifts, scratch);
+        arena_pop_to(scratch, flushed_mark);
+    }
+    arena_release(&type_arena);
+    arena_release(&index_arena);
 }
 
 static void check_driver_remaining_pragmas(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t* fp, uint32_t* visibility, bool quiet)
@@ -6284,10 +6373,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     }
                     const bool program_checked = program_diagnostics &&
                         check_program(&program, checking, program_input, &stream, &types, program_options, output_arena, scratch);
+                    // A control error's constraints, where check_program finds one.
+                    CheckProgramDiagnostic control = { 0 };
                     if (program_diagnostics && !program_checked)
                     {
                         // A constraint error's unit gives every one, as the diagnosis of a rejected unit does (#1447).
-                        CheckProgramDiagnostic control = { 0 };
                         const bool listed = program.status == CHECK_PROGRAM_INVALID &&
                                             check_program_diagnose_all(&control, program_input, &stream, checking, &types, BUSTER_CHECK_NONE, output_arena, scratch) &&
                                             control.constraint_count != 0;
@@ -6341,6 +6431,43 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             const uint8_t* flushed = check_driver_flushed_bodies(checking, recovered, pp, &program, scratch);
                             check_driver_common_warnings(checking, pp, &input, &stream, &types, &program, flushed, &shift_warnings, scratch);
                             arena_pop_to(scratch, flushed_mark);
+                        }
+                    }
+                    else if (!quiet && !driver_fatal && ready && !prefix_only && !repairing && !parse_failed && !pp->fatal && !pp->diagnostic_collection_failed &&
+                             !pp->history_failed && (located || (program_diagnostics && program.token < tokens)))
+                    {
+                        // A rejected unit's common warnings, of the bodies its errors don't reach (#1447): its reader's, its
+                        // graph's and its other errors' tokens, and its program's.
+                        const uint64_t error_room = (uint64_t)input.report_count + stream.report_count + 2 * (uint64_t)additional_count + control.constraint_count + 1;
+                        uint32_t* error_tokens = error_room <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output_arena, uint32_t, error_room) : NULL;
+                        uint32_t error_count = 0;
+                        for (uint32_t i = 0; error_tokens != NULL && i < input.report_count; i += 1)
+                        {
+                            error_tokens[error_count++] = input.reports[i].token;
+                        }
+                        for (uint32_t i = 0; error_tokens != NULL && i < stream.report_count; i += 1)
+                        {
+                            error_tokens[error_count++] = stream.reports[i].token;
+                        }
+                        for (uint32_t i = 0; error_tokens != NULL && i < additional_count; i += 1)
+                        {
+                            error_tokens[error_count++] = additional[i].token;
+                            error_tokens[error_count++] = additional[i].position;
+                        }
+                        for (uint32_t i = 0; error_tokens != NULL && i < control.constraint_count; i += 1)
+                        {
+                            error_tokens[error_count++] = control.constraints[i].token;
+                        }
+                        if (error_tokens != NULL && program_diagnostics)
+                        {
+                            error_tokens[error_count++] = program.token;
+                        }
+                        const CheckWarningSeverity baseline = !return_warning ? CHECK_WARNING_IGNORE :
+                            return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
+                        if (error_tokens != NULL)
+                        {
+                            check_driver_rejected_common(checking, recovered, pp, error_tokens, error_count, scalar, return_warning, baseline, &shift_warnings, arena,
+                                                         scratch);
                         }
                     }
                     result = pp->errors != 0 ? 1 : result;
