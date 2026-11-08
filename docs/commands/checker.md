@@ -286,7 +286,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   default; an arithmetic or bitwise operation's `-Wenum-enum-conversion`, a conditional's `-Wenum-compare-conditional`
   and a floating mix's `-Wenum-float-conversion` (a compound assignment's only from an enumeration to a floating target),
   the three under `-Wenum-conversion` and so `-Wconversion` and `-Wnon-gcc`; and an unnamed enumeration's
-  `-Wanon-enum-enum-conversion`. A unit that defines no enumeration skips the scan.
+  `-Wanon-enum-enum-conversion`. Only a unit where an enumerator or an enumeration's variable is named as such an
+  operator's operand (`CheckInput.enum_operands`, set where the identifiers' leaves are made, outside its own
+  enumeration's definition) is scanned, and an operator is tested only where an operand may be an enumeration. An
+  enumeration operand that is only a member, a call's result or a cast's isn't looked for without one, and the constant
+  reader's expressions (an array bound in a type name, an enumerator's value) aren't scanned.
   `c_check_enum_arithmetic_driver_test.c` compares them with complete pinned-Clang output at each policy, both paths and
   with `-c`.
   `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both

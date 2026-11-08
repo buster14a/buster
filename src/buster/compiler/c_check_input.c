@@ -5092,19 +5092,44 @@ static bool check_input_address_is_weak(const CheckInputReader* reader, uint32_t
 
 // BUSTER_CHECK_NONNULL_ADDRESS for a declaration's address, or 0 when the address may be null or is not an object.
 // An enumerator is an integer. A weak attribute or pragma at or before `use` can resolve to a null pointer.
-// Whether the identifier `token` is, through parentheses, an operand of an operator whose usual arithmetic conversions may
-// mix enumerations: an arithmetic, bitwise, comparison, conditional or assignment operator's.
-static bool check_input_enum_operand(const Parser* parser, uint32_t token)
+// Whether the enumerator declared at `declaration` is one of the enumeration whose closing brace is `close`: its
+// parse-tree climb reaches it.
+static bool check_input_enum_member(const Parser* parser, uint32_t declaration, uint32_t close)
 {
+    uint32_t at = declaration;
+    for (uint32_t steps = 0; at < parser->tokens.count && at != close && parser->tree.parents[at] != at && steps < parser->tokens.count; steps += 1)
+    {
+        at = parser->tree.parents[at];
+    }
+    return at == close;
+}
+
+// Whether the identifier `token` is, through parentheses, an operand of an operator whose usual arithmetic conversions may
+// mix enumerations: an arithmetic, bitwise, comparison, conditional or assignment operator's. An enumerator of the
+// enumeration whose definition holds the operator is none: clang takes it as an int, its enumeration incomplete there.
+static bool check_input_enum_operand(const CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
     uint32_t parent = parser->tree.parents[token];
     for (uint32_t steps = 0; parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_GROUP && steps < parser->tokens.count; steps += 1)
     {
         parent = parser->tree.parents[parent];
     }
     const uint8_t role = parent < parser->tokens.count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
-    return role == PARSE_ROLE_MULTIPLICATIVE || role == PARSE_ROLE_ADDITIVE || role == PARSE_ROLE_RELATIONAL || role == PARSE_ROLE_EQUALITY ||
-           role == PARSE_ROLE_BITWISE_AND || role == PARSE_ROLE_BITWISE_XOR || role == PARSE_ROLE_BITWISE_OR || role == PARSE_ROLE_ASSIGN ||
-           role == PARSE_ROLE_OPEN_TERNARY || role == PARSE_ROLE_CLOSE_TERNARY;
+    const bool operand = role == PARSE_ROLE_MULTIPLICATIVE || role == PARSE_ROLE_ADDITIVE || role == PARSE_ROLE_RELATIONAL || role == PARSE_ROLE_EQUALITY ||
+                         role == PARSE_ROLE_BITWISE_AND || role == PARSE_ROLE_BITWISE_XOR || role == PARSE_ROLE_BITWISE_OR || role == PARSE_ROLE_ASSIGN ||
+                         role == PARSE_ROLE_OPEN_TERNARY || role == PARSE_ROLE_CLOSE_TERNARY;
+    // The enumeration definition the operator is in, if any: its closing brace.
+    uint32_t definition = parent;
+    for (uint32_t steps = 0; operand && definition < parser->tokens.count && parser->tree.roles[definition] != PARSE_ROLE_CLOSE_ENUM &&
+                             parser->tree.parents[definition] != definition && steps < parser->tokens.count; steps += 1)
+    {
+        definition = parser->tree.parents[definition];
+    }
+    const uint32_t declaration = token < reader->output->token_count ? reader->output->declarations[token] : BUSTER_CHECK_NONE;
+    const bool own = definition < parser->tokens.count && parser->tree.roles[definition] == PARSE_ROLE_CLOSE_ENUM && declaration < definition &&
+                     parser->tree.roles[declaration] != PARSE_ROLE_CLOSE_ENUM && check_input_enum_member(parser, declaration, definition);
+    return operand && !own;
 }
 
 // An identifier leaf at `token` that names an enumerator or a variable of an enumeration type (an aligned typedef's
@@ -5112,7 +5137,7 @@ static bool check_input_enum_operand(const Parser* parser, uint32_t token)
 static void check_input_note_enum(const CheckInputReader* reader, uint32_t token, bool enumeration, TypeId type)
 {
     const uint8_t kind = type_kind(reader->types, type);
-    if ((enumeration || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_ALIGNED) && check_input_enum_operand(reader->parser, token))
+    if ((enumeration || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_ALIGNED) && check_input_enum_operand(reader, token))
     {
         reader->output->enum_operands = true;
     }

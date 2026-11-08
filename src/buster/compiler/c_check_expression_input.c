@@ -647,7 +647,7 @@ static uint32_t check_input_expression_identifiers(const CheckInputReader* reade
                           _mm512_mask_cmpeq_epi32_mask(typed, type_kinds, _mm512_set1_epi32(BUSTER_TYPE_KIND_ALIGNED));
         for (; enums != 0 && !reader->output->enum_operands; enums &= (__mmask16)(enums - 1))
         {
-            reader->output->enum_operands = check_input_enum_operand(reader->parser, found[at + (uint32_t)__builtin_ctz(enums)]);
+            reader->output->enum_operands = check_input_enum_operand(reader, found[at + (uint32_t)__builtin_ctz(enums)]);
         }
         const __mmask16 has_object = _mm512_mask_test_epi32_mask(typed, objects, objects);
         const __mmask16 nonnull = has_object & ~enumeration;
