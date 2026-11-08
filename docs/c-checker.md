@@ -4137,16 +4137,35 @@ These differences remain:
 - An enum's vector mode after its body gives its deprecation warning twice (on
   main too).
 
+Three of clang's words and places are followed (#1447):
+
+- **A static initializer that isn't constant.** "initializer element is not a
+  compile-time constant" is at clang's culprit (`Expr::isConstantInitializer`):
+  the value past same-type casts and conversions, at a binary, unary or
+  postfix operator's token, a member's name, a cast's `(`, or the first token
+  of a call, a subscript, a conditional or a name (`check_init_culprit_at`).
+  The initializers' plan and the expressions' static check both place it so.
+- **`sizeof` and `alignof` of an incomplete type.** "invalid application of
+  'sizeof' to an incomplete type 'T'", with `alignof` or `__alignof` as
+  clang spells the keyword, the type as written (a typedef with its "aka"),
+  at a type name's keyword or an expression's first token, and a tag's
+  "forward declaration" note (`check_semantic_forward_note`). An array of
+  unknown size's alignment is its element's (C11 6.5.3.4p3), as clang takes
+  it.
+- **A call of no function.** "called object type 'T' is not a function or
+  function pointer" at the call's `(`, with the callee's type as written.
+
+These are rendering only, apart from the alignment, and only the reports'
+own nodes take them.
+
 The later phases are left:
 
 - **Invalid declarations.** Not covered by phase 2:
   - C23's incompatible tag redefinitions (above).
 
-  These still stop the reader. A non-constant initializer's error is at its
-  first token, where clang's is at the operand that isn't constant
-  (`k + 1`'s `+`), and `sizeof` of an incomplete type reads "incomplete type
-  is not permitted here" at the `sizeof`, where clang's names the type at its
-  operand; both on main too.
+  These still stop the reader. A call of no function whose arguments have an
+  error gives the call's error too, where clang gives the arguments' alone (on
+  main too).
 - **Units with a graph's or a reader's error.** These, other than a recovered
   one, still don't reach `check_program`. They get none of its diagnostics:
   the common warnings, their runtime warnings included. The asm and control

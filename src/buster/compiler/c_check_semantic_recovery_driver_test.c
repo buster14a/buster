@@ -183,6 +183,67 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // no node and keeps its error (third review on #1791).
         "int c = undecl, d[] = 6;\nunknown_type z;\n",
         "int c = undecl;\nint d[] = 6;\nint e[] = (5);\nint f2[] = undecl2 + 1;\nint g[] = (int)7;\nunknown_type z;\n",
+        // Clang's words and places (#1447): a static initializer's culprit (an operator, a member's name, a cast's `(`, a
+        // call's or a name's first token), `sizeof` and `alignof` of an incomplete type (the type as written, at a type
+        // name's keyword or an expression's start, with the tag's note; an array of unknown size's alignment its
+        // element's), and a call of no function (the callee's type, at the `(`).
+        "int k;\n"
+        "static int s2 = k + 1;\n"
+        "static int s3 = 1 + k;\n"
+        "static int s4 = (k);\n"
+        "static int s5 = -k;\n"
+        "static int s6 = k * 2 + 3;\n"
+        "static int s7 = 2 + 3 * k;\n"
+        "static int *p1 = &k + k;\n",
+        "int k;\n"
+        "int f(void);\n"
+        "struct S { int a; } s;\n"
+        "int arr[4];\n"
+        "static long c1 = (long)k;\n"
+        "static int c2 = f();\n"
+        "static int c3 = k ? 1 : 2;\n"
+        "static int c4 = s.a;\n"
+        "static int c5 = arr[k];\n"
+        "static int c6 = ((k));\n"
+        "static int c7[2] = { 1, k };\n"
+        "static struct S c8 = { k };\n"
+        "static int c9 = (int)(k + 1);\n"
+        "static int c10 = k++;\n"
+        "static int *c11 = &arr[k];\n"
+        "static int c13 = !k;\n",
+        "extern int a[];\n"
+        "struct Q;\n"
+        "int s = sizeof(a);\n"
+        "int t = sizeof(struct Q);\n"
+        "int u = sizeof a;\n"
+        "int v = _Alignof(struct Q);\n"
+        "void f(void);\n"
+        "int w = sizeof(f());\n"
+        "int x = sizeof(void);\n",
+        "struct Q;\n"
+        "int a1 = __alignof__(struct Q);\n"
+        "int a2 = __alignof(struct Q);\n"
+        "int a4 = _Alignof(struct Q);\n"
+        "extern int e[];\n"
+        "int a5 = __alignof__(e);\n"
+        "typedef struct Q QT;\n"
+        "int a6 = sizeof(QT);\n"
+        "union U; enum E;\n"
+        "int a7 = sizeof(union U) + sizeof(enum E);\n"
+        "int a8 = sizeof(struct Q *) + sizeof(e[0]);\n"
+        "void g(void) { struct Q *q = 0; int a9 = sizeof(*q); int a10 = sizeof *q; }\n",
+        "extern int e[];\n"
+        "_Static_assert(__alignof__(e) == 4, \"\");\n"
+        "_Static_assert(_Alignof(int[]) == 4, \"\");\n"
+        "_Static_assert(_Alignof(char[][4]) == 1, \"\");\n"
+        "extern double d2[][3];\n"
+        "_Static_assert(__alignof__(d2) == 8, \"\");\n"
+        "struct Q;\n"
+        "int q = _Alignof(struct Q);\n",
+        "int f(void);\n"
+        "int x;\n"
+        "struct S { int a; } s;\n"
+        "void g(void) { f()(); x(); s(); (1)(); int *p = 0; p(); }\n",
         // A block's, and clang's unused-variable warnings of no scope in which an error occurred (a body's from its
         // definition's start).
         "void f(int p)\n{\n    int x;\n    float x;\n    int y = 1;\n    long y = 2;\n    (void)y;\n    if (y = 2) {}\n}\n"
