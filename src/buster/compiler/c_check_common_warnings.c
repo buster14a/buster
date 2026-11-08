@@ -3172,51 +3172,25 @@ static bool check_common_displaced_root(const CheckGraph* graph, const uint32_t*
     return result;
 }
 
-// The displaced roots (check_common_displaced_root), each its operand's node above its own, in their operands' order, into
-// `items` (at most half the graph's nodes: each has an operand and a node between them): their count. A bottom-up merge sort
-// through `temporary`, as no recursion is allowed; nearly every run is sorted already.
-static uint32_t check_common_displaced_roots(const CheckGraph* graph, const uint32_t* parents, uint64_t* items, uint64_t* temporary, bool vector)
+// The displaced roots (check_common_displaced_root), each its operand's node above its own, in their operands' order
+// (c_bindings_sort's stable radix sort of the operands, through `temporary`): their count, and the sorted keys in `*sorted`.
+// At most half the graph's nodes are displaced: each has an operand and a node between them.
+static uint32_t check_common_displaced_roots(const CheckGraph* graph, const uint32_t* parents, uint64_t* items, uint64_t* temporary,
+                                             const uint64_t** sorted, bool vector)
 {
     static const CheckOp wrappers[] = { CHECK_OP_CONDITION, CHECK_OP_POSITIVE, CHECK_OP_CAST };
     const CheckCommonOps set = check_common_ops(wrappers, BUSTER_ARRAY_LENGTH(wrappers));
     CheckCommonScan scan = { 0 };
     uint32_t count = 0;
-    bool sorted = true;
     for (uint32_t node = check_common_next_op(graph, &set, &scan, vector); node < graph->count; node = check_common_next_op(graph, &set, &scan, vector))
     {
         if (check_common_displaced_root(graph, parents, node))
         {
-            items[count] = ((uint64_t)graph->operand0[node] << 32) | node;
-            sorted &= count == 0 || items[count - 1] < items[count];
-            count += 1;
+            items[count++] = ((uint64_t)graph->operand0[node] << 32) | node;
         }
     }
-    uint64_t* from = items;
-    uint64_t* to = temporary;
-    for (uint32_t width = 1; !sorted && width < count; width *= 2)
-    {
-        for (uint32_t start = 0; start < count; start += 2 * width)
-        {
-            const uint32_t middle = count - start > width ? start + width : count;
-            const uint32_t end = count - middle > width ? middle + width : count;
-            uint32_t left = start;
-            uint32_t right = middle;
-            for (uint32_t at = start; at < end; at += 1)
-            {
-                const bool take_left = right >= end || (left < middle && from[left] < from[right]);
-                to[at] = take_left ? from[left] : from[right];
-                left += take_left ? 1u : 0u;
-                right += take_left ? 0u : 1u;
-            }
-        }
-        uint64_t* swap = from;
-        from = to;
-        to = swap;
-    }
-    if (from != items && count != 0)
-    {
-        memcpy(items, from, count * sizeof(uint64_t));
-    }
+    const uint32_t varying = graph->count != 0 ? UINT32_MAX >> __builtin_clz(graph->count) : 0;
+    *sorted = count != 0 ? c_bindings_sort(items, temporary, count, vector, varying) : items;
     return count;
 }
 
@@ -3329,9 +3303,10 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         {
             check_common_exhausted(pp);
         }
+        const uint64_t* displaced_sorted = displaced;
         const uint32_t displaced_count = displaced_temporary != NULL ?
-                                         check_common_displaced_roots(graph, facts->parents, displaced, displaced_temporary, vector) : 0;
-        CheckCommonRootOrder order = { .displaced = displaced, .displaced_count = displaced_count };
+                                         check_common_displaced_roots(graph, facts->parents, displaced, displaced_temporary, &displaced_sorted, vector) : 0;
+        CheckCommonRootOrder order = { .displaced = displaced_sorted, .displaced_count = displaced_count };
         order.natural = check_common_next_root(facts->parents, graph->count, &order.roots, vector);
         for (uint32_t node = check_common_root_order_next(graph, facts->parents, &order, vector); node < graph->count && !pp->fatal;
              node = check_common_root_order_next(graph, facts->parents, &order, vector))
