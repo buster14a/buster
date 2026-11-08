@@ -47,6 +47,11 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // Two errors in one list, the parser's (a string's) before Sema's (an alignment's) as clang gives them, and the
         // attribute between them kept.
         "__attribute__((aligned(3), unused, section(1))) int x;\nint y = sizeof x;\n",
+        // The same on declarators with parameters, whose subject checks come before their function's (#1764's review): the
+        // function's Sema errors still wait for its declarator's end, and a parameter's for its own.
+        "__attribute__((aligned(3), section(1))) void f(int *p);\n__attribute__((aligned(3), section(1))) int g(int a, int b);\n"
+        "__attribute__((aligned(3), section(1))) void (*fp)(int);\nvoid h(__attribute__((aligned(3), section(1))) int p);\n"
+        "__attribute__((nonnull(5), section(1))) void k(int *p);\nint m(void) { return missing_name; }\n",
         // A recovered error, then one that ends the unit's checking as before (a control's).
         "__attribute__((nonnull(5))) void g(int *p);\nvoid k(void) { break; }\n",
         // Recovered errors with missing names, whose constructs alone are cut (check_input_diagnostic_recover).
