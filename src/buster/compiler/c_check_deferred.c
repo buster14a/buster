@@ -695,6 +695,12 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     // The top level's memo of declared builtins' verdicts (CheckInputReader.intrinsic_source) is the top reader's alone:
     // a lane, which no lane's write may reach, keeps none, and its pre-check works each verdict out again.
     reader->intrinsic_source = NULL;
+    // The top level's C23 redefinitions are its own (c_check_tag_compatible.c): a lane keeps its own, in its arena.
+    reader->c23_tags = NULL;
+    reader->c23_earlier = NULL;
+    reader->c23_earlier_keywords = NULL;
+    reader->c23_count = 0;
+    reader->c23_capacity = 0;
     reader->output = input;
     reader->types = &lane->types;
     reader->arena = &arenas->output;
@@ -1518,7 +1524,7 @@ static CheckInputReport check_deferred_report(const CheckInputReport* report, co
     CheckInputReport result = *report;
     const bool redeclaration = result.message == CHECK_INPUT_REDECLARATION || result.message == CHECK_INPUT_CONFLICTING_TYPES;
     const bool binary = result.message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (result.detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_BINARY;
-    const bool typed = (redeclaration && result.detail != CHECK_REDECLARATION_GENERIC) || binary;
+    const bool typed = (redeclaration && result.detail != CHECK_REDECLARATION_GENERIC) || binary || result.message == CHECK_INPUT_TAG_INCOMPATIBLE;
     result.type = check_deferred_type(part, result.type);
     result.value = typed ? check_deferred_type(part, (TypeId)result.value) : result.value;
     return result;

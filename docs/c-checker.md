@@ -3983,9 +3983,18 @@ do:
   without a fixed type listed twice) gives "redefinition of 'S'" at the name,
   noting the earlier definition. Its body is read as an anonymous tag's, so the
   name's later uses find the first definition, and a repeated enumerator in it
-  is reported as below. This is before C23 only: C23 allows a compatible
-  redefinition and words an incompatible one otherwise (N3037), which the
-  checker doesn't model, and still refuses with its generic error.
+  is reported as below. This is before C23 only. Under `-std=c23`/`gnu23`
+  (N3037) a struct or union defined again in its scope is compared with the
+  earlier definition when its body completes (`c_check_tag_compatible.c`):
+  members in order, with the same names, bit-field widths and compatible
+  types, anonymous nested records compared structurally with an explicit
+  stack, and the same attributes. A compatible redefinition declares the
+  earlier type. An incompatible one gives clang's "type 'struct S' has
+  incompatible definitions" at the new name, with its two notes at the
+  differing members (name, bit-field, type, a member with no counterpart),
+  or clang's `-Wodr` error when only the attributes differ; the unit is
+  refused and recovered. `-Wno-odr` doesn't turn that error off here. An enum
+  defined again still refuses with the generic error under C23.
 - **A repeated enumerator** gives "redefinition of enumerator 'A'" with its
   note at the earlier one, and is dropped (`CheckTagFrame.dropped`). As in
   clang, whose next `CheckEnumConstant` sees no previous constant, the next
@@ -4180,7 +4189,7 @@ These differences remain:
 The later phases are left:
 
 - **Invalid declarations.** Not covered by phase 2:
-  - C23's incompatible tag redefinitions (above).
+  - C23's redefinition of an enum, compatible or not (above).
 
   These still stop the reader. A non-constant initializer's error is at its
   first token, where clang's is at the operand that isn't constant

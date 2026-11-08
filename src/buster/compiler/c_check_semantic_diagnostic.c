@@ -34,6 +34,67 @@ static uint32_t check_semantic_function(const Parser* parser, const CheckInput* 
     return result;
 }
 
+// C23's incompatible redefinition's two notes (#1447, CHECK_INPUT_TAG_INCOMPATIBLE): at the first difference's member of
+// the second definition then the earlier's, or at a member then "no corresponding field" at the other definition's name,
+// as clang words them. How many there are.
+static uint32_t check_semantic_tag_notes(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                         CheckWarningSpelling* spell, const CheckInputReport* report, PPOutputDiagnosticNote* notes, Arena* scratch)
+{
+    const uint32_t count = input->token_count;
+    const uint32_t first = report->attribute;
+    const uint32_t second = report->note_token;
+    const String8 first_name = first < count ? check_semantic_name(parser, pp, first) : (String8){ "", 0 };
+    const String8 second_name = second < count ? check_semantic_name(parser, pp, second) : (String8){ "", 0 };
+    const char* texts[2] = { NULL, NULL };
+    switch (report->detail)
+    {
+        case 0: // CHECK_TAG_MISMATCH_NAME
+            texts[0] = check_warning_text(scratch, "field has name '%.*s' here", (int)first_name.length, first_name.pointer);
+            texts[1] = check_warning_text(scratch, "field has name '%.*s' here", (int)second_name.length, second_name.pointer);
+            break;
+        case 1: // CHECK_TAG_MISMATCH_BIT_FIELD
+        {
+            const uint32_t widths[2] = { report->bit_widths >> 16, report->bit_widths & 0xffffu };
+            const String8 names[2] = { first_name, second_name };
+            for (uint32_t n = 0; n < 2; n += 1)
+            {
+                texts[n] = widths[n] == 0 ? check_warning_text(scratch, "field '%.*s' is not a bit-field", (int)names[n].length, names[n].pointer) :
+                                            check_warning_text(scratch, "bit-field '%.*s' has bit-width %u here", (int)names[n].length, names[n].pointer, widths[n] - 1);
+            }
+        } break;
+        case 2: // CHECK_TAG_MISMATCH_TYPE
+        {
+            const String8 first_type = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type,
+                                                                 first < count ? check_input_typedef_spelling(input, parser, first) : 0);
+            const String8 second_type = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value,
+                                                                  second < count ? check_input_typedef_spelling(input, parser, second) : 0);
+            texts[0] = check_warning_text(scratch, "field '%.*s' has type %.*s here", (int)first_name.length, first_name.pointer, (int)first_type.length, first_type.pointer);
+            texts[1] = check_warning_text(scratch, "field '%.*s' has type %.*s here", (int)second_name.length, second_name.pointer, (int)second_type.length, second_type.pointer);
+        } break;
+        case 5: // CHECK_TAG_MISMATCH_ATTRIBUTE
+            texts[0] = check_warning_text(scratch, "attribute '%.*s' here", (int)first_name.length, first_name.pointer);
+            break;
+        default: // CHECK_TAG_MISMATCH_EXTRA_NEW, CHECK_TAG_MISMATCH_EXTRA_OLD
+        {
+            const String8 first_type = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type,
+                                                                 first < count ? check_input_typedef_spelling(input, parser, first) : 0);
+            texts[0] = check_warning_text(scratch, "field '%.*s' has type %.*s here", (int)first_name.length, first_name.pointer, (int)first_type.length, first_type.pointer);
+            texts[1] = "no corresponding field here";
+        } break;
+    }
+    uint32_t result = 0;
+    const uint32_t tokens[2] = { first, second };
+    for (uint32_t n = 0; n < 2; n += 1)
+    {
+        if (tokens[n] < count && texts[n] != NULL)
+        {
+            notes[result] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[tokens[n]], .message = texts[n] };
+            result += 1;
+        }
+    }
+    return result;
+}
+
 static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                        const CheckInputReport* report, CheckWarningSpelling* spell, Arena* scratch)
 {
@@ -50,6 +111,20 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
             result = check_warning_text(scratch, "non-void function '%.*s' should return a value [-Wreturn-mismatch]",
                                         (int)function_name.length, function_name.pointer);
         }
+    }
+    else if (report->message == CHECK_INPUT_TAG_INCOMPATIBLE && name.length != 0 && token > 0)
+    {
+        // C23's incompatible redefinition of a record (#1447): its keyword, struct or union, before its name.
+        uint32_t keyword = token - 1;
+        for (uint32_t steps = 0; keyword != 0 && steps < 64 && parser->tokens.kinds[keyword] != PARSE_KIND_STRUCT; steps += 1)
+        {
+            keyword -= 1;
+        }
+        const String8 word = check_semantic_name(parser, pp, keyword);
+        result = word.length == 0 ? NULL : check_warning_text(scratch, report->detail == 5 ?
+                                                              "type '%.*s %.*s' has an attribute which currently causes the types to be treated as though they are incompatible [-Wodr]" :
+                                                              "type '%.*s %.*s' has incompatible definitions", (int)word.length, word.pointer,
+                                                              (int)name.length, name.pointer);
     }
     else if (report->message == CHECK_INPUT_ENUMERATOR_REDEFINITION && name.length != 0)
     {

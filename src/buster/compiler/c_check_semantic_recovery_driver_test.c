@@ -208,6 +208,59 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum F : short { U = 7, T, V };\n"
         "_Static_assert(V == 0 && sizeof(V) == 2, \"v\");\n"
         "void w(void) { int loc; enum { loc, after } e; (void)e; (void)loc; }\n",
+        // C23's redefinition of a record in its scope (#1447, N3037), gnu23's alone: a compatible one redeclares the
+        // earlier record, typedef'd members and nested anonymous records too; an incompatible one is clang's "has
+        // incompatible definitions" with its notes at the first difference (a name, a bit-field, a type, a member more or
+        // fewer), and attributes one definition hasn't are -Wodr's error.
+        "/* gnu23 only */\n"
+        "struct S { int a; long b; };\n"
+        "struct S { int a; long b; };\n"
+        "union U { int x; float y; };\n"
+        "union U { int x; float y; };\n"
+        "struct N { struct S s; int arr[3]; int bits : 3; };\n"
+        "struct N { struct S s; int arr[3]; int bits : 3; };\n"
+        "int use(void) { struct S v = { 1, 2 }; struct N n; n.bits = 1; return v.a + n.arr[0]; }\n"
+        "void blk(void) { struct L { int q; }; struct L { int q; } l; l.q = 0; }\n"
+        "int bad = undeclared;\n",
+        "/* gnu23 only */\n"
+        "struct S { int a; long b; };\n"
+        "struct S { int a; int b; };\n"
+        "struct T { int a; };\n"
+        "struct T { int b; };\n"
+        "struct U { int a; int b; };\n"
+        "struct U { int a; };\n"
+        "struct W { int a : 3; };\n"
+        "struct W { int a : 4; };\n"
+        "struct X { int a; } __attribute__((packed));\n"
+        "struct X { int a; };\n"
+        "struct Y { int a; };\n"
+        "struct Y { const int a; };\n"
+        "int x = undeclared;\n",
+        "/* gnu23 only */\n"
+        "struct A { int a; int b : 3; };\n"
+        "struct A { int a; int b; };\n"
+        "struct B { int a; };\n"
+        "struct B { int a; int b; };\n"
+        "struct C { struct { int x; } in; };\n"
+        "struct C { struct { int x; } in; };\n"
+        "struct D { int a; };\n"
+        "struct D { int a; } __attribute__((aligned(8)));\n"
+        "struct E { int a[2]; };\n"
+        "struct E { int a[3]; };\n"
+        "typedef int I;\n"
+        "struct F { I a; };\n"
+        "struct F { int a; };\n"
+        "struct G { int a, b; };\n"
+        "struct G { int b, a; };\n"
+        "union H { int a; };\n"
+        "union H { int a; long b; };\n"
+        "void f(void) { struct L { int q; }; struct L { int r; }; }\n",
+        "/* gnu23 only */\n"
+        "struct D { int a; };\n"
+        "struct D { int a; } __attribute__((aligned(8)));\n"
+        "struct X { int a; } __attribute__((packed));\n"
+        "struct X { int a; } __attribute__((packed));\n"
+        "int x = undeclared;\n",
         // A block's, and clang's unused-variable warnings of no scope in which an error occurred (a body's from its
         // definition's start).
         "void f(int p)\n{\n    int x;\n    float x;\n    int y = 1;\n    long y = 2;\n    (void)y;\n    if (y = 2) {}\n}\n"
@@ -282,7 +335,9 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         snprintf(source, sizeof(source), "%s/semantic-recovery-%u.c", directory, f);
         const bool made = parse_test_write(source, fixtures[f], strlen(fixtures[f]));
         const uint32_t standard_count = f >= before_c23 ? 1u : (uint32_t)BUSTER_ARRAY_LENGTH(standards);
-        for (uint32_t s = 0; made && s < standard_count; s += 1)
+        // A fixture that starts with this marker is gnu23's alone (C23's tag compatibility).
+        const bool c23_only = strncmp(fixtures[f], "/* gnu23 only */", 16) == 0;
+        for (uint32_t s = c23_only ? 1u : 0u; made && s < standard_count; s += 1)
         {
             for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(options); o += 1)
             {
