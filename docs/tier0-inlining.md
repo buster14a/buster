@@ -23,8 +23,10 @@ and result goes through the call's objects:
 - the callee stores the result into a result object, loads it into `ymm0`;
 - and the caller stores `ymm0` into its own result object and copies that again.
 
-#1398's kernels run 4.8 to 29 times clang -O0 at Tier 0 on the 9700X; Tier 1,
-which inlines these wrappers since #1282, is within 1.1 to 1.5 times clang -O2.
+#1398's kernels run 4.8 to 29 times clang -O0 at Tier 0 on the 9700X. Tier 1,
+which inlines these wrappers since #1282, runs three of them within 1.1 to 1.5
+times clang -O2. The fourth, a masked count, is 5.1 times, which the issue puts
+down to #1374's `popcount`.
 Tier 0 is what `-c` and the direct path use by default, and what the self-host
 qualification (`tools/ci/selfhost.c`, #1111) builds the compiler with: a
 compiler built by itself runs its own vector lexer, refinement and checker
