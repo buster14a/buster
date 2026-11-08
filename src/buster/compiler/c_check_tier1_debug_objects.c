@@ -169,7 +169,7 @@ static bool check_tier1_debug_object_clips(const Tier0Function* function, const 
     uint64_t* event_sorting = prove ? ir_allocate(scratch, (uint64_t)shared * 2, 8, &valid) : NULL;
     uint32_t key_count = 0;
     uint32_t event_count = 0;
-    valid = valid && (!prove || locals <= UINT32_MAX / 2 && shared <= UINT32_MAX / 2);
+    valid = valid && (!prove || (locals <= UINT32_MAX / 2 && shared <= UINT32_MAX / 2));
     if (valid && prove)
     {
         memset(owners, 0xff, (uint64_t)frame->slot_count * 4);
