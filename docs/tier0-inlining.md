@@ -242,6 +242,13 @@ the copy. Everything else in the callee's tables is appended to `G`'s:
   `argument_classes`, `argument_sizes`). The contract doesn't promise that a
   row has only one `CALL`, and a copy per site doesn't need it to.
 
+Optional per-local and per-call columns need a full output span if any input
+uses them. For a missing `local_sizes`, `local_alignments`, `argument_sizes`,
+`call_result_objects` or `call_tails` column, materialize zeros for that input
+segment rather than omitting the other segment or reading a null pointer.
+Preserve column-level constraints too: if the resulting optional-column shape
+is invalid for the caller, validation keeps the original call.
+
 Sharing the locals between a caller's sites of one callee is sound because no two
 of them are ever live at once. A site's locals live from its first binding to
 its last entry. Its arguments, any other site among them included, are
@@ -482,8 +489,9 @@ this one's, and needs its own issue.
     of each, and each program run natively with and without the splice on the
     generator's eight inputs, which must give the same results and globals;
   - hand-written fixtures for every row of the binding and result tables,
-    mixed-width vector constants and their width column, forwarding and its
-    near misses, nested callees, recursive cycles entered
+    mixed-width vector constants and their width column, scalar callers with
+    aggregate callees and the reverse (including null optional columns),
+    forwarding and its near misses, nested callees, recursive cycles entered
     from different callers and orders, the same callee at different remaining
     depths, cold and warm caches, the depth bound, a
     callee of every refused kind (each keeping its calls), compatible and
