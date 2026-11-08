@@ -4240,6 +4240,22 @@ and each callee name's answer from clang's builtin table is looked up once. Expl
 
 Literal floating-to-integer conversions warn for the supported initializer, assignment, return and call-argument paths, including conditional arms and top-level comma values. Literal conversion warnings do not descend through a comma inside a conditional arm, or through a nested comma or conditional inside a comma's value. A floating literal a truth context converts to `_Bool` warns as clang's CheckBoolLikeConversion gives it ("changes value from 1.5 to true"): the operands of `!`, `&&` and `||`, a statement's or a conditional's condition and a static assertion's, never a conditional's arms, a comma's result or `sizeof`'s operand (`check_common_truth_operands`).
 
+A literal conversion is reported at once, as clang's `Sema::Diag` reports
+`DiagnoseFloatingImpCast` and `CheckBoolLikeConversion`, not with the runtime
+warnings `DiagRuntimeBehavior` defers to the function's end (constant
+conversions, shift counts, division by zero): it is published where its full
+expression completes (`check_common_full_expression_end`: the end of its
+root, or of the declarator's initialization on the way, and a brace
+initializer's end for all its parts), so every literal conversion of a body
+precedes that body's deferred warnings. One full expression's conversions
+share that boundary and keep the walk's order (a call's last argument first).
+The phase after the lexer's at that boundary puts them before the next
+statement's own diagnostics. At file scope a declarator's constant conversion
+is published at the same boundary in the later phase, after its literal ones,
+as clang delays it to the declaration's end. Where these warnings may report
+(unreachable code and short-circuited operands, but not `sizeof`'s operand) is
+unchanged.
+
 The graph's passes share their facts, `check_common_facts`, which give each
 node its parent, whether another node uses its value, whether it is evaluated,
 a conditional's or comma's arm effect, a separate logical-discard fact in the

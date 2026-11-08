@@ -872,10 +872,10 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
                                           Arena* scratch);
 static void check_common_conversion_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
-                                            TypeId target, bool evaluated, Arena* scratch);
+                                            TypeId target, bool evaluated, const uint32_t* parents, uint32_t at_once, Arena* scratch);
 static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                          TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
-                                         TypeId target, uint32_t completion, Arena* scratch);
+                                         TypeId target, const uint32_t* parents, uint32_t at_once, Arena* scratch);
 
 // Query preparation suppresses every unevaluated constant-warning family before graph construction; runtime
 // selections suppress overflow alone. The retained full mask also identifies detached initializer roots inside
@@ -908,6 +908,9 @@ typedef struct CheckCommonEmission
     // Separate ownership for the ordinary tree, detached count scans, count publication, the conversion visit and the
     // literal-only source context (BUSTER_CHECK_EMITTED_*).
     uint8_t* emitted;
+    // The full expression's end a brace initializer's conversions all complete at (check_common_initializer_conversions),
+    // or BUSTER_CHECK_NONE, where each conversion's root gives it (check_common_full_expression_end).
+    uint32_t at_once;
     // The existing arm-discard fact and the stricter logical-operand fact (BUSTER_CHECK_DISCARD_*).
     // CONDITIONAL answers its arms', COMMA its result operand's, SELECT its chosen value's.
     // Children precede parents in the graph, so one ascending pass fills it and every query stays iterative.
@@ -1691,7 +1694,8 @@ static void check_common_call_argument(CheckCommonEmission* emission, uint32_t i
             const TypeId destination = prototype ? conversion.type : type_default_argument_promote(emission->types, conversion.type);
             const CheckValue value = check_stream_value(stream, argument);
             check_common_conversion_warning(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell,
-                                            argument, &value, destination, check_common_emit_evaluated(emission, argument), emission->scratch);
+                                            argument, &value, destination, check_common_emit_evaluated(emission, argument), emission->parents,
+                                            emission->at_once, emission->scratch);
         }
     }
 }
@@ -1718,7 +1722,7 @@ static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t 
             const CheckValue value = check_stream_value(stream, source);
             const TypeId target = check_stream_type(stream, node);
             check_common_conversion_warning(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell,
-                                            source, &value, target, evaluated, emission->scratch);
+                                            source, &value, target, evaluated, emission->parents, emission->at_once, emission->scratch);
         }
     }
     else if (evaluated || (emission->emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0)
@@ -1733,7 +1737,7 @@ static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t 
             {
                 const CheckValue value = check_stream_value(stream, source);
                 check_common_conversion_leaf(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, source, &value,
-                                             BUSTER_TYPE_BOOL, check_common_function_boundary(emission->parser, graph->tokens[source]), emission->scratch);
+                                             BUSTER_TYPE_BOOL, emission->parents, emission->at_once, emission->scratch);
             }
         }
     }
@@ -2957,11 +2961,35 @@ static bool check_common_nondecimal_literal(const Parser* parser, Preprocessor* 
     return result;
 }
 
-// A value-changing implicit integer conversion of a constant: the warning clang spells at the constant's own
-// token, shared by initializers, assignments, return conversions and a call's per-argument assignment.
+// Where the full expression holding `node` completes: the exclusive end (CheckGraph.source_positions) of its root up
+// `parents`, or of the first initialization on the way, since each declarator's initializer is a full expression of its
+// own while its declaration's discard wrapper spans them all; the node's own token where the graph keeps no ends. A
+// conversion's warning is located at its constant, but clang's Sema::CheckCompletedExpr checks an expression's implicit
+// conversions there, in its own order (AnalyzeImplicitConversions: a call's last argument first, an assignment before its
+// operands), which publishing them all at this one boundary keeps. Only a reported warning asks: the climb is its cost.
+static uint32_t check_common_full_expression_end(const Parser* parser, const CheckGraph* graph, const uint32_t* parents, uint32_t node)
+{
+    uint32_t root = node;
+    for (uint32_t steps = 0; parents != NULL && root < graph->count && graph->ops[root] != CHECK_OP_INITIALIZE && parents[root] < graph->count &&
+         steps < graph->count; steps += 1)
+    {
+        root = parents[root];
+    }
+    const uint32_t end = graph->source_positions != NULL && root < graph->count ? graph->source_positions[root] : BUSTER_CHECK_NONE;
+    const uint32_t result = end <= parser->tokens.count ? end : graph->tokens[node];
+    return result;
+}
+
+// A value-changing implicit conversion of a constant, shared by initializers, assignments, return conversions, a call's
+// per-argument assignment and a truth context's: the warning clang spells at the constant's own token. An integer one is
+// clang's DiagRuntimeBehavior's, deferred to its function's end; at file scope clang delays it to its declaration's end,
+// after that initializer's literal conversions (the SEMANTIC phase at the same boundary). A floating literal's is clang's
+// Diag's (DiagnoseFloatingImpCast, CheckBoolLikeConversion), at once, as its full expression completes: `at_once`, or the
+// end check_common_full_expression_end finds up `parents`. Its phase there, after the lexer's lookahead, puts it before
+// whatever the next statement or declarator reports from that token. Where either may report is unchanged.
 static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
-                                            TypeId target, uint32_t completion, Arena* scratch)
+                                            TypeId target, const uint32_t* parents, uint32_t at_once, Arena* scratch)
 {
     __int128 converted = 0;
     if (value->constant_kind == CHECK_CONSTANT_INTEGER && check_common_conversion_changes(types, value->type, target, value->integer, &converted) &&
@@ -2987,7 +3015,10 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
             const CheckGraph* graph = &input->graph;
             const uint32_t condition = graph->ops[source] == CHECK_OP_CONDITIONAL ? graph->operand0[source] : BUSTER_CHECK_NONE;
             const uint32_t token = condition < graph->count ? graph->tokens[condition] : graph->tokens[source];
-            check_common_report_evaluated(parser, pp, input, token, completion, PP_DIAGNOSTIC_DEFERRED,
+            const bool body = check_common_function_end(parser, token) != token;
+            const uint32_t publication = body ? check_common_function_boundary(parser, token) :
+                                         at_once != BUSTER_CHECK_NONE ? at_once : check_common_full_expression_end(parser, graph, parents, source);
+            check_common_report_evaluated(parser, pp, input, token, publication, body ? PP_DIAGNOSTIC_DEFERRED : PP_DIAGNOSTIC_SEMANTIC,
                                         CHECK_WARNING_ID_CONSTANT_CONVERSION, false, message, NULL, 0, scratch);
         }
     }
@@ -3030,7 +3061,8 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
                     message = check_warning_text(scratch, "implicit conversion from %.*s to %.*s changes value from %s to %s",
                                                  (int)source_name.length, source_name.pointer, (int)target_name.length, target_name.pointer, original, converted_text);
                 }
-                check_common_report_evaluated(parser, pp, input, graph->tokens[source], completion, PP_DIAGNOSTIC_DEFERRED,
+                const uint32_t publication = at_once != BUSTER_CHECK_NONE ? at_once : check_common_full_expression_end(parser, graph, parents, source);
+                check_common_report_evaluated(parser, pp, input, graph->tokens[source], publication, PP_DIAGNOSTIC_DEFERRED,
                                             CHECK_WARNING_ID_LITERAL_CONVERSION, false, message, NULL, 0, scratch);
             }
         }
@@ -3042,7 +3074,7 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
 // Only these branching expressions use a worklist, with a small local frontier and bounded arena growth.
 static void check_common_conversion_warning_at(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                                 TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
-                                                TypeId target, uint32_t completion, bool evaluated, Arena* scratch)
+                                                TypeId target, const uint32_t* parents, uint32_t at_once, bool evaluated, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
     const uint32_t graph_count = graph->count;
@@ -3084,7 +3116,7 @@ static void check_common_conversion_warning_at(const Parser* parser, Preprocesso
                     const CheckValue leaf = check_stream_value(stream, leaf_node);
                     if (reached || leaf.constant_kind == CHECK_CONSTANT_FLOATING)
                     {
-                        check_common_conversion_leaf(parser, pp, input, stream, types, spell, leaf_node, &leaf, target, completion, scratch);
+                        check_common_conversion_leaf(parser, pp, input, stream, types, spell, leaf_node, &leaf, target, parents, at_once, scratch);
                     }
                 }
             }
@@ -3117,16 +3149,15 @@ static void check_common_conversion_warning_at(const Parser* parser, Preprocesso
     }
     else if (evaluated || value->constant_kind == CHECK_CONSTANT_FLOATING)
     {
-        check_common_conversion_leaf(parser, pp, input, stream, types, spell, source, value, target, completion, scratch);
+        check_common_conversion_leaf(parser, pp, input, stream, types, spell, source, value, target, parents, at_once, scratch);
     }
 }
 
 static void check_common_conversion_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
-                                            TypeId target, bool evaluated, Arena* scratch)
+                                            TypeId target, bool evaluated, const uint32_t* parents, uint32_t at_once, Arena* scratch)
 {
-    check_common_conversion_warning_at(parser, pp, input, stream, types, spell, source, value, target,
-                                       check_common_function_boundary(parser, input->graph.tokens[source]), evaluated, scratch);
+    check_common_conversion_warning_at(parser, pp, input, stream, types, spell, source, value, target, parents, at_once, evaluated, scratch);
 }
 
 static bool check_common_initializer_literal(const Parser* parser, const CheckInput* input, const CheckStream* stream,
@@ -3450,8 +3481,9 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
     const uint8_t* evaluated = emission->evaluated;
     const CheckInitializer* plan = program->initializers->plans + index;
     const uint32_t declaration = program->initializers->declaration_tokens[index];
+    // The initializer is one full expression: its parts' conversions, nested ones too, complete at its end.
     const uint32_t end = check_common_sparse_get(input->initializer_ends, declaration);
-    const uint32_t completion = end < parser->tokens.count ? check_common_function_boundary(parser, end) : parser->tokens.count;
+    emission->at_once = end <= parser->tokens.count ? end : BUSTER_CHECK_NONE;
     for (uint32_t p = plan->count; p != 0 && !pp->fatal; p -= 1)
     {
         const CheckInitPart* part = plan->parts + p - 1;
@@ -3466,7 +3498,7 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
             {
                 const CheckValue value = check_stream_value(stream, root);
                 check_common_conversion_warning_at(parser, pp, input, stream, emission->types, emission->spell, root, &value, part->conversion.type,
-                                                   completion, evaluated == NULL || evaluated[root] != 0, emission->scratch);
+                                                   emission->parents, emission->at_once, evaluated == NULL || evaluated[root] != 0, emission->scratch);
             }
             // A plan part can also have a graph parent, such as its declaration's discard wrapper.
             // Its nested conversions still belong immediately after this part's target conversion;
@@ -3479,6 +3511,7 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
             }
         }
     }
+    emission->at_once = BUSTER_CHECK_NONE;
 }
 
 // The static selection enclosing a detached root. The source parser retains that edge even though the evaluated
@@ -3701,6 +3734,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             .evaluated = evaluated,
             .parents = parents,
             .emitted = emitted,
+            .at_once = BUSTER_CHECK_NONE,
             .arm_effects = facts->arm_effects,
             .reach = reach,
             .work_nodes = work_nodes,

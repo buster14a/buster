@@ -237,6 +237,50 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .source = "int h(void){return 0;short a=65536;int b=1.5;(void)a;(void)b;}\n",
         .warnings = 1,
     },
+    // Clang reports a literal conversion at once, as its full expression completes (Sema::Diag), while constant
+    // conversions, shift counts and division by zero wait for their function's end (DiagRuntimeBehavior); at file scope a
+    // declarator's constant conversion follows its literal ones. The whole output is clang's, in clang's order.
+    {
+        .name = "a truth context's literal conversion precedes the body's shift counts",
+        .source = "int f(int x){return (x<<40)+(x>>-1)+(1.5?x<<33:0);}\n",
+        .warnings = 4,
+    },
+    {
+        .name = "literal conversions report at once before the body's deferred conversions and shift counts",
+        .source = "char c=1<<9;\n"
+                  "void g(int x){char d=1<<9;char e=x<<40;int k=2.5;if(0.5){x<<=64;}x=!1.5?x>>99:x;(void)d;(void)e;(void)k;}\n",
+        .warnings = 7,
+    },
+    {
+        .name = "literal conversions precede selection arms' shift counts and division by zero",
+        .source = "int h(int x){int a=_Generic(x,int:1,long:x<<70);int b=1.5&&(x+(x<<35));int c=__builtin_choose_expr(1,x,x>>40);short s=3.7;"
+                  "return a+b+c+s+(x<<-3)/0;}\n",
+        .warnings = 7,
+    },
+    {
+        .name = "argument and conditional-arm literal conversions precede deferred constant conversions",
+        .source = "void take(char);int m(int x){take(1<<9);take(2.5);unsigned char u=(x?300:1.5);(void)u;return x?x<<32:(0?x<<50:1);}\n",
+        .warnings = 5,
+    },
+    {
+        .name = "literal conversions in unreachable and short-circuited code precede deferred shift counts",
+        .source = "int g1(int x){if(0){int a=2.5;x<<=40;(void)a;}int b=sizeof(x<<40)+sizeof((char)3.5);int c=0&&(x<<40)&&1.5;"
+                  "int d=_Generic(1.5,double:x<<1,default:x<<99);int e=(char)(x>>70)+4;int f[2]={1.5,x<<33};return b+c+d+e+f[0];}\n"
+                  "_Static_assert(1.5,\"x\");struct S{int m;}s={2.5};\n",
+        .warnings = 8,
+    },
+    {
+        .name = "file-scope literal conversions keep each declarator's order with constant conversions",
+        .source = "char c=1<<9;int a=2.5;_Bool b=0.5;char d=1.5?300:2;char w=300,x=5.5;int v[3]={300,4.5,7};_Static_assert(1.5,\"\");"
+                  "struct T{int i;double e;}t={6.5,1.5};\n",
+        .warnings = 10,
+    },
+    {
+        .name = "unreachable code keeps literal conversions in each full expression's conversion order",
+        .source = "int c0(int);int u(int x){return x;x=x<<40;int a=2.5;char c=1.5?300:0;x/=0;return a+c+c0(3.5)+(x&&4.5);}\n"
+                  "int w(int x){if(0){x=x<<40;x=5.5;}while(0){x=x/0+6.5;}return x;}\n",
+        .warnings = 5,
+    },
     {
         .name = "floating literal boolean conversions",
         .source = "_Bool a=1.5;_Bool b=2.0;_Bool c=1.0;\n",
