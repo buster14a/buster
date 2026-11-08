@@ -2803,7 +2803,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                     .type = type,
                     .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
                     .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) |
-                             (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0) | check_input_nonnull_flag(reader, declaration, token, enumeration, reader->objects[declaration]),
+                             check_input_register_flags(reader, declaration, token) | check_input_nonnull_flag(reader, declaration, token, enumeration, reader->objects[declaration]),
                     .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
                     .integer = enumeration ? reader->enum_values[declaration] : 0,
                     .object = reader->objects[declaration],
@@ -3585,7 +3585,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                     .type = type,
                     .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
                     .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) |
-                             (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0) | check_input_nonnull_flag(reader, declaration, token, enumeration, reader->objects[declaration]),
+                             check_input_register_flags(reader, declaration, token) | check_input_nonnull_flag(reader, declaration, token, enumeration, reader->objects[declaration]),
                     .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
                     .integer = enumeration ? reader->enum_values[declaration] : 0,
                     .object = reader->objects[declaration],
