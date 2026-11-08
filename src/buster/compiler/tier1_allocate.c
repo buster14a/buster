@@ -64,8 +64,12 @@ struct Tier1AllocationInput
     // Optional columns. Required means the entire interval must have a register; impossible requests fail closed.
     const uint8_t* flags;
     const uint8_t* hints;
+    // Optional soft preference per interval, within its class's registers. Choose from its free preferred registers
+    // before following hints; when none is free, keep the ordinary choice. It never restricts allowed_registers,
+    // including a definition's one-register mask or registers removed by fixed ranges. Zero means no preference.
+    const uint32_t* preferred_registers;
     // Optional: per interval, a value whose most recently assigned register the interval takes at its start where
-    // that register is free (after `hints`, which only the scan honors); UINT32_MAX for none. Both paths honor it, so
+    // that register is free (after `hints` in the scan or inside a free preferred set); UINT32_MAX for none. Both paths honor it, so
     // that a value's separate intervals, a CFG's per-block ranges, can keep one register. The hinted value's intervals
     // must have this interval's class.
     const uint32_t* hint_values;
@@ -154,6 +158,7 @@ static bool tier1_allocation_input_valid(const Tier1AllocationInput* input)
         {
             valid = (input->allowed_registers[i] & ~input->registers[input->classes[i]]) == 0;
             valid = valid && (input->hints == 0 || input->hints[i] == UINT8_MAX || (input->hints[i] < 32 && ((input->allowed_registers[i] >> input->hints[i]) & 1) != 0));
+            valid = valid && (input->preferred_registers == 0 || (input->preferred_registers[i] & ~input->registers[input->classes[i]]) == 0);
         }
         if (valid && input->use_offsets != 0)
         {
@@ -220,7 +225,7 @@ static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns, 
     return value != UINT32_MAX ? last[value] : UINT8_MAX;
 }
 
-static inline __attribute__((always_inline)) bool tier1_allocate_scan(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* allowed, uint8_t* regs, uint32_t* split, uint8_t* kinds, uint8_t* last)
+static inline __attribute__((always_inline)) bool tier1_allocate_scan(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* allowed, uint8_t* regs, uint32_t* split, uint8_t* kinds, uint8_t* last, const uint32_t* preferred_registers)
 {
     // A local copy keeps the column pointers in registers: under -fno-strict-aliasing every store below could change
     // *input, and clang would reload them after each one.
@@ -254,12 +259,14 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan(const Tier
                 uint32_t chosen = UINT32_MAX;
                 if (free != 0)
                 {
-                    chosen = (uint32_t)__builtin_ctz(free);
-                    if (columns.hints != 0 && columns.hints[interval] != UINT8_MAX && ((free >> columns.hints[interval]) & 1) != 0)
+                    const uint32_t preferred = preferred_registers != 0 ? free & preferred_registers[interval] : 0;
+                    const uint32_t choices = preferred != 0 ? preferred : free;
+                    chosen = (uint32_t)__builtin_ctz(choices);
+                    if (columns.hints != 0 && columns.hints[interval] != UINT8_MAX && ((choices >> columns.hints[interval]) & 1) != 0)
                     {
                         chosen = columns.hints[interval];
                     }
-                    else if (follow < 32 && ((free >> follow) & 1) != 0)
+                    else if (follow < 32 && ((choices >> follow) & 1) != 0)
                     {
                         chosen = follow;
                     }
@@ -388,7 +395,7 @@ static bool tier1_allocation_required_at(const Tier1AllocationInput* input, uint
 // Reload at required uses, with the same next-use eviction rule as the simpler scan. All values needed at the
 // current position are pinned before processing any one event, so input order cannot evict a simultaneous operand.
 // Each start/use creates at most two transitions (its own and its victim's), bounding the temporary piece capacity.
-static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* use_intervals, const uint32_t* allowed, uint8_t* regs, uint32_t* begins, uint8_t* kinds, Tier1AllocationPieces* pieces, uint8_t* last)
+static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* use_intervals, const uint32_t* allowed, uint8_t* regs, uint32_t* begins, uint8_t* kinds, Tier1AllocationPieces* pieces, uint8_t* last, const uint32_t* preferred_registers)
 {
     // As in tier1_allocate_scan: column pointers in registers, and registers freed at end events. An evicted interval
     // has no register (regs is UINT8_MAX) until a required use reloads it, so the active[r] check guards its end.
@@ -432,12 +439,14 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             uint32_t chosen = UINT32_MAX;
             if (free != 0)
             {
-                chosen = (uint32_t)__builtin_ctz(free);
-                if (columns.hints != 0 && columns.hints[interval] != UINT8_MAX && ((free >> columns.hints[interval]) & 1) != 0)
+                const uint32_t preferred = preferred_registers != 0 ? free & preferred_registers[interval] : 0;
+                const uint32_t choices = preferred != 0 ? preferred : free;
+                chosen = (uint32_t)__builtin_ctz(choices);
+                if (columns.hints != 0 && columns.hints[interval] != UINT8_MAX && ((choices >> columns.hints[interval]) & 1) != 0)
                 {
                     chosen = columns.hints[interval];
                 }
-                else if (follow < 32 && ((free >> follow) & 1) != 0)
+                else if (follow < 32 && ((choices >> follow) & 1) != 0)
                 {
                     chosen = follow;
                 }
@@ -506,12 +515,14 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
 // that holds it, which then holds the register the rule would have taken, or as a fresh one, which makes a register
 // taken from this level fresh again. Every level from the current one up then still holds a free register or none,
 // and every level below none, so an end never overwrites a deposit and a start never runs out of registers while the
-// class's pressure fits. In tier1_allocate_body's copy without hints, `last` is a constant null and this is the rule's
-// loop alone.
-static inline __attribute__((always_inline)) void tier1_allocation_color(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, uint8_t* regs, uint8_t* last)
+// class's pressure fits. A soft preference uses the same free-register exchange: a static hint or a value's last
+// register inside the free preferred set, otherwise its lowest register. Without a free preferred register the old
+// level/value-hint choice stands. The copy without hints or preferences keeps the level rule's loop alone.
+static inline __attribute__((always_inline)) void tier1_allocation_color(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, uint8_t* regs, uint8_t* last, const uint32_t* preferred_registers)
 {
+    const Tier1AllocationInput columns = *input;
     uint8_t ended[32];
-    uint32_t available = input->registers[class];
+    uint32_t available = columns.registers[class];
     uint32_t deposited = 0;
     uint32_t level = 0;
     memset(ended, UINT8_MAX, sizeof(ended));
@@ -522,9 +533,9 @@ static inline __attribute__((always_inline)) void tier1_allocation_color(const T
         {
             level -= 1;
             ended[level] = regs[interval];
-            deposited |= last != 0 ? 1u << regs[interval] : 0;
+            deposited |= last != 0 || preferred_registers != 0 ? 1u << regs[interval] : 0;
         }
-        else if (last == 0)
+        else if (last == 0 && preferred_registers == 0)
         {
             uint8_t r = ended[level];
             if (r != UINT8_MAX)
@@ -547,7 +558,13 @@ static inline __attribute__((always_inline)) void tier1_allocation_color(const T
             {
                 r = (uint8_t)__builtin_ctz(available);
             }
-            const uint8_t follow = tier1_allocation_value_hint(input, last, interval);
+            uint8_t follow = tier1_allocation_value_hint(&columns, last, interval);
+            const uint32_t preferred = preferred_registers != 0 ? (available | deposited) & preferred_registers[interval] : 0;
+            if (preferred != 0)
+            {
+                const uint8_t hint = columns.hints != 0 ? columns.hints[interval] : UINT8_MAX;
+                follow = hint < 32 && ((preferred >> hint) & 1) != 0 ? hint : follow < 32 && ((preferred >> follow) & 1) != 0 ? follow : (uint8_t)__builtin_ctz(preferred);
+            }
             if (follow < 32 && follow != r && (((available | deposited) >> follow) & 1) != 0)
             {
                 if (((deposited >> follow) & 1) != 0)
@@ -576,7 +593,10 @@ static inline __attribute__((always_inline)) void tier1_allocation_color(const T
             }
             ended[level] = UINT8_MAX;
             regs[interval] = r;
-            last[input->values[interval]] = r;
+            if (last != 0)
+            {
+                last[columns.values[interval]] = r;
+            }
             level += 1;
         }
     }
@@ -683,11 +703,11 @@ static bool tier1_allocation_filter_fixed(const Tier1AllocationInput* input, Are
     return valid;
 }
 
-// The allocator, compiled twice (tier1_allocate_impl): `hinted`, a constant, says whether the input has hint_values.
-// Without them the body has no hint code at all, so that an input without hints runs the code it ran before them.
+// The allocator's specialized copies (tier1_allocate_impl): `hinted` and `preferred` are constants in the production
+// paths, so an input without either column keeps loops without its selection code or column reads.
 // Both production paths color regular classes; `color` is false only for the independent scan reference. The production
 // class-event column is eight temporary bytes per interval on either host, independent of `vector`'s filtering kernels.
-static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate_body(const Tier1AllocationInput* input, Arena* arena, bool vector, bool color, bool hinted, Tier1Allocation* result)
+static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate_body(const Tier1AllocationInput* input, Arena* arena, bool vector, bool color, bool hinted, bool preferred, Tier1Allocation* result)
 {
     (void)vector;
 
@@ -907,7 +927,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
             regular &= allocation.peak_pressure[class] <= (uint32_t)__builtin_popcount(columns.registers[class]);
             if (regular && class_count != 0)
             {
-                tier1_allocation_color(input, class, class_events, class_event_count, regs, hinted ? value_last : 0);
+                tier1_allocation_color(input, class, class_events, class_event_count, regs, hinted ? value_last : 0, preferred ? columns.preferred_registers : 0);
                 allocation.vector_intervals += class_count;
             }
             else if (class_count != 0)
@@ -917,11 +937,11 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
                 if (columns.use_required != 0)
                 {
                     extended[class] = true;
-                    assigned = tier1_allocate_scan_uses(input, class, events, event_count, use_intervals, allowed, regs, split, kinds, &pieces, hinted ? value_last : 0);
+                    assigned = tier1_allocate_scan_uses(input, class, events, event_count, use_intervals, allowed, regs, split, kinds, &pieces, hinted ? value_last : 0, preferred ? columns.preferred_registers : 0);
                 }
                 else
                 {
-                    assigned = tier1_allocate_scan(input, class, events, event_count, allowed, regs, split, kinds, hinted ? value_last : 0);
+                    assigned = tier1_allocate_scan(input, class, events, event_count, allowed, regs, split, kinds, hinted ? value_last : 0, preferred ? columns.preferred_registers : 0);
                 }
                 if (!assigned)
                 {
@@ -1021,12 +1041,28 @@ static __attribute__((noinline)) Tier1AllocationError tier1_allocate_hinted(cons
     {
         valid = input->hint_values[i] == UINT32_MAX || input->hint_values[i] < input->value_count;
     }
-    return valid ? tier1_allocate_body(input, arena, vector, true, true, result) : TIER1_ALLOCATION_INVALID;
+    return valid ? tier1_allocate_body(input, arena, vector, true, true, false, result) : TIER1_ALLOCATION_INVALID;
+}
+
+// Soft preferences are uncommon outside the CFG consumer's second allocation. Keep their loops apart from the
+// existing hint-only and unhinted copies, including when a caller gives preferences without value hints.
+static __attribute__((noinline)) Tier1AllocationError tier1_allocate_preferred(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1Allocation* result)
+{
+    const uint32_t count = input->count;
+    const uint32_t value_count = input->value_count;
+    const uint32_t* const hints = input->hint_values;
+    bool valid = true;
+    for (uint32_t i = 0; valid && hints != 0 && i < count && count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS; i += 1)
+    {
+        valid = hints[i] == UINT32_MAX || hints[i] < value_count;
+    }
+    return !valid ? TIER1_ALLOCATION_INVALID : hints != 0 ? tier1_allocate_body(input, arena, vector, true, true, true, result) : tier1_allocate_body(input, arena, vector, true, false, true, result);
 }
 
 static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1Allocation* result)
 {
-    return input != 0 && input->hint_values != 0 ? tier1_allocate_hinted(input, arena, vector, result) : tier1_allocate_body(input, arena, vector, true, false, result);
+    return input != 0 && input->preferred_registers != 0 ? tier1_allocate_preferred(input, arena, vector, result) :
+           input != 0 && input->hint_values != 0 ? tier1_allocate_hinted(input, arena, vector, result) : tier1_allocate_body(input, arena, vector, true, false, false, result);
 }
 
 static __attribute__((unused)) Tier1AllocationError tier1_allocate_scalar(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result);
@@ -1057,11 +1093,11 @@ static __attribute__((unused)) Tier1AllocationError tier1_allocate_scan_referenc
         {
             valid = input->hint_values[i] == UINT32_MAX || input->hint_values[i] < input->value_count;
         }
-        error = valid ? tier1_allocate_body(input, arena, false, false, true, result) : TIER1_ALLOCATION_INVALID;
+        error = valid ? tier1_allocate_body(input, arena, false, false, true, input->preferred_registers != 0, result) : TIER1_ALLOCATION_INVALID;
     }
     else
     {
-        error = tier1_allocate_body(input, arena, false, false, false, result);
+        error = tier1_allocate_body(input, arena, false, false, false, input != 0 && input->preferred_registers != 0, result);
     }
     return error;
 }

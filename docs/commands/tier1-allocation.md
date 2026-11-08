@@ -19,3 +19,15 @@ requirements. [Command index](README.md).
   records producer constraints and the corpora's spills with and without
   rematerialization. Use the shared 9700X lock per build/test/measurement and
   CPU 2 for timing.
+
+## Register preferences (#1216)
+
+The allocator and CFG adapter accept optional soft `preferred_registers` masks.
+They select free registers from that set first and use other allowed registers
+when it is full. `test-tier1-allocation` checks preferences, hints, required uses
+and fixed restrictions through both production paths and the independent scan.
+The production CFG emitter uses them to prefer callee-saved registers across
+calls without restricting loop-carried values to that small register set.
+`test-tier1-emit` covers an eight-value loop and hostile caller clobbers with and
+without a frame pointer. Dynamic edge-traffic and native runtime acceptance
+remain the workload measurements specified by #1216.

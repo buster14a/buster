@@ -101,6 +101,9 @@ struct Tier1CfgInput
     // Per value.
     const uint8_t* classes;
     const uint32_t* allowed_registers;
+    // Optional soft register preference per value, within its class's registers. Every piece carries it unchanged;
+    // the allocator intersects it with free allowed registers, including a definition's narrower allowed mask.
+    const uint32_t* preferred_registers;
     const uint32_t* definitions;
     // Optional: the registers each value's definition must be in (a parameter's incoming one), a subset of its allowed
     // ones, on the interval that holds the definition alone; allowed_registers holds on the others, and on every interval
@@ -322,6 +325,7 @@ static bool tier1_cfg_input_valid(const Tier1CfgInput* input, Arena* scratch)
     {
         valid = input->classes[v] < BUSTER_TIER1_ALLOCATE_CLASSES && (input->allowed_registers[v] & ~input->registers[input->classes[v]]) == 0 && input->definitions[v] < input->position_count &&
                 (input->definition_registers == 0 || (input->definition_registers[v] & ~input->allowed_registers[v]) == 0);
+        valid = valid && (input->preferred_registers == 0 || (input->preferred_registers[v] & ~input->registers[input->classes[v]]) == 0);
         valid = valid && (input->rematerializable == 0 || input->rematerializable[v] <= 1) && input->use_offsets[v] <= input->use_offsets[v + 1];
         const uint32_t block = valid ? tier1_cfg_block_of(input, input->definitions[v]) : 0;
         for (uint32_t u = input->use_offsets[v]; valid && u < input->use_offsets[v + 1]; u += 1)
@@ -734,6 +738,7 @@ struct Tier1CfgPieces
     uint32_t* ends;
     uint32_t* values;
     uint32_t* allowed;
+    uint32_t* preferred;
     uint8_t* classes;
     uint8_t* remat;
     uint32_t* hints;
@@ -756,6 +761,10 @@ static void tier1_cfg_piece(Tier1CfgPieces* pieces, const Tier1CfgInput* input, 
         pieces->values[i] = v;
         const uint32_t defined = input->definition_registers != 0 ? input->definition_registers[v] : 0;
         pieces->allowed[i] = defined != 0 && start <= input->definitions[v] && input->definitions[v] < end ? defined : input->allowed_registers[v];
+        if (pieces->preferred != 0)
+        {
+            pieces->preferred[i] = input->preferred_registers[v];
+        }
         pieces->classes[i] = input->classes[v];
         pieces->remat[i] = input->rematerializable != 0 ? input->rematerializable[v] : 0;
         pieces->hints[i] = hint;
@@ -1353,6 +1362,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                 pieces.ends = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 pieces.values = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 pieces.allowed = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+                pieces.preferred = ready && input->preferred_registers != 0 ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 pieces.classes = ready ? arena_push(output, interval_count + 1, 1) : 0;
                 pieces.remat = ready ? arena_push(output, interval_count + 1, 1) : 0;
                 pieces.hints = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
@@ -1360,6 +1370,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                 pieces.split_positions = ready ? arena_push_array(scratch, split_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 pieces.split_values = ready ? arena_push_array(scratch, split_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 ready = ready && pieces.starts != 0 && pieces.ends != 0 && pieces.values != 0 && pieces.allowed != 0 && pieces.classes != 0 && pieces.remat != 0 && pieces.hints != 0 && use_offsets != 0 && pieces.split_positions != 0 && pieces.split_values != 0;
+                ready = ready && (input->preferred_registers == 0 || pieces.preferred != 0);
                 pieces.fill = ready;
             }
             for (uint32_t v = 0; ready && v < values; v += 1)
@@ -1464,6 +1475,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                     .ends = pieces.ends,
                     .values = pieces.values,
                     .allowed_registers = pieces.allowed,
+                    .preferred_registers = pieces.preferred,
                     .classes = pieces.classes,
                     .hint_values = pieces.hints,
                     .rematerializable = input->rematerializable != 0 ? pieces.remat : 0,

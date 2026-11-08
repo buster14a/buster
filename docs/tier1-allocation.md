@@ -25,6 +25,7 @@ Allocating the unfused uses and then folding is unsound.
 | `values` | u32 | Stable value id, below `value_count` |
 | `classes` | u8 | GPR=0, vector=1, opmask=2 |
 | `allowed_registers` | u32 | Allowed physical-register bit mask |
+| `preferred_registers` | optional u32 | Soft register-set preference; zero means none |
 | `flags` | optional u8 | `REQUIRED` pins the whole interval in a register |
 | `hints` | optional u8 | Preferred allowed register, or `UINT8_MAX` |
 | `rematerializable` | optional u8 | Certified 0/1 eligibility from selection |
@@ -44,6 +45,17 @@ no opmask registers. The caller excludes RSP, reserved scratch registers, and
 frame bases selected by the frame planner. In particular, it applies the frame
 planner's RBP/R13 reservation before allocation. Masks of zero are valid when
 memory operands are permitted.
+
+`preferred_registers` never changes those constraints. At a register choice,
+intersect the preference with the free allowed registers; use that subset when
+nonempty, otherwise use the full free allowed set. Register and value hints
+break ties within the selected set. A fixed reservation or a definition's
+incoming-register constraint can exclude every preferred register without
+forcing a spill. The constrained scan's eviction and required-use rules stay
+the same. The regular-class coloring also honors the preference while retaining
+its existing rule when the column is absent or no preferred register is free.
+The CFG producer accepts this optional column per value and copies it to that
+value's interval pieces; producers without preferences allocate no such column.
 
 A class without intervals is skipped: one pass over the intervals' classes
 finds the classes present, and an absent class's passes over the intervals and
@@ -606,6 +618,23 @@ is the sixth callee-saved register where the frame keeps no frame pointer in it.
 The frame's reservations, made before allocation, say so (`tier1_frame.c`'s
 `reserved_registers`).
 
+The second CFG allocation uses soft ABI preferences (#1216): values whose
+ranges cross a call prefer callee-saved registers, and the others prefer
+caller-saved registers. Both groups may use the other set when their preferred
+set is full. Previously each group was restricted to its own set, so more than
+five or six call-crossing loop values could spill at dispatch boundaries while
+caller-saved registers were free. The reverse restriction could spill header
+phis whose updated back-edge operands, but not the phis, cross the call. The
+existing call-save rows preserve overflow caller-saved fragments at calls;
+the frame saves every callee-saved register actually used. Parameter definition
+constraints, reserved frame/scratch registers, required uses and certificates
+remain authoritative. This change does not add another allocation pass.
+
+`test-tier1-emit` exercises a loop with eight carried values and a hostile call,
+including both allocator paths and frame-pointer choices. These bounded
+regressions do not establish #1216's required reduction in dynamic edge traffic
+on speedtest1 and the five Lua scripts, or its 9700X runtime acceptance.
+
 A parameter keeps its incoming register over its definition's interval, so a
 parameter live across a run of calls in its entry block, as in Lua's
 `luac.c:PrintCode` and its runs of `printf`, stays in a caller-saved register.
@@ -649,8 +678,8 @@ that poison every caller-saved register (`tier1_call_test.c`):
 - **Values live past a call** take the callee-saved registers the frame
   leaves. Six take all six, `rbp` among them, without a frame pointer. With
   one, five take exactly `rbx` and `r12` to `r15`, the frame pushing them and
-  `rbp` as its pointer. (Six would split one there, which discards the
-  preference whole, so they only run.) In
+  `rbp` as its pointer. Values beyond that set can use caller-saved registers
+  and are saved around the call. In
   `test-check-debug --cross-check`'s Tier 1 fixture, `six` is such a function,
   with a branch and a join that keep it on the CFG consumer, since the
   straight-line consumer takes no callee-saved register. Its FDE must save

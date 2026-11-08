@@ -78,6 +78,8 @@ struct Tier1CallFixture
     // A call past which this many computed values live (six or five, else none), which the callee-saved registers take
     // (tier1_call_callee_fixture).
     uint32_t callee_values;
+    // Eight changing values cross a hot loop and then one cold call, exceeding the callee-saved subset (#1216).
+    uint32_t loop_values;
     // A function that returns its parameter truncated to this narrow type (I8 or I16, else none), without calls.
     IrType return_type;
     // Divisions, remainders and shifts by a register of the four parameters, without calls, whose operands that live on
@@ -720,6 +722,92 @@ static bool tier1_call_callee_fixture(Tier1EmitTest* test, Tier1CallFixture* fix
     return ready;
 }
 
+// The loop updates eight phis, then one hostile call precedes the sum of all updated values. The old phis need no
+// call protection, while their back-edge operands do: hard caller/callee partitions spill even though the union fits.
+// The native oracle varies the trip count and seed; the allocation assertions check the hot edge and cold call apart.
+static bool tier1_call_loop_fixture(Tier1EmitTest* test, Tier1CallFixture* fixture)
+{
+    const uint32_t values = 8;
+    const uint32_t header = 6 + 2 * values;
+    const uint32_t cold = header + 2 * values + 4;
+    const uint32_t updated = header + values + 1;
+    const uint32_t increment = updated + values;
+    const IrSizes sizes = {
+        .instruction_count = cold + values + 2,
+        .block_count = 3,
+        .extra_count = (values + 1) * 4,
+        .constant_count = values + 2,
+        .call_count = 1,
+        .parameter_count = 3,
+    };
+    IrFunction* function = &fixture->function;
+    bool ready = ir_create(&test->input, &sizes, function) == IR_OK;
+    if (ready)
+    {
+        function->result_type = IR_I64;
+        function->symbol_count = 1;
+        function->block_offsets[1] = header;
+        function->block_offsets[2] = cold;
+        function->block_offsets[3] = (uint32_t)sizes.instruction_count;
+        for (uint32_t parameter = 0; parameter < 3; parameter += 1)
+        {
+            const IrType type = parameter == 0 ? IR_PTR : IR_I64;
+            function->parameter_types[parameter] = (uint8_t)type;
+            tier1_emit_test_node(function, parameter, IR_PARAM, type, parameter, BUSTER_IR_NONE);
+        }
+        for (uint32_t constant = 0; constant < 2; constant += 1)
+        {
+            function->constants[constant].low = constant;
+            tier1_emit_test_node(function, 3 + constant, IR_CONST, IR_I64, constant, BUSTER_IR_NONE);
+        }
+        for (uint32_t k = 0; k < values; k += 1)
+        {
+            function->constants[2 + k].low = tier1_call_term(k);
+            tier1_emit_test_node(function, 5 + 2 * k, IR_CONST, IR_I64, 2 + k, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 6 + 2 * k, IR_XOR, IR_I64, 1, 5 + 2 * k);
+        }
+        tier1_emit_test_node(function, header - 1, IR_BR, IR_VOID, 1, BUSTER_IR_NONE);
+        for (uint32_t k = 0; k <= values; k += 1)
+        {
+            function->extra[4 * k] = 0;
+            function->extra[4 * k + 1] = k < values ? 6 + 2 * k : 3;
+            function->extra[4 * k + 2] = 1;
+            function->extra[4 * k + 3] = k < values ? updated + k : increment;
+            tier1_emit_test_node(function, header + k, IR_PHI, IR_I64, 4 * k, 2);
+        }
+        for (uint32_t k = 0; k < values; k += 1)
+        {
+            tier1_emit_test_node(function, updated + k, IR_ADD, IR_I64, header + k, 4);
+        }
+        tier1_emit_test_node(function, increment, IR_ADD, IR_I64, header + values, 4);
+        tier1_emit_test_node(function, increment + 1, IR_ICMP, IR_I1, increment, 2);
+        function->c[increment + 1] = IR_ULT;
+        tier1_emit_test_node(function, increment + 2, IR_CBR, IR_VOID, increment + 1, 1);
+        function->c[increment + 2] = 2;
+        tier1_call_descriptor(function, 0, 0, 0, IR_I64);
+        tier1_emit_test_node(function, cold, IR_CALL_INDIRECT, IR_I64, 0, 0);
+        uint32_t sum = cold;
+        for (uint32_t k = 0; k < values; k += 1)
+        {
+            tier1_emit_test_node(function, cold + 1 + k, IR_ADD, IR_I64, sum, updated + k);
+            sum = cold + 1 + k;
+        }
+        tier1_emit_test_node(function, sum + 1, IR_RET, IR_VOID, sum, BUSTER_IR_NONE);
+        for (uint32_t block = 0; block < 3; block += 1)
+        {
+            fixture->dominance_enter[block] = block;
+            fixture->dominance_leave[block] = 3;
+        }
+        fixture->dominated = true;
+        fixture->width = 8;
+        fixture->first_call = cold;
+        fixture->helper_count = 1;
+        fixture->indirect = true;
+        fixture->loop_values = values;
+    }
+    return ready;
+}
+
 // R10/R11 are scratch only after all six incoming arguments have been recorded. The helper is a SysV leaf:
 // its own red zone is writable, but [RSP] is the return address and is never touched.
 static uint32_t tier1_call_helper(const Tier1CallFixture* fixture, uint32_t helper, Tier1CallObserved* observed, X86Instruction* records)
@@ -1019,6 +1107,16 @@ static void tier1_call_execute(Tier1EmitTest* test, const Tier1CallFixture* fixt
             counts[1] = 1;
             expected = tier1_call_mix(passed[1], 1, 8) + arguments[3];
         }
+        else if (fixture->loop_values != 0)
+        {
+            arguments[0] = addresses[0];
+            arguments[2] = 1 + sample % 9;
+            expected = tier1_call_mix(passed[0], 0, 8);
+            for (uint32_t k = 0; k < fixture->loop_values; k += 1)
+            {
+                expected += (arguments[1] ^ tier1_call_term(k)) + arguments[2];
+            }
+        }
         else if (fixture->callee_values != 0)
         {
             arguments[0] = addresses[0];
@@ -1155,6 +1253,49 @@ static uint32_t tier1_call_record(const Tier1EmitResult* emitted, uint32_t k)
     return found;
 }
 
+static void tier1_call_loop_check(Tier1EmitTest* test, const Tier1CallFixture* fixture, const Tier1EmitResult* emitted)
+{
+    const Tier1CfgInput* input = &emitted->cfg_input;
+    const Tier1CfgAllocation* cfg = &emitted->cfg;
+    const uint32_t header = fixture->function.block_offsets[1];
+    const uint32_t updated = header + fixture->loop_values + 1;
+    const uint32_t entry = input->block_starts[1];
+    const uint32_t exit = input->block_starts[2] - 1;
+    const uint32_t call = 2 * fixture->first_call + 1;
+    bool registered = true;
+    uint32_t overflow = 0;
+    for (uint32_t k = 0; k < fixture->loop_values; k += 1)
+    {
+        uint32_t location = BUSTER_TIER1_CFG_NONE;
+        uint8_t kind = 0;
+        registered &= tier1_cfg_entry_location_oracle(cfg, emitted->node_values[header + k], entry, &location, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER;
+        registered &= tier1_cfg_location_oracle(cfg, emitted->node_values[updated + k], exit, &location, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER;
+        const bool across = tier1_cfg_location_oracle(cfg, emitted->node_values[updated + k], call, &location, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER;
+        registered &= across;
+        const bool caller = across && location < 16 && ((emitted->callee_registers >> location) & 1) == 0;
+        overflow += caller;
+        registered &= !caller || ((emitted->prepared.call_save_mask >> location) & 1) != 0;
+    }
+    tier1_emit_test_expect(test, registered, "eight loop-carried values stay in registers at the header, back edge and cold call");
+    uint32_t back_edge = BUSTER_TIER1_CFG_NONE;
+    for (uint32_t edge = input->successor_offsets[1]; edge < input->successor_offsets[2]; edge += 1)
+    {
+        back_edge = input->successors[edge] == 1 ? edge : back_edge;
+    }
+    uint32_t traffic = 0;
+    for (uint32_t move = back_edge != BUSTER_TIER1_CFG_NONE ? cfg->edge_move_offsets[back_edge] : 0; back_edge != BUSTER_TIER1_CFG_NONE && move < cfg->edge_move_offsets[back_edge + 1]; move += 1)
+    {
+        traffic += cfg->move_sources[move] >= BUSTER_TIER1_CFG_SPILL || cfg->move_destinations[move] >= BUSTER_TIER1_CFG_SPILL;
+    }
+    tier1_emit_test_expect(test, back_edge != BUSTER_TIER1_CFG_NONE && traffic == 0, "the hot loop back edge has no spill stores or reloads when the full register file fits");
+    tier1_emit_test_expect(test, overflow != 0 && emitted->call_stores >= overflow && emitted->call_loads >= overflow, "the cold hostile call saves and reloads values that overflow the callee-saved preference");
+    tier1_emit_test_expect(test, emitted->certified && emitted->code_checked && emitted->code_reason == TIER1_CERT_EMITTED_OK, "the overflow loop's allocation and emitted machine code are independently certified");
+    if (test->failures < 20 && (!registered || traffic != 0 || overflow == 0))
+    {
+        fprintf(stderr, "  overflow loop: registered=%u edge=%u stack_moves=%u caller_values=%u call_stores=%u call_loads=%u\n", registered, back_edge, traffic, overflow, emitted->call_stores, emitted->call_loads);
+    }
+}
+
 static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixture, bool vector, bool rematerialize, uint32_t frame_flags)
 {
     test->terms = fixture->terms;
@@ -1248,6 +1389,10 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
                 {
                     fprintf(stderr, "  run=%u carry=%u: stores before the first call %u, between the calls %u\n", fixture->run, fixture->carry, before, between);
                 }
+            }
+            else if (fixture->loop_values != 0)
+            {
+                tier1_call_loop_check(test, fixture, &emitted);
             }
             else if (fixture->callee_values != 0)
             {
@@ -1511,8 +1656,8 @@ static void tier1_call_cases(Tier1EmitTest* test)
     }
     // The mixed cycles, the dirty I32, I8 and I16 call results, the I8 and I16 parameters, the indirect call, the I8
     // and I16 returns, the 64- and 32-bit divisions and shifts, a run of calls, the three carries, and six and five values
-    // in callee-saved registers.
-    for (uint32_t shape = 0; shape < 18; shape += 1)
+    // in callee-saved registers, and eight loop-carried values that overflow that preference.
+    for (uint32_t shape = 0; shape < 19; shape += 1)
     {
         Tier1CallFixture fixture = {
             .narrow_type = shape == 3 ? IR_I8 : shape == 4 ? IR_I16 : 0,
@@ -1523,7 +1668,8 @@ static void tier1_call_cases(Tier1EmitTest* test)
         const bool ready = shape < 2 ? tier1_call_mixed_fixture(test, &fixture, shape != 0) : shape < 5 ? tier1_call_narrow_fixture(test, &fixture) :
                            shape < 7 ? tier1_call_parameter_fixture(test, &fixture) : shape == 7 ? tier1_call_indirect_fixture(test, &fixture) :
                            shape < 10 ? tier1_call_return_fixture(test, &fixture) : shape < 12 ? tier1_call_fixed_fixture(test, &fixture) :
-                           shape == 12 ? tier1_call_run_fixture(test, &fixture) : shape < 16 ? tier1_call_carry_fixture(test, &fixture, shape - 12) : tier1_call_callee_fixture(test, &fixture, shape == 16 ? 6 : 5);
+                           shape == 12 ? tier1_call_run_fixture(test, &fixture) : shape < 16 ? tier1_call_carry_fixture(test, &fixture, shape - 12) :
+                           shape < 18 ? tier1_call_callee_fixture(test, &fixture, shape == 16 ? 6 : 5) : tier1_call_loop_fixture(test, &fixture);
         tier1_emit_test_expect(test, ready, "construct genuine mixed-width cycle, dirty narrow return or narrow parameter fixture");
         for (uint32_t vector = 0; ready && vector < 2; vector += 1)
         {

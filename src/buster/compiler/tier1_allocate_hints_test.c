@@ -42,7 +42,17 @@ static bool tier1_allocation_test_hinted_levels(const Tier1AllocationInput* inpu
                         r = (uint8_t)__builtin_ctz(fresh);
                     }
                     const uint32_t hinted = input->hint_values[i];
-                    const uint8_t follow = hinted != UINT32_MAX ? last[hinted] : UINT8_MAX;
+                    uint8_t follow = hinted != UINT32_MAX ? last[hinted] : UINT8_MAX;
+                    uint32_t preferred = input->preferred_registers != 0 ? fresh & input->preferred_registers[i] : 0;
+                    for (uint32_t k = height; input->preferred_registers != 0 && k < 33; k += 1)
+                    {
+                        preferred |= levels[k] < 32 ? (1u << levels[k]) & input->preferred_registers[i] : 0;
+                    }
+                    if (preferred != 0)
+                    {
+                        const uint8_t hint = input->hints != 0 ? input->hints[i] : UINT8_MAX;
+                        follow = hint < 32 && ((preferred >> hint) & 1) != 0 ? hint : follow < 32 && ((preferred >> follow) & 1) != 0 ? follow : (uint8_t)__builtin_ctz(preferred);
+                    }
                     uint32_t holder = UINT32_MAX;
                     for (uint32_t k = height + 1; follow != UINT8_MAX && k < 33; k += 1)
                     {
@@ -75,8 +85,153 @@ static bool tier1_allocation_test_hinted_levels(const Tier1AllocationInput* inpu
     return fits;
 }
 
+// Soft register sets must not create spills when another legal register is free. These three-register cases cover
+// the level matcher, constrained scan, fixed-clobber filtering and simultaneous required uses in all three classes.
+static void tier1_allocation_test_preferences(Tier1AllocationTestTally* tally, Arena* arena)
+{
+    const uint8_t registers[3][3] = {
+        { 0, 2, 5 },
+        { 0, 17, 31 },
+        { 1, 3, 7 },
+    };
+    for (uint32_t class = 0; class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
+    {
+        const uint32_t low = 1u << registers[class][0];
+        const uint32_t middle = 1u << registers[class][1];
+        const uint32_t high = 1u << registers[class][2];
+        const uint32_t mask = low | middle | high;
+        for (uint32_t shape = 0; shape < 5; shape += 1)
+        {
+            const bool sequential = shape >= 3;
+            const uint32_t count = shape == 1 || sequential ? 2 : 3;
+            const uint32_t starts[] = { 0, sequential ? 2 : 1, 2 };
+            const uint32_t ends[] = { sequential ? 2 : 5, 5, 5 };
+            const uint32_t values[] = { 0, sequential ? 0 : 1, 2 };
+            const uint8_t classes[] = { (uint8_t)class, (uint8_t)class, (uint8_t)class };
+            const uint32_t allowed[] = { shape == 2 || shape == 3 ? low : shape == 4 ? high : mask, mask, mask };
+            const uint32_t preferred[] = { shape == 4 ? middle | high : high, shape == 4 ? middle | high : high, high };
+            const uint32_t hints[] = { UINT32_MAX, sequential ? 0 : UINT32_MAX, UINT32_MAX };
+            const uint8_t static_hints[] = { shape == 3 ? registers[class][0] : registers[class][2], shape == 4 ? registers[class][1] : registers[class][0], UINT8_MAX };
+            const uint32_t use_offsets[] = { 0, 1, 2, 3 };
+            const uint32_t use_positions[] = { sequential ? 1 : 3, 3, 3 };
+            const uint8_t required[] = { 1, 1, 1 };
+            const uint32_t fixed_start[] = { 0 };
+            const uint32_t fixed_end[] = { 5 };
+            const uint32_t fixed_registers[] = { high };
+            const uint8_t fixed_classes[] = { (uint8_t)class };
+            Tier1AllocationInput input = {
+                .starts = starts,
+                .ends = ends,
+                .values = values,
+                .allowed_registers = allowed,
+                .preferred_registers = preferred,
+                .classes = classes,
+                .hints = sequential ? static_hints : 0,
+                .hint_values = hints,
+                .use_offsets = use_offsets,
+                .use_positions = use_positions,
+                .use_required = required,
+                .use_count = count,
+                .count = count,
+                .value_count = sequential ? 1 : count,
+                .position_count = 5,
+                .fixed = {
+                    .starts = fixed_start,
+                    .ends = fixed_end,
+                    .registers = fixed_registers,
+                    .classes = fixed_classes,
+                    .count = shape == 1 ? 1 : 0,
+                },
+            };
+            input.registers[class] = mask;
+            for (uint32_t variant = 0; variant < 6; variant += 1)
+            {
+                const uint32_t path = variant % 3;
+                input.hint_values = variant < 3 ? hints : 0;
+                const uint64_t saved = arena->length;
+                Tier1Allocation output = { 0 };
+                const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : path == 1 ? tier1_allocate_scalar(&input, arena, &output) : tier1_allocate_scan_reference(&input, arena, &output);
+                const bool ready = error == TIER1_ALLOCATION_OK && output.spill_count == 0 && output.fragment_count == count;
+                tier1_allocation_test_expect(tally, ready && tier1_allocation_verify(&input, &output) && tier1_allocation_test_occupancy(&input, &output), "preferred registers never force a spill with a legal free fallback");
+                if (ready)
+                {
+                    const uint8_t first = output.registers[output.fragment_offsets[0]];
+                    const uint8_t second = output.registers[output.fragment_offsets[1]];
+                    const bool expected = shape == 0 ? first == registers[class][2] : shape == 1 ? first != registers[class][2] && second != registers[class][2] :
+                                          shape == 2 || shape == 3 ? first == registers[class][0] && second == registers[class][2] :
+                                                                   first == registers[class][2] && second == registers[class][1];
+                    tier1_allocation_test_expect(tally, expected, "free preferences precede hints, while definition masks and fixed clobbers stay mandatory");
+                    tier1_allocation_test_expect(tally, shape != 0 || path == 2 || output.vector_intervals == count, "soft preferences retain the regular level-coloring path");
+                }
+                if (shape == 0)
+                {
+                    // A present but empty preference column must retain the old assignment policy as well as validity.
+                    const uint32_t neutral[] = { 0, 0, 0 };
+                    Tier1AllocationInput plain = input;
+                    plain.preferred_registers = 0;
+                    Tier1Allocation absent = { 0 };
+                    const Tier1AllocationError absent_error = path == 0 ? tier1_allocate(&plain, arena, &absent) : path == 1 ? tier1_allocate_scalar(&plain, arena, &absent) : tier1_allocate_scan_reference(&plain, arena, &absent);
+                    plain.preferred_registers = neutral;
+                    Tier1Allocation empty = { 0 };
+                    const Tier1AllocationError empty_error = path == 0 ? tier1_allocate(&plain, arena, &empty) : path == 1 ? tier1_allocate_scalar(&plain, arena, &empty) : tier1_allocate_scan_reference(&plain, arena, &empty);
+                    tier1_allocation_test_expect(tally, absent_error == TIER1_ALLOCATION_OK && empty_error == TIER1_ALLOCATION_OK && tier1_allocation_test_equal(&plain, &absent, &empty), "zero and absent preference columns give identical allocation output");
+                }
+                arena_pop_to(arena, saved);
+            }
+        }
+        // More live intervals than physical registers forces reload/resplit. The two simultaneous operands must
+        // remain pinned even though every interval prefers the same register; a third simultaneous use must fail.
+        const uint32_t starts[] = { 0, 0, 1 };
+        const uint32_t ends[] = { 10, 10, 8 };
+        const uint32_t values[] = { 0, 1, 2 };
+        const uint8_t classes[] = { (uint8_t)class, (uint8_t)class, (uint8_t)class };
+        const uint32_t allowed[] = { low | high, low | high, low | high };
+        const uint32_t preferred[] = { high, high, high };
+        const uint32_t offsets[] = { 0, 3, 6, 8 };
+        uint32_t uses[] = { 0, 5, 9, 0, 5, 9, 1, 7 };
+        const uint8_t required[] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+        Tier1AllocationInput input = {
+            .starts = starts,
+            .ends = ends,
+            .values = values,
+            .allowed_registers = allowed,
+            .preferred_registers = preferred,
+            .classes = classes,
+            .use_offsets = offsets,
+            .use_positions = uses,
+            .use_required = required,
+            .use_count = BUSTER_ARRAY_LENGTH(uses),
+            .count = BUSTER_ARRAY_LENGTH(values),
+            .value_count = BUSTER_ARRAY_LENGTH(values),
+            .position_count = 10,
+        };
+        input.registers[class] = low | high;
+        for (uint32_t simultaneous = 0; simultaneous < 2; simultaneous += 1)
+        {
+            uses[6] = simultaneous != 0 ? 5 : 1;
+            for (uint32_t path = 0; path < 3; path += 1)
+            {
+                const uint64_t saved = arena->length;
+                Tier1Allocation output = { .splits = 987 };
+                const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : path == 1 ? tier1_allocate_scalar(&input, arena, &output) : tier1_allocate_scan_reference(&input, arena, &output);
+                if (simultaneous != 0)
+                {
+                    tier1_allocation_test_expect(tally, error == TIER1_ALLOCATION_CONSTRAINT && output.splits == 987 && arena->length == saved, "preferences cannot evict a simultaneous required operand and failure remains transactional");
+                }
+                else
+                {
+                    const bool ready = error == TIER1_ALLOCATION_OK && output.scalar_intervals == input.count && output.spill_count != 0 && output.fragment_count > input.count;
+                    tier1_allocation_test_expect(tally, ready && tier1_allocation_verify(&input, &output) && tier1_allocation_test_occupancy(&input, &output), "preferred required-use reloads preserve pinned operands under genuine register pressure");
+                }
+                arena_pop_to(arena, saved);
+            }
+        }
+    }
+}
+
 static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* arena, uint64_t seed)
 {
+    tier1_allocation_test_preferences(tally, arena);
     // Two values, each with two adjacent ranges: a [0, 10) [10, 20), b [2, 10) [10, 20). Ends come first in input
     // order, a's then b's, so the level rule gives a's second range b's register and b's a's.
     {
@@ -185,6 +340,7 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
     uint32_t ends[128];
     uint32_t values[128];
     uint32_t allowed[128];
+    uint32_t preferred[128];
     uint8_t classes[128];
     uint32_t hint_values[128];
     uint32_t use_offsets[129];
@@ -259,6 +415,7 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
                 hinted = value_classes[other] == classes[i] ? other : UINT32_MAX;
             }
             hint_values[i] = hinted;
+            preferred[i] = allowed[i] & (uint32_t)tier1_allocation_test_random(&seed);
             use_offsets[i] = i;
             use_positions[i] = ends[i] - 1;
             required[i] = (uint8_t)(tier1_allocation_test_random(&seed) & 1);
@@ -269,6 +426,7 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
             .ends = ends,
             .values = values,
             .allowed_registers = allowed,
+            .preferred_registers = iteration % 3 == 1 ? preferred : 0,
             .classes = classes,
             .hint_values = hint_values,
             .use_offsets = use_offsets,
