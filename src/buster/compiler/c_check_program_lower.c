@@ -993,6 +993,12 @@ static const char* check_lower_convention(const TypeTable* types, TypeId functio
         case TYPE_FUNCTION_ABI_COUNT:
         case TYPE_FUNCTION_ABI_INVALID: break;
     }
+    // A Swift parameter ABI of another convention's function: swift_async_context's (#1447), which clang takes of any, and
+    // LLVM's CC_X86_64_C passes in r14, a location Tier 0 hasn't.
+    if (result == NULL && type_function_has_parameter_abis(types, function))
+    {
+        result = "functions with a swift_async_context parameter";
+    }
     return result;
 }
 

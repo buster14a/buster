@@ -6582,12 +6582,15 @@ arguments against the function. The checker now gives these as clang does.
   not compatible", with its note); then the declared function's own, once its
   convention is final (`check_input_declarator_conventions`), as
   `checkExtParameterInfos` checks them, at the parameter: the convention
-  (swiftcall or swiftasynccall, swiftcall's alone for an error result), an
-  indirect result first or after another, an error result just after a
-  context. A Swift parameter of another function type than a declaration's own
-  (a pointer's, a parameter's or a type name's), whose convention clang takes
-  from attributes it places otherwise, is refused by name. Off a parameter,
-  each is "only applies to parameters" (a warning). A definition's `-Wgcc-compat` warning comes before Sema's
+  (swiftcall or swiftasynccall, swiftcall's alone for an error result, and any
+  for `swift_async_context`, whose function clang's backend gives it r14, which
+  the producer refuses by name), an indirect result first or after another, an
+  error result just after a context. A Swift parameter of another function type
+  than a declaration's own (a pointer's, a parameter's or a type name's), whose
+  convention clang takes from attributes it places otherwise, is refused by
+  name. Off a parameter, each is "only applies to parameters" (a warning).
+
+  A definition's `-Wgcc-compat` warning comes before Sema's
   diagnostics of the same attribute.
 
   The GPU kernels' attributes change nothing here but have their handlers'

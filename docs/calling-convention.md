@@ -1853,7 +1853,8 @@ The producer refuses each of the first six by name
 (`check_lower_convention`): a definition, and a call through a function type
 of one, directly or through a pointer. Swift's aggregate lowering, swifterror's
 register and swifttailcc's callee-popped frame are no location or frame Tier 0
-has.
+has. A function of another convention with a `swift_async_context` parameter,
+which clang takes and LLVM's `CC_X86_64_C` passes in r14, is refused too.
 
 `intel_ocl_bicc` passes System V's arguments on x86-64 Linux: clang's
 `X86_64ABIInfo` classifies them as System V's, and LLVM's

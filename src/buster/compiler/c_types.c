@@ -1514,9 +1514,15 @@ static bool type_key_matches(const TypeTable* table, uint32_t index, uint32_t ke
     bool result = true;
     if ((key & 0xff) == BUSTER_TYPE_KIND_FUNCTION)
     {
-        // The flags are the slot's, so the two have the info word or neither; equal info words, the same count of words.
-        const uint64_t words = type_function_words(parameters, (uint8_t)(key >> 8), extent);
-        result = words == 0 || memcmp(table->parameters.type + table->types.index[index], parameters, words * sizeof(TypeId)) == 0;
+        // The flags are the slot's, so the two have the info word or neither: the parameters and it first, and only where
+        // the info words are equal, which gives both the same count of words, the parameter ABIs' words after them, so that
+        // no comparison reads past the stored type's words.
+        const uint8_t flags = (uint8_t)(key >> 8);
+        const TypeId* stored = table->parameters.type + table->types.index[index];
+        const uint64_t head = extent + ((flags & BUSTER_TYPE_FLAG_FUNCTION_INFO) != 0 ? 1 : 0);
+        result = head == 0 || memcmp(stored, parameters, head * sizeof(TypeId)) == 0;
+        const uint64_t words = result ? type_function_words(parameters, flags, extent) : 0;
+        result = result && (words == head || memcmp(stored + head, parameters + head, (words - head) * sizeof(TypeId)) == 0);
     }
     else if ((key & BUSTER_TYPE_SLOT_WIDE) != 0)
     {

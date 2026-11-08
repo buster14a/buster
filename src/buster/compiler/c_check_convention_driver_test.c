@@ -118,6 +118,30 @@ static void check_test_driver_conventions(CheckTest* test, const char* clang, co
         unlink(caller_object);
         unlink(linked);
     }
+    // A function of another convention with a swift_async_context parameter, which clang takes and LLVM passes in r14, a
+    // location Tier 0 hasn't: its definition and a call of it are refused by name (#1447).
+    static const char* const async_sources[] = {
+        "long f(void *__attribute__((swift_async_context)) c, long x) { return (long)c + x; }\n",
+        "long f(void *__attribute__((swift_async_context)) c, long x);\nlong g(void *p) { return f(p, 3); }\n",
+    };
+    for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(async_sources); a += 1)
+    {
+        const bool async_written = parse_test_write(path, async_sources[a], strlen(async_sources[a]));
+        char* async_reference[] = { (char*)clang, "-std=gnu17", "-O0", "-c", path, "-o", object, NULL };
+        const int async_clang = async_written ? check_test_driver_spawn(async_reference, &text) : -1;
+        free(text);
+        for (uint32_t p = 0; async_written && p < 2; p += 1)
+        {
+            char* arguments[] = { (char*)executable, "-std=gnu17", "-c", path, "-o", object, p == 1 ? "--scalar" : NULL, NULL };
+            const int status = check_test_driver_spawn(arguments, &text);
+            char description[1024];
+            snprintf(description, sizeof(description), "conventions: %s of a function with a swift_async_context parameter by the %s path is refused by name (status %d, clang %d: %s)",
+                     a == 0 ? "a definition" : "a call", p == 1 ? "scalar" : "vector", status, async_clang, text != NULL ? text : "");
+            check_test_expect(test, async_clang == 0 && status == 1 && text != NULL &&
+                                        strstr(text, "unsupported: functions with a swift_async_context parameter") != NULL, description);
+            free(text);
+        }
+    }
     // An intel_ocl_bicc call on an AVX-512 target, whose callee keeps rbx, rsi, r14 and r15 of the general registers alone
     // (LLVM's CSR_64_Intel_OCL_BI_AVX512), is refused by name, where clang compiles it (#1447).
     static const char wide_call[] = "int __attribute__((intel_ocl_bicc)) f(int x);\nint g(int n) { return f(n) + n; }\n";
@@ -249,6 +273,10 @@ static void check_test_driver_convention_diagnostics(CheckTest* test, const char
         { "void __attribute__((ms_abi)) f(int);\nvoid __attribute__((preserve_most)) f(int);\n", "-std=gnu17" },
         { "void __attribute__((regcall)) f();\n", "-std=gnu17" },
         { "void __attribute__((swiftcall)) f(int, ...);\nvoid __attribute__((intel_ocl_bicc)) g(int, ...);\n", "-std=gnu17" },
+        // swift_async_context of any convention, which clang's checkExtParameterInfos doesn't check (#1743's review).
+        { "void f(void *c __attribute__((swift_async_context)));\nvoid __attribute__((ms_abi)) g(void *__attribute__((swift_async_context)) c);\n"
+          "void __attribute__((intel_ocl_bicc)) h(void *__attribute__((swift_async_context)) c, int x);\nlong k(void *__attribute__((swift_async_context)) c) { return (long)c; }\n", "-std=gnu17" },
+        { "void f(void *c __attribute__((swift_async_context)));\nvoid __attribute__((preserve_most)) g(int x, void *__attribute__((swift_async_context)) c);\n", "-std=gnu23" },
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);

@@ -4483,8 +4483,8 @@ static bool check_input_swift_parameter(CheckInputReader* reader, CheckInputAttr
 }
 
 // A function type's parameters' Swift ABIs against its convention and their order (#1447, clang's checkExtParameterInfos):
-// swift_indirect_result, swift_context and swift_async_context of a swiftcall or swiftasynccall function, and
-// swift_error_result of a swiftcall one; an indirect result first or after another, and an error result just after a
+// swift_indirect_result and swift_context of a swiftcall or swiftasynccall function, and swift_error_result of a swiftcall
+// one (swift_async_context of any: clang's switch checks no convention of it); an indirect result first or after another, and an error result just after a
 // context. Each error is at its parameter (`places`, its name or where an unnamed one's would be); `attributes` are each
 // parameter's attribute's first token, the report's. Whether there was none.
 static bool check_input_swift_parameters(CheckInputReader* reader, TypeId function, const uint32_t* places, const uint32_t* attributes, uint32_t count)
@@ -4501,7 +4501,7 @@ static bool check_input_swift_parameters(CheckInputReader* reader, TypeId functi
         const bool error_result = abi == TYPE_PARAMETER_ABI_SWIFT_ERROR_RESULT;
         uint32_t error = BUSTER_CHECK_NONE;
         uint32_t number = abi;
-        if (abi != TYPE_PARAMETER_ABI_ORDINARY && !(error_result ? swift : either))
+        if (abi != TYPE_PARAMETER_ABI_ORDINARY && abi != TYPE_PARAMETER_ABI_SWIFT_ASYNC_CONTEXT && !(error_result ? swift : either))
         {
             error = CHECK_ARGUMENT_SWIFT_PARAMETER_CONVENTION;
             number |= error_result ? BUSTER_CHECK_SWIFT_ONLY : 0;
