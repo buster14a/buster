@@ -31,9 +31,10 @@ compiler built by itself runs its own vector lexer, refinement and checker
 kernels through these calls.
 
 A Tier 0 `-c -march=znver5` of #1398's `k_adds`
-(`_mm256_storeu_si256(d, _mm256_adds_epu8(loadu(a), loadu(b)))`) at `77fb9128`
-is 45 instructions with four calls in the caller. `_mm256_adds_epu8`'s own copy is
-20 instructions: a realigned frame, two parameter stores, two copies into
+(`_mm256_storeu_si256(d, _mm256_adds_epu8(loadu(a), loadu(b)))`), by a build of
+`77fb9128` with #1754 (whose `-H` doesn't touch code generation), is 45
+instructions with four calls in the caller. `_mm256_adds_epu8`'s own copy is 21
+instructions, its `ret` among them: a realigned frame, two parameter stores, two copies into
 the vector stack's slots, the `vpaddusb`, and three moves of the result through
 its slot and its result object into `ymm0`.
 
