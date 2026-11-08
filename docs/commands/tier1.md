@@ -86,7 +86,7 @@ requirements. [Command index](README.md).
   builds them: speedtest1 as one translation unit but by clang, which compiles an
   object of each file and links them. It checks that speedtest1's `--verify`
   gives one hash and each script prints clang -O0's output, then runs every
-  build of every program in `--runs` rounds (11) of a rotating order, as whole
+  build of every program in `--runs` rounds (11) of a Williams design's order, as whole
   processes (`profile.c`'s), each with its wall time and its user cycles and
   instructions, every speedtest1 run from a fresh database: its files and
   SQLite's temporary directory removed before it, outside its time, as the

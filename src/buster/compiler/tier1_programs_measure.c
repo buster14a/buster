@@ -3,7 +3,7 @@
 
 //
 // measure-tier1-programs (#138, #1189): the programs Tier 1 is measured by against clang -O2, each built by this
-// compiler's Tier 0 and --tier1, clang -O0 and -O2, and tcc, then run as whole processes in a rotating order.
+// compiler's Tier 0 and --tier1, clang -O0 and -O2, and tcc, then run as whole processes in a Williams design's order.
 //
 //   build/compiler measure-tier1-programs --clang PATH [--tcc PATH] --sqlite DIR --speedtest DIR --lua DIR --scripts DIR
 //                                         [--runs N] [--warmups N] [--directory DIR] [--keep] [--uncounted]

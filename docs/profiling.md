@@ -173,8 +173,8 @@ The noise sets which comparison to use.
   ```
 
   Read the difference over several holds. Each hold's fresh copies carry their own physical pages: the same
-  executables moved by up to 0.6% between holds, more than one hold's error bars allow. `time-runs` also runs its
-  slots in one cyclic order, so each executable follows the same one in every run (#1311).
+  executables moved by up to 0.6% between holds, more than one hold's error bars allow. `time-runs` runs its
+  slots in each run's row of a Williams design, each slot following each other equally often over the period (#1311).
 - **Short runs on many lanes: the reference twice, and a balanced order.** A run of a few milliseconds on several cores
   varies with what ran before it: the other cores' idle states and clocks (only CPU 2 runs the performance governor),
   and its threads' waits and scheduling. `link-foreign`'s 2,000-worker dynamic PIE on eight lanes took 2.2 to 2.8 ms

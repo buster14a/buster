@@ -2679,7 +2679,7 @@ report, on standard error after the command, a row per stage.
 
 **The harness.** `measure-compile [--runs N] [--warmups N] [--reference PATH]
 [--directory DIR] [--keep] -- ARGUMENT...` (`compile_measure.c`) times
-`ARGUMENT... -o FILE` as whole processes in a rotating order: this compiler
+`ARGUMENT... -o FILE` as whole processes in a Williams design's order: this compiler
 without the option, with it, and the reference compiler.
 - **Measures.** Each process's wall time runs from `fork` to `wait4`'s return,
   and `wait4`'s rusage gives its user and system time, peak RSS and faults.

@@ -59,8 +59,9 @@ For a comparison of two compiler revisions:
 `time-runs` already accepts several executables for each named build:
 `--build base BASE_ORDER_0 --build head HEAD_ORDER_0 --build base BASE_ORDER_1
 --build head HEAD_ORDER_1 ... --list closures.lua`. Give each build's placements
-in the same order; its rounds rotate the execution order and its report retains
-the placement medians. Repeat the lists for the other four scripts. Its
+in the same order; each run takes its round's row of a Williams design over the
+slots, and its report retains the placement medians. Repeat the lists for the
+other four scripts. Its
 `over placements` range is a range of comparisons, **not a confidence interval
 or a paired-layout estimator**; calculate paired ratios from the recorded
 per-layout results when reporting those statistics. `--copies` measures a
