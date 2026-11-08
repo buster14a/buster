@@ -4045,9 +4045,11 @@ initializer's end, after the initializer's own diagnostics, and an extern
 array loses its -Wextern-initializer event. Clang gives no such error where
 the initializer is no valid value. The driver decides that once the
 expressions are checked (`check_init_listless_drop`, which removes the
-report): the initializer's outermost node is missing, diagnosed, of no valid
-type or incomplete as the initializers' diagnosis counts it, or an undeclared
-name in it isn't shielded by a statement expression. A statement expression
+report): an undeclared name in it isn't shielded by a statement expression,
+or the initializer's outermost node is diagnosed, of no valid type or
+incomplete as the initializers' diagnosis counts it. An initializer with no
+node keeps its report: a rejected unit's retained graph ends at its first
+missing name, so a later valid initializer has none. A statement expression
 shields a name in a statement before its last, its value
 (`check_init_undeclared_poisons`). The report keeps its initializer's first
 token (`value`) for this; only a unit with another error drops one. A

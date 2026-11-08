@@ -179,6 +179,10 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void h(void) { int u[] = ({ int y = undecl2; 5; }); }\nvoid k(void) { int u[] = ({ sizeof(undecl3); 5; }); }\n"
         "void n(void) { int u[] = ({ int z = ({ undecl8; 1; }); 5; }); }\nvoid q(void) { int u[] = ({ if (1) undecl10 = 2; 5; }); }\n"
         "void r(void) { int u[] = (undecl11); }\nint v1[] = ((struct S){0}).nosuch;\nint v4[] = (int[2]){1,2} + x;\nint v6[] = undecl6 + 1;\n",
+        // A unit the reader rejects, whose retained graph ends at its first missing name: a later array's initializer has
+        // no node and keeps its error (third review on #1791).
+        "int c = undecl, d[] = 6;\nunknown_type z;\n",
+        "int c = undecl;\nint d[] = 6;\nint e[] = (5);\nint f2[] = undecl2 + 1;\nint g[] = (int)7;\nunknown_type z;\n",
         // A block's, and clang's unused-variable warnings of no scope in which an error occurred (a body's from its
         // definition's start).
         "void f(int p)\n{\n    int x;\n    float x;\n    int y = 1;\n    long y = 2;\n    (void)y;\n    if (y = 2) {}\n}\n"

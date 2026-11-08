@@ -298,9 +298,10 @@ struct CheckInitDiagnostic
 // narrower than a pointer (an absolute address, `(int *)5`'s, stays a constant). Another failed conversion, of a record or a
 // floating value, is the initializer's only error.
 // An array of unknown size's recovered "array initializer must be an initializer list" (check_input_initializer_finish,
-// #1447) whose initializer is no valid value, which clang reports alone: its outermost node (its last token's, as
-// check_init_node takes it) is missing, diagnosed, of no valid type or past a missing name's diagnostic limit, or has an
-// operand or argument that is (the initializers' diagnosis's `complete`). A statement expression's inner errors leave its
+// #1447) whose initializer is no valid value, which clang reports alone: an undeclared name in it that no statement
+// expression shields, or its outermost node (its last token's, as check_init_node takes it) diagnosed, of no valid type
+// or past a missing name's diagnostic limit, or with an operand or argument that is (the initializers' diagnosis's
+// `complete`). An initializer with no node keeps its report. A statement expression's inner errors leave its
 // value valid, as clang's. Such reports leave `input->reports`; only a unit with another error drops one, so a rejected
 // unit always says why. Error-free units and those without the report don't look.
 // Whether an undeclared name at `token`, in an initializer from `begin`, makes the initializer no value: unless a
@@ -398,7 +399,9 @@ static void check_init_listless_drop(CheckInput* input, const Parser* parser, co
             undeclared = name->message == CHECK_INPUT_UNDECLARED && name->token >= report->value && name->token < report->completion &&
                          check_init_undeclared_poisons(parser, (uint32_t)report->value, name->token);
         }
-        const bool dropped = candidate && (undeclared || outermost == BUSTER_CHECK_NONE || !complete[outermost]);
+        // No node is no evidence: a rejected unit's retained graph ends at its first missing name, so a later valid
+        // initializer has none (review on #1791). The missing names in it are, read from the reports.
+        const bool dropped = candidate && (undeclared || (outermost != BUSTER_CHECK_NONE && !complete[outermost]));
         input->reports[kept] = *report;
         kept += !dropped;
         input->recovered_published -= dropped;
