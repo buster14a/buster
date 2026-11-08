@@ -472,7 +472,7 @@ On the 9700X, under the lock, CPU 2, a `znver5` build, before and after:
   with and without `--tier0-no-inline`.
 - Compile time, by `measure-compile`, the `--time-stages` laps and a new
   inlining lap: `sqlite3.c` (no callee; must not move) and the compiler's
-  `main.c` at `-march=znver5`, whose sources spell 35,900 intrinsic calls of 1,032
+  `main.c` at `-march=znver5`, whose sources spell 12,104 intrinsic calls of 858
 different intrinsics (a `grep` of `src/buster/compiler/*.c`). The splice and the second
   validation against the Tier 0 work that the calls' code no longer needs.
 - `main.c`'s object: its size, and the callees it no longer defines.
