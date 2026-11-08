@@ -100,6 +100,11 @@ enum
     // -Wall. Its constant forms, and a conditional of integer constants, are -Wtautological-constant-compare's, on by default.
     CHECK_WARNING_ID_INT_IN_BOOL_CONTEXT = 101,
     CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE = 102,
+    // A constant a bit-field's assignment or initialization truncates (#1447, clang's AnalyzeBitFieldAssignment):
+    // -Wbitfield-constant-conversion, and its 1 to a signed one-bit bit-field, -Wsingle-bit-bitfield-constant-conversion
+    // under it, both under -Wconstant-conversion and on by default.
+    CHECK_WARNING_ID_BITFIELD_CONSTANT_CONVERSION = 103,
+    CHECK_WARNING_ID_SINGLE_BIT_BITFIELD_CONSTANT_CONVERSION = 104,
     CHECK_WARNING_ID_COUNT,
 };
 

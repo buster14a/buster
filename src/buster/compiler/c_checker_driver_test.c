@@ -7547,6 +7547,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_format_bitint_driver_test.c"
 #include "c_check_shift_count_driver_test.c"
 #include "c_check_int_in_bool_driver_test.c"
+#include "c_check_bitfield_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
 
 // The terminal CLI may leave mappings for exit, but callers that go on compiling must retain the reusable command's
@@ -8378,6 +8379,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_int_in_bool(&test, clang, executable, directory);
+            check_test_driver_bitfields(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
