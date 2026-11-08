@@ -206,6 +206,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   isn't implemented; and three forms the checker refuses: a statement expression in a variable-array
   `sizeof`'s operand, `sizeof ({ ... })` (whose `(` is the statement expression's own), and a statement
   expression as `_Generic`'s controlling expression.
+  `c_check_unused_result_driver_test.c` (#1447) compares a discarded call's result warnings (`-Wunused-result`'s
+  warn_unused_result and nodiscard, a return type's, pure's and const's, the builtin table's) with Clang's whole
+  output at each warning policy, both paths and one or three lanes: their spellings and messages, macros, types,
+  redeclarations, comma, conditional and for clauses, builtins and `-Wno-unused`'s groups; nested commas,
+  conditionals and selections (clang's `isUnusedResultAWarning`, `check_common_unused_of`), calls through pointers,
+  unreachable code, keyword builtins' values and logical operators among them.
   Runtime `-Wshift-count-negative` and `-Wshift-count-overflow` warnings inspect an independently constant count
   even when the left operand is not constant (#1394). The ordinary shift uses the promoted left type's value width;
   compound shifts use the original lvalue's underlying integer type, including atomic operands, matching Clang.

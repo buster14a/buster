@@ -91,6 +91,7 @@ enum
     // clang's -Wfunction-multiversion (#1447, c_check_cpu_dispatch.c): a cpu_specific or cpu_dispatch CPU list with two
     // names of one mangling, and a cpu_dispatch function's body.
     CHECK_WARNING_ID_FUNCTION_MULTIVERSION = 95,
+    CHECK_WARNING_ID_UNUSED_RESULT = 96,
     CHECK_WARNING_ID_COUNT,
 };
 

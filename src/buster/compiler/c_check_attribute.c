@@ -357,6 +357,9 @@ struct CheckInputAttributes
     bool has_alignas;
     // A counted_by family attribute among the records (#148), which a member's declaration checks.
     bool counted;
+    // A const, pure, warn_unused_result or nodiscard among the records (#1447), which a discarded call's result warns of
+    // (c_check_ignored_result.c): the unit's other attribute lists are skipped by it.
+    bool results;
     // A nonempty function-type chunk remains after type attributes slide to it. clang rechecks the declaration's
     // already-applied kernel attributes after that chunk's attribute list too (#147).
     bool function_chunk;
@@ -1262,6 +1265,7 @@ static bool check_input_attribute_append(CheckInputReader* reader, CheckInputAtt
     {
         attributes->records[attributes->count++] = attribute;
         attributes->counted |= attribute.kind == CHECK_ATTRIBUTE_COUNTED_BY;
+        attributes->results |= attribute.kind == CHECK_ATTRIBUTE_CONST || attribute.kind == CHECK_ATTRIBUTE_PURE || attribute.kind == CHECK_ATTRIBUTE_WARN_UNUSED_RESULT;
     }
     return valid;
 }
