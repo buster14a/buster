@@ -56,13 +56,25 @@ static Tier1AllocationError tier1_certificate_test_allocate_scalar(const Tier1Al
     return error;
 }
 
+static Tier1AllocationError tier1_certificate_test_allocate_scan_reference(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result)
+{
+    const Tier1AllocationError error = tier1_allocate_scan_reference(input, arena, result);
+    if (error == TIER1_ALLOCATION_OK)
+    {
+        tier1_certificate_test_allocation(input, result);
+    }
+    return error;
+}
+
 // These macros are confined to test fixtures. Production allocation and its
 // transactional capacity tests retain their original storage and error paths.
 #define tier1_allocate tier1_certificate_test_allocate
 #define tier1_allocate_scalar tier1_certificate_test_allocate_scalar
+#define tier1_allocate_scan_reference tier1_certificate_test_allocate_scan_reference
 #define run_tier1_allocate_tests run_tier1_allocate_cases
 #include "buster/compiler/tier1_allocate_test_cases.c"
 #undef run_tier1_allocate_tests
+#undef tier1_allocate_scan_reference
 #undef tier1_allocate_scalar
 #undef tier1_allocate
 

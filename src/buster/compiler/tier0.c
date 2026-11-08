@@ -507,6 +507,9 @@ struct Tier0Operation
 // code takes, table t's labels after table t - 1's, and table_jumps each table's JUMP_INDIRECT, its entry's index, in
 // increasing order. A table's jump reaches its table's labels alone, and any other JUMP_INDIRECT (a goto *) the labels of
 // no table; Tier 0's code takes every label for a target of every JUMP_INDIRECT all the same.
+// table_addresses optionally gives each table's GLOBAL_ADDRESS entry, in increasing order and before its jump: a U64
+// direct symbol address, which ir_lower may materialize once in its preheader (#1217). NULL preserves ordinary entry
+// lowering; GOT and TLS accesses cannot be moved by this column. Tier 0 validates it and leaves its code unchanged.
 //
 // The tail calls (TAIL_CALL entries, #147's musttail) are an optional column too, 0 for a function without them:
 // call_tails[c] is 1 for a row of the calls table that a TAIL_CALL calls, and 0 for a CALL's. A tail call's row passes
@@ -590,6 +593,7 @@ struct Tier0Function
     uint32_t label_count;
     const uint32_t* label_tables;
     const uint32_t* table_jumps;
+    const uint32_t* table_addresses;
     uint32_t table_count;
     const uint8_t* call_tails;
     bool entry_records;
@@ -3711,7 +3715,8 @@ static bool tier0_label(const uint64_t* labels, uint32_t entry)
 
 // The jump tables' columns (Tier0Function.table_jumps): each table's jump a JUMP_INDIRECT, after the one before; each
 // label of no table or of one of them, table t's labels after table t - 1's (each table's at its dispatch); and each table
-// with a label.
+// with a label. An optional table_addresses column names direct U64 symbol addresses before their jumps, in entry
+// order, which ir_lower can safely materialize in its preheader without moving a load or a TLS access (#1217).
 static bool tier0_jump_tables_valid(const Tier0Function* function)
 {
     const uint32_t tables = function->table_count;
@@ -3720,6 +3725,18 @@ static bool tier0_jump_tables_valid(const Tier0Function* function)
     {
         const uint32_t entry = function->table_jumps[t];
         valid = entry < function->count && function->kinds[entry] == BUSTER_TYPED_JUMP_INDIRECT && (t == 0 || function->table_jumps[t - 1] < entry);
+        if (valid && function->table_addresses != 0)
+        {
+            const uint32_t address = function->table_addresses[t];
+            valid = address < entry && (t == 0 || function->table_addresses[t - 1] < address) &&
+                    function->kinds[address] == BUSTER_TYPED_GLOBAL_ADDRESS && function->classes[address] == BUSTER_TYPED_CLASS_U64;
+            if (valid)
+            {
+                const uint64_t symbol = function->values[address];
+                valid = symbol != 0 && symbol <= UINT32_MAX &&
+                        (function->symbol_access == 0 || (symbol < function->symbol_count && function->symbol_access[symbol] == BUSTER_TIER0_ACCESS_DIRECT));
+            }
+        }
     }
     uint32_t next = 1;
     for (uint32_t k = 0; valid && tables != 0 && k < function->label_count; k += 1)
@@ -11717,7 +11734,7 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Fun
         }
         if (!tier0_jump_tables_valid(function))
         {
-            tier0_reject(&validator, 0, "jump tables whose jumps aren't JUMP_INDIRECTs in order, or whose labels aren't in their tables' order");
+            tier0_reject(&validator, 0, "jump tables whose jumps, direct addresses or labels aren't in their tables' order");
         }
         for (uint32_t k = 0; k < function->label_count && function->label_entries != 0 && validator.check.error == TIER0_OK; k += 1)
         {

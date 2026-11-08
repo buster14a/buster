@@ -463,7 +463,7 @@ static void ir_optimize_test_simd_flow(IrOptimizeTest* test, Arena* input, Arena
         for (uint32_t distinct = 0; distinct < 2; distinct += 1)
         {
             f.vector_constants[1].words[1] ^= distinct;
-            for (uint32_t passes = 0; passes < 8; passes += 1)
+            for (uint32_t passes = 0; passes < 16; passes += 1)
             {
                 ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, passes);
             }
@@ -531,7 +531,7 @@ static void ir_optimize_test_simd_loop(IrOptimizeTest* test, Arena* input, Arena
         ir_optimize_test_instruction(&f, 11, IR_CBR, IR_VOID, 10, 1, 2);
         ir_optimize_test_instruction(&f, 12, IR_BITCAST, IR_I128, 8, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_optimize_test_instruction(&f, 13, IR_RET, IR_VOID, 12, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        for (uint32_t passes = 0; passes < 8; passes += 1)
+        for (uint32_t passes = 0; passes < 16; passes += 1)
         {
             ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, passes);
         }

@@ -76,6 +76,14 @@ requirements. [Command index](README.md).
   the same measurement (`tier0_benchmark_measure.c`) on the functions `-c`
   compiles of C files. `docs/tier0.md` has the contract, the design and the
   9700X measurements.
+
+`Tier0Function.table_addresses` optionally accompanies the jump-table columns
+(#1217): ordered typed-entry indices naming direct U64 symbol addresses before
+their matching jumps. Both validators check it; Tier 0 keeps entry placement,
+while IR lowering may materialize these addresses in its entry preheader.
+[The lowering guide](lowering.md#jump-table-address-reuse-1217) records the
+contract and regression coverage.
+
 ## Tier 0 tests
 
 `./build/compiler test-tier0 [--seed N] [--count N] [--cross-check

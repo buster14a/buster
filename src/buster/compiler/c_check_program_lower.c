@@ -311,8 +311,9 @@ struct CheckLowerTable
     uint32_t* labels;
     uint32_t label_count;
     uint32_t first_label;
-    // The dispatch's two GLOBAL_ADDRESS entries in the function, which check_lower_finish gives the table's symbol.
-    uint32_t addresses[2];
+    // The dispatch's GLOBAL_ADDRESS entry in the function, which check_lower_finish gives the table's symbol. DUP
+    // shares that value between the indexed entry load and the addition of its signed offset (#1217).
+    uint32_t address;
     // The lowest value, in its class's bits, and the label of the switch's default or end (a control entry's index).
     uint64_t lower;
     uint32_t fallback;
@@ -776,6 +777,10 @@ struct CheckLowerWriter
     // Whether the body calls __builtin_setjmp, whose function keeps nothing in a callee-saved register
     // (Tier0Function.returns_twice).
     bool returns_twice;
+    // Whether the function whose opening token is `init_reentry_body` - 1 names a returns-twice function: a whole-object
+    // call initializer asks once per body, before any argument tasks are emitted (check_lower_init_reentry).
+    uint32_t init_reentry_body;
+    bool init_reentry;
     // Whether the body calls __builtin_eh_return (#148, Tier0Function.eh_return), whose TAIL_CALL rows are its; and the
     // node of the expression statement being lowered (BUSTER_CHECK_NONE for another control), the only place of one.
     bool eh_return;
@@ -832,9 +837,11 @@ struct CheckLowerWriter
     uint32_t label_symbol_capacity;
     // Each label's jump table (Tier0Function.label_tables, #785): 1 + t for the function's table t's, numbered as its
     // dispatches come, and 0 for a label whose address the program takes; and each table's JUMP_INDIRECT's entry
-    // (Tier0Function.table_jumps), `table_jump_count` of them, with room for the program's tables.
+    // (Tier0Function.table_jumps) and shared GLOBAL_ADDRESS (table_addresses), `table_jump_count` of them, with room for
+    // the program's tables. The addresses let ir_lower materialize these direct symbols before loops (#1217).
     uint32_t* label_tables;
     uint32_t* table_jumps;
+    uint32_t* table_addresses;
     uint32_t table_jump_count;
     // The function's lifetime events (#177, Tier0Function.lifetime_entries and lifetime_locals): each LIFETIME control's,
     // one per local of its block, at the entry the control comes before, with room for the program's.
@@ -6016,7 +6023,7 @@ static void check_lower_eh_return(CheckLowerWriter* writer, uint32_t node)
 // own code has no test of one. A removed interval (`omitted` arguments from `omit`) contains only certified effect-free
 // constants; source argument indices and conversions remain unchanged for every retained argument.
 static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLowerWriter* writer, uint32_t node, CheckLowerRuntime runtime, uint32_t omit,
-                                                                         uint32_t omitted, bool halves)
+                                                                      uint32_t omitted, bool halves, uint32_t destination)
 {
     bool retry = false;
     const CheckGraph* graph = &writer->program->input->graph;
@@ -6085,8 +6092,8 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
         const TypeId argument = stream->argument_conversions[first + a].type;
         passed = halves ? check_lower_passed(writer, argument) : check_lower_call_passed(writer, argument);
     }
-    // A struct or union result lands in a frame object of the call's own, whose address is the call's value, and so do a
-    // 128-bit integer's and a vector's, which LOCAL then reads.
+    // A struct or union result lands in a frame object whose address is the call's value: its own, unless a whole-object
+    // initializer supplies its unaliased destination. Wide integers and vectors keep their own objects, read by LOCAL.
     const bool aggregate_result = !plain && check_lower_aggregate(writer, result);
     const bool wide_result = !plain && (check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0);
     const char* returned = plain ? NULL : aggregate_result ? check_lower_by_value(writer, result, true) : check_lower_class(writer, result) == UINT8_MAX ? check_lower_type_feature(types, result) : NULL;
@@ -6121,6 +6128,7 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
         const uint8_t result_class = check_lower_class(writer, result);
         const bool object_result = !tail && (aggregate_result || wide_result);
         const uint32_t object = !object_result ? BUSTER_CHECK_NONE :
+                                destination != BUSTER_CHECK_NONE ? destination :
                                 aggregate_result ? check_lower_object(writer, type_size(types, result), declared > canonical ? declared : canonical) :
                                                    check_lower_temporary_of(writer, result);
         writer->call_targets[call] = builtin ? check_lower_runtime(writer, runtime) : direct ? writer->program->object_symbols[value.object] : 0;
@@ -6258,18 +6266,24 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
 }
 
 // A call that passes a half-precision argument (check_lower_call_body's), out of line.
-static __attribute__((noinline)) void check_lower_call_halves(CheckLowerWriter* writer, uint32_t node, CheckLowerRuntime runtime, uint32_t omit, uint32_t omitted)
+static __attribute__((noinline)) void check_lower_call_halves(CheckLowerWriter* writer, uint32_t node, CheckLowerRuntime runtime, uint32_t omit, uint32_t omitted,
+                                                            uint32_t destination)
 {
-    (void)check_lower_call_body(writer, node, runtime, omit, omitted, true);
+    (void)check_lower_call_body(writer, node, runtime, omit, omitted, true, destination);
 }
 
-// A normal source call, or an exactly typed fortified libc call (check_lower_call_body's).
+// A normal source call, or an exactly typed fortified libc call, with an optional result destination (check_lower_call_body's).
+static void check_lower_call_result(CheckLowerWriter* writer, uint32_t node, CheckLowerRuntime runtime, uint32_t omit, uint32_t omitted, uint32_t destination)
+{
+    if (check_lower_call_body(writer, node, runtime, omit, omitted, false, destination))
+    {
+        check_lower_call_halves(writer, node, runtime, omit, omitted, destination);
+    }
+}
+
 static void check_lower_call_to(CheckLowerWriter* writer, uint32_t node, CheckLowerRuntime runtime, uint32_t omit, uint32_t omitted)
 {
-    if (check_lower_call_body(writer, node, runtime, omit, omitted, false))
-    {
-        check_lower_call_halves(writer, node, runtime, omit, omitted);
-    }
+    check_lower_call_result(writer, node, runtime, omit, omitted, BUSTER_CHECK_NONE);
 }
 
 static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
@@ -12571,6 +12585,124 @@ static uint32_t check_lower_init_literal(const CheckLowerWriter* writer, const C
     return literal != NULL && literal->object_size == size && !check_lower_init_volatile_object(writer, literal, declared) ? selected : 0;
 }
 
+// A destination named anywhere in its initializer can escape before the call, including in another argument's call
+// or a statement expression. The immutable binding column finds those uses without walking the expression graph;
+// each full vector reads 16 in-range tokens, and the scalar twin and tail test the same declaration identities.
+static bool check_lower_init_names_destination(const CheckLowerWriter* writer, uint32_t declaration)
+{
+    const CheckInput* input = writer->program->input;
+    const uint32_t count = input->token_count;
+    const uint32_t begin = check_sparse_get(input->initializer_begins, declaration);
+    const uint32_t end = check_sparse_get(input->initializer_ends, declaration);
+    const uint32_t* declarations = input->declarations;
+    const bool scalar = BUSTER_SCALAR_PATH(writer->scalar);
+    bool named = begin >= end || end > count;
+    uint32_t token = begin;
+    for (; !named && !scalar && end - token >= BUSTER_CHECK_PROGRAM_LANES; token += BUSTER_CHECK_PROGRAM_LANES)
+    {
+        named = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(declarations + token), _mm512_set1_epi32((int)declaration)) != 0;
+    }
+    for (; !named && token < end; token += 1)
+    {
+        named = declarations[token] == declaration;
+    }
+    return named;
+}
+
+// A bound function with returns_twice, or a builtin whose catalogue says it returns twice ('j'): setjmp's standard
+// library names need the catalogue even when their source declarations do not spell the attribute. A mere reference
+// suffices; taking such a function's address keeps the conservative result too.
+static bool check_lower_init_returns_twice(const CheckProgram* program, uint32_t token)
+{
+    const CheckInput* input = program->input;
+    const uint32_t declaration = input->declarations[token];
+    const bool function = declaration < input->token_count && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+    const uint32_t object = function ? input->objects[declaration] : 0;
+    const uint32_t id = input->intrinsic_ids != NULL ? input->intrinsic_ids[token] : 0;
+    const CheckInputIntrinsicCall* call = id != 0 && id <= input->intrinsic_call_count ? input->intrinsic_calls + id - 1 : NULL;
+    const BuiltinIntrinsicInfo* info = call != NULL && call->declaration < input->intrinsic_declaration_count ?
+                                         input->intrinsic_declarations[call->declaration].info : NULL;
+    if (info == NULL && function && program->identifiers != NULL)
+    {
+        const uint32_t name = program->parser->tokens.names[declaration];
+        info = builtin_intrinsic_lookup((const char*)intern_bytes(program->identifiers, name), intern_length(program->identifiers, name));
+    }
+    const bool declared = object != 0 && object < program->object_count && program->object_returns_twice != NULL && program->object_returns_twice[object] != 0;
+    return declared || (info != NULL && memchr(info->attributes, 'j', info->attributes_length) != NULL);
+}
+
+// A returns-twice call can reenter an initializer after its destination escaped on the first visit. Inspect a body's
+// immutable bindings and intrinsic IDs once, only when a candidate initializer asks: an argument's setjmp has not yet
+// been lowered then. Full vectors filter in-range declarations and intrinsic calls; the scalar twin and tail ask the
+// same token predicate. No expression graph traversal or unit-wide scan is needed.
+static bool check_lower_init_reentry(CheckLowerWriter* writer)
+{
+    const CheckProgram* program = writer->program;
+    const CheckInput* input = program->input;
+    const uint32_t opening = writer->body->opening;
+    if (writer->init_reentry_body != opening + 1)
+    {
+        const uint32_t closing = program->parser->tree.parents[opening];
+        const uint32_t end = closing < input->token_count ? closing + 1 : input->token_count;
+        const uint32_t* declarations = input->declarations;
+        const uint32_t* intrinsics = input->intrinsic_ids;
+        const bool scalar = BUSTER_SCALAR_PATH(writer->scalar);
+        bool reentry = closing >= input->token_count || end <= opening;
+        uint32_t token = opening;
+        for (; !reentry && !scalar && end - token >= BUSTER_CHECK_PROGRAM_LANES; token += BUSTER_CHECK_PROGRAM_LANES)
+        {
+            uint32_t selected = _mm512_cmplt_epu32_mask(_mm512_loadu_si512(declarations + token), _mm512_set1_epi32((int)input->token_count));
+            if (intrinsics != NULL)
+            {
+                selected |= _mm512_cmpneq_epi32_mask(_mm512_loadu_si512(intrinsics + token), _mm512_setzero_si512());
+            }
+            for (; !reentry && selected != 0; selected &= selected - 1)
+            {
+                reentry = check_lower_init_returns_twice(program, token + (uint32_t)__builtin_ctz(selected));
+            }
+        }
+        for (; !reentry && token < end; token += 1)
+        {
+            reentry = check_lower_init_returns_twice(program, token);
+        }
+        writer->init_reentry_body = opening + 1;
+        writer->init_reentry = reentry;
+    }
+    return writer->init_reentry;
+}
+
+// A whole automatic object initialized by one call can be that call's hidden result object (#1549). The destination
+// is passed to this call's expansion only: its argument tasks, including nested calls, keep their own result objects.
+// Keep a copy for volatile objects, a different result type, register returns, insufficient canonical ABI alignment,
+// and self references. A body with source labels can reenter an initializer after its destination has escaped, so it
+// keeps the ordinary path too, as does a body that names a returns-twice function. No assignment reaches this helper.
+static bool check_lower_init_call(CheckLowerWriter* writer, const CheckInitializer* plan, uint32_t declaration, uint32_t local, TypeId destination)
+{
+    const CheckProgram* program = writer->program;
+    const TypeTable* types = program->types;
+    const CheckInitPart* part = plan->count == 1 ? plan->parts : NULL;
+    const uint8_t kind = check_action_kind(types, destination);
+    const bool single = part != NULL && part->kind == CHECK_INIT_VALUE && part->bit_offset == 0 && part->bit_width == 0 && part->overload_candidate == 0 &&
+                        (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && part->node < program->stream->count &&
+                        program->input->graph.ops[part->node] == CHECK_OP_CALL && writer->body->label_count == 0 &&
+                        !check_lower_init_volatile_object(writer, plan, destination);
+    const TypeId result = single ? check_stream_type(program->stream, part->node) : 0;
+    const TypeId canonical = single ? type_strip_aligned(types, result) : 0;
+    const bool inplace = single && type_unqualified(canonical) == type_unqualified(type_strip_aligned(types, destination)) &&
+                         writer->abi_table->results[type_index(result)].kind == BUSTER_ABI_RESULT_MEMORY &&
+                         type_size(types, result) == writer->local_sizes[local] && plan->object_size == writer->local_sizes[local] &&
+                         writer->local_alignments[local] >= type_alignment_log2(types, canonical) &&
+                         !check_lower_init_names_destination(writer, declaration) && !check_lower_init_reentry(writer);
+    if (inplace)
+    {
+        writer->token = part->token;
+        check_lower_source(writer, part->token);
+        check_lower_instruction(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_call_result(writer, part->node, CHECK_LOWER_RUNTIMES, 0, 0, local);
+    }
+    return inplace;
+}
+
 static void check_lower_initializer(CheckLowerWriter* writer, CheckControl control)
 {
     const CheckProgram* program = writer->program;
@@ -12599,6 +12731,7 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
         const uint32_t pool = object ? check_lower_init_pool(&writer->output->initializers, target, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
         const uint8_t class = check_lower_class(writer, plan->type);
         const bool library = object && check_lower_init_library(writer, plan, destination);
+        const bool returned = object && pool == BUSTER_CHECK_NONE && check_lower_init_call(writer, plan, declaration, local, destination);
         if (local == BUSTER_CHECK_NONE || (!object && class == UINT8_MAX))
         {
             check_lower_unsupported(writer, "initializers of this type");
@@ -12613,7 +12746,7 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
             }
             check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_INITIALIZER_COPY, .node = pool, .value = local });
         }
-        for (uint32_t part = plan->count; pool == BUSTER_CHECK_NONE && part-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        for (uint32_t part = plan->count; !returned && pool == BUSTER_CHECK_NONE && part-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
             const CheckInitPart* write = &plan->parts[part];
             writer->token = write->token;
@@ -12812,7 +12945,7 @@ static bool check_lower_switch_table(CheckProgramLowered* lowered, uint32_t capa
                     .labels = labels,
                     .label_count = label_count,
                     .first_label = first,
-                    .addresses = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE },
+                    .address = BUSTER_CHECK_NONE,
                     .lower = (sorted[0].lower ^ sign) & mask,
                     .fallback = controls[end].target,
                 };
@@ -12894,7 +13027,8 @@ static void check_lower_table_index(CheckLowerWriter* writer, const CheckLowerTa
 // part's label symbols; then to the default (or the switch's end) when the index (check_lower_table_index) is past the
 // table's last entry, and otherwise to the table's address (its provisional symbol, which check_lower_finish and the
 // emission's merge replace) plus the entry's 32-bit offset of its label from it, as clang -O0's code goes. Its entries
-// are the switch statement's, for -g's rows, as clang's code is.
+// are the switch statement's, for -g's rows, as clang's code is. DUP reuses the table's address for both operations;
+// the IR lowering carries the same value through it, without requiring value numbering to merge two symbol nodes.
 static void check_lower_switch_dispatch(CheckLowerWriter* writer, uint32_t table, uint32_t local, uint8_t class)
 {
     CheckLowerTable* item = writer->tables + table;
@@ -12919,9 +13053,8 @@ static void check_lower_switch_dispatch(CheckLowerWriter* writer, uint32_t table
     check_lower_emit(writer, BUSTER_TYPED_GT, BUSTER_TYPED_CLASS_I32, 0);
     check_lower_emit(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, item->fallback);
     check_lower_emit(writer, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, (uint64_t)writer->provisional_tables + table);
-    item->addresses[0] = writer->count - 1;
-    check_lower_emit(writer, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, (uint64_t)writer->provisional_tables + table);
-    item->addresses[1] = writer->count - 1;
+    item->address = writer->count - 1;
+    check_lower_emit(writer, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
     check_lower_table_index(writer, item, local, class, index_class);
     if (index_class == BUSTER_TYPED_CLASS_U32)
     {
@@ -12934,6 +13067,7 @@ static void check_lower_switch_dispatch(CheckLowerWriter* writer, uint32_t table
     check_lower_emit(writer, BUSTER_TYPED_JUMP_INDIRECT, BUSTER_TYPED_CLASS_U64, 0);
     if (writer->table_jump_count < writer->table_count)
     {
+        writer->table_addresses[writer->table_jump_count] = item->address;
         writer->table_jumps[writer->table_jump_count++] = writer->count - 1;
     }
     else
@@ -14580,6 +14714,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     BUSTER_CHECK_LOWER_COLUMN(label_entries, uint32_t, (uint64_t)program->control_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(label_tables, uint32_t, (uint64_t)program->control_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(table_jumps, uint32_t, (uint64_t)shared->lowered->table_count + 1);
+    BUSTER_CHECK_LOWER_COLUMN(table_addresses, uint32_t, (uint64_t)shared->lowered->table_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(lifetime_entries, uint32_t, (uint64_t)program->lifetime_event_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(lifetime_locals, uint32_t, (uint64_t)program->lifetime_event_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(runtimes, uint16_t, CHECK_LOWER_RUNTIMES);
@@ -15284,6 +15419,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         function->label_count = writer->label_entry_count;
         BUSTER_CHECK_LOWER_COPY(label_tables, label_tables, uint32_t, writer->table_jump_count != 0 ? writer->label_entry_count : 0);
         BUSTER_CHECK_LOWER_COPY(table_jumps, table_jumps, uint32_t, writer->table_jump_count);
+        BUSTER_CHECK_LOWER_COPY(table_addresses, table_addresses, uint32_t, writer->table_jump_count);
         function->table_count = writer->table_jump_count;
         // The lifetime events before an entry: one after the last entry has nothing to come before, and is left out.
         uint32_t lifetimes = writer->lifetime_count;
@@ -15578,8 +15714,7 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
         {
             const CheckLowerTable* table = lowered->tables + t;
             uint64_t* values = (uint64_t*)lowered->functions[table->function].values;
-            values[table->addresses[0]] = lowered->case_symbol_base + t;
-            values[table->addresses[1]] = lowered->case_symbol_base + t;
+            values[table->address] = lowered->case_symbol_base + t;
         }
     }
     return valid;

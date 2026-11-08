@@ -955,6 +955,13 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = type.length != 0 ? check_warning_text(scratch, "ISO C does not allow indirection on operand of type %.*s", (int)type.length, type.pointer) : NULL;
             break;
         }
+        case CHECK_WARNING_EVENT_DIAGNOSE_IF:
+        {
+            // diagnose_if's message, its string literals decoded and joined, as clang prints it (#1447).
+            const String8 message = check_warning_strings_value(parser, pp, payload->token, scratch);
+            result = check_warning_text(scratch, "%.*s", (int)message.length, message.pointer);
+            break;
+        }
         case CHECK_WARNING_EVENT_DEPRECATED_USE:
         {
             // The message is the attribute's string as written, without its quotes or prefix. An anonymous tag's name is its
@@ -969,6 +976,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                           check_warning_text(scratch, "%s%.*s%s is deprecated", quotes, (int)used.length, used.pointer, quotes);
             break;
         }
+        case CHECK_WARNING_EVENT_UNKNOWN_ESCAPE:
+            result = check_warning_text(scratch, "unknown escape sequence '\\%c'", (char)payload->name);
+            break;
         case CHECK_WARNING_EVENT_ALIGNOF_EXPRESSION:
         {
             result = check_warning_text(scratch, "'%.*s' applied to an expression is a GNU extension", (int)name.length, name.pointer);
@@ -1264,6 +1274,9 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
         case CHECK_WARNING_NOTE_DECLARED_HERE:
             result = check_warning_text(scratch, "'%.*s' declared here", (int)name.length, name.pointer);
             break;
+        case CHECK_WARNING_NOTE_DIAGNOSE_IF:
+            result = check_warning_text(scratch, "from 'diagnose_if' attribute on '%.*s':", (int)name.length, name.pointer);
+            break;
         case CHECK_WARNING_NOTE_SPAN_REASON:
         {
             static const char* const places[] = { "", "1st", "2nd" };
@@ -1390,6 +1403,11 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                             pp_diagnose_output_phase(pp, disposition, source, semantic ? boundary : event->payload.token,
                                                      semantic ? PP_DIAGNOSTIC_SEMANTIC : PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
                         }
+                    }
+                    else if (event->kind == CHECK_WARNING_EVENT_UNKNOWN_ESCAPE)
+                    {
+                        // At its backslash inside the literal's token (#1447).
+                        pp_diagnose_output_offset_at(pp, disposition, source, event->payload.data, boundary, "%s%s", message, suffix);
                     }
                     else if ((event->flags & BUSTER_CHECK_WARNING_UNLOCATED) != 0)
                     {

@@ -464,7 +464,7 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "swift_error_result", CHECK_ATTRIBUTE_PARAMETER_ABI, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "swift_context", CHECK_ATTRIBUTE_PARAMETER_ABI, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "swift_async_context", CHECK_ATTRIBUTE_PARAMETER_ABI, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
-    { "diagnose_if", CHECK_ATTRIBUTE_DIAGNOSE_IF, CHECK_ATTRIBUTE_CONDITION_STRINGS, 3, 3 },
+    { "diagnose_if", CHECK_ATTRIBUTE_DIAGNOSE_IF, CHECK_ATTRIBUTE_CONDITION_STRINGS, 3, 4 },
     { "enable_if", CHECK_ATTRIBUTE_ENABLE_IF, CHECK_ATTRIBUTE_CONDITION_STRINGS, 2, 2 },
     { "flatten", CHECK_ATTRIBUTE_FLATTEN, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "leaf", CHECK_ATTRIBUTE_LEAF, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
@@ -819,6 +819,13 @@ typedef enum CheckAttributeArgumentError
     // declarator, "'X' attribute only applies to variables", at its first token.
     CHECK_ARGUMENT_UNEXPECTED_SEMI,
     CHECK_ARGUMENT_OBJC_VARIABLES,
+    // diagnose_if's and enable_if's (#1447, c_check_condition.c): a third argument other than "error" or "warning", "invalid
+    // diagnostic type for 'diagnose_if'; use \"error\" or \"warning\" instead", and a fourth that names no warning group,
+    // "unknown warning group 'G'", at the argument; a condition that is no constant without its parameters' values, "'X'
+    // attribute expression never produces a constant expression", at the attribute, its note at the subexpression.
+    CHECK_ARGUMENT_DIAGNOSTIC_TYPE,
+    CHECK_ARGUMENT_WARNING_GROUP,
+    CHECK_ARGUMENT_NEVER_CONSTANT,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -1258,27 +1265,36 @@ static bool check_input_attribute_copy(CheckInputReader* reader, const CheckInpu
     return valid;
 }
 
-// A compatible visible bare function redeclaration keeps its predecessor's format contract. Copy only those
+static uint32_t check_input_inherited_contract(const CheckInputAttribute* attribute)
+{
+    const uint32_t bit = attribute->kind == CHECK_ATTRIBUTE_FORMAT ? 1u :
+                         attribute->kind == CHECK_ATTRIBUTE_CONST ? 2u :
+                         attribute->kind == CHECK_ATTRIBUTE_PURE ? 4u :
+                         attribute->kind == CHECK_ATTRIBUTE_WARN_UNUSED_RESULT ? 8u : 0u;
+    const uint32_t result = !attribute->ignored && !attribute->subject_ignored ? bit : 0u;
+    return result;
+}
+
+// A compatible visible function redeclaration keeps its predecessor's format and value-discard contracts. Copy only those
 // records into a new accumulator: neither the predecessor nor already published declaration metadata is mutable.
-static void check_input_format_inherit(CheckInputReader* reader, uint32_t token, uint32_t previous)
+static void check_input_contract_inherit(CheckInputReader* reader, uint32_t token, uint32_t previous)
 {
     // Binding-only clients can omit the optional attribute column entirely.
     const CheckInputAttributes* prior = check_sparse_wide_present(reader->output->attributes) ?
                                         check_input_attributes_at(reader->output, previous) : NULL;
-    bool inherit = false;
+    uint32_t inherit = 0;
     for (uint32_t i = 0; prior != NULL && i < prior->count; i += 1)
     {
-        const CheckInputAttribute* attribute = prior->records + i;
-        inherit |= attribute->kind == CHECK_ATTRIBUTE_FORMAT && !attribute->ignored && !attribute->subject_ignored;
+        inherit |= check_input_inherited_contract(prior->records + i);
     }
     const CheckInputAttributes* own = inherit ? check_input_attributes_at(reader->output, token) : NULL;
-    bool annotated = false;
+    uint32_t annotated = 0;
     for (uint32_t i = 0; own != NULL && i < own->count; i += 1)
     {
-        const CheckInputAttribute* attribute = own->records + i;
-        annotated |= attribute->kind == CHECK_ATTRIBUTE_FORMAT && !attribute->ignored && !attribute->subject_ignored;
+        annotated |= check_input_inherited_contract(own->records + i);
     }
-    if (inherit && !annotated)
+    const uint32_t missing = inherit & ~annotated;
+    if (missing != 0)
     {
         CheckInputAttributes* copy = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1);
         bool valid = copy != NULL;
@@ -1290,7 +1306,7 @@ static void check_input_format_inherit(CheckInputReader* reader, uint32_t token,
         for (uint32_t i = 0; valid && i < prior->count; i += 1)
         {
             const CheckInputAttribute* attribute = prior->records + i;
-            if (attribute->kind == CHECK_ATTRIBUTE_FORMAT && !attribute->ignored && !attribute->subject_ignored)
+            if ((check_input_inherited_contract(attribute) & missing) != 0)
             {
                 valid = check_input_attribute_append(reader, copy, *attribute);
             }
@@ -1366,10 +1382,14 @@ static bool check_input_attribute_argument(const CheckInputAttribute* attribute,
     return valid;
 }
 
+static CheckStringLiteral check_input_strings_extended(CheckInputReader* reader, uint32_t token, const CheckStringPart* parts, uint32_t count);
+
 // Ordinary string tokens may concatenate. The shared literal decoder retains embedded NULs and UTF-8/escapes;
 // consumers must not treat these bounded payloads as C strings. Decoded bytes live in the output arena, while the
-// spelling views and the one-part-per-token array are scratch storage and disappear after this operation.
-static bool check_input_attribute_string(CheckInputReader* reader, uint32_t first, uint32_t end, String8* text)
+// spelling views and the one-part-per-token array are scratch storage and disappear after this operation. An `evaluated`
+// one (an asm label's, which clang reads as an evaluated string literal, #1447) takes the escapes the fast decoding
+// refuses that clang takes, a delimited one's and an unknown one's with its warning (check_input_strings_extended).
+static bool check_input_attribute_string(CheckInputReader* reader, uint32_t first, uint32_t end, bool evaluated, String8* text)
 {
     const uint64_t mark = reader->scratch->length;
     bool valid = first < end;
@@ -1392,8 +1412,12 @@ static bool check_input_attribute_string(CheckInputReader* reader, uint32_t firs
     }
     if (valid)
     {
-        const CheckStringLiteral decoded = check_literal_strings(parts, end - first, reader->pp->options.language.standard >= 2023, reader->arena);
+        CheckStringLiteral decoded = check_literal_strings(parts, end - first, reader->pp->options.language.standard >= 2023, reader->arena);
         reader->output->resource |= decoded.resource;
+        if (evaluated && !decoded.valid && !decoded.resource)
+        {
+            decoded = check_input_strings_extended(reader, first, parts, end - first);
+        }
         valid = decoded.valid && decoded.byte_count != 0;
         if (valid)
         {
@@ -1815,13 +1839,36 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
                 string_first += 1;
                 string_end -= 1;
             }
-            const bool decoded = check_input_attribute_string(reader, string_first, string_end, &text);
+            const bool decoded = check_input_attribute_string(reader, string_first, string_end, attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL, &text);
             valid = decoded;
             error = CHECK_ATTRIBUTE_ERROR_STRING;
-            if (valid && attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF && argument == 2)
+            // diagnose_if's diagnostic type, and its warning group (#1447, clang's handleDiagnoseIfAttr): its error at the
+            // string. A group clang knows names the warning's option, which this checker's warnings don't take yet.
+            if (valid && attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF && argument == 2 &&
+                !check_input_attribute_equal(text, "warning") && !check_input_attribute_equal(text, "error"))
             {
-                valid = check_input_attribute_equal(text, "warning") || check_input_attribute_equal(text, "error");
-                error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+                check_input_attribute_argument_error(reader, attributes, attribute, string_first, CHECK_ARGUMENT_DIAGNOSTIC_TYPE, 0);
+                valid = false;
+            }
+            if (valid && attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF && argument == 3)
+            {
+                char group[128];
+                const bool fits = text.length != 0 && text.length < sizeof(group) && memchr(text.pointer, 0, text.length) == NULL;
+                if (fits)
+                {
+                    memcpy(group, text.pointer, text.length);
+                    group[text.length] = 0;
+                }
+                const bool known = fits && pp_warning_group_known(group);
+                if (!known)
+                {
+                    check_input_attribute_argument_error(reader, attributes, attribute, string_first, CHECK_ARGUMENT_WARNING_GROUP, 0);
+                }
+                else
+                {
+                    error = CHECK_ATTRIBUTE_ERROR_UNKNOWN;
+                }
+                valid = false;
             }
             if (valid && argument == 0)
             {
@@ -1830,7 +1877,19 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             // clang's error of an argument that is no string literal, at it (#147): visibility's own wording, the others'
             // checkStringLiteralArgumentAttr's.
             // visibility's argument is an enumerator's, which clang's parser reads as an identifier: one is its own error.
-            if (!decoded)
+            // An asm label's string literal that refuses its escapes is the literal's error (#1447, clang's literal parser's
+            // escape errors: check_driver_literal_escapes).
+            const bool label_literal = !decoded && attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !reader->output->resource &&
+                                       string_first < string_end && parser->tokens.kinds[string_first] == PARSE_KIND_STRING;
+            if (label_literal && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+            {
+                // (The attribute's error, which then gives no other.)
+                attributes->error = CHECK_ATTRIBUTE_ERROR_STRING;
+                attributes->error_first = string_first;
+                attributes->error_end = string_end;
+                check_input_report(reader, string_first, CHECK_INPUT_LITERAL);
+            }
+            else if (!decoded)
             {
                 const bool named = first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER;
                 check_input_attribute_argument_error(reader, attributes, attribute, first,
@@ -3627,6 +3686,11 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             const bool late_kind = check_input_attribute_late_kind(&attribute);
             reader->late_attributes |= late_kind;
             reader->deprecated_attributes |= rule->kind == CHECK_ATTRIBUTE_DEPRECATED || rule->kind == CHECK_ATTRIBUTE_UNAVAILABLE;
+            // diagnose_if's and enable_if's conditions are each function declaration's, which a lane can't publish to the
+            // declarations and calls after it (#1447, c_check_condition.c).
+            const bool conditional = rule->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF || rule->kind == CHECK_ATTRIBUTE_ENABLE_IF;
+            reader->condition_attributes |= conditional;
+            check_input_lane_refuse(reader, reader->lane && conditional, "a body declares a diagnose_if or enable_if attribute");
             // A lane cannot publish attribute state to later declarations; source-order replay handles this case.
             check_input_lane_refuse(reader, reader->lane && late_kind, "a body declares an attribute with linked state");
             // x86's interrupt and no_caller_saved_registers (#147): only a unit with either has its calls looked through
@@ -3666,7 +3730,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             // sentinel's, whose subject its handler checks after the count. Kept as clang's generated handler's (the
             // generic kind), its own handler's checks and effects aren't made.
             // (no_caller_saved_registers' count before its subject too: clang's type processing checks it first.)
-            const bool type_attribute = rule->kind == CHECK_ATTRIBUTE_NORETURN || rule->kind == CHECK_ATTRIBUTE_PACKED || rule->kind == CHECK_ATTRIBUTE_MAY_ALIAS ||
+            // (diagnose_if's and enable_if's too: their arguments name the function's parameters, which a generic handler's
+            // reading of them wouldn't find; clang's count is its error first, #1447.)
+            const bool type_attribute = conditional || rule->kind == CHECK_ATTRIBUTE_NORETURN || rule->kind == CHECK_ATTRIBUTE_PACKED || rule->kind == CHECK_ATTRIBUTE_MAY_ALIAS ||
                                         rule->kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION || rule->kind == CHECK_ATTRIBUTE_NULLABILITY ||
                                         rule->kind == CHECK_ATTRIBUTE_SENTINEL ||
                                         (rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_call(name) == CHECK_CALL_NO_CALLER_SAVED);
@@ -5191,7 +5257,7 @@ static bool check_input_attribute_handled(CheckInputReader* reader, CheckInputAt
                                   type_kind(reader->types, type_strip_aligned(reader->types, reader->types->types.base[type_index(bare)])) == BUSTER_TYPE_KIND_FUNCTION;
     const bool destroy = check_input_attribute_equal(spelled, "always_destroy") || check_input_attribute_equal(spelled, "no_destroy");
     const String8 text = attribute->argument_first < attribute->argument_end && parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_STRING &&
-                         check_input_attribute_string(reader, attribute->argument_first, attribute->argument_end, &attribute->text) ? attribute->text : (String8){ 0 };
+                         check_input_attribute_string(reader, attribute->argument_first, attribute->argument_end, false, &attribute->text) ? attribute->text : (String8){ 0 };
     bool valid = true;
     if (attribute->count_check != BUSTER_CHECK_COUNT_NONE)
     {
@@ -5678,7 +5744,7 @@ static bool check_input_attribute_annotations(CheckInputReader* reader, CheckInp
     else if (check_input_attribute_equal(spelled, "type_visibility") && tag)
     {
         const bool string = attribute->argument_first < attribute->argument_end && parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_STRING &&
-                            check_input_attribute_string(reader, attribute->argument_first, attribute->argument_end, &attribute->text);
+                            check_input_attribute_string(reader, attribute->argument_first, attribute->argument_end, false, &attribute->text);
         if (string && !check_input_attribute_equal(attribute->text, "default") && !check_input_attribute_equal(attribute->text, "hidden") &&
             !check_input_attribute_equal(attribute->text, "protected"))
         {
@@ -5934,7 +6000,7 @@ static String8 check_input_checks_string(CheckInputReader* reader, uint32_t firs
 {
     String8 text = { "", 0 };
     const bool string = first < end && reader->parser->tokens.kinds[first] == PARSE_KIND_STRING;
-    if (!(string && check_input_attribute_string(reader, first, end, &text)))
+    if (!(string && check_input_attribute_string(reader, first, end, false, &text)))
     {
         text = (String8){ "", 0 };
     }
@@ -7029,7 +7095,7 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             uint32_t first = attribute->argument_first;
             uint32_t end = attribute->argument_end;
             String8 sanitizer = { 0 };
-            const bool string = check_input_attribute_argument(attribute, argument, &first, &end) && check_input_attribute_string(reader, first, end, &sanitizer);
+            const bool string = check_input_attribute_argument(attribute, argument, &first, &end) && check_input_attribute_string(reader, first, end, false, &sanitizer);
             const PredefinesSanitizers known = string ? predefines_sanitizer_value(sanitizer.pointer, sanitizer.length) : (PredefinesSanitizers){ 0 };
             const bool unknown = string && known.kinds == 0 && known.groups == 0 && !check_input_attribute_equal(sanitizer, "coverage");
             const bool global = (declaration & (BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_GLOBAL)) == (BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_GLOBAL);
@@ -7125,6 +7191,11 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             attributes->error = attributes->error == CHECK_ATTRIBUTE_ERROR_NONE ? CHECK_ATTRIBUTE_ERROR_ARGUMENTS : attributes->error;
             valid = false;
         }
+        const bool required_typedef = valid && kept && attribute->kind == CHECK_ATTRIBUTE_WARN_UNUSED_RESULT &&
+                                      (declaration & BUSTER_CHECK_SUBJECT_TYPEDEF) != 0;
+        reader->output->typedef_result_contracts |= required_typedef;
+        // A lane's input is private; source-order replay publishes a body's unit-wide result-contract guard.
+        check_input_lane_refuse(reader, reader->lane && required_typedef, "a body declares a result-contract typedef");
     }
     // A kernel's attributes on a function of no GPU kernel's convention (#147, clang's ProcessDeclAttributeList's end).
     if (valid && (declaration & BUSTER_CHECK_SUBJECT_FUNCTION) != 0 && name < parser->tokens.count)
@@ -7628,14 +7699,6 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
         if (attribute->kind == CHECK_ATTRIBUTE_ALIGNAS)
         {
             check_input_alignas_error(reader, attributes, NULL, BUSTER_CHECK_NONE, 0, 0);
-            valid = false;
-        }
-        if (!attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF || attribute->kind == CHECK_ATTRIBUTE_ENABLE_IF) &&
-            attributes->object_sizes == NULL && !check_graph_system_token(&reader->output->graph, attribute->first))
-        {
-            // #1361's unchecked wrappers include system-header functions without size annotations (glibc 2.44's
-            // openat2). General user diagnostics/filtering remain unsupported outside this compatibility path.
-            check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
             valid = false;
         }
         const bool allocation = attribute->kind == CHECK_ATTRIBUTE_ALLOC_SIZE || attribute->kind == CHECK_ATTRIBUTE_ALLOC_ALIGN;

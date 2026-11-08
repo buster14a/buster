@@ -459,6 +459,74 @@ static void check_test_half_constant_graph(CheckTest* test, TypeTable* table)
     arena_release(&storage);
 }
 
+// A folded NaN's x87 fields, as the checker's long double holds every real format's NaN (check_action_nan_bits).
+static bool check_test_nan_fields(long double value, uint16_t top, uint64_t significand)
+{
+    uint64_t low = 0;
+    uint16_t high = 0;
+    memcpy(&low, &value, sizeof(low));
+    memcpy(&high, (const uint8_t*)&value + sizeof(low), sizeof(high));
+    return isnan(value) && high == top && low == significand;
+}
+
+// float, double and long double folds give NaNs as clang's APFloat does (#1473), in required and ordinary contexts
+// alike: an invalid operation on non-NaNs gives the positive canonical NaN, where the host's SSE and x87 give their
+// negative one, and otherwise the result is the first NaN operand's sign and payload, quieted, whichever operand the
+// host's operation would take. The expected fields are written out, independent of the encoder.
+static void check_test_real_nan_actions(CheckTest* test, TypeTable* table)
+{
+    const TypeId formats[] = { BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_LONG_DOUBLE };
+    const long double infinity = __builtin_infl();
+    const long double negative = -__builtin_nanl("0x5");
+    const long double signaling = __builtin_nansl("0x9");
+    const uint64_t canonical = UINT64_C(0xc000000000000000);
+    const struct
+    {
+        CheckOp op;
+        long double a;
+        long double b;
+        uint16_t top;
+        uint64_t significand;
+    } cases[] =
+    {
+        { CHECK_OP_ADD, infinity, -infinity, 0x7fff, canonical },
+        { CHECK_OP_ADD, -infinity, infinity, 0x7fff, canonical },
+        { CHECK_OP_SUBTRACT, infinity, infinity, 0x7fff, canonical },
+        { CHECK_OP_SUBTRACT, -infinity, -infinity, 0x7fff, canonical },
+        { CHECK_OP_MULTIPLY, 0, infinity, 0x7fff, canonical },
+        { CHECK_OP_MULTIPLY, -infinity, -0.0L, 0x7fff, canonical },
+        { CHECK_OP_DIVIDE, 0, -0.0L, 0x7fff, canonical },
+        { CHECK_OP_DIVIDE, -infinity, infinity, 0x7fff, canonical },
+        { CHECK_OP_ADD, 1, negative, 0xffff, canonical | 5 },
+        { CHECK_OP_SUBTRACT, 1, negative, 0xffff, canonical | 5 },
+        { CHECK_OP_MULTIPLY, negative, 2, 0xffff, canonical | 5 },
+        { CHECK_OP_DIVIDE, 2, signaling, 0x7fff, canonical | 9 },
+        { CHECK_OP_ADD, signaling, negative, 0x7fff, canonical | 9 },
+        { CHECK_OP_MULTIPLY, negative, signaling, 0xffff, canonical | 5 },
+        { CHECK_OP_SUBTRACT, negative, __builtin_nanl("0x3"), 0xffff, canonical | 5 },
+        { CHECK_OP_DIVIDE, __builtin_nanl("0x3"), negative, 0x7fff, canonical | 3 },
+    };
+    for (uint32_t format = 0; format < BUSTER_ARRAY_LENGTH(formats); format += 1)
+    {
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+        {
+            for (uint32_t required = 0; required < 2; required += 1)
+            {
+                const CheckAction action = {
+                    .op = cases[i].op,
+                    .operands = { check_test_float(formats[format], cases[i].a), check_test_float(formats[format], cases[i].b) },
+                    .context = { .constant_evaluated = required != 0 },
+                };
+                const CheckActionResult result = check_test_action(test, table, action);
+                check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.fault == CHECK_FAULT_NONE &&
+                                       result.value.constant_kind == CHECK_CONSTANT_FLOATING &&
+                                       check_test_nan_fields(result.value.floating, cases[i].top, cases[i].significand),
+                                  "a real format's folded NaN has APFloat's sign and payload, not the host's");
+            }
+        }
+    }
+}
+
 static __attribute__((noinline)) void check_test_fp_actions(CheckTest* test, TypeTable* table)
 {
     check_test_pragma_extensions(test);
@@ -467,6 +535,7 @@ static __attribute__((noinline)) void check_test_fp_actions(CheckTest* test, Typ
     check_test_half_encodings(test);
     check_test_half_constant_actions(test, table);
     check_test_half_constant_graph(test, table);
+    check_test_real_nan_actions(test, table);
     check_test_fp_evaluation_actions(test, table);
     check_test_fp_graph(test, table);
 }
