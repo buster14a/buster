@@ -1384,7 +1384,8 @@ static void check_test_driver_tier1_rematerialization(CheckTest* test, const cha
 // sum and load-add loop exposed the former maximal-munch/costed split; multiplication by 3/5/9 and by a power of two
 // retain #1217's already established costs. A parameter-free leaf's volatile loads keep every operand visible and
 // leave register assignment unrestricted, exercising the common allocation policy without phi order. Unsigned
-// arithmetic keeps every oracle input defined.
+// arithmetic keeps every oracle input defined. Scaled indices exercise #1217's index folding through C lowering,
+// allocation and both rematerialization modes, with a store between the loads to preserve the access-order check.
 static const char check_test_tier1_reproducible_source[] =
     "#include <stdio.h>\n"
     "__attribute__((noinline)) unsigned long m3(unsigned long x) { return x * 3; }\n"
@@ -1396,6 +1397,8 @@ static const char check_test_tier1_reproducible_source[] =
     "__attribute__((noinline)) unsigned long chain(unsigned long x) { return (x * 3) * 3; }\n"
     "__attribute__((noinline)) unsigned long load_add(unsigned long x, const unsigned long* p) { return x + *p; }\n"
     "__attribute__((noinline)) unsigned long two_loads(const unsigned long* p) { return p[0] + p[1]; }\n"
+    "__attribute__((noinline)) unsigned long scaled_indices(unsigned* p, unsigned long i, unsigned x)\n"
+    "{ unsigned a = p[(i << 1) + 2]; p[(i + 1) << 1] = x; return (unsigned long)a + p[i * 2 + 1] + p[(i << 1) + 2]; }\n"
     "volatile unsigned long allocation_inputs[] = {0x123456789abcdeful, ~0ul, 0x8000000000000000ul, 5};\n"
     "__attribute__((noinline)) unsigned long unrestricted(void)\n"
     "{ unsigned long a = allocation_inputs[0], b = allocation_inputs[1], c = allocation_inputs[2], d = allocation_inputs[3]; return (a + b) + (c + d); }\n"
@@ -1404,12 +1407,14 @@ static const char check_test_tier1_reproducible_source[] =
     "int main(void)\n"
     "{\n"
     "    unsigned long p[] = {0, 1, ~0ul, 0x8000000000000000ul, 0x123456789abcdeful};\n"
+    "    unsigned q[] = {1, 3, 5, 7, 9, 11};\n"
     "    unsigned long s = loop(p, 0) ^ loop(p, 5) ^ two_loads(p + 2) ^ unrestricted();\n"
     "    for (unsigned i = 0; i < 5; i += 1)\n"
     "    {\n"
     "        unsigned long x = p[i];\n"
     "        s += m3(x) ^ m5(x) ^ m9(x) ^ m4(x) ^ m3i((unsigned)x);\n"
     "        s ^= address_sum(x, p[4 - i]) + chain(x) + load_add(x, p + i);\n"
+    "        s += scaled_indices(q, i & 1, (unsigned)x);\n"
     "    }\n"
     "    printf(\"%lx\\n\", s);\n"
     "    return 0;\n"
@@ -1458,7 +1463,7 @@ static void check_test_tier1_reproducible_difference(const char* first, const ch
     uint32_t* offsets = calloc(2 * CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS, sizeof(uint32_t));
     uint32_t* types = calloc(2 * CHECK_TEST_TIER1_REPRODUCIBLE_RECORDS, sizeof(uint32_t));
     const bool ready = records[0] != NULL && records[1] != NULL && offsets != NULL && types != NULL && x86_disassembler_initialize();
-    static const char* const names[] = { "m3", "m5", "m9", "m4", "m3i", "address_sum", "chain", "load_add", "two_loads", "unrestricted", "loop", "main" };
+    static const char* const names[] = { "m3", "m5", "m9", "m4", "m3i", "address_sum", "chain", "load_add", "two_loads", "scaled_indices", "unrestricted", "loop", "main" };
     for (uint32_t f = 0; ready && f < sizeof(names) / sizeof(names[0]); f += 1)
     {
         uint32_t counts[2];
