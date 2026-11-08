@@ -2035,8 +2035,9 @@ static CheckWarningSeverity check_driver_legacy_severity(Preprocessor* pp, const
 // - ActOnEndOfTranslationUnit gives no unused file-scope declaration's warning once an error has occurred, so a rejected
 //   unit's unused functions' and file-scope objects' warnings, which complete at the unit's end, are left out;
 // - ActOnPopScope gives no unused-variable warning of a scope in which an error occurred (Scope's
-//   hasUnrecoverableErrorOccurred), from its `{` to its `}`, nested scopes' errors among them; a function body's scope is
-//   open from its definition's start, as ActOnStartOfFunctionDef handles the definition's declarator inside it.
+//   hasUnrecoverableErrorOccurred), from its opening to its end, nested scopes' errors among them; a for initializer's
+//   scope runs from its header through the body's end, and a function body's scope opens at its definition's start,
+//   as ActOnStartOfFunctionDef handles the definition's declarator inside it.
 // `rejected` says the unit has an error; `errors`, where its reports locate some, counts them before each token (a prefix
 // count, check_driver_error_counts), else is NULL. A unit without an error publishes its events as they are, with no copy;
 // another publishes a copy in `scratch`. Whether there was room.
@@ -2057,9 +2058,14 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
             const bool unused = event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION;
             const bool unit_end = unused && event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
             const uint32_t close = unused && event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER ? event->completion : count;
-            // The scope's `{`, whose parent is its `}`: before the declaration, within the scope.
+            // The scope's opening delimiter, before the declaration. A for initializer retains its header's `)`
+            // separately from completion at the statement's end; a later error in the enclosing block isn't its own.
+            const uint32_t anchor = event->payload.token;
+            const bool for_scope = event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE && anchor < count && parser->tree.roles[anchor] == PARSE_ROLE_CLOSE_FOR;
+            const uint32_t delimiter = for_scope ? anchor : close;
+            const uint8_t opening_kind = for_scope ? PARSE_KIND_L_PAREN : PARSE_KIND_L_BRACE;
             uint32_t open = close < count && event->token < close ? event->token : 0;
-            while (open > 0 && !(parser->tree.parents[open] == close && parser->tokens.kinds[open] == PARSE_KIND_L_BRACE))
+            while (open > 0 && !(parser->tree.parents[open] == delimiter && parser->tokens.kinds[open] == opening_kind))
             {
                 open -= 1;
             }

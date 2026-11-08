@@ -629,6 +629,13 @@ and copy no function of musl's. No file of this tree holds musl's code.
 
 ## C semantic compatibility references
 
+The TLS redeclaration diagnostics and for-initializer unused-warning scope fixes
+for #1784 are original project code and fixtures under the default terms.
+Clang/LLVM revision `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s
+`clang/lib/Sema/SemaDecl.cpp` and `clang/include/clang/Basic/DiagnosticSemaKinds.td`
+supply diagnostic precedence and wording facts; Clang runs externally as the
+fixture oracle. No upstream implementation or test fixture is incorporated.
+
 The type-name prototype name tree and its original generated, nested-scope,
 ordering and guarded membership fixtures (#604) use the project default terms.
 Clang 23.1.1 and 23.1.4 run externally as acceptance and diagnostic oracles;
