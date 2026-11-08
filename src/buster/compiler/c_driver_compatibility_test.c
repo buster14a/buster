@@ -465,6 +465,90 @@ static void cc_compat_forced_include_depth(CCCompatibilityTest* test)
     }
 }
 
+// -H (#1380) against clang's standard error, byte for byte: nested headers (one through a directory of its own), a
+// guarded one and a #pragma once one included twice (shown once each), an unguarded one twice (shown twice), and an
+// -include file whose own include clang doesn't show either; by -E, -fsyntax-only and -c, on both paths. A #warning in
+// a nested header must come between the header lines as clang's does by -E; the checker's driver collects the
+// preprocessor's diagnostics, so there the lines come first (pp_show_include), and only the lines are compared.
+static void cc_compat_show_includes(CCCompatibilityTest* test)
+{
+    const bool written = cc_compat_write(test, "inc/show1380-a.h", "#include \"show1380-b.h\"\n#include \"show1380-b.h\"\nint show_a;\n") &&
+                         cc_compat_write(test, "inc/show1380-b.h", "int show_b;\n") &&
+                         cc_compat_write(test, "show1380-guard.h", "#ifndef SHOW1380_GUARD\n#define SHOW1380_GUARD\n#include \"show1380-once.h\"\nint show_guard;\n#endif\n") &&
+                         cc_compat_write(test, "show1380-once.h", "#pragma once\nint show_once;\n") &&
+                         cc_compat_write(test, "show1380-forced.h", "#include \"show1380-once.h\"\n#define SHOW1380_FORCED 1\n") &&
+                         cc_compat_write(test, "show1380-warn.h", "#include \"inc/show1380-b.h\"\n#warning show1380\n#include \"inc/show1380-b.h\"\n") &&
+                         cc_compat_write(test, "show1380.c", "#include \"inc/show1380-a.h\"\n#include \"show1380-guard.h\"\n#include \"show1380-guard.h\"\n#include \"show1380-once.h\"\nint show_main;\n") &&
+                         cc_compat_write(test, "show1380-warn.c", "#include \"show1380-guard.h\"\n#include \"show1380-warn.h\"\nint show_warn;\n");
+    cc_compat_expect(test, written, "-H fixtures are written");
+    static const char* const actions[][2] = {
+        { "-E", "-P" },
+        { "-fsyntax-only", NULL },
+        { "-c", "-ooutput1380.o" },
+    };
+    for (uint32_t source = 0; written && source < 3; source += 1)
+    {
+        for (uint32_t action = 0; action < 3; action += 1)
+        {
+            for (uint32_t route = 0; route < 3; route += 1)
+            {
+                const char* arguments[16] = { "-std=gnu17", "-fno-caret-diagnostics", "-fno-diagnostics-show-option", "-H", actions[action][0] };
+                uint32_t used = 5;
+                if (actions[action][1] != NULL)
+                {
+                    arguments[used++] = actions[action][1];
+                }
+                if (source == 1)
+                {
+                    arguments[used++] = "-include";
+                    arguments[used++] = "show1380-forced.h";
+                }
+                arguments[used++] = source == 2 ? "show1380-warn.c" : "show1380.c";
+                if (route == 2)
+                {
+                    arguments[used++] = "--scalar";
+                }
+                arguments[used] = NULL;
+                CCCompatibilityRun clang = cc_compat_run(test, test->clang, NULL, arguments);
+                CCCompatibilityRun ours = cc_compat_run(test, route == 0 ? test->clang : test->compiler, NULL, arguments);
+                // Away from -E, our diagnostics follow the header lines: compare the lines alone, in order.
+                bool good = clang.status == 0 && ours.status == 0 && clang.errors != NULL && ours.errors != NULL;
+                if (good && source == 2 && action != 0)
+                {
+                    char* lines[2] = { clang.errors, ours.errors };
+                    for (uint32_t side = 0; side < 2; side += 1)
+                    {
+                        char* write = lines[side];
+                        for (const char* read = lines[side]; *read != 0;)
+                        {
+                            const char* end = strchr(read, '\n');
+                            const size_t length = end != NULL ? (size_t)(end - read) + 1 : strlen(read);
+                            if (read[0] == '.')
+                            {
+                                memmove(write, read, length);
+                                write += length;
+                            }
+                            read += length;
+                        }
+                        *write = 0;
+                    }
+                }
+                good = good && strcmp(clang.errors, ours.errors) == 0 && strstr(ours.errors, "show1380") != NULL;
+                char description[256];
+                snprintf(description, sizeof(description), "-H shows clang's headers: source %u action %s route %u", source, actions[action][0], route);
+                cc_compat_expect(test, good, description);
+                if (!good)
+                {
+                    fprintf(stderr, "  status %d and %d\n  clang's stderr:\n%s\n  ours:\n%s\n", clang.status, ours.status,
+                            clang.errors != NULL ? clang.errors : "(missing)", ours.errors != NULL ? ours.errors : "(missing)");
+                }
+                cc_compat_release(&clang);
+                cc_compat_release(&ours);
+            }
+        }
+    }
+}
+
 static void cc_compat_preprocessor_languages(CCCompatibilityTest* test)
 {
     const char* source = "#define N 3\n#ifdef __ASSEMBLER__\nasm_mode\n#else\nc_mode\n#endif\n$N\n";
@@ -745,6 +829,7 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
         cc_compat_expect(&test, files, "write CC fixtures");
         cc_compat_warning_options(&test);
         cc_compat_preprocessor_languages(&test);
+        cc_compat_show_includes(&test);
         const char* const basic[] = { "-M", "./a.c", NULL };
         cc_compat_oracle(&test, "-M defaults and leading ./ normalization", NULL, basic, NULL);
         const char* const system_all[] = { "-M", "-isystem", "sys", "system.c", NULL };
