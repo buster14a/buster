@@ -412,6 +412,46 @@ static const CheckDriverDefaultWarningFixture check_driver_shift_count_fixtures[
         .notes = 1,
     },
     {
+        .name = "a comma's discarded left operand warns where clang builds it, before a later shift count",
+        .source = "int f(int x){return (x,1.5)?x<<32:0;}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "commas, counts and divisions keep their build order within one expression",
+        .source = "int a(int x){return (x<<40,2)+(x,3);}int b(int x){return ((x,1),x<<40);}int c(int x){(x,2),x<<40;return 0;}"
+                  "int d(int x){return (x,1/0);}int e(int x){return (x,1)+1/0;}\n",
+        .warnings = 14,
+    },
+    {
+        .name = "a comma's marker precedes the constant conversions its full expression completes",
+        .source = "char c;int f(int x){return (x,(c=300)+1);}int g(int x){return (x,1)+1/0+(c=301);}\n",
+        .warnings = 5,
+    },
+    {
+        .name = "statement conditions and for increments warn before their bodies",
+        .source = "int a(int x,int y){if((x,y))return x<<32;return 0;}int b(int x){while(x<<40){x=1/0;}return 0;}"
+                  "int c(int x){switch(x<<40){case 1:x=1/0;}return 0;}int d(int x){for(;;x<<40){x=1/0;}}"
+                  "int e(int x){if(x<<41)x=1/0;else if(x<<42)x=2/0;return 0;}int f(int x){if(x){if(x<<40)x=1/0;}else x=2/0;return 0;}\n",
+        .warnings = 16,
+    },
+    {
+        .name = "a declarator's initializer warns before the later declarators'",
+        .source = "int f(int x){int a=(x,1),b=x<<40;return a+b;}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "comma and count ordering under -Wall",
+        .source = "int f(int x){return (x,1.5)?x<<32:0;}int g(int x,int y){if((x,y))return x<<32;return 0;}\n",
+        .options = { "-Wall" },
+        .warnings = 4,
+    },
+    {
+        .name = "unused-value suppression keeps the reordered counts",
+        .source = "int f(int x){return (x,1.5)?x<<32:0;}int g(int x){if(1/0)return x<<32;return 0;}\n",
+        .options = { "-Wno-unused-value" },
+        .warnings = 3,
+    },
+    {
         .name = "overflow count suppression preserves the negative count family",
         .source = "int a(int x){return x<<32;}int b(int x){return x>>-1;}\n",
         .options = { "-Wno-shift-count-overflow" },

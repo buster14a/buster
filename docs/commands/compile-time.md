@@ -19,7 +19,7 @@ requirements. [Command index](README.md).
   hits, misses, folds and entries (#1050: `time-check transition-*`); off by default, its laps test a null pointer.
   `measure-compile [--runs N] [--reference PATH | --variant OPTION] -- ARGUMENT...` times `ARGUMENT... -o FILE` as whole
   processes, with and without the option and against a reference compiler (tcc), or with `--variant` against this
-  compiler with OPTION before the arguments (#172's `--variant --tier1-schedule=post`), in a rotating order, with each
-  stage's medians and the lowering's coverage; the 9700X job runs it on
+  compiler with OPTION before the arguments (#172's `--variant --tier1-schedule=post`), in a Williams design's
+  order, with each stage's medians and the lowering's coverage; the 9700X job runs it on
   `sqlite3.c` against tcc, with perf's counters and profile, where `changes`' `compile_time` says. [The compile-time
   guide](../../docs/compile-time.md) has the attribution. `test-checker-driver --executable` checks both.

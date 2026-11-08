@@ -157,7 +157,7 @@ too; reversing the units must retain the formerly discarded undefined reference.
 command of synth's shape (64 units of 200 functions by default) by `-c`, with
 the options after `--` (absolute paths: the processes run in the program's
 directory), by each lane count (1, 2, 4 and 8 by default), as processes in
-`time-runs`' rotated order, 5 runs of each after a warm-up, every one of which
+`time-runs`' order of a Williams design, 5 runs of each after a warm-up, every one of which
 must compile the units (`time-runs` alone passes a status that stays the same).
 Counts are whole decimals from 1: at most 4,096 units, 100,000 functions, eight
 lane counts of at most 4,096 lanes, and 1,000 runs. The options after `--` may
