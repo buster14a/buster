@@ -2,8 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // clang's checks-only attributes (#1447): availability, external_source_symbol, enforce_tcb, enforce_tcb_leaf, callback,
-// swift_async, ns_error_domain, objc_ownership, objc_gc and modular_format, and force_align_arg_pointer's subjects (whose
-// code c_check_program_test.c's run tests), by the driver against clang, on original
+// swift_async, ns_error_domain, objc_ownership, objc_gc, modular_format and diagnose_as_builtin, force_align_arg_pointer's
+// subjects (whose code c_check_program_test.c's run tests) and the NEON vectors' types, by the driver against clang, on original
 // fixtures: each unit's whole output (diagnostics, their places, their order and the attribute as each message names it)
 // must be clang's by both paths, in GNU C23. Valid uses, wrong subjects and wrong arguments for each, their handlers'
 // checks, availability's merges across redeclarations, -Wtcb-enforcement's calls, and objc_gc's and objc_ownership's types
@@ -662,6 +662,163 @@ static void check_test_driver_checks_attributes(CheckTest* test, const char* cla
         "void k(void) { __attribute__((force_align_arg_pointer)) int local; (void)local; }\n",
         "void f(void) __attribute__((force_align_arg_pointer(1)));\n",
         "[[gnu::force_align_arg_pointer]] void h(void);\n",
+        // clang's NEON vectors (#1447): their elements (each permitted type, a polynomial vector's, and others), sizes, counts and
+        // arguments, their places (a declarator's, a pointer's, a member's, a parameter's, a tag's, the C23 spellings' with
+        // their deprecation, a statement's), their compatibility with GNU vectors, their mode, sizes and spellings.
+        "typedef int v4 __attribute__((neon_vector_type(4)));\nv4 a;\n_Static_assert(sizeof(v4) == 16, \"\");\n_Static_assert(_Alignof(v4) == 16, \"\");\n",
+        "typedef int v2 __attribute__((neon_vector_type(2)));\n_Static_assert(sizeof(v2) == 8, \"\");\n",
+        "typedef char c8 __attribute__((neon_vector_type(8)));\n",
+        "typedef signed char s8 __attribute__((neon_vector_type(8)));\ntypedef unsigned char u16 __attribute__((neon_vector_type(16)));\n"
+        "typedef short h4 __attribute__((neon_vector_type(4)));\ntypedef unsigned short uh8 __attribute__((neon_vector_type(8)));\n"
+        "typedef unsigned u2 __attribute__((neon_vector_type(2)));\ntypedef long l2 __attribute__((neon_vector_type(2)));\n"
+        "typedef unsigned long ul1 __attribute__((neon_vector_type(1)));\ntypedef long long ll2 __attribute__((neon_vector_type(2)));\n"
+        "typedef unsigned long long ull1 __attribute__((neon_vector_type(1)));\ntypedef float f4 __attribute__((neon_vector_type(4)));\n"
+        "typedef double d2 __attribute__((neon_vector_type(2)));\ntypedef __fp16 hf8 __attribute__((neon_vector_type(8)));\n"
+        "typedef __bf16 bf4 __attribute__((neon_vector_type(4)));\ntypedef const int ci2 __attribute__((neon_vector_type(2)));\n",
+        "typedef signed char p8 __attribute__((neon_polyvector_type(8)));\ntypedef short p4 __attribute__((neon_polyvector_type(4)));\n"
+        "typedef long long p2 __attribute__((neon_polyvector_type(2)));\n",
+        "typedef unsigned char p8 __attribute__((neon_polyvector_type(8)));\n",
+        "typedef int p4 __attribute__((neon_polyvector_type(4)));\n",
+        "typedef _Bool b16 __attribute__((neon_vector_type(16)));\n",
+        "typedef _Float16 f16 __attribute__((neon_vector_type(4)));\n",
+        "typedef long double ld __attribute__((neon_vector_type(1)));\n",
+        "typedef __int128 i128 __attribute__((neon_vector_type(1)));\n",
+        "typedef int b3 __attribute__((neon_vector_type(3)));\n",
+        "typedef int b0 __attribute__((neon_vector_type(0)));\n",
+        "typedef int bn __attribute__((neon_vector_type(-1)));\n",
+        "typedef int t __attribute__((neon_vector_type(4294967300)));\n_Static_assert(sizeof(t) == 16, \"\");\n",
+        "typedef int e __attribute__((neon_vector_type));\n",
+        "typedef int e __attribute__((neon_vector_type(2, 3)));\n",
+        "int n;\ntypedef int e __attribute__((neon_vector_type(n)));\n",
+        "typedef int e __attribute__((neon_vector_type(1.5)));\n",
+        "int *p __attribute__((neon_vector_type(4)));\n",
+        "int __attribute__((neon_vector_type(4))) *q;\n_Static_assert(sizeof(*q) == 16, \"\");\n",
+        "int * __attribute__((neon_vector_type(4))) r;\n",
+        "typedef int v4 __attribute__((neon_vector_type(4)));\ntypedef v4 vv __attribute__((neon_vector_type(4)));\n",
+        "typedef int g4 __attribute__((vector_size(16)));\ntypedef g4 gg __attribute__((neon_vector_type(4)));\n",
+        "typedef struct { int x; } S;\ntypedef S bad __attribute__((neon_vector_type(4)));\n",
+        "enum E { A };\ntypedef enum E bad __attribute__((neon_vector_type(4)));\n",
+        "typedef int v4 __attribute__((neon_vector_type(4)));\ntypedef int g4 __attribute__((vector_size(16)));\n"
+        "_Static_assert(__builtin_types_compatible_p(v4, g4), \"\");\nv4 x;\ng4 y;\n"
+        "void f(void) { x = y; y = x; x = x + y; y = y - x; x = -x; }\n",
+        "typedef int v4 __attribute__((neon_vector_type(4)));\nint s = sizeof(int __attribute__((neon_vector_type(2))));\n"
+        "v4 c = (v4){1, 2, 3, 4};\n_Static_assert(sizeof(int __attribute__((neon_vector_type(4)))) == 16, \"\");\n",
+        "typedef float f4 __attribute__((neon_vector_type(4)));\nf4 add(f4 a, f4 b) { return a + b; }\nf4 mul(f4 a, float s) { return a * s; }\n",
+        "struct __attribute__((neon_vector_type(4))) S { int a; };\n",
+        "struct S { int a; } __attribute__((neon_vector_type(4)));\n",
+        "enum __attribute__((neon_vector_type(4))) E { A };\n",
+        "struct S { int m __attribute__((neon_vector_type(2))); };\n_Static_assert(sizeof(struct S) == 8, \"\");\n",
+        "void f(int x __attribute__((neon_vector_type(4))));\n",
+        "[[clang::neon_vector_type(4)]] int x;\n_Static_assert(sizeof(x) == 16, \"\");\n",
+        "int x [[clang::neon_vector_type(4)]];\n_Static_assert(sizeof(x) == 16, \"\");\n",
+        "int [[clang::neon_vector_type(4)]] x;\n_Static_assert(sizeof(x) == 16, \"\");\n",
+        "int x [[clang::neon_vector_type(3)]];\n",
+        "[[clang::neon_polyvector_type(8)]] signed char x;\n",
+        "void f(void) { [[clang::neon_vector_type(4)]] ; }\n",
+        "int f(int) [[clang::neon_vector_type(4)]];\n",
+        "struct S { int m [[clang::neon_vector_type(4)]]; };\n",
+        "void f(int p [[clang::neon_vector_type(4)]]);\n",
+        "[[gnu::neon_vector_type(4)]] int x;\n",
+        "typedef int v4 __attribute__((neon_vector_type(4), neon_vector_type(2)));\n",
+        "typedef int v2 __attribute__((neon_vector_type(2))) __attribute__((vector_size(8)));\n",
+        "typedef int v2 __attribute__((vector_size(8), neon_vector_type(2)));\n",
+        "typedef int v4 __attribute__((neon_vector_type(4)));\nv4 x;\nint g(void) { return x[1]; }\n",
+        "typedef int v4 __attribute__((neon_vector_type(4)));\ntypedef int g4 __attribute__((vector_size(16)));\nextern v4 x;\n"
+        "extern g4 x;\nvoid f(v4);\nvoid f(g4);\n",
+        "typedef int v4 __attribute__((neon_vector_type(4)));\ntypedef int g4 __attribute__((vector_size(16)));\nv4 x;\ng4 y;\nint c;\n"
+        "void f(void) { v4 r = c ? x : y; g4 s = x == y; (void)r; (void)s; }\n",
+        "typedef int v4 __attribute__((neon_vector_type(4)));\ntypedef float f4 __attribute__((neon_vector_type(4)));\nv4 x;\nf4 y;\nvoid f(void) { x = y; }\n",
+        "typedef int v4 __attribute__((neon_vector_type(4)));\nint f(v4 x) { return x[0] + x[3]; }\nv4 g(int n) { v4 r = {n, n, n, n}; return r * 2; }\n",
+        "typedef short p4 __attribute__((neon_polyvector_type(4)));\np4 add(p4 a, p4 b) { return a + b; }\n",
+        "typedef int v4 __attribute__((neon_vector_type(4)));\ntypedef v4 m __attribute__((mode(DI)));\n"
+        "_Static_assert(sizeof(m) == 16, \"\");\n"
+        "_Static_assert(__builtin_types_compatible_p(m, long __attribute__((vector_size(16)))), \"\");\n",
+        "typedef int v4 __attribute__((neon_vector_type(4)));\nvoid f(void) { v4 x __attribute__((neon_vector_type(2))); }\n",
+        "typedef double d1 __attribute__((neon_vector_type(1)));\n_Static_assert(sizeof(d1) == 8, \"\");\n",
+        "typedef int I;\ntypedef I v4 __attribute__((neon_vector_type(4)));\ntypedef I __attribute__((aligned(16))) A;\n"
+        "typedef A va __attribute__((neon_vector_type(2)));\n_Static_assert(sizeof(va) == 8, \"\");\n",
+        "typedef int v4 __attribute__((neon_vector_type(4)));\nconst v4 c = {1};\nvolatile v4 d;\n",
+        "[[clang::neon_vector_type(4)]] int *x;\n_Static_assert(sizeof(*x) == 16, \"\");\n",
+        "int *x [[clang::neon_vector_type(4)]];\n",
+        "[[clang::neon_vector_type(3)]] int x;\n",
+        "void f(void) { [[clang::neon_vector_type(4)]] ; }\n",
+        "int x [[clang::neon_vector_type(3)]];\n",
+        "struct [[clang::btf_type_tag(\"a\")]] S { int a; };\n",
+        "struct [[clang::neon_vector_type(4)]] S;\n",
+        "union [[clang::neon_vector_type(4)]] U { int a; };\n",
+        "enum [[clang::neon_vector_type(4)]] E { A };\n",
+        "struct S { int a; };\nstruct [[clang::neon_vector_type(4)]] S *p;\n",
+        "struct [[clang::neon_vector_type(3)]] S { int a; };\n",
+        "struct [[clang::neon_vector_type]] S { int a; };\n",
+        "struct [[clang::btf_type_tag]] S { int a; };\n",
+        "void f(void) { [[clang::btf_type_tag(\"a\")]] ; }\n",
+        "void f([[clang::neon_vector_type(3)]] int p);\n",
+        "void f(int a, [[clang::neon_vector_type(3)]] int p);\n",
+        "void f([[clang::neon_vector_type(4)]] int p);\n",
+        "struct S { [[clang::neon_vector_type(3)]] int m; };\n",
+        "struct S { int a; };\nstruct [[clang::btf_type_tag(\"a\")]] S *p;\n",
+        // diagnose_as_builtin (#1447): builtins by name (generic, library, x86's, custom-checked ones), other first arguments,
+        // counts, indices (wide, negative, not constant, past the parameters), parameter types (spelled as clang spells
+        // the builtin's: __size_t, _Nonnull), subjects, C23 spellings and redeclarations.
+        "typedef unsigned long size_t;\nvoid *my_memcpy(void *d, const void *s, size_t n) __attribute__((diagnose_as_builtin(__builtin_memcpy, 1, 2, 3)));\n",
+        "typedef unsigned long size_t;\nvoid *f(void *d, const void *s, size_t n) __attribute__((diagnose_as_builtin(__builtin_memcpy, 1, 2)));\n",
+        "typedef unsigned long size_t;\nvoid *g(void *d, const void *s, size_t n);\n"
+        "void *f(void *d, const void *s, size_t n) __attribute__((diagnose_as_builtin(g, 1, 2, 3)));\n",
+        "typedef unsigned long size_t;\nvoid *f(void *d, const void *s, size_t n) __attribute__((diagnose_as_builtin(__builtin_memcpy, 1, 2, 4)));\n",
+        "typedef unsigned long size_t;\nvoid *f(void *d, const void *s, size_t n) __attribute__((diagnose_as_builtin(__builtin_memcpy, 2, 1, 3)));\n",
+        "void *f(void *d, const void *s, int n) __attribute__((diagnose_as_builtin(__builtin_memcpy, 1, 2, 3)));\n",
+        "typedef unsigned long size_t;\nvoid *f(void *d, const void *s, size_t n) __attribute__((diagnose_as_builtin(__builtin_memcpy, 1, 2, -1)));\n",
+        "int f(int x) __attribute__((diagnose_as_builtin(__builtin_abs, 4294967297)));\n",
+        "int f(int x) __attribute__((diagnose_as_builtin(__builtin_abs, \"a\")));\n",
+        "int f(int x) __attribute__((diagnose_as_builtin(\"a\", 1)));\n",
+        "int f(int x) __attribute__((diagnose_as_builtin(1, 1)));\n",
+        "int f(int x) __attribute__((diagnose_as_builtin((__builtin_abs), 1)));\n",
+        "int f(int x) __attribute__((diagnose_as_builtin(__builtin_abs, 1)));\n",
+        "int f(int x) __attribute__((diagnose_as_builtin(__builtin_abs, 1)));\n"
+        "int f(int x) __attribute__((diagnose_as_builtin(__builtin_abs, 1)));\nint f(int x) { return x; }\n",
+        "int f(int x) __attribute__((diagnose_as_builtin(__builtin_abs, 1))) { return x; }\n",
+        "int f() __attribute__((diagnose_as_builtin(__builtin_abs, 1)));\n",
+        "int f(int x, ...) __attribute__((diagnose_as_builtin(__builtin_printf, 1)));\n",
+        "int f(const char *x, ...) __attribute__((diagnose_as_builtin(__builtin_printf, 1)));\n",
+        "int f(const char *x, ...) __attribute__((diagnose_as_builtin(__builtin_printf)));\n",
+        "int f(int x) __attribute__((diagnose_as_builtin(__builtin_abs, 1, 1)));\n",
+        "int f(unsigned x) __attribute__((diagnose_as_builtin(__builtin_abs, 1)));\n",
+        "int f(const unsigned x) __attribute__((diagnose_as_builtin(__builtin_abs, 1)));\n",
+        "typedef unsigned U;\nint f(U x) __attribute__((diagnose_as_builtin(__builtin_abs, 1)));\n",
+        "int f(int x) __attribute__((diagnose_as_builtin));\n",
+        "int v __attribute__((diagnose_as_builtin(__builtin_abs, 1)));\n",
+        "typedef int T(int) __attribute__((diagnose_as_builtin(__builtin_abs, 1)));\n",
+        "int (*fp)(int) __attribute__((diagnose_as_builtin(__builtin_abs, 1)));\n",
+        "[[clang::diagnose_as_builtin(__builtin_abs, 1)]] int f(int x);\n",
+        "int f(int x) [[clang::diagnose_as_builtin(__builtin_abs, 1)]];\n",
+        "[[clang::diagnose_as_builtin(__builtin_abs, 2)]] int f(int x);\n",
+        "void f(void) __attribute__((diagnose_as_builtin(__builtin_trap)));\n",
+        "void f(void) __attribute__((diagnose_as_builtin(__builtin_va_start)));\n",
+        "void f(void) __attribute__((diagnose_as_builtin(__builtin_ia32_pause)));\n",
+        "typedef unsigned long size_t;\nvoid *memcpy(void *d, const void *s, size_t n);\n"
+        "void *f(void *d, const void *s, size_t n) __attribute__((diagnose_as_builtin(memcpy, 1, 2, 3)));\n",
+        "typedef unsigned long size_t;\nstatic void *memcpy(void *d, const void *s, size_t n);\n"
+        "void *f(void *d, const void *s, size_t n) __attribute__((diagnose_as_builtin(memcpy, 1, 2, 3)));\n",
+        "int x;\nint f(int a) __attribute__((diagnose_as_builtin(x, 1)));\n",
+        "int f(int a) __attribute__((diagnose_as_builtin(y, 1)));\n",
+        "int f(int a) __attribute__((diagnose_as_builtin(__builtin_abs, a)));\n",
+        "int f(int a, int b) __attribute__((diagnose_as_builtin(__builtin_abs, 2)));\n",
+        "double f(double a) __attribute__((diagnose_as_builtin(__builtin_fabs, 1)));\n"
+        "float g(float a) __attribute__((diagnose_as_builtin(__builtin_fabs, 1)));\n",
+        "int f(char *a) __attribute__((diagnose_as_builtin(__builtin_strlen, 1)));\n",
+        "int f(int a[3]) __attribute__((diagnose_as_builtin(__builtin_abs, 1)));\n",
+        "typedef unsigned long size_t;\nsize_t f(const char *s) __attribute__((diagnose_as_builtin(__builtin_strlen, 1)));\n",
+        "int f(int, int) __attribute__((diagnose_as_builtin(__builtin_abs, 2), diagnose_as_builtin(__builtin_abs, 1)));\n",
+        "int f(int x) __attribute__((diagnose_as_builtin((__builtin_abs), 1)));\n",
+        "int f(int x) __attribute__((diagnose_as_builtin(((x)), 1)));\n",
+    };
+    // diagnose_as_builtin on K&R definitions (#1447, gnu89's identifier lists): the declarations' types compare, not the
+    // promoted prototype's, as clang's ParmVarDecl types do.
+    static const char* const kr89[] = {
+        "int f(a, b) __attribute__((diagnose_as_builtin(__builtin_abs, 2)))\nint a;\nint b;\n{ return a + b; }\n",
+        "int f(a, b) __attribute__((diagnose_as_builtin(__builtin_abs, 2)))\nint a;\nchar b;\n{ return a + b; }\n",
+        "int f(a) __attribute__((diagnose_as_builtin(__builtin_abs, 1)))\nshort a;\n{ return a; }\n",
+        "double f(a) __attribute__((diagnose_as_builtin(__builtin_fabs, 1)))\nfloat a;\n{ return a; }\n",
     };
     // Units whose warnings each option set below changes.
     static const char* const flagged[] = {
@@ -674,6 +831,8 @@ static void check_test_driver_checks_attributes(CheckTest* test, const char* cla
         "__attribute__((objc_gc(weak))) int x;\n",
         "__attribute__((force_align_arg_pointer)) int v;\n",
         "void g(void);\n__attribute__((enforce_tcb(\"x\"))) void f(void) { g(); }\n__attribute__((availability(macos, introduced=17))) void h(void);\n",
+        "[[clang::neon_vector_type(4)]] int x;\nint y [[clang::neon_vector_type(2)]];\n",
+        "int v __attribute__((diagnose_as_builtin(__builtin_abs, 1)));\n",
     };
     static const char* const options[] = {
         "-Werror",
@@ -704,11 +863,13 @@ static void check_test_driver_checks_attributes(CheckTest* test, const char* cla
     snprintf(source, sizeof(source), "%s/checks-attributes.c", directory);
     const uint32_t plain = BUSTER_ARRAY_LENGTH(units);
     const uint32_t optioned = plain + BUSTER_ARRAY_LENGTH(flagged) * BUSTER_ARRAY_LENGTH(options);
-    const uint32_t total = optioned + BUSTER_ARRAY_LENGTH(implicit);
+    const uint32_t kr = optioned + BUSTER_ARRAY_LENGTH(implicit);
+    const uint32_t total = kr + BUSTER_ARRAY_LENGTH(kr89);
     for (uint32_t unit = 0; expected_lines != NULL && actual_lines != NULL && unit < total; unit += 1)
     {
         const uint32_t flag = unit - plain;
-        const char* text = unit < plain ? units[unit] : unit < optioned ? flagged[flag % BUSTER_ARRAY_LENGTH(flagged)] : implicit[unit - optioned];
+        const char* text = unit < plain ? units[unit] : unit < optioned ? flagged[flag % BUSTER_ARRAY_LENGTH(flagged)] :
+                           unit < kr ? implicit[unit - optioned] : kr89[unit - kr];
         char* option = unit < plain || unit >= optioned ? NULL : (char*)options[flag / BUSTER_ARRAY_LENGTH(flagged)];
         char* standard = unit < optioned ? "-std=gnu23" : "-std=gnu89";
         const bool made = parse_test_write(source, text, strlen(text));

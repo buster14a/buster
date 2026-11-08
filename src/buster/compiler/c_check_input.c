@@ -4870,11 +4870,13 @@ static bool check_input_ownership_indices(CheckInputReader* reader, const CheckI
 }
 
 // Whether a generic attribute's integer arguments are its handler's parameter indices, evaluated where it is read (#1447,
-// CheckInputAttribute.constants): 1 for callback's (any argument but a lone name), 2 for swift_async's (its second), else 0.
+// CheckInputAttribute.constants): 1 for callback's (any argument but a lone name), 2 for swift_async's (its second), 3 for
+// diagnose_as_builtin's (each after its first, in 32 bits as clang's checkUInt32Argument reads them), else 0.
 static uint32_t check_input_checked_indices(CheckInputReader* reader, const CheckInputAttribute* attribute)
 {
     const String8 name = check_input_attribute_name(reader, attribute->name);
-    return check_input_attribute_equal(name, "callback") ? 1u : check_input_attribute_equal(name, "swift_async") && attribute->argument_count == 2 ? 2u : 0u;
+    return check_input_attribute_equal(name, "callback") ? 1u : check_input_attribute_equal(name, "swift_async") && attribute->argument_count == 2 ? 2u :
+           check_input_attribute_equal(name, "diagnose_as_builtin") ? 3u : 0u;
 }
 
 // A type argument's type (#147, CheckInputAttribute.argument_type): a C23 attribute's lone typedef name, which its tokens
@@ -5010,6 +5012,7 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
                 int64_t value = 0;
                 bool wide = false;
                 const bool constant = which == 1 ? !lone && check_input_constant_u32(reader, first, stop, &value, &wide) :
+                                      which == 3 ? argument != 0 && check_input_constant_u32(reader, first, stop, &value, &wide) :
                                       argument == 1 && check_input_constant_ice(reader, first, stop, &value);
                 attribute->argument_values[argument] = value;
                 attribute->constants |= constant ? 1u << argument : 0u;
@@ -8573,6 +8576,12 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     }
                     check_sparse_set(reader->output->sparse_pool, reader->output->initializer_begins, name, i + 1);
                     check_sparse_set(reader->output->sparse_pool, reader->output->initializer_ends, name, end);
+                    if (valid && constexpr_decl && file)
+                    {
+                        // Clang declines runtime diagnostics for a file-scope constexpr initializer, including
+                        // detached selection arms. Local constexpr initializers keep their runtime diagnostics.
+                        check_input_warning_suppress(reader, i + 1, end, CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW);
+                    }
                     i = valid ? direct_initializer ? direct_close + 1 : end : i;
                 }
                 // A declarator that ends before the first setting or section attribute is no section event (a section
@@ -11584,6 +11593,9 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
         {
             const uint32_t separator = check_constant_punctuation(parser, token + 2, close, PARSE_KIND_COMMA);
             memset(reader->constant_contexts + token + 2, 1, separator - token - 2);
+            // Clang parses this whole condition as constant-evaluated, including static-selection arms that the
+            // evaluated graph does not retain as operands. Their runtime shift-count diagnostics are not queued.
+            check_input_warning_suppress(reader, token + 2, separator, CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW);
             if (separator < close)
             {
                 // A message contributes no expression value. Mark its span once instead of walking the parser
@@ -11606,6 +11618,7 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
         if (close > token && close < count)
         {
             memset(reader->constant_contexts + token + 1, 1, close - token - 1);
+            check_input_warning_suppress(reader, token + 1, close, CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW);
         }
     }
 }

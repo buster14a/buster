@@ -206,6 +206,31 @@ unused-warning fixtures also check exact scope-completion tokens.
   isn't implemented; and three forms the checker refuses: a statement expression in a variable-array
   `sizeof`'s operand, `sizeof ({ ... })` (whose `(` is the statement expression's own), and a statement
   expression as `_Generic`'s controlling expression.
+  Runtime `-Wshift-count-negative` and `-Wshift-count-overflow` warnings inspect an independently constant count
+  even when the left operand is not constant (#1394). The ordinary shift uses the promoted left type's value width;
+  compound shifts use the original lvalue's underlying integer type, including atomic operands, matching Clang.
+  Compound `_Bool` uses its storage width (eight bits on this target); ordinary Boolean shifts use the promoted
+  integer width, while `_BitInt` retains its value width in both forms.
+  Ordinary unselected conditional arms, short-circuited logical operands and unreachable statements suppress these
+  warnings. Unselected `_Generic` associations and `__builtin_choose_expr` arms instead retain Clang's queued count
+  diagnostics: those detached expressions have no CFG block, even under an unreachable statement or with an ordinary
+  conditional or logical operand nested inside them. Lexical `sizeof`, `typeof` and `_Generic` controlling-expression
+  contexts suppress count warnings before queueing, including inside or around those detached arms (#1722).
+  Required-constant contexts such as `_Static_assert` and case values suppress their detached-arm count warnings too.
+  File-scope C23 `constexpr` initializers also suppress those warnings; function-local `constexpr` initializers retain them.
+  The count traversal preserves source order across selected and detached arms and neighboring expressions or
+  statements, and visits an omitted-middle conditional's shared condition once. Overlapping statement-expression
+  roots share count-publication ownership; detached scan visits and ordinary tree ownership have separate bits,
+  so count deduplication cannot mark unrelated warning families as emitted. Other warning families retain
+  their existing evaluated-expression rules, including the older unused-value gap for multiple discarded statements
+  in an unselected statement expression. Retained runtime constant-fold warnings join the count traversal without being
+  rendered or counted twice, preserving their order with new runtime warnings and discarded expressions;
+  required-constant warnings and groups collected before a failed program keep their original publication.
+  `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both
+  shift directions, narrow promotions, 128-bit and bit-precise widths, compound assignments, side effects, macros
+  and warning policy. The shared default-warning harness covers syntax checking and object publication through
+  both kernels and requested one/three-lane options, including `-Werror`, output preservation and `-w`.
+  The ordinary vector-shift exclusion control is syntax-only because baseline x86-64 cannot lower its vector shift.
   `c_check_return_flow.c` supplies source return-warning facts for checked graphs. Ordinary direct calls no longer
   suppress a function's `-Wreturn-type` warning; a proven direct `noreturn` call or terminating builtin ends only its
   own warning-flow edge. Short circuit, conditional and unevaluated operands retain their execution rules, and
