@@ -100,12 +100,21 @@ static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t 
             note_kind = defined ? CHECK_INPUT_NOTE_PREVIOUS_DEFINITION : CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
             // A type conflict of an entity with linkage notes its latest earlier declaration, as clang's redeclaration chain
             // does, though another block's, out of scope here (`int y; void f(void) { extern int y; }` then g's `extern
-            // double y;`, review on #1453): the entity's linked declaration (CheckInputReader.linked_declarations), which a
-            // definition keeps.
+            // double y;`, review on #1453): the last declaration before `token` of the same name, kind and object, which
+            // linkage gave it. (A scan back over the tokens, on the error path alone: a unit's checking ends at its error.)
             const uint32_t name = reader->parser->tokens.names[token];
-            const uint32_t latest = reader->linked_declarations != NULL && reader->linked_declarations[name] != 0 ? reader->linked_declarations[name] - 1 : BUSTER_CHECK_NONE;
-            if ((detail == CHECK_REDECLARATION_OBJECT_TYPE || detail == CHECK_REDECLARATION_FUNCTION_TYPE) && linkage != 0 && earlier_linkage != 0 &&
-                latest < token && latest != previous && reader->declaration_kinds[latest] == kind && check_input_linkage(reader->declaration_bits, latest) != 0)
+            const uint32_t entity = reader->objects != NULL ? reader->objects[previous] : 0;
+            uint32_t latest = BUSTER_CHECK_NONE;
+            const bool conflict = (detail == CHECK_REDECLARATION_OBJECT_TYPE || detail == CHECK_REDECLARATION_FUNCTION_TYPE) && linkage != 0 &&
+                                  earlier_linkage != 0 && entity != 0;
+            for (uint32_t t = token; conflict && latest == BUSTER_CHECK_NONE && t > previous + 1;)
+            {
+                t -= 1;
+                const bool same = reader->parser->tokens.names[t] == name && reader->declaration_kinds[t] == kind &&
+                                  check_input_linkage(reader->declaration_bits, t) != 0 && reader->objects[t] == entity && reader->declared_types[t] != 0;
+                latest = same ? t : BUSTER_CHECK_NONE;
+            }
+            if (latest < token && latest != previous)
             {
                 noted = latest;
                 note_kind = check_input_bit(reader->declaration_bits, latest, BUSTER_CHECK_BITS_DEFINED) ||

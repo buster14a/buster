@@ -887,6 +887,7 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
 static void check_common_conversion_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
                                             TypeId target, bool evaluated, const uint32_t* parents, uint32_t at_once, Arena* scratch);
+static bool check_common_atomic_destination(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node);
 static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                          TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
                                          TypeId target, const uint32_t* parents, uint32_t at_once, Arena* scratch);
@@ -1560,6 +1561,7 @@ static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t 
         const bool arms = check_common_conversion_arms(graph, source);
         if (source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
             check_common_conversion_source(check_stream_constant_kind(stream, source), arms) &&
+            !check_common_atomic_destination(graph, stream, emission->types, node) &&
             (evaluated || ((emission->emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0 &&
              (check_stream_constant_kind(stream, source) == CHECK_CONSTANT_FLOATING || arms))))
         {
@@ -3050,6 +3052,19 @@ static bool check_common_conversion_target(const TypeTable* types, TypeId target
     return result;
 }
 
+// Whether an implicit conversion's destination is an _Atomic object: an assignment's left operand's or an initialization's
+// declared type (CheckGraph.types). The conversion's own type is the atomic's value type, which the lowering converts to,
+// so check_common_conversion_target can't see it there; clang's conversion value warnings skip it (#1447).
+static bool check_common_atomic_destination(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
+{
+    const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const uint32_t left = op == CHECK_OP_ASSIGN ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    TypeId type = left < graph->count ? check_stream_type(stream, left) : op == CHECK_OP_INITIALIZE && graph->types != NULL ? graph->types[node] : 0;
+    type = type != 0 ? type_unqualified(type_strip_aligned(types, type)) : 0;
+    const bool result = type != 0 && type_kind(types, type) == BUSTER_TYPE_KIND_ATOMIC;
+    return result;
+}
+
 static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
                                             TypeId target, const uint32_t* parents, uint32_t at_once, Arena* scratch)
@@ -3558,7 +3573,9 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
             // Range initializers have one conversion per selected element, even when every write uses
             // the same source node. The graph's expression is traversed once; its conversions remain distinct.
             // (Not a compound literal's in an unevaluated query's operand: check_common_query_suppressed.)
-            if (!check_common_query_suppressed(graph, root) && check_common_initializer_literal(parser, input, stream, emission->types, part))
+            const TypeId element = part->type != 0 ? type_unqualified(type_strip_aligned(emission->types, part->type)) : 0;
+            const bool atomic = element != 0 && type_kind(emission->types, element) == BUSTER_TYPE_KIND_ATOMIC;
+            if (!atomic && !check_common_query_suppressed(graph, root) && check_common_initializer_literal(parser, input, stream, emission->types, part))
             {
                 const CheckValue value = check_stream_value(stream, root);
                 check_common_conversion_warning_at(parser, pp, input, stream, emission->types, emission->spell, root, &value, part->conversion.type,
