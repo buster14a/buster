@@ -157,6 +157,11 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "struct P { int x; int y; };\nint a[2] = 5;\nstruct P p = { .z = 1 };\nvoid f(void)\n{\n    int b[2] = 6;\n    struct P q = 3;\n"
         "    char c[1] = 7;\n    (void)b; (void)q; (void)c;\n}\nstatic int *sp = { 1.5 };\nint n = undeclared;\nstruct P r = { 1, 2, 3 };\nint e[3] = 8;\n",
         "int k;\nstatic int s1 = k;\nint a[2] = 5;\nstruct Q { char *p; } qs = { 4 };\nstatic struct Q qq = { 5L };\nint u(void) { int w; return 0; }\n",
+        // An array of unknown size whose initializer is no list: clang's words by its element's literal, recovered, the
+        // array keeping its unknown size.
+        "int y[] = 5;\nchar c[] = 6;\nstruct S { int x; };\nstruct S sa[] = 3;\nshort ss[] = 4;\nunsigned short us[] = 4;\n"
+        "static int z[] = 2;\nvoid i(void) { int fine; }\nvoid h(void) { char loc[] = 1; int unused; }\nint a2[2] = 7;\n"
+        "int g(void) { return y[0] + c[0]; }\n",
         // A block's, and clang's unused-variable warnings of no scope in which an error occurred (a body's from its
         // definition's start).
         "void f(int p)\n{\n    int x;\n    float x;\n    int y = 1;\n    long y = 2;\n    (void)y;\n    if (y = 2) {}\n}\n"

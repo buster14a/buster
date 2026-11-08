@@ -624,6 +624,10 @@ static const char* check_driver_input_report_message(const CheckInput* input, co
            section != NULL ? section->text.pointer : optimize != NULL ? optimize->text.pointer : fp != NULL ? check_input_fp_error_message(fp->error) :
            layout != NULL ? "this pragma cannot appear in struct declaration" :
            report->message == CHECK_INPUT_INTERRUPT_HANDLER ? check_driver_interrupt_message(report->detail) :
+           report->message == CHECK_INPUT_DIRECT_INITIALIZER_ARRAY && report->detail == CHECK_INPUT_ARRAY_LIST_WIDE ?
+           "array initializer must be an initializer list or wide string literal" :
+           report->message == CHECK_INPUT_DIRECT_INITIALIZER_ARRAY && report->detail == CHECK_INPUT_ARRAY_LIST_ONLY ?
+           "array initializer must be an initializer list" :
            report->message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (report->detail & 0xffu) == CHECK_ARGUMENT_ALIGNMENT_POWER ?
            check_driver_alignment_power : check_driver_input_message(report->message);
 }

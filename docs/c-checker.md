@@ -3987,18 +3987,29 @@ its walk's arenas are rolled back, and the driver gives each with its own
 conversion's words and a static object's second "not a compile-time constant"
 error. Only a unit whose initializers failed takes this path.
 
+An array of unknown size whose initializer is no list nor a string of its
+element (`int y[] = 5;`) gets clang's `FK_ArrayNeedsInitList` error at its
+name, worded by the literal its element takes: "or string literal" for a
+character, "or wide string literal" for `int`, `unsigned short` and
+`unsigned int` (wchar_t's, char16_t's and char32_t's), the list alone
+otherwise (`CHECK_INPUT_DIRECT_INITIALIZER_ARRAY`'s detail,
+`CheckInputArrayList`). `check_input_initializer_finish` recovers the report;
+the array keeps its unknown size, as clang's invalid declaration does, and its
+initializer leaves the sparse columns, so the initializers' run doesn't see it.
+A parenthesized initializer (GNU's compound literal, `int z[] = (int[2]){1,2};`,
+which clang accepts) is still refused, on main too.
+
 The later phases are left:
 
 - **Invalid declarations.** Not covered by phase 2:
   - a tag's redefinition (`struct S { … }` twice);
-  - an invalid initializer the reader reports: an array of unknown size whose
-    initializer is no list nor string (`int y[] = 5;`), which clang reports
-    at the name and keeps `int[]`;
   - a type attribute's error (`vector_size`, `mode`).
 
   These still stop the reader. A non-constant initializer's error is at its
   first token, where clang's is at the operand that isn't constant
-  (`k + 1`'s `+`), on main too.
+  (`k + 1`'s `+`), and `sizeof` of an incomplete type reads "incomplete type
+  is not permitted here" at the `sizeof`, where clang's names the type at its
+  operand; both on main too.
 - **Units with a graph's or a reader's error.** These, other than a recovered
   one, still don't reach `check_program`. They get none of its diagnostics:
   the common warnings, their runtime warnings included. The asm and control

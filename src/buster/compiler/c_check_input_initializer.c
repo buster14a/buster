@@ -511,6 +511,8 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
     const uint32_t assignment = check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) ? declaration : begin - 1;
     TypeId type = reader->declared_types[declaration];
     bool valid = begin < end && end <= parser->tokens.count;
+    // An array of unknown size whose initializer is no list, recovered (below): it keeps its type and no initializer.
+    bool listless = false;
     if (valid && (check_input_auto_type(type) || (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0))
     {
         type = check_input_auto_type_finish(reader, declaration, begin, end, type);
@@ -544,7 +546,34 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
                                                   reader->designator_valid, reader->declared_types, reader->query_types, reader->scratch, &type,
                                                   &failed, &status, &failed_type);
             reader->output->resource |= status == CHECK_INIT_RESOURCE;
-            if (!valid)
+            // An initializer of no braces that isn't a string of the element (#1447, phase 2): clang's "array initializer
+            // must be an initializer list" (FK_ArrayNeedsInitList) at the declarator, worded by the literal its element
+            // takes (CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail). The report is recovered: the array keeps its unknown
+            // size, as clang's invalid declaration does, and its initializer leaves the initializers' run. A
+            // parenthesized one (a compound literal, GNU's) keeps the refusal below.
+            const uint8_t first_role = parser->tree.roles[begin];
+            const bool unbraced = first_role != PARSE_ROLE_OPEN_INITIALIZER && first_role != PARSE_ROLE_OPEN_COMPOUND_BODY &&
+                                  parser->tokens.kinds[begin] != PARSE_KIND_L_PAREN;
+            const bool needs_list = !valid && unbraced && status != CHECK_INIT_MEMBER && !reader->output->resource;
+            if (needs_list)
+            {
+                const uint32_t before = reader->output->report_count;
+                const bool wide = element == BUSTER_TYPE_INT || element == BUSTER_TYPE_USHORT || element == BUSTER_TYPE_UINT;
+                check_input_report(reader, declaration, CHECK_INPUT_DIRECT_INITIALIZER_ARRAY);
+                if (reader->output->report_count == before + 1)
+                {
+                    reader->output->reports[before].detail = character ? CHECK_INPUT_ARRAY_LIST_STRING : wide ? CHECK_INPUT_ARRAY_LIST_WIDE : CHECK_INPUT_ARRAY_LIST_ONLY;
+                }
+                type = reader->declared_types[declaration];
+                listless = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
+                valid = listless;
+                if (listless)
+                {
+                    check_sparse_set(reader->output->sparse_pool, reader->output->initializer_begins, declaration, BUSTER_CHECK_NONE);
+                    check_sparse_set(reader->output->sparse_pool, reader->output->initializer_ends, declaration, BUSTER_CHECK_NONE);
+                }
+            }
+            else if (!valid)
             {
                 const uint32_t before = reader->output->report_count;
                 check_input_report(reader, failed, status == CHECK_INIT_MEMBER ? CHECK_INPUT_INITIALIZER_MEMBER : CHECK_INPUT_DECLARATION);
@@ -570,7 +599,7 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
             }
         }
     }
-    if (valid && check_const_eligible(reader->types, type))
+    if (valid && !listless && check_const_eligible(reader->types, type))
     {
         check_input_initializer_const(reader, declaration, begin, end, type);
     }

@@ -34,7 +34,8 @@ typedef enum CheckInputMessage
     CHECK_INPUT_NAKED_PARAMETER,
     CHECK_INPUT_KR_IMPLICIT_INT,
     CHECK_INPUT_CONSTANT_INITIALIZER,
-    // Clang's parenthesized initializer after attributes or an asm label (#1252).
+    // Clang's parenthesized initializer after attributes or an asm label (#1252), and an array of unknown size's
+    // initializer that is no list (#1447), worded by its detail (CheckInputArrayList).
     CHECK_INPUT_DIRECT_INITIALIZER_ARRAY,
     CHECK_INPUT_DIRECT_INITIALIZER_DEDUCED,
     // A field designator that names no member of the record in CheckInputReport.type.
@@ -273,6 +274,14 @@ typedef enum CheckInputMessage
     // at `note_token` where it has one.
     CHECK_INPUT_CPU_DISPATCH,
 } CheckInputMessage;
+
+// CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
+typedef enum CheckInputArrayList
+{
+    CHECK_INPUT_ARRAY_LIST_STRING,
+    CHECK_INPUT_ARRAY_LIST_WIDE,
+    CHECK_INPUT_ARRAY_LIST_ONLY,
+} CheckInputArrayList;
 
 // CHECK_INPUT_INTERRUPT_HANDLER's details: the rule x86's handler finds broken (its result isn't void; it hasn't one or two
 // parameters; its first isn't a pointer; its second isn't an unsigned 64-bit integer), and whether clang's error has no
