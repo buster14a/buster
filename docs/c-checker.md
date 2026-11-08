@@ -3087,7 +3087,7 @@ What the lowering covers past scalars (#145's programs):
     attribute requires an identifier" at the attribute; two names of one
     mangling character (`atom, bonnell`, or two of none) are
     -Wfunction-multiversion's "CPU list contains duplicate entries; attribute
-    ignored" (warning ID 94). Each drops the attribute.
+    ignored" (warning ID 95). Each drops the attribute.
   - *Declarations.* A declaration with either attribute is a version
     (`cpu_specific`) or its function's dispatcher (`cpu_dispatch`). One of the
     same kind and CPU list (the names in order) redeclares that version, whose
@@ -7291,6 +7291,91 @@ arguments against the function. The checker now gives these as clang does.
   checks-only attributes (#1447) in their valid uses, wrong subjects and wrong
   arguments, TCB calls, availability's merges and the Objective-C pointer
   attributes' types, with the warnings' options and GNU C89's implicit calls.
+
+## diagnose_if and enable_if (#1447)
+
+clang's `diagnose_if(condition, message, "warning" | "error")` and
+`enable_if(condition, message)` hold on any function declaration
+(`c_check_condition.c`), not only on #1361's fortify wrappers.
+
+- **Arguments.** Their counts are clang's errors first ("takes at least 3
+  arguments", "takes no more than 4 arguments", "requires exactly 2
+  arguments"), as their names would otherwise be read without the
+  parameters. A message that is no string is "expected string literal"; a
+  third argument other than `"error"` or `"warning"` is "invalid diagnostic
+  type for 'diagnose_if'; use "error" or "warning" instead"; a fourth,
+  clang's warning group, is "unknown warning group 'G'" where clang knows no
+  such group (`pp_warning_group_known`). A group clang knows names the
+  warning's option, which these warnings don't take yet: "not yet supported".
+- **The condition.** It is read once, where its function is declared, in the
+  function's parameter scope: its names are looked up there
+  (`check_input_thread_name`; an undeclared one is clang's error), and the
+  declaration evaluator checks it. One that names no parameter is a constant
+  then, false or true for every use, or clang's "'X' attribute expression
+  never produces a constant expression" at the attribute, its note
+  "subexpression not valid in a constant expression" at the variable it
+  reads. In one that names a parameter that error is clang's too where the
+  variable's read can't be skipped; a read in a `&&`'s or `||`'s right
+  operand or a conditional's second or third (`x > 0 && g > 0`) can be, as
+  clang asks whether some arguments give a constant, and it is an unknown
+  value that a call's evaluation needs only where it reads it. One that names a parameter becomes a program
+  (`CheckConditionStep`), from the parse tree in postorder: each largest
+  subexpression without a parameter, and each sizeof's or alignof's, is a
+  constant the evaluator gives; a parameter is its place and type; the
+  others are casts, unary, binary, logical and conditional operators, which
+  each call runs as the checker's own actions (`check_action_scalar`). Any
+  other shape (a subscript, a call, an assignment) is "not yet supported"
+  in user code; in a system header, and on an object-size wrapper
+  (`pass_object_size`), the condition is kept and decides nothing, as these
+  wrappers had it before.
+- **Lists.** Each function declaration where some condition holds has its
+  list (`CheckInput.condition_declarations`, by the declaration's name
+  token): its previous declaration's, then its own, as clang's
+  redeclarations inherit attributes. A use reads the list of the declaration
+  its lookup found.
+- **Uses.** A diagnose_if condition that names no parameter and holds is
+  diagnosed at each use of the name, sizeof's, typeof's and `_Generic`'s
+  operands included (clang's DiagnoseUseOfDecl): its message as a
+  `-Wuser-defined-warnings` warning or an error, with the note "from
+  'diagnose_if' attribute on 'f':" at the attribute. A use of a function an
+  enable_if restricts (one whose condition isn't always true), other than a
+  call's callee through parentheses and outside sizeof's, alignof's and
+  typeof's operands, is "cannot take address of function 'f' because it has
+  one or more non-tautological enable_if conditions", at the outermost `(`
+  around the name. `check_input_condition_uses` finds the uses once the
+  unit's names are bound: the vector path gathers 16 tokens' declarations'
+  marks at a time, the scalar path its twin.
+- **Calls.** After checking, each call whose callee names a function with a
+  list (`c_check_condition_graph.c`, in the warning graph's pass over calls)
+  binds each argument whose checked value is a constant (an integer, a
+  floating value, a null or absolute address), converted to its parameter's
+  type, and runs the programs. An object's or a function's address (`&x`, an
+  array or a function that decays, a string literal) is an address that is
+  never null, as clang's evaluation knows: compared with a null pointer, or
+  tested for truth, it decides; any other action on it is unknown. An
+  argument that isn't a constant is an unknown value, which a `&&`, a `||` or
+  a conditional that doesn't read it skips. An unknown result, and an action
+  that faults (an overflow, a division by zero, a shift past the width),
+  leave a condition unknown, as clang's EvaluateWithSubstitution does: a diagnose_if is then not given, an enable_if doesn't admit the
+  call. The first enable_if that doesn't admit it, in the order clang checks
+  them (the latest declaration's first, each declaration's in source order),
+  is "no matching function for call to 'f'" at the callee, its note
+  "candidate disabled: M" at the declaration the call found; otherwise the
+  diagnose_if conditions that hold are given at the call's `)`.
+- **Several at once.** Of the conditions that hold at one use or call, an
+  error is given alone, the first in source order; otherwise every warning,
+  in source order, each with its note.
+- **Cost.** A unit without these attributes tests a reader flag where
+  declarations are read and a count where uses and calls are; the steps are
+  built only for these attributes.
+
+What isn't clang's yet: an overloadable function's conditions, which take
+part in its overload resolution, are "not yet supported" in user code (a
+tautological `enable_if(1, ...)`, glibc's, aside); the fourth argument's
+known warning groups; the condition shapes above; and, as everywhere in this
+driver, the uses' errors stop the unit's later expression checks, so a call
+after one such error isn't diagnosed. clang gives one address error for a
+conditional operator's two function operands; this gives one for each.
 
 ## Operand errors (#147)
 

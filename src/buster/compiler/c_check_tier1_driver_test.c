@@ -1081,6 +1081,9 @@ static uint32_t check_test_tier1_function(const char* path, const char* name, X8
     return valid ? (uint32_t)decoded.count : 0;
 }
 
+#include "c_check_tier1_table_targets_test.c"
+#include "c_check_tier1_table_entry_test.c"
+
 // The status flags (CF, PF, AF, ZF, SF and OF) live before decoded record `index`, given those live after it, live[index]:
 // those it reads, and those live after it that it neither writes nor leaves undefined (x86_semantics.c).
 static uint8_t check_test_tier1_live_in(const X86Decoded* records, const uint8_t* live, uint32_t index)
@@ -1956,8 +1959,6 @@ static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, c
             uint32_t loop_jumps = 0;
             uint32_t loop_address = loop_records;
             uint32_t loop_base = UINT32_MAX;
-            uint32_t loop_first = loop_records;
-            uint32_t loop_last = 0;
             uint32_t dispatch = loop_records;
             bool triples = true;
             for (uint32_t i = 0; i < loop_records; i += 1)
@@ -1989,18 +1990,20 @@ static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, c
                                    destination == load->reg && source_register == loop_base && instruction->rm == destination;
                     }
                 }
-                const bool branch = x86_form_descriptions[form].relative_bytes != 0 && (x86_effects(form)->kinds >> 4) != BUSTER_X86_CONTROL_CALL;
-                const int64_t goal = (int64_t)records[i].offset + records[i].length + instruction->displacement;
-                for (uint32_t j = 0; branch && goal < (int64_t)records[i].offset && j < i; j += 1)
-                {
-                    loop_first = (int64_t)records[j].offset == goal ? j : loop_first;
-                    loop_last = (int64_t)records[j].offset == goal ? i : loop_last;
-                }
             }
             check_test_expect(test, loop_records != 0 && loop_jumps == 1 && triples,
                               "each loop dispatch is adjacent movsxd [base + index*4], add base and jmp through the same target register");
-            check_test_expect(test, loop_addresses == 1 && loop_relocations == 1 && loop_address < loop_first && loop_first <= dispatch && dispatch <= loop_last,
-                              "the loop's one relocated table base is materialized before the backedge target");
+            uint32_t loop_targets[4] = { 0 };
+            const bool table_resolved = loop_addresses == 1 && loop_address < loop_records && records[loop_address].length >= 4 &&
+                                        check_test_tier1_table_targets(object, "tier1_table_loop", records[loop_address].offset,
+                                                                       records[loop_address].offset + records[loop_address].length - 4, loop_targets, false);
+            const bool entry = table_resolved && check_test_tier1_table_entry(records, loop_records, loop_address, dispatch, loop_targets);
+            check_test_expect(test, loop_addresses == 1 && loop_relocations == 1 && entry,
+                              "the loop's one relocated table base is reached at entry and no direct or table edge reenters it");
+            if (entry && rematerialize == 0 && path == 0)
+            {
+                check_test_tier1_table_entry_controls(test, object, records, loop_records, loop_address, dispatch, loop_targets);
+            }
             unlink(output);
             unlink(object);
         }

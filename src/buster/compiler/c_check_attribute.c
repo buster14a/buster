@@ -451,7 +451,7 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "overloadable", CHECK_ATTRIBUTE_OVERLOADABLE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "pass_object_size", CHECK_ATTRIBUTE_PASS_OBJECT_SIZE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
     { "pass_dynamic_object_size", CHECK_ATTRIBUTE_PASS_DYNAMIC_OBJECT_SIZE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
-    { "diagnose_if", CHECK_ATTRIBUTE_DIAGNOSE_IF, CHECK_ATTRIBUTE_CONDITION_STRINGS, 3, 3 },
+    { "diagnose_if", CHECK_ATTRIBUTE_DIAGNOSE_IF, CHECK_ATTRIBUTE_CONDITION_STRINGS, 3, 4 },
     { "enable_if", CHECK_ATTRIBUTE_ENABLE_IF, CHECK_ATTRIBUTE_CONDITION_STRINGS, 2, 2 },
     { "flatten", CHECK_ATTRIBUTE_FLATTEN, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "leaf", CHECK_ATTRIBUTE_LEAF, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
@@ -793,6 +793,13 @@ typedef enum CheckAttributeArgumentError
     // declarator, "'X' attribute only applies to variables", at its first token.
     CHECK_ARGUMENT_UNEXPECTED_SEMI,
     CHECK_ARGUMENT_OBJC_VARIABLES,
+    // diagnose_if's and enable_if's (#1447, c_check_condition.c): a third argument other than "error" or "warning", "invalid
+    // diagnostic type for 'diagnose_if'; use \"error\" or \"warning\" instead", and a fourth that names no warning group,
+    // "unknown warning group 'G'", at the argument; a condition that is no constant without its parameters' values, "'X'
+    // attribute expression never produces a constant expression", at the attribute, its note at the subexpression.
+    CHECK_ARGUMENT_DIAGNOSTIC_TYPE,
+    CHECK_ARGUMENT_WARNING_GROUP,
+    CHECK_ARGUMENT_NEVER_CONSTANT,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -1785,10 +1792,33 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             const bool decoded = check_input_attribute_string(reader, string_first, string_end, attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL, &text);
             valid = decoded;
             error = CHECK_ATTRIBUTE_ERROR_STRING;
-            if (valid && attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF && argument == 2)
+            // diagnose_if's diagnostic type, and its warning group (#1447, clang's handleDiagnoseIfAttr): its error at the
+            // string. A group clang knows names the warning's option, which this checker's warnings don't take yet.
+            if (valid && attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF && argument == 2 &&
+                !check_input_attribute_equal(text, "warning") && !check_input_attribute_equal(text, "error"))
             {
-                valid = check_input_attribute_equal(text, "warning") || check_input_attribute_equal(text, "error");
-                error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+                check_input_attribute_argument_error(reader, attributes, attribute, string_first, CHECK_ARGUMENT_DIAGNOSTIC_TYPE, 0);
+                valid = false;
+            }
+            if (valid && attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF && argument == 3)
+            {
+                char group[128];
+                const bool fits = text.length != 0 && text.length < sizeof(group) && memchr(text.pointer, 0, text.length) == NULL;
+                if (fits)
+                {
+                    memcpy(group, text.pointer, text.length);
+                    group[text.length] = 0;
+                }
+                const bool known = fits && pp_warning_group_known(group);
+                if (!known)
+                {
+                    check_input_attribute_argument_error(reader, attributes, attribute, string_first, CHECK_ARGUMENT_WARNING_GROUP, 0);
+                }
+                else
+                {
+                    error = CHECK_ATTRIBUTE_ERROR_UNKNOWN;
+                }
+                valid = false;
             }
             if (valid && argument == 0)
             {
@@ -3606,6 +3636,11 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             const bool late_kind = check_input_attribute_late_kind(&attribute);
             reader->late_attributes |= late_kind;
             reader->deprecated_attributes |= rule->kind == CHECK_ATTRIBUTE_DEPRECATED || rule->kind == CHECK_ATTRIBUTE_UNAVAILABLE;
+            // diagnose_if's and enable_if's conditions are each function declaration's, which a lane can't publish to the
+            // declarations and calls after it (#1447, c_check_condition.c).
+            const bool conditional = rule->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF || rule->kind == CHECK_ATTRIBUTE_ENABLE_IF;
+            reader->condition_attributes |= conditional;
+            check_input_lane_refuse(reader, reader->lane && conditional, "a body declares a diagnose_if or enable_if attribute");
             // A lane cannot publish attribute state to later declarations; source-order replay handles this case.
             check_input_lane_refuse(reader, reader->lane && late_kind, "a body declares an attribute with linked state");
             // x86's interrupt and no_caller_saved_registers (#147): only a unit with either has its calls looked through
@@ -3645,7 +3680,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             // sentinel's, whose subject its handler checks after the count. Kept as clang's generated handler's (the
             // generic kind), its own handler's checks and effects aren't made.
             // (no_caller_saved_registers' count before its subject too: clang's type processing checks it first.)
-            const bool type_attribute = rule->kind == CHECK_ATTRIBUTE_NORETURN || rule->kind == CHECK_ATTRIBUTE_PACKED || rule->kind == CHECK_ATTRIBUTE_MAY_ALIAS ||
+            // (diagnose_if's and enable_if's too: their arguments name the function's parameters, which a generic handler's
+            // reading of them wouldn't find; clang's count is its error first, #1447.)
+            const bool type_attribute = conditional || rule->kind == CHECK_ATTRIBUTE_NORETURN || rule->kind == CHECK_ATTRIBUTE_PACKED || rule->kind == CHECK_ATTRIBUTE_MAY_ALIAS ||
                                         rule->kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION || rule->kind == CHECK_ATTRIBUTE_NULLABILITY ||
                                         rule->kind == CHECK_ATTRIBUTE_SENTINEL ||
                                         (rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_call(name) == CHECK_CALL_NO_CALLER_SAVED);
@@ -7483,14 +7520,6 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
         if (attribute->kind == CHECK_ATTRIBUTE_ALIGNAS)
         {
             check_input_alignas_error(reader, attributes, NULL, BUSTER_CHECK_NONE, 0, 0);
-            valid = false;
-        }
-        if (!attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF || attribute->kind == CHECK_ATTRIBUTE_ENABLE_IF) &&
-            attributes->object_sizes == NULL && !check_graph_system_token(&reader->output->graph, attribute->first))
-        {
-            // #1361's unchecked wrappers include system-header functions without size annotations (glibc 2.44's
-            // openat2). General user diagnostics/filtering remain unsupported outside this compatibility path.
-            check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
             valid = false;
         }
         const bool allocation = attribute->kind == CHECK_ATTRIBUTE_ALLOC_SIZE || attribute->kind == CHECK_ATTRIBUTE_ALLOC_ALIGN;
