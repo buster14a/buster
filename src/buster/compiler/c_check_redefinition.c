@@ -134,12 +134,24 @@ static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t 
             const uint32_t entity = reader->objects != NULL ? reader->objects[previous] : 0;
             uint32_t latest = BUSTER_CHECK_NONE;
             const bool conflict = object && detail == CHECK_REDECLARATION_OBJECT_TYPE && linkage != 0 && earlier_linkage != 0 && entity != 0;
-            for (uint32_t t = token; conflict && latest == BUSTER_CHECK_NONE && t > previous + 1;)
+            // Bodies read apart (c_check_deferred.c, #1447) haven't read one another's declarations: a deferred top level
+            // hasn't read the bodies it skipped, nor a lane the other bodies. A scan that reaches another body's closing
+            // brace before its declaration sends the unit to source order.
+            const uint8_t* roles = reader->parser->tree.roles;
+            const bool apart = (reader->deferred != 0 || reader->lane) && roles != NULL;
+            bool crossed = false;
+            for (uint32_t t = token; conflict && latest == BUSTER_CHECK_NONE && !crossed && t > previous + 1;)
             {
                 t -= 1;
-                const bool same = reader->parser->tokens.names[t] == name && reader->declaration_kinds[t] == kind &&
+                crossed = apart && roles[t] == PARSE_ROLE_CLOSE_BODY;
+                const bool same = !crossed && reader->parser->tokens.names[t] == name && reader->declaration_kinds[t] == kind &&
                                   check_input_linkage(reader->declaration_bits, t) != 0 && reader->objects[t] == entity && reader->declared_types[t] != 0;
                 latest = same ? t : BUSTER_CHECK_NONE;
+            }
+            check_input_lane_refuse(reader, crossed && reader->lane, "a body's redeclaration notes another body's declaration");
+            if (crossed && reader->deferred != 0)
+            {
+                check_deferred_note_scan(reader);
             }
             if (latest < token && latest != previous)
             {
