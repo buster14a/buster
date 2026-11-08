@@ -1377,10 +1377,21 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
     {
         valid = check_driver_spelling_ready(parser, pp, input, types, &spell, scratch);
     }
-    for (uint32_t i = 0; valid && i < view->count && !pp->fatal; i += 1)
+    // A function's unused parameters after its body's unused variables: clang's ActOnFinishFunctionBody diagnoses the
+    // parameters once the body's scope has popped its own (both at the body's `}`), so they publish in a second pass,
+    // which only a pass with one takes.
+    bool parameters = false;
+    for (uint32_t i = 0; !parameters && i < view->count; i += 1)
     {
+        parameters = view->events[i].kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER && view->events[i].completion_kind != CHECK_WARNING_COMPLETE_TU_END;
+    }
+    const uint64_t steps = (uint64_t)view->count * (parameters ? 2u : 1u);
+    for (uint64_t step = 0; valid && step < steps && !pp->fatal; step += 1)
+    {
+        const uint32_t i = (uint32_t)(step % view->count);
         const CheckWarningEvent* event = view->events + i;
-        const bool retained = event->kind != CHECK_WARNING_EVENT_MESSAGE &&
+        const bool late = event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER && event->completion_kind != CHECK_WARNING_COMPLETE_TU_END;
+        const bool retained = late == (step >= view->count) && event->kind != CHECK_WARNING_EVENT_MESSAGE &&
                               (event->token < parser->tokens.count || (event->kind == CHECK_WARNING_EVENT_PRAGMA && event->token == parser->tokens.count)) &&
                               (repair == NULL || check_repair_warning_token(repair, event->token));
         if (retained)

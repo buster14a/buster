@@ -59,6 +59,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_UNSUPPORTED: result = "construct is not yet supported by the type checker"; break;
         case CHECK_INPUT_DECLARATION: result = "invalid or unsupported declaration"; break;
         case CHECK_INPUT_INITIALIZER_MEMBER: result = "field designator does not refer to any field in the record type"; break;
+        case CHECK_INPUT_ARRAY_LITERAL_MISMATCH: result = "cannot initialize array with array of another type"; break;
         case CHECK_INPUT_TAG_INCOMPATIBLE: result = "type has incompatible definitions"; break;
         case CHECK_INPUT_UNDECLARED: result = "use of undeclared identifier"; break;
         case CHECK_INPUT_LITERAL: result = "invalid or unsupported literal"; break;
@@ -2236,6 +2237,116 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
         view->count = valid ? total : events->count;
     }
     return valid;
+}
+
+// A rejected unit's common warnings (#1447): clang's for the bodies its errors don't reach. The bodies that hold one of
+// `errors` (tokens) are left out of a second reading of the unit (check_input_selected, as -flazy-system-headers' bodies
+// are), whose program, where it is valid, gives the -Wreturn-type and common warnings of the others: what clang gives of
+// them, the bodies after the unit's first error flushed (check_driver_flushed_bodies). Its other warnings are the first
+// reading's, which the caller published. Nothing where an error lies outside every body, or the reading isn't valid. Only
+// a rejected unit pays for it; the type table, input and program are its own, and the arenas' pushes stay to the unit's end.
+static void check_driver_rejected_common(const Parser* parser, const Parser* original, Preprocessor* pp, const uint32_t* errors, uint32_t error_count,
+                                         bool scalar, bool return_warning, CheckWarningSeverity return_baseline, CheckCommonShiftWarnings* shifts,
+                                         bool publish_unused, uint32_t publication_end, Arena* arena, Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t body_count = 0;
+    for (uint32_t token = 0; token < count; token += 1)
+    {
+        body_count += parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY;
+    }
+    CBodyRange* ranges = body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CBodyRange, body_count) : NULL;
+    uint8_t* mask = ranges != NULL ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
+    uint32_t found = 0;
+    bool valid = mask != NULL && error_count != 0 && c_environment_bodies(&parser->tree, count, ranges, body_count, &found) && found == body_count;
+    if (valid)
+    {
+        memset(mask, 0, (uint64_t)count + 1);
+    }
+    for (uint32_t e = 0; valid && e < error_count; e += 1)
+    {
+        // The body whose tokens hold the error: the last one to begin at or before it.
+        const uint32_t token = errors[e];
+        uint32_t low = 0;
+        uint32_t high = body_count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            const bool before = ranges[middle].begin <= token;
+            low = before ? middle + 1 : low;
+            high = before ? high : middle;
+        }
+        valid = low != 0 && token < ranges[low - 1].end;
+        if (valid)
+        {
+            memset(mask + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
+        }
+    }
+    valid = valid && check_lazy_mask_valid(parser, mask);
+    const TypeCapacity capacity = {
+        .types = count <= (1u << 27) ? count * 4 + 64 : 0,
+        .parameters = count,
+        .tags = count,
+        .members = count,
+    };
+    const uint64_t type_bytes = type_capacity_bytes(capacity);
+    const uint64_t index_bytes = type_index_capacity_bytes(capacity);
+    Arena type_arena = valid ? arena_reserve_small(type_bytes, type_bytes) : (Arena){ 0 };
+    Arena index_arena = valid ? arena_reserve_small(index_bytes, BUSTER_TYPE_INDEX_SMALL_BYTES) : (Arena){ 0 };
+    TypeTable types = { 0 };
+    valid = valid && capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
+    CheckInput input = { 0 };
+    valid = valid && check_input_selected(&input, parser, pp, &types, arena, scratch, mask) && !input.resource && (input.report_count == 0 || input.recovered_valid);
+    const CheckOptions check_options = { .scalar = scalar };
+    CheckStream stream = { 0 };
+    valid = valid && check_graph_run(&types, &input.graph, arena, scratch, &check_options, &stream) && stream.report_count == 0 &&
+            check_input_packed_finalize(&input, parser, &types, &stream, scratch) && check_input_warning_graph(&input, parser, &types, &stream, arena, scratch);
+    CheckAsms asms = { 0 };
+    CheckInitializers initializers = { 0 };
+    valid = valid && check_asms_run(&asms, &input, &stream, &types, arena, scratch) &&
+            check_initializers_run_events(&initializers, &input, &stream, parser, &types, arena, scratch, NULL, NULL);
+    const CheckProgramOptions program_options = check_request_program_options(pp, (CheckProgramOptions){
+        .initializers = &initializers,
+        .asms = &asms,
+        .scalar = scalar,
+        .return_warnings = return_warning,
+        .noreturn_warnings = true,
+    });
+    CheckProgram program;
+    valid = valid && check_program(&program, parser, &input, &stream, &types, program_options, arena, scratch);
+    if (valid && publish_unused)
+    {
+        // The unused declarations' warnings, where the first reading gave none: a reader's error ends that pass. The
+        // unit-end ones are left out, as a rejected unit's are.
+        const uint64_t unused_mark = scratch->length;
+        CheckWarningEvent* unused = input.warning_events.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckWarningEvent, input.warning_events.count) : NULL;
+        CheckWarningEvents selected = { .events = unused };
+        for (uint32_t i = 0; unused != NULL && i < input.warning_events.count; i += 1)
+        {
+            const CheckWarningEvent* event = input.warning_events.events + i;
+            if (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER ||
+                event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION)
+            {
+                unused[selected.count++] = *event;
+            }
+        }
+        CheckWarningEvents view;
+        if (selected.count != 0 && check_driver_rejected_warnings(parser, &selected, true, NULL, scratch, &view))
+        {
+            check_driver_warning_events_at(parser, pp, &input, &types, &view, NULL, publication_end, scratch);
+        }
+        arena_pop_to(scratch, unused_mark);
+    }
+    if (valid)
+    {
+        check_driver_return_reports(parser, original, pp, &program, return_baseline, false);
+        const uint64_t flushed_mark = scratch->length;
+        const uint8_t* flushed = check_driver_flushed_bodies(parser, original, pp, &program, scratch);
+        check_driver_common_warnings(parser, pp, &input, &stream, &types, &program, flushed, shifts, scratch);
+        arena_pop_to(scratch, flushed_mark);
+    }
+    arena_release(&type_arena);
+    arena_release(&index_arena);
 }
 
 // The prefix count of the unit's errors' tokens (check_driver_rejected_warnings): its reader's reports, its graph's and the
@@ -6330,11 +6441,13 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     promoted |= check_driver_warning_promoted(pp, pragma_input, &pragma_input->pragma_warnings, NULL);
                     promoted |= check_diagnostic_first_pragma_error_mode(pragma_input, pragma_end, &promoted_token, &promoted_source, quiet);
                     bool visibility_diagnostics = false;
+                    bool visibility_errors = false;
                     const CheckInputVisibilityPragmas* visibility_history = pragma_input->visibility_pragmas;
                     for (uint32_t i = 0; visibility_history != NULL && i < visibility_history->count; i += 1)
                     {
                         const CheckInputVisibilityPragma* record = visibility_history->records + i;
                         visibility_diagnostics |= record->error || record->warning != 0;
+                        visibility_errors |= record->error;
                     }
                     for (uint32_t i = 0; !quiet && !promoted && i < excess_count; i += 1)
                     {
@@ -6368,34 +6481,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 control.position < tokens ? control.position + 1u : tokens };
                         }
                     }
-                    CheckCommonShiftWarnings shift_warnings = { 0 };
-                    // The unit's errors, whose warnings clang leaves out (check_driver_rejected_warnings): a preprocessing or parse
-                    // error counts at the unit's start, for the unit-end warnings alone.
-                    const bool unit_errors = pp->errors != 0 || parse_failed || input.report_count != 0 || stream.report_count != 0 || additional_count != 0;
-                    const bool located = input.report_count != 0 || stream.report_count != 0 || additional_count != 0;
-                    const uint32_t* error_counts = located ? check_driver_error_counts(checking, &input, &stream, additional, additional_count, scratch) : NULL;
-                    CheckWarningEvents input_warnings;
-                    const bool unit_end_ready = (!located || error_counts != NULL) &&
-                        check_driver_rejected_warnings(checking, &input.warning_events, unit_errors, error_counts, scratch, &input_warnings);
-                    if (!unit_end_ready ||
-                        !check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, quiet, scratch) ||
-                        !check_driver_reports(checking, recovered, pp, publication_end, &input, &stream, &types, repairing ? &repair : NULL,
-                                              original_pragmas_ready ? &original_pragmas : NULL, additional, additional_count,
-                                              NULL, 0, quiet, &shift_warnings, scratch) ||
-                        !check_driver_warning_events_at(checking, pp, &input, &types, &input_warnings, repairing ? &repair : NULL, publication_end, scratch) ||
-                        !check_driver_warning_events_at(checking, pp, &input, &types, &stream.warning_events, repairing ? &repair : NULL, publication_end, scratch))
-                    {
-                        fprintf(errors, "fatal error: checker diagnostic capacity exhausted\n");
-                        driver_fatal = true;
-                        ready = false;
-                    }
-                    original_pragmas_printed = true;
-                    if (input_valid && dump && !prefix_only)
-                    {
-                        check_driver_dump(&input.graph, &stream, &types, scratch);
-                    }
+                    // The errors the reports' publication below makes: warnings promoted to errors and visibility pragmas'
+                    // errors, which reject the unit as those already published do.
+                    const bool publication_errors = promoted || visibility_errors;
                     result = !driver_fatal && ready && expression_valid && !input.recovered_valid && additional_count == 0 && !repairing && pp->errors == 0 &&
-                             !pp->diagnostic_collection_failed && !pp->history_failed ? 0 : 1;
+                             !publication_errors && !pp->diagnostic_collection_failed && !pp->history_failed ? 0 : 1;
                     CheckProgram program;
                     CheckDataPrepared data = { 0 };
                     check_clock_mark(stage_clock, CHECK_STAGE_CHECK_DECLARATIONS);
@@ -6425,7 +6515,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .discard_huge = lanes != NULL && lanes->units_lane != NULL && check_units_discard_huge(lanes->units_lane),
                     });
                     const bool program_diagnostics = result == 0 ||
-                        (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && (pp->errors != 0 || input.recovered_valid) &&
+                        (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && (pp->errors != 0 || publication_errors || input.recovered_valid) &&
                          !pp->diagnostic_collection_failed && !pp->history_failed);
                     CheckInput diagnostic_input;
                     const CheckInput* program_input = &input;
@@ -6437,33 +6527,65 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     }
                     const bool program_checked = program_diagnostics &&
                         check_program(&program, checking, program_input, &stream, &types, program_options, output_arena, scratch);
+                    // A control error's constraints, where check_program finds one: every one, as the diagnosis of a rejected unit
+                    // gives them (#1447), among the unit's errors, which the reports below publish, so that the unit's warnings
+                    // leave out what clang's do after them (check_driver_rejected_warnings).
+                    CheckProgramDiagnostic control = { 0 };
                     if (program_diagnostics && !program_checked)
                     {
-                        // A constraint error's unit gives every one, as the diagnosis of a rejected unit does (#1447).
-                        CheckProgramDiagnostic control = { 0 };
                         const bool listed = program.status == CHECK_PROGRAM_INVALID &&
                                             check_program_diagnose_all(&control, program_input, &stream, checking, &types, BUSTER_CHECK_NONE, output_arena, scratch) &&
-                                            control.constraint_count != 0;
+                                            control.constraint_count != 0 &&
+                                            check_driver_additional_room(&additional, &additional_capacity, additional_count, control.constraint_count, output_arena);
                         for (uint32_t c = 0; listed && c < control.constraint_count; c += 1)
                         {
                             const CheckProgramConstraint* constraint = control.constraints + c;
-                            const char* message = check_semantic_constraint(checking, pp, program_input, &types, constraint, output_arena);
-                            const uint32_t publication = check_driver_publication_position(checking, pp, constraint->position < tokens ? constraint->position + 1u : tokens,
-                                                                                           publication_end);
-                            const PPOutputDiagnosticNote note = {
-                                .token = constraint->previous < tokens ? checking->tokens.sources[constraint->previous] : 0,
-                                .message = "previous case defined here",
+                            additional[additional_count++] = (CheckDriverDiagnostic){
+                                .token = constraint->token,
+                                .message = check_semantic_constraint(checking, pp, program_input, &types, constraint, output_arena),
+                                .position = constraint->position,
+                                .completion = constraint->position < tokens ? constraint->position + 1u : tokens,
+                                .repeated = true,
+                                .note_token = constraint->previous,
+                                .note = constraint->previous != BUSTER_CHECK_NONE ? "previous case defined here" : NULL,
                             };
-                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, checking->tokens.sources[constraint->token], publication, &note,
-                                                        constraint->previous < tokens ? 1u : 0u, "%s", message);
                         }
                         if (!listed)
                         {
-                            const char* message = check_semantic_control(pp, &types, program.status, &program.failure, scratch);
-                            check_driver_diagnose(checking, pp, program.token, message);
+                            additional[additional_count++] = (CheckDriverDiagnostic){ program.token, check_semantic_control(pp, &types, program.status, &program.failure, output_arena),
+                                                                                     program.token };
                         }
                         result = 1;
                     }
+                    CheckCommonShiftWarnings shift_warnings = { 0 };
+                    // The unit's errors, whose warnings clang leaves out (check_driver_rejected_warnings): a preprocessing or parse
+                    // error counts at the unit's start, for the unit-end warnings alone.
+                    const bool unit_errors = pp->errors != 0 || parse_failed || input.report_count != 0 || stream.report_count != 0 || additional_count != 0;
+                    const bool located = input.report_count != 0 || stream.report_count != 0 || additional_count != 0;
+                    const uint32_t* error_counts = located ? check_driver_error_counts(checking, &input, &stream, additional, additional_count, scratch) : NULL;
+                    CheckWarningEvents input_warnings;
+                    const bool unit_end_ready = (!located || error_counts != NULL) &&
+                        check_driver_rejected_warnings(checking, &input.warning_events, unit_errors, error_counts, scratch, &input_warnings);
+                    if (!unit_end_ready ||
+                        !check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, quiet, scratch) ||
+                        !check_driver_reports(checking, recovered, pp, publication_end, &input, &stream, &types, repairing ? &repair : NULL,
+                                              original_pragmas_ready ? &original_pragmas : NULL, additional, additional_count,
+                                              NULL, 0, quiet, &shift_warnings, scratch) ||
+                        !check_driver_warning_events_at(checking, pp, &input, &types, &input_warnings, repairing ? &repair : NULL, publication_end, scratch) ||
+                        !check_driver_warning_events_at(checking, pp, &input, &types, &stream.warning_events, repairing ? &repair : NULL, publication_end, scratch))
+                    {
+                        fprintf(errors, "fatal error: checker diagnostic capacity exhausted\n");
+                        driver_fatal = true;
+                        ready = false;
+                        result = 1;
+                    }
+                    original_pragmas_printed = true;
+                    if (input_valid && dump && !prefix_only)
+                    {
+                        check_driver_dump(&input.graph, &stream, &types, scratch);
+                    }
+                    // A warning the publication promoted to an error rejects the unit, before its final warnings.
+                    result = pp->errors != 0 ? 1 : result;
                     check_driver_x86_reports(checking, recovered, pp, &input, &stream, &types, quiet);
                     const bool final_warnings = result == 0 && program_checked && !prefix_only && !repairing && !parse_failed &&
                                                 input.deferred_tokens == NULL && !pp->diagnostic_collection_failed && !pp->history_failed;
@@ -6494,6 +6616,51 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             const uint8_t* flushed = check_driver_flushed_bodies(checking, recovered, pp, &program, scratch);
                             check_driver_common_warnings(checking, pp, &input, &stream, &types, &program, flushed, &shift_warnings, scratch);
                             arena_pop_to(scratch, flushed_mark);
+                        }
+                    }
+                    else if (!quiet && !driver_fatal && ready && !prefix_only && !repairing && !parse_failed && !pp->fatal && !pp->diagnostic_collection_failed &&
+                             !pp->history_failed && (located || (program_diagnostics && program.token < tokens)))
+                    {
+                        // A rejected unit's common warnings, of the bodies its errors don't reach (#1447): its reader's, its
+                        // graph's and its other errors' tokens, and its program's.
+                        const uint64_t error_room = (uint64_t)input.report_count + stream.report_count + 2 * (uint64_t)additional_count + control.constraint_count + 1;
+                        uint32_t* error_tokens = error_room <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output_arena, uint32_t, error_room) : NULL;
+                        uint32_t error_count = 0;
+                        for (uint32_t i = 0; error_tokens != NULL && i < input.report_count; i += 1)
+                        {
+                            error_tokens[error_count++] = input.reports[i].token;
+                        }
+                        for (uint32_t i = 0; error_tokens != NULL && i < stream.report_count; i += 1)
+                        {
+                            error_tokens[error_count++] = stream.reports[i].token;
+                        }
+                        for (uint32_t i = 0; error_tokens != NULL && i < additional_count; i += 1)
+                        {
+                            error_tokens[error_count++] = additional[i].token;
+                            error_tokens[error_count++] = additional[i].position;
+                        }
+                        for (uint32_t i = 0; error_tokens != NULL && i < control.constraint_count; i += 1)
+                        {
+                            error_tokens[error_count++] = control.constraints[i].token;
+                        }
+                        if (error_tokens != NULL && program_diagnostics)
+                        {
+                            error_tokens[error_count++] = program.token;
+                        }
+                        const CheckWarningSeverity baseline = !return_warning ? CHECK_WARNING_IGNORE :
+                            return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
+                        if (error_tokens != NULL)
+                        {
+                            // The first reading's unused declarations' events, which a reader's error leaves it without.
+                            bool unused_events = false;
+                            for (uint32_t i = 0; !unused_events && i < input.warning_events.count; i += 1)
+                            {
+                                const uint32_t kind = input.warning_events.events[i].kind;
+                                unused_events = kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER ||
+                                                kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION;
+                            }
+                            check_driver_rejected_common(checking, recovered, pp, error_tokens, error_count, scalar, return_warning, baseline, &shift_warnings,
+                                                         !unused_events && input.report_count != 0, publication_end, arena, scratch);
                         }
                     }
                     // The folded shifts' stashed runtime warnings no common walk reported or dropped (a unit with errors runs

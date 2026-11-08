@@ -183,6 +183,25 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // no node and keeps its error (third review on #1791).
         "int c = undecl, d[] = 6;\nunknown_type z;\n",
         "int c = undecl;\nint d[] = 6;\nint e[] = (5);\nint f2[] = undecl2 + 1;\nint g[] = (int)7;\nunknown_type z;\n",
+        // GNU's array initialized by a compound literal of its array type (#1447): the same element type and size or none
+        // (the literal's size then the array's, `(int[]){…}`'s once its own initializer finished); another array type's
+        // "cannot initialize array of type 'int[3]' with array of type 'int[2]'", recovered.
+        "int a[] = (int[2]){1, 2};\n"
+        "int b[2] = (int[2]){3, 4};\n"
+        "int c[3] = (int[2]){5, 6};\n"
+        "int d[1] = (int[2]){7, 8};\n"
+        "char s[] = (char[]){\"hi\"};\n"
+        "int e[] = ((int[3]){1});\n"
+        "_Static_assert(sizeof(a) == 8 && sizeof(e) == 12, \"\");\n"
+        "void f(void) { int x[] = (int[2]){1, 2}; int y[2] = (int[]){3, 4}; (void)x; (void)y; }\n",
+        "int a1[] = (long[2]){1, 2};\n"
+        "unsigned a2[] = (int[2]){1, 2};\n"
+        "const int a3[] = (int[2]){1, 2};\n"
+        "int a4[] = (const int[2]){1, 2};\n"
+        "int a5[2][2] = (int[2][2]){{1, 2}, {3, 4}};\n"
+        "int a6[] = (int[2]){1, 2, 3};\n"
+        "char a7[] = (char[2]){\"abc\"};\n"
+        "int a8[] = (int[2]){1} + 0;\n",
         // An enumerator whose name is another kind of the scope's (an object, a typedef, a parameter, a local): clang's
         // "redefinition of 'K'" with its note at the earlier declaration, the enumerator dropped and the next implicit
         // value restarting at 0, of int or of the fixed type (#1447).
@@ -320,8 +339,8 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void f(void) { struct L *p; struct L { int a; }; struct L { int b; }; (void)p; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
-    // The tag redefinitions, the last three fixtures, are gnu17's alone: C23 allows a compatible one and words an
-    // incompatible one otherwise (N3037), which the checker doesn't model yet.
+    // The tag redefinitions, the last three fixtures, are gnu17's alone: C23 compares a redefined record with the
+    // earlier one (N3037, the gnu23 fixtures above), and an enum's redefinition still refuses generically there.
     const uint32_t before_c23 = BUSTER_ARRAY_LENGTH(fixtures) - 3;
     static const char* const options[] = { NULL, "-Wall", "-ferror-limit=2", "-w" };
     enum { LINES = 16384 };
