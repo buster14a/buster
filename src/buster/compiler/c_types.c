@@ -381,6 +381,7 @@ typedef enum TypeError
 //   - ATOMIC: base is the value type. ALIGNED: base is the type it aligns, unqualified and never ALIGNED, and extent the
 //     alignment's log2. COMPLEX: base is the element. BIT_INT: extent is the width.
 //   - STRUCT, UNION, ENUM: index is the tag (TypeTags); an ENUM's base is its underlying type once it is complete.
+//   - ALIGNED, QUALIFIED: index is the index under every wrapper (type_unwrapped_index).
 // size is in bytes: 1 for void and functions, as GNU's sizeof has it, and 0 for incomplete types and variable length
 // arrays. alignment_log2 is in bytes too. An ALIGNED type's size, code and completeness are its base's, which
 // type_size, type_arithmetic_code and type_is_complete read, since its base may be a tag completed later. hash is a
@@ -524,6 +525,9 @@ struct TypeTable
     // than 64), which the lock-free queries answer by (#148): the source reader sets it from the unit's target, as it sets
     // char_unsigned. 8 bytes, x86-64's baseline, when false.
     bool atomic_inline_16;
+    // Whether the table has a QUALIFIED record (#1447), set when it makes its first and never cleared: a unit without one
+    // reads no type's extended qualifiers (type_extended_qualifiers, type_object_qualifiers).
+    bool extended;
 };
 
 // How many records of each table there is room for: types besides the builtin ones, tags and members besides record 0,
@@ -1389,17 +1393,12 @@ static TypeId type_qualify(const TypeTable* table, TypeId type, uint32_t qualifi
     return result;
 }
 
-// The index under a wrapper: an ALIGNED type's base's, then a QUALIFIED one's. Inline, past its callers' one compare:
-// as a call, it made their callers too large to inline where they were (check_action_integer_type, #1447).
+// The index under a wrapper: an ALIGNED type's base's, then a QUALIFIED one's, which the wrapper's index column holds
+// (#1447): one load past its callers' one compare, as the single ALIGNED was. A call, a loop over the wrappers or a
+// second test made their callers too large to inline where they were (check_action_integer_type).
 static inline __attribute__((always_inline)) uint32_t type_unwrapped_index(const TypeTable* table, uint32_t index)
 {
-    // `index` is a wrapper (its callers' compare); an ALIGNED type's base may be QUALIFIED, whose base is no wrapper.
-    uint32_t result = index;
-    do
-    {
-        result = table->types.base[result] >> BUSTER_TYPE_INDEX_SHIFT;
-    } while (table->types.kind[result] >= BUSTER_TYPE_KIND_WRAPPERS);
-    return result;
+    return table->types.index[index];
 }
 
 // The index whose size, code and completeness a type has: an ALIGNED or QUALIFIED type's base's. As in
@@ -1475,11 +1474,11 @@ static inline __attribute__((always_inline)) uint32_t type_wrapper_qualifiers(co
     return table->types.kind[at] == BUSTER_TYPE_KIND_QUALIFIED ? (uint32_t)table->types.extent[at] : 0;
 }
 
-// Inlined everywhere, as type_strip_aligned (#1447): one compare where the type is no wrapper.
+// Inlined everywhere (#1447): a table without a QUALIFIED record (TypeTable.extended) reads no type.
 static inline __attribute__((always_inline)) uint32_t type_extended_qualifiers(const TypeTable* table, TypeId type)
 {
     uint32_t result = 0;
-    if (__builtin_expect(type_kind(table, type) >= BUSTER_TYPE_KIND_WRAPPERS, 0))
+    if (__builtin_expect(table->extended, 0) && type_kind(table, type) >= BUSTER_TYPE_KIND_WRAPPERS)
     {
         result = type_wrapper_qualifiers(table, type >> BUSTER_TYPE_INDEX_SHIFT);
     }
@@ -1516,11 +1515,10 @@ static __attribute__((noinline)) uint32_t type_object_qualifiers_slow(const Type
     return type_extended_qualifiers(table, current);
 }
 
-// Inlined everywhere (#1447): a type that is no wrapper or array has none, which a load and two compares say.
+// Inlined everywhere (#1447): a table without a QUALIFIED record (TypeTable.extended) reads no type.
 static inline __attribute__((always_inline)) uint32_t type_object_qualifiers(const TypeTable* table, TypeId type)
 {
-    const uint8_t kind = type_kind(table, type);
-    return __builtin_expect(kind >= BUSTER_TYPE_KIND_WRAPPERS || type_kind_is_array(kind), 0) ? type_object_qualifiers_slow(table, type) : 0;
+    return __builtin_expect(table->extended, 0) ? type_object_qualifiers_slow(table, type) : 0;
 }
 
 // Whether the x86-64 psABI aligns a variable of `type` to at least 16 bytes (§3.1.2, clang's large arrays in
@@ -2103,11 +2101,15 @@ static uint32_t type_append(TypeTable* table, uint8_t kind, uint8_t flags, TypeI
     {
         result = types->count;
         types->kind[result] = kind;
+        table->extended |= kind == BUSTER_TYPE_KIND_QUALIFIED;
         types->code[result] = properties.code;
         types->flags[result] = flags | properties.flags;
         types->alignment_log2[result] = properties.alignment_log2;
         types->base[result] = base;
-        types->index[result] = kind == BUSTER_TYPE_KIND_FUNCTION ? parameter_column->count : 0;
+        // A wrapper's index is the type under every wrapper (type_unwrapped_index): its base's, or what its base's says.
+        const uint32_t under = base >> BUSTER_TYPE_INDEX_SHIFT;
+        const uint32_t unwrapped = types->kind[under] >= BUSTER_TYPE_KIND_WRAPPERS ? types->index[under] : under;
+        types->index[result] = kind == BUSTER_TYPE_KIND_FUNCTION ? parameter_column->count : kind >= BUSTER_TYPE_KIND_WRAPPERS ? unwrapped : 0;
         types->extent[result] = extent;
         types->size[result] = properties.size;
         types->hash[result] = hash;
@@ -6866,6 +6868,7 @@ static bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, A
     {
         const uint64_t count = source->types.count;
         memcpy(table->types.kind, source->types.kind, count * sizeof(*table->types.kind));
+        table->extended = source->extended;
         memcpy(table->types.code, source->types.code, count * sizeof(*table->types.code));
         memcpy(table->types.flags, source->types.flags, count * sizeof(*table->types.flags));
         memcpy(table->types.alignment_log2, source->types.alignment_log2, count * sizeof(*table->types.alignment_log2));
