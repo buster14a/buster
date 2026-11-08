@@ -4672,6 +4672,19 @@ static TypeId check_input_attribute_mode(CheckInputReader* reader, CheckInputAtt
     return error == CHECK_ARGUMENT_COUNT ? moded : 0;
 }
 
+// An enum's stand-in for the type a mode's error still installs (#1447, check_input_attribute_mode's `installed`): clang's
+// AddModeAttr makes a real floating type the enum's integer type, which the type table doesn't take, so the enum gets the
+// signed integer of its size and alignment (__fp16's, float's, double's, long double's and __float128's), which gives it
+// clang's layout; 0 for another type (a complex one, whose alignment no integer has), which still stops the reader.
+static TypeId check_input_mode_enum_integer(const TypeTable* types, TypeId installed)
+{
+    const TypeId bare = installed != 0 ? type_strip_aligned(types, installed) : 0;
+    const bool floating = bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_FLOATING;
+    const uint64_t size = floating ? type_size(types, bare) : 0;
+    const TypeId result = size == 2 ? BUSTER_TYPE_SHORT : size == 4 ? BUSTER_TYPE_INT : size == 8 ? BUSTER_TYPE_LONG : size == 16 ? BUSTER_TYPE_INT128 : 0;
+    return result != 0 && type_alignment(types, result) == type_alignment(types, bare) ? result : 0;
+}
+
 // vector_size's checks of its element type `element` and its size, as clang's BuildVectorType makes them, in its order
 // (#147): an element of no builtin integer type but bool, real floating type or _BitInt, or of a _BitInt whose width is
 // no power of 2; a size of no integer constant, negative (at the argument), 2^61 bytes or more, zero, no multiple of the

@@ -5,7 +5,7 @@
 // - A vector_size or neon_vector_type error leaves the type as it was (clang's HandleVectorSizeAttr and
 //   HandleNeonVectorTypeAttr). A mode error leaves it too, or installs the mode's type all the same where clang's
 //   AddModeAttr does (a mode of the other kind, or a base of no integer or floating type). An enum's mode whose error
-//   installs nothing leaves the enum without it.
+//   installs nothing leaves the enum without it; one that installs a floating type gives it the integer of its layout.
 // - An aligned's value error, and a specifiers' mode error, is given again for each later declarator that shares it, as
 //   clang's handlers run for each (CheckInputAttributeRepeat).
 // - Each _Alignas error is each declarator's, in clang's order (check_input_alignas_declarator): its place's (a function's,
@@ -110,6 +110,13 @@ static void check_test_driver_type_attribute_recovery(CheckTest* test, const cha
         "void f(void) { for (_Alignas(3) int i = 0, j; i; i++) ; }\n"
         "_Alignas(3) _Thread_local int t, u;\n"
         "struct Z *q = &t;\n",
+        // An enum's floating mode, of the other kind: clang installs the floating type as its integer type, here the integer
+        // of its layout (check_input_mode_enum_integer), before and after its body.
+        "enum __attribute__((mode(SF))) E { A, B = A + 1 };\n_Static_assert(sizeof(enum E) == 4 && _Alignof(enum E) == 4, \"four\");\n"
+        "enum E e = B;\nstruct Z *q = &e;\nenum F { C } __attribute__((mode(DF)));\n"
+        "_Static_assert(sizeof(enum F) == 8 && _Alignof(enum F) == 8, \"eight\");\nenum F f = C;\nstruct Z *s = &f;\n"
+        "enum __attribute__((mode(XF))) G { D };\n_Static_assert(sizeof(enum G) == 16 && _Alignof(enum G) == 16, \"sixteen\");\n"
+        "enum __attribute__((mode(HF))) I { I0 };\n_Static_assert(sizeof(enum I) == 2, \"hf\");\nint k = C << 40;\nstruct Z *t = (enum I *)0;\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     static const char* const options[] = { NULL, "-Wall", "-ferror-limit=2", "-w" };

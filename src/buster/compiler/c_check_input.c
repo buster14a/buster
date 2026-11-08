@@ -3886,10 +3886,14 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
                     TypeId installed = 0;
                     const TypeId moded = check_input_attribute_mode(reader, own, mode, type, &installed);
                     // An error after which clang installs no type, an unknown or unsupported mode's (#1447): the enum goes on
-                    // without it, as one with no mode. One that still installs a type of no integer stops the reader.
-                    const bool dropped = moded == 0 && installed == type && check_input_attribute_recover(reader, own, &recovery, 0, false, false);
-                    valid = dropped || (moded != 0 && type_enum_complete(reader->types, type, moded, own->alignment_log2));
-                    reader->output->resource |= moded != 0 && !valid && reader->types->last_error == TYPE_ERROR_FULL;
+                    // without it, as one with no mode. One that still installs a floating type gives the enum the integer of
+                    // its layout (check_input_mode_enum_integer); a complex one stops the reader.
+                    const TypeId stand_in = moded == 0 && installed != type ? check_input_mode_enum_integer(reader->types, installed) : 0;
+                    const bool recovered = moded == 0 && (installed == type || stand_in != 0) && check_input_attribute_recover(reader, own, &recovery, 0, false, false);
+                    const bool dropped = recovered && installed == type;
+                    const TypeId underlying = moded != 0 ? moded : recovered ? stand_in : 0;
+                    valid = dropped || (underlying != 0 && type_enum_complete(reader->types, type, underlying, own->alignment_log2));
+                    reader->output->resource |= underlying != 0 && !valid && reader->types->last_error == TYPE_ERROR_FULL;
                     if (!dropped)
                     {
                         reader->tag_completions[tag] = i;
