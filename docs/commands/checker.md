@@ -84,13 +84,18 @@ unused-warning fixtures also check exact scope-completion tokens.
   `-flazy-system-headers`, since the others run the same either way, and
   `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
   `CheckDriverPart`; `--cpu-dispatch-only` runs the `cpu_specific` and
-  `cpu_dispatch` section alone, #1447). Its library-builtin comparisons are pinned to Clang
-  23.1.4, CI's reference: it compares `clang --version` with the release,
-  prints `expected clang 23.1.4, found …` when another release is found, and
-  skips only the plain names that release's table is known to classify
-  differently (the named list `cbuiltin_library_table_differences`: 23.1.5's
-  `strlcat` and `strlcpy`), still comparing every other name and every
-  version-independent check, and reruns them under a fake clang 23.1.5 so the
+  `cpu_dispatch` section alone, #1447; `--semantic-recovery-only` runs
+  `c_check_semantic_recovery_driver_test.c` alone, the whole output and status
+  of semantic error recovery's fixtures against clang's on the vector, scalar
+  and two-lane deferred paths, and `-c`'s refusal of each: `docs/c-checker.md`'s
+  "Semantic error recovery", #1447). Its library-builtin comparisons are pinned to Clang
+  23.1.4's official build, CI's reference: it compares `clang --version` with
+  it, prints `expected clang 23.1.4, found …` when another build is found, and
+  skips only the plain names that build's vendor is known to classify
+  differently (the named list `cbuiltin_library_table_differences`: Debian's
+  and Ubuntu's packages drop `strlcat` and `strlcpy`), still comparing every
+  other name and every version-independent check, and reruns them under a fake
+  Ubuntu clang 23.1.6 so the
   skip path is exercised under the reference too; the fake reaches `--clang`'s
   executable through a path with a space, quotes and `$;*`
   (`clang_release_wrapper`), so an awkward `--clang` path stays one word. `test-checker-corpus`
@@ -209,7 +214,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   `c_check_unused_result_driver_test.c` (#1447) compares a discarded call's result warnings (`-Wunused-result`'s
   warn_unused_result and nodiscard, a return type's, pure's and const's, the builtin table's) with Clang's whole
   output at each warning policy, both paths and one or three lanes: their spellings and messages, macros, types,
-  redeclarations, comma, conditional and for clauses, builtins and `-Wno-unused`'s groups; nested commas,
+  redeclarations, comma, conditional and for clauses (a parenthesized clause's too, #1447), builtins and `-Wno-unused`'s groups; nested commas,
   conditionals and selections (clang's `isUnusedResultAWarning`, `check_common_unused_of`), calls through pointers,
   unreachable code, keyword builtins' values and logical operators among them.
   Runtime `-Wshift-count-negative` and `-Wshift-count-overflow` warnings inspect an independently constant count
@@ -232,6 +237,14 @@ unused-warning fixtures also check exact scope-completion tokens.
   in an unselected statement expression. Retained runtime constant-fold warnings join the count traversal without being
   rendered or counted twice, preserving their order with new runtime warnings and discarded expressions;
   required-constant warnings and groups collected before a failed program keep their original publication.
+  A source comma's "left operand of comma operator has no effect" is queued where clang's `CheckCommaOperands` builds
+  it (#1447): the arithmetic scan's post-order visit runs its marker among the divisions and shift counts, ahead of the
+  full expression's conversions, and the tree walk skips it. A comma whose operands hold an index's bound
+  (`BUSTER_CHECK_REACH_BOUND`) keeps its marker in the tree walk, which orders the bound as clang checks it; bounds still
+  follow every division and count of their root. Roots the reader adds after what follows their operand (a
+  statement's condition, a switch's, or a `for` increment's discard) are taken where their
+  operand stands (`check_common_displaced_roots`), so a condition's warnings precede its body's, as clang analyzes it.
+  A statement expression's inner statements still warn before the enclosing root's own divisions and counts.
   `c_check_int_in_bool_driver_test.c` (#1447) compares clang's `-Wint-in-bool-context` and the
   `-Wtautological-constant-compare` forms of a `<<` or a conditional converted to `_Bool` (`docs/c-checker.md`)
   with complete pinned-Clang output at each policy, both paths and with `-c`.

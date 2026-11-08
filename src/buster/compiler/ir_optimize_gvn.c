@@ -883,6 +883,31 @@ static IrError ir_gvn_alias_view(IrGvnWork* work, Arena* scratch, IrFunction* re
         view.call_count = calls;
         error = ok ? IR_OK : IR_ERROR_MEMORY;
     }
+    if (error == IR_OK && !ir_debug_create(scratch, &view, f->debug))
+    {
+        error = IR_ERROR_MEMORY;
+    }
+    if (error == IR_OK)
+    {
+        ir_debug_remap(f, &view, NULL, NULL, NULL);
+        for (uint32_t k = 0; view.debug != NULL && k < view.debug->binding_count; k += 1)
+        {
+            IrDebugBinding* binding = view.debug->bindings + k;
+            binding->anchor = binding->anchor != BUSTER_IR_NONE ? ir_gvn_resolve(work->alias, binding->anchor) : BUSTER_IR_NONE;
+            if (binding->kind == IR_DEBUG_BIND_VALUE)
+            {
+                binding->value = ir_gvn_resolve(work->alias, binding->value);
+            }
+        }
+        for (uint32_t k = 0; view.debug != NULL && k < view.debug->region_count; k += 1)
+        {
+            IrDebugRegion* region = view.debug->regions + k;
+            if (region->kind == IR_DEBUG_BIND_VALUE)
+            {
+                region->value = ir_gvn_resolve(work->alias, region->value);
+            }
+        }
+    }
     uint32_t extra = 0;
     uint32_t call = 0;
     for (uint32_t i = 0; error == IR_OK && i < f->instruction_count; i += 1)

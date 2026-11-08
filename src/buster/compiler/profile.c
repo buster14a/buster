@@ -15,8 +15,9 @@
 //                            [--executable PATH | --build NAME PATH]... --list ARGUMENT... [--list ARGUMENT...]...
 //
 // - ab runs `TREE/build/compiler ARGUMENT...` (or TREE itself, when it is a file) for every tree, every argument list
-//   and every round, the trees in an order that rotates by round, each run pinned to --cpu and under --lock (the
-//   9700X's exclusive.sh), which a CI job can then take between two runs. Comparing builds in separate processes has
+//   and every round, the trees in each round's order of a Williams design (profile_ab_tree: each follows each other
+//   equally often), each run pinned to --cpu and under --lock (the 9700X's exclusive.sh), which a CI job can then take
+//   between two runs. Comparing builds in separate processes has
 //   about 2% of noise on the 9700X, a single round more; variants inside one process (benchmark-lexer's, build.sh
 //   lexer-variant) take turns in each pass, and a copy of the reference among them measures what placement alone moves.
 // - hot-loops reads `objdump -d --no-show-raw-insn` of the executable and `perf script -F ip,sym,symoff,dsoff` of its
@@ -35,8 +36,8 @@
 //   by their mispredictions, at addresses less the load bias (where a PIE was mapped, from --show-mmap-events), so
 //   that `addr2line` and objdump of the file take them; with the file's disassembly, each with its instruction.
 // - time-runs times whole processes of this executable (or of each --executable, and of each --build's placements),
-//   one per argument list, executable and copy in each run, in an order that rotates by run, after warm-up runs in
-//   that order: each one's wall time from its exec's release to wait4's return, its user and system time, peak
+//   one per argument list, executable and copy in each run, in each run's order of a Williams design (profile_ab_tree:
+//   each slot follows each other equally often), after warm-up runs in slot order: each one's wall time from its exec's release to wait4's return, its user and system time, peak
 //   resident set and page faults, from wait4's rusage, and its user cycles and instructions (perf_event_open from its
 //   exec, all its threads), every run's line and each one's medians. With --after-scalar MS, an untimed scalar loop
 //   runs MS ms before each timed process, on the same CPU, the state a compiler starts in after lighter work. Each
@@ -1523,11 +1524,21 @@ static bool profile_branch_misses(Arena* arena, ProfileReport* report, String8 b
 // ---------------------------------------------------------------------------------------------------------------------
 // ab
 
-// The tree that run `position` of a round runs: the trees rotate by one each round, so that each runs at every place
-// in turn.
+// The tree that run `position` of a round runs (#1311): round r takes row r of a Williams design, a Latin square
+// whose rows each run every tree once, and over its period every tree runs at every place and directly after every
+// other tree equally often. A rotation ran the trees in one cyclic order from different starts, so each tree followed
+// the same one in every round, and a process starts on the caches and branch predictors the one before it left. The
+// first row is 0, 1, n - 1, 2, n - 2, ..., whose steps from one place to the next are each of 1 to n - 1 once; row r
+// adds r to each, modulo n. With an even count the n rows are the period, each tree following each other once; with
+// an odd count the n rows and then each of them reversed, 2n rows, each following each other twice. Two trees still
+// alternate, and three take the rotation's first three rounds.
 static uint64_t profile_ab_tree(uint64_t round, uint64_t position, uint64_t tree_count)
 {
-    return (round + position) % tree_count;
+    const uint64_t period = tree_count % 2 == 0 ? tree_count : 2 * tree_count;
+    const uint64_t row = round % period;
+    const uint64_t place = row < tree_count ? position : tree_count - 1 - position;
+    const uint64_t first = place == 0 ? 0 : place % 2 == 1 ? (place + 1) / 2 : tree_count - place / 2;
+    return (first + row) % tree_count;
 }
 
 typedef struct ProfileAb ProfileAb;
@@ -2122,7 +2133,7 @@ static char** profile_time_make_copies(Arena* arena, const ProfileTimeRuns* t, c
     return copying ? paths : 0;
 }
 
-// The warm-ups in slot order, then the runs, each with every slot in turn from an order that rotates by run
+// The warm-ups in slot order, then the runs, each with every slot in turn in the run's order of a Williams design
 // (profile_ab_tree's), then each slot's medians and, with more than one executable or copies, each list's comparison
 // of its builds (profile_time_compare): by wall time, and by user cycles where every process was counted. Returns how
 // many processes failed: an exit status other than its slot's first warm-up's, a signal, or a process that didn't

@@ -40,9 +40,10 @@ struct CheckDriverPart
 
 static CheckDriverPart check_driver_part = { .index = 0, .count = 1 };
 
-// Whether the clang this run compares with is the pinned reference release (BUSTER_CLANG_REFERENCE_VERSION), from
-// run_checker_driver_tests, and the release it named: the library builtin comparisons that depend on its table then
-// skip only the names that release is known to classify differently, and report them as a version difference.
+// Whether the clang this run compares with is the pinned reference release's official build
+// (BUSTER_CLANG_REFERENCE_VERSION), from run_checker_driver_tests, and the build it named ("23.1.4", "Ubuntu 23.1.6"):
+// the library builtin comparisons that depend on its table then skip only the names that build is known to classify
+// differently, and report them as a build difference.
 static bool check_driver_clang_reference = true;
 static char check_driver_clang_version[64] = "";
 
@@ -6644,6 +6645,7 @@ static void check_test_driver_declspec_literals(CheckTest* test, const char* cla
 #include "c_check_musttail_driver_test.c"
 #include "c_check_label_attribute_driver_test.c"
 #include "c_check_resume_driver_test.c"
+#include "c_check_semantic_recovery_driver_test.c"
 #include "c_check_empty_declaration_driver_test.c"
 #include "c_check_block_attribute_driver_test.c"
 #include "c_check_resume_corpus_test.c"
@@ -7112,6 +7114,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 #include "c_check_convention_driver_test.c"
 #include "c_check_interrupt_driver_test.c"
 #include "c_check_tier1_driver_test.c"
+#include "c_check_tier0_inline_driver_test.c"
 #include "c_check_tier1_if_convert_test.c"
 #include "c_check_string_pool_driver_test.c"
 #include "c_check_frame_pointer_driver_test.c"
@@ -7680,6 +7683,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool sign_compare_only = false;
     // --cpu-dispatch-only: the cpu_specific and cpu_dispatch section alone (#1447).
     bool cpu_dispatch_only = false;
+    // --semantic-recovery-only: the semantic error recovery section alone (#1447).
+    bool semantic_recovery_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -7699,6 +7704,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             cpu_dispatch_only = true;
         }
+        else if (strcmp(argv[i], "--semantic-recovery-only") == 0)
+        {
+            semantic_recovery_only = true;
+        }
         else if (strcmp(argv[i], "--lazy-system-headers") == 0)
         {
             lazy = true;
@@ -7717,12 +7726,13 @@ static int run_checker_driver_tests(int argc, char** argv)
             options = false;
         }
     }
-    options &= !(sign_compare_only && cpu_dispatch_only) && (!(sign_compare_only || cpu_dispatch_only) || (!lazy && check_driver_part.count == 1));
+    const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)semantic_recovery_only;
+    options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
-    const bool focused = sign_compare_only || cpu_dispatch_only;
+    const bool focused = focuses != 0;
     check_test_expect(&test, options, "driver test options are recognized");
-    // The library-builtin table is pinned to BUSTER_CLANG_REFERENCE_VERSION: a different clang release is reported with
-    // both versions, and the library comparisons then skip only the names that depend on its table (#1131).
+    // The library-builtin table is pinned to BUSTER_CLANG_REFERENCE_VERSION's official build: a different clang build is
+    // reported with both, and the library comparisons then skip only the names that depend on its table (#1131).
     check_driver_clang_reference = clang_reference_report(clang, check_driver_clang_version, sizeof(check_driver_clang_version));
     check_test_expect(&test, pp_test_clang_reference(), "clang reference: version comparison and mismatch reporting");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
@@ -8212,6 +8222,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_cpu_dispatch(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
     }
+    if (temporary && semantic_recovery_only)
+    {
+        check_test_driver_semantic_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+    }
     const char* clang_arguments[] = { "-std=gnu17", "-w" };
     if (temporary && !focused && !lazy && check_test_driver_takes())
     {
@@ -8325,6 +8339,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_lane_attributes(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_semantic_recovery(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
@@ -8757,6 +8775,14 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_tier1_inline(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier0_inline(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier0_inline_lanes(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

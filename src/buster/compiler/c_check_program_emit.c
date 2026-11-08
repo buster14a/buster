@@ -576,12 +576,34 @@ static void check_helper_print_report(FILE* stream, const CheckHelperReport* rep
 // columns, its functions' Tier 0 code and what their fixups and rows need until the merge (`scratch`), and its
 // functions' bytes (`bytes`); and with --tier1, every lane's (the first's too) for Tier 1's pipeline.
 typedef struct CheckProgramLaneArenas CheckProgramLaneArenas;
+// A lane's cache of the callees Tier 0 inlines (#1398, c_check_tier0_inline.c): per body, its state and its expanded
+// stream, in `cache`, for the emission's inline table's generation.
+typedef struct CheckTier0InlineLane CheckTier0InlineLane;
+struct CheckTier0InlineLane
+{
+    Arena cache;
+    uint64_t generation;
+    Tier0Function* functions;
+    uint8_t* states;
+    // Tarjan's search of the callees' graph (check_tier0_inline_prepare), per body: its visit's index plus one and its
+    // low link, and once settled its height; the component stack, the search's stack of bodies and each one's next row,
+    // and the visits so far.
+    uint32_t* indices;
+    uint32_t* links;
+    uint32_t* heights;
+    uint32_t* components;
+    uint32_t* path;
+    uint32_t* cursors;
+    uint32_t visits;
+};
+
 struct CheckProgramLaneArenas
 {
     Arena output;
     Arena scratch;
     Arena bytes;
     CheckTier1Lane tier1;
+    CheckTier0InlineLane tier0_inline;
 };
 
 // How check_program_emit_lanes runs a unit's functions on lanes, and what it ran. The caller keeps it until it is done
@@ -660,6 +682,8 @@ struct CheckProgramLanes
     bool tier1_no_lifetimes;
     // --tier1-no-inline keeps every call of the unit's always_inline functions (#1282's comparison).
     bool tier1_no_inline;
+    // --tier0-no-inline keeps Tier 0's (#1398's comparison, c_check_tier0_inline.c).
+    bool tier0_no_inline;
     // --tier1-schedule's variant (BUSTER_CHECK_TIER1_SCHEDULE_*, #172's measurement): none by default.
     uint8_t tier1_schedule;
     CheckTier1Report tier1_report;
@@ -695,6 +719,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
 static void check_tier1_lane_release(CheckTier1Lane* lane);
 // Defined in c_check_tier1_inline.c (#1282): the unit's inline callees by symbol, in `arena`, or false for none.
 static bool check_tier1_inline_table(const CheckProgram* program, const CheckProgramLowered* lowered, uint32_t symbol_count, Arena* arena, CheckTier1Inline* table);
+// Gives `table` a new generation, which no lane's cache is valid for: its bodies are lowered again.
+static void check_tier1_inline_renew(CheckTier1Inline* table);
 static uint32_t check_tier1_operation(CheckTier1Outcome outcome);
 // Prints `report`, a line on `stream`: how many functions each tier compiled, and why Tier 1 refused the others.
 static void check_tier1_print_report(FILE* stream, const CheckTier1Report* report);
@@ -730,6 +756,8 @@ static void check_program_lanes_release(CheckProgramLanes* lanes)
         arena_release(&lanes->arenas[lane].scratch);
         arena_release(&lanes->arenas[lane].bytes);
         check_tier1_lane_release(&lanes->arenas[lane].tier1);
+        arena_release(&lanes->arenas[lane].tier0_inline.cache);
+        lanes->arenas[lane].tier0_inline = (CheckTier0InlineLane){ 0 };
     }
     if (lanes != NULL)
     {
@@ -755,6 +783,10 @@ static void check_program_lanes_settle(CheckProgramLanes* lanes)
 // thread's first maps, protects and faults in none of their pages again (#442). Never released: the thread's largest
 // unit's columns, of which only the pages its bodies touched are resident.
 static _Thread_local Arena check_program_thread_columns;
+// Lane 0's cache of Tier 0's expanded inline callees without lanes (#1398, c_check_tier0_inline.c): the calling thread's,
+// as its columns are, so that an emission without lanes inlines what one with them does and makes the same object.
+// Its pages are popped by the next emission's first use; never released.
+static _Thread_local CheckTier0InlineLane check_program_thread_inline;
 
 // A body's code, as its lane made it (check_program_emit_code): its bytes, encoded after branch sizing; each marked
 // instruction's end (x86_encode's fixup ends) and each label's offset (or UINT32_MAX for a record past the code), and a
@@ -768,6 +800,9 @@ struct CheckEmitBody
     uint64_t length;
     CheckDebugValueSpan* debug_spans;
     uint32_t debug_span_count;
+    CheckDebugLocation* debug_locations;
+    uint32_t* debug_location_first;
+    uint32_t debug_location_count;
     uint32_t* fixup_ends;
     uint32_t* label_offsets;
     uint32_t* asm_offsets;
@@ -811,6 +846,8 @@ struct CheckEmitLane
     Arena* columns;
     // With --tier1, its arenas for Tier 1's pipeline (CheckProgramLaneArenas.tier1); null without.
     CheckTier1Lane* tier1;
+    // With Tier 0's inlining (CheckEmitRun.tier0_inline), its cache of expanded callees; null without.
+    CheckTier0InlineLane* tier0_inline;
     bool prepared;
     bool ready;
 };
@@ -861,6 +898,11 @@ struct CheckEmitRun
     // parts' lowering, meet, and take their code (check_program_emit_lane, check_program_emit_item,
     // check_program_emit_shared).
     const CheckTier1Inline* tier1_inline;
+    // The unit's inline callees for Tier 0's splice (#1398, c_check_tier0_inline.c), unless --tier0-no-inline; and the
+    // table either tier reads, which makes the emission's two epochs (a lowering for every part, then their code): null
+    // where neither inlines.
+    const CheckTier1Inline* tier0_inline;
+    const CheckTier1Inline* inline_table;
     // The driver's --time-stages clock (c_check_clock.c), which the calling thread's laps charge per function when it
     // compiles the bodies alone (check_program_emit_alone): null on the lanes, whose run its caller's mark charges.
     CheckClock* stage_clock;
@@ -1127,6 +1169,11 @@ static __attribute__((noinline, cold)) void check_program_emit_patchable(CheckEm
         body->debug_spans[s].begin += body->debug_spans[s].begin != 0 ? entry : 0;
         body->debug_spans[s].end += entry;
     }
+    for (uint32_t r = 0; run->sources && r < body->debug_location_count; r += 1)
+    {
+        body->debug_locations[r].begin += entry;
+        body->debug_locations[r].end += entry;
+    }
     if (run->unwind)
     {
         UnwindFunction* frame = &run->frames[b];
@@ -1142,6 +1189,67 @@ static __attribute__((noinline, cold)) void check_program_emit_patchable(CheckEm
     }
     body->sled = sled;
     body->prefix = prefix;
+}
+
+// Resolve optional optimized locations after branch sizing, then group by stable source local in one count/place/fill
+// pass. The input remains record-relative; only these retained bytes acquire patchable-entry adjustments. All arrays
+// are lane-owned and disjoint, and their counts/pointers remain unchanged across these bounded scans.
+static CheckProgramStatus check_program_emit_locations(CheckEmitBody* body, const EmittedCode* code, uint32_t locals, const uint32_t* offsets, Arena* scratch)
+{
+    const EmittedLocalRange* ranges = code->local_ranges;
+    const uint32_t count = code->local_range_count;
+    CheckProgramStatus status = count == 0 || ranges != NULL ? CHECK_PROGRAM_OK : CHECK_PROGRAM_BACKEND;
+    if (status == CHECK_PROGRAM_OK && count != 0)
+    {
+        uint32_t* first = body->debug_location_first;
+        CheckDebugLocation* locations = body->debug_locations;
+        uint32_t* next = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)locals + 1);
+        status = first != NULL && locations != NULL && next != NULL ? CHECK_PROGRAM_OK : CHECK_PROGRAM_RESOURCE;
+        if (status == CHECK_PROGRAM_OK)
+        {
+            memset(first, 0, ((uint64_t)locals + 1) * sizeof(uint32_t));
+            for (uint32_t r = 0; status == CHECK_PROGRAM_OK && r < count; r += 1)
+            {
+                const EmittedLocalRange range = ranges[r];
+                const bool valid = range.local < locals && range.begin < range.end && range.end <= code->count && range.value_bytes <= 8;
+                status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_BACKEND;
+                if (valid && offsets[range.begin] < offsets[range.end])
+                {
+                    first[range.local + 1] += 1;
+                }
+            }
+            for (uint32_t local = 0; status == CHECK_PROGRAM_OK && local < locals; local += 1)
+            {
+                first[local + 1] += first[local];
+                next[local] = first[local];
+            }
+            for (uint32_t r = 0; status == CHECK_PROGRAM_OK && r < count; r += 1)
+            {
+                const EmittedLocalRange range = ranges[r];
+                const uint32_t begin = offsets[range.begin];
+                const uint32_t end = offsets[range.end];
+                if (begin < end)
+                {
+                    const uint32_t index = next[range.local];
+                    const bool ordered = index == first[range.local] || locations[index - 1].end <= begin;
+                    status = ordered ? CHECK_PROGRAM_OK : CHECK_PROGRAM_BACKEND;
+                    if (ordered)
+                    {
+                        locations[index] = (CheckDebugLocation){
+                            .home = range.home,
+                            .value = range.value,
+                            .begin = begin,
+                            .end = end,
+                            .value_bytes = range.value_bytes,
+                        };
+                        next[range.local] = index + 1;
+                    }
+                }
+            }
+            body->debug_location_count = status == CHECK_PROGRAM_OK ? first[locals] : 0;
+        }
+    }
+    return status;
 }
 
 // Body `b`'s code after its code generator (Tier 0's or Tier 1's), on its lane (`lane`): branch sizing, encoding into
@@ -1168,6 +1276,9 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     // Its frame's rows (#1056, emitted_unwind), which the tables read once the lanes are done.
     EmissionFrameRow* frame_rows = run->unwind && code->frame_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, EmissionFrameRow, code->frame_count) : 0;
     body->debug_spans = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDebugValueSpan, (uint64_t)code->source_count + 1) : NULL;
+    const uint32_t locals = run->lowered->functions[b].local_count;
+    body->debug_locations = run->sources && code->local_range_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDebugLocation, code->local_range_count) : NULL;
+    body->debug_location_first = run->sources && code->local_range_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)locals + 1) : NULL;
     const uint64_t work_mark = scratch->length;
     uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)code->count + 1);
     // patchable_function_entry's NOPs (#1447): room for them after the code, which check_program_emit_patchable moves past
@@ -1180,6 +1291,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     uint8_t* encoded = arena_push(bytes, byte_capacity + sled, 16);
     bool valid = offsets != 0 && body->fixup_ends != 0 && encoded != 0 && (code->label_count == 0 || body->label_offsets != 0) &&
                  (naked == 0 || naked->label_count == 0 || body->asm_offsets != 0) && (!run->sources || (body->row_offsets != 0 && body->row_tokens != 0 && body->debug_spans != NULL)) &&
+                 (!run->sources || code->local_range_count == 0 || (body->debug_locations != NULL && body->debug_location_first != NULL)) &&
                  (!run->unwind || code->frame_count == 0 || frame_rows != 0);
     body->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_RESOURCE;
     // A failure past the encoding is the backend's, but where a frame's room ran out.
@@ -1222,10 +1334,17 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
                     const bool tail = code->local_homes != NULL && function->kinds[e] == BUSTER_TYPED_TAIL_CALL;
                     const uint32_t begin = offsets[code->source_records[e]];
                     const uint32_t end = offsets[code->source_records[e + 1]];
-                    if (!tail && begin < end)
+                    const bool known = code->source_origins == NULL || code->source_origins[e] != BUSTER_EMISSION_NO_ORIGIN;
+                    if (!tail && known && begin < end)
                     {
                         spans[body->debug_span_count++] = (CheckDebugValueSpan){ .begin = begin, .end = end, .token = check_debug_origin_token(code->source_origins, tokens, e, program->bodies[b].declaration) };
                     }
+                }
+                if (valid)
+                {
+                    const CheckProgramStatus locations = check_program_emit_locations(body, code, locals, offsets, scratch);
+                    valid = locations == CHECK_PROGRAM_OK;
+                    failure = valid ? failure : locations;
                 }
             }
             check_clock_lap(run->stage_clock, CHECK_STAGE_DEBUG);
@@ -1382,6 +1501,10 @@ typedef enum CheckEmitHalf
     CHECK_EMIT_HALF_CODE,
 } CheckEmitHalf;
 
+// Defined in c_check_tier0_inline.c (#1398): body `b`'s typed stream with its calls of the unit's inline callees spliced
+// in (tier0_inline), into *result in `arena`, or false where it has none or the splice refuses it.
+static bool check_tier0_inline_body(CheckEmitRun* run, CheckEmitLane* lane, uint32_t b, Arena* arena, Tier0Inlined* result);
+
 // A part's lowering (check_lower_part) on lane `lane`.
 static void check_program_emit_lower_half(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part)
 {
@@ -1408,9 +1531,9 @@ static void check_program_emit_lower_half(CheckEmitRun* run, CheckEmitLane* lane
         function->frame_pointer = run->program->frame_pointer;
         // Stack-clash protection's probes (#177), which Tier 0's frame and allocations take, and Tier 1's.
         function->probe_stack = run->program->probe_stack;
-        if (run->tier1_inline != NULL)
+        if (run->inline_table != NULL)
         {
-            run->tier1_inline->ready[b] = 1;
+            run->inline_table->ready[b] = 1;
         }
     }
     check_clock_lap(run->stage_clock, CHECK_STAGE_LOWER);
@@ -1473,7 +1596,16 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
             {
                 // Tier 0's code as the emission takes it (emitted_from_tier0), with its frame's events where the tables
                 // are written: a naked function's templates have none.
-                const Tier0Code compiled = naked != 0 ? naked->code : run->scalar ? tier0_compile_scalar(function, lane->scratch) : tier0_compile(function, lane->scratch);
+                // With Tier 0's inlining (#1398), the body's stream with its inline callees' calls spliced in, its code's
+                // entries and locals then put back in terms of its own (tier0_inline_code).
+                Tier0Inlined inlined;
+                const bool spliced = naked == 0 && lane->tier0_inline != NULL && check_tier0_inline_body(run, lane, b, lane->scratch, &inlined);
+                const Tier0Function* source = spliced ? &inlined.function : function;
+                Tier0Code compiled = naked != 0 ? naked->code : run->scalar ? tier0_compile_scalar(source, lane->scratch) : tier0_compile(source, lane->scratch);
+                if (spliced)
+                {
+                    tier0_inline_code(&compiled, function, &inlined, lane->scratch);
+                }
                 run->codes[b] = emitted_from_tier0(&compiled, run->unwind && naked == 0, run->sources, naked != 0, lane->scratch);
             }
             check_clock_lap(run->stage_clock, CHECK_STAGE_TIER0);
@@ -1538,6 +1670,7 @@ static bool check_program_emit_lane_arenas(CheckEmitRun* run, CheckEmitLane* lan
         lane->columns = &arenas->scratch;
     }
     lane->tier1 = run->tier1_outcomes != NULL ? &run->lanes->arenas[index].tier1 : NULL;
+    lane->tier0_inline = run->tier0_inline == NULL ? NULL : run->lanes != NULL ? &run->lanes->arenas[index].tier0_inline : &check_program_thread_inline;
     return valid;
 }
 
@@ -1646,7 +1779,7 @@ static void check_program_emit_lane(void* argument)
     const uint32_t index = lane_index();
     CheckEmitLane* lane = run->lane_states + index;
     const uint64_t parts = lane_parts_by_cost(run->costs, run->body_count, run->boundaries, run->orders[index]);
-    if (run->tier1_inline != NULL)
+    if (run->inline_table != NULL)
     {
         // Every part's lowering, then, once the lanes have met, every part's code (#1282).
         for (uint64_t taken = lane_take(parts); taken < parts; taken = lane_take(parts))
@@ -1747,7 +1880,7 @@ static void check_program_emit_item(CheckEmitRun* run, CheckEmitLane* lane, uint
     const bool lowering = item < parts;
     const uint64_t place = lowering ? item : item - parts;
     // A part's code waits for its lowering, or with inlining (#1282) for every part's: each was taken before any code was.
-    for (uint64_t other = run->tier1_inline != NULL ? 0 : place; !lowering && other < (run->tier1_inline != NULL ? parts : place + 1); other += 1)
+    for (uint64_t other = run->inline_table != NULL ? 0 : place; !lowering && other < (run->inline_table != NULL ? parts : place + 1); other += 1)
     {
         if ((__atomic_load_n(lowered + other, __ATOMIC_ACQUIRE) & ~1u) == 0)
         {
@@ -1977,8 +2110,8 @@ static void check_program_emit_shared(CheckEmitRun* run, CheckEmitBoard* board, 
     run->part_count = (uint32_t)parts;
     CheckEmitShare* share = board->shares + index;
     // With inlining (#1282), an epoch of the parts' lowering and then one of their code; else one of both halves.
-    const CheckEmitHalf halves[2] = { run->tier1_inline != NULL ? CHECK_EMIT_HALF_LOWER : CHECK_EMIT_HALF_BOTH, CHECK_EMIT_HALF_CODE };
-    for (uint32_t h = 0; h < (run->tier1_inline != NULL ? 2u : 1u); h += 1)
+    const CheckEmitHalf halves[2] = { run->inline_table != NULL ? CHECK_EMIT_HALF_LOWER : CHECK_EMIT_HALF_BOTH, CHECK_EMIT_HALF_CODE };
+    for (uint32_t h = 0; h < (run->inline_table != NULL ? 2u : 1u); h += 1)
     {
         const uint64_t epoch = (__atomic_load_n(&share->ticket, __ATOMIC_RELAXED) >> 32) + 1;
         share->run = run;
@@ -2760,11 +2893,16 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         // A body a failure before it left unreached has no outcome, never success.
         memset(run.tier1_outcomes, 0, (uint64_t)count * sizeof(CheckTier1Outcome));
     }
-    // The unit's inline callees (#1282), unless --tier1-no-inline keeps every call.
+    // The unit's inline callees (#1282, #1398), unless --tier1-no-inline and --tier0-no-inline keep every call: Tier 1's
+    // with --tier1, and Tier 0's for the bodies it compiles. A unit without them runs one epoch.
     CheckTier1Inline tier1_inline = { 0 };
-    if (tier1 && run.tier1_outcomes != 0 && !lanes->tier1_no_inline && check_tier1_inline_table(program, &result->lowered, access_count, scratch, &tier1_inline))
+    const bool tier1_inlines = tier1 && run.tier1_outcomes != 0 && !lanes->tier1_no_inline;
+    const bool tier0_inlines = valid && (lanes == NULL || !lanes->tier0_no_inline);
+    if ((tier1_inlines || tier0_inlines) && check_tier1_inline_table(program, &result->lowered, access_count, scratch, &tier1_inline))
     {
-        run.tier1_inline = &tier1_inline;
+        run.inline_table = &tier1_inline;
+        run.tier1_inline = tier1_inlines ? &tier1_inline : NULL;
+        run.tier0_inline = tier0_inlines ? &tier1_inline : NULL;
     }
     if (tier1 && run.tier1_outcomes != 0 && !check_tier1_ready)
     {
@@ -2926,10 +3064,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             {
                 memset(run.tier1_outcomes, 0, (uint64_t)count * sizeof(CheckTier1Outcome));
             }
-            if (run.tier1_inline != NULL)
+            if (run.inline_table != NULL)
             {
-                // The bodies are lowered again (#1282).
+                // The bodies are lowered again (#1282), and the lanes' caches of their streams are stale (#1398).
                 memset(tier1_inline.ready, 0, count);
+                check_tier1_inline_renew(&tier1_inline);
             }
             run.stage_clock = stage_clock;
             // The parts read the TSC for the lowering's rows on one lane alone, whose clock takes them; on several, the
@@ -3369,7 +3508,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             Tier0Home* homes = BUSTER_ARENA_PUSH_ARRAY(output, Tier0Home, (uint64_t)locals + 1);
             uint8_t* classes = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, (uint64_t)locals + 1);
             CheckDebugValueSpan* spans = BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugValueSpan, (uint64_t)body->debug_span_count + 1);
-            valid = bindings != NULL && homes != NULL && classes != NULL && spans != NULL;
+            const uint32_t location_count = body->debug_location_count;
+            CheckDebugLocation* locations = location_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugLocation, location_count) : NULL;
+            uint32_t* location_first = location_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)locals + 1) : NULL;
+            valid = bindings != NULL && homes != NULL && classes != NULL && spans != NULL && (location_count == 0 || (locations != NULL && location_first != NULL));
             if (valid)
             {
                 if (locals != 0)
@@ -3389,7 +3531,22 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 {
                     memcpy(spans, body->debug_spans, (uint64_t)body->debug_span_count * sizeof(*spans));
                 }
-                *value = (CheckDebugBody){ .bindings = bindings, .homes = homes, .classes = classes, .spans = spans, .local_count = locals, .span_count = body->debug_span_count };
+                if (location_count != 0)
+                {
+                    memcpy(locations, body->debug_locations, (uint64_t)location_count * sizeof(*locations));
+                    memcpy(location_first, body->debug_location_first, ((uint64_t)locals + 1) * sizeof(*location_first));
+                }
+                *value = (CheckDebugBody){
+                    .bindings = bindings,
+                    .homes = homes,
+                    .classes = classes,
+                    .spans = spans,
+                    .locations = locations,
+                    .location_first = location_first,
+                    .local_count = locals,
+                    .span_count = body->debug_span_count,
+                    .location_count = location_count,
+                };
             }
             if (body->row_count != 0)
             {

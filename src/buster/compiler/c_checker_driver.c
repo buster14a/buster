@@ -1982,6 +1982,32 @@ static CheckWarningSeverity check_driver_legacy_severity(Preprocessor* pp, const
     return severity;
 }
 
+// The reader's warning events to publish (#1447): clang's ActOnEndOfTranslationUnit gives no unused file-scope
+// declaration's warning once an error has occurred (`errors`), so a rejected unit's unused functions' and file-scope
+// objects' warnings, which complete at the unit's end, are left out of a copy in `scratch`. A unit without an error
+// publishes the events as they are, with no copy. Whether there was room.
+static bool check_driver_unit_end_warnings(const CheckWarningEvents* events, bool errors, Arena* scratch, CheckWarningEvents* view)
+{
+    *view = *events;
+    bool valid = true;
+    if (errors && events->count != 0)
+    {
+        CheckWarningEvent* kept = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckWarningEvent, events->count);
+        valid = kept != NULL;
+        uint32_t count = 0;
+        for (uint32_t i = 0; valid && i < events->count; i += 1)
+        {
+            const CheckWarningEvent* event = events->events + i;
+            const bool unused = event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION;
+            kept[count] = *event;
+            count += !(unused && event->completion_kind == CHECK_WARNING_COMPLETE_TU_END);
+        }
+        view->events = valid ? kept : events->events;
+        view->count = valid ? count : events->count;
+    }
+    return valid;
+}
+
 // Each parameter has its own specifiers. Unlike a declaration's comma-separated declarators, a parameter cannot
 // inherit a typedef spelling from the preceding parameter or the function's return type.
 static uint32_t check_driver_parameter_spelling(const Parser* parser, const CheckInput* input, uint32_t token)
@@ -5409,6 +5435,8 @@ struct CheckDriverCommand
     bool tier1_gvn;
     bool tier1_no_lifetimes;
     bool tier1_no_inline;
+    // --tier0-no-inline keeps Tier 0's calls of always_inline functions (#1398).
+    bool tier0_no_inline;
     // --tier1-schedule=post|pre (#172): BUSTER_CHECK_TIER1_SCHEDULE_*.
     uint8_t tier1_schedule;
     CheckTier1Report* tier1_report;
@@ -5820,7 +5848,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     // The musttail returns' errors (c_check_musttail.c), each clang's, with the three below.
                     CheckMusttails musttails = { 0 };
                     // The reader's reports after checking are unavailable members' uses (check_input_member_uses, #147).
-                    const bool expression_valid = input_valid && stream.report_count == 0 && input.report_count == 0;
+                    // A unit whose only reports are recovered ones (#1447, CheckInput.recovered_valid) was checked as a valid
+                    // one is, and its diagnostics are found so; its result still fails, and nothing is emitted.
+                    const bool checked_valid = input_valid || input.recovered_valid;
+                    const bool expression_valid = checked_valid && stream.report_count == 0 && (input.report_count == 0 || input.recovered_valid);
                     const bool musttails_checked = !expression_valid || repairing || check_musttail_run(&musttails, &input, checking, &stream, &types, output_arena, scratch);
                     CheckDriverDiagnostic fallback[5] = { 0 };
                     CheckDriverDiagnostic* pushed = BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverDiagnostic, 5 + (uint64_t)musttails.count);
@@ -5988,11 +6019,16 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         }
                     }
                     CheckCommonShiftWarnings shift_warnings = { 0 };
-                    if (!check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, quiet, scratch) ||
+                    // Any error the unit has, whose unit-end warnings clang leaves out (check_driver_unit_end_warnings).
+                    const bool unit_errors = pp->errors != 0 || parse_failed || input.report_count != 0 || stream.report_count != 0 || additional_count != 0;
+                    CheckWarningEvents input_warnings;
+                    const bool unit_end_ready = check_driver_unit_end_warnings(&input.warning_events, unit_errors, scratch, &input_warnings);
+                    if (!unit_end_ready ||
+                        !check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, quiet, scratch) ||
                         !check_driver_reports(checking, recovered, pp, publication_end, &input, &stream, &types, repairing ? &repair : NULL,
                                               original_pragmas_ready ? &original_pragmas : NULL, additional, additional_count,
                                               NULL, 0, quiet, &shift_warnings, scratch) ||
-                        !check_driver_warning_events_at(checking, pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, publication_end, scratch) ||
+                        !check_driver_warning_events_at(checking, pp, &input, &types, &input_warnings, repairing ? &repair : NULL, publication_end, scratch) ||
                         !check_driver_warning_events_at(checking, pp, &input, &types, &stream.warning_events, repairing ? &repair : NULL, publication_end, scratch))
                     {
                         fprintf(errors, "fatal error: checker diagnostic capacity exhausted\n");
@@ -6004,7 +6040,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         check_driver_dump(&input.graph, &stream, &types, scratch);
                     }
-                    result = !driver_fatal && ready && expression_valid && additional_count == 0 && !repairing && pp->errors == 0 &&
+                    result = !driver_fatal && ready && expression_valid && !input.recovered_valid && additional_count == 0 && !repairing && pp->errors == 0 &&
                              !pp->diagnostic_collection_failed && !pp->history_failed ? 0 : 1;
                     CheckProgram program;
                     CheckDataPrepared data = { 0 };
@@ -6035,7 +6071,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .discard_huge = lanes != NULL && lanes->units_lane != NULL && check_units_discard_huge(lanes->units_lane),
                     });
                     const bool program_diagnostics = result == 0 ||
-                        (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && pp->errors != 0 &&
+                        (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && (pp->errors != 0 || input.recovered_valid) &&
                          !pp->diagnostic_collection_failed && !pp->history_failed);
                     CheckInput diagnostic_input;
                     const CheckInput* program_input = &input;
@@ -6776,6 +6812,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             lanes->tier1_no_inline = true;
         }
+        else if (strcmp(arguments[i], "--tier0-no-inline") == 0)
+        {
+            lanes->tier0_no_inline = true;
+        }
         else if (strcmp(arguments[i], "--tier1-gvn") == 0)
         {
             lanes->tier1_gvn = true;
@@ -7089,6 +7129,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_gvn = lanes->tier1_gvn,
         .tier1_no_lifetimes = lanes->tier1_no_lifetimes,
         .tier1_no_inline = lanes->tier1_no_inline,
+        .tier0_no_inline = lanes->tier0_no_inline,
         .tier1_schedule = lanes->tier1_schedule,
         .tier1_report = &lanes->tier1_report,
         .tier1_refusals = lanes->tier1_refusals,

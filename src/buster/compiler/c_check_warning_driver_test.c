@@ -452,6 +452,12 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 8,
     },
     {
+        .name = "a compound literal's constant conversions follow its full expression's counts, in conditions and increments too",
+        .source = "struct S{int i;char c;};int f(int x){x=(struct S){x,300}.c+(x<<33);if((struct S){x,301}.c+(x<<34))return x<<32;"
+                  "for(int i=0;i<2;i+=(struct S){1,302}.c+(x<<35)){struct S s={1,303};x+=s.c+(x<<36);}return x;}\n",
+        .warnings = 9,
+    },
+    {
         .name = "_Atomic brace elements and members take no constant conversion",
         .source = "_Atomic short a0[2]={32768,1};struct{_Atomic char c;int i;}s={300,1};void f(void){_Atomic short a3[2]={32768,70000};(void)a3;}\n",
     },
@@ -1633,6 +1639,55 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         // and stays unevaluated. (A statement expression inside a variable array's operand isn't supported yet.)
         .name = "a statement expression decaying from a variable array stays unevaluated",
         .source = "void g(int n) {\n    char vv[n][n];\n    (void)sizeof(({ 3; vv[0]; }));\n    (void)sizeof(({ 4; vv; }));\n}\n",
+    },
+    {
+        // -Wsign-compare's operands keep their declared typedef's spelling (#1100): a parameter's typedef, a cast's,
+        // and sizeof's `__size_t`, each with clang's (aka) of what the sugar hides; the same sugar survives the
+        // operands' shared-type arithmetic.
+        .name = "sign-compare operands keep their typedef spelling",
+        .source = "typedef int wchar_t;\ntypedef unsigned long size_t;\ntypedef int myint;\ntypedef signed char tiny;\n"
+                  "int s1(wchar_t wc) { return wc < 0xffU; }\n"
+                  "int s2(int n) { int a[4]; return n >= sizeof a / sizeof a[0]; }\n"
+                  "int s3(int n, size_t m) { return n < m; }\n"
+                  "int s4(myint n, unsigned u) { return n < u; }\n"
+                  "int s5(int n, size_t m) { return n < m + 1; }\n"
+                  "int s6(int n, size_t m) { return n < 1 + m; }\n"
+                  "int s7(int n, size_t m) { return n < (m >> 1); }\n"
+                  "int s8(int n, size_t m, unsigned long u) { return n < m + u; }\n"
+                  "int s9(int n) { return n < (size_t)1; }\n"
+                  "int s10(tiny x, tiny y, unsigned u) { return x + y < u; }\n",
+        .options = { "-Wsign-compare" },
+        .warnings = 10,
+    },
+    {
+        // A format argument keeps its declared typedef's spelling (#1100), with the (aka) of what it hides.
+        .name = "format arguments keep their typedef spelling",
+        .source = "typedef unsigned long size_t;\ntypedef long ptrdiff_t;\ntypedef int wchar_t;\ntypedef int myint;\n"
+                  "int printf(const char*,...);\n"
+                  "void f(size_t m, ptrdiff_t d, wchar_t *w, myint n) { printf(\"%u\", m); printf(\"%u\", d); printf(\"%d\", w); printf(\"%lu\", -n); printf(\"%lu\", +n); printf(\"%lu\", ~n); }\n",
+        .options = { "-Wformat" },
+        .warnings = 6,
+    },
+    {
+        // A fixed-parameter conversion must not transfer the source cast's typedef to the converted pointer.
+        .name = "format fixed conversion does not borrow source typedef",
+        .source = "typedef _BitInt(32) T;\nvoid f(const char*, _BitInt(32)*) __attribute__((format(printf,1,2)));\n"
+                  "void g(void) { f(\"%d\", (T)0); }\n",
+        .options = { "-Wformat", "-Wno-gcc-compat", "-Wno-non-literal-null-conversion" },
+        .warnings = 1,
+    },
+    {
+        // A for clause's value in parentheses is the clause's (#1447): clang's IgnoreParens finds the discarded comma,
+        // its operand of no effect and its literal 0 idiom through them, in the init and the increment; the condition's
+        // value is read.
+        .name = "parenthesized comma for clauses discard their values",
+        .source = "int g(int);\nvoid f(int n, int *p) {\n    int i = 0, j = 0;\n    for ((i, j); i < n; ++i) {}\n"
+                  "    for (; ; (i++, j)) { break; }\n    for (((i, j)); ; ) { break; }\n    for ((j, i++); ; ((i, 2))) { break; }\n"
+                  "    for (; (i, j); ) { break; }\n    for ((i == 1, j == 2); ; (i < 2)) { break; }\n"
+                  "    for ((i == 1); ; ((i < 2))) { break; }\n    for ((g(1), j); ; (j, (void)0)) { break; }\n"
+                  "    for ((i, 0); ; (j, 0)) { break; }\n    for ((void)(i, j); ; ) { break; }\n    for ((p[0], (j)); ; ) { break; }\n}\n",
+        .warnings = 14,
+        .notes = 1,
     },
 };
 

@@ -300,6 +300,42 @@ files go in a directory under `$TMPDIR` (or `/tmp`), kept with
 `--keep` or on a failure. The 9700X job's test step runs it with
 `--cross-check`.
 
+## Inlining always_inline functions (#1398)
+
+Tier 0 inlines a direct call of the unit's `always_inline` functions of
+internal linkage, the callees #1282's Tier 1 inliner takes (every
+`<immintrin.h>` wrapper among them), by splicing the callee's typed stream into
+the caller's: [the design](../tier0-inlining.md) and what the implementation
+does are there.
+
+- `src/buster/compiler/tier0_inline.c`: the splice (`tier0_inline`, its vector
+  path, and `tier0_inline_scalar`, its twin), the callees' rule
+  (`tier0_inline_callee_valid`), the forwarding pass and
+  `tier0_inline_code`, which puts a spliced body's code back in terms of its own
+  entries and locals for `-g`'s rows.
+- `src/buster/compiler/c_check_tier0_inline.c`: the emission's use of it
+  (`check_tier0_inline_body`), each lane's cache of expanded callees
+  (`CheckTier0InlineLane`; an emission without lanes takes the calling thread's,
+  so that it makes the object `-c` does). The emission builds the callees' table once a unit
+  for either tier (`check_tier1_inline_table`), and a unit with a callee runs
+  #1282's two epochs (`CheckEmitRun.inline_table`): every part's lowering, then
+  every part's code.
+- `--tier0-no-inline` keeps every call: the control, as `--tier1-no-inline` is
+  Tier 1's.
+
+`./build/compiler test-tier0-inline [preprocessor options] [file...]` lowers
+each file as `-c` does and splices every body by both paths, each with its own
+lane cache: both must splice the same bodies into the same bytes in every
+column, `tier0_validate` must accept each and Tier 0 compile it. Without a file
+it takes the driver fixture below at x86-64-v4 (under a second), and checks
+that at least 20 calls were inlined. On the compiler's own `main.c` (`-march=native -Isrc -fwrapv
+-funsigned-char -fno-strict-aliasing`) it splices 830 of 8,509 bodies,
+7,695 calls, in about 8 s on a 4-core cloud host. `test-checker-driver`'s
+fixture (`c_check_tier0_inline_driver_test.c`) builds a program of the
+splice's shapes by the vector path, the scalar twin and `--tier0-no-inline`:
+each runs as clang -O0's build does, the two paths' objects are the same bytes,
+and the control's differs.
+
 ## Backend benchmark
 
 `./build/compiler benchmark-backend [--entries N] [--seed N] [--only

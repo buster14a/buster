@@ -109,8 +109,8 @@ nonetheless produce different code between `-O0` and `-O2`.
 Use `buster --tier1 -O2 -c file.c` explicitly to request Tier 1; `--tier1`
 wins even with `-O0`, and a function unsupported by Tier 1 takes its
 documented Tier 0 fallback unless `--tier1-strict` forbids that fallback.
-`--tier1 -g` gives a Tier 1 function its declaration's and closing brace's rows
-only ("Debug information" below, #1056). The driver deliberately does not map
+`--tier1 -g` retains surviving source statements and proved value locations
+("Debug information" below, #1114). The driver deliberately does not map
 standard `-O` flags to Tier 1 until #138's correctness and compile-/run-time
 gates and #1116's code-quality gates qualify it for ordinary Release builds.
 The driver regression in `test-checker-driver` pins this selection policy;
@@ -217,20 +217,47 @@ compile as without the option, each unit's report added to the command's.
 
 ### Debug information
 
-`--tier1 -g` compiles (#1056's bounded subset). Tier 1's IR keeps no source
-positions, so a Tier 1 function's DWARF has its name and range and rows at its
-granularity alone: every instruction from its entry to its last epilogue at its
-declaration's line (its body's start the function's breakpoint row) and the
-closing brace's line from its last epilogue where its frame is closed. There are
-no statement lines inside a Tier 1 function and no variable locations: a debugger
-steps over its body as one line, and a backtrace places each Tier 1 frame at its
-function's declaration. Tier 0's functions in the same program keep their
-statement rows, and the unwind tables are complete either way.
-`test-check-debug --cross-check` checks the subset with `llvm-dwarfdump --verify`
-and gdb, as an executable (by each path, on lanes and with its identifiers' ids
-in another order, into the same bytes) and as a `-c -g` object linked by `cc`
-([the debug guide](debug.md)); statement rows need source positions
-carried through the IR, lowering to selection, which remains.
+`--tier1 -g` carries original typed-entry and local identities through the IR,
+optimization, emission and the final scheduler permutation (#1114). Its DWARF
+has surviving statement rows and call-site rows, qualified source types,
+parameters, locals and lexical scopes. Optimization may remove statements or
+move their instructions; generated records and inline callee instances do not
+acquire invented source identities. The unwind tables use their independent
+frame events as before.
+
+Value locations require concrete machine proof. Whole retained objects use a
+verified frame base and their actual physical storage; shared rows need an
+explicit single-block lifetime, complete initialization and overwrite bounds.
+Normal scalar parameters and locals can use exact literal bytes or SSA values
+established by the full CFG emitted-code certificate. Assignments in an entry
+source block with no incoming backedge use ordered events; other assignments
+require sparse source windows witnessed
+by real reads or stores and surviving exact block identities. Existing semantic
+phis can supply join and loop values from a register proved on every incoming
+edge. Memory-only phi entries and unwitnessed paths remain unavailable. Fresh
+block entries and repeated definitions discard older iteration copies before
+publishing current values. The straight-line emitter also certifies
+bounded integer kernels without calls, spills, rematerialization or
+transitions, checking actual operand ownership and exact kernel bytes after
+the allocation certificate. Decoded copies, compiler-row spills/reloads,
+writes, call clobbers and CFG intersections determine where those values
+remain available. At suspended calls, only preserved carriers are published.
+Unsupported source bindings, split values and inline locals stay named and
+typed where appropriate but have no guessed value. Debug metadata changes no
+instructions or allocation decisions. The [debug guide](debug.md#optimized-tier-1-values)
+records the exact admission rules and gaps.
+
+`test-check-debug --cross-check` checks native and object-linked programs with
+`llvm-dwarfdump --verify` and GDB. Its Tier 1 fixtures read retained objects,
+shadowed names, loop values, snapshots and reassigned call results at explicit
+stops, including a computed straight-line local, both branch arms and their
+join, three scalar loop iterations, and the caller's frame while a callee is
+running. Default, scalar,
+pre/post scheduling, frame-pointer and no-rematerialization variants compare
+values with native output and compare allocated bytes with a compile without
+`-g`; lane variants require deterministic complete files. Direct unit fixtures
+also check carrier joins/backedges, shared-row boundaries, final byte-range
+publication and resource rollback.
 
 Beyond the straight-line subset, the CFG consumer takes frame objects'
 addresses (each object a frame slot live throughout, its `lea` re-based on the
