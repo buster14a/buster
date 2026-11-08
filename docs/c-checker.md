@@ -3887,7 +3887,13 @@ source order's reader finds them, by those counts:
 Each report's TypeIds take the merged table's: the type it names, and a typed
 redeclaration's prior type, which its `value` holds. Tokens, declarations and
 names are the unit's already. `check_input_recovered_publish` then appends them
-as source order's does. A body with a report it doesn't recover still goes to
+as source order's does.
+
+One recovered note isn't merged: an object's type conflict notes the entity's
+latest earlier declaration, even a block-scope one in another body. The deferred
+top level hasn't read the bodies it skipped, and a lane hasn't read the other
+bodies. So the scan back from the declaration sends the unit to source order
+when it reaches another body's closing brace before its match. A body with a report it doesn't recover still goes to
 source order, as does a top level with one. Error-free units take none of this:
 their recovered lists stay empty, and the driver copies their warning events
 only on an error.
@@ -3897,14 +3903,16 @@ only on an error.
 status with clang 23:
 
 - by the vector path, the scalar one, and deferred bodies on one, two and
-  three lanes and on three by the scalar path;
+  three lanes;
 - under gnu17 and gnu23;
 - with no option, `-Wall`, `-ferror-limit=2` and `-w`.
 
 It also checks that `-c` of each fixture is refused with no object written. The
-deferred readings are `-c`'s, on one, two and three lanes, and on three by the
-scalar path: `-fsyntax-only` starts no lanes, so a deferred `-fsyntax-only`
-reading is source order's.
+deferred readings are `-c`'s, on one, two and three lanes: `-fsyntax-only`
+starts no lanes, so a deferred `-fsyntax-only` reading is source order's. The
+driver reads `--scalar`'s in source order; `test-checker-deferred` compares the
+deferred reader with both paths, and its merge with its scalar twins, on its
+recovered fixtures too.
 The fixtures cover each pass above, shared records, two errors in one list,
 missing names and a control error after a recovered error, block declarations,
 exclusions, `_Alignas`, a dropped `format`, and enumerators.

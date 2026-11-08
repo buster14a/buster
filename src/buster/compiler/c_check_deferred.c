@@ -442,6 +442,15 @@ static void check_deferred_cut(CheckInputReader* reader, uint32_t opening)
     deferred->reason = !room ? "more bodies than the mask has" : deferred->reason;
 }
 
+// A top level's redeclaration whose note (check_input_redeclaration_report's of an object's latest earlier declaration,
+// #1447) may be a declaration in a body it skipped, which no lane has read yet: the unit is source order's.
+static void check_deferred_note_scan(CheckInputReader* reader)
+{
+    CheckDeferred* deferred = reader->deferred;
+    deferred->reason = !deferred->unsupported ? "a redeclaration notes a body's declaration" : deferred->reason;
+    deferred->unsupported = true;
+}
+
 static void check_deferred_linked(CheckInputReader* reader, uint32_t name, uint32_t position)
 {
     CheckDeferred* deferred = reader->deferred;
@@ -2621,7 +2630,8 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     bool valid = !deferred->unsupported && input->report_count == 0 && !input->resource && reader->bindings.valid && !deferred->top_changes.full &&
                  input->overload_heads == 0 && input->sections == 0 && deferred->lanes != 0 && deferred->lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES;
     deferred->reason = input->report_count != 0 ? "the top level reports an error" : input->overload_heads != 0 ? "overloadable functions" :
-                       input->sections != 0 ? "#pragma clang section" : !valid ? "the top level ran out of room" : 0;
+                       input->sections != 0 ? "#pragma clang section" : deferred->unsupported && deferred->reason != 0 ? deferred->reason :
+                       !valid ? "the top level ran out of room" : 0;
     deferred->top_reader = reader;
     const uint64_t environment_begin = deferred->timing ? check_deferred_now() : 0;
     deferred->top_ns = deferred->timing ? environment_begin - deferred->top_ns : 0;

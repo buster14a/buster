@@ -6,8 +6,9 @@
 // attributes, the declaration itself and the unit's later declarations (check_input_attribute_recover, CheckInput's
 // recovered reports). On original fixtures, the whole output, line for line, and the status, by the vector path, the
 // scalar one and deferred bodies (whose bodies carry their recovered reports through the lanes) on one, two and three
-// lanes and on three by the scalar path, under gnu17 and gnu23 and the warning and error-limit options; and -c of each,
-// which must be refused with no object written. The deferred readings are -c's, since -fsyntax-only starts no lanes. Include after c_check_resume_driver_test.c, whose reader this
+// lanes, under gnu17 and gnu23 and the warning and error-limit options; and -c of each, which must be refused with no
+// object written. The deferred readings are -c's, since -fsyntax-only starts no lanes; the driver reads --scalar's in
+// source order, and test-checker-deferred checks the deferred reader's scalar twins. Include after c_check_resume_driver_test.c, whose reader this
 // takes.
 
 // The legacy preprocessor omits #warning's option suffix (the initializer/constant timing controls have the same
@@ -224,8 +225,8 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
                 check_test_semantic_recovery_lookahead(expected);
                 const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
                 check_test_expect(test, lines && oracle != 0, "semantic recovery: clang rejects the fixture and its lines are read");
-                // The vector path, the scalar one, deferred bodies on 1, 2 and 3 lanes, and on 3 by the scalar path.
-                static const char* const mode_lanes[] = { NULL, NULL, "1", "2", "3", "3" };
+                // The vector path, the scalar one, and deferred bodies on 1, 2 and 3 lanes.
+                static const char* const mode_lanes[] = { NULL, NULL, "1", "2", "3" };
                 for (uint32_t mode = 0; lines && mode < BUSTER_ARRAY_LENGTH(mode_lanes); mode += 1)
                 {
                     arguments[0] = (char*)executable;
@@ -242,7 +243,6 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
                         compile[at++] = "--deferred-bodies";
                         compile[at++] = "--lanes";
                         compile[at++] = (char*)mode_lanes[mode];
-                        compile[at++] = mode == 5 ? "--scalar" : NULL;
                         compile[at] = NULL;
                         spawned = compile;
                         unlink(object);

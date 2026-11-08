@@ -1408,6 +1408,7 @@ static bool check_deferred_shared(const CheckDeferred* deferred);
 // The top level's updates of a name's linked declaration and type, by position, from which a lane takes the state at its
 // body's opening.
 static void check_deferred_linked(CheckInputReader* reader, uint32_t name, uint32_t position);
+static void check_deferred_note_scan(CheckInputReader* reader);
 typedef struct CheckInputVarargs CheckInputVarargs;
 typedef struct CheckInputSpecifierJob CheckInputSpecifierJob;
 typedef struct CheckInputFpEvalUse CheckInputFpEvalUse;

@@ -336,6 +336,16 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
       "int f(void) { struct S { int x; } a; float a; a.x = 1; return a.x; }\n"
       "int g(void) { typedef struct Q { int y; } T; typedef long T; T q = { 2 }; return q.y; }\nint h(void) { enum E { A } e; int e; return 0; }\n", true },
     { "recovered-control", "int f(void) { break; return 0; }\nint g(void) { continue; return 1; }\nint h(void) { return 2; }\n", true },
+    // A type conflict notes the entity's latest earlier declaration, even another body's block-scope one, which neither
+    // the top level's walk nor another body's lane has read: source order's, at file scope and in a body. One whose
+    // note is before any body, or in its own body, is merged.
+    { "recovered-redeclaration-noting-a-body",
+      "int y;\nvoid f(void) { extern int y; (void)y; }\nfloat y;\nint g(void) { return 2; }\n", false },
+    { "recovered-redeclaration-noting-another-body",
+      "int y;\nvoid f(void) { extern int y; (void)y; }\nvoid g(void) { extern float y; (void)y; }\nint h(void) { return 2; }\n", false },
+    { "recovered-redeclaration-before-the-bodies", "int y;\nfloat y;\nvoid f(void) { extern int y; (void)y; }\nint g(void) { return 2; }\n", true },
+    { "recovered-redeclaration-noting-its-body",
+      "int y;\nvoid f(void) { (void)y; }\nvoid g(void) { extern int y; extern float y; (void)y; }\nint h(void) { return 2; }\n", true },
     { "recovered-beside-an-error", "int f(void) { int a __attribute__((aligned(3))); return 0; }\nint g(void) { int b[-1]; return 0; }\n", false },
     // A body whose walk reports an error is source order's, as is a unit whose top level does; a syntax error stops
     // before any reading, and an error the later phases find is merged like any other.
