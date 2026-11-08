@@ -44,10 +44,10 @@ its slot and its result object into `ymm0`.
 
 Goals:
 
-1. Tier 0 inlines a call of a unit's `always_inline` function of internal
-   linkage wherever Tier 1's inliner would (`c_check_tier1_inline.c`), so the
-   two tiers agree on which calls are calls. The x86 intrinsics' wrappers are
-   the target, and every one of `<immintrin.h>`'s must qualify.
+1. Tier 0 targets calls of the unit's internal `always_inline` functions,
+   the same candidate set as Tier 1 (`c_check_tier1_inline.c`), subject to the
+   first version's eligibility, cycle and depth limits below. The x86
+   intrinsics' wrappers are the target; measure their coverage explicitly.
 2. A function whose every call was inlined, and whose address nothing takes, is
    not emitted, as clang emits none.
 3. The output stays deterministic: one lane's bytes on any number of lanes, the
@@ -76,8 +76,9 @@ Non-goals, each its own follow-up:
   (`CheckProgram.object_inline`, `BUSTER_CHECK_PROGRAM_INLINE_ALWAYS`). Calls
   through a pointer are calls. A variadic callee is a call: LLVM can't inline a
   function that calls `va_start`.
-- **Recursion.** An always_inline function that reaches itself is inlined until
-  the cycle closes, and the call that would close it stays a call.
+- **Recursion.** The first version keeps calls on recursive cycles, even where
+  clang may inline some of them. This conservative rule makes every expansion
+  independent of which caller or lane first requests it.
 - **Targets.** A callee whose target has a feature its caller's lacks is
   clang's error ("always_inline function '...' requires target feature '...',
   but would be inlined into function '...'"), which the checker's driver already
@@ -143,9 +144,18 @@ A **call site** is a `CALL` entry of the caller whose call table row names a
 callee (`call_targets[c]` a callee's symbol), with `call_variadic[c]` clear and
 the caller's target including the callee's. Every other call stays a call.
 
-A callee whose stream fails any rule is never inlined, and its calls stay calls.
-That is a property of the callee alone, so it is decided once per callee, before
-any caller is spliced (below).
+Before accepting a site, also prove that the call row and callee definition
+have compatible argument counts, value classes and widths, aggregate sizes
+and layouts, and result conventions. Use the checked source signature and ABI
+records to account for promotions and hidden parameters; if that information
+does not establish the bindings, keep the call. A matching symbol alone is not
+enough, and `tier0_validate` cannot prove that a well-formed binding preserves
+the original call semantics. The existing Tier 1 path checks its own signatures
+(`ir_inline_signature`); the Tier 0 check must cover its aggregate bindings too.
+
+A callee whose stream fails a callee-only rule is never inlined, and its calls
+stay calls. That decision is made once per callee before any caller is spliced;
+site-specific signature and target checks remain per call.
 
 ## The splice
 
@@ -197,9 +207,11 @@ the call's result is bound as the call's row says:
 | an aggregate in registers (`result_size > 0`, the `RETURN`'s operand its bytes' address, U64), at a call whose `call_result_objects[c]` is `1 + R` | of a vector local class's size: `LOAD` of it, `SET_LOCAL R`; else `SET_LOCAL t`, `LOCAL_ADDRESS R`, `LOCAL t`, `COPY result_size` |
 | an aggregate in memory (`AbiReturn` `MEMORY`, a hidden pointer) | not a callee: it keeps its call (first version) |
 
-A vector result of 16, 32 or 64 bytes returns in a register under the targets
-that have that register. Under `-mno-avx` a `__m256` returns in memory, and its
-wrappers keep their calls there, as do structs of more than 16 bytes.
+A vector result of 16, 32 or 64 bytes uses the register placement in the
+call row: a wide vector can be split across XMM or YMM registers when the
+target lacks a register of its full width (`Tier0Function.result_size`). A
+result actually classified `MEMORY` keeps its call in the first version; do
+not infer that classification from vector width alone.
 
 ### Rebasing the callee's entries
 
@@ -252,6 +264,12 @@ covers the callee's entries.
 
 The other columns:
 
+- **Indirect control flow.** The caller may have labels and jump tables even
+  though a copied callee may not. Rebase every `label_entries` and
+  `table_jumps` entry through `start`, including an end-of-function label;
+  retain `label_tables`, whose values are table identities rather than entry
+  indices. A valid stale index can silently change the destination, so
+  validation alone cannot establish this mapping is correct.
 - **Lifetimes** (`lifetime_entries`, read only by `ir_lower`) are the caller's
   own, rebased by `start`. `G` reaches only Tier 0, which ignores them, but they
   keep `G` a valid stream.
@@ -263,9 +281,10 @@ The other columns:
   `DW_TAG_inlined_subroutine` (#1114's).
 
 Then `G` goes through `tier0_validate`, as the lowering's own streams do. If it
-refuses `G`, or anything above runs out of room, the caller compiles `F`, every
-site of it a call, which the reference count of "The callee's own code" then
-sees.
+refuses `G` or the deterministic per-caller expansion budget is exceeded, the
+caller compiles `F`, every site of it a call, which the reference count of
+"The callee's own code" then sees. Scratch is reserved before code emission;
+reservation failure disables this optimization for the whole unit.
 
 ## Callees that call callees
 
@@ -276,25 +295,38 @@ therefore splices the callee's **expanded** stream: the callee's own stream with
 its sites already spliced, so that one level of splicing at the caller takes
 everything.
 
+Build the eligible direct-call graph once in deterministic body and site order.
+Find its strongly connected components; a self-edge and each edge whose ends
+are in the same nontrivial component remain calls. Other edges form a DAG.
+This conservative policy removes a choice that otherwise depends on the
+active walk: in an `A -> B -> A` cycle, expanding `A` first and expanding `B`
+first would leave different closing calls. Retaining all edges within that
+cycle is deterministic and preserves the original calls.
+
 Each lane keeps a cache of expanded callees, as #1282's keeps prepared ones
-(`CheckTier1Lane.inline_cache`): an arena, and a state per callee body
-(unprepared, in progress, ready, refused) for the emission's generation. A
-lane expands a callee when a caller's site first needs it, by a walk with an
-explicit stack (the coding style's rule against recursion) over the callees
-its sites reach:
+(`CheckTier1Lane.inline_cache`), but keys each entry by both callee body and
+remaining inline depth. A caller starts with `BUSTER_TIER0_INLINE_DEPTH` (16)
+levels; expanding a site consumes one. At zero remaining levels its calls
+stay calls. A cached stream is computed solely from its body, the immutable
+cycle-edge policy and its remaining depth, never from the requesting lane,
+caller or previously prepared entries. An explicit-stack walk over the DAG
+prepares dependencies before their users (the coding style rules out recursion).
+A failed eligibility check or validation keeps the affected site as a call.
+Cached failures have the same key and must not depend on transient scratch
+exhaustion.
 
-- a callee whose sites are all ready is spliced into its expanded stream and
-  marked ready;
-- a site whose callee is in progress closes a cycle, and stays a call;
-- a callee that fails eligibility, or whose expansion `tier0_validate` refuses,
-  is refused, and its sites stay calls.
-
-The depth is bounded by `BUSTER_TIER0_INLINE_DEPTH` (16). A site past it
-stays a call. `<immintrin.h>`'s chains are a few calls long (a masked form, its
-unmasked form, a `_mm*_set*` under that); the implementation counts them on
-clang 23's headers. Each lane expands a
-callee at most once an emission, and the expansion depends only on the callee
-and the bodies it reaches, so every lane's expansion of it is the same bytes.
+A body can therefore have up to 16 cached variants per lane. Bound expansion
+growth by a deterministic per-caller budget, computed the same way on cache
+hits and misses; a caller over budget keeps its original stream and references.
+The cache is an optional bounded acceleration: eviction or a cold cache must
+not change that decision. Reserve the required lane scratch before starting the
+code epoch; if that reservation fails, disable this optimization for the whole
+unit before any body is compiled, rather than making a lane-dependent choice.
+The tests compare exact output across lane counts, caller orders and cold and
+warm caches, including recursive pairs and a callee reached at different
+depths. `<immintrin.h>`'s chains are a few
+calls long (a masked form, its unmasked form, a `_mm*_set*` under that); the
+implementation counts them on clang 23's headers.
 
 ## Data-parallel: the splice's vector path and its twin
 
@@ -448,10 +480,16 @@ this one's, and needs its own issue.
     of each, and each program run natively with and without the splice on the
     generator's eight inputs, which must give the same results and globals;
   - hand-written fixtures for every row of the binding and result tables,
-    forwarding and its near misses, nested callees, a cycle, the depth bound, a
-    callee of every refused kind (each keeping its calls), a target the caller
-    lacks, and a callee shared by sites inside a loop and inside another site's
+    forwarding and its near misses, nested callees, recursive cycles entered
+    from different callers and orders, the same callee at different remaining
+    depths, cold and warm caches, the depth bound, a
+    callee of every refused kind (each keeping its calls), compatible and
+    refused call-signature shapes including promoted arguments and aggregate
+    results, a target the caller lacks, and a callee shared by sites inside a loop and inside another site's
     arguments;
+  - callers with a splice before a computed-goto label and a jump-table
+    dispatch, including an end label; verify mapped metadata and native results
+    against the original stream, including stale indices that would validate;
   - every column's end at a `PROT_NONE` page, and a lane short of scratch: each
     failure must keep the caller's `F` and count its kept calls.
 - **`test-checker-driver`:** #1282's inlining fixture (intrinsics, a struct
@@ -493,9 +531,9 @@ The record goes to buster-performance, as AGENTS.md asks.
 
 1. **The splice** (`tier0_inline.c`, its twin, `test-tier0-inline` and its
    benchmark): standalone, used by no driver yet.
-2. **The emission:** the shared inline table, the per-lane expansion cache, the
-   code epoch's splice, `--tier0-no-inline`, the driver fixtures, and the
-   measurements above.
+2. **The emission:** the shared inline table, cycle policy and depth-keyed
+   per-lane cache, the code epoch's splice, `--tier0-no-inline`, the driver
+   fixtures, and the measurements above.
 3. **Dropping callees**, with the `--symbols` changes.
 4. **Forwarding** argument and result objects (later steps 1 and 2), each
    measured.
