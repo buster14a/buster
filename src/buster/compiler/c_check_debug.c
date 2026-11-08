@@ -777,7 +777,7 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
             .line = line <= INT32_MAX ? line : 0,
             .prologue_end = prologue_end,
         };
-        symbols[b] = program->object_symbols[body->object];
+        symbols[b] = check_program_body_symbol(program, b);
         kept += row_count;
     }
     debug->unit = (DebugUnit){

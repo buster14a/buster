@@ -87,7 +87,11 @@ struct CheckProgramCode
     uint64_t records;
     uint64_t deferred;
     uint64_t code_bytes;
+    // The first of the symbols cpu_dispatch's and cpu_specific's groups add (#1447, check_program_cpu_symbols).
+    SymbolId cpu_first;
 };
+
+#include "c_check_program_cpu_dispatch.c"
 
 // The local symbols whose names the compiler makes are named as clang names them, so that tools and #129's comparison
 // with clang's objects (c_lowering_symbols.c) read them alike: a block-scope static is "function.name", its function's
@@ -2281,10 +2285,16 @@ static void check_program_object_access(const CheckProgram* program, uint8_t* ac
             }
         }
     }
-    // GNU's aliases and ifuncs are definitions of the unit's (#147), whose symbols the emission defines at their bases.
+    // GNU's aliases and ifuncs are definitions of the unit's (#147), whose symbols the emission defines at their bases,
+    // and so are a cpu_dispatch group's f.ifunc and f, at its resolver (#1447).
     for (uint32_t k = 0; k < program->alias_count; k += 1)
     {
         defined[program->aliases[k].object] |= program->aliases[k].kind != CHECK_PROGRAM_WEAKREF;
+    }
+    for (uint32_t g = 0; g < program->cpu_group_count; g += 1)
+    {
+        defined[program->cpu_groups[g].reference] |= program->cpu_groups[g].dispatch != 0;
+        defined[program->cpu_groups[g].dispatch] |= program->cpu_groups[g].dispatch != 0;
     }
     for (uint32_t s = 0; s < program->symbol_count; s += 1)
     {
@@ -2980,6 +2990,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         // through weakrefs alone (BUSTER_CHECK_PROGRAM_ALIAS_WEAK). An alias or ifunc clang's code generation refuses (the
         // driver reports its error before the emission: check_driver_aliases), or one the emission doesn't take, is
         // refused at its attribute, in source order.
+        // cpu_specific's and cpu_dispatch's names (#1447): f.ifunc for the references, f.X for each version's own.
+        valid = valid && check_program_cpu_names(program, symbol_names, output);
         if (symbol_aliases != 0)
         {
             memset(symbol_aliases, 0, ((uint64_t)program->symbol_count + 1) * sizeof(uint32_t));
@@ -3298,7 +3310,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     uint32_t structor_count = 0;
     for (uint32_t b = 0; valid && b < count; b += 1)
     {
-        const SymbolId symbol = program->object_symbols[program->bodies[b].object];
+        const SymbolId symbol = check_program_body_symbol(program, b);
         structor_count += (structors[2 * symbol] != 0) + (structors[2 * symbol + 1] != 0);
     }
     // Templates that take directives publish their assembled units' tables too: their atoms (one is the helper's or the
@@ -3332,14 +3344,19 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             unit_wide += naked->unit.link.fixups.wide_count;
         }
     }
+    // cpu_dispatch's resolvers and their symbols, and cpu_specific's versions' other names (#1447, check_program_cpu_emit).
+    uint64_t cpu_atoms = 0;
+    uint64_t cpu_symbols = 0;
+    uint64_t cpu_fixups = 0;
+    check_program_cpu_room(program, &cpu_atoms, &cpu_symbols, &cpu_fixups);
     const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + pools->count + runtime.atoms + (frames != 0 ? 1 : 0) +
-                                (valid ? result->lowered.table_count : 0) + file_asm.count + structor_count + unit_atoms;
-    const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries + structor_count + unit_fixups;
+                                (valid ? result->lowered.table_count : 0) + file_asm.count + structor_count + unit_atoms + cpu_atoms;
+    const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries + structor_count + unit_fixups + cpu_fixups;
     const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references + runtime.wide_addends + unit_wide;
     const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.symbols +
-                                  unit_symbols;
+                                  unit_symbols + cpu_symbols;
     const uint64_t name_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.names +
-                                unit_names;
+                                unit_names + cpu_symbols;
     valid = valid && atom_count < UINT32_MAX && fixup_count < UINT32_MAX && wide_count < UINT32_MAX && symbol_count < UINT32_MAX &&
             name_count < UINT32_MAX && (uint64_t)data_capacity.priorities + runtime.priorities + structor_count < UINT32_MAX;
     const LinkCapacity capacity = {
@@ -3611,12 +3628,14 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             *flags = (uint8_t)((*flags & ~BUSTER_LINK_SYMBOL_VISIBILITY) | (name->flags & BUSTER_LINK_SYMBOL_VISIBILITY));
         }
     }
+    // cpu_specific's and cpu_dispatch's symbols beyond the program's (#1447).
+    valid = valid && (program->cpu_group_count == 0 || check_program_cpu_symbols(result, program, output));
     // Every symbol of the program's exists: an executable's runtime joins now, before the program's atoms, with the
     // symbols this emission and the static data will define marked as the program's definitions (bind.c).
     for (uint32_t b = 0; valid && binding != NULL && b < count + helpers->count + binding->data_count; b += 1)
     {
         const uint32_t object = b < count ? program->bodies[b].object : b >= count + helpers->count ? binding->data_objects[b - count - helpers->count].object : 0;
-        const SymbolId symbol = b >= count && b < count + helpers->count ? helpers->items[b - count].symbol :
+        const SymbolId symbol = b < count ? check_program_body_symbol(program, b) : b < count + helpers->count ? helpers->items[b - count].symbol :
                                 object < program->object_count ? program->object_symbols[object] : 0;
         if (symbol != 0 && symbol < result->link.symbols.count)
         {
@@ -3742,7 +3761,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         // A helper's code as the emission takes it (emitted_from_tier0, below), a body's as its lane made it.
         EmittedCode helper_code = { 0 };
         const EmittedCode* code = source_body ? &run.codes[b] : &helper_code;
-        const SymbolId symbol = source_body ? program->object_symbols[program->bodies[b].object] : helpers->items[b - count].symbol;
+        const SymbolId symbol = source_body ? check_program_body_symbol(program, b) : helpers->items[b - count].symbol;
         const uint8_t alignment = source_body && alignments[symbol] > 5 ? alignments[symbol] - 1 : 4;
         const uint64_t work_mark = scratch->length;
         CheckEmitBody* body = source_body ? run.bodies + b : &helper_body;
@@ -3935,6 +3954,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             result->link.symbols.source[pools->symbol_base + p] = BUSTER_LINK_SOURCE_PROGRAM;
         }
     }
+    // cpu_dispatch's resolvers, and cpu_specific's versions' other names at their code (#1447).
+    valid = valid && (program->cpu_group_count == 0 || check_program_cpu_atoms(result, program, bytes));
     check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
     // The unwind tables, after the last function: measured, then written into the byte arena, one CIE and an FDE per
     // function after it, as one EH_FRAME atom whose FDEs' initial locations refer to their functions.
@@ -3952,7 +3973,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         valid = atom != 0;
         for (uint32_t f = 0; valid && f < frames; f += 1)
         {
-            const SymbolId symbol = f < count ? program->object_symbols[program->bodies[f].object] : helpers->items[f - count].symbol;
+            const SymbolId symbol = f < count ? check_program_body_symbol(program, f) : helpers->items[f - count].symbol;
             valid = link_add_fixup(&result->link, atom, locations[f], BUSTER_LINK_FIXUP_PC32, symbol, 0) != 0;
         }
     }
@@ -3989,7 +4010,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         uint32_t entries = 0;
         for (uint32_t b = 0; valid && b < count; b += 1)
         {
-            const SymbolId symbol = program->object_symbols[program->bodies[b].object];
+            const SymbolId symbol = check_program_body_symbol(program, b);
             for (uint32_t k = 0; k < 2; k += 1)
             {
                 if (structors[2 * symbol + k] != 0)
@@ -4003,7 +4024,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         {
             const uint32_t k = (uint32_t)(sorted[e] >> 48);
             const uint32_t priority = (uint32_t)(sorted[e] >> 32) & 0xffff;
-            const SymbolId symbol = program->object_symbols[program->bodies[(uint32_t)sorted[e]].object];
+            const SymbolId symbol = check_program_body_symbol(program, (uint32_t)sorted[e]);
             uint8_t* data = arena_push(bytes, 8, 8);
             const AtomId atom = data != 0 ? link_add_atom(&result->link, k != 0 ? BUSTER_LINK_CLASS_FINI_ARRAY : BUSTER_LINK_CLASS_INIT_ARRAY, 3, 8,
                                                        (uint8_t*)memset(data, 0, 8), 0) : 0;
@@ -4116,7 +4137,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // With --tier1-refusals, each body Tier 0 compiled, in source order, by its symbol's name.
     for (uint32_t b = 0; valid && run.tier1_outcomes != 0 && lanes->tier1_refusals != NULL && b < count; b += 1)
     {
-        const SymbolId symbol = program->object_symbols[program->bodies[b].object];
+        const SymbolId symbol = check_program_body_symbol(program, b);
         const NameId name = symbol < result->link.symbols.count ? result->link.symbols.name[symbol] : 0;
         if (run.tier1_outcomes[b].fallback == CHECK_TIER1_FALLBACK_TIER0 && name != 0)
         {
