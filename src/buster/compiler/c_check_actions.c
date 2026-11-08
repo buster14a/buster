@@ -289,6 +289,10 @@ typedef enum CheckDiagnostic
 #define BUSTER_CHECK_CONVERT_CAST 0x40u
 #define BUSTER_CHECK_CONVERT_NULL 0x80u
 #define BUSTER_CHECK_CONVERT_TRANSPARENT_UNION 0x100u
+// The destination is an _Atomic object (#1447): an assignment's, an initialization's or initializer element's, a return's
+// or a prototype argument's. The conversion is to its value type, so this says what the type no longer does, for the
+// conversion value warnings, which clang gives no atomic destination (c_check_common_warnings.c).
+#define BUSTER_CHECK_CONVERT_ATOMIC 0x200u
 
 #define CHECK_WARNING_DISCARDED_QUALIFIERS 0x01u
 #define CHECK_WARNING_GNU_CONSTANT 0x02u
@@ -1194,6 +1198,51 @@ static bool check_action_nested_qualifiers(const TypeTable* table, TypeId left, 
 // pointers to pointers whose levels' qualifiers differ. void * converts to and from any object pointer, and to and
 // from a function pointer as a pedantic extension, without the qualifier warning. strict takes clang's Compatible
 // alone, as transparent-union selection does: no warning, and no function pointer through void *.
+// Pointees are explicit so diagnostic rendering can classify an array's implicit decay without interning a type.
+// `nested` is optional source wording, not a semantic type property.
+static inline __attribute__((always_inline)) bool check_action_pointer_assignable(const TypeTable* table, TypeId to, TypeId from, const CheckAction* action,
+                                                                                  CheckActionResult* result, bool strict, bool* nested)
+{
+    const uint8_t tk = check_action_kind(table, to);
+    const uint8_t fk = check_action_kind(table, from);
+    const bool function = tk == BUSTER_TYPE_KIND_FUNCTION || fk == BUSTER_TYPE_KIND_FUNCTION;
+    uint32_t warning = (type_qualifiers(from) & ~type_qualifiers(to)) == 0 ? 0 : CHECK_WARNING_DISCARDED_QUALIFIERS;
+    bool accepted = false;
+    bool extension = false;
+    if (nested != NULL)
+    {
+        *nested = false;
+    }
+    if (tk == BUSTER_TYPE_KIND_VOID || fk == BUSTER_TYPE_KIND_VOID)
+    {
+        accepted = true;
+        extension = function;
+        warning = function ? 0 : warning;
+    }
+    else if (check_action_compatible_at(table, type_unqualified(to), type_unqualified(from), action, result))
+    {
+        accepted = true;
+    }
+    else if (result->diagnostic == CHECK_DIAG_NONE && check_action_sign_key(table, to) == check_action_sign_key(table, from))
+    {
+        accepted = true;
+        // In C the signedness warning takes precedence over a compatible qualifier discard.
+        warning = CHECK_WARNING_POINTER_SIGN;
+    }
+    else if (result->diagnostic == CHECK_DIAG_NONE && check_action_nested_qualifiers(table, to, from, result))
+    {
+        accepted = true;
+        warning = CHECK_WARNING_DISCARDED_QUALIFIERS;
+        if (nested != NULL)
+        {
+            *nested = true;
+        }
+    }
+    accepted = accepted && !(strict && (warning != 0 || extension));
+    result->warnings |= accepted ? warning : 0;
+    return accepted;
+}
+
 // Always inlined (#880), as profile-guided builds do; hot caller: check_action_assignable.
 static inline __attribute__((always_inline)) bool check_action_assignable_mode(const TypeTable* table, TypeId destination, const CheckValue* source, const CheckAction* action, CheckActionResult* result, bool strict)
 {
@@ -1220,35 +1269,7 @@ static inline __attribute__((always_inline)) bool check_action_assignable_mode(c
     }
     else if (target_kind == BUSTER_TYPE_KIND_POINTER && input_kind == BUSTER_TYPE_KIND_POINTER)
     {
-        const TypeId to = type_element(table, target);
-        const TypeId from = type_element(table, input);
-        const uint8_t tk = check_action_kind(table, to);
-        const uint8_t fk = check_action_kind(table, from);
-        const bool function = tk == BUSTER_TYPE_KIND_FUNCTION || fk == BUSTER_TYPE_KIND_FUNCTION;
-        uint32_t warning = (type_qualifiers(from) & ~type_qualifiers(to)) == 0 ? 0 : CHECK_WARNING_DISCARDED_QUALIFIERS;
-        bool extension = false;
-        if (tk == BUSTER_TYPE_KIND_VOID || fk == BUSTER_TYPE_KIND_VOID)
-        {
-            accepted = true;
-            extension = function;
-            warning = function ? 0 : warning;
-        }
-        else if (check_action_compatible_at(table, type_unqualified(to), type_unqualified(from), action, result))
-        {
-            accepted = true;
-        }
-        else if (result->diagnostic == CHECK_DIAG_NONE && check_action_sign_key(table, to) == check_action_sign_key(table, from))
-        {
-            accepted = true;
-            warning = warning != 0 ? warning : CHECK_WARNING_POINTER_SIGN;
-        }
-        else if (result->diagnostic == CHECK_DIAG_NONE && check_action_nested_qualifiers(table, to, from, result))
-        {
-            accepted = true;
-            warning = CHECK_WARNING_DISCARDED_QUALIFIERS;
-        }
-        accepted = accepted && !(strict && (warning != 0 || extension));
-        result->warnings |= accepted ? warning : 0;
+        accepted = check_action_pointer_assignable(table, type_element(table, target), type_element(table, input), action, result, strict, NULL);
     }
     else if ((target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION || target_kind == BUSTER_TYPE_KIND_NULLPTR ||
               target_kind == BUSTER_TYPE_KIND_ATOMIC) && target_kind == input_kind)
@@ -2326,6 +2347,7 @@ static inline __attribute__((always_inline)) void check_action_assignment(TypeTa
     }
     if (type_is_valid(table, target))
     {
+        const bool atomic = check_action_kind(table, target) == BUSTER_TYPE_KIND_ATOMIC && check_action_kind(table, source.type) != BUSTER_TYPE_KIND_ATOMIC;
         target = check_action_kind(table, source.type) == BUSTER_TYPE_KIND_ATOMIC ? type_unqualified(type_strip_aligned(table, target))
                                                                                : type_conversion_operand(table, target);
         const bool void_return = action->op == CHECK_OP_CONVERT && check_action_kind(table, target) == BUSTER_TYPE_KIND_VOID &&
@@ -2336,7 +2358,8 @@ static inline __attribute__((always_inline)) void check_action_assignment(TypeTa
         }
         else
         {
-            const uint32_t conversion = BUSTER_CHECK_CONVERT_ASSIGNMENT | (check_action_kind(table, target) == BUSTER_TYPE_KIND_POINTER && check_action_null(table, &source, action->context.extensions) ? BUSTER_CHECK_CONVERT_NULL : 0);
+            const uint32_t conversion = BUSTER_CHECK_CONVERT_ASSIGNMENT | (check_action_kind(table, target) == BUSTER_TYPE_KIND_POINTER && check_action_null(table, &source, action->context.extensions) ? BUSTER_CHECK_CONVERT_NULL : 0) |
+                                        (atomic ? BUSTER_CHECK_CONVERT_ATOMIC : 0);
             check_action_conversion(table, &source, target, conversion, &result->conversions[slot], action->node);
             result->value = source;
             result->value.category = CHECK_RVALUE;
@@ -2677,6 +2700,7 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
                 {
                     destination = BUSTER_TYPE_DOUBLE;
                 }
+                const bool atomic = check_action_kind(table, destination) == BUSTER_TYPE_KIND_ATOMIC && check_action_kind(table, value.type) != BUSTER_TYPE_KIND_ATOMIC;
                 if (check_action_kind(table, value.type) != BUSTER_TYPE_KIND_ATOMIC)
                 {
                     destination = type_conversion_operand(table, destination);
@@ -2700,7 +2724,7 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
                 else
                 {
                     const uint32_t conversion = (parameter ? BUSTER_CHECK_CONVERT_ASSIGNMENT : destination != value.type ? BUSTER_CHECK_CONVERT_PROMOTION : 0) |
-                                                (transparent ? BUSTER_CHECK_CONVERT_TRANSPARENT_UNION : 0);
+                                                (transparent ? BUSTER_CHECK_CONVERT_TRANSPARENT_UNION : 0) | (atomic ? BUSTER_CHECK_CONVERT_ATOMIC : 0);
                     check_action_conversion(table, &value, destination, conversion, &converted.conversions[0], action->node);
                 }
                 if (converted.diagnostic != CHECK_DIAG_NONE)

@@ -234,7 +234,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   required-constant warnings and groups collected before a failed program keep their original publication.
   A source comma's "left operand of comma operator has no effect" is queued where clang's `CheckCommaOperands` builds
   it (#1447): the arithmetic scan's post-order visit runs its marker among the divisions and shift counts, ahead of the
-  full expression's conversions, and the tree walk skips it. Roots the reader adds after what follows their operand (a
+  full expression's conversions, and the tree walk skips it. A comma whose operands hold an index's bound
+  (`BUSTER_CHECK_REACH_BOUND`) keeps its marker in the tree walk, which orders the bound as clang checks it; bounds still
+  follow every division and count of their root. Roots the reader adds after what follows their operand (a
   statement's condition, a switch's, or a `for` increment's discard) are taken where their
   operand stands (`check_common_displaced_roots`), so a condition's warnings precede its body's, as clang analyzes it.
   A statement expression's statements are roots of their own, ahead of its enclosing expression's in node order: the
