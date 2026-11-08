@@ -259,7 +259,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   reported at the end (a unit with errors runs none). `-Wshift-overflow` is no runtime warning, and stays. Two
   unevaluated places still warn, as clang's do: an unselected `_Generic` or `__builtin_choose_expr` arm, which has no CFG
   block, and a reachable statement's condition that folds to a constant, whose range the program drops: its statement,
-  by its keyword and its first kept root past the condition, is reached in the evaluation with no range dropped.
+  by its keyword and its first kept root past the condition (never a static selection's unselected one), is reached in
+  the evaluation with no range dropped, and its warnings are reported where its root stands in the roots' order.
   `c_check_int_in_bool_driver_test.c` (#1447) compares clang's `-Wint-in-bool-context` and the
   `-Wtautological-constant-compare` forms of a `<<` or a conditional converted to `_Bool` (`docs/c-checker.md`)
   with complete pinned-Clang output at each policy, both paths and with `-c`.

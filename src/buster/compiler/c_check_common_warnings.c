@@ -991,9 +991,10 @@ static uint32_t check_common_condition_root(const Parser* parser, const CheckInp
 // A statement the program drops whole, its keyword too (a constant condition's other branch, an `else if` past a true one),
 // is not. Another's folded condition has no program entry of its own, so its statement's first kept root past it stands for
 // it: its arm's (whose nodes come between the condition's operand and its root) or the next statement's, either reached
-// where the statement is. A statement with neither is taken as reached.
+// where the statement is; a static selection's controlling expression and unselected arms (`unselected`), roots no
+// evaluation reaches, never stand for it (review on #1778). A statement with neither is taken as reached.
 static bool check_common_condition_reached(const Parser* parser, const CheckGraph* graph, const CheckProgram* program, const uint32_t* parents,
-                                           const uint8_t* reached, uint32_t condition)
+                                           const uint8_t* unselected, const uint8_t* reached, uint32_t condition)
 {
     const uint32_t close = graph->tokens[condition];
     const uint32_t open = check_common_opener(parser, close);
@@ -1003,10 +1004,29 @@ static bool check_common_condition_reached(const Parser* parser, const CheckGrap
     uint32_t found = BUSTER_CHECK_NONE;
     for (uint32_t node = operand < condition ? operand + 1 : condition; kept && found == BUSTER_CHECK_NONE && node < graph->count; node += 1)
     {
-        found = node != condition && parents[node] == BUSTER_CHECK_NONE && graph->tokens[node] > close &&
+        found = node != condition && parents[node] == BUSTER_CHECK_NONE && graph->tokens[node] > close && unselected[node] == 0 &&
                 (program == NULL || program->dropped_range_count == 0 || !check_program_token_dropped(program, graph->tokens[node])) ? node : BUSTER_CHECK_NONE;
     }
     return kept && (found >= graph->count || reached[found] != 0);
+}
+
+// The stashed warnings from `first` to `last`, the tokens of a root no walk enters, reported where that root stands in the
+// roots' order (those check_common_shift_unreached kept).
+static void check_common_shift_span(Preprocessor* pp, CheckCommonShiftWarnings* shifts, uint32_t first, uint32_t last)
+{
+    uint32_t low = 0;
+    uint32_t high = shifts->count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = shifts->records[middle].token < first;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    for (uint32_t i = low; i < shifts->count && shifts->records[i].token <= last; i += 1)
+    {
+        check_common_shift_report(pp, shifts->records + i);
+    }
 }
 
 // The stashed warnings the walk never reached whose shift it proved unevaluated, dropped: clang's runtime shift
@@ -1039,7 +1059,8 @@ static void check_common_shift_unreached(const Parser* parser, Preprocessor* pp,
             reached = check_common_evaluated(graph, stream, types, parser, program != NULL ? &whole : NULL, parents, scratch);
             marked = true;
         }
-        drop &= reached != NULL && !(condition < graph->count && check_common_condition_reached(parser, graph, program, parents, reached, condition));
+        drop &= reached != NULL && unselected != NULL &&
+                !(condition < graph->count && check_common_condition_reached(parser, graph, program, parents, unselected, reached, condition));
         uint32_t root = node;
         for (uint32_t steps = 0; drop && parents[root] < graph->count && steps < graph->count; steps += 1)
         {
@@ -4770,6 +4791,9 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         uint32_t next_integer = initializer_keys.integer_count != 0 ? (uint32_t)(initializer_keys.integer[0] >> 32) : UINT32_MAX;
         uint32_t walked = 0;
         bool any_walked = false;
+        // The stashed shift warnings no walk will reach, dropped or kept, before the roots' order: a kept one in an unevaluated
+        // root (a folded condition's) is reported where that root stands (check_common_shift_span).
+        check_common_shift_unreached(parser, pp, shifts, input, stream, types, program, parents, evaluated, scratch);
         for (uint32_t node = check_common_root_order_next(graph, parents, &order, vector); node < graph->count && !pp->fatal;
              node = check_common_root_order_next(graph, parents, &order, vector))
         {
@@ -4796,6 +4820,10 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                     initializer += 1;
                 }
                 next_init = initializer < initializer_count ? (uint32_t)(initializers[initializer] >> 32) : UINT32_MAX;
+            }
+            if (root && evaluated[node] == 0 && shifts != NULL && shifts->count != 0)
+            {
+                check_common_shift_span(pp, shifts, check_common_emission_subtree_start(&emission, graph->tokens[node]), graph->tokens[node]);
             }
             check_common_root_frames(&emission, node);
             if (emission.work_count != 0)
@@ -4842,7 +4870,6 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                 check_common_emit_run(&emission);
             }
         }
-        check_common_shift_unreached(parser, pp, shifts, input, stream, types, program, parents, evaluated, scratch);
     }
     check_common_shift_finish(pp, shifts);
 }

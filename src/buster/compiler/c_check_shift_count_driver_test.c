@@ -565,6 +565,17 @@ static const CheckDriverDefaultWarningFixture check_driver_shift_count_fixtures[
         .notes = 1,
     },
     {
+        // Re-review on #1778: a static selection's unselected roots never stand for a folded condition's statement.
+        .name = "a folded condition before a static selection keeps its shifts' warnings in its place",
+        .source = "int f1(int x){if((1<<40)!=0)return _Generic(x,int:0,long:0);return 0;}\n"
+                  "int f2(int x){if((1<<41)!=0)return __builtin_choose_expr(1,0,0);return 0;}\n"
+                  "int f3(int x){if((1<<42)!=0){}_Generic(x,int:0,long:0);return 0;}\n"
+                  "int f4(int x){switch(1<<43){default:return _Generic(x,int:0,long:0);}return 0;}\n"
+                  "int f5(int x){if((-1<<2)<0)return _Generic(x,int:0,long:0);return 0;}\n"
+                  "int f6(int x){return x;if((1<<44)!=0)return _Generic(x,int:0,long:0);return 0;}\n",
+        .warnings = 6,
+    },
+    {
         .name = "a unit with an error keeps its folded shifts' runtime warnings",
         .source = "int f(int x){x=-1<<2;x=1<<40;x=undeclared;return x;x=-1<<3;}\n",
         .warnings = 3,
