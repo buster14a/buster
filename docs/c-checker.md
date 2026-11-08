@@ -4187,8 +4187,11 @@ controlling expression, and an assignment target are not reads, while an
 initializer's value, a compound assignment and an increment are, with the write
 ordered after the read. A brace initializer writes its object even without an
 expression node, and a variable read in its own initializer (braced or not) gets
-Clang's "within its own initialization" message. The brace initializer's read is
-found by a scan of its tokens (#1349). An AVX-512 pass, with its scalar twin
+Clang's "within its own initialization" message. A compound literal's unnamed
+object is no variable and never warns, as Clang's analysis follows variables
+alone: its own value, at its closing `}`, is not a read in its initializer,
+while the variables that initializer reads still warn. The brace initializer's
+read is found by a scan of its tokens (#1349). An AVX-512 pass, with its scalar twin
 under `--scalar`, keeps only identifiers spelled as the object's name that don't
 follow `.` or `->`, 64 tokens a block. Only those climb the parse tree for an
 enclosing `sizeof`, and the climbs are memoized per unit, so a table of N
