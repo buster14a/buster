@@ -266,10 +266,10 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
         // A block's declaration with linkage (an extern object, any function) belongs to the translation unit, not the
         // function, in clang (its semantic context, which ShouldDiagnoseUnusedDecl reads), so it is never unused; a
         // local's is one without linkage (#1447).
-        const uint32_t linkage = check_input_linkage(output->declaration_bits, token);
         const bool selected = events->operation[event] == C_BINDING_DECLARE && events->key[event] / events->name_capacity == C_BINDING_ORDINARY &&
                               token < count && !implicit && !inline_function && !declaration_used && !check_input_unused_suppressed(output, token, kind) &&
-                              chain_marked[event] == 0 && main_file && (parameter || (local ? linkage == 0 : linkage == 1));
+                              chain_marked[event] == 0 && main_file &&
+                              (parameter || check_input_linkage(output->declaration_bits, token) == (local ? 0u : 1u));
         const uint32_t first = events->operation[event] == C_BINDING_DECLARE ? chain_first[event] : event;
         const uint32_t chosen = chain_definition[first] != 0 ? chain_definition[first] : events->declaration[first];
         const uint32_t id = kind == C_BINDING_FUNCTION ? CHECK_WARNING_ID_UNUSED_FUNCTION :
@@ -465,17 +465,20 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
                         // declaration with linkage redeclares the outer one with linkage it hides, so the walk goes on
                         // out to it: `static int s; void f(void) { extern int s; (void)s; }` uses s, as clang marks the
                         // entity's every redeclaration (#1447).
+                        // (Linkage is read only where the walk would cross a depth, which few chains do.)
                         uint32_t at = handle;
                         uint32_t depth = events->depth[handle - 1];
-                        bool linked = false;
+                        uint32_t last = BUSTER_CHECK_NONE;
                         for (uint32_t steps = 0; at != 0 && steps < events->count; steps += 1)
                         {
                             const uint32_t declaration = at - 1;
                             const uint32_t token = events->declaration[declaration];
-                            const bool linkage = token < count && check_input_linkage(output->declaration_bits, token) != 0;
-                            const bool outward = events->depth[declaration] < depth && linked && linkage;
+                            const bool crossing = events->depth[declaration] != depth;
+                            const bool outward = crossing && events->depth[declaration] < depth && last < count && token < count &&
+                                                 check_input_linkage(output->declaration_bits, last) != 0 &&
+                                                 check_input_linkage(output->declaration_bits, token) != 0;
                             if (events->operation[declaration] != C_BINDING_DECLARE || events->key[declaration] != events->key[handle - 1] ||
-                                (events->depth[declaration] != depth && !outward) || used[declaration] != 0)
+                                (crossing && !outward) || used[declaration] != 0)
                             {
                                 break;
                             }
@@ -485,7 +488,7 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
                                 used_tokens[token] = 1;
                             }
                             depth = events->depth[declaration];
-                            linked = linkage;
+                            last = token;
                             at = events->previous[declaration];
                         }
                     }
