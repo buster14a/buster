@@ -6,8 +6,12 @@
 //   HandleNeonVectorTypeAttr). A mode error leaves it too, or installs the mode's type all the same where clang's
 //   AddModeAttr does (a mode of the other kind, or a base of no integer or floating type). An enum's mode whose error
 //   installs nothing leaves the enum without it.
-// - An aligned's or _Alignas's value error, and a specifiers' mode error, is given again for each later declarator that
-//   shares it, as clang's handlers run for each (CheckInputAttributeRepeat).
+// - An aligned's value error, and a specifiers' mode error, is given again for each later declarator that shares it, as
+//   clang's handlers run for each (CheckInputAttributeRepeat).
+// - Each _Alignas error is each declarator's, in clang's order (check_input_alignas_declarator): its place's (a function's,
+//   a typedef's, a parameter's, a bit-field's, a register variable's), else its value's (no power of 2, no integer
+//   constant, past 2^32), then the underalignment, at the last _Alignas that stands. A declaration that declares nothing
+//   has none.
 // The checker goes on to the declaration and the unit's later ones (check_input_attribute_type). On original fixtures,
 // the whole output, line for line, and the status, by the vector path, the scalar one and deferred bodies on two lanes,
 // under gnu17 and gnu23 and the warning and error-limit options; and -c of each, which must be refused with no object
@@ -67,6 +71,45 @@ static void check_test_driver_type_attribute_recovery(CheckTest* test, const cha
         "void f(void) { _Alignas(3) int a = \"x\", b; _Alignas(3) static int c, d; extern _Alignas(3) int e, g; __attribute__((aligned(3))) int h, i; }\n"
         "_Alignas(3) int i = 1, j = \"x\";\n_Alignas(3) int k; _Alignas(3) int l, m, o;\n"
         "__attribute__((aligned(3), section(1))) int p, r;\n__attribute__((aligned(3), nonnull(1))) int s, t;\nint after = \"a\";\n",
+        // _Alignas on a function or a typedef, the subject's error for each _Alignas and declarator, a variable's value error after.
+        "_Alignas(3) int f(void), b;\n"
+        "_Alignas(3) _Alignas(8) int g(void), c;\n"
+        "typedef _Alignas(3) int T, U;\n"
+        "typedef _Alignas(8) int V;\n"
+        "_Alignas(3) int a, h(void), d;\n"
+        "_Alignas(3) int k(void) { return 0; }\n"
+        "struct Z *q = &b;\n",
+        // _Alignas on a parameter, a bit-field and a register variable: the place's error for each, before the value's.
+        "void g(_Alignas(3) int p);\n"
+        "void g2(_Alignas(8) int p, _Alignas(8) _Alignas(16) int q);\n"
+        "int f(_Alignas(3) int);\n"
+        "struct S { _Alignas(3) int a : 2, b; _Alignas(8) int c : 2, d : 3; };\n"
+        "void h(void) { _Alignas(3) register int r, s; _Alignas(8) register int t; int u = r + s + t; struct Z *q = &u; }\n",
+        // _Alignas's and aligned's values of no integer constant and past 2^32, for each declarator; a typedef's and a parameter's place first.
+        "int n;\n"
+        "_Alignas(n) int a, b;\n"
+        "_Alignas(1ull << 40) int c, d;\n"
+        "_Alignas(1.5) int e;\n"
+        "__attribute__((aligned(1ull << 40))) int g, h;\n"
+        "typedef _Alignas(n) int T, U;\n"
+        "void p(_Alignas(n) int x);\n"
+        "struct Z *q = &a;\n"
+        "struct Z *r = &c;\n",
+        // Underalignment after the declarator's _Alignas values' errors, at the last _Alignas that stands.
+        "_Alignas(1) int u, v;\n"
+        "_Alignas(1) _Alignas(3) int w, x;\n"
+        "_Alignas(3) _Alignas(1) int y;\n"
+        "_Alignas(1) _Alignas(2) int z;\n"
+        "_Alignas(1) int _Alignas(2) z2;\n"
+        "struct S { _Alignas(1) int a, b; _Alignas(1) _Alignas(2) int c; };\n"
+        "void f(void) { _Alignas(1) _Alignas(3) int m = 1, n; struct Z *q = &n; }\n",
+        // Declarations that declare nothing take no _Alignas value error; an anonymous record member and a for's declarators do.
+        "_Alignas(3) int;\n"
+        "_Alignas(3) struct S { int a; };\n"
+        "struct T { _Alignas(3) int; _Alignas(1) int; int b; _Alignas(3) struct { int x; }; };\n"
+        "void f(void) { for (_Alignas(3) int i = 0, j; i; i++) ; }\n"
+        "_Alignas(3) _Thread_local int t, u;\n"
+        "struct Z *q = &t;\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     static const char* const options[] = { NULL, "-Wall", "-ferror-limit=2", "-w" };

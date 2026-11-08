@@ -884,6 +884,10 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_DIAGNOSTIC_TYPE,
     CHECK_ARGUMENT_WARNING_GROUP,
     CHECK_ARGUMENT_NEVER_CONSTANT,
+    // _Alignas's "'aligned' attribute requires integer constant", at the argument (#1447): clang's handler names it so.
+    CHECK_ARGUMENT_ALIGNAS_INTEGER_CONSTANT,
+    // aligned's and _Alignas's "requested alignment must be 4294967296 bytes or smaller", at the attribute (#1447).
+    CHECK_ARGUMENT_ALIGNMENT_TOO_LARGE,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -907,22 +911,27 @@ static void check_input_attribute_argument_error(CheckInputReader* reader, Check
 }
 
 // An alignment specifier's error (#147, C11 6.7.5p2: CHECK_ARGUMENT_ALIGNAS_*), at the keyword of the declaration's first
-// (its specifiers', `common`, then its declarator's, `own`): on a parameter, a register variable or a bit-field
+// (its specifiers', `common`, then its declarator's, `own`; an underalignment's at the last): on a parameter, a register variable or a bit-field
 // (`declaration` 0, 1 or 3, as clang numbers them) "cannot be applied to", on a typedef or a function (BUSTER_CHECK_NONE)
 // "only applies to variables and fields"; with `type` (and `declaration` its alignment in bytes) "requested alignment
 // is less than minimum alignment" (`spelling` the declaration's typedef's, check_input_typedef_spelling).
 static void check_input_alignas_error(CheckInputReader* reader, CheckInputAttributes* common, CheckInputAttributes* own, uint32_t declaration, TypeId type,
                                       uint32_t spelling)
 {
+    // The underalignment's is at the last _Alignas that stands (clang's CheckAlignasUnderalignment, #1447), the others' at the
+    // first.
+    const bool last = type != 0;
     CheckInputAttribute* found = NULL;
     CheckInputAttributes* holder = NULL;
-    for (uint32_t list = 0; found == NULL && list < 2; list += 1)
+    for (uint32_t list = 0; (last || found == NULL) && list < 2; list += 1)
     {
         CheckInputAttributes* attributes = list == 0 ? common : own;
-        for (uint32_t i = 0; attributes != NULL && found == NULL && i < attributes->count; i += 1)
+        for (uint32_t i = 0; attributes != NULL && (last || found == NULL) && i < attributes->count; i += 1)
         {
-            found = attributes->records[i].kind == CHECK_ATTRIBUTE_ALIGNAS ? attributes->records + i : NULL;
-            holder = found != NULL ? attributes : holder;
+            CheckInputAttribute* record = attributes->records + i;
+            const bool match = record->kind == CHECK_ATTRIBUTE_ALIGNAS && (!last || record->deferred == NULL);
+            found = match ? record : found;
+            holder = match ? attributes : holder;
         }
     }
     const CheckAttributeArgumentError error = type != 0 ? CHECK_ARGUMENT_ALIGNAS_UNDERALIGNED :
@@ -937,23 +946,6 @@ static void check_input_alignas_error(CheckInputReader* reader, CheckInputAttrib
         reader->output->reports[before].type = type;
         reader->output->reports[before].type_spelling = spelling;
     }
-}
-
-// clang's CheckAlignasUnderalignment (#147, C11 6.7.5p4), on a declaration's or a member's own type, its declarator's
-// (`type`, its name `name`), where one of its alignments is _Alignas's: the greatest of them all, GNU aligned's too, less
-// than the type's is an error at the keyword, naming the type as clang prints it (its typedef's spelling). Whether it is
-// fine. The specifiers' type isn't checked (check_input_specifiers): a declarator makes another type of it.
-static bool check_input_alignas_underaligned(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type, uint32_t name)
-{
-    const bool checked = attributes != 0 && attributes->required_alignment_log2 != 0 && type != 0 && type_kind(reader->types, type) != BUSTER_TYPE_KIND_FUNCTION;
-    const uint32_t natural = checked ? type_alignment_log2(reader->types, type) : 0;
-    const bool underaligned = checked && attributes->alignment_log2 - 1 < natural;
-    if (underaligned)
-    {
-        const uint32_t spelling = name < reader->parser->tokens.count ? check_input_typedef_spelling(reader->output, reader->parser, name) : 0;
-        check_input_alignas_error(reader, attributes, NULL, 1u << natural, type, spelling);
-    }
-    return !underaligned;
 }
 
 // An argument of more than 32 bits (CheckInputAttribute.wide), clang's err_ice_too_large at its expression, from `first`
@@ -1036,6 +1028,10 @@ static bool check_input_attribute_constant_error(CheckInputReader* reader, Check
     else if (kind == CHECK_ATTRIBUTE_ALIGNED || kind == CHECK_ATTRIBUTE_ALIGN_VALUE)
     {
         check_input_attribute_argument_error(reader, attributes, attribute, first, CHECK_ARGUMENT_INTEGER_CONSTANT, 0);
+    }
+    else if (kind == CHECK_ATTRIBUTE_ALIGNAS)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, first, CHECK_ARGUMENT_ALIGNAS_INTEGER_CONSTANT, 0);
     }
     else if (kind == CHECK_ATTRIBUTE_REGPARM || kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR ||
              (kind == CHECK_ATTRIBUTE_ASSUME_ALIGNED && argument == 0))
@@ -1769,6 +1765,11 @@ static bool check_input_attribute_value(CheckInputReader* reader, CheckInputAttr
         else if (power)
         {
             check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_ALIGNMENT_POWER, 0);
+        }
+        else if (kind == CHECK_ATTRIBUTE_ALIGNED || kind == CHECK_ATTRIBUTE_ALIGNAS)
+        {
+            // A power of 2 past 2^32 (#1447), clang's MaxAlignment's.
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_ALIGNMENT_TOO_LARGE, 0);
         }
         else if (kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE && value == 0)
         {
@@ -3644,6 +3645,70 @@ static bool check_input_attribute_recover(CheckInputReader* reader, CheckInputAt
     return valid || recovered;
 }
 
+// clang's CheckAlignasUnderalignment (#147, C11 6.7.5p4), on a declaration's or a member's own type, its declarator's
+// (`type`, its name `name`), where one of its alignments is _Alignas's: the greatest of them all, GNU aligned's too, less
+// than the type's is an error at the keyword, naming the type as clang prints it (its typedef's spelling). Whether it is
+// fine. The specifiers' type isn't checked (check_input_specifiers): a declarator makes another type of it.
+static bool check_input_alignas_underaligned(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type, uint32_t name)
+{
+    const bool checked = attributes != 0 && attributes->required_alignment_log2 != 0 && type != 0 && type_kind(reader->types, type) != BUSTER_TYPE_KIND_FUNCTION;
+    const uint32_t natural = checked ? type_alignment_log2(reader->types, type) : 0;
+    const bool underaligned = checked && attributes->alignment_log2 - 1 < natural;
+    bool recovered = false;
+    if (underaligned)
+    {
+        const uint32_t spelling = name < reader->parser->tokens.count ? check_input_typedef_spelling(reader->output, reader->parser, name) : 0;
+        const CheckInputAttributeRecovery recovery = check_input_attribute_recovery(reader, attributes, NULL);
+        check_input_alignas_error(reader, attributes, NULL, 1u << natural, type, spelling);
+        // An error clang gives and goes on from (#1447), each declarator's, completing with its own: after its _Alignas'
+        // values' errors (CheckAlignasUnderalignment comes after the attributes), so ordered at the declarator's name.
+        if (reader->output->report_count > recovery.reports && name < reader->parser->tokens.count)
+        {
+            reader->output->reports[recovery.reports].sort = name;
+        }
+        recovered = check_input_attribute_errors_recover(reader, attributes, &recovery, 0);
+    }
+    return !underaligned || recovered;
+}
+
+// A declarator's _Alignas errors (#1447), in clang's order: for each _Alignas of its specifiers' list (`common`) and then of
+// its own (`own`), its place's where the declarator can't take one (`place`: 0, 1 or 3 for a parameter, a register
+// variable or a bit-field, BUSTER_CHECK_NONE for a typedef, as check_input_alignas_error takes them), else its value's that
+// the reader kept for its declarators (CheckInputAttribute.deferred: no power of 2, no integer constant, past 2^32), once
+// for each declarator; the underalignment is the caller's after (check_input_alignas_underaligned). A function's place is
+// check_input_attribute_function's; CHECK_ALIGNAS_OBJECT is a variable's or a field's. Each error recovers, as clang goes
+// on, waiting for the declarator's end as the reader's errors do (CheckInputReport.pending). Whether the declaration may
+// go on: not where room ran out, or where the list had an error before.
+#define CHECK_ALIGNAS_OBJECT 2u
+static bool check_input_alignas_declarator(CheckInputReader* reader, CheckInputAttributes* common, CheckInputAttributes* own, uint32_t place)
+{
+    bool valid = true;
+    for (uint32_t list = 0; valid && list < 2; list += 1)
+    {
+        CheckInputAttributes* attributes = list == 0 ? common : own;
+        for (uint32_t i = 0; valid && attributes != NULL && attributes->has_alignas && i < attributes->count; i += 1)
+        {
+            const CheckInputAttribute* attribute = attributes->records + i;
+            const bool given = attribute->kind == CHECK_ATTRIBUTE_ALIGNAS && (place != CHECK_ALIGNAS_OBJECT || attribute->deferred != NULL);
+            CheckInput* output = reader->output;
+            const CheckInputAttributeRecovery recovery = check_input_attribute_recovery(reader, attributes, NULL);
+            if (given && place != CHECK_ALIGNAS_OBJECT)
+            {
+                CheckInputAttributes one = { 0 };
+                const CheckAttributeArgumentError error = place == BUSTER_CHECK_NONE ? CHECK_ARGUMENT_ALIGNAS_SUBJECT : CHECK_ARGUMENT_ALIGNAS_DECLARATION;
+                check_input_attribute_argument_error(reader, &one, attribute, attribute->first, error, place == BUSTER_CHECK_NONE ? 0 : place);
+            }
+            else if (given && output->report_count < output->report_capacity)
+            {
+                output->reports[output->report_count++] = *attribute->deferred;
+            }
+            output->resource |= given && output->report_count == recovery.reports;
+            valid = !given || check_input_attribute_errors_recover(reader, attributes, &recovery, 0);
+        }
+    }
+    return valid;
+}
+
 // The token after a GNU or C23 list's item that starts at `item`: its next comma at the list's level, or the list's end.
 static uint32_t check_input_attribute_item_end(const Parser* parser, uint32_t item, uint32_t list_end)
 {
@@ -4771,6 +4836,10 @@ static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAtt
                 valid = result != 0;
             }
             error = CHECK_ATTRIBUTE_ERROR_VECTOR;
+        }
+        else if (attribute->kind == CHECK_ATTRIBUTE_ALIGNAS && attribute->deferred != NULL)
+        {
+            // Its value's error, which waits for its declarators (check_input_alignas_declarator); no alignment.
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_ALIGNED || attribute->kind == CHECK_ATTRIBUTE_ALIGNAS)
         {
@@ -8257,7 +8326,8 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
         }
         if (attribute->kind == CHECK_ATTRIBUTE_ALIGNAS)
         {
-            check_input_alignas_error(reader, attributes, NULL, BUSTER_CHECK_NONE, 0, 0);
+            // Each _Alignas's, at it (#1447).
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_ALIGNAS_SUBJECT, 0);
             valid = false;
         }
         const bool allocation = attribute->kind == CHECK_ATTRIBUTE_ALLOC_SIZE || attribute->kind == CHECK_ATTRIBUTE_ALLOC_ALIGN;
