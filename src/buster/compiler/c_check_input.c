@@ -272,6 +272,9 @@ typedef enum CheckInputMessage
     // (CheckCpuDispatchError), `attribute` a CPU's token the message names, `value` 1 for cpu_dispatch's option, and a note
     // at `note_token` where it has one.
     CHECK_INPUT_CPU_DISPATCH,
+    // A block's extern declaration with an initializer, at its name (#1447): clang's "declaration of block scope identifier
+    // with linkage cannot have an initializer".
+    CHECK_INPUT_BLOCK_EXTERN_INITIALIZER,
 } CheckInputMessage;
 
 // CHECK_INPUT_INTERRUPT_HANDLER's details: the rule x86's handler finds broken (its result isn't void; it hasn't one or two
@@ -8789,7 +8792,11 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                                                          kind == PARSE_KIND_L_BRACE ? i : BUSTER_CHECK_NONE);
                 }
             }
-            valid &= file || storage != C_NAME_EXTERN || !initialized;
+            if (valid && !file && storage == C_NAME_EXTERN && initialized)
+            {
+                check_input_report(reader, name, CHECK_INPUT_BLOCK_EXTERN_INITIALIZER);
+                valid = false;
+            }
             valid &= check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, initialized, thread_local);
             if (valid && reader->cleanup_attributes && attributes != 0)
             {
