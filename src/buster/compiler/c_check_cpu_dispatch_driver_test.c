@@ -12,7 +12,7 @@
 //   unit with the external dispatcher and calls, by clang and both paths: each symbol clang has (f.A, f.O, f.P, f.V,
 //   f.ifunc, f, f.resolver, s.A, s.a, s.ifunc, s, s.resolver) with clang's binding, type and definedness; the scalar and
 //   vector objects the same bytes; and every mix of clang's and this executable's objects linked by cc, and the direct
-//   path's executables of the unit of both, run as clang's build.
+//   path's executables of the unit of both, and -g's objects of it, run as clang's build.
 // - The resolver's choice: a unit that defines libgcc's CPU model itself (statically initialized, as an IFUNC's resolver
 //   runs at load), with versions of eleven CPUs of distinct masks and two of none (no CPU whose code this host may not run,
 //   as diamondrapids's prologue may have APX's instructions), built by clang and both paths for
@@ -278,6 +278,29 @@ static void check_test_cpu_dispatch_objects(CheckTest* test, const char* clang, 
                  p == 0 ? "vector" : "scalar", captured, runs[0]);
         check_test_expect(test, ran && strcmp(captured, runs[0]) == 0, description);
         unlink(direct);
+    }
+    // With -g: the versions' bodies' debug information is at their own symbols.
+    for (uint32_t p = 0; joined && p < 2; p += 1)
+    {
+        char debug_object[PATH_MAX];
+        char debug_program[PATH_MAX];
+        char captured[128] = { 0 };
+        snprintf(debug_object, sizeof(debug_object), "%s/cpu-debug-%u.o", directory, p);
+        snprintf(debug_program, sizeof(debug_program), "%s/cpu-debug-%u", directory, p);
+        char* arguments[] = { (char*)executable, "-std=gnu17", "-O0", "-w", "-g", "-c", together, "-o", debug_object, p == 1 ? "--scalar" : NULL, NULL };
+        char* text = NULL;
+        const bool compiled = check_test_driver_spawn(arguments, &text) == 0;
+        free(text);
+        char* link[] = { (char*)clang, debug_object, "-o", debug_program, NULL };
+        const bool linked = compiled && check_test_driver_spawn(link, &text) == 0;
+        free(text);
+        const bool ran = linked && check_test_driver_capture(debug_program, captured, sizeof(captured));
+        char description[384];
+        snprintf(description, sizeof(description), "cpu_dispatch: -g's object, by the %s path, links and runs as clang's build: \"%s\" (clang \"%s\")",
+                 p == 0 ? "vector" : "scalar", captured, runs[0]);
+        check_test_expect(test, ran && strcmp(captured, runs[0]) == 0, description);
+        unlink(debug_object);
+        unlink(debug_program);
     }
     for (uint32_t u = 0; u < 2; u += 1)
     {

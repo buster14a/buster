@@ -631,6 +631,7 @@ static void check_program_cpu_needed(const CheckProgram* program, uint8_t* neede
 static bool check_program_cpu_number(CheckProgram* program, Arena* output);
 static String8 check_program_cpu_version_features(const CheckProgram* program, const CheckInputAttribute* attribute, Arena* output);
 static uint64_t check_program_cpu_features_write(const CheckProgram* program, const CheckInputAttribute* attribute, char* text, uint64_t capacity);
+static SymbolId check_program_body_symbol(const CheckProgram* program, uint32_t b);
 // The room a cpu_specific version's features take (check_program_cpu_features_write): more than any CPU's, 712 bytes in
 // c_check_cpu_dispatch.inc.
 #define BUSTER_CHECK_PROGRAM_CPU_FEATURES 1024u
