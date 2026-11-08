@@ -229,6 +229,9 @@ struct Tier1CertEmittedBuild
 {
     const Tier1SelectPlan* plan;
     const Tier1EmitResult* emitted;
+    // Optional per-node scalar definition candidates. They are usable only after the complete decoded program
+    // passes tier1_certificate_check; a kernel's matching bytes alone do not prove its operands' provenance.
+    Tier1DebugDefinition* debug_definitions;
     Tier1CertEmittedStats* stats;
     Tier1CertLocation* locations;
     uint32_t location_count;
@@ -2682,6 +2685,41 @@ static bool tier1_cert_emitted_return(Tier1CertEmittedBuild* build, uint32_t nod
     return valid && tier1_cert_emitted_originals(build, node, &kernel, ret, 1);
 }
 
+// Save only a whole scalar result of a kernel whose concrete records were regenerated and compared. The caller
+// publishes this array only after the independent value-flow certificate succeeds. An empty kernel, a machine row,
+// a phi and an unsupported register class have no claim here. In particular, a call's interval includes its result
+// conversion/copy, so that the call instruction's own PC can never stand for its future result.
+static bool tier1_cert_emitted_debug_definition(Tier1CertEmittedBuild* build, uint32_t node, const Tier1CertEmittedKernel* kernel, uint32_t first, uint32_t end)
+{
+    const uint32_t type = build->plan->function->type[node];
+    const uint32_t narrow = tier1_cert_emitted_narrow(type);
+    const uint32_t bytes = narrow != 0 ? narrow : type == IR_I32 || type == IR_F32 ? 4 : type == IR_I64 || type == IR_F64 || type == IR_PTR ? 8 : 0;
+    const bool floating = type == IR_F32 || type == IR_F64;
+    bool valid = true;
+    if (build->debug_definitions != NULL && bytes != 0 && kernel->definition != BUSTER_TIER1_CFG_NONE && first < end)
+    {
+        valid = kernel->definition_location < build->location_count && kernel->definition == build->emitted->node_values[node] &&
+                end <= build->emitted->code.count && build->debug_definitions[node].first == UINT32_MAX;
+        if (valid)
+        {
+            const Tier1CertLocation location = build->locations[kernel->definition_location];
+            const bool supported = location.reg < 16 && location.width >= bytes &&
+                                   location.class == (floating ? TIER1_CERT_VECTOR : TIER1_CERT_GPR);
+            if (supported)
+            {
+                build->debug_definitions[node] = (Tier1DebugDefinition){
+                    .first = first,
+                    .end = end,
+                    .reg = location.reg,
+                    .class = floating ? BUSTER_TIER1_ALLOCATE_VECTOR : BUSTER_TIER1_ALLOCATE_GPR,
+                    .bytes = (uint8_t)bytes,
+                };
+            }
+        }
+    }
+    return valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_ORIGIN, first);
+}
+
 // Node `node`'s run from record `r` before block tail `tail`: its records (their origin `origin`), a return's epilogue
 // (which may have none) before its ret among them, as its kernel says; then its ORIGINALs. `next` is the record after
 // the run.
@@ -2781,6 +2819,7 @@ static bool tier1_cert_emitted_run(Tier1CertEmittedBuild* build, uint32_t node, 
         {
             valid = tier1_cert_emitted_define(build, node, kernel.results[k], kernel.result_locations[k]);
         }
+        valid = valid && tier1_cert_emitted_debug_definition(build, node, &kernel, r, at);
     }
     *condition = function->op[node] == IR_CBR ? kernel.condition : *condition;
     *next = at;
@@ -2947,7 +2986,8 @@ static bool tier1_cert_emitted_entry(Tier1CertEmittedBuild* build, uint32_t r)
     return valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_DECODE, r);
 }
 
-static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, Arena* output, Arena* scratch, Tier1CertProgram* program, Tier1CertEmittedStats* stats)
+static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, Arena* output, Arena* scratch,
+                                                            Tier1DebugDefinition* definitions, Tier1DebugPhi* phis, Tier1CertProgram* program, Tier1CertEmittedStats* stats)
 {
     const uint64_t output_saved = output->length;
     const uint64_t scratch_saved = scratch->length;
@@ -2968,10 +3008,19 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
     Tier1CertEmittedBuild build = {
         .plan = plan,
         .emitted = emitted,
+        .debug_definitions = definitions,
         .stats = &tally,
         .base = (uint8_t)emitted->frame.base_register,
         .base_position = 2 * added,
     };
+    for (uint32_t node = 0; definitions != NULL && node < count; node += 1)
+    {
+        definitions[node] = (Tier1DebugDefinition){ .first = UINT32_MAX, .end = UINT32_MAX };
+    }
+    for (uint32_t node = 0; phis != NULL && node < count; node += 1)
+    {
+        phis[node] = (Tier1DebugPhi){ .record = UINT32_MAX, .block = UINT32_MAX };
+    }
     // A wide layout's vector registers (#1284) for a function whose vectors or rows need them.
     build.wide = tier1_cert_emitted_wide(plan, emitted);
     build.frame_unit = BUSTER_CERT_EMITTED_VECTOR_UNIT + (build.wide ? 32 * 64 : 16 * 16) + 8 * 8;
@@ -3498,6 +3547,19 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
                         {
                             location = tier1_cert_emitted_register(&build, v, where);
                             valid = location != BUSTER_CERT_NONE;
+                            if (valid && phis != NULL && is_phi[v] != 0 && input->definitions[v] == entry && b >= added)
+                            {
+                                const uint32_t node = emitted->value_nodes[v];
+                                const uint32_t type = function->type[node];
+                                const uint32_t narrow = tier1_cert_emitted_narrow(type);
+                                const uint32_t bytes = narrow != 0 ? narrow : type == IR_I32 || type == IR_F32 ? 4 : type == IR_I64 || type == IR_PTR || type == IR_F64 ? 8 : 0;
+                                const uint32_t class = where / 32;
+                                const uint32_t reg = where % 32;
+                                if (bytes != 0 && reg < 16 && class <= BUSTER_TIER1_ALLOCATE_VECTOR)
+                                {
+                                    phis[node] = (Tier1DebugPhi){ .record = UINT32_MAX, .block = b - added, .reg = (uint8_t)reg, .class = (uint8_t)class, .bytes = (uint8_t)bytes };
+                                }
+                            }
                         }
                         else if (valid && kind == BUSTER_TIER1_ALLOCATE_SPILL)
                         {
@@ -3561,6 +3623,16 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
         while (lead < end && tier1_cert_emitted_kind(emitted->origins[lead]) == TIER1_ORIGIN_EDGE && input->successors[emitted->origins[lead] & BUSTER_TIER1_ORIGIN_PAYLOAD] == b && in_degree == 1)
         {
             lead += 1;
+        }
+        // The block's entry certificate describes state after those leading edge moves. The checker below proves
+        // every incoming edge's actual copies and simultaneous phi renames before accepting these candidates.
+        for (uint32_t k = input->phi_offsets[b]; live && valid && phis != NULL && k < input->phi_offsets[b + 1]; k += 1)
+        {
+            const uint32_t node = emitted->value_nodes[input->phi_values[k]];
+            if (phis[node].block != UINT32_MAX)
+            {
+                phis[node].record = lead;
+            }
         }
         uint32_t tail = lead;
         for (uint32_t r = lead; r < end; r += 1)
@@ -3803,10 +3875,20 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
     return tally.reason;
 }
 
+static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, Arena* output, Arena* scratch,
+                                                      Tier1CertProgram* program, Tier1CertEmittedStats* stats)
+{
+    return tier1_certificate_emitted_debug(plan, emitted, output, scratch, NULL, NULL, program, stats);
+}
+
 // Publishes the certificate of the emitted code and checks it: OK, an unsupported shape's reason (not certified, not
 // refused), or a refusal: the decoding's, or TIER1_CERT_EMITTED_CHECK with the checker's error in `report`. Both arenas
 // are restored.
-static Tier1CertEmittedReason tier1_certificate_emitted_check(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, Arena* output, Arena* scratch, Tier1CertReport* report, Tier1CertEmittedStats* stats)
+// `definitions`, when present, points to instruction_count entries owned outside these temporary arena tails. The
+// entries and the optional node-indexed phi carriers remain candidates until the returned reason is OK; callers
+// must not publish any of them on another reason.
+static Tier1CertEmittedReason tier1_certificate_emitted_check_debug(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, Arena* output, Arena* scratch,
+                                                                  Tier1DebugDefinition* definitions, Tier1DebugPhi* phis, Tier1CertReport* report, Tier1CertEmittedStats* stats)
 {
     const uint64_t output_saved = output->length;
     const uint64_t scratch_saved = scratch->length;
@@ -3818,7 +3900,7 @@ static Tier1CertEmittedReason tier1_certificate_emitted_check(const Tier1SelectP
         .instruction = BUSTER_CERT_NONE,
     };
     Tier1CertEmittedStats tally = { 0 };
-    Tier1CertEmittedReason reason = tier1_certificate_emitted(plan, emitted, output, scratch, &program, &tally);
+    Tier1CertEmittedReason reason = tier1_certificate_emitted_debug(plan, emitted, output, scratch, definitions, phis, &program, &tally);
     if (reason == TIER1_CERT_EMITTED_OK)
     {
         const size_t size = tier1_certificate_scratch_size(&program);
@@ -3838,4 +3920,10 @@ static Tier1CertEmittedReason tier1_certificate_emitted_check(const Tier1SelectP
         *stats = tally;
     }
     return reason;
+}
+
+static Tier1CertEmittedReason tier1_certificate_emitted_check(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, Arena* output, Arena* scratch,
+                                                            Tier1CertReport* report, Tier1CertEmittedStats* stats)
+{
+    return tier1_certificate_emitted_check_debug(plan, emitted, output, scratch, NULL, NULL, report, stats);
 }

@@ -135,6 +135,54 @@ static bool ir_gvn_test_straight(Arena* arena, IrFunction* f, uint32_t kind)
     return created;
 }
 
+static void ir_gvn_test_debug_bindings(IrOptimizeTest* test, const IrFunction* source, Arena* input, Arena* output, Arena* reference, Arena* scratch)
+{
+    const uint64_t im = input->length;
+    const uint64_t om = output->length;
+    const uint64_t rm = reference->length;
+    const uint64_t sm = scratch->length;
+    IrFunction f = *source;
+    IrDebugBinding binding = { .local = 1, .entry = 3, .value = 3, .anchor = 3, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 };
+    uint8_t flags[2] = { BUSTER_IR_DEBUG_BIND_ENTRY, BUSTER_IR_DEBUG_BIND_REGIONS };
+    IrDebugRegion region = { .local = 1, .block = 0, .begin = 4, .end = f.instruction_count, .block_end = f.instruction_count, .value = 3, .next = BUSTER_IR_NONE,
+                             .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 };
+    const IrDebugInfo seed = { .entry_count = f.instruction_count, .local_count = 2, .bindings = &binding, .binding_count = 1,
+                               .regions = &region, .region_count = 1, .binding_flags = flags, .first_block_end = f.instruction_count };
+    const bool created = ir_debug_create(input, &f, &seed);
+    ir_optimize_test_expect(test, created, "GVN source assignment fixture allocation");
+    for (uint32_t i = 0; created && i < f.instruction_count; i += 1)
+    {
+        f.debug->origins[i] = i;
+    }
+    for (uint32_t path = 0; created && path < 2; path += 1)
+    {
+        IrGvnOptions options = ir_gvn_options();
+        options.scalar = path != 0;
+        IrGvnResult a = { 0 };
+        IrGvnResult b = { 0 };
+        const IrCheck ac = ir_optimize_gvn(&f, output, scratch, options, &a);
+        const IrCheck bc = ir_optimize_gvn(source, reference, scratch, options, &b);
+        ir_optimize_test_expect(test, ac.error == IR_OK && bc.error == IR_OK && scratch->length == sm && ir_optimize_test_equal(&a.function, &b.function), "GVN source assignments do not affect executable IR");
+        if (ac.error == IR_OK && a.function.debug != NULL && a.function.debug->binding_count == 1 && a.function.debug->bindings != NULL)
+        {
+            const IrDebugBinding result = a.function.debug->bindings[0];
+            ir_optimize_test_expect(test, a.function.debug->binding_count == 1 && result.kind == IR_DEBUG_BIND_VALUE && result.value < a.function.instruction_count &&
+                                   result.anchor == result.value && a.function.op[result.value] == IR_ADD && a.function.debug->origins[result.value] == 2 &&
+                                   a.function.debug->region_count == 1 && a.function.debug->regions[0].kind == IR_DEBUG_BIND_VALUE &&
+                                   a.function.debug->regions[0].value == result.value && a.function.debug->regions[0].block == 0 &&
+                                   a.function.debug->regions[0].begin == 4 && f.debug->regions[0].value == 3 &&
+                                   result.entry == 3 && f.debug->bindings[0].value == 3, "GVN removed duplicate source value follows its exact surviving representative");
+        }
+        else
+        {
+            ir_optimize_test_expect(test, false, "GVN preserves source assignment sidecar");
+        }
+        arena_pop_to(reference, rm);
+        arena_pop_to(output, om);
+    }
+    arena_pop_to(input, im);
+}
+
 // cyclic: the congruence result must remove more than available expressions do; recurrent: some values reach a cycle.
 static void ir_gvn_test_compare(IrOptimizeTest* test, const IrFunction* f, Arena* vector, Arena* scalar, Arena* scratch, uint32_t minimum_removed, bool cyclic, bool recurrent)
 {
@@ -631,6 +679,10 @@ static void ir_gvn_test_ir(IrOptimizeTest* test)
             if (created)
             {
                 ir_gvn_test_compare(test, &f, &vector, &scalar, &scratch, kind == 1 ? 0 : 2, false, false);
+                if (kind == 0)
+                {
+                    ir_gvn_test_debug_bindings(test, &f, &input, &vector, &scalar, &scratch);
+                }
                 if (kind == 1)
                 {
                     IrGvnResult result = { 0 };
