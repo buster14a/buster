@@ -576,6 +576,30 @@ static const CheckDriverDefaultWarningFixture check_driver_shift_count_fixtures[
         .warnings = 6,
     },
     {
+        // Re-review on #1778: an unselected static-selection arm's shifts warn in the selection's order, not its root's.
+        .name = "unselected static-selection arms' folded shifts warn in their order",
+        .source = "int f(int x){return _Generic(x,int:1<<40,default:-1<<2);}\n"
+                  "int g(int x){return _Generic(x,long:1<<41,short:-2<<2,default:x)+__builtin_choose_expr(0,-3<<1,1<<42);}\n",
+        .warnings = 6,
+    },
+    {
+        // Re-review on #1778: a folded condition's statement whose arm has no expression is reached where its place is.
+        .name = "a folded condition with an empty arm keeps its shifts' warnings only where its place is reached",
+        .source = "int d1(int x){return 0;if((1<<40)!=0){}}\n"
+                  "int n1(int x){return _Generic(x,int:0,long:0);}\n"
+                  "int d2(int x){goto out;if((1<<41)!=0){}out:return x;}\n"
+                  "int d3(int x){while(x){return 1;if((1<<42)!=0){}}return 0;}\n"
+                  "int d4(int x){switch(x){case 1:return 1;if((1<<43)!=0){}case 2:if((1<<44)!=0){}}return 0;}\n"
+                  "int d5(int x){while(1){if(x)return 1;}if((1<<45)!=0){}}\n"
+                  "int r1(int x){if(x)return 1;if((1<<46)!=0){}return 0;}\n"
+                  "int r2(int x){goto l;return 1;l:if((1<<47)!=0){}return 0;}\n"
+                  "int r3(int x){while(x){if(x>2)break;if((1<<48)!=0){}}return 0;}\n"
+                  "int r4(int x){for(;;){if(x)break;}if((1<<49)!=0){}return 0;}\n"
+                  "int r5(int x){if(x){x=2;}else{return 1;}if((1<<50)!=0){}return x;}\n"
+                  "int r6(int x){if((1<<51)!=0){}}\n",
+        .warnings = 8,
+    },
+    {
         .name = "a unit with an error keeps its folded shifts' runtime warnings",
         .source = "int f(int x){x=-1<<2;x=1<<40;x=undeclared;return x;x=-1<<3;}\n",
         .warnings = 3,

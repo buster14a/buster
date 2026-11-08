@@ -900,6 +900,9 @@ struct CheckCommonShiftWarning
     uint32_t publication;
     uint8_t severity;
     uint8_t phase;
+    // In an unselected static-selection arm or controlling expression, which check_common_shift_span leaves to the
+    // selection's walk (CheckCommonShiftExtras), in its order, or to the end (review on #1778).
+    bool selection;
     // NULL once reported or dropped.
     const char* message;
 };
@@ -964,6 +967,7 @@ static bool check_common_shift_replay(Preprocessor* pp, CheckCommonShiftWarnings
 }
 
 static uint8_t* check_common_unselected(const CheckGraph* graph, const Parser* parser, Arena* scratch);
+static void check_common_body_reached(const CheckProgram* program, const CheckProgramBody* body, uint8_t* seen, uint32_t* queue);
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
                                        const CheckProgram* program, const uint32_t* parents, Arena* scratch);
 
@@ -987,14 +991,104 @@ static uint32_t check_common_condition_root(const Parser* parser, const CheckInp
     return result;
 }
 
+// Whether the place of the statement at `keyword`, whose condition closes at `close`, is reached in its function's control
+// program: a folded condition's statement whose arm has no expression has no program entry of its own (review on #1778).
+// Within its enclosing block, its place follows the block's last entry before it: it is reached where that entry is and
+// falls through, or where a jump lands there from a label before the statement — a goto's or a case's source label before
+// it, or a preceding statement's own end, a jump from within the block. A label past it (a goto's, a case's, an enclosing
+// statement's end) lands at the same entry but not at the place. The first statement of its block, whose place follows no
+// entry of the block, is reached where the block's next entry is, unless a source label comes between. A place the program
+// can't locate is taken as reached.
+static bool check_common_place_reached(const Parser* parser, const CheckProgram* program, uint32_t keyword, uint32_t close, Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t scope = close < count ? parser->tree.parents[close] : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; scope < count && steps < count && parser->tree.roles[scope] != PARSE_ROLE_CLOSE_BLOCK &&
+                             parser->tree.roles[scope] != PARSE_ROLE_CLOSE_BODY && parser->tree.parents[scope] != scope; steps += 1)
+    {
+        scope = parser->tree.parents[scope];
+    }
+    const bool closed = scope < count && (parser->tree.roles[scope] == PARSE_ROLE_CLOSE_BLOCK || parser->tree.roles[scope] == PARSE_ROLE_CLOSE_BODY);
+    // (Its opening brace, its closing one's child.)
+    uint32_t open = BUSTER_CHECK_NONE;
+    for (uint32_t at = closed ? scope : 0; at != 0 && open == BUSTER_CHECK_NONE;)
+    {
+        at -= 1;
+        const uint8_t role = parser->tree.roles[at];
+        open = parser->tree.parents[at] == scope && (role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_OPEN_BODY) ? at : BUSTER_CHECK_NONE;
+    }
+    const CheckProgramBody* body = NULL;
+    for (uint32_t b = 0; open < count && program != NULL && program->controls != NULL && program->input != NULL && b < program->body_count; b += 1)
+    {
+        const CheckProgramBody* candidate = program->bodies + b;
+        body = candidate->opening <= open && (body == NULL || candidate->opening > body->opening) ? candidate : body;
+    }
+    bool result = true;
+    if (body != NULL && body->count != 0 && body->count == body->entry_count)
+    {
+        const uint64_t mark = scratch->length;
+        uint8_t* seen = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, body->count);
+        uint32_t* queue = seen != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, body->count) : NULL;
+        if (queue != NULL)
+        {
+            check_common_body_reached(program, body, seen, queue);
+            const CheckControl* entries = program->controls + body->first;
+            uint32_t before = BUSTER_CHECK_NONE;
+            uint32_t after = BUSTER_CHECK_NONE;
+            for (uint32_t i = 0; i < body->count; i += 1)
+            {
+                const uint32_t token = entries[i].token;
+                before = token >= open && token < keyword ? i : before;
+                after = after == BUSTER_CHECK_NONE && token >= keyword && token <= scope ? i : after;
+            }
+            if (before != BUSTER_CHECK_NONE)
+            {
+                const CheckControlKind kind = entries[before].kind;
+                const uint32_t place = before + 1;
+                result = seen[before] != 0 && kind != CHECK_CONTROL_RETURN && kind != CHECK_CONTROL_END && kind != CHECK_CONTROL_JUMP &&
+                         kind != CHECK_CONTROL_JUMP_INDIRECT;
+                for (uint32_t i = 0; !result && i < body->count; i += 1)
+                {
+                    const CheckControl* entry = entries + i;
+                    const bool jump = entry->kind >= CHECK_CONTROL_BRANCH_FALSE;
+                    const bool source = jump && entry->token < count && parser->tokens.kinds[entry->token] == PARSE_KIND_GOTO;
+                    const uint32_t label = source ? check_common_sparse_get(program->input->label_targets, entry->token) : BUSTER_CHECK_NONE;
+                    const CheckProgramCase* item = entry->kind == CHECK_CONTROL_CASE && program->cases != NULL ? program->cases + entry->target : NULL;
+                    // (A branch whose condition the program knows is taken only one way, as check_common_body_reached's.)
+                    bool truth = false;
+                    const bool known = jump && entry->kind != CHECK_CONTROL_JUMP && check_program_branch_truth(program, entry->node, entry->node, &truth);
+                    const bool taken = !known || truth == (entry->kind == CHECK_CONTROL_BRANCH_TRUE);
+                    result = seen[i] != 0 &&
+                             ((jump && taken && entry->target == place && (source ? label < keyword : entry->token >= open && entry->token < keyword)) ||
+                              (item != NULL && item->target == place && item->token < keyword) ||
+                              entry->kind == CHECK_CONTROL_ASM || (entry->kind == CHECK_CONTROL_JUMP_INDIRECT && place < body->count &&
+                                                                   entries[place].kind == CHECK_CONTROL_LABEL));
+                }
+            }
+            else if (after != BUSTER_CHECK_NONE)
+            {
+                bool labeled = false;
+                for (uint32_t at = keyword; at < entries[after].token && at < count; at += 1)
+                {
+                    labeled |= parser->tree.roles[at] == PARSE_ROLE_LABEL || parser->tree.roles[at] == PARSE_ROLE_CLOSE_CASE;
+                }
+                result = labeled || seen[after] != 0;
+            }
+        }
+        arena_pop_to(scratch, mark);
+    }
+    return result;
+}
+
 // Whether the statement whose condition's root is `condition` is reached, by `reached`, the evaluation with no range dropped.
 // A statement the program drops whole, its keyword too (a constant condition's other branch, an `else if` past a true one),
-// is not. Another's folded condition has no program entry of its own, so its statement's first kept root past it stands for
-// it: its arm's (whose nodes come between the condition's operand and its root) or the next statement's, either reached
-// where the statement is; a static selection's controlling expression and unselected arms (`unselected`), roots no
-// evaluation reaches, never stand for it (review on #1778). A statement with neither is taken as reached.
+// is not. Another's folded condition has no program entry of its own, so the first kept root of its executed arm stands
+// for it (whose nodes come between the condition's operand and its root), reached where the statement is; a static
+// selection's controlling expression and unselected arms (`unselected`), roots no evaluation reaches, never stand for it.
+// A statement with no such root, an empty arm's, is reached where its place in the program is (check_common_place_reached;
+// reviews on #1778).
 static bool check_common_condition_reached(const Parser* parser, const CheckGraph* graph, const CheckProgram* program, const uint32_t* parents,
-                                           const uint8_t* unselected, const uint8_t* reached, uint32_t condition)
+                                           const uint8_t* unselected, const uint8_t* reached, uint32_t condition, Arena* scratch)
 {
     const uint32_t close = graph->tokens[condition];
     const uint32_t open = check_common_opener(parser, close);
@@ -1002,12 +1096,25 @@ static bool check_common_condition_reached(const Parser* parser, const CheckGrap
                       !check_program_token_dropped(program, open - 1);
     const uint32_t operand = graph->operand0[condition];
     uint32_t found = BUSTER_CHECK_NONE;
-    for (uint32_t node = operand < condition ? operand + 1 : condition; kept && found == BUSTER_CHECK_NONE && node < graph->count; node += 1)
+    bool past = false;
+    for (uint32_t node = operand < condition ? operand + 1 : condition; kept && !past && found == BUSTER_CHECK_NONE && node < graph->count; node += 1)
     {
-        found = node != condition && parents[node] == BUSTER_CHECK_NONE && graph->tokens[node] > close && unselected[node] == 0 &&
-                (program == NULL || program->dropped_range_count == 0 || !check_program_token_dropped(program, graph->tokens[node])) ? node : BUSTER_CHECK_NONE;
+        const uint32_t token = graph->tokens[node];
+        const bool candidate = node != condition && parents[node] == BUSTER_CHECK_NONE && token > close && unselected[node] == 0 &&
+                               (program == NULL || program->dropped_range_count == 0 || !check_program_token_dropped(program, token));
+        // (A root within the statement: its token's parse-tree climb reaches the condition's closing parenthesis.)
+        uint32_t at = token;
+        for (uint32_t steps = 0; candidate && at < parser->tokens.count && at != close && steps < parser->tokens.count && parser->tree.parents[at] != at;
+             steps += 1)
+        {
+            at = parser->tree.parents[at];
+        }
+        found = candidate && at == close ? node : BUSTER_CHECK_NONE;
+        past = candidate && at != close;
     }
-    return kept && (found >= graph->count || reached[found] != 0);
+    const bool result = kept && (found < graph->count ? reached[found] != 0 :
+                                 open == BUSTER_CHECK_NONE || open == 0 || check_common_place_reached(parser, program, open - 1, close, scratch));
+    return result;
 }
 
 // The stashed warnings from `first` to `last`, the tokens of a root no walk enters, reported where that root stands in the
@@ -1025,7 +1132,10 @@ static void check_common_shift_span(Preprocessor* pp, CheckCommonShiftWarnings* 
     }
     for (uint32_t i = low; i < shifts->count && shifts->records[i].token <= last; i += 1)
     {
-        check_common_shift_report(pp, shifts->records + i);
+        if (!shifts->records[i].selection)
+        {
+            check_common_shift_report(pp, shifts->records + i);
+        }
     }
 }
 
@@ -1060,14 +1170,15 @@ static void check_common_shift_unreached(const Parser* parser, Preprocessor* pp,
             marked = true;
         }
         drop &= reached != NULL && unselected != NULL &&
-                !(condition < graph->count && check_common_condition_reached(parser, graph, program, parents, unselected, reached, condition));
+                !(condition < graph->count && check_common_condition_reached(parser, graph, program, parents, unselected, reached, condition, scratch));
         uint32_t root = node;
-        for (uint32_t steps = 0; drop && parents[root] < graph->count && steps < graph->count; steps += 1)
+        for (uint32_t steps = 0; node < graph->count && evaluated[node] == 0 && parents[root] < graph->count && steps < graph->count; steps += 1)
         {
             root = parents[root];
         }
         drop &= unselected != NULL && unselected[node] == 0 && unselected[root] == 0;
         shifts->records[i].message = drop ? NULL : shifts->records[i].message;
+        shifts->records[i].selection = !drop && unselected != NULL && node < graph->count && (unselected[node] != 0 || unselected[root] != 0);
     }
 }
 
