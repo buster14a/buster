@@ -4430,96 +4430,26 @@ static bool check_driver_rejected_edit(const Parser* parser, const CheckInput* i
 // reading's, which the caller published, but those the first reading lacks: its events' (by kind and token), and past
 // `stop`, where a reader's error ended its walk, its reports' and warnings'. Nothing where an error lies outside every body, or the reading isn't valid. Only
 // a rejected unit pays for it; the type table, input and program are its own, and the arenas' pushes stay to the unit's end.
-static void check_driver_rejected_common(const Parser* unit, const Parser* original, Preprocessor* pp, const CheckInput* first_input, const TypeTable* first_types,
-                                         const uint32_t* errors, uint32_t error_count, bool scalar, bool return_warning, CheckWarningSeverity return_baseline,
-                                         CheckCommonShiftWarnings* shifts, const CheckWarningEvents* first, const CheckWarningEvents* first_graph, uint32_t stop,
-                                         uint32_t publication_end, Arena* arena, Arena* scratch)
+// A rejected unit's second reading (check_driver_rejected_common): with `edits`, through the view that leaves out what they
+// mark, the mask's bodies left out besides; without, the unit itself with the mask's bodies left out. Whether its reading
+// was valid, so that its warnings are published: where it isn't, nothing is.
+static bool check_driver_rejected_read(const Parser* unit, const Parser* original, Preprocessor* pp, const uint32_t* errors, uint32_t error_count,
+                                       const CBodyRange* ranges, uint32_t body_count, const uint8_t* bodies, uint8_t* mask, const uint8_t* edits, bool scalar,
+                                       bool return_warning, CheckWarningSeverity return_baseline, CheckCommonShiftWarnings* shifts,
+                                       const CheckWarningEvents* first, const CheckWarningEvents* first_graph, uint32_t stop, uint32_t publication_end,
+                                       Arena* arena, Arena* scratch)
 {
     const Parser* parser = unit;
-    const uint32_t count = parser->tokens.count;
-    uint32_t body_count = 0;
-    for (uint32_t token = 0; token < count; token += 1)
-    {
-        body_count += parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY;
-    }
-    CBodyRange* ranges = body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CBodyRange, body_count) : NULL;
-    uint8_t* mask = ranges != NULL ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
-    uint32_t found = 0;
-    bool valid = mask != NULL && error_count != 0 && c_environment_bodies(&parser->tree, count, ranges, body_count, &found) && found == body_count;
-    // What the view leaves out of the bodies (check_driver_rejected_edit): an error's initializer or expression statement
-    // where it can, else its whole body, which the mask leaves out.
-    uint8_t* edits = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
-    uint32_t initialized_count = 0;
-    for (uint32_t token = 0; edits != NULL && token < count; token += 1)
-    {
-        initialized_count += check_sparse_get(first_input->initializer_begins, token) != BUSTER_CHECK_NONE;
-    }
-    uint32_t* initialized = edits != NULL && initialized_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, initialized_count) : NULL;
-    valid = edits != NULL && (initialized_count == 0 || initialized != NULL);
-    if (valid)
-    {
-        memset(mask, 0, (uint64_t)count + 1);
-        memset(edits, 0, (uint64_t)count + 1);
-        initialized_count = 0;
-        for (uint32_t token = 0; token < count; token += 1)
-        {
-            if (check_sparse_get(first_input->initializer_begins, token) != BUSTER_CHECK_NONE)
-            {
-                initialized[initialized_count++] = token;
-            }
-        }
-    }
-    bool edited = false;
-    // The bodies of every error, the mask where the view can't be made; and whether each error has one.
-    uint8_t* bodies = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
-    bool bodied_all = true;
-    valid = valid && bodies != NULL;
-    if (valid)
-    {
-        memset(bodies, 0, (uint64_t)count + 1);
-    }
-    for (uint32_t e = 0; valid && e < error_count; e += 1)
-    {
-        const bool kept = errors[e] < count && check_driver_rejected_edit(parser, first_input, first_types, initialized, initialized_count, errors[e], edits);
-        edited |= kept;
-        // The body whose tokens hold the error: the last one to begin at or before it.
-        const uint32_t token = errors[e];
-        uint32_t low = 0;
-        uint32_t high = body_count;
-        while (low < high)
-        {
-            const uint32_t middle = low + (high - low) / 2;
-            const bool before = ranges[middle].begin <= token;
-            low = before ? middle + 1 : low;
-            high = before ? high : middle;
-        }
-        const bool bodied = low != 0 && token < ranges[low - 1].end;
-        valid = kept || bodied;
-        bodied_all &= bodied;
-        if (bodied)
-        {
-            memset(bodies + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
-        }
-        if (!kept && bodied)
-        {
-            memset(mask + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
-        }
-    }
-    valid = valid && check_lazy_mask_valid(parser, mask);
+    const uint32_t count = unit->tokens.count;
+    const bool edited = edits != NULL;
     // The view, where an error's part is left out; its mask is the bodies', each brace with the token before it.
     CheckDriverRejectedView view = { 0 };
-    const bool viewed = valid && edited && check_driver_rejected_view(&view, unit, edits, arena, scratch);
+    const bool viewed = edited && check_driver_rejected_view(&view, unit, edits, arena, scratch);
     uint8_t* view_mask = viewed ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)view.parser.tokens.count + 1) : NULL;
-    if (valid && edited && view_mask == NULL)
-    {
-        // No view: every error's body is left out, as where none is edited.
-        edited = false;
-        mask = bodies;
-        valid = bodied_all && check_lazy_mask_valid(parser, mask);
-    }
+    bool valid = !edited || view_mask != NULL;
     // What the reading leaves out, in the unit's tokens: the bodies it masks and the parts its view drops.
     const uint8_t* left_bodies = mask;
-    const uint8_t* left_parts = edited ? edits : NULL;
+    const uint8_t* left_parts = edits;
     if (valid && edited)
     {
         for (uint32_t token = 0; token < view.parser.tokens.count; token += 1)
@@ -4532,10 +4462,6 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
         original = &view.parser;
         mask = view_mask;
         stop = view.to_view[stop < count ? stop : count];
-        for (uint32_t i = 0; shifts != NULL && i < shifts->count; i += 1)
-        {
-            shifts->records[i].token = shifts->records[i].token < count ? view.to_view[shifts->records[i].token] : shifts->records[i].token;
-        }
         valid = check_lazy_mask_valid(parser, mask);
     }
     const uint32_t view_count = parser->tokens.count;
@@ -4677,6 +4603,11 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
     }
     if (valid)
     {
+        // The folded shifts' tokens in the reading's.
+        for (uint32_t i = 0; edited && shifts != NULL && i < shifts->count; i += 1)
+        {
+            shifts->records[i].token = shifts->records[i].token < count ? view.to_view[shifts->records[i].token] : shifts->records[i].token;
+        }
         check_driver_return_reports(parser, original, pp, &program, return_baseline, false);
         const uint64_t flushed_mark = scratch->length;
         const uint8_t* flushed = check_driver_flushed_bodies(parser, original, pp, &program, scratch);
@@ -4685,7 +4616,99 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
     }
     arena_release(&type_arena);
     arena_release(&index_arena);
+    return valid;
 }
+
+static void check_driver_rejected_common(const Parser* unit, const Parser* original, Preprocessor* pp, const CheckInput* first_input, const TypeTable* first_types,
+                                         const uint32_t* errors, uint32_t error_count, bool scalar, bool return_warning, CheckWarningSeverity return_baseline,
+                                         CheckCommonShiftWarnings* shifts, const CheckWarningEvents* first, const CheckWarningEvents* first_graph, uint32_t stop,
+                                         uint32_t publication_end, Arena* arena, Arena* scratch)
+{
+    const Parser* parser = unit;
+    const uint32_t count = parser->tokens.count;
+    uint32_t body_count = 0;
+    for (uint32_t token = 0; token < count; token += 1)
+    {
+        body_count += parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY;
+    }
+    CBodyRange* ranges = body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CBodyRange, body_count) : NULL;
+    uint8_t* mask = ranges != NULL ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
+    uint32_t found = 0;
+    bool valid = mask != NULL && error_count != 0 && c_environment_bodies(&parser->tree, count, ranges, body_count, &found) && found == body_count;
+    // What the view leaves out of the bodies (check_driver_rejected_edit): an error's initializer or expression statement
+    // where it can, else its whole body, which the mask leaves out.
+    uint8_t* edits = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
+    uint32_t initialized_count = 0;
+    for (uint32_t token = 0; edits != NULL && token < count; token += 1)
+    {
+        initialized_count += check_sparse_get(first_input->initializer_begins, token) != BUSTER_CHECK_NONE;
+    }
+    uint32_t* initialized = edits != NULL && initialized_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, initialized_count) : NULL;
+    valid = edits != NULL && (initialized_count == 0 || initialized != NULL);
+    if (valid)
+    {
+        memset(mask, 0, (uint64_t)count + 1);
+        memset(edits, 0, (uint64_t)count + 1);
+        initialized_count = 0;
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            if (check_sparse_get(first_input->initializer_begins, token) != BUSTER_CHECK_NONE)
+            {
+                initialized[initialized_count++] = token;
+            }
+        }
+    }
+    bool edited = false;
+    // The bodies of every error, the mask where the view can't be made; and whether each error has one.
+    uint8_t* bodies = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
+    bool bodied_all = true;
+    valid = valid && bodies != NULL;
+    if (valid)
+    {
+        memset(bodies, 0, (uint64_t)count + 1);
+    }
+    for (uint32_t e = 0; valid && e < error_count; e += 1)
+    {
+        const bool kept = errors[e] < count && check_driver_rejected_edit(parser, first_input, first_types, initialized, initialized_count, errors[e], edits);
+        edited |= kept;
+        // The body whose tokens hold the error: the last one to begin at or before it.
+        const uint32_t token = errors[e];
+        uint32_t low = 0;
+        uint32_t high = body_count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            const bool before = ranges[middle].begin <= token;
+            low = before ? middle + 1 : low;
+            high = before ? high : middle;
+        }
+        const bool bodied = low != 0 && token < ranges[low - 1].end;
+        valid = kept || bodied;
+        bodied_all &= bodied;
+        if (bodied)
+        {
+            memset(bodies + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
+        }
+        if (!kept && bodied)
+        {
+            memset(mask + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
+        }
+    }
+    valid = valid && check_lazy_mask_valid(parser, mask);
+    // The view, where an error's part is left out. Where its reading isn't valid (a statement expression's last statement
+    // left out makes its value void) or the view can't be made, every error's body is left out instead, as where none is
+    // edited: what that reading reads, the first did too.
+    const bool read = valid && edited && check_driver_rejected_read(unit, original, pp, errors, error_count, ranges, body_count, bodies, mask, edits, scalar,
+                                                                    return_warning, return_baseline, shifts, first, first_graph, stop, publication_end,
+                                                                    arena, scratch);
+    uint8_t* fallback = !edited ? mask : bodied_all ? bodies : NULL;
+    if (valid && !read && fallback != NULL && check_lazy_mask_valid(unit, fallback))
+    {
+        check_driver_rejected_read(unit, original, pp, errors, error_count, ranges, body_count, bodies, fallback, NULL, scalar, return_warning, return_baseline,
+                                   shifts, first, first_graph, stop, publication_end, arena, scratch);
+    }
+}
+
 
 static void check_driver_dump(const CheckGraph* graph, const CheckStream* stream, TypeTable* types, Arena* scratch)
 {
