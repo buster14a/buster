@@ -184,8 +184,9 @@ static char* clang_reference_output(const char* clang_path)
     return result;
 }
 
-// Reports whether `clang_path` is the pinned reference release, into `version`; a mismatch prints both releases. False
-// when it isn't the reference, and the caller then skips only the comparisons that depend on the release's table.
+// Reports whether `clang_path` is the pinned reference release's official build, into `version`; a mismatch prints both
+// builds. False when it isn't the reference, and the caller then skips only the comparisons that depend on the build's
+// table.
 static bool clang_reference_report(const char* clang_path, char* version, size_t version_capacity)
 {
     char* output = clang_reference_output(clang_path);
@@ -9248,9 +9249,9 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
             .parts = parts,
             .collecting = true,
         };
-        // The library-builtin table is pinned to BUSTER_CLANG_REFERENCE_VERSION: a different release's table is
-        // reported with both versions, and pp_test_builtin_targets then skips only the plain names that release is
-        // known to classify differently.
+        // The library-builtin table is pinned to BUSTER_CLANG_REFERENCE_VERSION's official build: a different build is
+        // reported with both, and pp_test_builtin_targets then skips only the plain names that build is known to
+        // classify differently.
         if (with_clang)
         {
             clang_reference_report(pp_test_clang_path, pp_test_clang_version, sizeof(pp_test_clang_version));
