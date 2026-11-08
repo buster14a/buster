@@ -124,9 +124,9 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "int g(int y){ if (y=1) return 1; int w; return 0; }\n"
         "int h(void) { return 1 << 40; }\n",
         // The same with bodies before it.
-        "int g(int y){ int w; return 0; }\n"
+        "int g(int y){ int w; return y; }\n"
         "int f(void){ return zz; }\n"
-        "int g2(int y){ int w2; return 0; }\n",
+        "int g2(int y){ int w2; return y; }\n",
         // A reader's error that ends its walk (a failed static assertion): the other bodies' reader warnings (deprecated uses,
         // unused variables), before the error and after it, and their common warnings, without the unit-end ones.
         "int printf(const char *, ...);\n"
@@ -139,9 +139,50 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "int g __attribute__((deprecated));\n"
         "int f(void) { _Static_assert(0, \"x\"); return g; }\n"
         "int h(int x) { int w; if (x = 1) return g; return 0; }\n",
+        // A graph's error mid-way in a body: the second reading leaves out its statement alone (`{` `}` in its place), so the
+        // body's warnings before and after it are given, the body flushed; and a file-scope initializer's error, left out
+        // of its declaration, before a later declaration's and body's warnings.
+        "struct S { int a; } s;\n"
+        "enum E { A, B };\n"
+        "int printf(const char *, ...);\n"
+        "int f(int x, unsigned u, enum E e)\n"
+        "{\n"
+        "    if (x = 1) x = 0;\n"
+        "    if (x);\n"
+        "    printf(\"%s\\n\", x);\n"
+        "    switch (e) { case A: break; }\n"
+        "    x = s.b;\n"
+        "    if (x = 2) x = 0;\n"
+        "    if (x);\n"
+        "    printf(\"%d\\n\", 1.5);\n"
+        "    int z = x << 40;\n"
+        "    switch (e) { case A: break; }\n"
+        "    if (x < u) return z;\n"
+        "    return 0;\n"
+        "}\n"
+        "int g = s.b, h = 1 << 40;\n"
+        "int after(int y) { if (y = 3) return 1; return 0; }\n",
+        // Errors whose statement can't be left out alone: a condition's, a for header's, a statement expression's and a
+        // const declaration's initializer's leave out their bodies, the others' warnings given.
+        "struct S { int a; } s;\n"
+        "int printf(const char *, ...);\n"
+        "int cond(void) { if (s.b) return 1; return 0; }\n"
+        "int loop(void) { int i; for (i = s.b; i < 2; i++) {} return i; }\n"
+        "int expr(void) { return ({ int t = s.b; t; }); }\n"
+        "int konst(void) { const int c = s.b; return c; }\n"
+        "int other(int x) { if (x = 1) return printf(\"%d\\n\", 1.5); return x << 40; }\n",
+        // A block declaration's initializer left out, the variable kept.
+        "struct S { int a; } s;\n"
+        "int f(int x)\n"
+        "{\n"
+        "    int y = s.b;\n"
+        "    if (x = 2) return y;\n"
+        "    return 0;\n"
+        "}\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
-    static const char* const options[] = { NULL, "-Wall", "-ferror-limit=2", "-w" };
+    // Each run's options: none, one or two.
+    static const char* const options[][2] = { { NULL, NULL }, { "-Wall", NULL }, { "-Wall", "-Wextra" }, { "-ferror-limit=2", NULL }, { "-w", NULL } };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);
     char* actual_lines = malloc(LINES);
@@ -158,9 +199,9 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
             {
                 char* arguments[12] = { (char*)clang, (char*)standards[s], "-fsyntax-only", "-fno-caret-diagnostics", source };
                 uint32_t count = 5;
-                if (options[o] != NULL)
+                for (uint32_t a = 0; a < 2 && options[o][a] != NULL; a += 1)
                 {
-                    arguments[count++] = (char*)options[o];
+                    arguments[count++] = (char*)options[o][a];
                 }
                 arguments[count] = NULL;
                 char* expected = NULL;
@@ -186,8 +227,8 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
                     const int status = check_test_driver_spawn(arguments, &actual);
                     const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
                     char description[8192];
-                    snprintf(description, sizeof(description), "statement recovery %u, %s %s, mode %u: status %d (clang %d), lines\n%s(clang\n%s)", f, standards[s],
-                             options[o] != NULL ? options[o] : "", mode, status, oracle, actual_lines, expected_lines);
+                    snprintf(description, sizeof(description), "statement recovery %u, %s %s %s, mode %u: status %d (clang %d), lines\n%s(clang\n%s)", f, standards[s],
+                             options[o][0] != NULL ? options[o][0] : "", options[o][1] != NULL ? options[o][1] : "", mode, status, oracle, actual_lines, expected_lines);
                     check_test_expect(test, same && (status != 0) == (oracle != 0), description);
                     free(actual);
                 }

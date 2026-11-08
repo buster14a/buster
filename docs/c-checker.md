@@ -4027,11 +4027,21 @@ A unit without other errors whose `check_asms_run` or `check_program` fails
 runs these diagnoses, so only a failing unit pays for them.
 `CheckDriverDiagnostic.note` carries a note through the reports' walk.
 
-A rejected unit's other bodies get the warnings clang gives them
-(`check_driver_rejected_common`). The bodies holding one of its errors (its
-reader's, its graph's, its asm, control, initializer and musttail errors) are
-left out of a second reading of the unit, by `check_input_selected` as
-`-flazy-system-headers`' bodies are. Where that reading is valid, its program
+A rejected unit gets the warnings clang gives it outside its errors
+(`check_driver_rejected_common`), from a second reading of the unit without
+them (its reader's, its graph's, its asm, control, initializer and musttail
+errors). Where it can, that reading leaves out an error's part alone, in a
+private view of the unit's tokens reparsed as a repair's is
+(`check_driver_rejected_view`): an initializer, from its `=`, where the
+declaration is complete without it (not an unsized array's, not a const
+object's), else an expression statement in a body, which `{` `}` replace
+(`check_driver_rejected_edit`). The body is then read as clang reads it, its
+warnings before and after the error given, flushed (no analysis warnings).
+Other errors leave out their bodies, by `check_input_selected` as
+`-flazy-system-headers`' bodies are, as does every error where the view
+doesn't parse. The second reading's unused variables in a scope with an error
+are left out (its own error counts, the dropped part's at the token after
+it), and its unused parameters in a function with one. Where that reading is valid, its program
 gives the other bodies' `-Wreturn-type` and common warnings, the bodies after
 the unit's first error flushed as above. Where a reader's error left the first
 reading without some of its warnings, the second's are given, without the
@@ -4055,12 +4065,14 @@ The later phases are left:
   - C23's incompatible tag redefinitions (above).
 
   These still stop the reader.
-- **Errors outside the bodies, and a body's own warnings.** A rejected unit's
-  bodies that hold no error get their common warnings (below), but a unit
-  with an error outside every body (a file-scope initializer's, a
-  declaration's) still gets none. The warnings clang gives within a body that
-  holds an error (its `-Wparentheses` before or after an expression's error)
-  are still left out.
+- **Errors no view part leaves out.** A body's error in a condition, a for
+  header, a statement expression or a declaration other than through its
+  initializer still leaves its body out, and its warnings with it. An error
+  outside every body other than an initializer's (a declaration's, an
+  unsized array's or a const object's initializer) still leaves the unit
+  without its common warnings. A function holding an error gets no
+  `-Wunused-parameter`, where clang gives one for a parameter it doesn't
+  use.
 - **Lanes.** Bodies don't carry their recovered reports; they fall back to
   source order instead.
 - **Shared `_Alignas`.** An `_Alignas` shared by several declarators gives its
