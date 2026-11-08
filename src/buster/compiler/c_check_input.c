@@ -2626,9 +2626,12 @@ static bool check_input_recover_reports(CheckInputReader* reader, uint32_t from)
 
 // The recovered reports appended to the unit's reports once the reader has run (#1447), which rejects the unit: its
 // expressions' and declarations' later diagnostics were found as a valid unit's would be.
+static void check_input_initializer_list_drop(CheckInputReader* reader);
+
 static void check_input_recovered_publish(CheckInputReader* reader)
 {
     CheckInput* input = reader->output;
+    check_input_initializer_list_drop(reader);
     for (uint32_t i = 0; !input->resource && i < input->recovered_count; i += 1)
     {
         if (input->report_count < input->report_capacity)

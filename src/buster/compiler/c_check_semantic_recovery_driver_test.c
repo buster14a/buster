@@ -162,6 +162,11 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int y[] = 5;\nchar c[] = 6;\nstruct S { int x; };\nstruct S sa[] = 3;\nshort ss[] = 4;\nunsigned short us[] = 4;\n"
         "static int z[] = 2;\nvoid i(void) { int fine; }\nvoid h(void) { char loc[] = 1; int unused; }\nint a2[2] = 7;\n"
         "int g(void) { return y[0] + c[0]; }\n",
+        // Its error after the initializer's own, none where the initializer names an undeclared identifier, and an extern
+        // array's without -Wextern-initializer; a parenthesized initializer, a cast and a scalar's compound literal are no
+        // list either (review on #1791).
+        "int u1[] = undecl_fn2();\nint u2[] = undecl;\nint u3[] = undecl + 1;\nint u4[] = sizeof(undecl2);\nextern int e[] = 7;\n"
+        "int h[] = (5);\nint i[] = (int)6;\nint j[] = (int){7};\nint n[] = 4, o[] = 5;\n",
         // A block's, and clang's unused-variable warnings of no scope in which an error occurred (a body's from its
         // definition's start).
         "void f(int p)\n{\n    int x;\n    float x;\n    int y = 1;\n    long y = 2;\n    (void)y;\n    if (y = 2) {}\n}\n"

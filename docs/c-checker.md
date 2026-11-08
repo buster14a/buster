@@ -4012,8 +4012,16 @@ otherwise (`CHECK_INPUT_DIRECT_INITIALIZER_ARRAY`'s detail,
 `CheckInputArrayList`). `check_input_initializer_finish` recovers the report;
 the array keeps its unknown size, as clang's invalid declaration does, and its
 initializer leaves the sparse columns, so the initializers' run doesn't see it.
-A parenthesized initializer (GNU's compound literal, `int z[] = (int[2]){1,2};`,
-which clang accepts) is still refused, on main too.
+As clang checks the initializer first, the report completes at the
+initializer's end, after the initializer's own diagnostics, and an extern
+array loses its -Wextern-initializer event. Where the initializer names an
+undeclared identifier, clang has no value to check and gives no such error:
+the bindings' pass reports those names after the walk, so the report keeps its
+initializer's first token (`value`) and `check_input_initializer_list_drop`
+drops it before the recovered reports are published. A parenthesized
+initializer, a cast or a scalar's compound literal is no list either; an
+array's compound literal (GNU's, `int z[] = (int[2]){1,2};`, which clang
+accepts) is still refused, on main too.
 
 The later phases are left:
 
