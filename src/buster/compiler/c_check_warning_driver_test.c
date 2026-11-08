@@ -563,6 +563,25 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .c23 = true,
     },
     {
+        // clang's extra `;` of attribute lists alone (#1447): only the C23 lists warn, whatever the GNU lists' order.
+        .name = "attribute-only declaration warns only for its C23 lists",
+        .source = "[[gnu::unused]] __attribute__((unused));\n"
+                  "[[gnu::unused]] __attribute__((unused)) [[gnu::unused]] __attribute__((unused));\n"
+                  "__attribute__((unused)) [[gnu::unused]] __attribute__((aligned(8)));\n"
+                  "[[gnu::unused]] __attribute__((deprecated, packed)) [[gnu::unused]];\n"
+                  "[[gnu::unused]] __attribute__((unknown_gnu));\n"
+                  "[[unknown_c23]] __attribute__((unknown_gnu));\n",
+        .warnings = 8,
+        .c23 = true,
+    },
+    {
+        .name = "attribute-only declaration's GNU lists stay quiet without ignored-attribute warnings",
+        .source = "[[gnu::unused]] __attribute__((unused));\n[[unknown_c23]] __attribute__((unknown_gnu));\n",
+        .options = { "-Wno-ignored-attributes" },
+        .warnings = 1,
+        .c23 = true,
+    },
+    {
         .name = "null conversion source push pop retains named policy",
         .source = "#pragma clang diagnostic push\n#pragma clang diagnostic ignored \"-Wnon-literal-null-conversion\"\n"
                   "int*quiet=1-1;\n#pragma clang diagnostic pop\nint*loud=2-2;\n",
@@ -636,6 +655,84 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 10,
     },
     {
+        // A dereference of a null pointer constant (#1447, -Wnull-dereference): read or assigned (a compound assignment's
+        // too, a cast to void's operand too), through casts (a void pointer's, a constant expression's), with clang's note;
+        // not its address, a member of it, its increment, a volatile one, a pointer variable's, a subscript, sizeof's
+        // operand, nor unreachable code.
+        .name = "null pointer dereferences",
+        .source = "struct S { int a; };\nint g(int);\nint f(int n) {\n"
+                  "  *(int *)0 = 1; *(int *)0 += 2; int x = *(int *)0; g(*(int *)0); int k = n ? *(int *)0 : 1;\n"
+                  "  int c = *(const int *)(0); int l = *(int *)(1 - 1); int t = *(char *)(void *)0L;\n"
+                  "  int m = (*(struct S *)0).a; int *q = &*(int *)0; (*(int *)0)++; *(volatile int *)0 = 3;\n"
+                  "  int *p = 0; *p = 4; int y = ((int *)0)[0]; int s = sizeof(*(int *)0); ((struct S *)0)->a = 2;\n"
+                  "  if (0) { int z = *(int *)0; (void)z; }\n"
+                  "  (void)*(int *)0;\n"
+                  "  return x + k + c + l + t + m + y + s + (q != 0);\n  *(int *)0 = 9;\n}\n",
+        .warnings = 9,
+        .notes = 9,
+    },
+    {
+        // A nullptr_t operand is a null pointer constant too (#1447, C23): `nullptr` and a nullptr_t variable through casts,
+        // not a volatile target.
+        .name = "null pointer dereferences of nullptr",
+        .source = "typedef typeof(nullptr) np;\nint g(np n) {\n"
+                  "  int a = *(int *)n; int b = *(int *)(nullptr); int c = *(volatile int *)nullptr; int d = *(int *)(void *)nullptr;\n"
+                  "  *(int *)nullptr = 1;\n"
+                  "  return a + b + c + d;\n}\n",
+        .c23 = true,
+        .warnings = 4,
+        .notes = 4,
+    },
+    {
+        // Unreachable initializers (#1447): after a return, in a constant false branch and in a `while (0)`'s body,
+        // clang's runtime behavior's warnings (array bounds, division by zero, null dereference) stay silent.
+        .name = "runtime warnings skip unreachable initializers",
+        .source = "int a[2];\nint f(int n) {\n"
+                  "  if (0) { int d = a[5]; int e = n / 0; int z = *(int *)0; (void)d; (void)e; (void)z; }\n"
+                  "  while (0) { int d = a[5]; int e = n / 0; int z = *(int *)0; (void)d; (void)e; (void)z; }\n"
+                  "  return n;\n"
+                  "  { int d = a[5]; int e = n / 0; int z = *(int *)0; (void)d; (void)e; (void)z; }\n}\n",
+    },
+    {
+        // An unreachable initializer's barriers outlive its body's scratch (#1447): the next body's marks and queue
+        // must not reuse them, which made a later body's initialized variables "uninitialized when used here".
+        .name = "unreachable initializer barriers outlive their body",
+        .source = "int f(int n) {\n  return n;\n  int dead = n;\n  return dead;\n}\n"
+                  "int g(int n) {\n  int a = n + 1;\n  if (n > 1) n = a;\n  int b = n + 2;\n  if (n > 2) n = b;\n"
+                  "  int c = n + 3;\n  if (n > 3) n = c;\n  int d = n + 4;\n  if (n > 4) n = d;\n  return n;\n}\n",
+        .options = { "-Wall" },
+    },
+    {
+        // A logical operator one operand decides though the other isn't known (#1447, clang's CFG tryEvaluateBool):
+        // `x && 0` and `x || 1`, through `!` and casts, prune the arm they leave out for the runtime warnings and for
+        // -Wreturn-type alike; `x && (x || 1)` and `x && 1` decide nothing.
+        .name = "short-circuit conditions one operand decides",
+        .source = "int a[2];\nint f(int n) {\n"
+                  "  if (n && 0) { n = n / 0; }\n"
+                  "  if (!(n || 1)) { n = a[5]; }\n"
+                  "  if ((long)(n || 1)) { n += 1; } else { n = n % 0; }\n"
+                  "  while (n && 0) { n = *(int *)0; }\n"
+                  "  if (n && (n || 1)) { n = n / 0; }\n"
+                  "  return n;\n}\n"
+                  "int g(int n) {\n  if (n || 1) return 1;\n}\n"
+                  "int h(int n) {\n  while (n || 1) { if (n) return 2; }\n}\n"
+                  "int k(int n) {\n  if (n && 1) return 1;\n}\n",
+        .warnings = 2,
+    },
+    {
+        // The same conditions prune a conditional's arm and a logical operator's right operand (#1447, clang's CFG builder
+        // in VisitConditionalOperator and VisitLogicalOperator): `n && 1` and `n || 0` decide nothing.
+        .name = "short-circuit operands one operand decides",
+        .source = "int a[2];\nint f(int n) {\n"
+                  "  int r = (n && 0) ? n / 0 : (n || 1) ? 1 : *(int *)0;\n"
+                  "  r += ((n && 0) && n % 0) + ((n || 1) || a[5]) + (!(n || 1) ? a[5] : 0) + ((long)(n && 0) ? *(int *)0 : 1);\n"
+                  "  r += (n && 1) ? n / 0 : 0;\n"
+                  "  r += (n || 0) || *(int *)0;\n"
+                  "  return r;\n}\n",
+        .warnings = 2,
+        .notes = 1,
+    },
+    {
         // Clang decides by the context its parser is in (#147): an unselected _Generic association or choose_expr operand in
         // an alignof's operand is unevaluated with it, as are a _Generic's controlling expression and a statement
         // expression in sizeof's; an array declarator's bound, in a sizeof's type name too, is evaluated; and a sizeof of a
@@ -646,6 +743,25 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
                   "    + sizeof(({ (void)*p; 1; })) + sizeof(char (*)[(*p, n)]) + sizeof(int[(*p, n)]) + sizeof(v[(*p, 0)]) + sizeof(w);\n}\n"
                   "void g(int a[(*p, 3)]) { (void)a; }\n",
         .warnings = 12,
+    },
+    {
+        // A file-scope declaration of attribute lists and `__extension__`s alone is clang's extra `;` (#1447), which says
+        // nothing but its C23 lists' ignored-attribute warnings; GNU attributes after an `__extension__` are specifiers,
+        // which declare nothing. A declaration's leading attribute lists, C23's and GNU's in any order, go on past its
+        // `__extension__`s.
+        .name = "file-scope extension markers after attributes",
+        .source = "__extension__;\n__attribute__((unused)) __extension__;\nint a; __extension__ __extension__;\n"
+                  "__extension__ __attribute__((unused));\n__attribute__((unused)) [[gnu::unused]] __extension__ int b;\n"
+                  "__attribute__((unused)) [[gnu::unused]] __extension__;\n[[gnu::unused]] __extension__ __extension__;\n",
+        .warnings = 3,
+        .c23 = true,
+    },
+    {
+        // `__extension__`s before a static assertion (#1447), at file scope and in a block: the assertion, checked.
+        .name = "extension markers before static assertions",
+        .source = "__extension__ _Static_assert(1, \"\");\n__extension__ _Static_assert(0, \"file\");\n"
+                  "void f(void) { __extension__ __extension__ _Static_assert(0, \"block\"); }\n",
+        .errors = 2,
     },
     {
         // An assignment to a const variable, through an array's subscripts or a record's members to it, or through a
@@ -672,6 +788,53 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .name = "independent bodies retain source order at requested lanes",
         .source = "int*f0(void){return 1-1;}\nint*f1(void){return 2-2;}\nint*f2(void){return 3-3;}\n",
         .warnings = 3,
+    },
+    {
+        // A GNU statement expression in an unevaluated operand (#147): its statements are the graph's roots, but clang drops
+        // the unused-result and runtime-behavior warnings in sizeof's, _Alignof's, __alignof__'s and typeof's operands
+        // (check_common_unevaluated). None of these statement expressions has a side effect, which clang's
+        // -Wunevaluated-expression would report.
+        .name = "statement expression results in sizeof operands",
+        .source = "int *q;\nunsigned long g(void) { return sizeof(({ *q; 1; })); }\nunsigned long k(void) { return sizeof(({ 1 + 2; 1; })); }\n",
+    },
+    {
+        .name = "unused results in unevaluated statement expressions",
+        .source = "int *q;\nstruct S { int m; } *ps, vs;\nunsigned long f(int x) {\n"
+                  "    return sizeof(({ x == 1; x != 1; x < 1; 1; })) + sizeof(({ (0, x); (void *)q; ps->m; vs.m; 1; })) +\n"
+                  "           sizeof(({ x ? 1 : 2; ({ 3; 4; }); 5; })) + sizeof(x ? ({ 1; 2; }) : 3) + sizeof (({ *q; 1; })) +\n"
+                  "           __alignof__(({ *q; x == 1; (void *)q; 1; })) + _Alignof(({ 1; 2; }));\n}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "runtime behavior warnings in unevaluated statement expressions",
+        .source = "int a[2];\nunsigned u;\nint s;\nunsigned long f(int x) {\n"
+                  "    return sizeof(({ x / 0; 1; })) + sizeof(({ x % 0; 1; })) + sizeof(({ a[5]; 1; })) + sizeof(({ char c = 300; c; })) +\n"
+                  "           sizeof(({ u < s; 1; })) + sizeof(({ int b[2]; b[2]; })) + __alignof__(({ a[2]; x / 0; 1; }));\n}\n",
+        .options = { "-Wsign-compare" },
+    },
+    {
+        .name = "typeof statement expressions are unevaluated",
+        .source = "int *q;\nvoid f(int x) {\n    __typeof__(({ *q; x == 1; x = x; x / 0; 1; })) t = 0;\n"
+                  "    typeof(({ (0, x); (void *)q; 1; })) v = 0;\n    (void)t;\n    (void)v;\n}\n",
+        .options = { "-Wself-assign" },
+    },
+    {
+        // The evaluated controls: a statement expression outside the operand, sizeof's own discarded result, and array
+        // bounds, which clang evaluates as constant expressions even in a sizeof's type name or in a declaration inside its
+        // statement expression, until a nested sizeof makes them unevaluated again.
+        .name = "evaluated statement expressions and array bounds keep their warnings",
+        .source = "int *q;\nunsigned long f(int x) {\n    ({ *q; 1; });\n    sizeof(({ 1; 2; }));\n"
+                  "    unsigned long n = sizeof(int[({ x == 1; 2; })]) + sizeof(({ int w[({ 3; 4; })]; 5; }));\n"
+                  "    return n + ({ x < 1; 6; }) + sizeof(int[sizeof(({ 7; 8; }))]);\n}\n",
+        .warnings = 6,
+        .notes = 1,
+    },
+    {
+        // A sizeof of an expression of variable array type evaluates it after all (clang's TransformToPotentiallyEvaluated),
+        // which the contexts mark TRANSFORMED; a statement expression whose value decays to a pointer is no variable array,
+        // and stays unevaluated. (A statement expression inside a variable array's operand isn't supported yet.)
+        .name = "a statement expression decaying from a variable array stays unevaluated",
+        .source = "void g(int n) {\n    char vv[n][n];\n    (void)sizeof(({ 3; vv[0]; }));\n    (void)sizeof(({ 4; vv; }));\n}\n",
     },
 };
 

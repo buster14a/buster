@@ -176,6 +176,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/calling_convention_builtins.c`, its focused tests in `calling_convention_test.c`, and `tools/generate_builtin_abi.c` | Original immutable projection of this project's builtin type and ABI classification rules, bounded initialization and independent scalar recomputation; Default. The initial input is project revision `e7f89091648f68940b595aadd648841c1ffc3ec5`, `c_types.c` and `calling_convention.c`. No external implementation or generated data is imported. The generator includes the existing `lane.c` module, which retains its MIT notice and grant. Reproduction and ownership limits are in `docs/calling-convention.md`. |
 | `src/buster/compiler/c_check_clock.c`, `src/buster/compiler/compile_measure.c`, `docs/compile-time.md` and the `--time-stages` additions to `src/buster/compiler/c_checker_driver.c`, `src/buster/compiler/c_check_program_emit.c` and `src/buster/compiler/c_checker_driver_test.c` | Original opt-in stage clock, whole-process compile harness, driver tests and attribution notes (#518); Default. Reuses this repository's profiling helpers (`profile.c`) and the preprocessor's phase timers. tcc, perf and the frozen SQLite amalgamation run or are read externally; no external implementation or data is imported. |
 | `src/buster/compiler/tier1_select.c`, `src/buster/compiler/tier1_select_test.c`, `src/buster/compiler/tier1_select_benchmark.c`, `src/buster/compiler/tier1_liveness.c`, `src/buster/compiler/tier1_liveness_test.c`, `src/buster/compiler/tier1_emit.c`, `src/buster/compiler/tier1_emit_test.c`, `src/buster/compiler/tier1_call_test.c`, `src/buster/compiler/tier1_narrow_test.c`, `src/buster/compiler/tier1_terminal_test.c`, `src/buster/compiler/tier1_pipeline_test.c`, `docs/tier1.md`, `docs/tier1-selection.md`, `docs/tier1-liveness.md`, `docs/tier1-pipeline.md` | Original selection, selected-use analysis, native fragment/call consumer, hostile native call helpers, guarded narrow-value and bounded terminal fixtures, typed-stream fixtures, independent Clang formulas, process supervisor and measurement helpers; Default. Existing project IR/SSA, dataflow, allocator, frame, encoder, target and model APIs are consumed under their retained provenance. Clang runs externally; no external implementation or corpus is imported. |
+| `src/buster/compiler/tier1_address_coalesce_test.c` | Original #1217 allocated-address regression fixtures; Default. Reuses this project's selector, encoder and independent IR interpreter. No external implementation, fixture or timing data is imported. |
 | `src/buster/compiler/tier1_model_measure.c`, `src/buster/compiler/tier1_model_measure_test.c`, `docs/tier1-model-measurements.md` | Original emitted-case inventory, register-normalized experiments and reader regression fixtures; Default. Uses the original project selector manifest, encoder/effects and Zen 5 counter helpers; introduces no third-party timing data or new model observations. |
 | `src/buster/compiler/ir_optimize_inline.c`, `src/buster/compiler/ir_optimize_inline_test.c`, `docs/ir-inlining.md` | Original bounded translation-unit inlining, call-graph analysis and independent execution fixtures; Default. Tarjan's algorithm description is referenced; no external implementation or fixtures are copied. Shared IR and optimizer contracts retain their project provenance. |
 | `src/buster/compiler/ir_optimize_sroa.c`, `src/buster/compiler/ir_optimize_sroa_test.c`, `src/buster/compiler/ir_optimize_passes_benchmark.c`, `docs/ir-scalar-replacement.md`, `docs/ir-optimization-measurements.md` | Original private-field replacement, independent fixtures and stage-cost harness; Default. The existing shared IR, SSA adapter and optimizer test representations are reused; no external implementation, fixture corpus or measurement dataset is imported. |
@@ -375,6 +376,75 @@ independent Unicode input manifest. The LLVM tag above is the review
 comparison pin, not a claim to have recovered that binary. The imported table
 bytes and generator are pinned by the lexer revision; retain all these terms
 when redistributing them. Regeneration must record the actual tool and inputs.
+
+## Unicode character names (#1447)
+
+Named universal character names (`\N{NAME}`) are read by a table of Unicode's
+character names and by routines that follow LLVM's.
+
+- **Data:** `src/buster/compiler/c_unicode_names.inc` is derived Unicode data,
+  not first-party material: the names and aliases of Unicode's characters, the
+  ranges of names Unicode makes by rule from code points, and the general
+  categories' printable and formatting characters. It keeps the Unicode
+  License V3's terms, **Copyright © 1991-2026 Unicode, Inc.**, whose complete
+  text is [LICENSES/Unicode-3.0.txt](LICENSES/Unicode-3.0.txt), and its header
+  says so.
+- **Inputs:** `UnicodeData.txt` (sha256
+  `0736451de439ae7baf1425136617da495e09ee5afbe6e394374db7009ea08950`) and
+  `NameAliases.txt` (sha256
+  `3d5cf5e468901b080cd99adf2230061b748083705fe633db43ac8b73ec7a13da`, its own
+  header "NameAliases-18.0.0.txt, Date: 2026-02-03") of the Unicode Character
+  Database 18.0.0, fetched from <https://www.unicode.org/Public/18.0.0/ucd/>
+  on November 7, 2026. Unicode 18.0.0 is the version clang 23.1.6 (Ubuntu's
+  `1:23.1.6~++20261103094202+2875c6073a7e`) reads: decoded, LLVM's generated
+  dictionary at that commit
+  (`llvm/lib/Support/UnicodeNameToCodepointGenerated.cpp`) holds exactly
+  18.0.0's names and aliases plus 40 Chisoi names (U+16D80 to U+16DA9) of a
+  draft that 18.0.0 doesn't have, which this table leaves out. LLVM's
+  printable ranges (`llvm/lib/Support/Unicode.cpp`) are this table's but for
+  those 40 code points, and its formatting ones are this table's.
+- **Generator:** `tools/generate_unicode_names.c`, original project code under
+  the default terms. It reads the inputs at run time and copies no LLVM code;
+  which names it takes follows LLVM's generator
+  (`llvm/utils/UnicodeData/UnicodeNameMappingGenerator.cpp`), read for its
+  rules. It was run as:
+
+  ```sh
+  cc -std=c17 -O2 -Wall -Wextra -Werror tools/generate_unicode_names.c -o build/generate_unicode_names
+  build/generate_unicode_names --self-test
+  build/generate_unicode_names UnicodeData.txt NameAliases.txt 18.0.0 "https://www.unicode.org/Public/18.0.0/ucd/ (UnicodeData.txt sha256 $(sha256sum UnicodeData.txt | cut -d' ' -f1), NameAliases.txt sha256 $(sha256sum NameAliases.txt | cut -d' ' -f1))" > c_unicode_names.inc.new
+  ```
+
+  The generator succeeds only when it has read both inputs whole, taken every
+  name and refused no range of names made by rule it doesn't know, and written
+  and flushed the whole table; `--self-test` checks this against a synthetic
+  input, a write to `/dev/full`, an unreadable input and malformed lines. The
+  output's sha256 is
+  `d6e1a03969e43939f9e846f4406f0ca284ef14e634435f6fc55391ce803900f3`: 35,832
+  stored names in 283,451 bytes, 22 ranges, 740 printable and 21 formatting
+  ranges.
+- **Routines:** `src/buster/compiler/c_unicode_names.c` is a C translation of
+  LLVM routines, which keeps the LLVM Project's `Apache-2.0 WITH
+  LLVM-exception` terms ([LICENSES/LLVM.txt](LICENSES/LLVM.txt)), and its
+  header says so: the exact, loose and nearest-name matching of
+  `llvm/lib/Support/UnicodeNameToCodepoint.cpp` (its `startsWith`, the Hangul
+  syllables' jamo table and `findSyllable`, the names made by rule, and
+  `nearestMatchesForCodepointName`'s edit distance and order), and
+  `EscapeStringForDiagnostic` of `clang/lib/Basic/Diagnostic.cpp`, at
+  llvm-project `2875c6073a7e`. The local changes are a different storage (the
+  front-coded table above, searched by loose key, where LLVM walks a trie),
+  bounded slices, single-exit control flow and the diagnostics' assembly.
+- **Behavior references:** `clang/lib/Lex/LiteralSupport.cpp`
+  (`ProcessNamedUCNEscape`, `DiagnoseInvalidUnicodeCharacterName`,
+  `CharLiteralParser`), `clang/lib/Lex/Lexer.cpp` (`tryReadNamedUCN`,
+  `tryReadUCN`, `tryConsumeIdentifierUCN`) and
+  `clang/include/clang/Basic/DiagnosticLexKinds.td`, at the same commit, were
+  read for the rules and wording of the lexer, preprocessor and checker code
+  that reads named UCNs (`c_lexer.c`, `c_refine.c`, `c_preprocessor.c`,
+  `c_check_literals.c`, `c_check_literal_diagnostic.c`, `c_checker_driver.c`),
+  which is original project code under the default terms; no implementation
+  was copied there. Clang 23.1.6 runs externally as the oracle of the tests,
+  whose fixtures are original.
 
 ## RAD Debugger
 

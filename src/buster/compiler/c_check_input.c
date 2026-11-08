@@ -255,6 +255,16 @@ typedef enum CheckInputMessage
     // service routine, at its callee (check_input_interrupt_calls).
     CHECK_INPUT_INTERRUPT_HANDLER,
     CHECK_INPUT_INTERRUPT_CALLED,
+    // diagnose_if's and enable_if's (#1447, c_check_condition.c): an error diagnose_if's condition gives, its message at the
+    // call's `)` (or at the use of a function whose condition no argument decides), its note "from 'diagnose_if' attribute
+    // on 'f':" at the attribute (`note_token`), the message's first string token plus one in `detail` and the function's
+    // name's token in `value`; a call no enable_if condition admits, "no matching function for call to 'f'" at the callee,
+    // its note "candidate disabled: M" at the function's declaration (`note_token`), M's token plus one in `detail`; and a
+    // use of a function with a condition that isn't always true other than a call's, "cannot take address of function 'f'
+    // because it has one or more non-tautological enable_if conditions", at the outermost `(` around the name (`value`).
+    CHECK_INPUT_DIAGNOSE_IF_ERROR,
+    CHECK_INPUT_ENABLE_IF_CALL,
+    CHECK_INPUT_ENABLE_IF_ADDRESS,
 } CheckInputMessage;
 
 // CHECK_INPUT_INTERRUPT_HANDLER's details: the rule x86's handler finds broken (its result isn't void; it hasn't one or two
@@ -396,6 +406,9 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_UNEVALUATED_ESCAPE] = "invalid escape sequence in an unevaluated string literal",
     [CHECK_INPUT_INTERRUPT_HANDLER] = "x86-64 'interrupt' attribute only applies to functions that have a 'void' return type",
     [CHECK_INPUT_INTERRUPT_CALLED] = "interrupt service routine cannot be called directly",
+    [CHECK_INPUT_DIAGNOSE_IF_ERROR] = "diagnose_if attribute error",
+    [CHECK_INPUT_ENABLE_IF_CALL] = "no matching function for call",
+    [CHECK_INPUT_ENABLE_IF_ADDRESS] = "cannot take address of function because it has one or more non-tautological enable_if conditions",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -771,6 +784,9 @@ struct CheckInput
     // keeps each pointer complemented, so that a null pointer is its NONE (check_input_attributes_at,
     // check_input_set_attributes_at).
     CheckSparseWide attributes;
+    // A kept warn_unused_result typedef can remain in a function's returned type through typeof or compatible
+    // redeclarations, but canonical TypeIds lose that provenance. Keep logical-call discard warnings in such a unit.
+    bool typedef_result_contracts;
     // Ignored asm labels are the only attribute warnings; their writer publishes this upper bound for report collection.
     uint32_t ignored_asm_count;
     bool asm_warnings_prepared;
@@ -802,6 +818,15 @@ struct CheckInput
     // (check_input_overload_uses, #147).
     CheckInputMarkedMember* marked_overloads;
     uint32_t marked_overload_count;
+    // diagnose_if's and enable_if's conditions (#1447, c_check_condition.c): every one read, in the arena, in the order read;
+    // and each function declaration where any holds (its own or an earlier redeclaration's), in ascending order of its name's
+    // token, for the uses' and calls' diagnostics. Null and 0 in a unit without them.
+    struct CheckCondition* conditions;
+    uint32_t condition_count;
+    uint32_t condition_capacity;
+    struct CheckConditionDeclaration* condition_declarations;
+    uint32_t condition_declaration_count;
+    uint32_t condition_declaration_capacity;
     uint8_t* availability_contexts;
     // The availability attributes' warnings' texts (#1447, CheckInputAvailabilityText), in the output arena, grown by doubling.
     CheckInputAvailabilityText* availability_texts;
@@ -1793,6 +1818,8 @@ struct CheckInputReader
     bool late_attributes;
     // Whether a deprecated or unavailable attribute was read, for its uses' diagnostics (check_input_deprecated_uses).
     bool deprecated_attributes;
+    // Whether a diagnose_if or enable_if attribute was read, for its conditions (#1447, c_check_condition.c).
+    bool condition_attributes;
     // Whether an enforce_tcb or enforce_tcb_leaf attribute was read, for its calls' warnings (#1447, check_input_tcb_calls),
     // and whether one of them or a modular_format was, for its redeclarations' checks (check_input_attribute_merge_checks).
     bool tcb_attributes;
@@ -3011,6 +3038,31 @@ static bool check_input_free_standing(const Parser* parser, uint32_t first, uint
     return reading && t < end && parser->tokens.kinds[t] == PARSE_KIND_SEMI;
 }
 
+// A free-standing declaration's run of attributes from `token` up to its first later GNU list or alignment specifier,
+// which the specifiers skip as clang applies nothing of them (check_input_attribute_ignored_lists): reading the run whole
+// would apply a GNU list that follows a C23 list (`[[gnu::unused]] __attribute__((unused));`). `end` when the run has
+// none, or a list it cannot bound, whose error the whole read reports.
+static uint32_t check_input_ignored_group_after(const Parser* parser, uint32_t token, uint32_t end)
+{
+    uint32_t t = token;
+    uint32_t bound = end;
+    bool reading = true;
+    while (reading && check_input_attribute_starts(parser, t, end))
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const bool ignored = t > token && (kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_ALIGNAS);
+        const bool grouped = kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_ASM;
+        const uint32_t open = kind == PARSE_KIND_L_SQUARE ? t : t + 1;
+        const bool opened = open < end && (parser->tokens.kinds[open] == PARSE_KIND_L_PAREN || parser->tokens.kinds[open] == PARSE_KIND_L_SQUARE);
+        const uint32_t close = grouped && opened ? parser->tree.parents[open] : BUSTER_CHECK_NONE;
+        const bool bounded = close > open && close < end;
+        bound = ignored ? t : bound;
+        reading = !ignored && (!grouped || bounded);
+        t = !reading ? t : grouped ? close + 1 : t + 1;
+    }
+    return bound;
+}
+
 // An attribute-only null declaration has no declaration specifiers to warn about. GNU lists are parsed and ignored;
 // C23 lists are applied to the null declaration, so their subject diagnostics still run.
 static bool check_input_attribute_only(const Parser* parser, uint32_t first, uint32_t end)
@@ -3031,6 +3083,12 @@ static bool check_input_attribute_only(const Parser* parser, uint32_t first, uin
         {
             break;
         }
+    }
+    // A file-scope one's `__extension__`s after them (#1447), which clang's ParseExternalDeclaration reads past to the
+    // `;`; not an attribute after one, a declaration specifier there.
+    while (attribute && token < end && parser->tokens.kinds[token] == PARSE_KIND_EXTENSION)
+    {
+        token += 1;
     }
     return attribute && token == end;
 }
@@ -3820,7 +3878,8 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
         }
         if (check_input_attribute_starts(parser, i, end))
         {
-            valid &= check_input_read_attributes(reader, &i, end, &attributes);
+            const uint32_t run_end = reader->specifier_free_standing ? check_input_ignored_group_after(parser, i, end) : end;
+            valid &= check_input_read_attributes(reader, &i, run_end, &attributes);
             if (!valid)
             {
                 break;
@@ -4337,6 +4396,86 @@ static bool check_input_assertion_escaped(CheckInputReader* reader, uint32_t fir
     return result && check_input_unevaluated_refused(reader, first, &message_end) != BUSTER_CHECK_NONE;
 }
 
+// The unknown escape sequences of the evaluated literal at `token` (#1447), whose spelling is `bytes`: each one's
+// -Wunknown-escape-sequence warning at its backslash (CHECK_WARNING_EVENT_UNKNOWN_ESCAPE), as clang's literal parser
+// gives it. The cold path of a literal the extended decoding read, which has one at least.
+static __attribute__((noinline, cold)) void check_input_unknown_escapes(CheckInputReader* reader, uint32_t token, const uint8_t* bytes, uint32_t length, bool once)
+{
+    const uint64_t mark = reader->scratch->length;
+    CheckEscapeDiagnostic* diagnostics = length != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length)) : NULL;
+    bool had_error = false;
+    const uint32_t count = diagnostics != NULL ? check_literal_evaluated_escapes(bytes, length, reader->parser->language.standard >= 2023, diagnostics, &had_error) : 0;
+    reader->output->resource |= length != 0 && diagnostics == NULL;
+    // (A character constant's, which the constant evaluator may read again (`once`): each of its escapes', at its first
+    // read alone.)
+    const uint64_t key = (uint64_t)CHECK_WARNING_EVENT_UNKNOWN_ESCAPE << 32 | ((uint64_t)token + 1);
+    bool first = !once || !check_warning_set_contains(&reader->source_warning_keys, key);
+    if (once && first)
+    {
+        first = check_warning_set_add(&reader->source_warning_keys, key);
+        reader->output->resource |= !first;
+    }
+    for (uint32_t i = 0; first && i < count; i += 1)
+    {
+        if (diagnostics[i].kind == CHECK_ESCAPE_DIAGNOSTIC_UNKNOWN)
+        {
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE,
+                .kind = CHECK_WARNING_EVENT_UNKNOWN_ESCAPE,
+                .token = token,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = token + 1,
+                .payload = { .name = diagnostics[i].character, .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = diagnostics[i].offset },
+            };
+            check_input_warning_event(reader, &event, NULL, 0);
+        }
+    }
+    arena_pop_to(reader->scratch, mark);
+}
+
+// A string literal's tokens from `token` (`count` parts) the fast decoding refused, read again with the escapes clang
+// takes that it doesn't (#1447, check_literal_strings_extended): a delimited escape and an unknown one, whose warnings
+// it gives. A literal it refuses too is the driver's to word (check_driver_literal).
+static __attribute__((noinline, cold)) CheckStringLiteral check_input_strings_extended(CheckInputReader* reader, uint32_t token, const CheckStringPart* parts, uint32_t count)
+{
+    const CheckStringLiteral literal = check_literal_strings_extended(parts, count, reader->parser->language.standard >= 2023, reader->arena);
+    reader->output->resource |= literal.resource;
+    for (uint32_t i = 0; literal.valid && i < count; i += 1)
+    {
+        check_input_unknown_escapes(reader, token + i, parts[i].bytes, parts[i].length, false);
+    }
+    return literal;
+}
+
+// An ordinary character constant's warnings of its `characters` (#1447, more than one), as clang's CharLiteralParser gives
+// them at the constant: -Wmultichar's, or for exactly four -Wfour-char-constants' (ignored by default), and past four
+// "character constant too long for its type" too (whose value keeps the last four). Once each, as the constant evaluator
+// may read the constant again.
+static __attribute__((noinline, cold)) void check_input_multichar(CheckInputReader* reader, uint32_t token, uint32_t characters)
+{
+    const CheckWarningEvent multichar =
+    {
+        .id = characters == 4 ? CHECK_WARNING_ID_FOUR_CHAR_CONSTANTS : CHECK_WARNING_ID_MULTICHAR,
+        .kind = CHECK_WARNING_EVENT_MULTICHAR,
+        .token = token,
+        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+        .flags = characters == 4 ? BUSTER_CHECK_WARNING_DEFAULT_IGNORED : 0,
+        .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+        .completion = token + 1,
+        .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+    };
+    check_input_warning_once(reader, &multichar);
+    if (characters > 4)
+    {
+        CheckWarningEvent long_event = multichar;
+        long_event.id = CHECK_WARNING_ID_CHARACTER_TOO_LONG;
+        long_event.kind = CHECK_WARNING_EVENT_CHARACTER_TOO_LONG;
+        check_input_warning_once(reader, &long_event);
+    }
+}
+
 static const CheckInitString* check_input_string(CheckInputReader* reader, uint32_t token)
 {
     const Parser* parser = reader->parser;
@@ -4375,6 +4514,13 @@ static const CheckInitString* check_input_string(CheckInputReader* reader, uint3
                 literal = check_literal_strings_by(parts, count, parser->language.standard >= 2023, BUSTER_SCALAR_PATH(parser->options.scalar), reader->arena);
                 reader->output->resource |= literal.resource;
                 valid = literal.valid;
+                // (Not a static assertion's message, an unevaluated string literal, whose escapes are the driver's:
+                // check_driver_escapes.)
+                if (!valid && !literal.resource && !check_input_assertion_escaped(reader, token, end))
+                {
+                    literal = check_input_strings_extended(reader, token, parts, count);
+                    valid = literal.valid;
+                }
             }
             const TypeId type = valid ? check_input_type_result(reader, type_array(reader->types, literal.element_type, literal.unit_count)) : 0;
             valid &= type != 0;
@@ -4460,6 +4606,19 @@ static inline __attribute__((always_inline)) void check_input_literal(CheckInput
         if (reader->parser->tokens.kinds[token] == PARSE_KIND_CHARACTER)
         {
             *result = check_literal_character(bytes, length, reader->pp->options.language.standard >= 2023, reader->types->char_unsigned);
+            if (!result->valid)
+            {
+                // clang's escapes the fast decoding refuses (#1447, check_input_unknown_escapes).
+                *result = check_literal_character_by(bytes, length, reader->pp->options.language.standard >= 2023, reader->types->char_unsigned, true);
+                if (result->valid)
+                {
+                    check_input_unknown_escapes(reader, token, bytes, length, true);
+                }
+            }
+            if (result->valid && result->characters > 1 && length != 0 && bytes[0] == '\'')
+            {
+                check_input_multichar(reader, token, result->characters);
+            }
         }
         else
         {
@@ -4542,6 +4701,7 @@ static void check_input_alloc_token_evidence(CheckInputReader* reader, uint32_t 
 #include "c_check_generic.c"
 static void check_input_implicit_function(CheckInputReader* reader, uint32_t token);
 // The plain library builtins' calls that clang folds (#148), defined after the implicit declarations below.
+static inline __attribute__((always_inline)) uint32_t check_input_library_declaration(CheckInputReader* reader, uint32_t declaration);
 static inline __attribute__((always_inline)) uint32_t check_input_library_call(CheckInputReader* reader, uint32_t use);
 
 // A constexpr object's value (#793), if its initializer's finish has read it: an integer, floating or null pointer
@@ -4762,18 +4922,6 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
                                attribute->kind == CHECK_ATTRIBUTE_ALLOC_ALIGN || attribute->kind == CHECK_ATTRIBUTE_FORMAT;
         const bool tag_type = reader->tag_attributes && (attribute->kind == CHECK_ATTRIBUTE_REGPARM || attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE);
         attribute->ignored |= tag_type;
-        if (attribute->kind == CHECK_ATTRIBUTE_ENABLE_IF)
-        {
-            uint32_t first = 0;
-            uint32_t end = 0;
-            int64_t value = 0;
-            // glibc uses enable_if(1, "") only to prefer a wrapper. Conditional candidate filtering remains unsupported.
-            valid = check_input_attribute_argument(attribute, 0, &first, &end) && check_input_constant_ice(reader, first, end, &value) && value != 0;
-            if (!valid)
-            {
-                check_input_attribute_error(reader, &parsed, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
-            }
-        }
         if (attribute->deferred != NULL)
         {
             // Its earlier handler error wins once the declaration accepts the attribute. In particular a malformed
@@ -6458,6 +6606,7 @@ static void check_input_mark_member(CheckInputReader* reader, uint32_t index, co
 #include "c_check_enum_input.c"
 #include "c_check_counted_by_input.c"
 #include "c_check_thread_safety_input.c"
+#include "c_check_condition.c"
 
 // The first of the function specifier inline's tokens in [first, end), a declaration's specifiers, or BUSTER_CHECK_NONE.
 static uint32_t check_input_inline_token(const Parser* parser, uint32_t first, uint32_t end)
@@ -7672,6 +7821,36 @@ static void check_input_standalone_specifiers(CheckInputReader* reader, uint32_t
 
 // Read a declaration's specifiers and its declarators, using parser group boundaries and subtree ends to pass
 // over each initializer. Identifier uses within them are resolved later at their own source positions.
+// Whether `first` starts `__extension__`s before a static assertion (#1447), which clang takes at file scope and in a block:
+// the parser's markers of its statement, no declaration's specifiers.
+static bool check_input_extension_assertion(const Parser* parser, uint32_t first)
+{
+    uint32_t token = first;
+    while (token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_EXTENSION)
+    {
+        token += 1;
+    }
+    return token > first && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_STATIC_ASSERT;
+}
+
+// Whether the file-scope declaration from `first` to its `;` at `end` is GNU attribute lists and then `__extension__`s
+// alone, which clang's ParseExternalDeclaration reads as an extra `;` after them (#1447), with no warning by default.
+static bool check_input_extra_semi(const CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    uint32_t token = first;
+    while (token < end && parser->tokens.kinds[token] == PARSE_KIND_ATTRIBUTE && check_input_attribute_starts(parser, token, end))
+    {
+        token = check_input_skip_attributes(parser, token, end);
+    }
+    const uint32_t extensions = token;
+    while (token < end && parser->tokens.kinds[token] == PARSE_KIND_EXTENSION)
+    {
+        token += 1;
+    }
+    return reader->function_body == BUSTER_CHECK_NONE && token == end && token > extensions;
+}
+
 static void check_input_declaration(CheckInputReader* reader, uint32_t first)
 {
     const Parser* parser = reader->parser;
@@ -7800,7 +7979,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 check_input_warning(reader, CHECK_WARNING_ID_MISSING_DECLARATIONS, CHECK_WARNING_EVENT_TYPEDEF_NAMELESS, specifiers,
                                     CHECK_WARNING_COMPLETE_AFTER_DELIMITER, i);
             }
-            else if (!tag)
+            else if (!tag && !check_input_extra_semi(reader, first, i))
             {
                 check_input_warning(reader, CHECK_WARNING_ID_MISSING_DECLARATIONS, CHECK_WARNING_EVENT_EMPTY_DECLARATION, specifiers,
                                     CHECK_WARNING_COMPLETE_AFTER_DELIMITER, i);
@@ -8104,6 +8283,12 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             reader->attribute_parameters = 0;
             reader->subject_function_list = BUSTER_CHECK_NONE;
             valid = valid && check_input_attribute_definition(reader, attributes, subject);
+            // diagnose_if's and enable_if's conditions (#1447, c_check_condition.c), in the function's parameter scope, after the
+            // ones its previous declaration has.
+            if (valid && reader->condition_attributes && function && !is_typedef)
+            {
+                valid = check_input_conditions(reader, attributes, name, type, parameters, function_list, previous_declaration);
+            }
             // clang's lifetimebound on a parameter of a function that returns void (#147, checkLifetimeBoundAttr), at the
             // attribute: of a function's declaration alone.
             if (valid && function && !is_typedef && reader->declarator_lifetimebound != BUSTER_CHECK_NONE)
@@ -8551,7 +8736,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             if (kind == C_BINDING_FUNCTION)
             {
                 check_input_noderef_redeclaration(reader, token, previous);
-                check_input_format_inherit(reader, token, previous);
+                check_input_contract_inherit(reader, token, previous);
             }
             // A typedef's redeclaration merges its attributes too (#1447); a declaration with linkage's are merged below.
             if (kind == C_BINDING_TYPEDEF && reader->merged_attributes)
@@ -8640,10 +8825,10 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                     const uint32_t first = reader->objects[previous];
                     const bool first_valid = first != 0 && first <= reader->parser->tokens.count &&
                                              reader->declaration_kinds[first - 1] == C_BINDING_FUNCTION && reader->objects[first - 1] == first;
-                    const uint32_t format_previous = linked_visible ? previous : first_valid ? first - 1 : BUSTER_CHECK_NONE;
-                    if (format_previous < reader->parser->tokens.count && check_input_declaration_visible(reader, format_previous, point))
+                    const uint32_t contract_previous = linked_visible ? previous : first_valid ? first - 1 : BUSTER_CHECK_NONE;
+                    if (contract_previous < reader->parser->tokens.count && check_input_declaration_visible(reader, contract_previous, point))
                     {
-                        check_input_format_inherit(reader, token, format_previous);
+                        check_input_contract_inherit(reader, token, contract_previous);
                     }
                 }
                 check_input_naked_inherit(reader, token, previous);
@@ -8761,7 +8946,7 @@ static __attribute__((noinline)) void check_input_library_names(CheckInputReader
 }
 
 // The mark of a call of `declaration`, a function with external linkage whose name, `name`, shares its low 6 bits with a
-// fold's (check_input_library_call): BUSTER_CHECK_LIBRARY_CALL and the fold's index where it is one and clang makes the
+// fold's (check_input_library_declaration): BUSTER_CHECK_LIBRARY_CALL and the fold's index where it is one and clang makes the
 // declaration the builtin, else 0.
 static __attribute__((noinline)) uint32_t check_input_library_match(CheckInputReader* reader, uint32_t declaration, IdentId name)
 {
@@ -8775,6 +8960,21 @@ static __attribute__((noinline)) uint32_t check_input_library_match(CheckInputRe
                          pp_library_builtin(&reader->pp->options, intern_bytes(table, name), intern_length(table, name)) &&
                          check_library_plain_prototype(reader->types, reader->declared_types[declaration], index);
     return library ? BUSTER_CHECK_LIBRARY_CALL | index : 0;
+}
+
+// The same declaration permission serves named calls and immutable overload candidates. The latter publish it only
+// for ordinary declarations, after inheriting attributes from their earlier declarations (#1234).
+static inline __attribute__((always_inline)) uint32_t check_input_library_declaration(CheckInputReader* reader, uint32_t declaration)
+{
+    if (!reader->library_names_known)
+    {
+        check_input_library_names(reader);
+    }
+    const Parser* parser = reader->parser;
+    const IdentId name = declaration < parser->tokens.count ? parser->tokens.names[declaration] : 0;
+    const bool candidate = name != 0 && ((reader->library_names_mask >> (name & 63)) & 1) != 0 && check_input_linkage(reader->declaration_bits, declaration) == 2 &&
+                           reader->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+    return candidate ? check_input_library_match(reader, declaration, name) : 0;
 }
 
 // The member that marks a call whose designator, at `use`, names the unit's declaration of a plain library builtin that
@@ -8794,10 +8994,7 @@ static inline __attribute__((always_inline)) uint32_t check_input_library_call(C
     const IdentId spelled = use < parser->tokens.count ? parser->tokens.names[use] : 0;
     const bool masked = ((reader->library_names_mask >> (spelled & 63)) & 1) != 0 && parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER;
     const uint32_t declaration = masked ? reader->output->declarations[use] : BUSTER_CHECK_NONE;
-    const IdentId name = declaration < parser->tokens.count ? parser->tokens.names[declaration] : 0;
-    const bool candidate = name != 0 && ((reader->library_names_mask >> (name & 63)) & 1) != 0 && check_input_linkage(reader->declaration_bits, declaration) == 2 &&
-                           reader->declaration_kinds[declaration] == C_BINDING_FUNCTION;
-    return candidate ? check_input_library_match(reader, declaration, name) : 0;
+    return masked ? check_input_library_declaration(reader, declaration) : 0;
 }
 
 #include "c_check_literal_table_input.c"
@@ -9530,9 +9727,14 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             {
                 check_input_local_labels(reader, i);
             }
-            else
+            else if (!check_input_extension_assertion(parser, declaration_first))
             {
                 check_input_declaration(reader, declaration_first);
+            }
+            else
+            {
+                // The markers carry nothing to their statement, as a declaration's specifiers carry nothing.
+                reader->ignored[i] = true;
             }
         }
         if (__builtin_expect((role == PARSE_ROLE_OPEN_BLOCK) | (role == PARSE_ROLE_OPEN_BODY) | (role == PARSE_ROLE_OPEN_FOR) | (role == PARSE_ROLE_OPEN_CONDITION), 0) &&
@@ -12523,6 +12725,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             if (reader.tcb_attributes && complete_translation_unit && !input->resource)
             {
                 check_input_tcb_calls(&reader);
+            }
+            if (input->condition_declaration_count != 0 && complete_translation_unit && !input->resource)
+            {
+                check_input_condition_uses(&reader);
             }
             if (reader.deprecated_attributes && complete_translation_unit && !input->resource)
             {

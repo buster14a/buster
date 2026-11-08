@@ -126,6 +126,11 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Winvalid-version-availability", NULL, "invalid version in availability attribute" },
     { "-Wunknown-escape-sequence", NULL, "unknown escape sequence" },
     { "-Wvoid-ptr-dereference", NULL, "ISO C does not allow indirection on operand of type 'void *'" },
+    { "-Wmultichar", NULL, "multi-character character constant" },
+    { "-Wfour-char-constants", NULL, "multi-character character constant" },
+    { NULL, NULL, "character constant too long for its type" },
+    { "-Wnull-dereference", NULL, "indirection of non-volatile null pointer will be deleted, not trap" },
+    { "-Wuser-defined-warnings", NULL, "user-defined warning" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

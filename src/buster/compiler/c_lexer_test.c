@@ -1077,6 +1077,108 @@ static bool check_line_bom(TokenArrays* tokens, uint32_t flags)
     return valid;
 }
 
+// Unicode's character names (#1447, c_unicode_names.c): every stored name and alias found exactly, and lowercased
+// loosely, as its own code point; every name of the ranges made by rule that UnicodeData.txt lists, and every Hangul
+// syllable's, exactly; an unlisted range's ends, a leading zero, a lowercase digit (loose alone) and the code points
+// past its ends; names that aren't any; the nearest names of a misspelled one, as clang 23 gives them; and clang's
+// printing of a character.
+static bool check_unicode_names(void)
+{
+    uint32_t checks = 0;
+    uint32_t failures = 0;
+    UnicodeNameCursor cursor = { 0 };
+    for (uint32_t n = 0; n < BUSTER_UNICODE_NAME_COUNT; n += 1)
+    {
+        unicode_name_next(&cursor);
+        uint8_t lower[BUSTER_UNICODE_NAME_BYTES];
+        for (uint32_t i = 0; i < cursor.length; i += 1)
+        {
+            const uint8_t c = (uint8_t)cursor.name[i];
+            lower[i] = c >= 'A' && c <= 'Z' ? (uint8_t)(c + 32) : c;
+        }
+        uint32_t exact = 0;
+        uint32_t loose = 0;
+        const bool found = unicode_name_strict((const uint8_t*)cursor.name, cursor.length, &exact) && exact == cursor.code_point;
+        const bool lowered = !unicode_name_strict(lower, cursor.length, &loose) && unicode_name_loose(lower, cursor.length, &loose) && loose == cursor.code_point;
+        failures += !found + !lowered;
+        checks += 2;
+        if ((!found || !lowered) && failures < 8)
+        {
+            printf("unicode names: %s (U+%04X): exactly %s U+%04X, lowercased loosely U+%04X\n", cursor.name, cursor.code_point, found ? "found" : "not found", exact, loose);
+        }
+    }
+    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(unicode_name_ranges); r += 1)
+    {
+        const UnicodeNameRange* range = &unicode_name_ranges[r];
+        // (An unlisted range's ends alone.)
+        for (uint32_t c = range->first; c <= range->last; c = range->listed || c == range->last ? c + 1 : range->last)
+        {
+            char name[BUSTER_UNICODE_NAME_BYTES];
+            const uint32_t length = (uint32_t)snprintf(name, sizeof(name), "%s%04X", range->prefix, c);
+            uint32_t value = 0;
+            const bool found = unicode_name_strict((const uint8_t*)name, length, &value) && value == c;
+            failures += !found;
+            checks += 1;
+        }
+        // Past its ends (no other range of its prefix reaching them), a leading zero, a lowercase digit.
+        char name[BUSTER_UNICODE_NAME_BYTES];
+        uint32_t value = 0;
+        bool past = true;
+        for (uint32_t other = 0; other < BUSTER_ARRAY_LENGTH(unicode_name_ranges); other += 1)
+        {
+            const UnicodeNameRange* next = &unicode_name_ranges[other];
+            past &= strcmp(next->prefix, range->prefix) != 0 || (range->last + 1 < next->first || range->last + 1 > next->last);
+        }
+        uint32_t length = (uint32_t)snprintf(name, sizeof(name), "%s%04X", range->prefix, range->last + 1);
+        failures += past && unicode_name_strict((const uint8_t*)name, length, &value);
+        length = (uint32_t)snprintf(name, sizeof(name), "%s0%04X", range->prefix, range->first);
+        failures += !(unicode_name_strict((const uint8_t*)name, length, &value) && value == range->first);
+        length = (uint32_t)snprintf(name, sizeof(name), "%s%04x", range->prefix, range->first);
+        const bool letter = strpbrk(name + strlen(range->prefix), "abcdef") != NULL;
+        failures += letter && unicode_name_strict((const uint8_t*)name, length, &value);
+        failures += !(unicode_name_loose((const uint8_t*)name, length, &value) && value == range->first);
+        checks += 4;
+    }
+    for (uint32_t syllable = 0; syllable < 11172; syllable += 1)
+    {
+        char name[BUSTER_UNICODE_NAME_BYTES];
+        const uint32_t length = (uint32_t)snprintf(name, sizeof(name), "HANGUL SYLLABLE %s%s%s", unicode_hangul_jamo[syllable / (21 * 28)][0],
+                                                   unicode_hangul_jamo[syllable / 28 % 21][1], unicode_hangul_jamo[syllable % 28][2]);
+        uint32_t value = 0;
+        const bool found = unicode_name_strict((const uint8_t*)name, length, &value) && value == 0xAC00 + syllable;
+        failures += !found;
+        checks += 1;
+    }
+    static const char* const refused[] = { "", "LATIN SMALL LETTER NOT A THING", "HANGUL SYLLABLE", "CJK UNIFIED IDEOGRAPH-", "CJK UNIFIED IDEOGRAPH-0x4E00",
+                                           "LATIN  SMALL LETTER A",
+                                           "A VERY LONG NAME A VERY LONG NAME A VERY LONG NAME A VERY LONG NAME A VERY LONG NAME A VERY LONG NAME A VERY LONG NAME A" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
+    {
+        uint32_t value = 0;
+        failures += unicode_name_strict((const uint8_t*)refused[i], (uint32_t)strlen(refused[i]), &value);
+        checks += 1;
+    }
+    UnicodeNameMatch matches[BUSTER_UNICODE_NAME_MATCHES];
+    static const char* const nearest[] = { "LATIN SMALL LETTER E WITH ACUTE", "LATIN SMALL LETTER A WITH ACUTE", "LATIN SMALL LETTER AE WITH ACUTE",
+                                           "LATIN SMALL LETTER C WITH ACUTE", "LATIN SMALL LETTER G WITH ACUTE" };
+    const char* misspelled = "LATIN SMALL LETTER E WITH ACUTX";
+    const uint32_t count = unicode_name_nearest((const uint8_t*)misspelled, (uint32_t)strlen(misspelled), matches);
+    bool near = count == BUSTER_UNICODE_NAME_MATCHES && matches[0].distance == 1 && matches[0].code_point == 0xE9;
+    for (uint32_t m = 0; near && m < count; m += 1)
+    {
+        near = strcmp(matches[m].name, nearest[m]) == 0;
+    }
+    failures += !near;
+    char printed[3][BUSTER_UNICODE_ESCAPE_BYTES + 8];
+    unicode_escape_code_point(0xE9, printed[0], sizeof(printed[0]));
+    unicode_escape_code_point(0x8, printed[1], sizeof(printed[1]));
+    unicode_escape_code_point(0xFEFF, printed[2], sizeof(printed[2]));
+    failures += strcmp(printed[0], "'\xC3\xA9' U+00E9") != 0 || strcmp(printed[1], "U+0008") != 0 || strcmp(printed[2], "") != 0;
+    checks += 2;
+    printf("unicode names: %u names (Unicode %s), %u checks, %u failures\n", BUSTER_UNICODE_NAME_COUNT, BUSTER_UNICODE_NAMES_VERSION, checks, failures);
+    return failures == 0;
+}
+
 // Parses a decimal number of up to 64 bits into `value`. Returns false if `text` isn't one.
 static bool parse_u64(const char* text, uint64_t* value)
 {
@@ -1155,7 +1257,7 @@ static int run_c_lexer_tests(const char* program, int argument_count, char** arg
         const bool comments = check_comments(&vectorized, &scalar, flags);
         const bool raw_strings = check_raw_strings(&vectorized, &scalar, flags) && check_raw_errors();
         const bool separators = check_separators(&vectorized, &scalar, flags) && check_separator_fixtures(&vectorized, &scalar, flags);
-        const bool line_bom = check_line_bom(&vectorized, flags);
+        const bool line_bom = check_line_bom(&vectorized, flags) && check_unicode_names();
         // Random inputs and cut templates are meant to need the scalar lexer at times, but the snippet is meant to stay
         // on the vectorized path.
         result = snippet.different == 0 && snippet.fell_back == 0 && random_inputs.different == 0 && page_edges.different == 0 && comments && raw_strings && separators && line_bom

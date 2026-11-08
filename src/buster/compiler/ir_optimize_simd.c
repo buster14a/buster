@@ -584,7 +584,7 @@ static bool ir_optimize_simd_fold(const IrFunction* f, uint32_t i, const IrSimdV
     return folded;
 }
 
-static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i, IrSimdValue* value)
+static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i, IrSimdValue* value, uint64_t* examined)
 {
     const IrFunction* f = work->function;
     const uint32_t op = f->op[i];
@@ -615,7 +615,8 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
     else if (op == IR_PHI)
     {
         result = IROPT_UNKNOWN;
-        for (uint32_t incoming = 0; incoming < b; incoming += 1)
+        uint32_t incoming = 0;
+        for (; incoming < b && result != IROPT_OVERDEFINED; incoming += 1)
         {
             const uint32_t predecessor = f->extra[a + incoming * 2];
             const uint32_t source = f->extra[a + incoming * 2 + 1];
@@ -626,6 +627,7 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
                 result = ir_optimize_simd_meet(result, value, work->states[source], &incoming_value, value);
             }
         }
+        *examined += incoming;
     }
     else if (op == IR_SELECT)
     {
@@ -689,7 +691,7 @@ static bool ir_optimize_simd_visit(IrOptimizeWork* work, uint32_t i, bool queue)
     if (ir_optimize_simd_storage(work))
     {
         IrSimdValue value = { 0 };
-        const uint8_t state = ir_optimize_simd_transfer(work, i, &value);
+        const uint8_t state = ir_optimize_simd_transfer(work, i, &value, &work->statistics.sccp_phi_incoming);
         if (ir_vector_type(work->function->type[i]))
         {
             IrSimdValue* const current = work->vector_values + work->vector_indices[i];

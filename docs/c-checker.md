@@ -1735,7 +1735,7 @@ sees what follows it. Masks of plain bytes, simple escapes, `\x` with one or
 two digits and octal escapes of one to three digits leave each unit's value in
 its first byte; `vpcompressb` packs them and a masked store writes their count.
 The blocks leave to the scalar step, stopping before it, a universal character
-name or `\N{}`, `\x` with no digit or more than two, an octal escape past 255,
+name (`\N{}`'s too), `\x` with no digit or more than two, an octal escape past 255,
 a quote, line break or NUL, and the unit holding the first byte UTF-8
 validation (Keiser and Lemire's, run only on a block with a byte past 127)
 rejects. A block takes at most 60 bytes unless it is the part's last, so every
@@ -1786,8 +1786,16 @@ The universal character names valid there are those clang's
   cannot be specified by a universal character name".
 - **Delimited `\u{…}`:** the delimited escapes' errors, and an overflow is
   "hex escape sequence out of range".
-- **Named `\N{…}`:** only its braces are checked ("expected '{' after '\N'
-  escape sequence", incomplete, empty).
+- **Named `\N{…}`** (#1447): its braces ("expected '{' after '\N' escape
+  sequence", incomplete, empty; a line break ends its name too), then its name,
+  exactly Unicode's (`unicode_name_strict`), else "'x' is not a valid Unicode
+  character name" at the name with clang's notes (`unicode_name_diagnose`: the
+  first byte no name has, "character x cannot appear in a Unicode character
+  name"; then where the name is one loosely, that names are sensitive to case
+  and whitespace; else, where every byte may be a name's, "did you mean NAME
+  (C)?" for the nearest names by the edit distance of their letters and digits,
+  while each is at most 3 farther than the one before), then its character as
+  a numeric one's.
 
 Such an error drops the construct as the others do, with no unevaluated error.
 
@@ -1822,13 +1830,58 @@ Not clang's yet: the encoding prefix's -Winvalid-unevaluated-string warning
 (a prefixed argument stays "expected string literal"), -pedantic's warnings of
 the non-standard escapes, the "expanded from macro" note of a literal that is
 a macro's argument, and what follows `\x` without digits, which clang alone
-keeps (its attribute still applies). A named universal character name's name:
-clang decodes `\N{…}` by Unicode's names, and checks a name against them
-("'x' is not a valid Unicode character name" with its notes), while the
-compiler takes no named escape anywhere, so a well-formed one stays the
-decoders' refusal; so does a valid delimited `\u{…}`, which the decoders
-don't read either. Like the checker's other errors, the
+keeps (its attribute still applies). A static assertion's message of an escape
+the fast decoding refuses (a named or a delimited one, #1447) is read as clang
+reads it (`check_literal_strings_extended`). Like the checker's other errors, the
 first one ends the unit's semantic diagnostics after its declaration.
+
+### Evaluated literals' escapes (#1447)
+
+The checker's literal decoding (`check_literal_strings_by`,
+`check_literal_character`, and the string blocks' vector path) refuses what it
+doesn't read. Clang takes some of that in an evaluated literal: delimited
+escapes (`\x{…}`, `\o{…}`, `\u{…}`), GNU's `\E` (27, as `\e`), and an unknown
+escape, whose character is its value, with -Wunknown-escape-sequence's warning
+at its backslash (`\(`, `\{`, `\[` and `\%` without one, as clang words those
+only under -pedantic). On a refused literal's cold path alone, the reader
+decodes it again with them (`check_literal_strings_extended`,
+`check_literal_character_by`'s `extended`, which the hot callers' constant
+false compiles out) and, where that takes it, gives each unknown escape's
+warning (`check_input_unknown_escapes`, `CHECK_WARNING_EVENT_UNKNOWN_ESCAPE`,
+published at its offset in the token).
+
+A literal the extended decoding refuses too is worded by the driver as clang's
+(`check_driver_literal_escapes`): its escapes' diagnostics in source order
+through its concatenated tokens (`check_literal_evaluated_escapes`, the
+unevaluated literals' printer `check_driver_escape`), a numeric escape's range
+by the literal's code unit (a byte, a `u` literal's 16 bits, none for `U` and
+`L`), the universal character names' and the delimited escapes' errors as
+above; a character constant's character past its type ("character too large
+for enclosing character literal type"), or several characters in a wide or
+Unicode one ("wide character literals may not contain multiple characters",
+"Unicode character literals ..."), and an ordinary one's characters, counted
+whatever their errors (`check_driver_character_count`), more than one's
+-Wmultichar warning after its errors (four characters' -Wfour-char-constants).
+A named universal character name (`\N{…}`, #1447) is its character, by
+Unicode's names (the extended decoding's `unicode_name_strict`), with the errors
+above. A string literal's own refusal stands for
+its declaration's (`check_input_initializer_prepare_slow`) and its asm
+statement's, so neither adds "invalid or unsupported declaration". An asm
+statement's strings and an asm label's, which clang reads as evaluated
+literals, decode the same way: the label through `check_input_attribute_string`'s
+`evaluated`. A static assertion's message stays the unevaluated literals'
+(`check_driver_escapes`). After a unit's parse error, the driver's scan of the
+unparsed rest (`check_driver_unparsed_strings`) words the evaluated literals'
+errors too. After a checker error, the first ends the unit's semantic
+diagnostics as the others do, so clang's later literal errors there are still
+missing (semantic error recovery).
+
+An ordinary character constant of more than one character
+(`CheckLiteral.characters`) has clang's warnings at it
+(`check_input_multichar`): -Wmultichar's "multi-character character constant",
+for exactly four characters -Wfour-char-constants' (ignored by default), and
+past four "character constant too long for its type" too, its value the last
+four.
 
 ### Large integer literal tables (#658)
 
@@ -2073,6 +2126,26 @@ What the lowering covers past scalars (#145's programs):
   would cost 2 to 4.5 times the stores. `sqlite3.c`'s compile time doesn't
   change (+0.0007% instructions); the compiler's own `main.c` makes 171 more
   memset calls and 1.9% less text.
+  A whole-object initializer whose one value is a call (`T x = f(...);`)
+  can use `x` as the call's hidden result object (#1549), removing the separate
+  temporary and copy before either backend sees the stream. The result and
+  destination must be the same unqualified record type, with matching sizes,
+  no volatile part and enough alignment for the result's canonical ABI type.
+  Register returns retain their previous path. The immutable source binding
+  column is scanned only across that initializer, 16 tokens at a time on the
+  vector path with a scalar tail and twin: any reference to `x`, even inside
+  another argument's call, retains the temporary. Bodies with source labels
+  or a reference to a known returns-twice function retain it too, because
+  reentry can find a destination whose address escaped after an earlier
+  initialization. The first candidate scans that body's bindings and
+  intrinsic IDs once and caches the latter decision, before any argument
+  tasks run, so an initializer's nested `__builtin_setjmp` is covered too.
+  The existing declaration pass records `returns_twice` by object when it
+  occurs, so a later redeclaration cannot hide an earlier attribute.
+  The destination is an explicit argument to this call's lowering, so nested
+  argument and callee calls retain their own result objects. Assignments
+  continue to evaluate into a separate result and copy afterwards. This is a
+  code-shape change; the #1376 measurements above do not measure this change.
   Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
   plans use a readonly byte image and one call to the target C library's
   `memcpy` (#598). The call returns the destination and discards it, which is the
@@ -3758,10 +3831,13 @@ The test command fails if the oracle cannot run. It covers:
   static assertions in a C23 source fixture, by both paths and against clang,
   and at run time in a program against clang -O0's
   (`bit-precise-constants`); and a 129-bit one refused by name.
-- Named UCNs (`\N{...}`), which clang reads as its extension in C, are refused
-  alike in identifiers and `#if`'s character constants (the preprocessor's
-  errors) and in literals (`invalid or unsupported literal`), at their places
-  (#452; `test-checker-driver`'s `check_test_driver_named_ucns`).
+- Named UCNs (`\N{...}`, #1447), which clang reads as its extension in C, in
+  identifiers, `#if`'s character constants, literals and a static assertion's
+  message, accepted by both paths and the default route, writing an object
+  (`test-checker-driver`'s `check_test_driver_named_ucns`); their errors and
+  notes, whole lines against clang's (`check_test_driver_unevaluated_strings`);
+  and their values at run time against clang's build
+  (`named-universal-character-names`).
 - `#pragma clang section` and `#pragma clang optimize` (#619;
   `test-checker-driver`'s `check_test_driver_section_pragmas` and
   `check_test_driver_optimize_pragmas`, on all four routes): each line's
@@ -4003,7 +4079,7 @@ unless `--keep` or a failure.
 
 `c_check_common_warnings.c`, included by the driver, reports the expression
 warnings that need the completed graph or the parser's operator tree:
-`-Wdivision-by-zero`, `-Wconstant-conversion`, `-Warray-bounds`,
+`-Wdivision-by-zero`, `-Wnull-dereference`, `-Wconstant-conversion`, `-Warray-bounds`,
 `-Wsign-compare`, `-Wunused-comparison`, `-Wunused-value`,
 `-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
 bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
@@ -4075,6 +4151,31 @@ expression, parenthesized or not; a comma operand with a call, assignment or
 increment has an effect and does not get the left-operand warning. Its reports
 complete with the function's closing brace, as Clang's do, after the body's
 own warnings and before an unused declaration's.
+Discarded scalar `&&` and `||` expressions also stay quiet when either
+operand's result path accepts discard (#1390): an ordinary direct call,
+assignment, increment, volatile read, or a nested logical expression with
+one of those operands. Commas follow their right operand (including the
+literal-zero sequencing idiom), ordinary conditionals follow their value
+arms, omitted-middle conditionals follow only their false arm, and statement
+expressions follow their final result. A call beneath arithmetic, a comparison,
+an explicit nonvoid cast, or a conditional's condition does not silence the
+unused logical result. The rule is syntactic even for a short-circuited operand.
+Accepted `pure`, `const`, and `warn_unused_result` function contracts retain
+the logical warning and inherit per kind through compatible source-visible
+redeclarations, without changing earlier uses or leaking block declarations.
+Plain library calls without discard contracts follow ordinary calls; implicit
+const/pure contracts such as `abs` and `isalpha` retain warnings. Disabling a
+builtin removes only its implicit contract, while explicit source contracts
+still apply. Internal-linkage library spellings remain ordinary functions.
+Indirect calls, calls resolved through overload tables, option-sensitive
+floating builtin contracts and tagged return contracts remain outside this
+logical-warning slice. A unit containing
+an accepted `warn_unused_result` typedef conservatively keeps the existing
+logical-call warnings: canonical result types do not retain the typedef and
+`typeof` provenance needed to rule out such contracts safely.
+The original fixtures in `c_check_logical_unused_driver_test.c` compare the
+complete Clang output, warning policy, scalar/vector paths and requested lanes
+in syntax-only and object modes.
 `-Warray-bounds` reports a direct array object, including a nested subscript
 such as `b[1][5]` at `b`, treats a zero extent as unknown, and leaves
 struct-member arrays to a full bounds analysis. `-Wunused-function` reports a
@@ -4102,16 +4203,53 @@ and check that file-spelled candidates and suppressed warnings do not replay his
 not an unused-but-set statement write. The `-Wswitch` definition is the one its
 selector's tag type names, so a fixed underlying type and a shadowing tag in
 another scope resolve correctly. The return-flow walk runs for non-aggregate
-functions only where `-Wreturn-type` is enabled.
+functions only where `-Wreturn-type` is enabled, and for them takes only the
+warning's walk: the first walk is an aggregate return's alone, whose lowering
+reads its result (#1340). The walk's per-node facts, whether an expression
+guaranteedly stops or may not return (`check_program_return_facts`), come from
+its calls, miscellaneous and x86 builtins and queries: the vector path
+(`check_program_return_sparse`) tests each node's operands' and arguments'
+facts, a byte each, and computes only a source's (found 16 operators at a time)
+or a node's with an operand that has facts; the scalar path, its twin and
+oracle, computes every node's (`test-checker` compares the two on every program
+fixture). The `analyzer_noreturn` scan takes the attributes column's tokens,
+and each callee name's answer from clang's builtin table is looked up once.
 
-The graph's passes share one pass in graph order, `check_common_facts`, which
-gives each node its parent, whether another node uses its value, whether it is
-evaluated, a conditional's or comma's arm effect, and its reach: a bit each for
-whether its subtree holds a node whose own warning may fire, a division by a
-constant, or a comparison (#1340). The expression walk starts only at a root that
-reaches something or whose discarded expression may get the statement's
-unused-value warning, and enters only the subtrees that hold its walk's bit;
-every warning keeps its order. The default-ignored warnings' work runs only
+The graph's passes share their facts, `check_common_facts`, which give each
+node its parent, whether another node uses its value, whether it is evaluated,
+a conditional's or comma's arm effect, a separate logical-discard fact in the
+same byte, and its reach: a bit each for whether
+its subtree holds a node whose own warning may fire, a division by a constant
+zero, or a comparison (#1340). A node's own bit counts only where its tests can
+warn (`check_common_own_candidate`): a constant whose value an initialization's,
+an assignment's, a conversion's or a call's argument's conversion changes (the
+types alone rule out a widening conversion, before the value's row is read), a
+self-assignment's names, a constant index outside its array, a source comma.
+What its warning tests past them only takes warnings away. The scalar path
+makes the facts in one pass in graph order and the evaluated nodes by a pass
+from the roots down. The vector path works on the graph's tree
+(`check_common_parents`: each node's reader, 16 nodes at a time, each operand
+slot's present children compressed to the front and written a child at a time,
+since a scatter costs as much whatever its mask and most slots are absent; a
+tree where every operand and argument precedes its node and no node has two
+readers, which counting the distinct children against the edges tells, and
+otherwise the scalar path). It visits only the nodes whose operators may have a
+bit of their own, 16 at a time, and carries each bit up to the first ancestor
+that has it; computes the arm effects of the operators that have them; and
+takes the evaluated nodes as everything with a parent, then clears, with all
+below them, the roots the control and selection walks left out and the
+operands a `sizeof` or a constant condition leaves out. A root that reaches
+nothing runs its statement's unused-value marker alone, without the walk's
+frames, which would find nothing else. The comma markers' subtree starts come
+from a search back from the operand by doubling steps, then halving, each
+probe's climb stopping at a token shallower than the operand
+(`check_common_emission_subtree_start`), rather than from a column of every
+token's start. `test-checker-driver` checks the parents by both paths and the
+starts against their definitions on random graphs and trees whose columns end
+at `PROT_NONE` pages (`c_check_common_tree_test.c`).
+The expression walk starts only at a root that reaches something or whose
+discarded expression may get the statement's unused-value warning, and enters
+only the subtrees that hold its walk's bit; every warning keeps its order. The default-ignored warnings' work runs only
 where the command line or a source pragma may enable them: the comparison bit
 for `-Wsign-compare`, a plain `x = y` for `-Wself-assign`, and the
 `-Wuninitialized` pass for it and `-Wunused-but-set-parameter`, as Clang skips
@@ -7174,6 +7312,91 @@ arguments against the function. The checker now gives these as clang does.
   spellings. `test-checker`'s program fixtures run NEON vectors' code
   (`neon-vectors`).
 
+## diagnose_if and enable_if (#1447)
+
+clang's `diagnose_if(condition, message, "warning" | "error")` and
+`enable_if(condition, message)` hold on any function declaration
+(`c_check_condition.c`), not only on #1361's fortify wrappers.
+
+- **Arguments.** Their counts are clang's errors first ("takes at least 3
+  arguments", "takes no more than 4 arguments", "requires exactly 2
+  arguments"), as their names would otherwise be read without the
+  parameters. A message that is no string is "expected string literal"; a
+  third argument other than `"error"` or `"warning"` is "invalid diagnostic
+  type for 'diagnose_if'; use "error" or "warning" instead"; a fourth,
+  clang's warning group, is "unknown warning group 'G'" where clang knows no
+  such group (`pp_warning_group_known`). A group clang knows names the
+  warning's option, which these warnings don't take yet: "not yet supported".
+- **The condition.** It is read once, where its function is declared, in the
+  function's parameter scope: its names are looked up there
+  (`check_input_thread_name`; an undeclared one is clang's error), and the
+  declaration evaluator checks it. One that names no parameter is a constant
+  then, false or true for every use, or clang's "'X' attribute expression
+  never produces a constant expression" at the attribute, its note
+  "subexpression not valid in a constant expression" at the variable it
+  reads. In one that names a parameter that error is clang's too where the
+  variable's read can't be skipped; a read in a `&&`'s or `||`'s right
+  operand or a conditional's second or third (`x > 0 && g > 0`) can be, as
+  clang asks whether some arguments give a constant, and it is an unknown
+  value that a call's evaluation needs only where it reads it. One that names a parameter becomes a program
+  (`CheckConditionStep`), from the parse tree in postorder: each largest
+  subexpression without a parameter, and each sizeof's or alignof's, is a
+  constant the evaluator gives; a parameter is its place and type; the
+  others are casts, unary, binary, logical and conditional operators, which
+  each call runs as the checker's own actions (`check_action_scalar`). Any
+  other shape (a subscript, a call, an assignment) is "not yet supported"
+  in user code; in a system header, and on an object-size wrapper
+  (`pass_object_size`), the condition is kept and decides nothing, as these
+  wrappers had it before.
+- **Lists.** Each function declaration where some condition holds has its
+  list (`CheckInput.condition_declarations`, by the declaration's name
+  token): its previous declaration's, then its own, as clang's
+  redeclarations inherit attributes. A use reads the list of the declaration
+  its lookup found.
+- **Uses.** A diagnose_if condition that names no parameter and holds is
+  diagnosed at each use of the name, sizeof's, typeof's and `_Generic`'s
+  operands included (clang's DiagnoseUseOfDecl): its message as a
+  `-Wuser-defined-warnings` warning or an error, with the note "from
+  'diagnose_if' attribute on 'f':" at the attribute. A use of a function an
+  enable_if restricts (one whose condition isn't always true), other than a
+  call's callee through parentheses and outside sizeof's, alignof's and
+  typeof's operands, is "cannot take address of function 'f' because it has
+  one or more non-tautological enable_if conditions", at the outermost `(`
+  around the name. `check_input_condition_uses` finds the uses once the
+  unit's names are bound: the vector path gathers 16 tokens' declarations'
+  marks at a time, the scalar path its twin.
+- **Calls.** After checking, each call whose callee names a function with a
+  list (`c_check_condition_graph.c`, in the warning graph's pass over calls)
+  binds each argument whose checked value is a constant (an integer, a
+  floating value, a null or absolute address), converted to its parameter's
+  type, and runs the programs. An object's or a function's address (`&x`, an
+  array or a function that decays, a string literal) is an address that is
+  never null, as clang's evaluation knows: compared with a null pointer, or
+  tested for truth, it decides; any other action on it is unknown. An
+  argument that isn't a constant is an unknown value, which a `&&`, a `||` or
+  a conditional that doesn't read it skips. An unknown result, and an action
+  that faults (an overflow, a division by zero, a shift past the width),
+  leave a condition unknown, as clang's EvaluateWithSubstitution does: a diagnose_if is then not given, an enable_if doesn't admit the
+  call. The first enable_if that doesn't admit it, in the order clang checks
+  them (the latest declaration's first, each declaration's in source order),
+  is "no matching function for call to 'f'" at the callee, its note
+  "candidate disabled: M" at the declaration the call found; otherwise the
+  diagnose_if conditions that hold are given at the call's `)`.
+- **Several at once.** Of the conditions that hold at one use or call, an
+  error is given alone, the first in source order; otherwise every warning,
+  in source order, each with its note.
+- **Cost.** A unit without these attributes tests a reader flag where
+  declarations are read and a count where uses and calls are; the steps are
+  built only for these attributes.
+
+What isn't clang's yet: an overloadable function's conditions, which take
+part in its overload resolution, are "not yet supported" in user code (a
+tautological `enable_if(1, ...)`, glibc's, aside); the fourth argument's
+known warning groups; the condition shapes above; and, as everywhere in this
+driver, the uses' errors stop the unit's later expression checks, so a call
+after one such error isn't diagnosed. clang gives one address error for a
+conditional operator's two function operands; this gives one for each.
+
 ## Operand errors (#147)
 
 - **Increments and decrements.** As clang's `CheckIncrementDecrementOperand`,
@@ -7222,6 +7445,36 @@ arguments against the function. The checker now gives these as clang does.
   constant evaluator reads alone (`__builtin_offsetof`'s designators,
   `__builtin_types_compatible_p`'s type names) and a `typeof`'s operand,
   which clang evaluates again when its type is variably modified.
+- **Indirection through a null pointer** (`-Wnull-dereference`, #1447, clang's
+  `CheckForNullPointerDereference`): "indirection of non-volatile null pointer
+  will be deleted, not trap" with its note "consider using __builtin_trap() or
+  qualifying pointer with 'volatile'", both at the `*`, of a `*` whose operand
+  is a null pointer constant through casts (an integer constant 0 once the
+  casts are passed: `*(int *)0`, `*(char *)(void *)0L`, `*(int *)(1 - 1)`; or,
+  in C23, any expression of type `nullptr_t` once the casts and conversions are
+  passed: `*(int *)nullptr` and a `nullptr_t` variable's), of a type neither
+  volatile nor an array's or a function's
+  (`check_common_null_dereference`), where an lvalue conversion or an
+  assignment (a compound one's too) reads it: not under `&`, `.` or an
+  increment, nor through a pointer variable, `->` or a subscript. As clang's
+  `DiagRuntimeBehavior`, reachable and evaluated code alone, at the body's end
+  with the division warnings (the division scan's, `check_common_div_own`).
+- **Unreachable code, as clang's CFG prunes it** (#1447). The runtime
+  warnings (division by zero, array bounds, null dereference) skip an
+  initializer after a `return` or in a dead branch, as they already skipped
+  its expression statements: `check_common_unreachable` clears its scalar and
+  braced roots and makes them barriers that no discarding parent re-evaluates.
+  A constant `if`'s dropped ranges are left out too. A branch condition's truth
+  (`check_program_branch_truth`, clang's `tryEvaluateBool`) also counts a
+  logical operator that one operand decides though the other isn't known:
+  `x && 0` and `x || 1`, through `!`, casts and conversions. That covers
+  `if (n && 0)`'s body, `if (n || 1)`'s else and `while (n && 0)`'s body, and,
+  as clang's `VisitConditionalOperator` and `VisitLogicalOperator` prune them,
+  `(n && 0) ? A : B`'s `A`, `(n || 1) ? A : B`'s `B` and `(n && 0) && A`'s `A`
+  (`check_common_operand_mask` takes the same truth where the condition's value
+  isn't constant).
+  `-Wreturn-type`'s walk takes the same truth, so `if (n || 1) return 1;` ends
+  a function without the warning.
 - **A const variable's assignment.** "cannot assign to variable 'x' with
   const-qualified type 'const int'" with clang's "variable 'x' declared const
   here" note at its name, as clang's `DiagnoseConstAssignment` walks to it:

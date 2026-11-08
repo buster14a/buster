@@ -78,9 +78,13 @@ an array, or through a 32-bit index that wrapped below 0, faults. On:
   its length and dirty pages above it (each parse's temporaries, and a pattern
   before each parse): the fixtures' sources, valid code of which the vector
   path sends some declarations to the scalar parser, an error, an unclosed
-  brace and 64 random streams. Each must parse as on a fresh parser, tokens,
-  tree, postorder, diagnostics and statistics alike, and leave the arena's
-  length and the caller's data as they were;
+  brace, an empty unit and 64 random streams. Each must parse as on a fresh
+  parser, tokens, tree, postorder, diagnostics and statistics alike, and leave the arena's
+  length and the caller's data as they were. A scalar host's default is checked
+  against an explicitly scalar fresh parser and must leave the vector
+  workspaces unused and the fallback statistics zero (#1369). Vector hosts
+  must still exercise a valid unit through the fallback. Direct kernel tests
+  retain the twins and their whole-unit retry on every host;
 - the driver, without files: seventeen cases' exit statuses and exact messages
   (a valid, an empty and an invalid file, the last with `--scalar` too, an
   `#error`, a missing header, a missing file, a directory, a sparse file past

@@ -294,7 +294,7 @@ static void check_input_thread_warnings(CheckInputReader* reader, const CheckInp
             TypeId argument_type = attribute->expression_types[index];
             uint32_t spelling = check_input_thread_spelling(reader, argument);
             String8 string = { 0 };
-            const bool literal = parser->tokens.kinds[argument] == PARSE_KIND_STRING && check_input_attribute_string(reader, argument, stop, &string);
+            const bool literal = parser->tokens.kinds[argument] == PARSE_KIND_STRING && check_input_attribute_string(reader, argument, stop, false, &string);
             if (literal && string.length != 0 && !(string.length == 1 && string.pointer[0] == '*'))
             {
                 check_input_thread_warning(reader, attribute, CHECK_WARNING_EVENT_THREAD_ARGUMENT, 0, 0);

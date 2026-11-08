@@ -78,8 +78,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers]` and `test-checker-asm`
-  check the driver and inline assembly against Clang (but for named UCNs,
-  which clang accepts and the driver refuses at their places, #452; with
+  check the driver and inline assembly against Clang (named UCNs too, #1447,
+  `check_test_driver_named_ucns`; with
   `--lazy-system-headers`, only the checks that pass the driver
   `-flazy-system-headers`, since the others run the same either way, and
   `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
@@ -125,6 +125,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes; and
   #1376's clears (`c_check_program_clear_test.c`): each path's shape (memset past 128 bytes, no loop, no clear before
   a whole object's copy, compound literals in place, a volatile object's stores) and native runs on a dirtied stack.
+  The same group covers #1549's hidden-result call initializers: copy and temporary elimination, nested and indirect
+  calls, alignment, volatile and self-reference fallbacks, assignments and reentry. `tests/interpreter/source.c`
+  also exercises direct, nested and indirect aggregate call initializers through the typed and Tier 1 source checks.
   `--program-vectors` selects the vector, x86 builtin and half-precision programs alone (`c_check_program_vector_test.c`,
   `c_check_program_x86_test.c`, `c_check_program_vector_builtins_test.c`, `c_check_program_fp16_test.c`,
   `c_check_program_half_test.c`), run against clang -O0's code where the host has their features.
@@ -133,6 +136,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   Required constant evaluation folds `_Float16` and `__bf16` arithmetic in the source format after each operation
   (#1497); runtime half-precision chains retain their target's excess-precision behavior. The constant-source and
   floating-action fixtures cover that distinction, ties, subnormals and negative zero.
+  `float`, `double` and `long double` folds give APFloat's NaNs, not the host's (#1473): an invalid operation
+  (`inf - inf`, `0 * inf`, `0 / 0`) folds to the positive quiet NaN, and an operation on a NaN keeps its first NaN
+  operand's sign and payload, quieted. The floating-action fixtures, the constant-source fixture "real invalid
+  constant arithmetic has Clang NaN signs" and `--program-float-constants`' "float-constants-invalid-arithmetic"
+  check them against Clang.
   `--program-library` selects the library builtins' tables, constant folds and programs alone
   (`c_check_program_library_test.c`).
   `--transitions` selects the memoized transitions' fixtures, classes, static words and table limits alone (`c_check_transitions_test.c`).
@@ -180,6 +188,23 @@ unused-warning fixtures also check exact scope-completion tokens.
   scalar-result controls, for clauses, macros and source policy through default and scalar modes and a requested
   deferred-option route. These single-file syntax-only commands are capped at one lane and use the ordinary-reader
   fallback; they do not establish admitted deferred-reader coverage.
+  A GNU statement expression in the expression operand of `sizeof`, `_Alignof`, `__alignof__` or `typeof` is
+  unevaluated (#147). Its statements are graph roots of their own, outside the operand's evaluation facts.
+  Clang drops its unused-result, unused-comparison, comma-operand, `void *`-cast, self-assignment, division,
+  bounds, sign-comparison and constant-conversion warnings there. `check_common_unevaluated` reads the token's
+  parser context from `-Wvoid-ptr-dereference`'s `check_warning_graph_void_context`, only when one of these
+  warnings is about to be published. An array declarator's bound is constant-evaluated to clang, which keeps
+  its unused-result warnings. So does a bound in the operand's type name or in a declaration inside the
+  statement expression. A `sizeof` of a variable-array expression evaluates its operand after all.
+  The contexts' memo is pushed at a unit's first such warning, so a unit without one pays nothing. Six
+  original default-warning fixtures compare complete output with Clang, among them the evaluated and bound
+  controls and a value that decays from a variable array. Still separate: `-Wuninitialized` reads and writes
+  in such a statement expression, which need the evaluation facts themselves; the input reader's
+  `-Wshift-count-overflow` there; clang's runtime-warning drop in every array bound; a variable-array
+  `sizeof`'s comma operands, which clang warns of when it evaluates them; `-Wunevaluated-expression`, which
+  isn't implemented; and three forms the checker refuses: a statement expression in a variable-array
+  `sizeof`'s operand, `sizeof ({ ... })` (whose `(` is the statement expression's own), and a statement
+  expression as `_Generic`'s controlling expression.
   `c_check_return_flow.c` supplies source return-warning facts for checked graphs. Ordinary direct calls no longer
   suppress a function's `-Wreturn-type` warning; a proven direct `noreturn` call or terminating builtin ends only its
   own warning-flow edge. Short circuit, conditional and unevaluated operands retain their execution rules, and

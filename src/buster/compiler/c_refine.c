@@ -111,8 +111,8 @@ static uint32_t refine_encode_utf8(uint32_t code_point, uint8_t* out)
 
 // The lookup key of the identifier token at [start, end): its characters after translation phases 1 and 2 (trigraphs
 // if enabled, line splices removed), with each UCN as the UTF-8 of its code point, as clang interns them, so that
-// fo\<newline>o is foo and é is é. A named UCN (\N{...}) stays as written, without its line splices: this table has no
-// character names, and the preprocessor refuses an identifier with one (#452).
+// fo\<newline>o is foo and é is é. A named UCN (\N{...}) is its character too (#1447), its name read loosely where it
+// starts the identifier, as the lexer reads it there (read_ucn_by).
 // `out` needs end - start bytes, which is enough: removing splices and encoding a UCN only make the spelling shorter.
 static uint32_t refine_identifier_key(const uint8_t* source, uint64_t length, uint32_t start, uint32_t end, uint32_t flags, uint8_t* out)
 {
@@ -131,14 +131,14 @@ static uint32_t refine_identifier_key(const uint8_t* source, uint64_t length, ui
         const int32_t c = get_char(&lexer, p, &size, &char_start);
         uint64_t ucn_end;
         uint32_t code_point;
-        if (c == '\\' && read_ucn(&lexer, p, &ucn_end, &code_point) && code_point != BUSTER_LEX_NAMED_UCN)
+        if (c == '\\' && read_ucn_by(&lexer, p, &ucn_end, &code_point, p == start) && code_point != 0)
         {
             result += refine_encode_utf8(code_point, out + result);
             p = ucn_end;
         }
         else
         {
-            // Every other character, and each character of a named UCN.
+            // Every other character.
             out[result] = (uint8_t)c;
             result += 1;
             p += size;
@@ -162,7 +162,7 @@ static __attribute__((unused)) uint32_t refine_identifier_end(const uint8_t* sou
     uint64_t p = start + size;
     uint64_t ucn_end;
     uint32_t code_point;
-    if (c == '\\' && read_ucn(&lexer, start, &ucn_end, &code_point))
+    if (c == '\\' && read_ucn_by(&lexer, start, &ucn_end, &code_point, true))
     {
         p = ucn_end;
     }

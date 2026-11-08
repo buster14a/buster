@@ -280,6 +280,59 @@ static uint32_t ssa_ir_value(const SsaIrWork* work, uint32_t value)
     return work->values[replacement];
 }
 
+// The constructors discover phis independently: dense-local order on the vector path, first-read order on the
+// predecessor-reading path. Publish each block's new phis in local order before assigning instruction IDs (#1395),
+// so equivalent construction does not change later allocation or object bytes. The usual already-ordered input
+// needs only the check. Otherwise two stable counting passes, by local then block, take linear time and scratch;
+// the SSA constructors, reaching-definition equations and cleanup remain independent.
+static IrError ssa_ir_order_phis(SsaIrWork* work, uint32_t* block_cursor)
+{
+    const SsaResult* ssa = &work->ssa;
+    bool ordered = true;
+    for (uint32_t block = 0; ssa->phi_count > 1 && ordered && block < work->input->block_count; block += 1)
+    {
+        const uint32_t first = work->phi_offsets[block];
+        const uint32_t end = work->phi_offsets[block + 1];
+        for (uint32_t p = first; ordered && p < end; p += 1)
+        {
+            ordered = p == first || ssa->phi_locals[work->phi_indices[p - 1]] < ssa->phi_locals[work->phi_indices[p]];
+        }
+    }
+    IrError error = IR_OK;
+    if (!ordered)
+    {
+        const uint64_t mark = work->scratch->length;
+        const uint32_t locals = work->source.local_count;
+        uint32_t* local_cursor = ssa_allocate(work->scratch, (uint64_t)locals + 1, sizeof(uint32_t));
+        uint32_t* by_local = ssa_allocate(work->scratch, ssa->phi_count, sizeof(uint32_t));
+        error = local_cursor != 0 && by_local != 0 ? IR_OK : IR_ERROR_MEMORY;
+        if (error == IR_OK)
+        {
+            memset(local_cursor, 0, ((uint64_t)locals + 1) * sizeof(uint32_t));
+            for (uint32_t phi = 0; phi < ssa->phi_count; phi += 1)
+            {
+                local_cursor[ssa->phi_locals[phi] + 1] += 1;
+            }
+            for (uint32_t local = 0; local < locals; local += 1)
+            {
+                local_cursor[local + 1] += local_cursor[local];
+            }
+            for (uint32_t phi = 0; phi < ssa->phi_count; phi += 1)
+            {
+                by_local[local_cursor[ssa->phi_locals[phi]]++] = phi;
+            }
+            memcpy(block_cursor, work->phi_offsets, (uint64_t)work->input->block_count * sizeof(uint32_t));
+            for (uint32_t p = 0; p < ssa->phi_count; p += 1)
+            {
+                const uint32_t phi = by_local[p];
+                work->phi_indices[block_cursor[ssa->phi_blocks[phi]]++] = phi;
+            }
+        }
+        arena_pop_to(work->scratch, mark);
+    }
+    return error;
+}
+
 static IrError ssa_ir_layout(SsaIrWork* work)
 {
     const IrFunction* f = work->input;
@@ -332,6 +385,10 @@ static IrError ssa_ir_layout(SsaIrWork* work)
             work->phi_indices[cursor[ssa->phi_blocks[phi]]++] = phi;
             work->sizes.extra_count += (uint64_t)(ssa->phi_offsets[phi + 1] - ssa->phi_offsets[phi]) * 2;
         }
+        error = ssa_ir_order_phis(work, cursor);
+    }
+    if (error == IR_OK)
+    {
         for (uint32_t operand = 0; operand < ssa->operand_count; operand += 1)
         {
             ssa_ir_need_undef(work, ssa->phi_operands[operand]);
