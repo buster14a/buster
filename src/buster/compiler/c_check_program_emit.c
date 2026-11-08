@@ -585,6 +585,16 @@ struct CheckTier0InlineLane
     uint64_t generation;
     Tier0Function* functions;
     uint8_t* states;
+    // Tarjan's search of the callees' graph (check_tier0_inline_prepare), per body: its visit's index plus one and its
+    // low link, and once settled its height; the component stack, the search's stack of bodies and each one's next row,
+    // and the visits so far.
+    uint32_t* indices;
+    uint32_t* links;
+    uint32_t* heights;
+    uint32_t* components;
+    uint32_t* path;
+    uint32_t* cursors;
+    uint32_t visits;
 };
 
 struct CheckProgramLaneArenas

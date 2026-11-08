@@ -9,12 +9,19 @@
 // The emission lowers every part before any part's code where a unit has a callee (CheckEmitRun.inline_table), so that
 // a body's lane reads any callee's typed stream. Each lane expands a callee once an emission, in its own cache
 // (CheckTier0InlineLane): the callee's stream with its own sites already spliced, so that one splice at a caller takes
-// everything a chain of wrappers reaches (_mm256_mask_add_epi32 calls _mm256_add_epi32). The expansion walks the callees
-// with an explicit stack: a callee whose sites' callees are all settled is spliced and ready; a site whose callee is on
-// the stack (a cycle) or past BUSTER_CHECK_TIER0_INLINE_DEPTH stays a call; a callee that tier0_inline_callee_valid
-// refuses, or whose target has a feature its caller's lacks, keeps its calls. An expansion depends only on the callee and
-// the bodies it reaches, so every lane's is the same bytes. Any failure keeps the body's own stream: inlining is an
-// optimization, never a refusal.
+// everything a chain of wrappers reaches (_mm256_mask_add_epi32 calls _mm256_add_epi32).
+//
+// Which callees expand, and into what, is a property of the unit's graph of callees alone, never of the order a lane
+// meets them in: the lanes take bodies in an order their timing decides, and every lane's object must be one lane's
+// (#1398's review: a depth bound counted from whichever root a lane met first cached a cut expansion that later bodies
+// took). The graph's nodes are the callees tier0_inline_callee_valid accepts, and its edges their rows' calls of other
+// such callees whose targets theirs include (check_tier0_inline_row). A lane finds the graph's strongly connected
+// components, as far as a body's calls reach, by an iterative Tarjan search (check_tier0_inline_prepare): a callee in a
+// cycle is never inlined, and its own calls of the cycle stay calls, whichever member a lane met first. Every other
+// callee is settled after the callees it calls (the search's postorder): its height is one more than the highest of
+// those that expand, and one past BUSTER_CHECK_TIER0_INLINE_DEPTH isn't inlined either (its own calls are); else it is
+// spliced with those callees and ready. A callee the splice refuses is ready as its own stream, its calls kept. Any
+// failure keeps the body's own stream: inlining is an optimization, never a refusal.
 
 // Defined in c_check_tier1_inline.c: body `b`'s target.
 static const X86Target* check_tier1_inline_target(const CheckProgram* program, uint32_t b);
@@ -44,12 +51,21 @@ static bool check_tier0_inline_cache(CheckTier0InlineLane* lane, const CheckTier
         }
         arena_pop_to(&lane->cache, 0);
         const uint32_t count = table->program->body_count;
-        lane->functions = lane->cache.base != 0 ? BUSTER_ARENA_PUSH_ARRAY(&lane->cache, Tier0Function, (uint64_t)count + 1) : 0;
-        lane->states = lane->cache.base != 0 ? BUSTER_ARENA_PUSH_ARRAY(&lane->cache, uint8_t, (uint64_t)count + 1) : 0;
-        valid = lane->functions != 0 && lane->states != 0;
+        const bool reserved = lane->cache.base != 0;
+        lane->functions = reserved ? BUSTER_ARENA_PUSH_ARRAY(&lane->cache, Tier0Function, (uint64_t)count + 1) : 0;
+        lane->states = reserved ? BUSTER_ARENA_PUSH_ARRAY(&lane->cache, uint8_t, (uint64_t)count + 1) : 0;
+        lane->indices = reserved ? BUSTER_ARENA_PUSH_ARRAY(&lane->cache, uint32_t, (uint64_t)count + 1) : 0;
+        lane->links = reserved ? BUSTER_ARENA_PUSH_ARRAY(&lane->cache, uint32_t, (uint64_t)count + 1) : 0;
+        lane->heights = reserved ? BUSTER_ARENA_PUSH_ARRAY(&lane->cache, uint32_t, (uint64_t)count + 1) : 0;
+        lane->components = reserved ? BUSTER_ARENA_PUSH_ARRAY(&lane->cache, uint32_t, (uint64_t)count + 1) : 0;
+        lane->path = reserved ? BUSTER_ARENA_PUSH_ARRAY(&lane->cache, uint32_t, (uint64_t)count + 1) : 0;
+        lane->cursors = reserved ? BUSTER_ARENA_PUSH_ARRAY(&lane->cache, uint32_t, (uint64_t)count + 1) : 0;
+        valid = lane->functions != 0 && lane->states != 0 && lane->indices != 0 && lane->links != 0 && lane->heights != 0 && lane->components != 0 &&
+                lane->path != 0 && lane->cursors != 0;
         if (valid)
         {
             memset(lane->states, BUSTER_CHECK_TIER0_INLINE_UNPREPARED, (uint64_t)count + 1);
+            lane->visits = 0;
             lane->generation = table->generation;
         }
     }
@@ -125,51 +141,120 @@ static bool check_tier0_inline_splice(const CheckEmitRun* run, CheckTier0InlineL
     return valid;
 }
 
-// Settles the callees that body `b`'s rows reach in the lane's cache (the file's comment): each ready, with its expanded
-// stream, or refused. An explicit stack of bodies, each with the next row it looks at.
+// Callee `v`, met by the search: refused at once where tier0_inline_callee_valid refuses it (it is no node of the graph),
+// else visited: its index and low link, on the component stack and the search's stack, in progress.
+static void check_tier0_inline_visit(const CheckEmitRun* run, CheckTier0InlineLane* lane, uint32_t v, uint32_t* components, uint32_t* depth)
+{
+    uint32_t body = 0;
+    if (tier0_inline_callee_valid(&run->lowered->functions[v], &body))
+    {
+        lane->visits += 1;
+        lane->indices[v] = lane->visits;
+        lane->links[v] = lane->visits;
+        lane->states[v] = BUSTER_CHECK_TIER0_INLINE_PROGRESS;
+        lane->components[*components] = v;
+        *components += 1;
+        lane->path[*depth] = v;
+        lane->cursors[*depth] = 0;
+        *depth += 1;
+    }
+    else
+    {
+        lane->states[v] = BUSTER_CHECK_TIER0_INLINE_REFUSED;
+    }
+}
+
+// Callee `v`, alone in its component and every callee it calls settled: its height (one more than the highest of the
+// callees it calls that expand) and, within BUSTER_CHECK_TIER0_INLINE_DEPTH, its expansion, ready; past it, refused.
+static void check_tier0_inline_settle(const CheckEmitRun* run, CheckTier0InlineLane* lane, const CheckTier1Inline* table, uint32_t v)
+{
+    const Tier0Function* function = &run->lowered->functions[v];
+    uint32_t height = 1;
+    for (uint32_t c = 0; c < function->call_count; c += 1)
+    {
+        const uint32_t w = check_tier0_inline_row(run, table, function, v, c);
+        const bool ready = w != 0 && lane->states[w - 1] == BUSTER_CHECK_TIER0_INLINE_READY;
+        height = ready && lane->heights[w - 1] + 1 > height ? lane->heights[w - 1] + 1 : height;
+    }
+    lane->heights[v] = height;
+    if (height <= BUSTER_CHECK_TIER0_INLINE_DEPTH)
+    {
+        Tier0Inlined expanded;
+        const bool spliced = check_tier0_inline_splice(run, lane, table, v, function, &lane->cache, &expanded);
+        lane->functions[v] = spliced ? expanded.function : *function;
+        lane->states[v] = BUSTER_CHECK_TIER0_INLINE_READY;
+    }
+    else
+    {
+        lane->states[v] = BUSTER_CHECK_TIER0_INLINE_REFUSED;
+    }
+}
+
+// Settles every callee that body `b`'s rows reach in the lane's cache (the file's comment), by Tarjan's search from each
+// one unmet, with explicit stacks: the search's (a callee and its next row each) and the components' (the callees in
+// progress, whose components aren't complete). A component of more than one callee is refused whole; one of one is
+// settled (check_tier0_inline_settle), after every callee it calls, which the search completed first. Body `b` is a node
+// only as another's callee: its own code splices it.
 static void check_tier0_inline_prepare(const CheckEmitRun* run, CheckTier0InlineLane* lane, const CheckTier1Inline* table, uint32_t b)
 {
-    uint32_t stack[BUSTER_CHECK_TIER0_INLINE_DEPTH + 1];
-    uint32_t cursors[BUSTER_CHECK_TIER0_INLINE_DEPTH + 1];
-    uint32_t depth = 1;
-    stack[0] = b;
-    cursors[0] = 0;
-    while (depth != 0)
+    const Tier0Function* root = &run->lowered->functions[b];
+    uint32_t components = 0;
+    for (uint32_t r = 0; r < root->call_count; r += 1)
     {
-        const uint32_t top = stack[depth - 1];
-        const Tier0Function* function = &run->lowered->functions[top];
-        // The next row whose callee is unsettled, which goes on the stack where there is room.
-        uint32_t next = 0;
-        while (next == 0 && cursors[depth - 1] < function->call_count)
+        const uint32_t start = check_tier0_inline_row(run, table, root, b, r);
+        uint32_t depth = 0;
+        if (start != 0 && lane->states[start - 1] == BUSTER_CHECK_TIER0_INLINE_UNPREPARED)
         {
-            const uint32_t callee = check_tier0_inline_row(run, table, function, top, cursors[depth - 1]);
-            next = callee != 0 && lane->states[callee - 1] == BUSTER_CHECK_TIER0_INLINE_UNPREPARED && depth <= BUSTER_CHECK_TIER0_INLINE_DEPTH ? callee : 0;
-            cursors[depth - 1] += 1;
+            check_tier0_inline_visit(run, lane, start - 1, &components, &depth);
         }
-        if (next != 0)
+        while (depth != 0)
         {
-            uint32_t body = 0;
-            const bool valid = tier0_inline_callee_valid(&run->lowered->functions[next - 1], &body);
-            lane->states[next - 1] = valid ? BUSTER_CHECK_TIER0_INLINE_PROGRESS : BUSTER_CHECK_TIER0_INLINE_REFUSED;
-            if (valid)
+            const uint32_t v = lane->path[depth - 1];
+            const Tier0Function* function = &run->lowered->functions[v];
+            if (lane->cursors[depth - 1] < function->call_count)
             {
-                stack[depth] = next - 1;
-                cursors[depth] = 0;
-                depth += 1;
+                const uint32_t w = check_tier0_inline_row(run, table, function, v, lane->cursors[depth - 1]);
+                lane->cursors[depth - 1] += 1;
+                const uint8_t state = w != 0 ? lane->states[w - 1] : BUSTER_CHECK_TIER0_INLINE_REFUSED;
+                if (state == BUSTER_CHECK_TIER0_INLINE_UNPREPARED)
+                {
+                    check_tier0_inline_visit(run, lane, w - 1, &components, &depth);
+                }
+                else if (state == BUSTER_CHECK_TIER0_INLINE_PROGRESS)
+                {
+                    // On the component stack: a callee of v's component or one the path still holds.
+                    lane->links[v] = lane->indices[w - 1] < lane->links[v] ? lane->indices[w - 1] : lane->links[v];
+                }
             }
-        }
-        else
-        {
-            // Every callee of the top's rows is settled (or stays a call): the top's expansion, but for `b` itself, which
-            // its own code splices.
-            if (depth > 1)
+            else
             {
-                Tier0Inlined expanded;
-                const bool spliced = check_tier0_inline_splice(run, lane, table, top, function, &lane->cache, &expanded);
-                lane->functions[top] = spliced ? expanded.function : *function;
-                lane->states[top] = BUSTER_CHECK_TIER0_INLINE_READY;
+                depth -= 1;
+                if (depth != 0)
+                {
+                    const uint32_t u = lane->path[depth - 1];
+                    lane->links[u] = lane->links[v] < lane->links[u] ? lane->links[v] : lane->links[u];
+                }
+                if (lane->links[v] == lane->indices[v])
+                {
+                    // v's component, complete: the component stack from v up.
+                    uint32_t first = components;
+                    while (first != 0 && lane->components[first - 1] != v)
+                    {
+                        first -= 1;
+                    }
+                    first -= 1;
+                    const bool alone = components - first == 1;
+                    for (uint32_t k = first; k < components; k += 1)
+                    {
+                        lane->states[lane->components[k]] = BUSTER_CHECK_TIER0_INLINE_REFUSED;
+                    }
+                    components = first;
+                    if (alone)
+                    {
+                        check_tier0_inline_settle(run, lane, table, v);
+                    }
+                }
             }
-            depth -= 1;
         }
     }
 }

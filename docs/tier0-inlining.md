@@ -586,9 +586,22 @@ measured on the 9700X yet. `test-tier0-inline` compares the two paths on every
 body of a unit, and the driver fixture compares their objects.
 
 **Callees that call callees** are expanded in each lane's cache
-(`CheckTier0InlineLane`), with a stack of at most `BUSTER_CHECK_TIER0_INLINE_DEPTH`
-(16) bodies and a cursor per body. A callee also needs a target its caller's
-includes, and a body with a planned naked function isn't one.
+(`CheckTier0InlineLane`), and which ones expand is a property of the unit's
+graph of callees alone, never of the order a lane meets them in. A depth bound
+counted from whichever root a lane's search met first, as "Callees that call
+callees" above has it, cached a cut expansion that the lane's later bodies took,
+and the lanes take bodies in an order their timing decides. #1770's review found
+it: a chain of 20 wrappers made several different objects by `--lanes 4`. Each
+lane now finds the graph's strongly connected components by an iterative Tarjan
+search (`check_tier0_inline_prepare`). A callee in a cycle isn't inlined, and its
+own calls of the cycle stay calls, whichever member a lane met first. That is
+fewer inlined calls than clang's, which unrolls a cycle once. Every other callee
+is settled after the callees it calls. Its height is one more than the highest
+of those that expand, and one past `BUSTER_CHECK_TIER0_INLINE_DEPTH` (16) isn't
+inlined (its own calls are). A callee also needs a target its caller's includes,
+and a body with a planned naked function isn't one. `test-checker-driver`'s
+lanes fixture builds such a graph by 4 lanes, three times, and by 1 lane, and
+compares the objects.
 
 **Callees aren't dropped yet** (plan step 3): each callee's code stays in the
 object, which on `main.c` makes it 12% larger (34.5 MB against 30.7 MB). Clang
