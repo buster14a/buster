@@ -269,6 +269,7 @@ typedef enum ChangesFixed
     CHANGES_BRANCH_SIZING,
     CHANGES_PERFORMANCE,
     CHANGES_PREPROCESSOR_CLANG,
+    CHANGES_SQLITE_STABLE,
     CHANGES_FIXED_COUNT,
 } ChangesFixed;
 
@@ -278,6 +279,7 @@ static const char* const changes_fixed_names[CHANGES_FIXED_COUNT] = {
     [CHANGES_BRANCH_SIZING] = "branch_sizing",
     [CHANGES_PERFORMANCE] = "performance",
     [CHANGES_PREPROCESSOR_CLANG] = "preprocessor_clang",
+    [CHANGES_SQLITE_STABLE] = "sqlite_stable",
 };
 
 typedef struct ChangesModule ChangesModule;
@@ -1261,6 +1263,21 @@ static ChangesResult changes_decide(const ChangesInput* input)
         // docs/performance is an input of the performance readers' qualification (its manifest schema), which runs
         // in `test`: it counts as code.
         regex_t documentation = changes_regex("", "docs/.*|.*\\.md", "");
+        bool warning_only = true;
+        bool warning_source = false;
+        for (uint32_t i = 0; i < files->count; i += 1)
+        {
+            Text file = files->items[i];
+            bool document = regexec(&documentation, file.data, 0, NULL, 0) == 0 && !text_starts_with(file, "docs/performance/");
+            bool test = text_starts_with(file, "src/buster/compiler/") && file.length >= strlen("_test.c") && memcmp(file.data + file.length - strlen("_test.c"), "_test.c", strlen("_test.c")) == 0;
+            bool warning = text_equal_c(file, "src/buster/compiler/c_check_common_warnings.c") ||
+                           text_equal_c(file, "src/buster/compiler/c_check_literal_warning.c");
+            warning_source = warning_source || warning;
+            warning_only = warning_only && (warning || document || test);
+        }
+        // These diagnostic-only sources are expected to leave successful object output unchanged. Other checker
+        // sources may legitimately change it, including lowering paths outside the benchmark selectors' tables.
+        result.fixed[CHANGES_SQLITE_STABLE] = warning_source && warning_only;
         for (uint32_t i = 0; i < files->count && !result.code; i += 1)
         {
             bool document = regexec(&documentation, files->items[i].data, 0, NULL, 0) == 0;
@@ -1624,6 +1641,28 @@ static const ChangesFixture changes_fixtures[] = {
         .outputs_true = "code",
         .outputs_false = "checker checker_bindings checker_binding_modes check_debug check_debug_rows",
         .measured = "checker-source checker-bindings",
+    },
+    {
+        .name = "diagnostic-only checker changes expect identical sqlite objects",
+        .files = "src/buster/compiler/c_check_common_warnings.c src/buster/compiler/c_check_warning_driver_test.c docs/c-checker.md",
+        .outputs_true = "checker sqlite_stable",
+    },
+    {
+        .name = "mixed warning and atomic lowering changes don't require identical objects",
+        .files = "src/buster/compiler/c_check_common_warnings.c src/buster/compiler/c_check_program_atomic.c",
+        .outputs_true = "checker",
+        .outputs_false = "sqlite_stable",
+    },
+    {
+        .name = "a checker semantic change does not require identical objects",
+        .files = "src/buster/compiler/c_check_constant.c",
+        .outputs_true = "checker",
+        .outputs_false = "sqlite_stable",
+    },
+    {
+        .name = "warning tests alone don't assert object identity",
+        .files = "src/buster/compiler/c_check_warning_driver_test.c",
+        .outputs_false = "sqlite_stable",
     },
     {
         .name = "the reader produces the binding events: the default handoff's samples, not the modes' comparison",
@@ -2143,7 +2182,10 @@ static void changes_test_workflow(ChangesTest* test, Text workflow, const char* 
         for (uint32_t j = 0; j < all_gates.count; j += 1)
         {
             bool code_or_measure = text_equal_c(all_gates.items[j], "code") || text_equal_c(all_gates.items[j], "measure");
-            changes_expect(test, code_or_measure || list_contains(&gates, all_gates.items[j]) || strstr(text_terminated(step->body), text_concat(text_concat(text_c("needs.changes.outputs."), all_gates.items[j]), text_c(" == 'false'")).data) != NULL, "a gate the matcher reads", step->name);
+            // This output is data for the comparison inside the step, not a condition that skips the step.
+            bool sqlite_data = text_equal_c(all_gates.items[j], "sqlite_stable") &&
+                               strstr(text_terminated(step->body), "SQLITE_EXPECT_STABLE: ${{ needs.changes.outputs.sqlite_stable }}") != NULL;
+            changes_expect(test, code_or_measure || sqlite_data || list_contains(&gates, all_gates.items[j]) || strstr(text_terminated(step->body), text_concat(text_concat(text_c("needs.changes.outputs."), all_gates.items[j]), text_c(" == 'false'")).data) != NULL, "a gate the matcher reads", step->name);
         }
         TextList names = { 0 };
         changes_scan_names(step->body, "contains(env.MEASURE, ',", true, ",')", &names);

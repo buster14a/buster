@@ -3832,33 +3832,50 @@ struct Tier1SelectAddress
     uint8_t folds;
 };
 
-// An address's index without the constants added to it: through 64-bit additions of a constant (on either side) and
-// subtractions of one that only `root`'s pattern uses, at most BUSTER_TIER1_SELECT_WALK of them, each constant times
-// `scale` joining `*displacement` while it fits 32 bits, each node passed counted in `*folds` (#977's review: `&p[100 + i]`
-// had its addition's lea). A 32-bit index's addition stays where a sign extension follows it: (i + c) * s isn't
-// i * s + c * s when i + c overflows, which the IR doesn't rule out (and -fwrapv defines).
-static uint32_t tier1_select_index(const Tier1SelectForest* forest, uint32_t root, uint32_t index, int64_t scale, int64_t* displacement, uint8_t* folds)
+// An address's index through single-use I64 arithmetic in its block, at most BUSTER_TIER1_SELECT_WALK nodes: additions
+// and subtractions of constants join the displacement at the current scale; shifts and power-of-two multiplies join
+// the SIB's log2 scale while it remains at most 3. Walk from the consumer: (i + c) << k scales c, but (i << k) + c does
+// not. These are modulo 2^64 identities. A narrower operation and its extension stay put, since folding them would lose
+// their wrap before widening. Shared arithmetic also stays put; only the address walk itself may take shared nodes.
+static uint32_t tier1_select_index(const Tier1SelectForest* forest, uint32_t root, uint32_t index, uint8_t* scale, int64_t* displacement, uint8_t* folds)
 {
     const IrFunction* function = forest->function;
+    uint8_t index_scale = *scale;
+    int64_t index_displacement = *displacement;
+    uint8_t index_folds = *folds;
     bool walking = true;
     for (uint32_t step = 0; walking && step < BUSTER_TIER1_SELECT_WALK; step += 1)
     {
         const uint32_t op = function->op[index];
+        const bool additive = op == IR_ADD || op == IR_SUB;
         uint64_t constant = 0;
-        const bool right = (op == IR_ADD || op == IR_SUB) && tier1_select_constant(function, function->b[index], &constant);
-        const bool left = op == IR_ADD && !right && tier1_select_constant(function, function->a[index], &constant);
-        int64_t term = 0;
-        int64_t sum = 0;
-        walking = (right || left) && function->type[index] == IR_I64 && tier1_select_tree_child(forest, root, index) && !__builtin_mul_overflow((int64_t)constant, scale, &term) &&
-                  (op == IR_SUB ? !__builtin_sub_overflow(*displacement, term, &sum) : !__builtin_add_overflow(*displacement, term, &sum)) && sum == (int64_t)(int32_t)sum;
+        const bool right = (additive || op == IR_SHL || op == IR_MUL) && tier1_select_constant(function, function->b[index], &constant);
+        const bool left = (op == IR_ADD || op == IR_MUL) && !right && tier1_select_constant(function, function->a[index], &constant);
+        walking = (right || left) && function->type[index] == IR_I64 && tier1_select_tree_child(forest, root, index);
+        if (walking && additive)
+        {
+            int64_t term = 0;
+            int64_t sum = 0;
+            walking = !__builtin_mul_overflow((int64_t)constant, INT64_C(1) << index_scale, &term) &&
+                      (op == IR_SUB ? !__builtin_sub_overflow(index_displacement, term, &sum) : !__builtin_add_overflow(index_displacement, term, &sum)) && sum == (int64_t)(int32_t)sum;
+            index_displacement = walking ? sum : index_displacement;
+        }
+        else if (walking)
+        {
+            const uint64_t shift = op == IR_SHL ? constant : tier1_select_log2(constant);
+            walking = shift <= 3u - index_scale;
+            index_scale += walking ? (uint8_t)shift : 0;
+        }
         if (walking)
         {
             const uint32_t constant_node = right ? function->b[index] : function->a[index];
-            *folds = (uint8_t)(*folds + 1 + (tier1_select_tree_child(forest, root, constant_node) ? 1 : 0));
-            *displacement = sum;
+            index_folds = (uint8_t)(index_folds + 1 + (tier1_select_tree_child(forest, root, constant_node) ? 1 : 0));
             index = right ? function->a[index] : function->b[index];
         }
     }
+    *scale = index_scale;
+    *displacement = index_displacement;
+    *folds = index_folds;
     return index;
 }
 
@@ -3897,8 +3914,8 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
             int64_t offset = 0;
             taken = (!indexed || address.index == BUSTER_IR_NONE) && !__builtin_mul_overflow((int64_t)constant, (int64_t)operand.scale, &offset) &&
                     !__builtin_add_overflow(offset, operand.offset, &offset) && !__builtin_add_overflow(address.displacement, offset, &next.displacement);
-            next.index = indexed && taken ? tier1_select_index(forest, root, b, operand.scale, &next.displacement, &peeled) : address.index;
             next.scale = indexed ? (uint8_t)tier1_select_log2(operand.scale) : address.scale;
+            next.index = indexed && taken ? tier1_select_index(forest, root, b, &next.scale, &next.displacement, &peeled) : address.index;
             next.base = a;
             constant_node = constant_index ? b : BUSTER_IR_NONE;
         }
@@ -3921,8 +3938,8 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
                 if (taken)
                 {
                     next.base = a;
-                    next.index = tier1_select_index(forest, root, b, 1, &next.displacement, &peeled);
                     next.scale = 0;
+                    next.index = tier1_select_index(forest, root, b, &next.scale, &next.displacement, &peeled);
                 }
             }
         }
@@ -4926,7 +4943,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 .object = BUSTER_IR_NONE,
                 .scale = constant_index ? 0 : (uint8_t)tier1_select_log2(operand.scale),
             };
-            start.index = start.index != BUSTER_IR_NONE ? tier1_select_index(forest, node, b, operand.scale, &start.displacement, &start.folds) : start.index;
+            start.index = start.index != BUSTER_IR_NONE ? tier1_select_index(forest, node, b, &start.scale, &start.displacement, &start.folds) : start.index;
             const Tier1SelectAddress address = tier1_select_address(forest, node, start, false);
             base.rule = TIER1_RULE_ADDRESS;
             base.values[0] = address.base;
