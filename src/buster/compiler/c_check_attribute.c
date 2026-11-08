@@ -3500,6 +3500,8 @@ static bool check_input_attribute_errors_recover(CheckInputReader* reader, Check
             report->completion = report->completion < completion ? completion : report->completion;
         }
         report->repeated = true;
+        // Without a boundary, it waits for its declarator's (CheckInputReport.pending).
+        report->pending = completion == 0;
     }
     const bool recovered = recoverable && check_input_recover_reports(reader, recovery->reports);
     if (recovered)
@@ -4231,11 +4233,15 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
                     // An item whose reading gives an error clang drops it for is left out, and the list goes on (#1447).
                     const uint32_t item = i;
                     const CheckInputAttributeRecovery recovery = check_input_attribute_recovery(reader, attributes, NULL);
+                    const uint32_t moved = reader->output->recovered_count;
                     valid = check_input_attribute_read_item(reader, attributes, &i, list_end, standard, place);
                     if (!valid && check_input_attribute_errors_recover(reader, attributes, &recovery, 0))
                     {
                         // Its parser's error, at its place: no Sema completion waits for it.
-                        reader->recovered_pending = reader->output->recovered_count;
+                        for (uint32_t r = moved; r < reader->output->recovered_count; r += 1)
+                        {
+                            reader->output->recovered_reports[r].pending = false;
+                        }
                         i = check_input_attribute_item_end(parser, item, list_end);
                         valid = true;
                     }
@@ -7156,21 +7162,27 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
     uint32_t ordinary_layout = UINT32_MAX;
     bool valid = true;
     const CheckInputUnknownAttribute* unknown = attributes != NULL ? attributes->unknown_begin : NULL;
-    // The recovered errors of this declarator's attributes that Sema gives where it processes them (#1447,
-    // CheckInputReader.recovered_pending) complete at its last token: after the parser's errors in it, before the next
-    // token's (a missing `;`'s, check_prefix_resume). An earlier declaration's, which had no subject check, keep their places.
+    // The waiting recovered errors of this declarator's attributes, which Sema gives where it processes them (#1447,
+    // CheckInputReport.pending), complete at its last token: after the parser's errors in it, before the next token's (a
+    // missing `;`'s, check_prefix_resume). Only those within the declaration's tokens: a parameter's checks, which come
+    // first, leave its function's to the function's. Those of a declaration with no subject check keep waiting, and so
+    // their places; the cursor passes the ones no longer waiting.
     CheckInput* output = reader->output;
     const uint32_t last = completion != 0 ? completion - 1 : 0;
     for (uint32_t r = reader->recovered_pending; r < output->recovered_count; r += 1)
     {
         CheckInputReport* report = output->recovered_reports + r;
-        if (report->token >= begin && report->token < last)
+        if (report->pending && report->token >= begin && report->token < last)
         {
             report->suborder = (uint64_t)(report->sort != 0 ? report->sort : report->completion != 0 ? report->completion : report->token) + 1;
             report->completion = report->completion < last ? last : report->completion;
+            report->pending = false;
         }
     }
-    reader->recovered_pending = output->recovered_count;
+    while (reader->recovered_pending < output->recovered_count && !output->recovered_reports[reader->recovered_pending].pending)
+    {
+        reader->recovered_pending += 1;
+    }
     CheckInputAttributeRecovery recovery = { 0 };
     // The condition first takes the last attribute's errors past, where it can (#1447): the body leaves an attribute at
     // several `continue`s.

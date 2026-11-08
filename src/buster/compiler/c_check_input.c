@@ -533,6 +533,8 @@ struct CheckInputReport
     // An error that didn't stop the reader (CheckInput.recovered_reports): it rejects the unit, but the diagnostics'
     // cutoffs after the reader don't end at it.
     bool recovered;
+    // A recovered error that waits for its declarator's completion (CheckInputReader.recovered_pending).
+    bool pending;
 };
 
 static __attribute__((unused)) uint32_t check_input_report_source(const Parser* parser, const CheckInputReport* report)
@@ -1711,9 +1713,11 @@ struct CheckInputReader
     CheckInputAttributes* declarator_common;
     // The current complete declarator's end: type and declaration attribute warnings follow its parameters (#147).
     uint32_t attribute_completion;
-    // The first of the unit's recovered reports (CheckInput.recovered_reports, #1447) that waits for its declarator's
-    // completion: an attribute's error clang's Sema gives where it processes the declaration's attributes, which the
-    // declaration's subject checks give it (check_input_attribute_subjects). One its reading's parser gives is past it.
+    // The first of the unit's recovered reports (CheckInput.recovered_reports, #1447) that may wait for its declarator's
+    // completion (CheckInputReport.pending): an attribute's error clang's Sema gives where it processes the declaration's
+    // attributes, which the subject checks of the declaration whose tokens hold it give it (check_input_attribute_subjects).
+    // A parameter's checks, which come first, leave its function's errors waiting. One its reading's parser gives doesn't
+    // wait.
     uint32_t recovered_pending;
     uint32_t declarator_declarations;
     // The prototypes open around the reader's position: a declarator's parameter lists, each a scope a level deeper than
