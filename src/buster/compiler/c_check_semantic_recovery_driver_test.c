@@ -183,6 +183,31 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // no node and keeps its error (third review on #1791).
         "int c = undecl, d[] = 6;\nunknown_type z;\n",
         "int c = undecl;\nint d[] = 6;\nint e[] = (5);\nint f2[] = undecl2 + 1;\nint g[] = (int)7;\nunknown_type z;\n",
+        // An enumerator whose name is another kind of the scope's (an object, a typedef, a parameter, a local): clang's
+        // "redefinition of 'K'" with its note at the earlier declaration, the enumerator dropped and the next implicit
+        // value restarting at 0, of int or of the fixed type (#1447).
+        "int K;\n"
+        "enum E { K, L };\n"
+        "int use(void) { return K + L + undeclared; }\n",
+        "enum E { A, B };\n"
+        "int A;\n"
+        "float B(void);\n"
+        "typedef int A2;\n"
+        "enum F { A2 };\n"
+        "int use(void) { return A + B; }\n",
+        "void f(int P)\n"
+        "{\n"
+        "    enum { P, Q } e;\n"
+        "    int x = Q;\n"
+        "    (void)e; (void)x;\n"
+        "}\n",
+        "int K;\n"
+        "enum E { J = 5, K, M };\n"
+        "_Static_assert(M == 0, \"m\");\n"
+        "typedef long T;\n"
+        "enum F : short { U = 7, T, V };\n"
+        "_Static_assert(V == 0 && sizeof(V) == 2, \"v\");\n"
+        "void w(void) { int loc; enum { loc, after } e; (void)e; (void)loc; }\n",
         // A block's, and clang's unused-variable warnings of no scope in which an error occurred (a body's from its
         // definition's start).
         "void f(int p)\n{\n    int x;\n    float x;\n    int y = 1;\n    long y = 2;\n    (void)y;\n    if (y = 2) {}\n}\n"
