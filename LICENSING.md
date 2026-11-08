@@ -21,6 +21,9 @@ material:
   exception.
 - `lane.c`, including local changes, is provided under MIT with the retained
   RAD Debugger notice.
+- The Unicode character names' table, `c_unicode_names.inc`, is derived
+  Unicode data under the Unicode License V3, and `c_unicode_names.c`, a C
+  translation of LLVM routines, keeps LLVM's terms.
 - The identified benchmark helpers retain MIT; the surrounding original
   benchmark code uses the project default.
 - Copied license texts, the DCO and upstream attribution records retain their

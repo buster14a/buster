@@ -528,11 +528,12 @@ typedef enum PPDirectiveKind
 // the file: `once`, the line cursor, and `prepared`, which says the unit has copied the record's prepared fields (a
 // copy's other fields are the record's).
 typedef struct PPFileData PPFileData;
-// PPRawError's kind for a named universal character name (\N{...}) that the lexer read in an identifier, a pp-number or
-// an unknown token. buster refuses it there, as pp_parse_ucn refuses one in a character constant and the checker one in
-// a literal: reading it needs Unicode's table of character names, which buster doesn't have (#452). clang reads it, as
-// an extension in C.
+// PPRawError's kind for a named universal character name (\N{...}) that starts an identifier or an unknown token and
+// isn't a character such a token may have: a name that isn't Unicode's, or a character below U+00A0
+// (pp_diagnose_named_ucn words clang's errors, #1447). One within a token is read without them, as clang reads it.
 #define BUSTER_PP_NAMED_UCN_ERROR 0x80
+// The bytes of a bad name pp_diagnose_named_ucn's error prints, at most.
+#define BUSTER_PP_NAMED_UCN_NAME_BYTES 1024
 
 typedef struct PPRawError PPRawError;
 struct PPRawError
@@ -1739,6 +1740,14 @@ struct PPOutputDiagnosticNote
     const char* message;
 };
 
+// A note at a byte of a token's spelling (pp_diagnose_output_offset_notes).
+typedef struct PPOffsetNote PPOffsetNote;
+struct PPOffsetNote
+{
+    uint32_t offset;
+    const char* message;
+};
+
 typedef struct PPDiagnosticNote PPDiagnosticNote;
 struct PPDiagnosticNote
 {
@@ -1754,7 +1763,9 @@ static uint32_t pp_lexed_start(const Preprocessor* pp, uint32_t location);
 static void pp_diagnostic_lines(Preprocessor* pp, uint32_t range);
 static bool pp_diagnostic_warning_visible(Preprocessor* pp, uint32_t location, uint32_t origin);
 static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const char* format, va_list arguments);
-static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_t position, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const PPOutputDiagnosticNote* source_notes, uint32_t source_note_count, const char* format, va_list arguments);
+static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_t position, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const PPOutputDiagnosticNote* source_notes, uint32_t source_note_count, const PPDiagnosticSourceNote* placed_notes, uint32_t placed_note_count, const char* format, va_list arguments);
+// The most notes with places of their own one diagnostic has (pp_diagnose_notes, pp_diagnose_output_offset_notes).
+#define BUSTER_PP_PLACED_NOTES 8
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_publish(Preprocessor* pp);
 
 // Both source and output-token diagnostics pass this gate before rendering their complete group, including notes.
@@ -1824,7 +1835,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
         const uint32_t position = pp->diagnostic_position != BUSTER_PP_NONE ? pp->diagnostic_position : pp->output.count;
         if (pp->options.collect_diagnostics)
         {
-            pp_collect_diagnostic(pp, requested, (uint64_t)position * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_LEXICAL, location, location != 0 ? pp->diagnostic_origin : 0, NULL, NULL, 0, format, arguments);
+            pp_collect_diagnostic(pp, requested, (uint64_t)position * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_LEXICAL, location, location != 0 ? pp->diagnostic_origin : 0, NULL, NULL, 0, NULL, 0, format, arguments);
         }
         else
         {
@@ -3299,17 +3310,14 @@ static void pp_scan_named_ucn_chunks(const uint8_t* bytes, uint64_t length, cons
     }
 }
 
-// Is candidate byte `i` of a file (pp_named_ucn_candidates) the backslash (or the end of ??/) of a named UCN that the
-// lexer read in an identifier, a pp-number or an unknown token? Then `token` is that token and `position` the UCN's first
-// byte. A UCN in a literal or a comment is in none: #if refuses one in a character constant when it reads it
-// (pp_parse_ucn), and the checker one in a literal. Within a token, a named UCN is one whenever its name is written with
-// capital letters, digits, spaces and hyphens (read_ucn: buster doesn't know which names Unicode has), and an unknown token
-// of its own otherwise, which clang refuses too, as no character's name. An identifier's end (which its id may have
-// replaced already) is found once: `*identifier` is the identifier whose end `*identifier_end` is, from an earlier call
-// (BUSTER_PP_NONE for none), so that the candidates of an identifier with many named UCNs, which come in order, take
-// time in proportion to its length, not to the square of it.
-static bool pp_named_ucn_at(uint32_t refine_flags, const PPFileData* data, uint64_t i, uint32_t* token, uint64_t* position, uint32_t* identifier,
-                            uint32_t* identifier_end)
+// Is candidate byte `i` of a file (pp_named_ucn_candidates) the backslash (or the end of ??/) of a named UCN that starts
+// an identifier or an unknown token and that clang diagnoses there? Then `token` is that token and `position` the UCN's
+// first byte. clang reads one within a token (an identifier's or a pp-number's later character) without a diagnostic
+// (tryConsumeIdentifierUCN): its name exactly Unicode's and its character one the token may have, or else the token ends
+// before it and it starts the next. Where it starts a token, its name not exactly Unicode's or a character below U+00A0
+// (whatever its name loosely stands for) is an error (pp_diagnose_named_ucn). A UCN in a literal or a comment is in
+// neither: #if words one in a character constant when it reads it (pp_parse_ucn), and the checker one in a literal.
+static bool pp_named_ucn_at(uint32_t refine_flags, const PPFileData* data, uint64_t i, uint32_t* token, uint64_t* position)
 {
     // As pp_file_lexer reads the file.
     const ScalarLexer lexer = {
@@ -3328,8 +3336,9 @@ static bool pp_named_ucn_at(uint32_t refine_flags, const PPFileData* data, uint6
     result = result && peek_char(&lexer, start + size, &kind_size) == 'N';
     uint64_t end = 0;
     uint32_t code_point = 0;
-    result = result && read_ucn(&lexer, start, &end, &code_point);
-    // The token it may be in: the last that starts at it or before it.
+    // (A name exactly Unicode's of a character at U+00A0 or past it is no error.)
+    result = result && read_ucn(&lexer, start, &end, &code_point) && code_point == 0;
+    // The token it may start: the last that starts at it or before it.
     uint32_t low = 0;
     uint32_t high = result ? data->token_count : 0;
     while (low < high)
@@ -3342,36 +3351,14 @@ static bool pp_named_ucn_at(uint32_t refine_flags, const PPFileData* data, uint6
     result = result && low != 0;
     const uint32_t t = low != 0 ? low - 1 : 0;
     const uint8_t kind = result ? data->kinds[t] & 0x7F : C_TOKEN_KIND_COUNT;
-    if (kind == C_TOKEN_UNKNOWN)
-    {
-        // An unknown token holds a UCN only when it is one (its name isn't written as read_ucn takes one).
-        result = data->starts[t] == start;
-    }
-    else if (kind == C_TOKEN_RAW_IDENTIFIER)
-    {
-        if (*identifier != t)
-        {
-            *identifier = t;
-            *identifier_end = refine_identifier_end(data->bytes, data->length, data->starts[t], refine_flags);
-        }
-        result = start < *identifier_end;
-    }
-    else if (kind == C_TOKEN_NUMERIC_CONSTANT)
-    {
-        result = start < data->values[t];
-    }
-    else
-    {
-        result = false;
-    }
+    result = result && (kind == C_TOKEN_UNKNOWN || kind == C_TOKEN_RAW_IDENTIFIER) && data->starts[t] == start;
     *token = t;
     *position = start;
     return result;
 }
 
-// Adds an error of kind BUSTER_PP_NAMED_UCN_ERROR to the file's raw errors for each named UCN in an identifier, a
-// pp-number or an unknown token (pp_named_ucn_at), at its backslash, as clang places its -pedantic warning that a named
-// UCN is its extension (but past an identifier's first character, which clang reads without one), merged with
+// Adds an error of kind BUSTER_PP_NAMED_UCN_ERROR to the file's raw errors for each named UCN that starts an identifier
+// or an unknown token and that clang diagnoses there (pp_named_ucn_at), at its backslash, merged with
 // pp_record_raw_errors's, in the arena they were just pushed to, in the token order the readers' search takes. Only a
 // file with a candidate (`scan`) reads its bytes again, from the first candidate to the last. Returns false if the arena
 // has no room.
@@ -3386,15 +3373,13 @@ static bool pp_record_named_ucns(const PPPrepare* prepare, Arena* arena, PPFileD
         result = errors != 0;
         const bool trigraphs = (prepare->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
         uint32_t named = 0;
-        uint32_t identifier = BUSTER_PP_NONE;
-        uint32_t identifier_end = 0;
         for (uint64_t b = scan->first; result && b <= scan->last; b += 64)
         {
             for (uint64_t bits = pp_named_ucn_candidates(data->bytes, data->length, b, scan->last + 1, trigraphs, BUSTER_VECTOR_PATH(prepare->vectorized)); bits != 0; bits &= bits - 1)
             {
                 uint32_t token = 0;
                 uint64_t position = 0;
-                if (named < scan->count && pp_named_ucn_at(prepare->refine_flags, data, b + (uint64_t)__builtin_ctzll(bits), &token, &position, &identifier, &identifier_end))
+                if (named < scan->count && pp_named_ucn_at(prepare->refine_flags, data, b + (uint64_t)__builtin_ctzll(bits), &token, &position))
                 {
                     errors[raw_count + named] = (PPRawError){ .token = token, .offset = (uint32_t)position, .kind = BUSTER_PP_NAMED_UCN_ERROR };
                     named += 1;
@@ -6803,6 +6788,75 @@ static void pp_end_regions(Preprocessor* pp, bool main_file)
 
 static void pp_continue_relex(Preprocessor* pp, uint32_t file_context, uint32_t begin, uint32_t expansion_end);
 
+// clang's error of a name that isn't Unicode's in a literal (DiagnoseInvalidUnicodeCharacterName), whose `length` bytes
+// start at byte `offset` of the token at `location`, with its notes, each at its byte of the name.
+static __attribute__((noinline, cold)) void pp_diagnose_named_ucn_name(Preprocessor* pp, const uint8_t* name, uint32_t length, uint32_t location, uint32_t offset)
+{
+    UnicodeNameDiagnosis diagnosis;
+    unicode_name_diagnose(name, length, true, &diagnosis);
+    PPDiagnosticSourceNote notes[BUSTER_UNICODE_NAME_NOTES];
+    for (uint32_t n = 0; n < diagnosis.note_count; n += 1)
+    {
+        notes[n] = (PPDiagnosticSourceNote){ pp_spelling_offset_location(pp, location, offset + diagnosis.notes[n].offset), pp->diagnostic_origin, diagnosis.notes[n].message };
+    }
+    pp_diagnose_notes(pp, PP_SEVERITY_ERROR, pp_spelling_offset_location(pp, location, offset), notes, diagnosis.note_count, "%s", diagnosis.error);
+}
+
+// The error clang gives of a UCN's character below U+00A0, at `location`, outside a literal and before C23 in one
+// (tryReadUCN's, ProcessUCNEscape's): a control character's, or a basic one's naming it.
+static void pp_diagnose_ucn_basic(Preprocessor* pp, uint32_t location, uint32_t code_point)
+{
+    if (code_point >= 0x20 && code_point < 0x7F)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "character '%c' cannot be specified by a universal character name", (char)code_point);
+    }
+    else
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "universal character name refers to a control character");
+    }
+}
+
+// The diagnostics of a named UCN that starts a token (BUSTER_PP_NAMED_UCN_ERROR), whose backslash is byte `offset` of
+// `data`, at `base`: as clang's tryReadNamedUCN, a name that isn't exactly Unicode's is an error at the name, with a note
+// where it is one loosely, whose character clang reads it as; then as tryReadUCN, that character (or the exact name's)
+// below U+00A0 is an error at the backslash. Cold: a file's bad named UCNs alone.
+static __attribute__((noinline, cold)) void pp_diagnose_named_ucn(Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t offset)
+{
+    const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
+    uint8_t name[BUSTER_PP_NAMED_UCN_NAME_BYTES];
+    uint64_t length = 0;
+    uint64_t start = 0;
+    uint64_t end = 0;
+    if (read_ucn_name(&lexer, offset, name, sizeof(name), &length, &start, &end))
+    {
+        const uint32_t shown = length < sizeof(name) ? (uint32_t)length : (uint32_t)sizeof(name);
+        uint32_t code_point = 0;
+        const bool exact = unicode_name_strict(name, shown, &code_point);
+        bool found = exact;
+        if (!exact)
+        {
+            UnicodeNameDiagnosis diagnosis;
+            unicode_name_diagnose(name, shown, false, &diagnosis);
+            const uint32_t location = base + (uint32_t)start;
+            if (diagnosis.note_count != 0)
+            {
+                const PPDiagnosticNote note = { .location = location, .message = diagnosis.notes[0].message };
+                pp_diagnose_note(pp, PP_SEVERITY_ERROR, location, &note, "%s", diagnosis.error);
+            }
+            else
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "%s", diagnosis.error);
+            }
+            found = diagnosis.loose;
+            code_point = diagnosis.loose_code_point;
+        }
+        if (found && code_point < 0xA0)
+        {
+            pp_diagnose_ucn_basic(pp, base + offset, code_point);
+        }
+    }
+}
+
 // Read only the exceptional errors in this consumed file-token range. Macro definitions diagnose once when read,
 // never each time expanded. Excluded group bodies never call this; directive lines still do. Header queries defer
 // it until their opaque spans are known.
@@ -6868,7 +6922,7 @@ static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor
                     break;
                 }
                 case BUSTER_PP_NAMED_UCN_ERROR:
-                    pp_diagnose(pp, PP_SEVERITY_ERROR, location, "\\N{...} escapes are not supported");
+                    pp_diagnose_named_ucn(pp, data, pp->ranges[context->range].base, error.offset);
                     break;
                 case C_RAW_STRING_OK:
                     break;
@@ -15809,10 +15863,51 @@ BUSTER_INLINE void pp_characters_add(PPCharacters* characters, uint32_t c)
     characters->count += 1;
 }
 
+// The named universal character name \N{NAME} whose backslash is spelling[escape] of a character constant whose token is
+// at `location`, as clang reads one in a literal (ProcessNamedUCNEscape), *at past its N: its '{', a '}' before a line
+// break or the end, and a name between them, exactly Unicode's (unicode_name_strict), else errors at the escape (or
+// the name), a bad name's with clang's notes (unicode_name_diagnose). Moves *at past it, and returns whether its name is
+// a character's, which is `*code_point`.
+static bool pp_parse_named_ucn(Preprocessor* pp, const uint8_t* spelling, uint32_t end, uint32_t* at, uint32_t escape, uint32_t location, uint32_t* code_point)
+{
+    const uint32_t backslash = pp_spelling_offset_location(pp, location, escape);
+    uint32_t i = *at;
+    bool result = false;
+    if (i == end || spelling[i] != '{')
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, backslash, "expected '{' after '\\N' escape sequence");
+    }
+    else
+    {
+        i += 1;
+        uint32_t close = i;
+        while (close < end && spelling[close] != '}' && spelling[close] != '\n' && spelling[close] != '\r')
+        {
+            close += 1;
+        }
+        if (close == end || close == i)
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, backslash, close == end ? "incomplete universal character name" : "delimited escape sequence cannot be empty");
+            i = close == end ? close : close + 1;
+        }
+        else
+        {
+            result = unicode_name_strict(spelling + i, close - i, code_point);
+            if (!result)
+            {
+                pp_diagnose_named_ucn_name(pp, spelling + i, close - i, location, i);
+            }
+            i = close + 1;
+        }
+    }
+    *at = i;
+    return result;
+}
+
 // The universal character name at spelling[*at] (its backslash) of a character constant, as clang reads one there
 // (ProcessUCNEscape): \u and four hex digits, \U and eight, or \u{...}; one that names a surrogate or a code point
-// past U+10FFFF is an error, and so before C23 is one below U+00A0 but $, @ and `. \N{name} is refused: there is no
-// table of Unicode's names here. Moves *at past it, and returns whether it is valid, with its code point.
+// past U+10FFFF is an error, and so before C23 is one below U+00A0 but $, @ and `. \N{name} names a character by
+// Unicode's name for it (pp_parse_named_ucn). Moves *at past it, and returns whether it is valid, with its code point.
 static bool pp_parse_ucn(Preprocessor* pp, const uint8_t* spelling, uint32_t end, uint32_t* at, uint32_t location, uint32_t* code_point)
 {
     const uint8_t letter = spelling[*at + 1];
@@ -15821,13 +15916,18 @@ static bool pp_parse_ucn(Preprocessor* pp, const uint8_t* spelling, uint32_t end
     bool result = false;
     if (letter == 'N')
     {
-        // Through the closing brace (or to the end), as clang skips it.
-        while (i < end && spelling[i] != '}')
+        // Its diagnostics at their own bytes, as clang's.
+        const uint32_t escape = pp_spelling_offset_location(pp, location, *at);
+        result = pp_parse_named_ucn(pp, spelling, end, &i, *at, location, &value);
+        if (result && value < 0xA0 && value != 0x24 && value != 0x40 && value != 0x60 && pp->options.language.standard < 2023)
         {
-            i += 1;
+            pp_diagnose_ucn_basic(pp, escape, value);
+            result = false;
         }
-        i += i < end;
-        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "\\N{...} escapes are not supported");
+        else if (result && pp->options.language.standard < 1999)
+        {
+            pp_diagnose(pp, PP_SEVERITY_WARNING, escape, "universal character names are only valid in C99 or C++");
+        }
     }
     else
     {

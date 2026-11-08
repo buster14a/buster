@@ -671,8 +671,6 @@ the following, which are listed in
 - Warnings that don't change acceptance: `-Wvariadic-macros`,
   `-Wexpansion-to-defined` and others. The comparison counts errors, not
   warnings.
-- `\N{name}` escapes in `#if`'s character constants are refused: there is no
-  table of Unicode's names. Clang decodes them.
 - `-funsigned-char`: an ordinary character constant in `#if` stays signed,
   where clang makes it unsigned.
 - `-E -P`, without line markers, keeps no line numbers, so it doesn't move the

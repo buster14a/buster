@@ -4070,6 +4070,17 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "int c='\\x{43}'+'\\o{104}'*3+'\\E'*5+'\\z'*7;unsigned long h=0;for(int i=0;s[i];i++)h=h*31+(unsigned char)s[i];"
             "for(int i=0;u[i];i++)h=h*37+u[i];for(int i=0;w[i];i++)h=h*41+(unsigned)w[i];return (int)(h%1000003)+c+n;}",
             "extended-escapes", clang);
+        // Named universal character names (#1447, unicode_name_strict): names, aliases and names made by rule (CJK,
+        // Hangul, Egyptian), in strings of each width, character constants, an identifier and a macro's name, their values
+        // against clang's build.
+        check_test_program_source(test,
+            "#define \\N{GREEK SMALL LETTER BETA}(x) ((x)*2)\n"
+            "int tested(int n){const char*s=\"\\N{LATIN SMALL LETTER E WITH ACUTE}\\N{SNOWMAN}\\N{GRINNING FACE}\\N{CJK UNIFIED IDEOGRAPH-4E00}\\N{HANGUL SYLLABLE GAG}\";"
+            "const unsigned short*u=u\"\\N{GRINNING FACE}\\N{GREEK SMALL LETTER ALPHA}\\N{NBSP}\";const int*w=L\"\\N{LATIN CAPITAL LETTER GHA}\\N{EGYPTIAN HIEROGLYPH-13460}\";"
+            "int c=L'\\N{SNOWMAN}'+(int)U'\\N{GRINNING FACE}'*3+u'\\N{BYTE ORDER MARK}'*5;int \\N{GREEK SMALL LETTER ALPHA}=n;unsigned long h=0;"
+            "for(int i=0;s[i];i++)h=h*31+(unsigned char)s[i];for(int i=0;u[i];i++)h=h*37+u[i];for(int i=0;w[i];i++)h=h*41+(unsigned)w[i];"
+            "return (int)(h%1000003)+c+\\u03b1+\\N{GREEK SMALL LETTER BETA}(\xCE\xB1);}",
+            "named-universal-character-names", clang);
         // x86's force_align_arg_pointer (#1447, Tier0Function.realign_stack): a function entered with rsp 8 bytes off a call's
         // alignment (an inline asm call that aligns rsp below the red zone, then moves it by 8) realigns its frame, so that
         // an object aligned to 16 is; with a call of its own and with a variable-length array (a realigned frame with a

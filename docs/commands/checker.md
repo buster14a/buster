@@ -78,8 +78,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers]` and `test-checker-asm`
-  check the driver and inline assembly against Clang (but for named UCNs,
-  which clang accepts and the driver refuses at their places, #452; with
+  check the driver and inline assembly against Clang (named UCNs too, #1447,
+  `check_test_driver_named_ucns`; with
   `--lazy-system-headers`, only the checks that pass the driver
   `-flazy-system-headers`, since the others run the same either way, and
   `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
