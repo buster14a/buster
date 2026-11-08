@@ -291,6 +291,12 @@ struct CheckInputAttribute
     // A specifiers' objc_gc or objc_ownership that a declarator moved to its pointer, which its later declarators don't see
     // (#1447, check_input_attribute_objc).
     bool objc_moved;
+    // An EXT_VECTOR_TYPE record's NEON kind (#1447): BUSTER_TYPE_FLAG_NEON for neon_vector_type, BUSTER_TYPE_FLAG_NEON_POLY
+    // for neon_polyvector_type, which clang's HandleNeonVectorTypeAttr checks and makes a GNU vector of that kind of;
+    // 0 for ext_vector_type. A C23 one after a declarator's name has its -Wdeprecated-attributes warning once its handler
+    // took it (check_input_neon_vector), as ProcessDeclAttribute gives it to a valid attribute alone.
+    uint8_t neon;
+    bool neon_deprecated;
 };
 
 // An availability attribute's arguments as clang's parser reads them (#1447, check_input_availability_parse): its platform's
@@ -388,6 +394,10 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "mode", CHECK_ATTRIBUTE_MODE, CHECK_ATTRIBUTE_IDENTIFIER, 1, 1 },
     { "vector_size", CHECK_ATTRIBUTE_VECTOR_SIZE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
     { "ext_vector_type", CHECK_ATTRIBUTE_EXT_VECTOR_TYPE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
+    // clang's NEON vectors (#1447), which x86-64 takes as vectors of their own kind: type attributes in ext_vector_type's
+    // places, its record's kind with CheckInputAttribute.neon, checked as HandleNeonVectorTypeAttr does (check_input_neon_vector).
+    { "neon_vector_type", CHECK_ATTRIBUTE_EXT_VECTOR_TYPE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
+    { "neon_polyvector_type", CHECK_ATTRIBUTE_EXT_VECTOR_TYPE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
     { "transparent_union", CHECK_ATTRIBUTE_TRANSPARENT_UNION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "may_alias", CHECK_ATTRIBUTE_MAY_ALIAS, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "noderef", CHECK_ATTRIBUTE_NODEREF, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
@@ -457,7 +467,7 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "overloadable", CHECK_ATTRIBUTE_OVERLOADABLE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "pass_object_size", CHECK_ATTRIBUTE_PASS_OBJECT_SIZE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
     { "pass_dynamic_object_size", CHECK_ATTRIBUTE_PASS_DYNAMIC_OBJECT_SIZE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
-    { "diagnose_if", CHECK_ATTRIBUTE_DIAGNOSE_IF, CHECK_ATTRIBUTE_CONDITION_STRINGS, 3, 3 },
+    { "diagnose_if", CHECK_ATTRIBUTE_DIAGNOSE_IF, CHECK_ATTRIBUTE_CONDITION_STRINGS, 3, 4 },
     { "enable_if", CHECK_ATTRIBUTE_ENABLE_IF, CHECK_ATTRIBUTE_CONDITION_STRINGS, 2, 2 },
     { "flatten", CHECK_ATTRIBUTE_FLATTEN, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "leaf", CHECK_ATTRIBUTE_LEAF, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
@@ -808,6 +818,24 @@ typedef enum CheckAttributeArgumentError
     // at its string.
     CHECK_ARGUMENT_BETWEEN,
     CHECK_ARGUMENT_PATCHABLE_SECTION,
+    // neon_vector_type's and neon_polyvector_type's vector of another width than 64 or 128 bits (#1447), at the attribute.
+    CHECK_ARGUMENT_NEON_SIZE,
+    // diagnose_as_builtin's (#1447, clang's handleDiagnoseAsBuiltinAttr): its first argument no builtin function's name (at
+    // it, its place in the number), its builtin's count of parameters (the number) not its count of indices, an index
+    // past the function's parameters (its count the number, the index and the function's name in the value), and a
+    // parameter's type not its builtin's (the builtin's parameter's place the number, the index and the function's name
+    // in the value, the parameter's type the report's).
+    CHECK_ARGUMENT_BUILTIN_FUNCTION,
+    CHECK_ARGUMENT_BUILTIN_COUNT,
+    CHECK_ARGUMENT_BUILTIN_BOUNDS,
+    CHECK_ARGUMENT_BUILTIN_TYPES,
+    // diagnose_if's and enable_if's (#1447, c_check_condition.c): a third argument other than "error" or "warning", "invalid
+    // diagnostic type for 'diagnose_if'; use \"error\" or \"warning\" instead", and a fourth that names no warning group,
+    // "unknown warning group 'G'", at the argument; a condition that is no constant without its parameters' values, "'X'
+    // attribute expression never produces a constant expression", at the attribute, its note at the subexpression.
+    CHECK_ARGUMENT_DIAGNOSTIC_TYPE,
+    CHECK_ARGUMENT_WARNING_GROUP,
+    CHECK_ARGUMENT_NEVER_CONSTANT,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -968,7 +996,9 @@ static bool check_input_attribute_constant_error(CheckInputReader* reader, Check
     }
     else if (kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE)
     {
-        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_EXT_VECTOR_INTEGER, 0);
+        // (A NEON vector's is verifyValidIntegerConstantExpr's, which names it: #1447.)
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first,
+                                             attribute->neon != 0 ? CHECK_ARGUMENT_AN_INTEGER_CONSTANT : CHECK_ARGUMENT_EXT_VECTOR_INTEGER, 0);
     }
     else if (kind == CHECK_ATTRIBUTE_ALLOC_ALIGN || kind == CHECK_ATTRIBUTE_FORMAT_ARG || kind == CHECK_ATTRIBUTE_NONNULL || kind == CHECK_ATTRIBUTE_SENTINEL ||
              kind == CHECK_ATTRIBUTE_ALLOC_SIZE || kind == CHECK_ATTRIBUTE_FORMAT || kind == CHECK_ATTRIBUTE_ASSUME_ALIGNED)
@@ -1559,7 +1589,8 @@ static bool check_input_attribute_value(CheckInputReader* reader, CheckInputAttr
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE)
         {
-            valid = value > 0 && (uint64_t)value <= BUSTER_TYPE_MAX_VECTOR_BITS;
+            // A NEON vector's count is checked with its element type (check_input_neon_vector, #1447).
+            valid = attribute->neon != 0 || (value > 0 && (uint64_t)value <= BUSTER_TYPE_MAX_VECTOR_BITS);
             error = CHECK_ATTRIBUTE_ERROR_VECTOR;
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE)
@@ -1790,10 +1821,33 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             const bool decoded = check_input_attribute_string(reader, string_first, string_end, attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL, &text);
             valid = decoded;
             error = CHECK_ATTRIBUTE_ERROR_STRING;
-            if (valid && attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF && argument == 2)
+            // diagnose_if's diagnostic type, and its warning group (#1447, clang's handleDiagnoseIfAttr): its error at the
+            // string. A group clang knows names the warning's option, which this checker's warnings don't take yet.
+            if (valid && attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF && argument == 2 &&
+                !check_input_attribute_equal(text, "warning") && !check_input_attribute_equal(text, "error"))
             {
-                valid = check_input_attribute_equal(text, "warning") || check_input_attribute_equal(text, "error");
-                error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+                check_input_attribute_argument_error(reader, attributes, attribute, string_first, CHECK_ARGUMENT_DIAGNOSTIC_TYPE, 0);
+                valid = false;
+            }
+            if (valid && attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF && argument == 3)
+            {
+                char group[128];
+                const bool fits = text.length != 0 && text.length < sizeof(group) && memchr(text.pointer, 0, text.length) == NULL;
+                if (fits)
+                {
+                    memcpy(group, text.pointer, text.length);
+                    group[text.length] = 0;
+                }
+                const bool known = fits && pp_warning_group_known(group);
+                if (!known)
+                {
+                    check_input_attribute_argument_error(reader, attributes, attribute, string_first, CHECK_ARGUMENT_WARNING_GROUP, 0);
+                }
+                else
+                {
+                    error = CHECK_ATTRIBUTE_ERROR_UNKNOWN;
+                }
+                valid = false;
             }
             if (valid && argument == 0)
             {
@@ -2899,6 +2953,28 @@ static uint32_t check_input_standard_place(const Parser* parser, uint32_t open)
            specifiers && open > 0 ? BUSTER_CHECK_PLACE_SPECIFIERS : BUSTER_CHECK_PLACE_DECLARATION;
 }
 
+// Whether the C23 lists from `open` (the first's outer `[`) of a tag's own list are a tag declaration's or definition's
+// (#1447): past them, its name if it has one, then `;` or its body's `{`; not a reference's.
+static bool check_input_attribute_tag_declares(const Parser* parser, uint32_t open)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t at = open;
+    while (at + 1 < count && parser->tokens.kinds[at] == PARSE_KIND_L_SQUARE && parser->tokens.kinds[at + 1] == PARSE_KIND_L_SQUARE)
+    {
+        uint32_t depth = 0;
+        bool scanning = true;
+        while (scanning && at < count)
+        {
+            const uint8_t kind = parser->tokens.kinds[at];
+            depth = kind == PARSE_KIND_L_SQUARE ? depth + 1 : kind == PARSE_KIND_R_SQUARE && depth != 0 ? depth - 1 : depth;
+            scanning = depth != 0;
+            at += 1;
+        }
+    }
+    at += at < count && parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER;
+    return at < count && (parser->tokens.kinds[at] == PARSE_KIND_SEMI || parser->tokens.kinds[at] == PARSE_KIND_L_BRACE);
+}
+
 // A warning event at `at` (an attribute's first token, a C23 one's scope's, or a token of it) naming it: as written, or a
 // C23 one's spelling normalized with its scope (check_warning_attribute_name), `token` its related token or none. It is
 // published there, or at a later related token (a warning at a declaration's name of an argument's, in its turn among the
@@ -3144,8 +3220,8 @@ static const CheckInputThreadRow* check_input_thread_row(String8 name)
 // counts and arguments' kinds (#147): btf_decl_tag (BPF's debug information), randomize_layout and no_randomize_layout (without
 // -frandomize-layout-seed), Objective-C's boxable and bridge_mutable, Fuchsia's handles (the analyzer's), suppress, Swift's
 // bridge, unsafe_buffer_usage and AMDGPU's max_num_work_groups (a kernel's alone); and clang's checks-only attributes
-// (#1447: enforce_tcb, enforce_tcb_leaf, callback, swift_async, ns_error_domain and modular_format), whose handlers check
-// what check_input_attribute_checks does and change nothing in C past TCB's warnings at calls.
+// (#1447: enforce_tcb, enforce_tcb_leaf, callback, swift_async, ns_error_domain, modular_format and diagnose_as_builtin),
+// whose handlers check what check_input_attribute_checks does and change nothing in C past TCB's warnings at calls.
 static bool check_input_attribute_generic(String8 name, const CheckInputFactRow* fact, bool subjectless)
 {
     static const char* const unchanged[] = {
@@ -3179,6 +3255,7 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         // clang's checks-only attributes (#1447), whose handlers' checks are check_input_attribute_checks', their
         // redeclarations' check_input_attribute_merge_checks' and TCB's calls check_input_tcb_calls'.
         "enforce_tcb", "enforce_tcb_leaf", "callback", "swift_async", "ns_error_domain", "modular_format", "availability", "external_source_symbol",
+        "diagnose_as_builtin",
         // Objective-C's pointer type attributes, which change no C type but objc_gc's qualifier (check_input_attribute_objc).
         "objc_gc", "objc_ownership",
     };
@@ -3545,15 +3622,37 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                                        (fact->flags & BUSTER_CHECK_FACT_TYPE) != 0;
         const bool effect = check_input_attribute_equal(name, "nonblocking") || check_input_attribute_equal(name, "nonallocating") ||
                             check_input_attribute_equal(name, "blocking") || check_input_attribute_equal(name, "allocating");
+        const bool neon_name = check_input_attribute_equal(name, "neon_vector_type") || check_input_attribute_equal(name, "neon_polyvector_type");
+        // A NEON vector's list before a declaration's specifiers: a parameter's too (#1447).
+        const bool neon_leading = leading || before_list == PARSE_KIND_L_PAREN || before_list == PARSE_KIND_COMMA;
+        uint32_t tag_bound = 0;
+        // A tag's own list, between its keyword and its name or body, of its declaration or definition (a reference's is
+        // the parser's error alone: check_input_tag_attributes).
+        const bool tag_keyword = declaration_place && reader->tag_attributes && (before_list == PARSE_KIND_STRUCT || before_list == PARSE_KIND_ENUM);
+        const bool tag_list = tag_keyword && check_input_attribute_tag_declares(parser, list_opener - 2);
         if (declaration_place && leading && effect)
         {
             check_input_attribute_argument_error(reader, attributes, &attribute, attribute.first, CHECK_ARGUMENT_INVALID_ON_DECLARATION, 0);
             valid = false;
         }
-        else if (declaration_place && clang_scope && check_input_attribute_equal(name, "btf_type_tag"))
+        else if (tag_list && (check_input_attribute_equal(name, "btf_type_tag") || neon_name) &&
+                 check_input_attribute_count_check(fact, check_input_attribute_count(parser, &attribute), &tag_bound) == BUSTER_CHECK_COUNT_NONE)
         {
+            // A tag's own list (`struct [[clang::btf_type_tag("x")]] S`) declares no declarator, which ProcessDeclAttribute
+            // refuses such a type attribute on (#1447), after its count's error.
+            check_input_attribute_argument_error(reader, attributes, &attribute, attribute.first, CHECK_ARGUMENT_INVALID_ON_DECLARATION, 0);
+            valid = false;
+        }
+        else if (declaration_place && clang_scope && !reader->statement_attributes && !tag_keyword &&
+                 (check_input_attribute_equal(name, "btf_type_tag") || (neon_name && neon_leading)))
+        {
+            // (A statement's is its error alone. The NEON vectors, #1447, slide to the specifiers' type too
+            // (slidesFromDeclToDeclSpecLegacyBehavior), GetDeclSpecTypeForDeclarator warning of those before the declaration
+            // before it applies them; of those after its name ProcessDeclAttribute warns once its type took them:
+            // CheckInputAttribute.neon_deprecated.)
             check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES, CHECK_WARNING_EVENT_TYPE_ON_DECLARATION);
         }
+        attribute.neon_deprecated = valid && declaration_place && clang_scope && !reader->statement_attributes && !tag_keyword && neon_name && !neon_leading;
         if (valid && chunk_gnu && typed)
         {
             // clang's declaration path warns of a calling convention it hasn't before this, on a function's chunk.
@@ -3606,11 +3705,19 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         {
             attribute.kind = rule->kind;
             attribute.schema = rule->schema;
+            attribute.neon = rule->kind != CHECK_ATTRIBUTE_EXT_VECTOR_TYPE ? 0u :
+                             check_input_attribute_equal(name, "neon_vector_type") ? BUSTER_TYPE_FLAG_NEON :
+                             check_input_attribute_equal(name, "neon_polyvector_type") ? BUSTER_TYPE_FLAG_NEON_POLY : 0u;
             reader->cleanup_attributes |= rule->kind == CHECK_ATTRIBUTE_CLEANUP;
             reader->weak_attributes |= rule->kind == CHECK_ATTRIBUTE_WEAK || rule->kind == CHECK_ATTRIBUTE_WEAKREF;
             const bool late_kind = check_input_attribute_late_kind(&attribute);
             reader->late_attributes |= late_kind;
             reader->deprecated_attributes |= rule->kind == CHECK_ATTRIBUTE_DEPRECATED || rule->kind == CHECK_ATTRIBUTE_UNAVAILABLE;
+            // diagnose_if's and enable_if's conditions are each function declaration's, which a lane can't publish to the
+            // declarations and calls after it (#1447, c_check_condition.c).
+            const bool conditional = rule->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF || rule->kind == CHECK_ATTRIBUTE_ENABLE_IF;
+            reader->condition_attributes |= conditional;
+            check_input_lane_refuse(reader, reader->lane && conditional, "a body declares a diagnose_if or enable_if attribute");
             // A lane cannot publish attribute state to later declarations; source-order replay handles this case.
             check_input_lane_refuse(reader, reader->lane && late_kind, "a body declares an attribute with linked state");
             // x86's interrupt and no_caller_saved_registers (#147): only a unit with either has its calls looked through
@@ -3650,7 +3757,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             // sentinel's, whose subject its handler checks after the count. Kept as clang's generated handler's (the
             // generic kind), its own handler's checks and effects aren't made.
             // (no_caller_saved_registers' count before its subject too: clang's type processing checks it first.)
-            const bool type_attribute = rule->kind == CHECK_ATTRIBUTE_NORETURN || rule->kind == CHECK_ATTRIBUTE_PACKED || rule->kind == CHECK_ATTRIBUTE_MAY_ALIAS ||
+            // (diagnose_if's and enable_if's too: their arguments name the function's parameters, which a generic handler's
+            // reading of them wouldn't find; clang's count is its error first, #1447.)
+            const bool type_attribute = conditional || rule->kind == CHECK_ATTRIBUTE_NORETURN || rule->kind == CHECK_ATTRIBUTE_PACKED || rule->kind == CHECK_ATTRIBUTE_MAY_ALIAS ||
                                         rule->kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION || rule->kind == CHECK_ATTRIBUTE_NULLABILITY ||
                                         rule->kind == CHECK_ATTRIBUTE_SENTINEL ||
                                         (rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_call(name) == CHECK_CALL_NO_CALLER_SAVED);
@@ -3766,6 +3875,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                 valid = false;
             }
             check_input_lane_refuse(reader, reader->lane && merged, "a body declares an attribute its entity's redeclarations merge");
+            // diagnose_as_builtin's builtin may be a library function the unit declares, whose declaration a body's lane
+            // can't read (check_input_checks_library, #1447).
+            check_input_lane_refuse(reader, reader->lane && check_input_attribute_equal(name, "diagnose_as_builtin"),
+                                    "a body declares diagnose_as_builtin, whose builtin the unit's declarations decide");
             attribute.argument_count = count;
             attribute.count_check = check_input_attribute_count_check(generic_fact, count, &attribute.count_bound);
             // Without parentheses, availability's handler's checkExactlyNumArgs(1) and external_source_symbol's
@@ -4192,6 +4305,52 @@ static bool check_input_vector_size(CheckInputReader* reader, CheckInputAttribut
     return valid;
 }
 
+// neon_vector_type's and neon_polyvector_type's checks of its element type `element` and its count (#1447), as clang's
+// HandleNeonVectorTypeAttr makes them on x86-64, after its count's and its argument's (check_input_attribute_value): an
+// element of none of isPermittedNeonBaseType's builtin types (signed char, short, int, long, long long, each unsigned
+// too, __fp16, __bf16, float and double; a polynomial vector's signed char, short and long long alone, AArch32's), then a
+// vector of another width than 64 or 128 bits, the count truncated to 32 bits and the width computed in 32 bits as
+// clang computes them. Each is clang's error at the attribute, false. The count it keeps is the truncated one.
+static bool check_input_neon_vector(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, TypeId element)
+{
+    const TypeTable* types = reader->types;
+    const TypeId bare = type_unqualified(type_strip_aligned(types, element));
+    const uint32_t code = type_is_valid(types, bare) && type_index(bare) < BUSTER_TYPE_BUILTIN_COUNT ? type_index(bare) : BUSTER_TYPE_CODE_NONE;
+    const uint64_t plain = (1ull << BUSTER_TYPE_CODE_SCHAR) | (1ull << BUSTER_TYPE_CODE_UCHAR) | (1ull << BUSTER_TYPE_CODE_SHORT) | (1ull << BUSTER_TYPE_CODE_USHORT) |
+                           (1ull << BUSTER_TYPE_CODE_INT) | (1ull << BUSTER_TYPE_CODE_UINT) | (1ull << BUSTER_TYPE_CODE_LONG) | (1ull << BUSTER_TYPE_CODE_ULONG) |
+                           (1ull << BUSTER_TYPE_CODE_LLONG) | (1ull << BUSTER_TYPE_CODE_ULLONG) | (1ull << BUSTER_TYPE_CODE_HALF) | (1ull << BUSTER_TYPE_CODE_BF16) |
+                           (1ull << BUSTER_TYPE_CODE_FLOAT) | (1ull << BUSTER_TYPE_CODE_DOUBLE);
+    const uint64_t poly = (1ull << BUSTER_TYPE_CODE_SCHAR) | (1ull << BUSTER_TYPE_CODE_SHORT) | (1ull << BUSTER_TYPE_CODE_LLONG);
+    const bool permitted = code != BUSTER_TYPE_CODE_NONE && (((attribute->neon == BUSTER_TYPE_FLAG_NEON_POLY ? poly : plain) >> code) & 1) != 0;
+    const uint32_t count = (uint32_t)(uint64_t)attribute->value;
+    const uint32_t width = permitted ? (uint32_t)type_size(types, bare) * 8u * count : 0;
+    const bool valid = permitted && (width == 64 || width == 128);
+    if (!permitted && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_report_argument(reader, attribute->first, CHECK_INPUT_VECTOR_ELEMENT, 0);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].type = element;
+            reader->output->reports[before].type_spelling = check_input_typedef_spelling(reader->output, reader->parser, attribute->first);
+        }
+        attributes->error = CHECK_ATTRIBUTE_ERROR_VECTOR;
+        attributes->error_first = attribute->first;
+        attributes->error_end = attribute->end;
+    }
+    else if (!valid)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_NEON_SIZE, 0);
+    }
+    else if (attribute->neon_deprecated)
+    {
+        check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES, CHECK_WARNING_EVENT_TYPE_ON_DECLARATION);
+        attribute->neon_deprecated = false;
+    }
+    attribute->value = count;
+    return valid;
+}
+
 // Mode/vector attributes change the scalar element, while a typedef's alignment wraps the resulting complete type.
 // An object's/member's alignment is declaration metadata: applying ALIGNED to its type would incorrectly alter
 // pointer/array compatibility. The caller feeds the alignment to the layout/storage consumer instead. Of `deduced`
@@ -4229,12 +4388,18 @@ static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAtt
         {
             valid = false;
         }
+        else if (attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE && attribute->neon != 0 && attribute->resolved &&
+                 !check_input_neon_vector(reader, attributes, attribute, result))
+        {
+            valid = false;
+        }
         else if (attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE || attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE)
         {
             valid = attribute->resolved;
             if (valid)
             {
                 result = attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE ? type_vector_size(reader->types, result, (uint64_t)attribute->value) :
+                         attribute->neon != 0 ? type_vector_kind(reader->types, result, (uint32_t)attribute->value, attribute->neon) :
                          type_vector(reader->types, result, (uint32_t)attribute->value, true);
                 result = check_input_type_result(reader, result);
                 valid = result != 0;
@@ -6229,9 +6394,13 @@ static bool check_input_modular_same(CheckInputReader* reader, const CheckInputA
     return same;
 }
 
+static bool check_input_attribute_diagnose_builtin(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, TypeId function,
+                                                   uint32_t name);
+
 // clang's checks-only attributes' handlers (#1447), past their subjects and counts: enforce_tcb's and enforce_tcb_leaf's
 // TCB, which no earlier attribute of the declaration has of the other kind (err_tcb_conflicting_attributes, at the later);
-// callback's (check_input_attribute_callback) and swift_async's (check_input_attribute_swift_async); ns_error_domain's
+// callback's (check_input_attribute_callback), swift_async's (check_input_attribute_swift_async) and diagnose_as_builtin's
+// (check_input_attribute_diagnose_builtin, c_check_attribute_checks_input.c); ns_error_domain's
 // argument, a variable's name where the attribute is (SemaObjC's handleNSErrorDomain: an ordinary lookup, which a
 // function, a typedef or an enumerator fails, at the name, as any other argument does at it); modular_format's
 // implementation's name, its aspects (no two the same, at the second), and its arguments, those of an earlier one of
@@ -6290,6 +6459,10 @@ static bool check_input_attribute_checks(CheckInputReader* reader, CheckInputAtt
     else if (check_input_attribute_equal(spelled, "swift_async") && function)
     {
         valid = check_input_attribute_swift_async(reader, attributes, attribute, bare, name);
+    }
+    else if (check_input_attribute_equal(spelled, "diagnose_as_builtin") && function)
+    {
+        valid = check_input_attribute_diagnose_builtin(reader, attributes, attribute, bare, name);
     }
     else if (check_input_attribute_equal(spelled, "ns_error_domain") && attribute->argument_count == 1)
     {
@@ -7560,14 +7733,6 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
         if (attribute->kind == CHECK_ATTRIBUTE_ALIGNAS)
         {
             check_input_alignas_error(reader, attributes, NULL, BUSTER_CHECK_NONE, 0, 0);
-            valid = false;
-        }
-        if (!attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF || attribute->kind == CHECK_ATTRIBUTE_ENABLE_IF) &&
-            attributes->object_sizes == NULL && !check_graph_system_token(&reader->output->graph, attribute->first))
-        {
-            // #1361's unchecked wrappers include system-header functions without size annotations (glibc 2.44's
-            // openat2). General user diagnostics/filtering remain unsupported outside this compatibility path.
-            check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
             valid = false;
         }
         const bool allocation = attribute->kind == CHECK_ATTRIBUTE_ALLOC_SIZE || attribute->kind == CHECK_ATTRIBUTE_ALLOC_ALIGN;

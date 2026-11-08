@@ -234,9 +234,17 @@ static TypeId check_vector_common(const TypeTable* table, const CheckValue* left
     if (lv && rv && check_vector_bits(table, left->type) == check_vector_bits(table, right->type))
     {
         common = left->type;
+        // clang's CheckVectorOperands takes compatible vectors' (areCompatibleVectorTypes) left type where it is an
+        // extended vector's and its right type otherwise: an extended vector's, and a NEON vector's against a GNU one's
+        // or the other way (#1447).
+        const TypeId left_vector = type_strip_aligned(table, left->type);
+        const TypeId right_vector = type_strip_aligned(table, right->type);
+        const uint8_t neon = BUSTER_TYPE_FLAG_NEON | BUSTER_TYPE_FLAG_NEON_POLY;
+        const bool kinds = check_action_kind(table, left->type) != BUSTER_TYPE_KIND_EXT_VECTOR &&
+                           ((table->types.flags[type_index(left_vector)] | table->types.flags[type_index(right_vector)]) & neon) != 0;
         if (check_vector_element(table, left->type) == check_vector_element(table, right->type) &&
             check_vector_count(table, left->type) == check_vector_count(table, right->type) &&
-            check_action_kind(table, right->type) == BUSTER_TYPE_KIND_EXT_VECTOR)
+            (check_action_kind(table, right->type) == BUSTER_TYPE_KIND_EXT_VECTOR || kinds))
         {
             common = right->type;
         }

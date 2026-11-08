@@ -203,6 +203,9 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_MS_STRUCT_ALIGNMENT: result = "ms_struct bit-field storage with non-power-of-two size is not supported"; break;
         case CHECK_INPUT_INTERRUPT_HANDLER: result = "x86-64 'interrupt' attribute only applies to functions that have a 'void' return type"; break;
         case CHECK_INPUT_INTERRUPT_CALLED: result = "interrupt service routine cannot be called directly"; break;
+        case CHECK_INPUT_DIAGNOSE_IF_ERROR: result = "diagnose_if attribute error"; break;
+        case CHECK_INPUT_ENABLE_IF_CALL: result = "no matching function for call"; break;
+        case CHECK_INPUT_ENABLE_IF_ADDRESS: result = "cannot take address of function because it has one or more non-tautological enable_if conditions"; break;
     }
     return result;
 }
@@ -469,6 +472,54 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_PATCHABLE_SECTION:
             snprintf(text, capacity, "section argument to 'patchable_function_entry' attribute is not valid for this target: section must not be empty");
             break;
+        case CHECK_ARGUMENT_NEON_SIZE: snprintf(text, capacity, "Neon vector size must be 64 or 128 bits"); break;
+        case CHECK_ARGUMENT_BUILTIN_FUNCTION: snprintf(text, capacity, "'%s' attribute requires parameter %u to be a builtin function", parsed, number); break;
+        case CHECK_ARGUMENT_BUILTIN_COUNT:
+        case CHECK_ARGUMENT_BUILTIN_BOUNDS:
+        case CHECK_ARGUMENT_BUILTIN_TYPES:
+        {
+            // diagnose_as_builtin's (#1447): its builtin by its first argument's name, the function by its name's token in
+            // the value's high half, the index in its low half; and a mismatched builtin parameter's type as clang spells
+            // the builtin's declaration's (cbuiltin_library_spell_parameter), with its aka where it has __size_t.
+            const String8 builtin = at + 2 < count ? check_driver_attribute_spelling(parser, pp, at + 2, false) : (String8){ "", 0 };
+            const uint32_t function = (uint32_t)(value >> 32);
+            const String8 named = function < count ? check_driver_attribute_spelling(parser, pp, function, false) : (String8){ "", 0 };
+            const uint32_t index = (uint32_t)value;
+            const uint32_t error = detail & 0xffu;
+            if (error == CHECK_ARGUMENT_BUILTIN_COUNT)
+            {
+                char takes[48];
+                snprintf(takes, sizeof(takes), number == 0 ? "takes no arguments" : number == 1 ? "takes one argument" : "takes exactly %u arguments", number);
+                snprintf(text, capacity, "'%s' attribute references function '%.*s', which %s", parsed, (int)builtin.length, builtin.pointer, takes);
+            }
+            else if (error == CHECK_ARGUMENT_BUILTIN_BOUNDS)
+            {
+                snprintf(text, capacity, "'%s' attribute references parameter %u, but the function '%.*s' has only %u parameters", parsed, index, (int)named.length,
+                         named.pointer, number);
+            }
+            else
+            {
+                const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup(builtin.pointer, (uint32_t)builtin.length);
+                const bool c99 = parser->language.standard >= 1999;
+                char sugared[256];
+                char plain[256];
+                bool sized = false;
+                bool unsugared = false;
+                const bool spelled = info != NULL &&
+                                     cbuiltin_library_spell_parameter(info->encoding, info->encoding_length, info->attributes, info->attributes_length, number - 1, true, c99,
+                                                                      sugared, sizeof(sugared), &sized) &&
+                                     cbuiltin_library_spell_parameter(info->encoding, info->encoding_length, info->attributes, info->attributes_length, number - 1, false, c99,
+                                                                      plain, sizeof(plain), &unsugared);
+                char builtin_type[560];
+                snprintf(builtin_type, sizeof(builtin_type), sized ? "'%s' (aka '%s')" : "'%s'", spelled ? sugared : "", plain);
+                snprintf(text, capacity, "'%s' attribute parameter types do not match: parameter %u of function '%.*s' has type %.*s, but parameter %u of function '%.*s' has type %s",
+                         parsed, index, (int)named.length, named.pointer, (int)literal.length, literal.pointer, number, (int)builtin.length, builtin.pointer, builtin_type);
+            }
+            break;
+        }
+        case CHECK_ARGUMENT_DIAGNOSTIC_TYPE: snprintf(text, capacity, "invalid diagnostic type for '%s'; use \"error\" or \"warning\" instead", parsed); break;
+        case CHECK_ARGUMENT_WARNING_GROUP: snprintf(text, capacity, "unknown warning group '%.*s'", (int)literal.length, literal.pointer); break;
+        case CHECK_ARGUMENT_NEVER_CONSTANT: snprintf(text, capacity, "'%s' attribute expression never produces a constant expression", parsed); break;
         case CHECK_ARGUMENT_SOURCE_STRING:
             snprintf(text, capacity, "expected string literal for %s in 'external_source_symbol' attribute",
                      number == 0 ? "language name" : number == 1 ? "source container name" : "USR");
@@ -2263,6 +2314,47 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                   "cannot use type '%.*s' within '#pragma clang fp eval_method'; type is set according to the default eval method for the translation unit",
                                                   (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
+                        else if (phase == 0 && (kind == CHECK_INPUT_DIAGNOSE_IF_ERROR || kind == CHECK_INPUT_ENABLE_IF_CALL || kind == CHECK_INPUT_ENABLE_IF_ADDRESS) &&
+                                 token < count)
+                        {
+                            // diagnose_if's and enable_if's errors (#1447, c_check_condition.c): the message, decoded and
+                            // joined, with its note at the attribute ("from 'diagnose_if' attribute on 'f':") or at the
+                            // function's declaration ("candidate disabled: M"); the function named by its declaration's name.
+                            const CheckInputReport* report = input->reports + index;
+                            const String8 message = report->detail != 0 ? check_warning_strings_value(parser, pp, report->detail - 1, scratch) : (String8){ 0 };
+                            const uint32_t named = kind != CHECK_INPUT_ENABLE_IF_CALL && report->value < count ? (uint32_t)report->value : token;
+                            const uint32_t function = parser->tokens.names[named];
+                            const String8 function_name = { .pointer = (char*)intern_bytes(pp->table, function), .length = intern_length(pp->table, function) };
+                            char noted[512];
+                            if (kind == CHECK_INPUT_DIAGNOSE_IF_ERROR)
+                            {
+                                snprintf(noted, sizeof(noted), "from 'diagnose_if' attribute on '%.*s':", (int)function_name.length, function_name.pointer);
+                            }
+                            else
+                            {
+                                snprintf(noted, sizeof(noted), "candidate disabled: %.*s", (int)message.length, message.pointer);
+                            }
+                            const PPOutputDiagnosticNote note = {
+                                .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
+                                .message = noted,
+                            };
+                            const uint32_t notes = report->note_token < count && kind != CHECK_INPUT_ENABLE_IF_ADDRESS ? 1u : 0u;
+                            if (kind == CHECK_INPUT_DIAGNOSE_IF_ERROR)
+                            {
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, notes, "%.*s", (int)message.length, message.pointer);
+                            }
+                            else if (kind == CHECK_INPUT_ENABLE_IF_CALL)
+                            {
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, notes, "no matching function for call to '%.*s'",
+                                                            (int)function_name.length, function_name.pointer);
+                            }
+                            else
+                            {
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 0,
+                                                            "cannot take address of function '%.*s' because it has one or more non-tautological enable_if conditions",
+                                                            (int)function_name.length, function_name.pointer);
+                            }
+                        }
                         else if (phase == 0 && kind == CHECK_INPUT_UNAVAILABLE_USE && token < count)
                         {
                             // A use of what an unavailable attribute marks (#147, check_input_deprecated_uses): its name, the
@@ -2683,7 +2775,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         {
                             // An attribute argument's error (#147) as clang's handler words it; a parser's "expected ')'" with
                             // its note at the arguments' `(`.
-                            char text[320];
+                            char text[768];
                             const CheckInputReport* report = input->reports + index;
                             const uint64_t type_mark = scratch->length;
                             // (The type an underaligned _Alignas names, as clang prints it: check_driver_warning_type.)
@@ -2694,7 +2786,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_SIZEOF ||
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_BINARY ||
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_CALLBACK_COUNT ||
-                                                (report->detail & 0xffu) == CHECK_ARGUMENT_SWIFT_ASYNC_BLOCK) &&
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_SWIFT_ASYNC_BLOCK ||
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_BUILTIN_TYPES) &&
                                                report->type != 0;
                             CheckWarningSpelling spell = { .count = pp->table->count };
                             spell.bytes = typed ? BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count) : NULL;
@@ -2723,7 +2816,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             const uint8_t* spelling_bytes = NULL;
                             const uint32_t spelling_length = spelling_buffer != NULL ? pp_spelling(pp, pp->output.kinds[at], pp->output.values[at], pp->output.locations[at],
                                                                                                    spelling_buffer, &spelling_bytes) : 0;
-                            String8 literal = (report->detail & 0xffu) == CHECK_ARGUMENT_CODE_MODEL && token < count ? check_warning_string_text(parser, pp, token, scratch) :
+                            String8 literal = ((report->detail & 0xffu) == CHECK_ARGUMENT_CODE_MODEL || (report->detail & 0xffu) == CHECK_ARGUMENT_WARNING_GROUP) && token < count ?
+                                                    check_warning_string_text(parser, pp, token, scratch) :
                                                     string_token < count ? check_warning_strings_value(parser, pp, string_token, scratch) :
                                                     spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling) :
                                                     captured && parser->tokens.names[report->value] != 0 ? check_driver_attribute_spelling(parser, pp, report->value, false) :
