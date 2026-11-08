@@ -446,6 +446,12 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .c23 = true,
     },
     {
+        .name = "brace parts of a constant shift warn of its changed value, and into _Bool of its truth",
+        .source = "struct S{short s;char c;};short a[1]={1<<20};int c[1]={3LL<<40};short d={1<<20};struct S e={1<<18,2<<8};"
+                  "void f(void){short x[1]={4<<18};struct S y={0,1<<9};_Bool b[1]={1<<3};short z[1]={1<<3};(void)x;(void)y;(void)b;(void)z;}\n",
+        .warnings = 8,
+    },
+    {
         .name = "_Atomic brace elements and members take no constant conversion",
         .source = "_Atomic short a0[2]={32768,1};struct{_Atomic char c;int i;}s={300,1};void f(void){_Atomic short a3[2]={32768,70000};(void)a3;}\n",
     },

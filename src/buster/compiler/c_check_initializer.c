@@ -486,7 +486,10 @@ static bool check_init_changed_integer(const CheckInitWalker* walker, const Chec
     const CheckStream* stream = walker->stream;
     const bool value = part->kind == CHECK_INIT_VALUE && stream != NULL && part->node < stream->count;
     const CheckOp op = value && walker->graph != NULL && part->node < walker->graph->count ? walker->graph->ops[part->node] : CHECK_OP_COUNT;
-    const bool branching = op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA || op == CHECK_OP_SHIFT_LEFT;
+    // A conditional's or a comma's arms carry the conversion; a `<<` converted to _Bool is DiagnoseIntInBoolContext's (#1447),
+    // and to another integer its constant value's, as any constant's.
+    const bool branching = op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA;
+    const bool shift = op == CHECK_OP_SHIFT_LEFT;
     // Most parts are no integer constant, or one below 128, which every integer target but a narrower _BitInt holds: their
     // tests come first, so that only the rest read the target's type.
     const bool constant = value && !branching && check_stream_constant_kind(stream, part->node) == CHECK_CONSTANT_INTEGER;
@@ -514,16 +517,15 @@ static bool check_init_changed_integer(const CheckInitWalker* walker, const Chec
         const bool outside = negative ? magnitude > half : magnitude > check_action_mask(part->bit_width);
         bit_field = outside || (check_action_integer_type(walker->types, part->conversion.type, &field_width, &field_signed) && field_signed != negative);
     }
-    if ((branching || (constant && source.integer > 127)) &&
+    if ((branching || shift || (constant && source.integer > 127)) &&
         check_action_integer_type(walker->types, part->conversion.type, &target_width, &target_signed))
     {
         const bool boolean = type_unqualified(type_strip_aligned(walker->types, part->conversion.type)) == BUSTER_TYPE_BOOL;
-        if (branching)
+        if (branching || boolean)
         {
-            // Arms carry the conversion; a `<<` converted to _Bool is DiagnoseIntInBoolContext's (#1447).
-            result = op != CHECK_OP_SHIFT_LEFT || boolean;
+            result = branching || shift;
         }
-        else if (!boolean && check_action_integer_type(walker->types, check_stream_type(stream, part->node), &source_width, &source_signed) &&
+        else if (constant && check_action_integer_type(walker->types, check_stream_type(stream, part->node), &source_width, &source_signed) &&
                  target_width < source_width && target_width < 128)
         {
             const unsigned __int128 mask = check_action_mask(source_width);
