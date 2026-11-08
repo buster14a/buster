@@ -255,6 +255,19 @@ unused-warning fixtures also check exact scope-completion tokens.
   displaced condition's first. Its last value, its statement's and the statement expression's, is scanned once. Still
   different: a short-circuited or unreachable statement expression's statements warn, and a comparison as its last
   value warns as a comparison where clang says "expression result unused".
+  A folded shift's warnings take clang's words (#1447, `check_driver_shift_message`): "shifting a negative signed
+  value is undefined", and "signed shift result (0x…) requires N bits to represent, but 'T' only has W bits", the
+  result's hexadecimal and its significant bits. Its `-Wshift-negative-value` is a runtime one like its counts: the
+  driver stashes both (`CheckCommonShiftWarnings`) rather than reporting them, the common walk reports each at its
+  shift and drops one it proves unevaluated (after a return, a `goto` or an endless loop, in a constant condition's
+  other branch), so that a dropped `-Werror` one neither counts nor rejects the unit, and whatever no walk reached is
+  reported at the end (a unit with errors runs none). `-Wshift-overflow` is no runtime warning, and stays. Two
+  unevaluated places still warn, as clang's do: an unselected `_Generic` or `__builtin_choose_expr` arm, which has no CFG
+  block, whose warnings keep the selection's order, and a reachable statement's condition that folds to a constant,
+  whose range the program drops. That statement is reached by its keyword and by the first kept root of its executed arm
+  (never a static selection's unselected one) in the evaluation with no range dropped; with an arm of no expression, by
+  its place in its function's control program (after its block's last entry before it, by a fall-through or a jump from
+  a label before it). Its warnings are reported where its root stands in the roots' order.
   `c_check_int_in_bool_driver_test.c` (#1447) compares clang's `-Wint-in-bool-context` and the
   `-Wtautological-constant-compare` forms of a `<<` or a conditional converted to `_Bool` (`docs/c-checker.md`)
   with complete pinned-Clang output at each policy, both paths and with `-c`.
