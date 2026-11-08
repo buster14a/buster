@@ -35,7 +35,11 @@ first walk original parents, accumulating their work; once that reaches the
 unit's token count, subsequent queries use a copy. Cheap queries pay no copy or
 extra allocation, and total uncached work is at most twice the token count.
 The scope predicate retains the
-nearest block/body/compound closing brace and leaves record braces out. Neither
+nearest block/body/compound closing brace or for-header closing parenthesis and
+leaves record braces out. A for initializer completes at the whole statement's
+subtree end; its retained header anchor bounds error suppression. A private
+suffix of unused warnings is stably ordered by scope anchor when a for
+initializer can share a completion with an inner scope (#1784). Neither
 copy changes the parser or outlives its phase; each predicate has its own copy.
 When activated, parent-copy initialization touches four bytes per token. The warning phase also
 reserves that amount of temporary scratch; program planning reuses existing

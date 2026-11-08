@@ -404,7 +404,9 @@ struct CheckWarningPayload
     TypeId second_type;
     // An IdentId in source consumers; standalone graph clients need not include the interner.
     uint32_t name;
-    // Related TU parser token when the kind uses one, or NO_SOURCE. Kinds without a related location ignore it;
+    // Related TU parser token when the kind uses one, or NO_SOURCE. UNUSED_VARIABLE retains a for-header's closing
+    // parenthesis here, separate from completion at the body's end, so rejected-unit filtering finds the scope's start.
+    // Other UNUSED_VARIABLE scopes have NO_SOURCE. Kinds without a related location ignore it;
     // their zero-initialized field is also a valid token whenever a primary can be published.
     uint32_t token;
     uint32_t data;

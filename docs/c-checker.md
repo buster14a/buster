@@ -3903,14 +3903,44 @@ definition is here", where the error used to read "conflicting declaration":
 - `CHECK_REDECLARATION_KIND`: "redefinition of 'X' as different kind of
   symbol".
 
+Thread-local redeclarations use the same type and linkage precedence (#1784):
+an incompatible object type is reported even when thread-local storage also
+differs, followed by static/non-static linkage conflicts and duplicate local
+declarations. Otherwise a storage mismatch says "thread-local declaration of
+'X' follows non-thread-local declaration", or its reverse. That diagnostic
+notes the visible prior declaration, with its declaration/definition note;
+object type conflicts still note the latest prior declaration of the entity,
+including one from another block. The checks that reject and recover the
+declaration are unchanged. The semantic-recovery fixtures cover both storage
+directions, extern and static combinations, and subsequent declarations and
+uses under the same Clang comparison matrix.
+The distinct recovery behavior of a TLS-only mismatch is tracked in
+[#1786](https://github.com/buster14a/buster/issues/1786): Clang keeps that
+declaration in its chain, while the reader currently drops it. This diagnostic
+fix does not claim parity for subsequent conflicts of that same entity or a
+second initializer diagnostic on an already-defined object.
+
 `check_driver_rejected_warnings` follows clang's `ActOnPopScope`: a scope in
 which an error occurred gives no unused-variable warning, nested scopes'
-errors included. Its extent runs from the scope's `{` to its `}`, or, for a
-function body, from the definition's start, since clang's
+errors included. Its extent runs from the scope's `{` to its `}`, from a
+for initializer's opening parenthesis through the whole loop statement, or,
+for a function body, from the definition's start, since clang's
 `ActOnStartOfFunctionDef` handles the definition's declarator inside the
 body's scope. Unused parameters are still warned. A per-token prefix count of
 the unit's error reports answers each scope's question in constant time, and
 only a unit with errors builds it.
+
+For-initializer warnings retain the header's closing parenthesis as a scope
+anchor and the parser subtree's final token as their completion (#1784).
+An error after the loop therefore cannot suppress its warning; an error inside
+the loop can. Nested loops and a loop's braced body can finish at the same
+token, so from the first unused for initializer the reader stages its remaining
+unused warnings privately and stably orders their scope anchors from inner to
+outer with the existing binding radix sort. Declaration order within a scope
+and preprocessing lookahead order remain intact. Units without an unused for
+initializer allocate no staging buffer. Reader and Clang differential fixtures
+cover braced/unbraced bodies, nested loops, if/else and do/while tails, statement
+expressions, shared completion tokens and errors before, inside and after a loop.
 
 The later phases are left:
 
