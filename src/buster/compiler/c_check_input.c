@@ -8549,6 +8549,12 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     }
                     check_sparse_set(reader->output->sparse_pool, reader->output->initializer_begins, name, i + 1);
                     check_sparse_set(reader->output->sparse_pool, reader->output->initializer_ends, name, end);
+                    if (valid && constexpr_decl && file)
+                    {
+                        // Clang declines runtime diagnostics for a file-scope constexpr initializer, including
+                        // detached selection arms. Local constexpr initializers keep their runtime diagnostics.
+                        check_input_warning_suppress(reader, i + 1, end, CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW);
+                    }
                     i = valid ? direct_initializer ? direct_close + 1 : end : i;
                 }
                 // A declarator that ends before the first setting or section attribute is no section event (a section
@@ -11552,6 +11558,9 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
         {
             const uint32_t separator = check_constant_punctuation(parser, token + 2, close, PARSE_KIND_COMMA);
             memset(reader->constant_contexts + token + 2, 1, separator - token - 2);
+            // Clang parses this whole condition as constant-evaluated, including static-selection arms that the
+            // evaluated graph does not retain as operands. Their runtime shift-count diagnostics are not queued.
+            check_input_warning_suppress(reader, token + 2, separator, CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW);
             if (separator < close)
             {
                 // A message contributes no expression value. Mark its span once instead of walking the parser
@@ -11574,6 +11583,7 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
         if (close > token && close < count)
         {
             memset(reader->constant_contexts + token + 1, 1, close - token - 1);
+            check_input_warning_suppress(reader, token + 1, close, CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW);
         }
     }
 }

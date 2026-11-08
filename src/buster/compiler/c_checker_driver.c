@@ -1806,7 +1806,8 @@ static CheckWarningSeverity check_driver_legacy_severity(Preprocessor* pp, const
 static bool check_driver_reports(const Parser* parser, const Parser* original, Preprocessor* pp, uint32_t publication_end,
                                   const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                   const CheckRepair* repair, const CheckInput* original_pragmas, const CheckDriverDiagnostic* extra, uint32_t extra_count,
-                                  const uint32_t* excess_tokens, uint32_t excess_count, bool quiet, Arena* scratch)
+                                  const uint32_t* excess_tokens, uint32_t excess_count, bool quiet,
+                                  CheckCommonShiftWarnings* shifts, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     const bool scalar = parser->options.scalar;
@@ -1837,6 +1838,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
     uint64_t* completion_sorting = completion_keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, completion_count) : NULL;
     const bool ready = fits && (!reports || report_sorting != NULL) && (!show_warnings || warning_sorting != NULL) &&
                        (completion_count == 0 || (completion_sorting != NULL && input->warning_events.events != NULL));
+    bool shifts_ready = true;
     if (ready)
     {
         for (uint32_t i = 0; i < completion_count; i += 1)
@@ -1998,6 +2000,22 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
         {
             warnings[warning_count] = UINT64_MAX;
         }
+        // Runtime constant-count groups will join the common arithmetic walk's new count diagnostics (#1394).
+        // Keep their original records queued until that walk is ready, so a failed program retains every group.
+        // Only units with count warnings allocate this sparse handoff, with room for both bits at each token.
+        if (shifts != NULL && pp->options.collect_diagnostics)
+        {
+            uint64_t capacity = 0;
+            for (uint32_t i = 0; i < warning_count; i += 1)
+            {
+                const uint32_t flags = (uint32_t)(warnings[i] >> 16) & (CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW);
+                capacity += (uint32_t)__builtin_popcount(flags);
+            }
+            shifts->records = capacity != 0 && capacity <= UINT32_MAX ? arena_push_array(&pp->arena, capacity, sizeof(CheckCommonShiftWarning),
+                                                                                         _Alignof(CheckCommonShiftWarning)) : NULL;
+            shifts->capacity = shifts->records != NULL ? (uint32_t)capacity : 0;
+            shifts_ready = capacity == 0 || shifts->records != NULL;
+        }
         const CheckInput* pragma_input = original_pragmas != NULL ? original_pragmas : input;
         const CheckInputVisibilityPragmas* visibility_history = pragma_input->visibility_pragmas;
         uint32_t visibility = 0;
@@ -2006,7 +2024,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
         uint32_t warning = 0;
         uint32_t report = 0;
         uint64_t position = 0;
-        bool walking = true;
+        bool walking = shifts_ready;
         while (walking && !pp->fatal)
         {
             uint64_t next = show_warnings ? warnings[warning] >> 32 : UINT64_MAX;
@@ -2077,7 +2095,23 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         const char* message = warning_flag == CHECK_WARNING_POINTER_SIGN ?
                                               check_driver_pointer_sign_message(parser, pp, input, stream, types, &spell, token, scratch) :
                                               check_diagnostic_message(warning_flag);
+                        PPDiagnosticRecord* previous = pp->diagnostic_last;
                         pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, phase, "%s%s", message, suffix);
+                        const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+                        if (shifts != NULL && shifts->records != NULL && phase == PP_DIAGNOSTIC_DEFERRED &&
+                            (warning_flag & (CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW)) != 0 &&
+                            node < input->graph.count && check_common_shift_op(input->graph.ops[node]) &&
+                            pp->diagnostic_last != previous)
+                        {
+                            if (shifts->count < shifts->capacity)
+                            {
+                                shifts->records[shifts->count++] = (CheckCommonShiftWarning){ token, pp->diagnostic_last };
+                            }
+                            else
+                            {
+                                shifts_ready = false;
+                            }
+                        }
                     }
                 }
                 flags &= flags - 1;
@@ -3021,7 +3055,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
     const bool pragma_ready = ready && check_driver_warning_events_at(original_pragmas != NULL ? original : parser, pp, directives, NULL,
         &directives->pragma_warnings, NULL, publication_end, scratch);
     arena_pop_to(scratch, mark);
-    return pragma_ready;
+    return pragma_ready && shifts_ready;
 }
 
 static void check_driver_dump(const CheckGraph* graph, const CheckStream* stream, TypeTable* types, Arena* scratch)
@@ -5105,10 +5139,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 control.position < tokens ? control.position + 1u : tokens };
                         }
                     }
+                    CheckCommonShiftWarnings shift_warnings = { 0 };
                     if (!check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, quiet, scratch) ||
                         !check_driver_reports(checking, recovered, pp, publication_end, &input, &stream, &types, repairing ? &repair : NULL,
                                               original_pragmas_ready ? &original_pragmas : NULL, additional, additional_count,
-                                              NULL, 0, quiet, scratch) ||
+                                              NULL, 0, quiet, &shift_warnings, scratch) ||
                         !check_driver_warning_events_at(checking, pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, publication_end, scratch) ||
                         !check_driver_warning_events_at(checking, pp, &input, &types, &stream.warning_events, repairing ? &repair : NULL, publication_end, scratch))
                     {
@@ -5194,7 +5229,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         check_driver_return_reports(checking, recovered, pp, &program, baseline, quiet);
                         if (!quiet)
                         {
-                            check_driver_common_warnings(checking, pp, &input, &stream, &types, &program, scratch);
+                            check_driver_common_warnings(checking, pp, &input, &stream, &types, &program, &shift_warnings, scratch);
                         }
                     }
                     result = pp->errors != 0 ? 1 : result;
@@ -5271,7 +5306,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             else
             {
                 if (!check_driver_reports(checking, recovered, pp, publication_end, &input, NULL, &types, repairing ? &repair : NULL,
-                                          original_pragmas_ready ? &original_pragmas : NULL, NULL, 0, NULL, 0, quiet, scratch) ||
+                                          original_pragmas_ready ? &original_pragmas : NULL, NULL, 0, NULL, 0, quiet, NULL, scratch) ||
                     !check_driver_warning_events_at(checking, pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, publication_end, scratch))
                 {
                     fprintf(errors, "fatal error: checker diagnostic capacity exhausted\n");
