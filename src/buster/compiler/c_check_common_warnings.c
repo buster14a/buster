@@ -3160,15 +3160,18 @@ static bool check_common_shift_extras(const Parser* parser, const CheckInput* in
 }
 
 // A root the reader adds after other roots its operand precedes: a statement's condition (CHECK_OP_CONDITION, a switch's
-// CHECK_OP_POSITIVE), which its keyword's closing parenthesis wraps after the body, and a for clause's or a declarator's
-// discard (CHECK_OP_CAST), which the `)` or the `;` adds after the body or the later declarators. Clang analyzes each
-// full expression as it is built, before what follows, so the walks take such a root where its operand stands.
-static bool check_common_displaced_root(const CheckGraph* graph, const uint32_t* parents, uint32_t node)
+// CHECK_OP_POSITIVE), which its keyword's closing parenthesis wraps after the body, and a for increment's discard
+// (CHECK_OP_CAST at the `)`), which the `)` adds after the body. Clang analyzes each full expression as it is built, before
+// what follows, so the walks take such a root where its operand stands. A declarator's discard at its declaration's `;`
+// follows the later declarators' values, but no root between: it keeps its place, as it costs a sort to move.
+static bool check_common_displaced_root(const Parser* parser, const CheckGraph* graph, const uint32_t* parents, uint32_t node)
 {
     const CheckOp op = graph->ops[node];
     const uint32_t operand = graph->operand0[node];
+    const uint32_t token = graph->tokens[node];
     const bool result = (op == CHECK_OP_CONDITION || op == CHECK_OP_POSITIVE || op == CHECK_OP_CAST) && parents[node] == BUSTER_CHECK_NONE &&
-                        operand < graph->count && operand + 1 < node;
+                        operand < graph->count && operand + 1 < node &&
+                        (op != CHECK_OP_CAST || (token < parser->tokens.count && parser->tree.roles[token] == PARSE_ROLE_CLOSE_FOR));
     return result;
 }
 
@@ -3178,8 +3181,8 @@ static bool check_common_displaced_root(const CheckGraph* graph, const uint32_t*
 // are displaced: each has an operand and a node between them. The vector path tests 16 nodes at a time: the wrapper
 // operators (a lane permute of the set's words), no parent, and an operand before the node's predecessor; the scalar
 // path, its twin, tests each node.
-static uint32_t check_common_displaced_roots(const CheckGraph* graph, const uint32_t* parents, uint64_t* items, uint64_t* temporary, uint32_t* nodes,
-                                             const uint64_t** sorted, bool vector)
+static uint32_t check_common_displaced_roots(const Parser* parser, const CheckGraph* graph, const uint32_t* parents, uint64_t* items, uint64_t* temporary,
+                                             uint32_t* nodes, const uint64_t** sorted, bool vector)
 {
     static const CheckOp wrappers[] = { CHECK_OP_CONDITION, CHECK_OP_POSITIVE, CHECK_OP_CAST };
     const CheckCommonOps set = check_common_ops(wrappers, BUSTER_ARRAY_LENGTH(wrappers));
@@ -3198,14 +3201,19 @@ static uint32_t check_common_displaced_roots(const CheckGraph* graph, const uint
                             _mm512_mask_cmpneq_epi32_mask(root, next, _mm512_setzero_si512());
         for (; selected != 0; selected &= selected - 1)
         {
+            // (A cast's `for` role is the one test left to the lanes found.)
             const uint32_t displaced = node + (uint32_t)__builtin_ctz(selected);
-            nodes[count] = displaced;
-            items[count++] = ((uint64_t)graph->operand0[displaced] << 32) | displaced;
+            const uint32_t token = graph->tokens[displaced];
+            if (graph->ops[displaced] != CHECK_OP_CAST || (token < parser->tokens.count && parser->tree.roles[token] == PARSE_ROLE_CLOSE_FOR))
+            {
+                nodes[count] = displaced;
+                items[count++] = ((uint64_t)graph->operand0[displaced] << 32) | displaced;
+            }
         }
     }
     for (; node < graph->count; node += 1)
     {
-        if (check_common_displaced_root(graph, parents, node))
+        if (check_common_displaced_root(parser, graph, parents, node))
         {
             nodes[count] = node;
             items[count++] = ((uint64_t)graph->operand0[node] << 32) | node;
@@ -3334,7 +3342,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         }
         const uint64_t* displaced_sorted = displaced;
         const uint32_t displaced_count = displaced_nodes != NULL ?
-                                         check_common_displaced_roots(graph, facts->parents, displaced, displaced_temporary, displaced_nodes, &displaced_sorted,
+                                         check_common_displaced_roots(parser, graph, facts->parents, displaced, displaced_temporary, displaced_nodes, &displaced_sorted,
                                                                       vector) : 0;
         CheckCommonRootOrder order = { .displaced = displaced_sorted, .displaced_count = displaced_count, .skipped = displaced_nodes };
         order.natural = check_common_next_root(facts->parents, graph->count, &order.roots, vector);

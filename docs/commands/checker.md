@@ -235,7 +235,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   A source comma's "left operand of comma operator has no effect" is queued where clang's `CheckCommaOperands` builds
   it (#1447): the arithmetic scan's post-order visit runs its marker among the divisions and shift counts, ahead of the
   full expression's conversions, and the tree walk skips it. Roots the reader adds after what follows their operand (a
-  statement's condition, a switch's, a `for` increment's or an earlier declarator's discard) are taken where their
+  statement's condition, a switch's, or a `for` increment's discard) are taken where their
   operand stands (`check_common_displaced_roots`), so a condition's warnings precede its body's, as clang analyzes it.
   A statement expression's inner statements still warn before the enclosing root's own divisions and counts.
   `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both
