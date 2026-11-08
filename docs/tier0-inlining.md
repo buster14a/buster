@@ -265,11 +265,12 @@ covers the callee's entries.
 The other columns:
 
 - **Indirect control flow.** The caller may have labels and jump tables even
-  though a copied callee may not. Rebase every `label_entries` and
-  `table_jumps` entry through `start`, including an end-of-function label;
-  retain `label_tables`, whose values are table identities rather than entry
-  indices. A valid stale index can silently change the destination, so
-  validation alone cannot establish this mapping is correct.
+  though a copied callee may not. Rebase every `label_entries`, `table_jumps`
+  and optional `table_addresses` entry through `start`, including an
+  end-of-function label; preserve a null `table_addresses` column. Retain
+  `label_tables`, whose values are table identities rather than entry indices.
+  A valid stale index can silently select the wrong entry, so validation alone
+  cannot establish this mapping is correct.
 - **Lifetimes** (`lifetime_entries`, read only by `ir_lower`) are the caller's
   own, rebased by `start`. `G` reaches only Tier 0, which ignores them, but they
   keep `G` a valid stream.
@@ -485,11 +486,12 @@ this one's, and needs its own issue.
     depths, cold and warm caches, the depth bound, a
     callee of every refused kind (each keeping its calls), compatible and
     refused call-signature shapes including promoted arguments and aggregate
-    results, a target the caller lacks, and a callee shared by sites inside a loop and inside another site's
-    arguments;
+    results, a target the caller lacks, and a callee shared by sites inside a
+    loop and inside another site's arguments;
   - callers with a splice before a computed-goto label and a jump-table
-    dispatch, including an end label; verify mapped metadata and native results
-    against the original stream, including stale indices that would validate;
+    dispatch, including an end label and a non-null `table_addresses` column;
+    verify all mapped metadata and native results against the original stream,
+    including stale indices that would validate, and preserve a null column;
   - every column's end at a `PROT_NONE` page, and a lane short of scratch: each
     failure must keep the caller's `F` and count its kept calls.
 - **`test-checker-driver`:** #1282's inlining fixture (intrinsics, a struct
