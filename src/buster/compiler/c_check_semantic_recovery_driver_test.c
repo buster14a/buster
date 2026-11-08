@@ -157,6 +157,22 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void f(int p)\n{\n    int x;\n    float x;\n    int y = 1;\n    long y = 2;\n    (void)y;\n    if (y = 2) {}\n}\n"
         "void g(void) { int x; int x; }\nvoid h(void) { extern int e; extern float e; }\nvoid i(void) { int unused; }\n",
         "__attribute__((nonnull(5))) void f(int *p) { int u; }\nvoid g(void) { int v; { int w; } }\n",
+        // A for initializer's scope ends with the whole loop, so a later error cannot suppress its unused warning.
+        "void unbraced(void) { for (int j; ; ) break; int x; float x; }\n"
+        "void braced(void) { for (int j; ; ) { break; } int x; float x; }\n",
+        // An earlier error lies outside the new for scope, while an error in its body suppresses its warning.
+        "void before(void) { int x; float x; for (int j; ; ) break; }\n"
+        "void inside(void) { for (int j; ; ) { int x; float x; break; } }\n",
+        // Nested controls and do/while bodies finish at their whole statement's end, not the header or first brace.
+        "void nested(int n) { for (int i; ; ) for (int j; ; ) if (n) break; else break; int x; float x; }\n"
+        "void trailing(void) { for (int j; ; ) do { break; } while (0); int x; float x; }\n",
+        // The body's scope pops before the for initializer's at their shared completion. Preprocessing lookahead keeps
+        // its earlier position at that boundary, and multiple declarations in one scope retain declaration order.
+        "void body(void) { for (int j, m; ; ) { int k, n; break; } int x; float x; }\n"
+        "void lookahead(void) {\nfor (int j; ; ) { int k; break; }\n#warning after-loop\nint x; float x;\n}\n",
+        // A statement expression has its own inner scope; its error is also within the enclosing for scope.
+        "void compound(void) { for (int j = ({ int k; 0; }); ; ) break; int x; float x; }\n"
+        "void compound_error(void) { for (int j = ({ int k; int x; float x; 0; }); ; ) break; }\n",
         // A repeated enumerator, dropped: the next one's implicit value restarts at 0 (of int, or of a fixed type), and
         // an enum left with none is unsigned int's.
         "enum A { X = 5 };\nenum B { Y = 3, X, Z };\n_Static_assert(Z == 0, \"z\");\n"
@@ -174,22 +190,6 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "struct S;\nstruct S { int a; };\nstruct S { int b; };\nstruct S { int c; };\nstruct T x;\nstruct T { int a; };\n"
         "struct T { int b; };\nenum E *pe;\nenum E { A };\nenum E { B };\n"
         "void f(void) { struct L *p; struct L { int a; }; struct L { int b; }; (void)p; }\n",
-        // A for initializer's scope ends with the whole loop, so a later error cannot suppress its unused warning.
-        "void unbraced(void) { for (int j; ; ) break; int x; float x; }\n"
-        "void braced(void) { for (int j; ; ) { break; } int x; float x; }\n",
-        // An earlier error lies outside the new for scope, while an error in its body suppresses its warning.
-        "void before(void) { int x; float x; for (int j; ; ) break; }\n"
-        "void inside(void) { for (int j; ; ) { int x; float x; break; } }\n",
-        // Nested controls and do/while bodies finish at their whole statement's end, not the header or first brace.
-        "void nested(int n) { for (int i; ; ) for (int j; ; ) if (n) break; else break; int x; float x; }\n"
-        "void trailing(void) { for (int j; ; ) do { break; } while (0); int x; float x; }\n",
-        // The body's scope pops before the for initializer's at their shared completion. Preprocessing lookahead keeps
-        // its earlier position at that boundary, and multiple declarations in one scope retain declaration order.
-        "void body(void) { for (int j, m; ; ) { int k, n; break; } int x; float x; }\n"
-        "void lookahead(void) {\nfor (int j; ; ) { int k; break; }\n#warning after-loop\nint x; float x;\n}\n",
-        // A statement expression has its own inner scope; its error is also within the enclosing for scope.
-        "void compound(void) { for (int j = ({ int k; 0; }); ; ) break; int x; float x; }\n"
-        "void compound_error(void) { for (int j = ({ int k; int x; float x; 0; }); ; ) break; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     // The tag redefinitions, the last three fixtures, are gnu17's alone: C23 allows a compatible one and words an
