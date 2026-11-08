@@ -771,6 +771,9 @@ struct CheckInput
     // keeps each pointer complemented, so that a null pointer is its NONE (check_input_attributes_at,
     // check_input_set_attributes_at).
     CheckSparseWide attributes;
+    // A kept warn_unused_result typedef can remain in a function's returned type through typeof or compatible
+    // redeclarations, but canonical TypeIds lose that provenance. Keep logical-call discard warnings in such a unit.
+    bool typedef_result_contracts;
     // Ignored asm labels are the only attribute warnings; their writer publishes this upper bound for report collection.
     uint32_t ignored_asm_count;
     bool asm_warnings_prepared;
@@ -8711,7 +8714,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             if (kind == C_BINDING_FUNCTION)
             {
                 check_input_noderef_redeclaration(reader, token, previous);
-                check_input_format_inherit(reader, token, previous);
+                check_input_contract_inherit(reader, token, previous);
             }
             // A typedef's redeclaration merges its attributes too (#1447); a declaration with linkage's are merged below.
             if (kind == C_BINDING_TYPEDEF && reader->merged_attributes)
@@ -8800,10 +8803,10 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                     const uint32_t first = reader->objects[previous];
                     const bool first_valid = first != 0 && first <= reader->parser->tokens.count &&
                                              reader->declaration_kinds[first - 1] == C_BINDING_FUNCTION && reader->objects[first - 1] == first;
-                    const uint32_t format_previous = linked_visible ? previous : first_valid ? first - 1 : BUSTER_CHECK_NONE;
-                    if (format_previous < reader->parser->tokens.count && check_input_declaration_visible(reader, format_previous, point))
+                    const uint32_t contract_previous = linked_visible ? previous : first_valid ? first - 1 : BUSTER_CHECK_NONE;
+                    if (contract_previous < reader->parser->tokens.count && check_input_declaration_visible(reader, contract_previous, point))
                     {
-                        check_input_format_inherit(reader, token, format_previous);
+                        check_input_contract_inherit(reader, token, contract_previous);
                     }
                 }
                 check_input_naked_inherit(reader, token, previous);

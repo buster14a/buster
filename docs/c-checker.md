@@ -4139,6 +4139,31 @@ expression, parenthesized or not; a comma operand with a call, assignment or
 increment has an effect and does not get the left-operand warning. Its reports
 complete with the function's closing brace, as Clang's do, after the body's
 own warnings and before an unused declaration's.
+Discarded scalar `&&` and `||` expressions also stay quiet when either
+operand's result path accepts discard (#1390): an ordinary direct call,
+assignment, increment, volatile read, or a nested logical expression with
+one of those operands. Commas follow their right operand (including the
+literal-zero sequencing idiom), ordinary conditionals follow their value
+arms, omitted-middle conditionals follow only their false arm, and statement
+expressions follow their final result. A call beneath arithmetic, a comparison,
+an explicit nonvoid cast, or a conditional's condition does not silence the
+unused logical result. The rule is syntactic even for a short-circuited operand.
+Accepted `pure`, `const`, and `warn_unused_result` function contracts retain
+the logical warning and inherit per kind through compatible source-visible
+redeclarations, without changing earlier uses or leaking block declarations.
+Plain library calls without discard contracts follow ordinary calls; implicit
+const/pure contracts such as `abs` and `isalpha` retain warnings. Disabling a
+builtin removes only its implicit contract, while explicit source contracts
+still apply. Internal-linkage library spellings remain ordinary functions.
+Indirect calls, calls resolved through overload tables, option-sensitive
+floating builtin contracts and tagged return contracts remain outside this
+logical-warning slice. A unit containing
+an accepted `warn_unused_result` typedef conservatively keeps the existing
+logical-call warnings: canonical result types do not retain the typedef and
+`typeof` provenance needed to rule out such contracts safely.
+The original fixtures in `c_check_logical_unused_driver_test.c` compare the
+complete Clang output, warning policy, scalar/vector paths and requested lanes
+in syntax-only and object modes.
 `-Warray-bounds` reports a direct array object, including a nested subscript
 such as `b[1][5]` at `b`, treats a zero extent as unknown, and leaves
 struct-member arrays to a full bounds analysis. `-Wunused-function` reports a
@@ -4180,7 +4205,8 @@ and each callee name's answer from clang's builtin table is looked up once.
 
 The graph's passes share their facts, `check_common_facts`, which give each
 node its parent, whether another node uses its value, whether it is evaluated,
-a conditional's or comma's arm effect, and its reach: a bit each for whether
+a conditional's or comma's arm effect, a separate logical-discard fact in the
+same byte, and its reach: a bit each for whether
 its subtree holds a node whose own warning may fire, a division by a constant
 zero, or a comparison (#1340). A node's own bit counts only where its tests can
 warn (`check_common_own_candidate`): a constant whose value an initialization's,
