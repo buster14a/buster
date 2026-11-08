@@ -4074,7 +4074,10 @@ object's), else an expression statement in a body, which `{` `}` replace
 warnings before and after the error given, flushed (no analysis warnings).
 Other errors leave out their bodies, by `check_input_selected` as
 `-flazy-system-headers`' bodies are, as does every error where the view
-doesn't parse. The second reading's unused variables in a scope with an error
+doesn't parse or its reading isn't valid (a statement expression's last
+statement left out makes its value `void`; `check_driver_rejected_read`
+publishes nothing of an invalid reading, which is then read again with the
+bodies left out). The second reading's unused variables in a scope with an error
 are left out (its own error counts, the dropped part's at the token after
 it), and its unused parameters in a function with one. Where that reading is valid, its program
 gives the other bodies' `-Wreturn-type` and common warnings, the bodies after

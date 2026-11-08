@@ -174,6 +174,11 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "int expr(void) { return ({ int t = s.b; t; }); }\n"
         "int konst(void) { const int c = s.b; return c; }\n"
         "int other(int x) { if (x = 1) return printf(\"%d\\n\", 1.5); return x << 40; }\n",
+        // A statement expression's last statement left out makes its value void, which the function's return can't take:
+        // the view's reading isn't valid, so the error's body is left out instead, and the next body's warnings given.
+        "struct S { int a; } s;\n"
+        "int f(int x) { return ({ x = 1; x = s.b; }); }\n"
+        "int ok(int y) { if (y = 5) return 1; return y << 40; }\n",
         // A block declaration's initializer left out, the variable kept.
         "struct S { int a; } s;\n"
         "int f(int x)\n"
