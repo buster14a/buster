@@ -3002,14 +3002,10 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         uint32_t visibility = 0;
         uint32_t pragma = 0;
         uint32_t packed = 0;
-        while (from != 0 && visibility_history != NULL && visibility < visibility_history->count && visibility_history->records[visibility].token < from)
-        {
-            visibility += 1;
-        }
-        while (from != 0 && pragma < pragma_input->fp_pragma_count && pragma_input->fp_pragmas[pragma].token < from)
-        {
-            pragma += 1;
-        }
+        // From `from` on (a rejected unit's second reading, check_driver_rejected_common), the pragmas' records are the
+        // unit's, which the first reading published whole, wherever its walk ended: none of them again.
+        visibility = from != 0 && visibility_history != NULL ? visibility_history->count : 0;
+        pragma = from != 0 ? pragma_input->fp_pragma_count : 0;
         while (from != 0 && packed < input->packed_member_count && input->packed_members[packed].address < from)
         {
             packed += 1;
@@ -4206,8 +4202,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         }
     }
     const CheckInput* directives = original_pragmas != NULL ? original_pragmas : input;
-    const bool pragma_ready = ready && check_driver_warning_events_at(original_pragmas != NULL ? original : parser, pp, directives, NULL,
-        &directives->pragma_warnings, NULL, publication_end, scratch);
+    // (As the pragmas' records, their warnings are the first reading's alone.)
+    const bool pragma_ready = ready && (from != 0 || check_driver_warning_events_at(original_pragmas != NULL ? original : parser, pp, directives, NULL,
+        &directives->pragma_warnings, NULL, publication_end, scratch));
     arena_pop_to(scratch, mark);
     return pragma_ready && shifts_ready;
 }
