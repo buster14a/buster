@@ -3944,6 +3944,73 @@ Such an object carries the executable's binding decisions: direct calls into
 the program, GOT calls into libc, local-exec TLS. So, like a `-fPIE` object,
 it links into executables and not into shared libraries.
 
+#### Patchable function entries
+
+GCC's and clang's `patchable_function_entry(N, M, "section")` attribute and
+`-fpatchable-function-entry=N,M,section` (#1447: the checker's side is
+[the checker guide](c-checker.md)'s) give a function N bytes of NOPs that a
+tracer or a live patcher rewrites at run time, M of them before its symbol,
+and an entry that points to them. The emission makes them as clang's x86-64
+code has them, whichever tier compiled the function
+(`check_program_emit_patchable`, on the function's lane, after its code is
+encoded and its tables are resolved):
+
+- **The sled.** The code moves past N bytes: the first M are one-byte NOPs
+  (`0x90`, LLVM's `emitNops`), and the other N − M, at the entry before the
+  prologue, the longest NOPs LLVM's `emitX86Nops` writes for a CPU whose
+  NOPs decode fast to 15 bytes (every x86-64 tuning but a few Atoms'):
+  `nopl`/`nopw` of rax with LLVM's displacements, past 9 bytes a `cs`
+  override and up to five `66` prefixes, 2 bytes `xchg ax, ax`
+  (`check_program_emit_nops`). The function's atom holds the whole sled,
+  so its alignment comes before the M NOPs, and its symbol is M bytes into
+  it, its size the rest. Its fixups, labels and templates' labels move by N
+  in the atom; its source rows and value spans (from the symbol) by N − M,
+  the declaration's row at 0 staying there over the NOPs (a body without a
+  prologue gets it back, so that its body starts after them, as clang's
+  line table has it); and its unwind descriptor's transitions and size by
+  N − M, a row program's rows at 0 (the entry's rules) staying too: the FDE
+  starts at the symbol, as clang's, the NOPs at the entry under the CIE's
+  rules, and the M before it in no FDE.
+- **The entry.** An 8-byte atom of writable data (`BUSTER_LINK_CLASS_DATA`),
+  zero, whose `ABS64` fixup points to a local label at the function's atom's
+  start, `.Lbuster_patchable_N` (`check_program_emit_patchable_entry`), which
+  `-c`'s object leaves out as a temporary, its relocation through `.text`'s
+  section symbol, as clang's `.Ltmp` label's. `check_program_sections` puts
+  each entry in its section (`__patchable_function_entries`, or the one the
+  attribute or the option names): in `-c`'s object a section per function,
+  as clang's, `SHF_ALLOC | SHF_WRITE | SHF_LINK_ORDER`, 8-byte aligned,
+  whose `sh_link` is its function's section (`ObjectAtomSection.link`, an
+  atom of the unit and of an earlier class, which the object writer checks:
+  its descriptors of other links are other sections), so that GNU ld and lld
+  keep or drop it with its function and order it by it; in an executable,
+  the atom's input section's name, so that `__start_` and `__stop_` of it
+  bound the entries, in `.data` (a PIE's pointer a relative relocation).
+- **Not yet:** a naked function whose assembly takes directives (an
+  assembled unit, `check_program_emit_asm_unit`) with a sled is refused by
+  name; and the NOPs are the 15-byte tuning's whatever `-march`'s tuning is
+  (clang's `-march=atom` writes ones of 10 bytes at most).
+
+The linker takes another compiler's `SHF_LINK_ORDER` sections as it takes any
+other allocated section of an unknown name: clang's objects' patchable
+entries link and run, and `__start_`/`__stop_` bound them. Its garbage
+collection (`link-foreign --gc-sections`) doesn't yet make such a section
+depend on its `sh_link` section, as lld does: GNU ld's result where
+`__start_` or `__stop_` refers to them (their references keep their
+functions), none of them where nothing does.
+
+`test-checker-driver`'s `check_test_driver_patchable`
+(`c_check_patchable_driver_test.c`) compares `-c`'s objects (vector, scalar
+and `--tier1`) with clang's: each entry's section, flags, alignment, link
+and relocation, and the bytes before each symbol; and links them, and the
+direct path's executables, to run a program that prints each sled's bytes,
+the entries `__start_`/`__stop_` find for it and two backtraces' depths
+through patched functions, as clang's does, with the attribute and with the
+option's default (`-fpatchable-function-entry=2,1,flagged_entries`, `=17`),
+and the option's errors against clang's driver. `test-checker`'s
+`patchable-function-entry` program hashes the sleds through the functions'
+addresses against clang's build, and `test-object-writer` checks linked
+descriptors' headers and refuses malformed ones.
+
 ### Linking other compilers' objects
 
 Foreign inputs are ELF relocatable objects, archives (with their symbol index,

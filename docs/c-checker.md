@@ -4209,8 +4209,11 @@ controlling expression, and an assignment target are not reads, while an
 initializer's value, a compound assignment and an increment are, with the write
 ordered after the read. A brace initializer writes its object even without an
 expression node, and a variable read in its own initializer (braced or not) gets
-Clang's "within its own initialization" message. The brace initializer's read is
-found by a scan of its tokens (#1349). An AVX-512 pass, with its scalar twin
+Clang's "within its own initialization" message. A compound literal's unnamed
+object is no variable and never warns, as Clang's analysis follows variables
+alone: its own value, at its closing `}`, is not a read in its initializer,
+while the variables that initializer reads still warn. The brace initializer's
+read is found by a scan of its tokens (#1349). An AVX-512 pass, with its scalar twin
 under `--scalar`, keeps only identifiers spelled as the object's name that don't
 follow `.` or `->`, 64 tokens a block. Only those climb the parse tree for an
 enclosing `sizeof`, and the climbs are memoized per unit, so a table of N
@@ -7088,6 +7091,39 @@ arguments against the function. The checker now gives these as clang does.
   A variadic routine, which clang compiles, is refused by name ("unsupported:
   variadic interrupt service routines"), as are `__builtin_eh_return`,
   `__builtin_setjmp` and musttail calls in one, as in any preserving frame.
+
+  GCC's and clang's `patchable_function_entry(N[, M[, "section"]])`
+  (`CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY`, #1447) is clang's
+  `handlePatchableFunctionEntryAttr`'s: a function's ("only applies to
+  functions and Objective-C methods" elsewhere, the generated row's
+  warning, before anything else), of one to three arguments (the generic
+  count errors), its third a string literal (the parser's "expected string
+  literal as argument of 'X' attribute"). Its count and offset are read
+  where its attributes are, each in 32 bits as `checkUInt32Argument` reads
+  them (`check_input_constant_u32`: `CheckInputAttribute.constants`, `wide`
+  and `argument_values`), and its section's string (`text`); its handler's
+  errors come once its subject takes it (`check_input_patchable_entry`), in
+  clang's order, each dropping the declaration: no integer constant, "'X'
+  attribute requires parameter N to be an integer constant" (N from 0, as
+  clang numbers them here); more than 32 bits, "integer constant expression
+  evaluates to value V that cannot be represented in a 32-bit unsigned
+  integer type" at the argument; negative, "'X' attribute requires a
+  non-negative integral compile time constant expression"; an offset past
+  the count, "'X' attribute requires integer constant between 0 and N
+  inclusive" (`CHECK_ARGUMENT_BETWEEN`); and an empty section, "section
+  argument to 'patchable_function_entry' attribute is not valid for this
+  target: section must not be empty" at the string. A redeclaration without
+  one inherits its last declaration's, and one after the definition is
+  dropped with "attribute declaration must precede definition".
+  `CheckProgram.patchable_keys` holds the function declarations with it,
+  sorted by object, and `check_program_patchable(program, b)` gives body
+  `b`'s NOPs as clang's code generation takes them: the first attribute of
+  its function's last declaration with one up to its definition (a count of
+  0 makes none), or `-fpatchable-function-entry=N[,M[,SECTION]]`'s
+  (`predefines_patchable`, `CheckProgramOptions.patchable_count`), and its
+  entry's section, the attribute's or else the option's. The emission's
+  (`check_program_emit_patchable`, both tiers' code) is the [object writer
+  guide](object-writer-and-linker.md)'s "Patchable function entries".
 
   The rest stay refused by name: the attributes whose handlers clang has its
   own (`pass_object_size` and others). Recognizing their names does not

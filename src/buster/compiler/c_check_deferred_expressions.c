@@ -276,8 +276,8 @@ static bool check_deferred_binding_answers(CheckDeferred* deferred, CheckInputRe
     return used;
 }
 
-// A context writes only its initializer/case/assertion's span, wholly inside the same body's token interval. The
-// top-level gaps run after the round; the shared warning index is invalidated once, after every context is written.
+// A context writes only its initializer/case/assertion's span, wholly inside the same body's token interval. Worker
+// warning suppressions touch only those token bytes; the shared count and interval index are restored after the join.
 static void check_deferred_context_lane(void* argument)
 {
     CheckDeferredExpressions* run = argument;
@@ -301,9 +301,20 @@ static bool check_deferred_constant_contexts(CheckDeferred* deferred, CheckInput
         const uint32_t group_size = check_deferred_post_group(deferred->body_count, lanes);
         const uint32_t groups = (deferred->body_count + group_size - 1) / group_size;
         CheckDeferredExpressions run = { .deferred = deferred, .reader = reader, .group_size = group_size, .count = groups };
+        reader->parallel_warning_ranges = true;
         used = check_deferred_lanes_run(deferred, BUSTER_CHECK_DEFERRED_ROUND_CONTEXTS, lanes, check_deferred_context_lane, &run);
+        reader->parallel_warning_ranges = false;
         if (used)
         {
+            // No per-token worker writes were counted, and the index may summarize the pre-round warning bits.
+            // Rebuild once with the existing SIMD/scalar byte counter, before the ordered top-level gaps run.
+            reader->output->constant_warning_count = reader->output->constant_warnings != NULL ?
+                check_deferred_count_bytes(reader->output->constant_warnings, 0, reader->parser->tokens.count,
+                                           !BUSTER_SCALAR_PATH(reader->parser->options.scalar)) : 0;
+            if (reader->warning_index_ready)
+            {
+                memset(reader->warning_index, 0xff, (uint64_t)reader->warning_index_base * 2 * sizeof(uint16_t));
+            }
             uint32_t begin = 0;
             const uint32_t bodies = deferred->body_count;
             for (uint32_t b = 0; b < bodies; b += group_size)

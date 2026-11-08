@@ -166,6 +166,13 @@ struct CheckProgramOptions
     // Whether the code probes the stack as it grows it (#177, -fstack-clash-protection, predefines_stack_clash): every
     // function's (Tier0Function.probe_stack).
     bool probe_stack;
+    // -fpatchable-function-entry=N[,M[,SECTION]] (#1447, predefines_patchable): the NOPs every function without a
+    // patchable_function_entry attribute gets, `patchable_count` of them, `patchable_offset` before its symbol (none for a
+    // count of 0), and the section of their entries for every function whose attribute names none (empty for
+    // __patchable_function_entries). The emission reads them through check_program_patchable.
+    uint32_t patchable_count;
+    uint32_t patchable_offset;
+    String8 patchable_section;
     // Every asm statement with instructions keeps its helper, none placed in its caller (#1059, check_asm_row): for a
     // lowering Tier 1's IR takes (the C driver's --tier1, the IR's source tools), which has no operation for a placed
     // statement's row and calls its helper as any function's.
@@ -337,6 +344,16 @@ struct CheckProgram
     // BUSTER_CHECK_NONE for the others; null in a unit without one, the usual one. A function's body realigns the stack
     // in its prologue when that declaration is at or before its definition (check_program_realign), as object_interrupt's.
     uint32_t* object_realign;
+    // The function declarations with a patchable_function_entry attribute (#1447, not ignored), as keys of their object in
+    // the high half and their token in the low, sorted (check_program_patchable_keys); null in a unit without one, the
+    // usual one. A body takes the first attribute of its function's last such declaration up to its definition
+    // (check_program_patchable), as clang's redeclarations inherit it where they have none of their own.
+    uint64_t* patchable_keys;
+    uint32_t patchable_key_count;
+    // CheckProgramOptions.patchable_count, patchable_offset and patchable_section: -fpatchable-function-entry's.
+    uint32_t patchable_count;
+    uint32_t patchable_offset;
+    String8 patchable_section;
     // Per object, whether a declaration of the function has GNU's always_inline attribute (BUSTER_CHECK_PROGRAM_INLINE_ALWAYS)
     // or noinline (BUSTER_CHECK_PROGRAM_INLINE_NEVER), not ignored; null in a unit without either. --tier1's inliner
     // (#1282, c_check_tier1_inline.c) expands the calls of a defined function of internal linkage with the first and not
@@ -578,6 +595,7 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_INTERRUPT 64u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_REALIGN 128u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE 256u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_PATCHABLE 512u
 // CheckProgram.object_inline's bits.
 #define BUSTER_CHECK_PROGRAM_INLINE_ALWAYS 1u
 #define BUSTER_CHECK_PROGRAM_INLINE_NEVER 2u
@@ -586,8 +604,8 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 // attribute (CheckProgram.object_naked), a target or target_clones attribute (CheckProgramTargetEvents), one of a
 // callee's that code generation's check of target features reads, always_inline, flatten or noreturn (#775,
 // CheckProgram.attribute_keys), an alias, ifunc or weakref attribute (#147, CheckProgram.aliases), and x86's interrupt
-// (#147, CheckProgram.object_interrupt), force_align_arg_pointer (#1447, CheckProgram.object_realign), and
-// returns_twice (#1549, CheckProgram.object_returns_twice).
+// (#147, CheckProgram.object_interrupt), force_align_arg_pointer (#1447, CheckProgram.object_realign), returns_twice
+// (#1549, CheckProgram.object_returns_twice) and patchable_function_entry (#1447, CheckProgram.patchable_keys).
 static uint32_t check_program_attribute_bits(const CheckInputAttributes* attributes)
 {
     uint32_t bits = 0;
@@ -606,7 +624,8 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
         const uint32_t interrupt = kind == CHECK_ATTRIBUTE_INTERRUPT && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_INTERRUPT : 0;
         const uint32_t realign = kind == CHECK_ATTRIBUTE_FORCE_ALIGN_ARG_POINTER ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_REALIGN : 0;
         const uint32_t twice = kind == CHECK_ATTRIBUTE_RETURNS_TWICE && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE : 0;
-        bits |= attribute->ignored ? 0 : bit | inlining | interrupt | realign | twice;
+        const uint32_t patchable = kind == CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_PATCHABLE : 0;
+        bits |= attribute->ignored ? 0 : bit | inlining | interrupt | realign | twice | patchable;
     }
     return bits;
 }
@@ -616,8 +635,9 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
 // object's declarations' order, in `scratch`, which grows them by doubling. A unit without one, the usual one, has none.
 // Beside them, the declarations with an always_inline, flatten or noreturn attribute, as keys of the same form, which
 // code generation's check of target features or a late symbol rename's emission walk reads (#775,
-// CheckProgram.attribute_keys); and the file-scope declarations with an alias, ifunc or weakref attribute, which
-// check_program_aliases makes the unit's entries of (#147, CheckProgram.aliases).
+// CheckProgram.attribute_keys); the file-scope declarations with an alias, ifunc or weakref attribute, which
+// check_program_aliases makes the unit's entries of (#147, CheckProgram.aliases); and the function declarations with a
+// patchable_function_entry attribute (#1447, CheckProgram.patchable_keys).
 typedef struct CheckProgramTargetEvents CheckProgramTargetEvents;
 struct CheckProgramTargetEvents
 {
@@ -631,6 +651,9 @@ struct CheckProgramTargetEvents
     uint64_t* alias_keys;
     uint32_t alias_count;
     uint32_t alias_capacity;
+    uint64_t* patchable_keys;
+    uint32_t patchable_count;
+    uint32_t patchable_capacity;
     bool room;
 };
 
@@ -3288,6 +3311,10 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
         {
             check_program_event_push(events, &events->callee_keys, &events->callee_count, &events->callee_capacity, object, token);
         }
+        if ((function_attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_PATCHABLE) != 0)
+        {
+            check_program_event_push(events, &events->patchable_keys, &events->patchable_count, &events->patchable_capacity, object, token);
+        }
         // An alias's, ifunc's or weakref's: clang's code generation takes them at file scope alone (EmitGlobal).
         if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS) != 0 && check_sparse_get(input->declaration_bodies, token) == BUSTER_CHECK_NONE)
         {
@@ -3638,6 +3665,92 @@ __attribute__((noinline)) static bool check_program_attribute_keys(CheckProgram*
     return valid;
 }
 
+// The patchable_function_entry declarations' keys (#1447, CheckProgram.patchable_keys), in `output`, where the unit has
+// one: in token order as the scan found them, sorted stably by object with the radix kernel's twins (c_bindings_sort), so
+// that each object's are in token order. Returns false if there was no room.
+__attribute__((noinline)) static bool check_program_patchable_keys(CheckProgram* program, const CheckProgramTargetEvents* events, bool scalar, Arena* output, Arena* scratch)
+{
+    const uint32_t total = events->patchable_count;
+    bool valid = events->room;
+    if (valid && total != 0)
+    {
+        uint64_t* keys = BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, total);
+        uint64_t* temporary = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, total);
+        valid = keys != 0 && temporary != 0;
+        if (valid)
+        {
+            memcpy(keys, events->patchable_keys, (uint64_t)total * sizeof(uint64_t));
+            uint32_t varying = 0;
+            for (uint32_t e = 1; e < total; e += 1)
+            {
+                varying |= (uint32_t)((keys[0] ^ keys[e]) >> 32);
+            }
+            const uint64_t* sorted = c_bindings_sort(keys, temporary, total, !scalar, varying);
+            if (sorted != keys)
+            {
+                memcpy(keys, sorted, (uint64_t)total * sizeof(uint64_t));
+            }
+            program->patchable_keys = keys;
+            program->patchable_key_count = total;
+        }
+    }
+    return valid;
+}
+
+// A function's patchable entry (#1447): `count` bytes of NOPs, `offset` of them before its symbol (none for a count of 0),
+// and the section of its entry (empty for __patchable_function_entries).
+typedef struct CheckProgramPatchable CheckProgramPatchable;
+struct CheckProgramPatchable
+{
+    uint32_t count;
+    uint32_t offset;
+    String8 section;
+};
+
+// Body `b`'s patchable entry (#1447), as clang's code generation takes it (CodeGenFunction::StartFunction): the first
+// patchable_function_entry attribute of its function's last declaration with one up to its definition (clang's
+// redeclarations inherit it where they have none of their own; it drops one after the definition with a warning), whose
+// count of 0 makes none; or without one, -fpatchable-function-entry's (CheckProgram.patchable_count); and its section, the
+// attribute's, or where it names none, the option's. A binary search of CheckProgram.patchable_keys, which a unit without
+// the attribute hasn't.
+static CheckProgramPatchable check_program_patchable(const CheckProgram* program, uint32_t b)
+{
+    const CheckProgramBody body = program->bodies[b];
+    CheckProgramPatchable result = { .count = program->patchable_count, .offset = program->patchable_offset };
+    String8 section = { 0 };
+    if (program->patchable_key_count != 0)
+    {
+        // The last key at or before (object, definition).
+        const uint64_t wanted = ((uint64_t)body.object << 32) | body.declaration;
+        uint32_t low = 0;
+        uint32_t high = program->patchable_key_count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            low = program->patchable_keys[middle] <= wanted ? middle + 1 : low;
+            high = program->patchable_keys[middle] <= wanted ? high : middle;
+        }
+        const uint64_t key = low != 0 ? program->patchable_keys[low - 1] : UINT64_MAX;
+        const CheckInputAttributes* attributes = key != UINT64_MAX && (uint32_t)(key >> 32) == body.object ? check_input_attributes_at(program->input, (uint32_t)key) : 0;
+        const CheckInputAttribute* attribute = 0;
+        for (uint32_t i = 0; attributes != 0 && attribute == 0 && i < attributes->count; i += 1)
+        {
+            const CheckInputAttribute* record = &attributes->records[i];
+            attribute = record->kind == CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY && !record->ignored && !record->subject_ignored && record->argument_values != 0 ? record : 0;
+        }
+        if (attribute != 0)
+        {
+            result.count = (uint32_t)attribute->argument_values[0];
+            result.offset = attribute->argument_count >= 2 ? (uint32_t)attribute->argument_values[1] : 0;
+            section = attribute->argument_count == 3 ? attribute->text : section;
+        }
+    }
+    result.section = section.length != 0 ? section : program->patchable_section;
+    // (The checker and the driver refuse an offset past the count.)
+    result.offset = result.count != 0 ? result.offset : 0;
+    return result;
+}
+
 // #442's kernels (c_check_program_select.c), which check_program numbers the needed objects' symbols with too.
 static uint32_t check_program_needed_count(const uint8_t* needed, uint32_t objects, bool scalar);
 static void check_program_needed_number(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects, bool scalar);
@@ -3684,7 +3797,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
                                .asm_helpers = options.asm_helpers, .helper_forms = options.helper_forms, .target = options.target, .frame_pointer = options.frame_pointer,
-                               .probe_stack = options.probe_stack, .token = BUSTER_CHECK_NONE,
+                               .probe_stack = options.probe_stack, .patchable_count = options.patchable_count, .patchable_offset = options.patchable_offset,
+                               .patchable_section = options.patchable_section, .token = BUSTER_CHECK_NONE,
                                .diagnostic_position = BUSTER_CHECK_NONE };
     // The constant CFStrings' calls (#148), which the bodies' references read (check_program_references).
     if (options.prepared_data != NULL)
@@ -4200,6 +4314,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         program->status = CHECK_PROGRAM_RESOURCE;
     }
     if (valid && program->status == CHECK_PROGRAM_OK && !check_program_attribute_keys(program, &target_events, BUSTER_SCALAR_PATH(options.scalar), output, scratch))
+    {
+        program->status = CHECK_PROGRAM_RESOURCE;
+    }
+    if (valid && program->status == CHECK_PROGRAM_OK && !check_program_patchable_keys(program, &target_events, BUSTER_SCALAR_PATH(options.scalar), output, scratch))
     {
         program->status = CHECK_PROGRAM_RESOURCE;
     }

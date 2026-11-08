@@ -56,7 +56,14 @@ requirements. [Command index](README.md).
   makes both tiers' frames of a page or more and their dynamic allocations
   touch each page below rsp before rsp passes it (`predefines_stack_clash`,
   #177: the frame guide's "Stack-clash protection on request"); without it
-  neither probes, as clang's default. Either
+  neither probes, as clang's default.
+  `-fpatchable-function-entry=N[,M[,SECTION]]`, the last one, as clang's
+  driver reads and checks it (`predefines_patchable`, with its errors), gives
+  every function without a `patchable_function_entry` attribute N bytes of
+  NOPs, M of them before its symbol, and an entry in SECTION
+  (`__patchable_function_entries` by default), by both tiers (#1447: the
+  [object writer guide](../../docs/object-writer-and-linker.md)'s
+  "Patchable function entries"). Either
   output's functions compile on lanes (#151, `check_program_emit_lanes`, the
   [lanes guide](../../docs/function-lanes.md)): by default as many as the bodies'
   tokens pay for, up to one per core of the CPUs the process may run on, and

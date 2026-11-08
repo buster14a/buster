@@ -77,6 +77,17 @@ struct CheckProgramCode
     // definitions' atoms exist only after the static data is published, so check_program_sections applies them.
     uint64_t* asm_sizes;
     uint8_t* asm_size_set;
+    // patchable_function_entry's (#1447, check_program_patchable): each such function's entry, `patchable_count` of them in
+    // its bodies' order, an 8-byte atom (patchable_atoms) whose absolute fixup points to its NOP sled, through a label at its
+    // function's atom's start (patchable_functions): local temporaries from patchable_symbol_base, named
+    // .Lbuster_patchable_N, which -c's object leaves out as clang's assembler leaves its .Ltmp label. Each entry's section
+    // (patchable_sections, empty for __patchable_function_entries) is the one check_program_sections gives it, linked to
+    // its function's (SHF_LINK_ORDER). None in a unit without the attribute or -fpatchable-function-entry.
+    AtomId* patchable_atoms;
+    AtomId* patchable_functions;
+    String8* patchable_sections;
+    SymbolId patchable_symbol_base;
+    uint32_t patchable_count;
     CheckProgramStatus status;
     Tier0Error backend_error;
     CheckTier1Outcome tier1_failure;
@@ -769,6 +780,10 @@ struct CheckEmitBody
     const char* reason;
     // Only a failed frame verification retains its verdict, until the calling thread reports it in source order.
     const EmittedVerdict* frame_verdict;
+    // patchable_function_entry's NOPs (#1447, check_program_emit_patchable): `sled` bytes at the start of `bytes`, `prefix`
+    // of them before the function's symbol; 0 for a function without them, the usual one.
+    uint32_t sled;
+    uint32_t prefix;
 };
 
 // A part's steps (CheckLowerPart, the lowering's), and its first body whose backend failed (either tier) and whose code
@@ -1026,6 +1041,109 @@ static void check_program_emit_frame_failure(const EmittedCode* code, uint32_t b
     }
 }
 
+static uint64_t check_program_emit_marked(const EmittedCode* code);
+
+// `count` bytes of NOPs at `bytes`, as LLVM's X86 printer writes a patchable function entry's (emitX86Nops, for a CPU whose
+// NOPs decode fast up to 15 bytes, every x86-64 tuning but a few Atoms'): the longest it can, of 15 bytes at most, then the
+// rest. Each is nopl or nopw of rax with LLVM's displacements (8, then 512), past 9 bytes a cs override and up to five
+// 66 prefixes before it; 2 bytes are xchg ax, ax.
+static void check_program_emit_nops(uint8_t* bytes, uint32_t count)
+{
+    static const uint8_t nops[11][10] = {
+        { 0 },
+        { 0x90 },
+        { 0x66, 0x90 },
+        { 0x0f, 0x1f, 0x00 },
+        { 0x0f, 0x1f, 0x40, 0x08 },
+        { 0x0f, 0x1f, 0x44, 0x00, 0x08 },
+        { 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x08 },
+        { 0x0f, 0x1f, 0x80, 0x00, 0x02, 0x00, 0x00 },
+        { 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x02, 0x00, 0x00 },
+        { 0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x02, 0x00, 0x00 },
+        { 0x2e, 0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x02, 0x00, 0x00 },
+    };
+    uint32_t at = 0;
+    while (at < count)
+    {
+        const uint32_t size = count - at < 15 ? count - at : 15;
+        const uint32_t prefixes = size > 10 ? size - 10 : 0;
+        const uint32_t base = size - prefixes;
+        memset(bytes + at, 0x66, prefixes);
+        memcpy(bytes + at + prefixes, nops[base], base);
+        at += size;
+    }
+}
+
+// Body `b`'s patchable_function_entry NOPs (#1447, check_program_patchable), once its code is encoded at `bytes`
+// (`length` of them, with `sled` bytes of room after them): the code moved past the sled, whose first `prefix` bytes are
+// one-byte NOPs before the function's symbol, as LLVM's emitNops writes them, and the rest the longest NOPs at its entry,
+// before its prologue (check_program_emit_nops). What refers into the code moves with it: its fixups' fields, its labels
+// and its templates' (from the atom's start, by the sled); its source rows and value spans (from the symbol, by the entry's
+// NOPs, the declaration's row at 0 left there, so that its line covers them) and its unwind descriptor's transitions and size,
+// whose entry rules (a row at 0) hold through the NOPs, as clang's FDE starts at the symbol. Out of line and cold: a unit
+// without the attribute or -fpatchable-function-entry never reaches it.
+static __attribute__((noinline, cold)) void check_program_emit_patchable(CheckEmitRun* run, CheckEmitBody* body, const EmittedCode* code, uint32_t b, uint8_t* bytes,
+                                                                        uint32_t length, uint32_t sled, uint32_t prefix, EmissionFrameRow* frame_rows)
+{
+    const uint32_t entry = sled - prefix;
+    memmove(bytes + sled, bytes, length);
+    memset(bytes, 0x90, prefix);
+    check_program_emit_nops(bytes + prefix, entry);
+    const uint64_t marked = check_program_emit_marked(code);
+    for (uint64_t k = 0; k < marked; k += 1)
+    {
+        body->fixup_ends[k] += sled;
+    }
+    // (A label past the code, UINT32_MAX, stays the failure it is.)
+    for (uint32_t k = 0; k < code->label_count; k += 1)
+    {
+        body->label_offsets[k] += body->label_offsets[k] != UINT32_MAX ? sled : 0;
+    }
+    const CheckProgramNaked* naked = run->lowered->asms.naked != 0 && run->lowered->asms.naked[b].planned ? run->lowered->asms.naked + b : 0;
+    for (uint32_t k = 0; naked != 0 && k < naked->label_count; k += 1)
+    {
+        body->asm_offsets[k] += body->asm_offsets[k] != UINT32_MAX ? sled : 0;
+    }
+    // Its rows from the symbol: the first, the declaration's, stays at 0 over the entry's NOPs, and the others move past
+    // them, as the body's start does. A body without a prologue, whose first entry's row took the declaration's at 0
+    // (check_debug_rows), gets that one back first, so that its body starts at the end of the NOPs, as clang's line table
+    // has it: one row more than it had, which the rows' room has (the declaration's).
+    const bool bare = run->sources && entry != 0 && body->body_offset == 0 && body->row_count != 0 && body->row_offsets[0] == 0;
+    if (bare)
+    {
+        memmove(body->row_offsets + 1, body->row_offsets, (uint64_t)body->row_count * sizeof(uint32_t));
+        memmove(body->row_tokens + 1, body->row_tokens, (uint64_t)body->row_count * sizeof(uint32_t));
+        body->row_offsets[0] = 0;
+        body->row_tokens[0] = run->program->bodies[b].declaration;
+        body->row_count += 1;
+    }
+    for (uint32_t r = 1; run->sources && r < body->row_count; r += 1)
+    {
+        body->row_offsets[r] += entry;
+    }
+    body->body_offset += entry;
+    for (uint32_t s = 0; run->sources && s < body->debug_span_count; s += 1)
+    {
+        body->debug_spans[s].begin += body->debug_spans[s].begin != 0 ? entry : 0;
+        body->debug_spans[s].end += entry;
+    }
+    if (run->unwind)
+    {
+        UnwindFunction* frame = &run->frames[b];
+        frame->size += entry;
+        for (uint32_t k = 0; frame->open != BUSTER_UNWIND_ROWS && k < frame->event_count; k += 1)
+        {
+            frame->offsets[k] += entry;
+        }
+        for (uint32_t r = 0; frame->open == BUSTER_UNWIND_ROWS && frame_rows != 0 && r < frame->row_count; r += 1)
+        {
+            frame_rows[r].offset += frame_rows[r].offset != 0 ? entry : 0;
+        }
+    }
+    body->sled = sled;
+    body->prefix = prefix;
+}
+
 // Body `b`'s code after its code generator (Tier 0's or Tier 1's), on its lane (`lane`): branch sizing, encoding into
 // the lane's bytes, its unwind frame, its labels' offsets and with -g its raw rows, and what its fixups need. Returns
 // false for a failure, which it records in the body as source order's emission reports it: no room; a record
@@ -1052,9 +1170,14 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     body->debug_spans = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDebugValueSpan, (uint64_t)code->source_count + 1) : NULL;
     const uint64_t work_mark = scratch->length;
     uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)code->count + 1);
+    // patchable_function_entry's NOPs (#1447): room for them after the code, which check_program_emit_patchable moves past
+    // them. A unit without the attribute or -fpatchable-function-entry reads two fields.
+    const CheckProgramPatchable patchable = program->patchable_key_count != 0 || program->patchable_count != 0 ? check_program_patchable(program, b) :
+                                                                                                                  (CheckProgramPatchable){ 0 };
+    const uint32_t sled = patchable.count;
     const uint64_t byte_capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
     const uint64_t before = bytes->length;
-    uint8_t* encoded = arena_push(bytes, byte_capacity, 16);
+    uint8_t* encoded = arena_push(bytes, byte_capacity + sled, 16);
     bool valid = offsets != 0 && body->fixup_ends != 0 && encoded != 0 && (code->label_count == 0 || body->label_offsets != 0) &&
                  (naked == 0 || naked->label_count == 0 || body->asm_offsets != 0) && (!run->sources || (body->row_offsets != 0 && body->row_tokens != 0 && body->debug_spans != NULL)) &&
                  (!run->unwind || code->frame_count == 0 || frame_rows != 0);
@@ -1107,6 +1230,12 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
             }
             check_clock_lap(run->stage_clock, CHECK_STAGE_DEBUG);
         }
+        if (valid && sled != 0 && (uint64_t)length + sled > INT32_MAX)
+        {
+            body->reason = "a function of 2 GB of code or more, past its unwind table's offsets";
+            failure = CHECK_PROGRAM_UNSUPPORTED;
+            valid = false;
+        }
         if (valid && run->unwind)
         {
             // Its frame events resolved after sizing (a naked function's code is its templates', which say nothing of
@@ -1122,10 +1251,10 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
         }
         if (valid)
         {
-            const uint64_t end = (uint64_t)(encoded - bytes->base) + (uint64_t)length;
+            const uint64_t end = (uint64_t)(encoded - bytes->base) + (uint64_t)length + sled;
             arena_pop_to(bytes, end > before ? end : before);
             body->bytes = encoded;
-            body->length = (uint64_t)length;
+            body->length = (uint64_t)length + sled;
             for (uint32_t k = 0; k < code->label_count; k += 1)
             {
                 // An optimized-away label has no control-flow target. Keep its symbol's existing entry placeholder
@@ -1138,6 +1267,10 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
             {
                 const uint32_t record = naked->labels[k].record;
                 body->asm_offsets[k] = record < code->count ? offsets[record] : record == code->count ? (uint32_t)length : UINT32_MAX;
+            }
+            if (sled != 0)
+            {
+                check_program_emit_patchable(run, body, code, b, encoded, (uint32_t)length, sled, patchable.offset, frame_rows);
             }
         }
         else
@@ -2020,6 +2153,33 @@ static uint64_t check_program_emit_marked(const EmittedCode* code)
         marked += i == 0 || code->references[i].instruction != code->references[i - 1].instruction;
     }
     return marked;
+}
+
+// Body `b`'s patchable_function_entry entry (#1447), its function's atom `function` published: its label
+// (CheckProgramCode.patchable_symbol_base's next) defined at the atom's start, where its NOP sled begins, and an 8-byte
+// atom of writable data, zero, whose absolute fixup (R_X86_64_64 in an object, a relative relocation in a PIE) points there,
+// as clang's entry does; its section (check_program_patchable's) for check_program_sections. Returns false for no room.
+static bool check_program_emit_patchable_entry(CheckProgramCode* result, const CheckProgram* program, uint32_t b, AtomId function, Arena* bytes)
+{
+    const uint32_t k = result->patchable_count;
+    const SymbolId label = result->patchable_symbol_base + k;
+    uint8_t* entry = arena_push(bytes, 8, 8);
+    const AtomId atom = entry != 0 ? link_add_atom(&result->link, BUSTER_LINK_CLASS_DATA, 3, 8, memset(entry, 0, 8), 0) : 0;
+    const bool valid = atom != 0 && link_define_symbol(&result->link, label, function, 0, 0) &&
+                       link_add_fixup(&result->link, atom, 0, BUSTER_LINK_FIXUP_ABS64, label, 0) != 0;
+    if (valid)
+    {
+        result->link.symbols.source[label] = BUSTER_LINK_SOURCE_PROGRAM;
+        result->patchable_atoms[k] = atom;
+        result->patchable_functions[k] = function;
+        result->patchable_sections[k] = check_program_patchable(program, b).section;
+        result->patchable_count = k + 1;
+    }
+    else
+    {
+        result->status = CHECK_PROGRAM_RESOURCE;
+    }
+    return valid;
 }
 
 // `spelling`'s index in the asm names (`asms->names`), or BUSTER_CHECK_NONE: the unit's symbols' names are the names
@@ -3198,7 +3358,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const CheckEmitBody* body = run.bodies + b;
             rows->first[b] = rows->count;
             rows->counts[b] = body->row_count;
-            rows->sizes[b] = (uint32_t)body->length;
+            // (From its symbol: past a patchable entry's NOPs before it, #1447.)
+            rows->sizes[b] = (uint32_t)(body->length - body->prefix);
             rows->bodies[b] = body->body_offset;
             const EmittedCode* code = run.codes + b;
             CheckDebugBody* value = rows->values + b;
@@ -3344,19 +3505,31 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             unit_wide += naked->unit.link.fixups.wide_count;
         }
     }
+    // patchable_function_entry's entries (#1447, CheckProgramCode.patchable_atoms): an atom, a fixup, a label and its name
+    // each.
+    uint32_t patched = 0;
+    for (uint32_t b = 0; valid && (program->patchable_key_count != 0 || program->patchable_count != 0) && b < count; b += 1)
+    {
+        patched += check_program_patchable(program, b).count != 0 ? 1 : 0;
+    }
+    result->patchable_atoms = patched != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, patched) : 0;
+    result->patchable_functions = patched != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, patched) : 0;
+    result->patchable_sections = patched != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, String8, patched) : 0;
+    valid = valid && (patched == 0 || (result->patchable_atoms != 0 && result->patchable_functions != 0 && result->patchable_sections != 0));
     // cpu_dispatch's resolvers and their symbols, and cpu_specific's versions' other names (#1447, check_program_cpu_emit).
     uint64_t cpu_atoms = 0;
     uint64_t cpu_symbols = 0;
     uint64_t cpu_fixups = 0;
     check_program_cpu_room(program, &cpu_atoms, &cpu_symbols, &cpu_fixups);
     const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + pools->count + runtime.atoms + (frames != 0 ? 1 : 0) +
-                                (valid ? result->lowered.table_count : 0) + file_asm.count + structor_count + unit_atoms + cpu_atoms;
-    const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries + structor_count + unit_fixups + cpu_fixups;
+                                (valid ? result->lowered.table_count : 0) + file_asm.count + structor_count + unit_atoms + patched + cpu_atoms;
+    const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries + structor_count + unit_fixups + patched +
+                                 cpu_fixups;
     const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references + runtime.wide_addends + unit_wide;
     const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.symbols +
-                                  unit_symbols + cpu_symbols;
+                                  unit_symbols + patched + cpu_symbols;
     const uint64_t name_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.names +
-                                unit_names + cpu_symbols;
+                                unit_names + patched + cpu_symbols;
     valid = valid && atom_count < UINT32_MAX && fixup_count < UINT32_MAX && wide_count < UINT32_MAX && symbol_count < UINT32_MAX &&
             name_count < UINT32_MAX && (uint64_t)data_capacity.priorities + runtime.priorities + structor_count < UINT32_MAX;
     const LinkCapacity capacity = {
@@ -3628,6 +3801,18 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             *flags = (uint8_t)((*flags & ~BUSTER_LINK_SYMBOL_VISIBILITY) | (name->flags & BUSTER_LINK_SYMBOL_VISIBILITY));
         }
     }
+    // patchable_function_entry's labels (#1447, CheckProgramCode.patchable_symbol_base), after every symbol whose id the
+    // lowering numbered: local, with names a source can't spell, each defined at its function's atom's start as the body is
+    // published, the program's definitions for an executable's runtime to join.
+    result->patchable_symbol_base = valid ? (SymbolId)result->link.symbols.count : 0;
+    for (uint32_t k = 0; valid && k < patched; k += 1)
+    {
+        char spelling[48];
+        const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_patchable_%u", k);
+        const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
+        valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_NOTYPE,
+                                            binding != NULL ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE) == result->patchable_symbol_base + k;
+    }
     // cpu_specific's and cpu_dispatch's symbols beyond the program's (#1447).
     valid = valid && (program->cpu_group_count == 0 || check_program_cpu_symbols(result, program, output));
     // Every symbol of the program's exists: an executable's runtime joins now, before the program's atoms, with the
@@ -3781,9 +3966,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             body->status = CHECK_PROGRAM_OK;
             body->token = BUSTER_CHECK_NONE;
             const char* reason = NULL;
-            valid = symbol != 0 && check_program_emit_asm_unit(result, asms, unit, asm_symbols, symbol, result->unit_atoms, result->unit_sections,
-                                                               &result->unit_atom_count, bytes, scratch, &entry_atom, &entry_bytes, &entry_length);
-            reason = valid ? NULL : "an inline assembly unit could not be published";
+            // (A naked function whose assembly takes directives has no NOP sled of patchable_function_entry's yet, #1447.)
+            const bool patchable = source_body && patched != 0 && check_program_patchable(program, b).count != 0;
+            valid = symbol != 0 && !patchable &&
+                    check_program_emit_asm_unit(result, asms, unit, asm_symbols, symbol, result->unit_atoms, result->unit_sections,
+                                                &result->unit_atom_count, bytes, scratch, &entry_atom, &entry_bytes, &entry_length);
+            reason = patchable ? "patchable_function_entry on a naked function whose assembly takes directives" :
+                     valid ? NULL : "an inline assembly unit could not be published";
             if (valid)
             {
                 body->bytes = entry_bytes;
@@ -3817,7 +4006,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             }
             else
             {
-                result->status = CHECK_PROGRAM_BACKEND;
+                result->status = patchable ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
                 result->reason = reason != NULL ? reason : "an inline assembly unit could not be published";
                 result->token = source_body ? program->bodies[b].declaration : BUSTER_CHECK_NONE;
                 valid = false;
@@ -3896,10 +4085,16 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
         if (valid)
         {
+            // A function with patchable_function_entry's NOPs (#1447, CheckEmitBody.sled) has its symbol after the first
+            // `prefix` of them, which the atom's alignment comes before, as clang's: its entry's label is the atom's start.
             const AtomId atom = link_add_atom(&result->link, BUSTER_LINK_CLASS_TEXT, alignment, body->length, body->bytes, 0);
-            valid = atom != 0 && symbol != 0 && link_define_symbol(&result->link, symbol, atom, 0, body->length) &&
+            valid = atom != 0 && symbol != 0 && link_define_symbol(&result->link, symbol, atom, body->prefix, body->length - body->prefix) &&
                     link_add_code_fixups(&result->link, atom, code->records, code->count, body->fixup_ends,
                                          assembly ? check_program_emit_marked(code) : code->reference_count, code->references, code->reference_count);
+            if (valid && source_body && body->sled != 0)
+            {
+                valid = check_program_emit_patchable_entry(result, program, b, atom, bytes);
+            }
             // The labels its templates define, each at its record's offset (its lane's, for a naked function): the
             // program's definitions.
             const CheckProgramAsmLabel* asm_labels = !assembly ? 0 : source_body ? asms->naked[b].labels : asms->plans[helpers->items[b - count].assembly - 1].labels;
@@ -4241,7 +4436,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
     *table = 0;
     bool valid = true;
     if (placements != 0 || code->asm_atom_count != 0 || link->priorities.count > 1 || code->retained_count != 0 || code->unit_atom_count != 0 ||
-        program->cfstring_count != 0 || code->selectany_count != 0)
+        program->cfstring_count != 0 || code->selectany_count != 0 || code->patchable_count != 0)
     {
         uint32_t refused = BUSTER_CHECK_NONE;
         const char* reason = NULL;
@@ -4274,6 +4469,20 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             {
                 descriptors[code->unit_atoms[a]] = code->unit_sections[a];
                 valid = valid && link_set_atom_section(link, code->unit_atoms[a], code->unit_sections[a].name);
+            }
+            // patchable_function_entry's entries (#1447, CheckProgramCode.patchable_atoms): each in its section,
+            // __patchable_function_entries unless its attribute or -fpatchable-function-entry names another, writable data
+            // linked to its function's section (SHF_LINK_ORDER, ObjectAtomSection.link), one per function as clang's object
+            // has them, which a linker keeps or drops with it and orders by it.
+            static const char patchable_default[] = "__patchable_function_entries";
+            for (uint32_t k = 0; k < code->patchable_count; k += 1)
+            {
+                const String8 named = code->patchable_sections[k];
+                const String8 name = named.length != 0 ? named : (String8){ .pointer = (char*)patchable_default, .length = sizeof(patchable_default) - 1 };
+                const AtomId atom = code->patchable_atoms[k];
+                descriptors[atom] = (ObjectAtomSection){ .name = name, .type = SHT_PROGBITS, .flags = SHF_ALLOC | SHF_WRITE | SHF_LINK_ORDER,
+                                                         .link = code->patchable_functions[k] };
+                valid = valid && link_set_atom_section(link, atom, name);
             }
             *table = descriptors;
         }

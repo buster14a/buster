@@ -7096,13 +7096,17 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
         // unit's first candidate read, so a unit without one pays nothing.
         uint8_t* sizeof_known = NULL;
         bool sizeof_failed = false;
-        // A local declaration is one with a body, an entry of its column: no other warns.
+        // A local declaration is one with a body, an entry of its column: no other warns. A compound literal's unnamed
+        // object has one too, but it is no variable, and clang's -Wuninitialized follows variables alone: the literal's
+        // own value, at its closing `}`, would otherwise be a read inside its initializer's range, a self-use. The
+        // variables its initializer reads keep their own warnings.
         for (uint32_t declaration = check_common_next_entry(input->declaration_bodies, 0, count, vector); valid && declaration < count;
              declaration = check_common_next_entry(input->declaration_bodies, declaration + 1, count, vector))
         {
             const bool local = input->declaration_kinds[declaration] == C_BINDING_OBJECT && check_common_sparse_get(input->declaration_bodies, declaration) < parser->tokens.count &&
                                !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) &&
-                               !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL);
+                               !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) &&
+                               !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND);
             const bool parameter = local && parameters[declaration] != 0;
             const bool plain = local && !parameter && !addressed[declaration];
             const TypeId type = local ? input->declared_types[declaration] : 0;

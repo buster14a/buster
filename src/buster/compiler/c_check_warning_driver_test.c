@@ -1372,6 +1372,41 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .options = { "-Wall" },
     },
     {
+        // A compound literal's unnamed object is no variable for -Wuninitialized (#1447): its own value, at its closing
+        // `}`, is no read within its own initialization. Scalar, pointer, array and struct literals in initializers and
+        // assignments, at file scope, in loops, under `&` and nested, say nothing.
+        .name = "compound literals are no variables for -Wuninitialized",
+        .source = "struct S { int x; int y; };\nstruct T { int n; int *p; };\n"
+                  "int *gp = &(int){ 4 };\nstruct S *gs = &(struct S){ .x = 3 };\nint *gq = (int[]){ 5, 6 };\n"
+                  "int scalars(void) {\n  int e = (int){ 4 };\n  long l;\n  l = (long){ 5 };\n  int *q;\n  q = (int *){ 0 };\n"
+                  "  return e + (int)l + (q != 0) + *gp + gs->x + gq[1];\n}\n"
+                  "int aggregates(void) {\n  int a[2] = { (int){ 1 }, (int){ 2 } };\n  int z = { (int){ 3 } };\n"
+                  "  struct S s = (struct S){ .x = 1 };\n  struct S m = { .x = (int){ 1 } };\n  int *p = (int[2]){ 1, 2 };\n"
+                  "  s = (struct S){ .y = 2 };\n  return a[0] + z + s.x + m.x + p[1];\n}\n"
+                  "int loops(int n) {\n  int total = 0;\n"
+                  "  for (int i = 0; i < n; i += 1) { int e = (int){ i }; total += e + (int){ 2 }; }\n"
+                  "  while (n > 0) { int d = (int){ n }; total += d; n -= 1; }\n  return total;\n}\n"
+                  "int addresses(void) {\n  int *p = &(int){ 4 };\n  int **pp = &(int *){ &(int){ 5 } };\n  return *p + **pp;\n}\n"
+                  "int nested(void) {\n  int e = (int){ (int){ 4 } };\n  struct T t = (struct T){ .n = (int){ 1 }, .p = &(int){ 2 } };\n"
+                  "  int a = (int){ (int){ (int){ 3 } } + 1 };\n  return e + t.n + *t.p + a;\n}\n",
+        .options = { "-Wall" },
+    },
+    {
+        // The variables a compound literal's initializer reads keep their warnings (#1447): an uninitialized one is used
+        // here, directly or through a nested literal or an assignment's, and the declared variable itself inside its
+        // own initializer's literal, braced or not, is used within its own initialization.
+        .name = "compound literal initializers keep their variables' uninitialized reads",
+        .source = "int reads(void) {\n  int u;\n  int e = (int){ u };\n  return e;\n}\n"
+                  "int self(void) {\n  int x = (int){ x };\n  return x;\n}\n"
+                  "int nested(void) {\n  int u;\n  int v;\n  int e = (int){ (int){ u } + v };\n  return e;\n}\n"
+                  "int assigned(void) {\n  int x;\n  x = (int){ x };\n  return x;\n}\n"
+                  "int braced(void) {\n  int y = { (int){ y } };\n  return y;\n}\n"
+                  "int pointer(void) {\n  int *p = (int *){ p };\n  return p != 0;\n}\n",
+        .options = { "-Wall" },
+        .warnings = 7,
+        .notes = 4,
+    },
+    {
         // A logical operator one operand decides though the other isn't known (#1447, clang's CFG tryEvaluateBool):
         // `x && 0` and `x || 1`, through `!` and casts, prune the arm they leave out for the runtime warnings and for
         // -Wreturn-type alike; `x && (x || 1)` and `x && 1` decide nothing.
