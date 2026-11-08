@@ -22,7 +22,7 @@ static const char* check_driver_action_message(CheckDiagnostic diagnostic)
         case CHECK_DIAG_INCOMPATIBLE: result = "incompatible operand or conversion types"; break;
         case CHECK_DIAG_INCOMPLETE: result = "incomplete type is not permitted here"; break;
         case CHECK_DIAG_BIT_FIELD: result = "invalid use of a bit-field"; break;
-        case CHECK_DIAG_REGISTER_ADDRESS: result = "address of register object requested"; break;
+        case CHECK_DIAG_REGISTER_ADDRESS: result = "address of register variable requested"; break;
         case CHECK_DIAG_MEMBER: result = "no such member in the record type"; break;
         case CHECK_DIAG_CALL: result = "called object is not a function or function pointer"; break;
         case CHECK_DIAG_ARGUMENT_COUNT: result = "incorrect number of arguments"; break;

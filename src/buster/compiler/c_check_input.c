@@ -5080,6 +5080,17 @@ static bool check_input_address_is_weak(const CheckInputReader* reader, uint32_t
 
 // BUSTER_CHECK_NONNULL_ADDRESS for a declaration's address, or 0 when the address may be null or is not an object.
 // An enumerator is an integer. A weak attribute or pragma at or before `use` can resolve to a null pointer.
+// A use `token` of `declaration`'s flags for its register storage: BUSTER_CHECK_REGISTER, and BUSTER_CHECK_REGISTER_NAME where
+// the name stands unparenthesized, whose array decay clang rejects (#1447).
+static uint32_t check_input_register_flags(const CheckInputReader* reader, uint32_t declaration, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t parent = token < parser->tokens.count ? parser->tree.parents[token] : BUSTER_CHECK_NONE;
+    const bool grouped = parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_GROUP;
+    return check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ?
+           BUSTER_CHECK_REGISTER | (grouped ? 0 : BUSTER_CHECK_REGISTER_NAME) : 0;
+}
+
 static uint32_t check_input_nonnull_flag(const CheckInputReader* reader, uint32_t declaration, uint32_t use, bool enumeration, uint32_t object)
 {
     const bool weak = check_input_address_is_weak(reader, declaration, use);
@@ -11209,7 +11220,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                     {
                         .type = type,
                         .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
-                        .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0) | check_input_nonnull_flag(reader, declaration, token, enumeration, reader->objects[declaration]),
+                        .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) | check_input_register_flags(reader, declaration, token) | check_input_nonnull_flag(reader, declaration, token, enumeration, reader->objects[declaration]),
                         .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
                         .integer = enumeration ? reader->enum_values[declaration] : 0,
                         .object = reader->objects[declaration],
