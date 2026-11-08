@@ -7,12 +7,42 @@ typedef enum CheckRedeclarationKind
 {
     CHECK_REDECLARATION_GENERIC,
     CHECK_REDECLARATION_OBJECT_TYPE,
+    // An object's type conflict whose new declaration says extern (or __private_extern__): clang's "redeclaration".
+    CHECK_REDECLARATION_OBJECT_TYPE_EXTERN,
     CHECK_REDECLARATION_FUNCTION_TYPE,
     CHECK_REDECLARATION_DEFINITION,
     CHECK_REDECLARATION_PARAMETER,
     CHECK_REDECLARATION_STATIC,
     CHECK_REDECLARATION_NON_STATIC,
 } CheckRedeclarationKind;
+
+// Whether the declaration of `token`, a declarator's name, says extern or __private_extern__: up its declarator's chunks
+// (a pointer's `*`, groups, other declarators' commas, an initialized declarator's `=`) to its specifiers, then along
+// them. Clang words an object's type conflict by whether the new declaration is a definition before its initializer is
+// read (diagnoseVarDeclTypeMismatch's isThisDeclarationADefinition), so an extern one is a "redeclaration" even with an
+// initializer, and any other one (a tentative definition too) a "redefinition" (#1447, review on #1453).
+static bool check_input_redeclaration_extern(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t up = token < count ? parser->tree.parents[token] : count;
+    for (uint32_t steps = 0; up < count && steps < count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[up];
+        const bool chunk = role == PARSE_ROLE_CLOSE_FUNCTION || role == PARSE_ROLE_CLOSE_CALL || role == PARSE_ROLE_CLOSE_GROUP ||
+                           role == PARSE_ROLE_CLOSE_ATTRIBUTE || role == PARSE_ROLE_COMMA || role == PARSE_ROLE_ASSIGN ||
+                           (role == PARSE_ROLE_PREFIX && parser->tokens.kinds[up] == PARSE_KIND_STAR);
+        up = chunk ? parser->tree.parents[up] : up;
+        steps = chunk ? steps : count;
+    }
+    bool result = false;
+    for (uint32_t steps = 0; up < count && steps < count && !result && parser->tree.roles[up] == PARSE_ROLE_SPECIFIER; steps += 1)
+    {
+        const uint32_t name = parser->tokens.names[up];
+        result = name == C_NAME_EXTERN || name == C_NAME_PRIVATE_EXTERN;
+        up = parser->tree.parents[up];
+    }
+    return result;
+}
 
 static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t token, uint32_t previous,
                                              TypeAnswer compatible, bool repeatable, bool parameter_conflict, CheckInputMessage message)
@@ -77,7 +107,8 @@ static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t 
     if (input->report_count > before && !input->resource && detail != CHECK_REDECLARATION_GENERIC && input->reports[before].message == message)
     {
         CheckInputReport* report = input->reports + before;
-        report->detail = detail;
+        report->detail = detail == CHECK_REDECLARATION_OBJECT_TYPE && check_input_redeclaration_extern(reader->parser, token) ?
+                         CHECK_REDECLARATION_OBJECT_TYPE_EXTERN : detail;
         report->note_token = noted;
         report->note_kind = note_kind;
         report->type = reader->declared_types[token];

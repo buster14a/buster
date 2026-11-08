@@ -3039,12 +3039,24 @@ static uint32_t check_common_full_expression_end(const Parser* parser, const Che
 // Diag's (DiagnoseFloatingImpCast, CheckBoolLikeConversion), at once, as its full expression completes: `at_once`, or the
 // end check_common_full_expression_end finds up `parents`. Its phase there, after the lexer's lookahead, puts it before
 // whatever the next statement or declarator reports from that token. Where either may report is unchanged.
+// Whether `target` takes clang's implicit-conversion value warnings: a builtin type, which clang's CheckImplicitConversion
+// reads (a BuiltinType), not an enumeration or an _Atomic type, to which clang gives neither -Wconstant-conversion nor
+// -Wliteral-conversion (#1447, review on #1453), though check_common_integer reads their integer types.
+static bool check_common_conversion_target(const TypeTable* types, TypeId target)
+{
+    const TypeId bare = target != 0 ? type_unqualified(type_strip_aligned(types, target)) : 0;
+    const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_VOID;
+    const bool result = bare != 0 && kind != BUSTER_TYPE_KIND_ENUM && kind != BUSTER_TYPE_KIND_ATOMIC;
+    return result;
+}
+
 static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
                                             TypeId target, const uint32_t* parents, uint32_t at_once, Arena* scratch)
 {
     __int128 converted = 0;
-    if (value->constant_kind == CHECK_CONSTANT_INTEGER && check_common_conversion_changes(types, value->type, target, value->integer, &converted) &&
+    const bool plain = check_common_conversion_target(types, target);
+    if (plain && value->constant_kind == CHECK_CONSTANT_INTEGER && check_common_conversion_changes(types, value->type, target, value->integer, &converted) &&
         !check_common_nondecimal_literal(parser, pp, &input->graph, types, source, value, target, scratch))
     {
         const String8 source_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, value->type, 0);
@@ -3074,7 +3086,7 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
                                         CHECK_WARNING_ID_CONSTANT_CONVERSION, false, message, NULL, 0, scratch);
         }
     }
-    else if (value->constant_kind == CHECK_CONSTANT_FLOATING)
+    else if (plain && value->constant_kind == CHECK_CONSTANT_FLOATING)
     {
         const CheckGraph* graph = &input->graph;
         uint32_t width = 0;
