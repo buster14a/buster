@@ -1729,7 +1729,7 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
                   "void h(int x) { if (0) x = x; return; x = x; }\nvoid k(int x) { x = x; if (x); int y = 0 ? (x = x) : 1; (void)y; }\n"
                   "int m(int x) { return (x = x) + _Generic(x, int: 1, default: (x = x)); }\n",
         .options = { "-Wself-assign" },
-        .warnings = 10,
+        .warnings = 11,
         .notes = 2,
     },
 };
