@@ -6637,6 +6637,7 @@ static void check_test_driver_declspec_literals(CheckTest* test, const char* cla
 #include "c_check_musttail_driver_test.c"
 #include "c_check_label_attribute_driver_test.c"
 #include "c_check_resume_driver_test.c"
+#include "c_check_semantic_recovery_driver_test.c"
 #include "c_check_empty_declaration_driver_test.c"
 #include "c_check_block_attribute_driver_test.c"
 #include "c_check_resume_corpus_test.c"
@@ -7669,6 +7670,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool sign_compare_only = false;
     // --cpu-dispatch-only: the cpu_specific and cpu_dispatch section alone (#1447).
     bool cpu_dispatch_only = false;
+    // --semantic-recovery-only: the semantic error recovery section alone (#1447).
+    bool semantic_recovery_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -7688,6 +7691,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             cpu_dispatch_only = true;
         }
+        else if (strcmp(argv[i], "--semantic-recovery-only") == 0)
+        {
+            semantic_recovery_only = true;
+        }
         else if (strcmp(argv[i], "--lazy-system-headers") == 0)
         {
             lazy = true;
@@ -7706,9 +7713,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             options = false;
         }
     }
-    options &= !(sign_compare_only && cpu_dispatch_only) && (!(sign_compare_only || cpu_dispatch_only) || (!lazy && check_driver_part.count == 1));
+    const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)semantic_recovery_only;
+    options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
-    const bool focused = sign_compare_only || cpu_dispatch_only;
+    const bool focused = focuses != 0;
     check_test_expect(&test, options, "driver test options are recognized");
     // The library-builtin table is pinned to BUSTER_CLANG_REFERENCE_VERSION: a different clang release is reported with
     // both versions, and the library comparisons then skip only the names that depend on its table (#1131).
@@ -8201,6 +8209,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_cpu_dispatch(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
     }
+    if (temporary && semantic_recovery_only)
+    {
+        check_test_driver_semantic_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+    }
     const char* clang_arguments[] = { "-std=gnu17", "-w" };
     if (temporary && !focused && !lazy && check_test_driver_takes())
     {
@@ -8314,6 +8326,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_lane_attributes(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_semantic_recovery(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {

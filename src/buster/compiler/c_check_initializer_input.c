@@ -512,7 +512,8 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
                  (check_sparse_present(input->initializer_begins) && check_sparse_present(input->initializer_ends) && input->declared_types != 0 &&
                   input->declaration_bits != 0 && input->token_nodes != 0));
     result->status = valid ? CHECK_INIT_OK : CHECK_INIT_INVALID;
-    if (valid && (input->resource || input->report_count != 0 || stream->status != CHECK_STATUS_OK || stream->report_count != 0))
+    // A unit whose only reports are recovered ones (#1447) is checked as a valid one.
+    if (valid && (input->resource || (input->report_count != 0 && !input->recovered_valid) || stream->status != CHECK_STATUS_OK || stream->report_count != 0))
     {
         valid = false;
         result->status = input->resource || stream->status == CHECK_STATUS_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_CHECK_FAILED;

@@ -32,6 +32,10 @@ struct CheckAttributeFixture
     bool pointer_result;
     bool ignored;
     bool nonvariadic;
+    // The attribute's reading or its function type's pass gives `error` at `error_word` and recovers from it (#1447,
+    // check_input_attribute_recover): the attributes stay valid with no declaration error, the report is the unit's one
+    // recovered report, and the attribute is dropped (left out of the list, or ignored).
+    bool recovered;
 };
 
 static void check_test_attribute_storage(CheckTest* test)
@@ -437,27 +441,32 @@ static void check_test_attribute_fixture(CheckTest* test, const CheckAttributeFi
             valid = result != 0;
         }
         snprintf(description, sizeof(description), "%s: exact attribute diagnosis", fixture->name);
-        check_test_expect(test, ready && attributes.error == fixture->error && valid == (fixture->error == CHECK_ATTRIBUTE_ERROR_NONE), description);
+        const bool recovered = fixture->recovered && valid && attributes.error == CHECK_ATTRIBUTE_ERROR_NONE && reader.output->recovered_count == 1 &&
+                               reader.output->report_count == 0 && (attributes.count == 0 || attributes.records[attributes.count - 1].ignored);
+        check_test_expect(test, ready && (fixture->recovered ? recovered : attributes.error == fixture->error && valid == (fixture->error == CHECK_ATTRIBUTE_ERROR_NONE)),
+                          description);
         if (ready && fixture->error_word != 0)
         {
             const uint8_t* bytes = 0;
             uint32_t length = 0;
-            bool spelled = attributes.error_first < parser.tokens.count;
+            // A recovered error's place is its report's.
+            const uint32_t place = recovered ? reader.output->recovered_reports[0].token : attributes.error_first;
+            bool spelled = place < parser.tokens.count;
             uint8_t buffer[64];
             if (spelled)
             {
                 // The authored offending names/numbers/punctuators above fit this buffer. Identifier spellings
                 // are returned from the intern table; pp_spelling writes at most 24 bytes for generated integers.
-                const uint32_t source = parser.tokens.sources[attributes.error_first];
+                const uint32_t source = parser.tokens.sources[place];
                 length = pp_spelling(&pp, pp.output.kinds[source], pp.output.values[source], pp.output.locations[source], buffer, &bytes);
                 spelled = length < sizeof(buffer);
             }
             snprintf(description, sizeof(description), "%s: attribute diagnosis points at the offending token", fixture->name);
             check_test_expect(test, spelled && length == strlen(fixture->error_word) && memcmp(bytes, fixture->error_word, length) == 0, description);
-            check_test_expect(test, attributes.error_first < attributes.error_end && attributes.error_end <= parser.tokens.count,
+            check_test_expect(test, recovered || (attributes.error_first < attributes.error_end && attributes.error_end <= parser.tokens.count),
                               "attribute diagnosis has a bounded nonempty source range");
         }
-        if (valid)
+        if (valid && !fixture->recovered)
         {
             snprintf(description, sizeof(description), "%s: retained attribute metadata", fixture->name);
             check_test_expect(test, attributes.count == fixture->count && (attributes.count == 0 || attributes.records[attributes.count - 1].kind == fixture->last_kind) &&
@@ -1109,6 +1118,7 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         },
         {
             .name = "format non-string parameter rejected",
+            .recovered = true,
             .source = "int f(int,...) __attribute__((format(printf,1,2)));\n",
             .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "format",
@@ -1120,6 +1130,7 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         },
         {
             .name = "nonnull parameter index rejected",
+            .recovered = true,
             .source = "int f(char*) __attribute__((nonnull(2)));\n",
             .error = CHECK_ATTRIBUTE_ERROR_PARAMETER,
             // clang's "parameter 1 is out of bounds" is at the attribute's name.
@@ -1167,6 +1178,7 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         },
         {
             .name = "allocation floating parameter rejected",
+            .recovered = true,
             .source = "void *f(float,...) __attribute__((alloc_size(1)));\n",
             .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "1",
@@ -1202,6 +1214,7 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         },
         {
             .name = "format_arg non-string return rejected",
+            .recovered = true,
             .source = "int f(char*,...) __attribute__((format_arg(1)));\n",
             .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "format_arg",
@@ -1214,6 +1227,7 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         },
         {
             .name = "malformed packed argument",
+            .recovered = true,
             .source = "struct __attribute__((packed(1))) S { int x; };\n",
             .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "packed",
@@ -1304,6 +1318,7 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         },
         {
             .name = "invalid string attribute",
+            .recovered = true,
             .source = "int x __attribute__((section(3)));\n",
             .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "3",

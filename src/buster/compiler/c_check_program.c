@@ -3802,7 +3802,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     const uint32_t node_count = input->graph.count;
     CheckProgramTargetEvents target_events = { .scratch = scratch, .room = true };
     bool valid = output != scratch && count == parser->tokens.count && count < (UINT32_MAX - 16) / 8 &&
-                 stream->status == CHECK_STATUS_OK && stream->count == node_count && stream->report_count == 0 && !input->resource && input->report_count == 0 &&
+                 stream->status == CHECK_STATUS_OK && stream->count == node_count && stream->report_count == 0 && !input->resource &&
+                 // A unit whose only reports are recovered ones (#1447) is checked as a valid one; it is never emitted.
+                 (input->report_count == 0 || input->recovered_valid) &&
                  !input->visibility_error;
     valid = valid && (options.initializers == 0 || (options.initializers->status == CHECK_INIT_OK && options.initializers->token_count == count)) &&
             (input->asm_count == 0 || (options.asms != 0 && options.asms->status == CHECK_ASM_OK)) &&
