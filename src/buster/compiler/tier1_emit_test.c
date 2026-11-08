@@ -544,10 +544,14 @@ static void tier1_emit_test_saves_twins(Tier1EmitTest* test)
 // 8-bit displacement's edge, through stores, loads and an addition fused into a memory operand; shape 1 reaches one
 // object through an indexed address the accesses fold whole; shape 2 reads an over-aligned object, which realigns the
 // frame; shape 3 keeps an address value the stores share; shape 4 reaches one object from the entry block past the
-// walk's block (a store and a load through two single-use addresses, verified as a round trip). Shapes 5 and 7 fold a
-// qword load into a materialized comparison and a branch; shapes 6 and 8 compare a promoted byte and signed word
-// directly in an over-aligned object (#1218). Every access must execute natively to its oracle's value, with no
-// object address keeping its lea.
+// walk's block (a store and a load through two single-use addresses, verified as a round trip). Shape 5 shares one
+// entry address across those accesses; shape 6 also stores the shared address itself and reads it back to use it;
+// shape 7 shares an address in a nonentry block and realigns the frame (#1217). Shape 8 escapes an indexed address
+// whose object's final offset is nonzero in a realigned frame: its lea must preserve that offset when the frame's
+// base and displacement are resolved before expansion. Memory operands fold shared addresses independently; an
+// escaping value retains its lea. Shapes 9 and 11 fold a qword load into a materialized comparison and a branch; shapes 10 and 12
+// compare a promoted byte and signed word directly in an over-aligned object (#1218). Every access must execute
+// natively to its oracle's value.
 static uint64_t tier1_emit_test_object_oracle(uint32_t shape, uint64_t a, uint64_t b)
 {
     uint64_t result = 0;
@@ -555,19 +559,19 @@ static uint64_t tier1_emit_test_object_oracle(uint32_t shape, uint64_t a, uint64
     {
         result = a + 2 * b;
     }
-    else if (shape < 5)
+    else if (shape < 9)
     {
         result = a + b;
     }
-    else if (shape == 5)
+    else if (shape == 9)
     {
         result = a < b;
     }
-    else if (shape == 6)
+    else if (shape == 10)
     {
         result = (uint8_t)a > 127;
     }
-    else if (shape == 7)
+    else if (shape == 11)
     {
         result = a < b ? a : b;
     }
@@ -601,10 +605,22 @@ static bool tier1_emit_test_object_fixture(Tier1EmitTest* test, uint32_t shape, 
     {
         sizes = (IrSizes){ .instruction_count = 9, .block_count = 2, .slot_count = 1, .parameter_count = 2 };
     }
+    else if (shape == 6)
+    {
+        sizes = (IrSizes){ .instruction_count = 10, .block_count = 1, .slot_count = 2, .parameter_count = 2 };
+    }
+    else if (shape == 8)
+    {
+        sizes = (IrSizes){ .instruction_count = 13, .block_count = 1, .slot_count = 2, .constant_count = 1, .address_count = 1, .parameter_count = 2 };
+    }
+    else if (shape < 9)
+    {
+        sizes = (IrSizes){ .instruction_count = 8, .block_count = 2, .slot_count = 1, .parameter_count = 2 };
+    }
     else
     {
-        const bool narrow = shape == 6 || shape == 8;
-        const bool branch = shape >= 7;
+        const bool narrow = shape == 10 || shape == 12;
+        const bool branch = shape >= 11;
         sizes = (IrSizes){ .instruction_count = (narrow ? 14u : 11u) + branch, .block_count = branch ? 3u : 1u, .constant_count = narrow, .slot_count = 1, .address_count = 1, .parameter_count = 2 };
     }
     bool ok = ir_create(&test->input, &sizes, function) == IR_OK;
@@ -709,12 +725,59 @@ static bool tier1_emit_test_object_fixture(Tier1EmitTest* test, uint32_t shape, 
             tier1_emit_test_node(function, 7, IR_ADD, IR_I64, 6, 0);
             tier1_emit_test_node(function, 8, IR_RET, IR_VOID, 7, BUSTER_IR_NONE);
         }
+        else if (shape == 6)
+        {
+            function->slots[0] = (IrSlot){ .size = 8, .alignment = 8, .type = IR_I64, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+            function->slots[1] = (IrSlot){ .size = 8, .alignment = 8, .type = IR_PTR, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+            tier1_emit_test_node(function, 2, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 3, IR_STACK_ADDR, IR_PTR, 1, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 4, IR_STORE, IR_VOID, 3, 2);
+            tier1_emit_test_node(function, 5, IR_LOAD, IR_PTR, 3, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 6, IR_STORE, IR_VOID, 5, 1);
+            tier1_emit_test_node(function, 7, IR_LOAD, IR_I64, 2, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 8, IR_ADD, IR_I64, 7, 0);
+            tier1_emit_test_node(function, 9, IR_RET, IR_VOID, 8, BUSTER_IR_NONE);
+        }
+        else if (shape == 8)
+        {
+            // The 32-byte-aligned pointer object precedes the indexed object's 8-byte alignment class in the layout.
+            function->slots[0] = (IrSlot){ .size = 32, .alignment = 32, .type = IR_PTR, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+            function->slots[1] = (IrSlot){ .size = 32, .alignment = 8, .type = IR_I64, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+            function->constants[0].low = 7;
+            function->addresses[0] = (IrAddress){ .scale = 1 };
+            tier1_emit_test_node(function, 2, IR_CONST, IR_I64, 0, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 3, IR_AND, IR_I64, 1, 2);
+            tier1_emit_test_node(function, 4, IR_STACK_ADDR, IR_PTR, 1, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 5, IR_ADDRESS, IR_PTR, 4, 3);
+            function->c[5] = 0;
+            tier1_emit_test_node(function, 6, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 7, IR_STORE, IR_VOID, 6, 5);
+            tier1_emit_test_node(function, 8, IR_LOAD, IR_PTR, 6, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 9, IR_STORE, IR_VOID, 8, 0);
+            tier1_emit_test_node(function, 10, IR_LOAD, IR_I64, 8, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 11, IR_ADD, IR_I64, 10, 1);
+            tier1_emit_test_node(function, 12, IR_RET, IR_VOID, 11, BUSTER_IR_NONE);
+        }
+        else if (shape < 9)
+        {
+            function->slots[0] = (IrSlot){ .size = 8, .alignment = shape == 7 ? 32 : 8, .type = IR_I64, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+            function->block_offsets[1] = shape == 7 ? 3 : 4;
+            function->block_offsets[2] = sizes.instruction_count;
+            const uint32_t object = shape == 7 ? 3 : 2;
+            const uint32_t branch = shape == 7 ? 2 : 3;
+            tier1_emit_test_node(function, object, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, branch, IR_BR, IR_VOID, 1, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 4, IR_STORE, IR_VOID, object, 1);
+            tier1_emit_test_node(function, 5, IR_LOAD, IR_I64, object, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 6, IR_ADD, IR_I64, 5, 0);
+            tier1_emit_test_node(function, 7, IR_RET, IR_VOID, 6, BUSTER_IR_NONE);
+        }
         else
         {
-            const bool narrow = shape == 6 || shape == 8;
-            const bool branch = shape >= 7;
-            const IrType type = shape == 6 ? IR_I8 : shape == 8 ? IR_I16 : IR_I64;
-            const IrType promoted = shape == 6 ? IR_I32 : IR_I64;
+            const bool narrow = shape == 10 || shape == 12;
+            const bool branch = shape >= 11;
+            const IrType type = shape == 10 ? IR_I8 : shape == 12 ? IR_I16 : IR_I64;
+            const IrType promoted = shape == 10 ? IR_I32 : IR_I64;
             function->slots[0] = (IrSlot){ .size = narrow ? 64u : 16u, .alignment = narrow ? 32u : 8u, .type = (uint8_t)type, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
             function->addresses[0] = (IrAddress){ .offset = 8, .scale = 1 };
             uint32_t next = 2;
@@ -742,13 +805,13 @@ static bool tier1_emit_test_object_fixture(Tier1EmitTest* test, uint32_t shape, 
             {
                 left = next++;
                 right = next++;
-                tier1_emit_test_node(function, left, shape == 6 ? IR_ZEXT : IR_SEXT, promoted, load, BUSTER_IR_NONE);
+                tier1_emit_test_node(function, left, shape == 10 ? IR_ZEXT : IR_SEXT, promoted, load, BUSTER_IR_NONE);
                 tier1_emit_test_node(function, right, IR_CONST, promoted, 0, BUSTER_IR_NONE);
-                function->constants[0].low = shape == 6 ? 127 : (uint64_t)-17;
+                function->constants[0].low = shape == 10 ? 127 : (uint64_t)-17;
             }
             const uint32_t compared = next++;
             tier1_emit_test_node(function, compared, IR_ICMP, IR_I1, left, right);
-            function->c[compared] = shape == 6 ? IR_GT : shape == 8 ? IR_LT : IR_ULT;
+            function->c[compared] = shape == 10 ? IR_GT : shape == 12 ? IR_LT : IR_ULT;
             if (branch)
             {
                 const uint32_t jumped = next++;
@@ -801,7 +864,7 @@ static void tier1_emit_test_execute_object(Tier1EmitTest* test, uint32_t shape, 
         uint64_t random = UINT64_C(0x1f2b3c4d5e6f7081) + shape;
         for (uint32_t sample = 0; sample < 32; sample += 1)
         {
-            const uint64_t a = shape >= 5 && sample < sizeof(compare_edges) / sizeof(compare_edges[0]) ? compare_edges[sample] :
+            const uint64_t a = shape >= 9 && sample < sizeof(compare_edges) / sizeof(compare_edges[0]) ? compare_edges[sample] :
                               sample < 4 ? UINT64_MAX << sample : tier1_emit_test_random(&random);
             const uint64_t b = sample < 4 ? UINT64_MAX >> sample : tier1_emit_test_random(&random);
             const uint64_t actual = tier1_emit_test_call(executable, a, b);
@@ -819,11 +882,11 @@ static void tier1_emit_test_execute_object(Tier1EmitTest* test, uint32_t shape, 
 // object's offset plus the walked displacement, with no lea left but the address values the stores keep.
 static void tier1_emit_test_objects(Tier1EmitTest* test)
 {
-    for (uint32_t shape = 0; shape < 9; shape += 1)
+    for (uint32_t shape = 0; shape < 13; shape += 1)
     {
         for (uint32_t vector = 0; vector < 2; vector += 1)
         {
-            for (uint32_t flags = 0; flags < (shape == 2 || shape >= 5 ? 2 : 1); flags += 1)
+            for (uint32_t flags = 0; flags < (shape >= 5 ? 4 : shape == 2 ? 2 : 1); flags += 1)
             {
                 test->terms = shape;
                 IrFunction function = { 0 };
@@ -845,9 +908,9 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
                         .certify = true,
                         .diagnostic = &diagnostic,
                         .register_mask = tier1_liveness_register_mask(),
-                        .frame_flags = flags == 1 ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
+                        .frame_flags = (flags & 1) != 0 ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
                         .vector = vector != 0,
-                        .rematerialize = true,
+                        .rematerialize = flags < 2,
                     };
                     Tier1EmitResult emitted;
                     const uint64_t scratch_mark = test->scratch.length;
@@ -864,15 +927,39 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
                         bool covered = true;
                         for (uint32_t n = 0; n < function.instruction_count; n += 1)
                         {
-                            covered &= function.op[n] != IR_STACK_ADDR || plan.covered[n] != 0;
+                            covered &= function.op[n] != IR_STACK_ADDR || (plan.covered[n] != 0) == !(shape == 6 && n == 2);
                         }
                         tier1_emit_test_expect(test, covered, "every folded object address leaves no lea");
-                        bool object_lea = false;
+                        uint32_t object_leas = 0;
                         for (uint32_t n = 0; n < function.instruction_count; n += 1)
                         {
-                            object_lea |= plan.covered[n] == 0 && plan.patterns[n].rule == TIER1_RULE_STACK_ADDRESS;
+                            object_leas += plan.covered[n] == 0 && plan.patterns[n].rule == TIER1_RULE_STACK_ADDRESS;
                         }
-                        tier1_emit_test_expect(test, !object_lea, "no object address keeps its lea");
+                        tier1_emit_test_expect(test, object_leas == (shape == 6 ? 1u : 0u), "only an escaping object address keeps its lea");
+                        if (shape == 3)
+                        {
+                            tier1_emit_test_expect(test, !plan.covered[3] && plan.patterns[6].stack_object == 0 &&
+                                                           (plan.covered[7] ? plan.patterns[8].stack_object : plan.patterns[7].stack_object) == 0,
+                                                   "shared displaced address remains for its escape while both memory users fold it");
+                        }
+                        if (shape == 6)
+                        {
+                            tier1_emit_test_expect(test, plan.patterns[4].stack_object == 1 && plan.patterns[5].stack_object == 1 &&
+                                                           (plan.covered[7] ? plan.patterns[8].stack_object : plan.patterns[7].stack_object) == 0,
+                                                   "shared frame address remains for a pointer store and its folded memory uses keep their own objects");
+                        }
+                        if (shape == 8)
+                        {
+                            int32_t offset = 0;
+                            const uint32_t first = emitted.code.node_first[5];
+                            const uint32_t end = emitted.code.node_first[6];
+                            const X86Instruction* record = end > first ? &emitted.code.records[end - 1] : 0;
+                            tier1_emit_test_expect(test, !plan.covered[5] && plan.patterns[5].stack_object == 1 && plan.patterns[5].displacement == 0 &&
+                                                           tier1_emit_cfg_object(&function, &emitted, 1, &offset) && offset != 0 && record != 0 &&
+                                                           record->form == X86_FORM_LEA_R64_M && record->mode == BUSTER_X86_MEMORY_BASE_INDEX(0) &&
+                                                           record->rm == (uint8_t)emitted.frame.base_register && record->displacement == offset,
+                                                   "an escaping indexed frame address keeps its lea and the frame's nonzero final displacement");
+                        }
                         bool placed = true;
                         uint32_t compared = 0;
                         int32_t low = INT32_MAX;
@@ -905,12 +992,12 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
                                         {
                                             record = candidate;
                                             accesses += 1;
-                                            placed &= effects->width == (shape == 6 ? 1 : shape == 8 ? 2 : 8);
+                                            placed &= effects->width == (shape == 10 ? 1 : shape == 12 ? 2 : 8);
                                         }
-                                        consumed |= record != 0 && effects->operation == (shape >= 7 ? X86_OPERATION_JCC : X86_OPERATION_SETCC);
+                                        consumed |= record != 0 && effects->operation == (shape >= 11 ? X86_OPERATION_JCC : X86_OPERATION_SETCC);
                                     }
                                     compared += 1;
-                                    placed &= accesses == 1 && consumed && (rule == TIER1_RULE_BRANCH_COMPARE) == (shape >= 7);
+                                    placed &= accesses == 1 && consumed && (rule == TIER1_RULE_BRANCH_COMPARE) == (shape >= 11);
                                 }
                                 placed &= record != 0 && record->rm == (uint8_t)emitted.frame.base_register && record->displacement == total;
                                 low = record != 0 && total < low ? total : low;
@@ -922,11 +1009,11 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
                         {
                             tier1_emit_test_expect(test, placed && low < 128 && high >= 128, "the emitted displacements straddle the 8-bit edge");
                         }
-                        if (shape == 2 || shape == 6 || shape == 8)
+                        if (shape == 2 || shape == 7 || shape == 8 || shape == 10 || shape == 12)
                         {
                             tier1_emit_test_expect(test, emitted.frame.realigned, "the over-aligned object realigns the frame");
                         }
-                        if (shape >= 5)
+                        if (shape >= 9)
                         {
                             bool folded = true;
                             for (uint32_t n = 0; n < function.instruction_count; n += 1)
@@ -934,7 +1021,7 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
                                 folded &= function.op[n] != IR_LOAD || plan.covered[n] != 0;
                             }
                             tier1_emit_test_expect(test, compared == 1 && folded, "one frame-object CMP covers the load before its boolean result or branch");
-                            tier1_emit_test_expect(test, emitted.frame.frame_pointer == (shape == 6 || shape == 8 || flags == 1), "comparison fixtures keep the requested or realignment frame pointer");
+                            tier1_emit_test_expect(test, emitted.frame.frame_pointer == (shape == 10 || shape == 12 || (flags & 1) != 0), "comparison fixtures keep the requested or realignment frame pointer");
                         }
                         tier1_emit_test_expect(test, test->scratch.length == scratch_mark, "object emission returns scratch");
                         tier1_emit_test_execute_object(test, shape, &function, &emitted);

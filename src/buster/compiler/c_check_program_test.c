@@ -2636,7 +2636,8 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
 // The jump tables the lowering makes of `source`'s switches (#136's item 7), by both paths: `tables` of them, with
 // `entries` entries in all, as clang -O0's rule gives them (check_lower_switch_table). The program must list exactly
 // its SWITCH controls with four CASE controls or more after them, in the controls' order (CheckProgram.switches), as a
-// scan of its controls finds them.
+// scan of its controls finds them. Each table's address is made once and duplicated for its load and signed-offset
+// addition (#1217), with one symbol patch even when several tables share a function.
 static void check_test_program_tables(CheckTest* test, const char* source, const char* name, uint32_t tables, uint32_t entries)
 {
     static InternTable identifiers;
@@ -2669,12 +2670,31 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
         const CheckProgramOptions options = { .initializers = &plans, .asms = &asms, .identifiers = &identifiers, .scalar = path == 0 };
         const bool lowered_ok = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) &&
                                 check_program_lower(&lowered, &program, path == 0, &output, &scratch);
+        char description[256];
         uint32_t total = 0;
         for (uint32_t t = 0; lowered_ok && t < lowered.table_count; t += 1)
         {
-            total += lowered.tables[t].count;
+            const CheckLowerTable* table = lowered.tables + t;
+            const Tier0Function* function = table->function < program.body_count ? lowered.functions + table->function : NULL;
+            const uint32_t address = table->address;
+            const uint64_t symbol = (uint64_t)lowered.case_symbol_base + t;
+            const bool shared = function != NULL && address < function->count && function->count - address >= 2 &&
+                                function->kinds[address] == BUSTER_TYPED_GLOBAL_ADDRESS && function->values[address] == symbol &&
+                                function->kinds[address + 1] == BUSTER_TYPED_DUP && function->classes[address + 1] == BUSTER_TYPED_CLASS_U64;
+            uint32_t references = 0;
+            for (uint32_t i = 0; function != NULL && i < function->count; i += 1)
+            {
+                references += function->kinds[i] == BUSTER_TYPED_GLOBAL_ADDRESS && function->values[i] == symbol;
+            }
+            uint32_t listed_addresses = 0;
+            for (uint32_t k = 0; function != NULL && function->table_addresses != NULL && k < function->table_count; k += 1)
+            {
+                listed_addresses += function->table_addresses[k] == address && address < function->table_jumps[k];
+            }
+            snprintf(description, sizeof(description), "%s: the %s path shares table %u's one patched address", name, path == 0 ? "scalar" : "vector", t);
+            check_test_expect(test, shared && references == 1 && listed_addresses == 1, description);
+            total += table->count;
         }
-        char description[256];
         snprintf(description, sizeof(description), "%s: %u jump tables of %u entries by the %s path (clang -O0's rule: %u of %u)", name,
                  lowered_ok ? lowered.table_count : 0, total, path == 0 ? "scalar" : "vector", tables, entries);
         check_test_expect(test, lowered_ok && lowered.table_count == tables && total == entries, description);

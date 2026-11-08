@@ -399,7 +399,8 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
 //    untyped temporaries, each of which one type's values reach, so that #134
 //    promotes it. Mark all address-taken locals so #134 never promotes them.
 // 2. In a preheader, materialize each slot address and each PARAM value, then
-//    store parameters into their local slots and branch to source block zero.
+//    store parameters into their local slots, materialize the explicitly listed
+//    direct table addresses (#1217), and branch to source block zero.
 //    The preheader matters when source entry zero is a backedge target: placing
 //    parameter stores directly in that block would reinitialize locals on loops.
 // 3. Each source block begins by LOADing its incoming stack shape from the depth
