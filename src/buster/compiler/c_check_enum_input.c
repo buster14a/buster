@@ -258,11 +258,14 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
                 const CheckInputMessage message = reader->bindings.kind[old - 1] == C_BINDING_ENUMERATOR ? CHECK_INPUT_ENUMERATOR_REDEFINITION : CHECK_INPUT_REDECLARATION;
                 const uint32_t before = reader->output->report_count;
                 check_input_report_subject(reader, name, message, reader->bindings.declaration[old - 1]);
-                const bool enumerator = message == CHECK_INPUT_ENUMERATOR_REDEFINITION && reader->output->report_count == before + 1 && !reader->output->resource;
-                if (enumerator)
+                const bool reported = reader->output->report_count == before + 1 && !reader->output->resource;
+                if (reported)
                 {
-                    // clang's note at the earlier enumerator (#1447): "previous definition is here". The enumerator is
-                    // dropped and the walk goes on (phase 2), its name still the earlier one's.
+                    // clang's note at the earlier declaration (#1447): "previous definition is here", an enumerator's or
+                    // any other name's of the scope (an object, a typedef, a parameter), whose error is clang's
+                    // "redefinition of 'K'". The enumerator is dropped and the walk goes on, its name still the earlier
+                    // one's.
+                    reader->output->reports[before].detail = message == CHECK_INPUT_REDECLARATION ? CHECK_REDECLARATION_DEFINITION : 0;
                     reader->output->reports[before].note_token = reader->bindings.declaration[old - 1];
                     reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
                     valid = check_input_recover_reports(reader, before);

@@ -2360,8 +2360,8 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
     const uint8_t kind = type_kind(walker->types, type);
     if (!walker->infer && string != 0 && (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY))
     {
-        const TypeId element = type_unqualified(type_element(walker->types, type));
-        const TypeId source = type_unqualified(type_element(walker->types, string->type));
+        const TypeId element = type_unqualified(type_strip_aligned(walker->types, type_element(walker->types, type)));
+        const TypeId source = type_unqualified(type_strip_aligned(walker->types, type_element(walker->types, string->type)));
         const uint64_t unit = type_size(walker->types, element);
         const bool compatible = element == source || (check_init_character(element) && check_init_character(source));
         uint64_t size = type_size(walker->types, type);
@@ -2709,7 +2709,7 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
                     uint32_t embed_length = 0;
                     const uint8_t* embed = parse_embed_bytes(walker->parser, token, &embed_length);
                     const TypeId element = type_unqualified(type_strip_aligned(walker->types, selected.type));
-                    const TypeId string_element = string != 0 ? type_unqualified(type_element(walker->types, string->type)) : 0;
+                    const TypeId string_element = string != 0 ? type_unqualified(type_strip_aligned(walker->types, type_element(walker->types, string->type))) : 0;
                     const bool string_elements = element == string_element || (check_init_character(element) && check_init_character(string_element));
                     if (stop == token)
                     {
