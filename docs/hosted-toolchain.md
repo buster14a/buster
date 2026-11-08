@@ -146,8 +146,24 @@ no credential reaches a command line. Tiny fake tools qualify installer mechanic
 hosted runs must still pass the actual compiler, Clang API, sanitizer and fuzzer
 probes; setup success is not compiler correctness qualification.
 
+`hosted-inputs-drill.yml` rehearses the outages on real hosted runners with no
+Actions cache, on PRs that change the acquisition path, weekly and on dispatch.
+It takes a source down by pointing its hosts at the loopback address in
+`/etc/hosts`. With upstream down, every input must come from the pinned mirror
+and nothing from upstream. With the mirror down, the log must report
+`reason=transport` and every input must come from upstream. Both successful
+rows install, compile and link with lld and mold, and inventory the tree (type,
+mode, path, link target and SHA-256 of every entry); a final job requires the two
+inventories to be identical. With both down, preparation must fail, publish
+nothing, and do so within 420 s: one mirror attempt plus one bounded upstream
+sequence for the first input. The weekly run also catches a pinned publication
+that has gone missing.
+
 The workflow preserves all existing hosted rows, fuzzing and aggregate failure
 semantics. Cache hits remove upstream **release** downloads, not apt, corpus,
-checkout or GitHub-service network access. Record cold/warm setup and transfer
-costs (including preparation and the artifact handoff) before claiming a latency
-improvement. Raw measurement evidence belongs in `buster-performance`.
+checkout or GitHub-service network access. What the change bought is upstream
+traffic and reliability, not per-shard latency: a warm shard spends about as
+long restoring 1.2 GB from the cache as it once spent downloading it, and the
+preparation job adds a short serial step. The measured cold/warm costs, transfer
+counts and cache size are in `buster-performance`
+(`docs/measurements/hosted-toolchain-2026-11-08/`); raw evidence belongs there.
