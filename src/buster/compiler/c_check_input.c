@@ -6304,8 +6304,10 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 valid = false;
             }
         }
-        else if (i < frame->end && check_input_attribute_starts(parser, i, frame->end))
+        else if (i < frame->end && check_input_attribute_starts(parser, i, frame->end) && parser->tokens.kinds[i] != PARSE_KIND_ALIGNAS)
         {
+            // (_Alignas is a declaration's specifier, never a declarator's suffix: after a K&R definition's identifier list
+            // it starts the first declaration of its parameters, check_input_kr_declarations, #1447.)
             valid = check_input_read_attributes(reader, &i, frame->end, &frame->attributes);
             frame->cursor = i;
         }
@@ -7641,8 +7643,9 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
             const TypeId type = check_input_declarator(reader, base, &i, body, &name, &parameters);
             CheckInputAttributes* attributes = check_input_merge_attributes(reader, common, reader->declarator_attributes);
             const uint8_t next = i < body ? parser->tokens.kinds[i] : PARSE_KIND_END;
-            valid = type != 0 && name != BUSTER_CHECK_NONE && !reader->declarator_identifier_list && (next == PARSE_KIND_COMMA || next == PARSE_KIND_SEMI) &&
-                    (attributes == 0 || !attributes->has_alignas);
+            valid = type != 0 && name != BUSTER_CHECK_NONE && !reader->declarator_identifier_list && (next == PARSE_KIND_COMMA || next == PARSE_KIND_SEMI);
+            // A parameter's _Alignas, the error of each (#1447), as clang gives it for each of the list's declarators.
+            valid = valid && (attributes == 0 || !attributes->has_alignas || check_input_alignas_declarator(reader, attributes, NULL, 0));
             uint32_t listed = BUSTER_CHECK_NONE;
             for (uint32_t parameter = names; valid && parameter != BUSTER_CHECK_NONE && listed == BUSTER_CHECK_NONE; parameter = check_sparse_get(reader->parameter_next, parameter))
             {
