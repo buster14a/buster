@@ -82,7 +82,7 @@ requirements. [Command index](README.md).
   [--uncounted]` (`helpers_measure.c`) builds the primitives' kernels and
   speedtest1 by Tier 0 and `--tier1`, each with and without
   `--helper-forms=all`, checks their outputs alike, and times their compiles and
-  runs as whole processes in rotating rounds beside each object's helper calls,
+  runs as whole processes in a Williams design's order beside each object's helper calls,
   executable bytes and Tier 1's spill and call stores and loads; the 9700X job
   runs it under the `helpers` gate (the guide's "Paired measurements"). The x86
   builtins whose instructions no Tier 0 row takes (`rdtsc`, `pause`, `xgetbv`,
