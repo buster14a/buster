@@ -1213,6 +1213,19 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_CPU_DISPATCH_BODY:
             result = "body of cpu_dispatch function will be ignored";
             break;
+        case CHECK_WARNING_EVENT_ADDRESS_SPACE_DEPRECATED:
+            // (clang's message quotes the quoted name again.)
+            result = check_warning_text(scratch, "''%.*s'' attribute is deprecated and may be removed in a future version of Clang", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_ADDRESS_SPACE_IDENTICAL:
+            result = "multiple identical address spaces specified for type";
+            break;
+        case CHECK_WARNING_EVENT_GC_WEAK_LOCAL:
+            result = "__weak attribute cannot be specified on an automatic variable when ARC is not enabled";
+            break;
+        case CHECK_WARNING_EVENT_GC_WEAK_FIELD:
+            result = "__weak attribute cannot be specified on a field declaration";
+            break;
         case CHECK_WARNING_EVENT_VECTOR_MODE:
             result = "specifying vector types with the 'mode' attribute is deprecated; use the 'vector_size' attribute instead";
             break;

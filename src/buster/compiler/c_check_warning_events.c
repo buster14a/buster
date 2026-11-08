@@ -336,6 +336,14 @@ typedef enum CheckWarningEventKind
     // function's body, at its `{`.
     CHECK_WARNING_EVENT_CPU_LIST_DUPLICATE,
     CHECK_WARNING_EVENT_CPU_DISPATCH_BODY,
+    // The address-space attributes' warnings (#1447, check_input_address_space): opencl_global_device's and
+    // opencl_global_host's -Wdeprecated-attributes, at the attribute as clang's parser gives it; and a second attribute of
+    // a type's own space, -Wduplicate-decl-specifier's, at it.
+    CHECK_WARNING_EVENT_ADDRESS_SPACE_DEPRECATED,
+    CHECK_WARNING_EVENT_ADDRESS_SPACE_IDENTICAL,
+    // objc_gc's weak qualifier on an automatic variable's or a member's type (#1447): -Wignored-attributes', at its name.
+    CHECK_WARNING_EVENT_GC_WEAK_LOCAL,
+    CHECK_WARNING_EVENT_GC_WEAK_FIELD,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

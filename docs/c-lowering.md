@@ -1385,6 +1385,24 @@ laptop, never below 1:
 
 So no compile takes the sweep; its code stays in the branch's history.
 
+## Address spaces (#1447)
+
+The checker's types carry clang's address spaces (docs/c-types.md's "Extended
+qualifiers"). clang's x86 target maps 256, 257 and 258 (`__seg_gs`, `__seg_fs`)
+to the `%gs`, `%fs` and `%ss` segments: its -O0 code loads and stores there with
+a segment override (`mov %gs:(%rax),%eax`). Tier 0's and Tier 1's memory operands
+carry no segment (the encoder has the overrides, which thread-local storage's
+forms alone use), so the lowering refuses such a load or store by name, rather
+than compile it as a plain access: an lvalue of one of those spaces read (not an
+address taken: `&`, a member's or a subscript's base), and an assignment's,
+compound assignment's, increment's or decrement's operand in one
+(`check_lower_segment_access`). Only a unit whose type table has a type in a
+segment's space tests its nodes (`CheckLowerWriter.segments`, from one `memchr`
+of the kinds for a `QUALIFIED` record, then those records' spaces), and such a
+unit's expressions take the expansion, not the plain or batched paths, so that
+each node meets the test. Any other space's code is the default space's, as
+clang's x86 code is.
+
 ## Computing with transport vectors (#137)
 
 Tier 0's VECTOR class holds vectors of 4, 8, 16, 32 and 64 bytes. The others,
