@@ -70,7 +70,34 @@ static void check_test_warning_ranges(CheckTest* test)
                 }
                 const uint8_t clear = (uint8_t)check_test_random(test);
                 const uint8_t suppress = step % 3 == 0 ? clear : 0;
+                const bool parallel = step % 4 == 0;
+                const uint32_t count_before = input.constant_warning_count;
+                // The largest fixture has eight 64-token leaves: its whole index fits sixteen words.
+                uint16_t index_before[16];
+                const uint32_t index_bytes = parallel && reader.warning_index_ready ?
+                    reader.warning_index_base * 2 * (uint32_t)sizeof(uint16_t) : 0;
+                if (index_bytes != 0)
+                {
+                    memcpy(index_before, reader.warning_index, index_bytes);
+                }
+                reader.parallel_warning_ranges = parallel;
                 check_input_warning_range(&reader, first, end, clear, suppress);
+                reader.parallel_warning_ranges = false;
+                if (parallel)
+                {
+                    mismatches += input.constant_warning_count != count_before;
+                    if (index_bytes != 0)
+                    {
+                        mismatches += memcmp(index_before, reader.warning_index, index_bytes) != 0;
+                    }
+                    // As after a worker join, account for the disjoint token writes only once.
+                    input.constant_warning_count = 0;
+                    for (uint32_t token = 0; token < count; token += 1)
+                    {
+                        input.constant_warning_count += columns[0][token] != 0;
+                    }
+                    reader.warning_index_ready = false;
+                }
                 for (uint32_t token = first; token < end; token += 1)
                 {
                     if ((columns[3][token] & BUSTER_CHECK_CONSTANT_BOUND_CONTEXT) == 0)

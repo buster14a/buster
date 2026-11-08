@@ -1,20 +1,17 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-# Stage the CMake and Ninja that build.sh drives (docs/commands/build.md) under PARENT, in a directory named by their
-# versions, from their official release archives verified by SHA-256, and print its bin directory, which holds cmake,
-# ctest and ninja. A directory that already holds them is reused; staging is serialized on a lock beside it, and a
-# failed one is never used.
+# Stage the pinned CMake/Ninja under PARENT; hosted consumers read the verified
+# handoff, while standalone/9700X callers retain bounded upstream acquisition.
 set -euo pipefail
-[ $# -eq 1 ] || { echo "usage: setup-build-tools.sh PARENT" >&2; exit 2; }
+[ $# -eq 1 ] || { echo 'usage: setup-build-tools.sh PARENT' >&2; exit 2; }
 test "$(uname -s)" = Linux
 test "$(uname -m)" = x86_64
-cmake_version=4.4.3
-# Kitware's cmake-4.4.3-SHA-256.txt for the release asset.
-cmake_digest=d6c83076c575bc00b823522ac974bda66d0af05d6ddc30e739c12385cf32c6cc
-ninja_version=1.13.2
-# The release asset ninja-linux.zip, which has no published digest; recorded when it was pinned.
-ninja_digest=5749cbc4e668273514150a80e387a957f933c6ed3f5f11e03fb30955e2bbead6
+release="$(dirname "$0")/hosted-release.sh"
+cmake_version=$(bash "$release" version cmake)
+cmake_digest=$(bash "$release" digest cmake)
+ninja_version=$(bash "$release" version ninja)
+ninja_digest=$(bash "$release" digest ninja)
 destination="$1/cmake-$cmake_version-ninja-$ninja_version"
 expected="cmake $cmake_version $cmake_digest, ninja $ninja_version $ninja_digest"
 mkdir -p "$(dirname "$destination")"
@@ -24,23 +21,13 @@ if [ ! -f "$destination/.complete" ] || [ "$(cat "$destination/.complete")" != "
     temporary=$(mktemp -d "$destination.XXXXXXXX")
     trap 'rm -rf "$temporary"' EXIT
     archive="cmake-$cmake_version-linux-x86_64"
-    # Curl's default retry policy omits transport resets (e.g. exit 35). These
-    # immutable release downloads are SHA-256 checked, so retry all errors.
-    curl --fail --location --retry 8 --retry-all-errors --retry-max-time 240 --silent --show-error \
-        "https://github.com/Kitware/CMake/releases/download/v$cmake_version/$archive.tar.gz" \
-        --output "$temporary/cmake.tar.gz"
-    printf '%s  %s\n' "$cmake_digest" "$temporary/cmake.tar.gz" | sha256sum --check --status
+    bash "$release" get cmake "$temporary/cmake.tar.gz"
     mkdir "$temporary/tree"
-    # The programs, their modules and the license; not the GUI or the documentation.
     tar -xzf "$temporary/cmake.tar.gz" -C "$temporary/tree" --strip-components=1 --no-same-owner \
         "$archive/bin/cmake" "$archive/bin/ctest" "$archive/share/cmake-${cmake_version%.*}" \
         "$archive/doc/cmake/LICENSE.rst"
     rm "$temporary/cmake.tar.gz"
-    curl --fail --location --retry 8 --retry-all-errors --retry-max-time 240 --silent --show-error \
-        "https://github.com/ninja-build/ninja/releases/download/v$ninja_version/ninja-linux.zip" \
-        --output "$temporary/ninja.zip"
-    printf '%s  %s\n' "$ninja_digest" "$temporary/ninja.zip" | sha256sum --check --status
-    # The CMake just staged extracts it: nothing else this needs may be on the host (unzip, Python).
+    bash "$release" get ninja "$temporary/ninja.zip"
     (cd "$temporary/tree/bin" && ../bin/cmake -E tar xf "$temporary/ninja.zip")
     chmod 755 "$temporary/tree/bin/ninja"
     rm "$temporary/ninja.zip"
