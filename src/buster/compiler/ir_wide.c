@@ -882,6 +882,15 @@ static IrCheck ir_wide_split_path(const IrFunction* function, Arena* output, Are
             work.output = &split;
             ir_wide_pass(&work);
             check = ir_check(work.instruction == instructions ? work.error : IR_ERROR_STRUCTURE, work.error_instruction, 0);
+            for (uint32_t k = 0; check.error == IR_OK && split.debug != NULL && k < split.debug->binding_count; k += 1)
+            {
+                IrDebugBinding* binding = split.debug->bindings + k;
+                binding->anchor = binding->anchor != BUSTER_IR_NONE ? ir_wide_low(&work, binding->anchor) : BUSTER_IR_NONE;
+                if (binding->kind == IR_DEBUG_BIND_VALUE)
+                {
+                    binding->value = ir_wide_low(&work, binding->value);
+                }
+            }
         }
         if (check.error == IR_OK)
         {

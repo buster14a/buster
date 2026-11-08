@@ -1414,6 +1414,7 @@ static int run_check_debug_tests(int argc, char** argv)
         check_debug_test_expect(&tally, initialized, "initialize the backend", 0);
         check_debug_values_test_descriptors(&tally);
         check_debug_tier1_values_locations(&tally);
+        check_debug_tier1_values_parameters(&tally);
         check_debug_test_rows(&tally);
         check_debug_test_keep(&tally);
         check_debug_test_sources(&tally, directory, programs);

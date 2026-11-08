@@ -3849,7 +3849,7 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     }
     if (error == TIER1_EMIT_OK)
     {
-        error = tier1_emit_cfg_records(plan, allowed_forms, BUSTER_VECTOR_PATH(options->vector), options->certify, options->sources, output, scratch, emitted, error_node);
+        error = tier1_emit_cfg_records(plan, allowed_forms, BUSTER_VECTOR_PATH(options->vector), options->certify || options->sources, options->sources, output, scratch, emitted, error_node);
     }
     return error;
 }

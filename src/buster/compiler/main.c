@@ -652,6 +652,7 @@ int run_backend_benchmark(int argc, char** argv);
 #pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_check_tier1.c"
 #pragma clang optimize off
+#include "buster/compiler/c_check_debug_tier1_parameters_test.c"
 #include "buster/compiler/c_check_tier1_outcome_test.c"
 #pragma clang optimize on
 #pragma clang section text = ""

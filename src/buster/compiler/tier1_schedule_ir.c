@@ -416,6 +416,15 @@ static __attribute__((unused)) IrError tier1_schedule_ir_function(IrFunction* f,
                 {
                     f->debug->origins[i] = words[w.order[i]];
                 }
+                for (uint32_t k = 0; k < f->debug->binding_count; k += 1)
+                {
+                    IrDebugBinding* binding = f->debug->bindings + k;
+                    binding->anchor = binding->anchor != BUSTER_IR_NONE ? w.place[binding->anchor] : BUSTER_IR_NONE;
+                    if (binding->kind == IR_DEBUG_BIND_VALUE)
+                    {
+                        binding->value = w.place[binding->value];
+                    }
+                }
             }
             memset(renamed, 0, ((uint64_t)f->extra_count / 64 + 1) * sizeof(uint64_t));
             for (uint32_t i = 0; i < n; i += 1)
@@ -499,6 +508,17 @@ static __attribute__((unused)) bool tier1_schedule_ir_verify(const Tier1Schedule
         {
             place[order[i]] = i;
         }
+    }
+    valid = valid && ((f->debug == NULL && scheduled->debug == NULL) ||
+                     (f->debug != NULL && scheduled->debug != NULL && f->debug->binding_count == scheduled->debug->binding_count));
+    for (uint32_t k = 0; valid && f->debug != NULL && k < f->debug->binding_count; k += 1)
+    {
+        const IrDebugBinding before = f->debug->bindings[k];
+        const IrDebugBinding after = scheduled->debug->bindings[k];
+        const uint32_t anchor = before.anchor != BUSTER_IR_NONE ? place[before.anchor] : BUSTER_IR_NONE;
+        const uint32_t value = before.kind == IR_DEBUG_BIND_VALUE ? place[before.value] : BUSTER_IR_NONE;
+        valid = before.local == after.local && before.entry == after.entry && before.literal == after.literal && before.kind == after.kind &&
+                before.bytes == after.bytes && before.type == after.type && after.anchor == anchor && after.value == value;
     }
     for (uint32_t b = 0; valid && b < f->block_count; b += 1)
     {

@@ -95,7 +95,9 @@ static bool ssa_ir_conflict(const IrFunction* f, const Arena* arena)
         (f->debug != NULL && (ssa_ir_owned(arena, f->debug, 1, sizeof(IrDebugInfo)) ||
                              ssa_ir_owned(arena, f->debug->origins, f->instruction_count, sizeof(uint32_t)) ||
                              ssa_ir_owned(arena, f->debug->locals, f->slot_count, sizeof(uint32_t)) ||
-                             ssa_ir_owned(arena, f->debug->scalars, f->debug->scalar_count, sizeof(IrDebugScalar))));
+                             ssa_ir_owned(arena, f->debug->scalars, f->debug->scalar_count, sizeof(IrDebugScalar)) ||
+                             ssa_ir_owned(arena, f->debug->bindings, f->debug->binding_count, sizeof(IrDebugBinding)) ||
+                             ssa_ir_owned(arena, f->debug->binding_flags, f->debug->binding_flags != NULL ? f->debug->local_count : 0, 1)));
 }
 
 static IrError ssa_ir_error(SsaError error)
@@ -803,6 +805,25 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
         // Promoted loads/stores and newly synthesized phis have no instruction origin. Only an original instruction
         // retained by the constructor keeps one; surviving storage slots follow the constructor's exact compaction.
         ir_debug_remap(input, &candidate, work.values, work.slots);
+        for (uint32_t k = 0; candidate.debug != NULL && k < candidate.debug->binding_count; k += 1)
+        {
+            const IrDebugBinding original = input->debug->bindings[k];
+            IrDebugBinding* binding = candidate.debug->bindings + k;
+            binding->anchor = original.anchor != BUSTER_IR_NONE ? ssa_ir_value(&work, original.anchor) : BUSTER_IR_NONE;
+            if (binding->anchor != BUSTER_IR_NONE && candidate.op[binding->anchor] == IR_UNDEF)
+            {
+                binding->anchor = BUSTER_IR_NONE;
+            }
+            if (original.kind == IR_DEBUG_BIND_VALUE)
+            {
+                binding->value = ssa_ir_value(&work, original.value);
+                if (binding->value != BUSTER_IR_NONE && candidate.op[binding->value] == IR_UNDEF)
+                {
+                    binding->value = BUSTER_IR_NONE;
+                }
+                binding->kind = binding->value == BUSTER_IR_NONE ? IR_DEBUG_BIND_UNAVAILABLE : IR_DEBUG_BIND_VALUE;
+            }
+        }
         check = ssa_ir_verify_output(&work, &candidate, vector);
     }
     if (check.error == IR_OK)

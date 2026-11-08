@@ -1321,6 +1321,120 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_labels(IrTypedSin
 // ---------------------------------------------------------------------------------------------------------------------
 // Entry points
 
+// Keep every direct source assignment, even when its value is unavailable. Entry-block admission is a property of
+// the whole original local: a write in a branch/loop, an address escape or a volatile declaration disables it. The
+// events themselves stay present so an unknown later write can never silently extend an earlier constant binding.
+static bool ir_typed_debug_bindings(const Tier0Function* input, const IrTypedPlan* plan, IrFunction* function, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    uint64_t count = input->parameter_count;
+    bool entry_once = true;
+    bool indirect = false;
+    for (uint32_t entry = 0; entry < input->count; entry += 1)
+    {
+        const uint8_t kind = input->kinds[entry];
+        count += kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
+        entry_once &= !(kind >= BUSTER_TYPED_BRANCH_FALSE && kind <= BUSTER_TYPED_JUMP_VALUE && input->values[entry] == 0);
+        indirect |= kind == BUSTER_TYPED_JUMP_INDIRECT;
+    }
+    for (uint32_t label = 0; indirect && label < input->label_count; label += 1)
+    {
+        entry_once &= input->label_entries[label] != 0;
+    }
+    bool ok = count <= UINT32_MAX;
+    IrDebugBinding* bindings = ir_allocate(output, count, sizeof(IrDebugBinding), &ok);
+    uint8_t* flags = ir_allocate(output, input->local_count, 1, &ok);
+    uint32_t* entries = ir_allocate(scratch, input->count, 4, &ok);
+    const uint32_t first_end = plan->block_count != 0 ? plan->block_firsts[1] : 0;
+    if (ok)
+    {
+        for (uint32_t local = 0; local < input->local_count; local += 1)
+        {
+            const uint8_t class = input->local_classes[local];
+            flags[local] = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64 && input->local_flags[local] == 0 ? BUSTER_IR_DEBUG_BIND_ENTRY : 0;
+        }
+        for (uint32_t local = 0; local < input->parameter_count; local += 1)
+        {
+            const uint8_t class = input->local_classes[local];
+            const bool scalar = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64;
+            bindings[local] = (IrDebugBinding)
+            {
+                .local = local,
+                .entry = BUSTER_IR_NONE,
+                .value = BUSTER_IR_NONE,
+                .anchor = BUSTER_IR_NONE,
+                .kind = IR_DEBUG_BIND_UNAVAILABLE,
+                .bytes = scalar ? (uint8_t)tier0_class_bytes(class) : 0,
+                .type = scalar ? ir_typed_types[class] : IR_VOID,
+            };
+        }
+        uint32_t at = input->parameter_count;
+        for (uint32_t entry = 0; entry < input->count; entry += 1)
+        {
+            const uint8_t kind = input->kinds[entry];
+            entries[entry] = BUSTER_IR_NONE;
+            if (kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_ATOMIC_CAS)
+            {
+                const uint32_t local = (uint32_t)(input->values[entry] >> (kind == BUSTER_TYPED_ATOMIC_CAS ? BUSTER_TYPED_CAS_LOCAL_SHIFT : 0));
+                flags[local] = 0;
+            }
+            if (kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL)
+            {
+                const uint32_t local = (uint32_t)input->values[entry];
+                const uint8_t class = input->local_classes[local];
+                const bool scalar = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64;
+                flags[local] = entry < first_end && entry_once ? flags[local] : 0;
+                entries[entry] = at;
+                bindings[at++] = (IrDebugBinding)
+                {
+                    .local = local,
+                    .entry = entry,
+                    .value = BUSTER_IR_NONE,
+                    .anchor = BUSTER_IR_NONE,
+                    .kind = IR_DEBUG_BIND_UNAVAILABLE,
+                    .bytes = scalar ? (uint8_t)tier0_class_bytes(class) : 0,
+                    .type = scalar ? ir_typed_types[class] : IR_VOID,
+                };
+            }
+        }
+        for (uint32_t node = 0; node < function->instruction_count; node += 1)
+        {
+            if (function->op[node] == IR_STORE && function->op[function->a[node]] == IR_STACK_ADDR)
+            {
+                const uint32_t local = function->a[function->a[node]];
+                const uint32_t entry = function->debug->origins[node];
+                const uint32_t event = entry < input->count ? entries[entry] : local < input->parameter_count ? local : BUSTER_IR_NONE;
+                const uint32_t value = function->b[node];
+                if (event != BUSTER_IR_NONE && bindings[event].local == local && bindings[event].bytes != 0 && function->type[value] == bindings[event].type)
+                {
+                    IrDebugBinding* binding = bindings + event;
+                    binding->anchor = value;
+                    binding->value = value;
+                    binding->kind = IR_DEBUG_BIND_VALUE;
+                    if (function->op[value] == IR_CONST)
+                    {
+                        const uint8_t bytes = binding->bytes;
+                        const uint64_t literal = function->constants[function->a[value]].low;
+                        binding->literal = bytes == 8 ? literal : literal & ((UINT64_C(1) << (bytes * 8)) - 1);
+                        binding->value = BUSTER_IR_NONE;
+                        binding->kind = IR_DEBUG_BIND_CONSTANT;
+                    }
+                }
+            }
+        }
+        function->debug->bindings = bindings;
+        function->debug->binding_count = (uint32_t)count;
+        function->debug->binding_flags = flags;
+        function->debug->first_block_end = first_end;
+        function->arena_bytes += output->length - mark;
+    }
+    else
+    {
+        arena_pop_to(output, mark);
+    }
+    return ok;
+}
+
 // Whole values whose identity needs no later SSA reconstruction. A parameter must never be assigned or exposed by
 // address. A literal local must have exactly one initializing store in the first source block, before its control
 // transfer or any incoming label. That store dominates every later source entry. The debug consumer still restricts
@@ -1631,7 +1745,8 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
                 {
                     candidate.debug->locals[local] = local;
                 }
-                check.error = ir_typed_debug_scalars(input, &plan, &candidate, output, scratch) ? IR_OK : IR_ERROR_MEMORY;
+                check.error = ir_typed_debug_bindings(input, &plan, &candidate, output, scratch) &&
+                              ir_typed_debug_scalars(input, &plan, &candidate, output, scratch) ? IR_OK : IR_ERROR_MEMORY;
             }
             else
             {

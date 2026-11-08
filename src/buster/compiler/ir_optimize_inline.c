@@ -179,6 +179,8 @@ static bool ir_inline_function_conflict(const IrFunction* function, const Arena*
         function->debug != NULL ? function->debug->origins : NULL,
         function->debug != NULL ? function->debug->locals : NULL,
         function->debug != NULL ? function->debug->scalars : NULL,
+        function->debug != NULL ? function->debug->bindings : NULL,
+        function->debug != NULL ? function->debug->binding_flags : NULL,
     };
     const uint64_t counts[] = {
         sizeof(*function),
@@ -206,6 +208,8 @@ static bool ir_inline_function_conflict(const IrFunction* function, const Arena*
         function->debug != NULL ? (uint64_t)function->instruction_count * sizeof(uint32_t) : 0,
         function->debug != NULL ? (uint64_t)function->slot_count * sizeof(uint32_t) : 0,
         function->debug != NULL ? (uint64_t)function->debug->scalar_count * sizeof(IrDebugScalar) : 0,
+        function->debug != NULL ? (uint64_t)function->debug->binding_count * sizeof(IrDebugBinding) : 0,
+        function->debug != NULL && function->debug->binding_flags != NULL ? function->debug->local_count : 0,
     };
     bool conflict = false;
     for (uint32_t i = 0; !conflict && i < sizeof(pointers) / sizeof(pointers[0]); i += 1)

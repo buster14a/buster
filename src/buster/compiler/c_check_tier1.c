@@ -581,7 +581,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
                 .anchor_count = 2,
                 .record_order = record_order,
             };
-            scheduled = sources && record_order == NULL ? (CheckTier1ScheduleResult){ 0 } : check_tier1_schedule_code(scratch, &schedule, !scalar, certify);
+            scheduled = sources && record_order == NULL ? (CheckTier1ScheduleResult){ 0 } : check_tier1_schedule_code(scratch, &schedule, !scalar, certify || sources);
             counts->schedule_blocks = scheduled.blocks;
             counts->schedule_moved = scheduled.moved;
         }

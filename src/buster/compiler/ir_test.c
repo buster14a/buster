@@ -2309,7 +2309,26 @@ static void ir_test_debug(IrTestTally* tally, Arena* memory, Arena* scratch)
         const uint64_t plain = memory->length;
         ir_test_expect(tally, ir_debug_create(memory, &function, NULL) && function.debug == NULL && memory->length == plain,
                        "absent source metadata allocated storage");
-        const IrDebugInfo seed = { .entry_count = 4, .local_count = 0 };
+        uint8_t binding_flags = BUSTER_IR_DEBUG_BIND_ENTRY;
+        IrDebugBinding binding =
+        {
+            .local = 0,
+            .entry = 2,
+            .value = 1,
+            .anchor = 1,
+            .kind = IR_DEBUG_BIND_VALUE,
+            .bytes = 8,
+            .type = IR_I64,
+        };
+        const IrDebugInfo seed =
+        {
+            .entry_count = 4,
+            .local_count = 1,
+            .bindings = &binding,
+            .binding_count = 1,
+            .binding_flags = &binding_flags,
+            .first_block_end = 4,
+        };
         if (ir_debug_create(memory, &function, &seed))
         {
             ir_test_expect(tally, function.debug->origins[0] == BUSTER_IR_NONE && function.debug->origins[2] == BUSTER_IR_NONE,
@@ -2317,6 +2336,9 @@ static void ir_test_debug(IrTestTally* tally, Arena* memory, Arena* scratch)
             function.debug->origins[0] = 1;
             function.debug->origins[1] = 3;
             ir_test_pair(tally, &function, scratch, NULL, true, "valid source identities rejected");
+            function.debug->bindings[0].value = function.instruction_count;
+            ir_test_pair(tally, &function, scratch, NULL, false, "stale source assignment value accepted");
+            function.debug->bindings[0].value = 1;
             function.debug->instruction_count += 1;
             ir_test_pair(tally, &function, scratch, NULL, false, "stale instruction identity length accepted");
             function.debug->instruction_count -= 1;
@@ -2335,6 +2357,10 @@ static void ir_test_debug(IrTestTally* tally, Arena* memory, Arena* scratch)
                 ir_test_expect(tally, copy.debug != function.debug && copy.debug->origins != origins && copy.debug->origins[0] == BUSTER_IR_NONE &&
                                copy.debug->origins[1] == BUSTER_IR_NONE && copy.debug->origins[2] == 1 && origins[0] == 1 && origins[1] == 3,
                                "source remap aliased input, retained a dropped origin or missed a permutation");
+                ir_test_expect(tally, copy.debug->binding_count == 1 && copy.debug->bindings[0].kind == IR_DEBUG_BIND_UNAVAILABLE &&
+                               copy.debug->bindings[0].value == BUSTER_IR_NONE && copy.debug->bindings[0].anchor == BUSTER_IR_NONE &&
+                               copy.debug->bindings[0].entry == 2 && function.debug->bindings[0].value == 1,
+                               "a missing value map erased an assignment kill or reused a stale SSA identity");
             }
             else
             {

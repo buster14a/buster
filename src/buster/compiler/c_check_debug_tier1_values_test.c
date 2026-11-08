@@ -3,8 +3,9 @@
 //
 // Tier 1's retained object locations (#1114). The source passes objects' addresses across a translation-unit
 // boundary, changes them through aliases, and keeps them alive across calls. GDB stops inside the callee and reads
-// its caller, so a location must also be valid at the suspended caller's adjusted PC. Promoted values remain named
-// and typed but unavailable; an inlined callee's local must never become one of the caller's declarations.
+// its caller, so a location must also be valid at the suspended caller's adjusted PC. Snapshots must keep their old
+// values after alias mutation; an assignment cannot show a call's result until it returns. An inlined callee's local
+// must never become one of the caller's declarations.
 
 // The late publication boundary rejects bad source IDs and record ranges before publishing a count. Interleaved
 // source locals become separate sorted lists; a record interval whose instructions encode to no bytes disappears.
@@ -89,6 +90,9 @@ static void check_debug_tier1_values_locations(CheckDebugTestTally* tally)
                                 "patchable entry padding shifts exact debug ranges from the symbol and never extends them over NOPs", NULL);
     }
 }
+
+// Defined after the Tier 1 debug helpers in c_check_debug_tier1_parameters_test.c.
+static void check_debug_tier1_values_parameters(CheckDebugTestTally* tally);
 
 static const char check_debug_tier1_values_source[] =
     "#line 1 \"dbg_tier1_values.c\"\n"
@@ -234,60 +238,77 @@ static const char* const check_debug_tier1_values_expected[] = {
 };
 
 // Unlike the short-command helper, a checked command file neither drops commands at an argv limit nor accepts a
-// successful inferior run as proof that GDB reached all value assertions. Every required read precedes DONE.
+// successful inferior run as proof that GDB reached all value assertions. GDB's Python exception boundary lets a
+// failed read report its own error without hiding subsequent checkpoints. Errors, missing exact values and missing
+// DONE are all failures; catching the error only preserves the rest of the diagnostic transcript.
 static const char check_debug_tier1_values_script[] =
     "set pagination off\n"
     "set confirm off\n"
     "set width 0\n"
     "set debuginfod enabled off\n"
+    "python\n"
+    "import gdb\n"
+    "class T1Read(gdb.Command):\n"
+    "    def __init__(self):\n"
+    "        super().__init__('t1-read', gdb.COMMAND_DATA)\n"
+    "    def invoke(self, command, from_tty):\n"
+    "        try:\n"
+    "            gdb.execute(command, from_tty=from_tty)\n"
+    "        except gdb.error as error:\n"
+    "            gdb.write('\\nGDB-T1-READ-ERROR: ' + str(error) + '\\n')\n"
+    "T1Read()\n"
+    "end\n"
     "break *t1_checkpoint\n"
     "break dbg_tier1_values.c:700\n"
     "break *t1_scalars\n"
     "break dbg_tier1_values.c:800\n"
     "run\n"
     "up\n"
-    "printf \"GDB-T1-BASE %d %d %d %d %d %d %d %d %d\\n\",number,frame,escaped,record.first,record.small,*record.pointer,array[2],*pointer,shadow\n"
+    "t1-read printf \"GDB-T1-BASE %d %d %d %d %d %d %d %d %d\\n\",number,frame,escaped,record.first,record.small,*record.pointer,array[2],*pointer,shadow\n"
     "printf \"GDB-T1-LOCALS-BEGIN\\n\"\n"
-    "info locals\n"
+    "t1-read info locals\n"
     "printf \"GDB-T1-LOCALS-END\\n\"\n"
-    "ptype promoted\n"
+    "t1-read ptype promoted\n"
     "down\n"
     "continue\n"
     "up\n"
-    "printf \"GDB-T1-MUTATED %d %d %d %d %d %d %d %d %d\\n\",number,frame,escaped,record.first,record.small,*record.pointer,array[2],*pointer,shadow\n"
+    "t1-read printf \"GDB-T1-MUTATED %d %d %d %d %d %d %d %d %d\\n\",number,frame,escaped,record.first,record.small,*record.pointer,array[2],*pointer,shadow\n"
+    "printf \"GDB-T1-AFTER-BEGIN\\n\"\n"
+    "t1-read info locals\n"
+    "printf \"GDB-T1-AFTER-END\\n\"\n"
     "down\n"
     "continue\n"
     "up\n"
-    "printf \"GDB-T1-INNER %d\\n\",shadow\n"
+    "t1-read printf \"GDB-T1-INNER %d\\n\",shadow\n"
     "down\n"
     "continue\n"
     "up\n"
-    "printf \"GDB-T1-OUTER %d\\n\",shadow\n"
+    "t1-read printf \"GDB-T1-OUTER %d\\n\",shadow\n"
     "down\n"
     "continue\n"
     "up\n"
-    "printf \"GDB-T1-LOOP %d\\n\",loop\n"
+    "t1-read printf \"GDB-T1-LOOP %d\\n\",loop\n"
     "down\n"
     "continue\n"
     "up\n"
-    "printf \"GDB-T1-LOOP %d\\n\",loop\n"
+    "t1-read printf \"GDB-T1-LOOP %d\\n\",loop\n"
     "down\n"
     "continue\n"
     "up\n"
-    "printf \"GDB-T1-ALIGNED %d %d\\n\",aligned[0],aligned[15]\n"
+    "t1-read printf \"GDB-T1-ALIGNED %d %d\\n\",aligned[0],aligned[15]\n"
     "down\n"
     "continue\n"
     "up\n"
     "printf \"GDB-T1-CALL-ARGS-BEGIN\\n\"\n"
-    "info args\n"
+    "t1-read info args\n"
     "printf \"GDB-T1-CALL-ARGS-END\\n\"\n"
     "down\n"
     "continue\n"
-    "printf \"GDB-T1-LEAF %d\\n\",leaf\n"
+    "t1-read printf \"GDB-T1-LEAF %d\\n\",leaf\n"
     "continue\n"
-    "printf \"GDB-T1-PARAMS %d %ld %.2f %.2f %d\\n\",number,wide,fraction,precision,*pointer\n"
+    "t1-read printf \"GDB-T1-PARAMS %d %ld %.2f %.2f %d\\n\",number,wide,fraction,precision,*pointer\n"
     "continue\n"
-    "printf \"GDB-T1-CONSTANTS %d %d %llu\\n\",literal,negative,(unsigned long long)literal_bits\n"
+    "t1-read printf \"GDB-T1-CONSTANTS %d %d %llu\\n\",literal,negative,(unsigned long long)literal_bits\n"
     "continue\n"
     "printf \"GDB-T1-DONE\\n\"\n";
 
@@ -384,7 +405,7 @@ static bool check_debug_tier1_values_same_code(String8 debug, String8 plain)
     return same && text && counts[0] == counts[1];
 }
 
-static void check_debug_tier1_values_read(CheckDebugTestTally* tally, const char* program, const char* script, Arena* arena)
+static void check_debug_tier1_values_read(CheckDebugTestTally* tally, const char* program, const char* script, const char* directory, Arena* arena)
 {
     char report[PATH_MAX + 24];
     char errors[PATH_MAX + 24];
@@ -407,10 +428,11 @@ static void check_debug_tier1_values_read(CheckDebugTestTally* tally, const char
                                 "the optimized fixture prints independently specified values", check_debug_tier1_values_expected[e]);
     }
     snprintf(report, sizeof(report), "%s.t1-gdb", program);
-    char* gdb[] = { (char*)"gdb", (char*)"-nx", (char*)"-batch", (char*)"-x", (char*)script, (char*)program, NULL };
+    char* gdb[] = { (char*)"gdb", (char*)"-nx", (char*)"-batch", (char*)"-directory", (char*)directory, (char*)"-x", (char*)script, (char*)program, NULL };
     const bool inspected = object_test_run(gdb, report, errors) == 0;
     const String8 transcript = foreign_test_read(arena, report);
-    check_debug_test_expect(tally, inspected && transcript.pointer != NULL && strstr(transcript.pointer, "GDB-T1-DONE\n") != NULL,
+    check_debug_test_expect(tally, inspected && transcript.pointer != NULL && strstr(transcript.pointer, "GDB-T1-DONE\n") != NULL &&
+                                  strstr(transcript.pointer, "GDB-T1-READ-ERROR:") == NULL,
                             "GDB reaches every optimized value checkpoint without a command error", report);
     for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(check_debug_tier1_values_expected); e += 1)
     {
@@ -421,15 +443,23 @@ static void check_debug_tier1_values_read(CheckDebugTestTally* tally, const char
     }
     const char* begin = transcript.pointer != NULL ? strstr(transcript.pointer, "GDB-T1-LOCALS-BEGIN\n") : NULL;
     const char* end = begin != NULL ? strstr(begin, "GDB-T1-LOCALS-END\n") : NULL;
-    const char* promoted = begin != NULL ? strstr(begin, "promoted = <optimized out>") : NULL;
-    const char* mutable_value = begin != NULL ? strstr(begin, "mutable_value = <optimized out>") : NULL;
+    const char* promoted = begin != NULL ? strstr(begin, "promoted = 17\n") : NULL;
+    const char* mutable_value = begin != NULL ? strstr(begin, "mutable_value = ") : NULL;
     const char* inline_only = begin != NULL ? strstr(begin, "inline_only") : NULL;
     check_debug_test_expect(tally, end != NULL && promoted != NULL && promoted < end && strstr(end, "type = int") != NULL,
-                            "a promoted snapshot retains its name and type without inventing a location", report);
-    check_debug_test_expect(tally, end != NULL && mutable_value != NULL && mutable_value < end,
-                            "an unsupported reassignment advertises neither its stale constant nor its future call result in the suspended caller", report);
+                            "a promoted snapshot retains its name, type and actual pre-mutation value", report);
+    check_debug_test_expect(tally, end != NULL && mutable_value != NULL && mutable_value < end &&
+                                  (strncmp(mutable_value, "mutable_value = 7\n", strlen("mutable_value = 7\n")) == 0 ||
+                                   strncmp(mutable_value, "mutable_value = <optimized out>\n", strlen("mutable_value = <optimized out>\n")) == 0),
+                            "a suspended assignment exposes only its previous value or a gap, never its future call result", report);
     check_debug_test_expect(tally, end != NULL && (inline_only == NULL || inline_only >= end),
                             "an inlined callee's local is not reported as a caller local", report);
+    const char* after_begin = transcript.pointer != NULL ? strstr(transcript.pointer, "GDB-T1-AFTER-BEGIN\n") : NULL;
+    const char* after_end = after_begin != NULL ? strstr(after_begin, "GDB-T1-AFTER-END\n") : NULL;
+    const char* after_promoted = after_begin != NULL ? strstr(after_begin, "promoted = 17\n") : NULL;
+    const char* after_value = after_begin != NULL ? strstr(after_begin, "mutable_value = 101\n") : NULL;
+    check_debug_test_expect(tally, after_end != NULL && after_promoted != NULL && after_promoted < after_end && after_value != NULL && after_value < after_end,
+                            "after the call and alias mutation, the saved snapshot is still 17 and the completed assignment is 101", report);
     const char* call_begin = transcript.pointer != NULL ? strstr(transcript.pointer, "GDB-T1-CALL-ARGS-BEGIN\n") : NULL;
     const char* call_end = call_begin != NULL ? strstr(call_begin, "GDB-T1-CALL-ARGS-END\n") : NULL;
     const char* saved = call_begin != NULL ? strstr(call_begin, "number = 19\n") : NULL;
@@ -473,7 +503,7 @@ static void check_debug_tier1_values_test(CheckDebugTestTally* tally, const char
                                 "-g preserves executable code, data, unwind and runtime relocations for each Tier 1 option", program);
         if (built)
         {
-            check_debug_tier1_values_read(tally, program, script, arena);
+            check_debug_tier1_values_read(tally, program, script, directory, arena);
         }
         baseline = v == 0 ? debug : baseline;
     }
@@ -520,7 +550,7 @@ static void check_debug_tier1_values_test(CheckDebugTestTally* tally, const char
         check_debug_test_expect(tally, linked, "the optimized value object links through bfd, lld and link-foreign", errors);
         if (linked)
         {
-            check_debug_tier1_values_read(tally, program, script, arena);
+            check_debug_tier1_values_read(tally, program, script, directory, arena);
         }
     }
 }

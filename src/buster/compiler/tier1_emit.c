@@ -240,6 +240,19 @@ struct Tier1RowPlacement
     uint8_t position;
 };
 
+// An optional scalar definition proved by the emitted-code certificate. The index in the array is its IR node;
+// [first, end) is its verified kernel in the original record order, not an allocation interval. A consumer must
+// still replay concrete writes after scheduling before publishing a location. UINT32_MAX boundaries mean absent.
+typedef struct Tier1DebugDefinition Tier1DebugDefinition;
+struct Tier1DebugDefinition
+{
+    uint32_t first;
+    uint32_t end;
+    uint8_t reg;
+    uint8_t class;
+    uint8_t bytes;
+};
+
 typedef struct Tier1EmitResult Tier1EmitResult;
 struct Tier1EmitResult
 {
@@ -311,7 +324,7 @@ struct Tier1EmitResult
     uint64_t certificate_edits;
     // #939/#1114: both consumers' record origins (Tier1Origin and its payload), with sources or the CFG certificate.
     // Values, each block's first record (and the records' count after them) and each split edge's stub's first
-    // (UINT32_MAX for an edge without a stub) belong to the CFG certificate alone; null otherwise.
+    // (UINT32_MAX for an edge without a stub) support the CFG certificate, also used to prove debug definitions.
     uint32_t* origins;
     uint32_t* origin_values;
     uint32_t* block_records;
@@ -332,6 +345,9 @@ struct Tier1EmitResult
     uint32_t code_reason;
     uint64_t code_edits;
     uint64_t code_originals;
+    // With sources, one entry per IR node, present only after the complete emitted-code certificate succeeds.
+    // Register classes use BUSTER_TIER1_ALLOCATE_GPR/VECTOR; only scalar low-byte values are represented here.
+    Tier1DebugDefinition* debug_definitions;
 };
 
 typedef struct Tier1EmitTransitions Tier1EmitTransitions;
@@ -1792,23 +1808,6 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     {
         error = tier1_emit_cfg_function(plan, options, allowed_forms, output, scratch, &emitted, error_node);
     }
-    if (error == TIER1_EMIT_OK && !chain && options->certify)
-    {
-        // The code's certificate (#939), decoded from its records: a refusal fails the function, a shape it doesn't
-        // decode yet leaves the code uncertified.
-        Tier1CertReport report = { 0 };
-        Tier1CertEmittedStats stats = { 0 };
-        const Tier1CertEmittedReason reason = tier1_certificate_emitted_check(plan, &emitted, output, scratch, &report, &stats);
-        emitted.code_checked = true;
-        emitted.code_reason = reason;
-        emitted.code_edits = stats.edits + stats.edge_edits;
-        emitted.code_originals = stats.originals;
-        if (reason >= TIER1_CERT_EMITTED_REFUSED)
-        {
-            tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CERTIFICATE, BUSTER_TIER1_EMIT_CODE_CERTIFICATE | reason);
-            error = reason == TIER1_CERT_EMITTED_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_CERTIFICATE;
-        }
-    }
     if (error == TIER1_EMIT_OK && chain)
     {
         const Tier1LivenessError live = tier1_liveness_build(plan, output, scratch, BUSTER_VECTOR_PATH(options->vector), &emitted.liveness);
@@ -1915,6 +1914,27 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     if (error == TIER1_EMIT_OK && chain)
     {
         error = tier1_emit_records(plan, allowed_forms, BUSTER_VECTOR_PATH(options->vector), options->sources, output, scratch, &emitted, error_node);
+    }
+    if (error == TIER1_EMIT_OK && !chain && (options->certify || options->sources))
+    {
+        // Decode the final CFG consumer's code, including a straight-line allocation that fell back to this
+        // consumer. Debug definitions require the same independent proof even without --verify. Unsupported
+        // shapes retain their existing reason and publish no definition claims; a refusal remains transactional.
+        bool room = true;
+        Tier1DebugDefinition* definitions = options->sources ? ir_allocate(output, plan->function->instruction_count, sizeof(Tier1DebugDefinition), &room) : NULL;
+        Tier1CertReport report = { 0 };
+        Tier1CertEmittedStats stats = { 0 };
+        const Tier1CertEmittedReason reason = room ? tier1_certificate_emitted_check_debug(plan, &emitted, output, scratch, definitions, &report, &stats) : TIER1_CERT_EMITTED_CAPACITY;
+        emitted.code_checked = true;
+        emitted.code_reason = reason;
+        emitted.code_edits = stats.edits + stats.edge_edits;
+        emitted.code_originals = stats.originals;
+        emitted.debug_definitions = reason == TIER1_CERT_EMITTED_OK ? definitions : NULL;
+        if (reason >= TIER1_CERT_EMITTED_REFUSED)
+        {
+            tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CERTIFICATE, BUSTER_TIER1_EMIT_CODE_CERTIFICATE | reason);
+            error = reason == TIER1_CERT_EMITTED_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_CERTIFICATE;
+        }
     }
     if (arguments)
     {

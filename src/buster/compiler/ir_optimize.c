@@ -1797,6 +1797,19 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
         ir_debug_remap(f, &candidate, values, NULL);
         if (candidate.debug != NULL)
         {
+            for (uint32_t k = 0; k < candidate.debug->binding_count; k += 1)
+            {
+                const IrDebugBinding original = f->debug->bindings[k];
+                IrDebugBinding* binding = candidate.debug->bindings + k;
+                if (original.kind == IR_DEBUG_BIND_VALUE && work->states[original.value] == IROPT_CONSTANT &&
+                    f->type[original.value] == original.type && original.bytes != 0 && original.bytes <= 8)
+                {
+                    const uint64_t literal = work->values[original.value].low;
+                    binding->literal = original.bytes == 8 ? literal : literal & ((UINT64_C(1) << (original.bytes * 8)) - 1);
+                    binding->value = BUSTER_IR_NONE;
+                    binding->kind = IR_DEBUG_BIND_CONSTANT;
+                }
+            }
             // SCCP can retain a floating operation's effects immediately before its folded constant. Both records
             // originate in that operation; neither new node is inferred from a neighboring instruction's source.
             for (uint32_t i = 0; i < f->instruction_count; i += 1)

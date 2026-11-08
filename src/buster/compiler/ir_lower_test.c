@@ -2458,8 +2458,9 @@ static void ir_lower_test_sources(IrLowerTestTally* tally)
         BUSTER_TYPED_CLASS_I32,
         BUSTER_TYPED_CLASS_I8,
         BUSTER_TYPED_CLASS_F64,
+        BUSTER_TYPED_CLASS_I32,
     };
-    const uint8_t local_flags[] = { 0, 0, 0, 0, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, 0, 0, 0 };
+    const uint8_t local_flags[] = { 0, 0, 0, 0, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, 0, 0, 0, 0 };
     const AbiLocation parameters[] = {
         { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
         { .registers = { BUSTER_ABI_RSI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
@@ -2469,13 +2470,28 @@ static void ir_lower_test_sources(IrLowerTestTally* tally)
     for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(assigned); k += 1)
     {
         const uint32_t local = assigned[k];
-        ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, local_classes[local], literals[k]);
+        if (k + 1 == BUSTER_ARRAY_LENGTH(assigned))
+        {
+            ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+            ir_lower_test_entry(&stream, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
+        }
+        else
+        {
+            ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, local_classes[local], literals[k]);
+        }
         ir_lower_test_entry(&stream, BUSTER_TYPED_SET_LOCAL, local_classes[local], local);
     }
     ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
-    ir_lower_test_entry(&stream, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_U64, 18);
+    const uint32_t branch = stream.count;
+    ir_lower_test_entry(&stream, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_U64, 0);
     ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 23);
     ir_lower_test_entry(&stream, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, 5);
+    const uint32_t loop = stream.count;
+    stream.values[branch] = loop;
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 5);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, 8);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_U64, loop);
     ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
     ir_lower_test_entry(&stream, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
     const Tier0Function source = {
@@ -2529,6 +2545,19 @@ static void ir_lower_test_sources(IrLowerTestTally* tally)
                 valid = described.debug->locals[local] == local;
             }
             ir_lower_test_expect(tally, valid, "debug admission changed IR, lost exact literal bits, or admitted a reassigned/addressed/conditional local", 0, scalar);
+            const IrDebugInfo* debug = described.debug;
+            bool bindings = debug->binding_count == 11 && debug->first_block_end == branch + 1 &&
+                            debug->bindings[0].local == 0 && debug->bindings[0].entry == BUSTER_IR_NONE && debug->bindings[0].kind == IR_DEBUG_BIND_VALUE &&
+                            described.op[debug->bindings[0].value] == IR_PARAM && described.a[debug->bindings[0].value] == 0 &&
+                            debug->bindings[3].local == 3 && debug->bindings[3].entry == 3 && debug->bindings[3].kind == IR_DEBUG_BIND_CONSTANT && debug->bindings[3].literal == 11 &&
+                            debug->bindings[8].local == 3 && debug->bindings[8].entry == 14 && debug->bindings[8].kind == IR_DEBUG_BIND_VALUE &&
+                            described.op[debug->bindings[8].value] == IR_TRUNC;
+            for (uint32_t local = 0; bindings && local < source.local_count; local += 1)
+            {
+                const uint8_t admitted = local != 4 && local != 5 && local != 8 ? BUSTER_IR_DEBUG_BIND_ENTRY : 0;
+                bindings = debug->binding_flags[local] == admitted;
+            }
+            ir_lower_test_expect(tally, bindings, "assignment events lost an initial parameter, a later unknown write, or the branch/loop whole-local exclusion", 0, scalar);
             const uint64_t required = plain_output.length;
             arena_pop_to(&output, 0);
             Arena bounded = output;
@@ -2543,6 +2572,19 @@ static void ir_lower_test_sources(IrLowerTestTally* tally)
         }
         arena_pop_to(&output, 0);
         arena_pop_to(&plain_output, 0);
+        // The first typed block can itself be a loop header. Its assignments are not one-time definitions merely
+        // because their entry numbers precede the first control transfer; an unchanged incoming parameter still is.
+        stream.values[loop + 3] = 0;
+        IrFunction reentered = { 0 };
+        const IrCheck reentered_check = ir_lower_typed_target_pieces_sources(&source, IR_I64, 1, 0, &output, &scratch, &reentered, scalar != 0);
+        bool excluded = reentered_check.error == IR_OK && reentered.debug != NULL && reentered.debug->binding_count == 11;
+        for (uint32_t local = 0; excluded && local < source.local_count; local += 1)
+        {
+            excluded = reentered.debug->binding_flags[local] == (local == 0 ? BUSTER_IR_DEBUG_BIND_ENTRY : 0);
+        }
+        ir_lower_test_expect(tally, excluded, "a backedge into the first source block excludes every written local", 0, scalar);
+        stream.values[loop + 3] = loop;
+        arena_pop_to(&output, 0);
     }
     arena_release(&scratch);
     arena_release(&plain_output);

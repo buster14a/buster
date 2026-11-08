@@ -6,8 +6,8 @@
 // Neither an instruction number nor an allocation interval is a source-variable identity. The post-scheduler's
 // new-to-old permutation carries those record origins without adding a scheduling cut or changing code under -g.
 //
-// Retained objects use the actual frame's base and byte offsets. A shared physical slot is unavailable here until
-// its source lifetime can be proved at final instruction boundaries. Prologue, entry copies, epilogues, returns and
+// Retained objects use the actual frame's base and byte offsets. A shared physical slot additionally needs a proved
+// source lifetime and concrete initialization/overwrite boundaries. Prologue, entry copies, epilogues, returns and
 // unknown origins are gaps. A body write to the frame base also makes these homes unavailable. Unsupported storage
 // loses only its location; malformed metadata and capacity failures fail transactionally.
 //
@@ -642,8 +642,8 @@ static uint32_t check_tier1_debug_sources(const uint32_t* entries, uint32_t firs
     return count;
 }
 
-// A retained original local's whole object, proved to have its own physical slot. Slot flags for ABI bookkeeping do
-// not describe source objects. The original local's size must fit the surviving slot, including scalar homes.
+// A retained original local's whole object in the physical frame. A shared row needs the additional lifetime proof
+// below. Slot flags for ABI bookkeeping do not describe source objects. The original local's size must fit.
 static bool check_tier1_debug_home(const Tier0Function* function, const IrFunction* ir, const Tier1EmitResult* emitted, const uint32_t* uses, uint32_t slot, Tier0Home* home)
 {
     const uint32_t local = ir->debug->locals[slot];
@@ -656,7 +656,7 @@ static bool check_tier1_debug_home(const Tier0Function* function, const IrFuncti
     int32_t displacement = 0;
     const bool special = (object.flags & (BUSTER_IR_SLOT_REGISTER_SAVE_AREA | BUSTER_IR_SLOT_OVERFLOW_AREA)) != 0;
     bool valid = !special && bytes != 0 && bytes <= object.size && object.size <= INT32_MAX && row < frame->count;
-    valid = valid && frame->slot[row] < frame->slot_count && uses[frame->slot[row]] == 1;
+    valid = valid && frame->slot[row] < frame->slot_count && uses[frame->slot[row]] != 0;
     valid = valid && tier1_emit_cfg_object(ir, emitted, slot, &displacement);
     valid = valid && displacement >= bias && (int64_t)displacement + (int64_t)object.size <= bias + frame->payload_bytes;
     *home = (Tier0Home){
@@ -666,6 +666,9 @@ static bool check_tier1_debug_home(const Tier0Function* function, const IrFuncti
     };
     return valid;
 }
+
+#include "c_check_tier1_debug_objects.c"
+#include "c_check_tier1_debug_values.c"
 
 static bool check_tier1_debug(const Tier0Function* function, const IrFunction* ir, const Tier1EmitResult* emitted, const uint32_t* record_order, uint32_t epilogue,
                              bool vector, Arena* output, Arena* scratch, CheckTier1Debug* result)
@@ -770,27 +773,38 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
             local_slots[local] = local_slots[local] == BUSTER_IR_NONE ? slot : UINT32_MAX - 1;
         }
     }
-    uint32_t home_count = 0;
     for (uint32_t local = 0; valid && local < locals; local += 1)
     {
         const uint32_t slot = local_slots[local];
         const bool found = framed && slot < slots && check_tier1_debug_home(function, ir, emitted, uses, slot, homes + local);
         local_slots[local] = found ? slot : BUSTER_IR_NONE;
-        home_count += found;
     }
-    for (uint32_t k = 0; valid && k < debug->scalar_count; k += 1)
+    const bool bindings = debug->binding_flags != NULL;
+    for (uint32_t local = 0; valid && bindings && local < locals; local += 1)
+    {
+        if ((debug->binding_flags[local] & BUSTER_IR_DEBUG_BIND_ENTRY) != 0)
+        {
+            local_slots[local] = BUSTER_IR_NONE;
+        }
+    }
+    for (uint32_t k = 0; valid && !bindings && k < debug->scalar_count; k += 1)
     {
         const uint32_t local = debug->scalars[k].local;
-        home_count -= local_slots[local] != BUSTER_IR_NONE;
         local_slots[local] = BUSTER_IR_NONE;
     }
+    CheckTier1DebugSpan* object_clips = NULL;
+    valid = valid && (!framed || check_tier1_debug_object_clips(function, ir, emitted, record_order, uses, local_slots, homes, vector, scratch, &object_clips));
     CheckTier1DebugParameters parameters = { 0 };
     CheckTier1DebugConstants constants = { 0 };
-    valid = valid && check_tier1_debug_parameters(function, debug, emitted, record_order, vector, scratch, &parameters);
-    valid = valid && check_tier1_debug_constants(debug, scratch, &constants);
-    const uint64_t parameter_ranges = valid ? check_tier1_debug_parameter_ranges(&parameters, vector, NULL) : 0;
-    const uint64_t constant_ranges = valid ? check_tier1_debug_constant_ranges(&constants, entries, safe, body, epilogue, NULL) : 0;
-    const uint64_t ranges = (uint64_t)home_count * span_count + parameter_ranges + constant_ranges;
+    CheckTier1DebugValues values = { 0 };
+    valid = valid && (!bindings || check_tier1_debug_values(function, ir, emitted, record_order, vector, scratch, &values));
+    valid = valid && (bindings || check_tier1_debug_parameters(function, debug, emitted, record_order, vector, scratch, &parameters));
+    valid = valid && (bindings || check_tier1_debug_constants(debug, scratch, &constants));
+    const uint64_t parameter_ranges = valid && !bindings ? check_tier1_debug_parameter_ranges(&parameters, vector, NULL) : 0;
+    const uint64_t constant_ranges = valid && !bindings ? check_tier1_debug_constant_ranges(&constants, entries, safe, body, epilogue, NULL) : 0;
+    const uint64_t value_ranges = valid && bindings ? check_tier1_debug_value_ranges(&values, entries, safe, body, epilogue, vector, NULL) : 0;
+    const uint64_t object_ranges = valid ? check_tier1_debug_object_ranges(homes, local_slots, locals, spans, span_count, object_clips, NULL) : 0;
+    const uint64_t ranges = object_ranges + parameter_ranges + constant_ranges + value_ranges;
     valid = valid && ranges <= UINT32_MAX;
     if (valid)
     {
@@ -801,17 +815,9 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
     if (valid)
     {
         candidate.source_count = check_tier1_debug_sources(entries, body, epilogue, vector, candidate.source_records, candidate.source_origins);
-        for (uint32_t local = 0; local < locals; local += 1)
+        if (object_ranges != 0)
         {
-            for (uint32_t span = 0; local_slots[local] != BUSTER_IR_NONE && span < span_count; span += 1)
-            {
-                candidate.local_ranges[candidate.local_range_count++] = (EmittedLocalRange){
-                    .home = homes[local],
-                    .local = local,
-                    .begin = spans[span].begin,
-                    .end = spans[span].end,
-                };
-            }
+            candidate.local_range_count += (uint32_t)check_tier1_debug_object_ranges(homes, local_slots, locals, spans, span_count, object_clips, candidate.local_ranges);
         }
         if (parameter_ranges != 0)
         {
@@ -820,6 +826,10 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
         if (constant_ranges != 0)
         {
             candidate.local_range_count += (uint32_t)check_tier1_debug_constant_ranges(&constants, entries, safe, body, epilogue, candidate.local_ranges + candidate.local_range_count);
+        }
+        if (value_ranges != 0)
+        {
+            candidate.local_range_count += (uint32_t)check_tier1_debug_value_ranges(&values, entries, safe, body, epilogue, vector, candidate.local_ranges + candidate.local_range_count);
         }
         *result = candidate;
     }

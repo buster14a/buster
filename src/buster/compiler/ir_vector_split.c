@@ -546,6 +546,15 @@ static IrCheck ir_vector_split_path(const IrFunction* function, uint32_t piece_b
             work.output = &split;
             ir_vector_split_pass(&work);
             check = ir_check(work.instruction == instructions ? work.error : IR_ERROR_STRUCTURE, work.error_instruction, 0);
+            for (uint32_t k = 0; check.error == IR_OK && split.debug != NULL && k < split.debug->binding_count; k += 1)
+            {
+                IrDebugBinding* binding = split.debug->bindings + k;
+                binding->anchor = binding->anchor != BUSTER_IR_NONE ? ir_vector_split_piece(&work, binding->anchor, 0) : BUSTER_IR_NONE;
+                if (binding->kind == IR_DEBUG_BIND_VALUE)
+                {
+                    binding->value = ir_vector_split_piece(&work, binding->value, 0);
+                }
+            }
         }
         if (check.error == IR_OK)
         {

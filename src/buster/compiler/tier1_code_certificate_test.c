@@ -716,6 +716,113 @@ static void tier1_code_certificate_compile(Tier1EmitTest* test, bool vector, boo
     arena_pop_to(&test->input, 0);
 }
 
+// Debug definitions use the same complete code proof even when --verify is absent. Reuse the call fixture with RAX
+// excluded from allocation, forcing its result into another register only after the ABI result copy completes.
+// Mutate the actual copy's bytes and its origin, not a fabricated definition descriptor.
+static void tier1_code_certificate_debug(Tier1EmitTest* test, bool vector)
+{
+    IrFunction function = { 0 };
+    uint32_t call = BUSTER_IR_NONE;
+    const bool created = tier1_code_certificate_function(&test->input, &function, &call);
+    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    IrDominance dominance = { 0 };
+    const bool dominated = valid && tier1_terminal_dominance(test, &function, vector, &dominance);
+    Tier1SelectPlan plan = { 0 };
+    uint32_t node = BUSTER_IR_NONE;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const Tier1EmitOptions options = {
+        .register_mask = (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDI),
+        .vector = vector,
+        .sources = true,
+    };
+    Tier1EmitResult emitted = { 0 };
+    const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+    const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK && emitted.debug_definitions != NULL;
+    tier1_emit_test_expect(test, certified, "source metadata obtains a complete emitted-code proof without requesting the allocation verifier");
+    uint32_t call_record = UINT32_MAX;
+    for (uint32_t r = 0; certified && r < emitted.code.count; r += 1)
+    {
+        if (emitted.origins[r] == tier1_origin(TIER1_ORIGIN_NODE, call) && (emitted.code.records[r].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_CALL_REL32)
+        {
+            call_record = r;
+        }
+    }
+    const Tier1DebugDefinition definition = certified ? emitted.debug_definitions[call] : (Tier1DebugDefinition){ .first = UINT32_MAX, .end = UINT32_MAX };
+    const bool bounded = certified && call_record < emitted.code.count && definition.first == call_record && definition.end == call_record + 2 && definition.end <= emitted.code.count;
+    const X86Instruction called = bounded ? emitted.code.records[call_record] : (X86Instruction){ 0 };
+    const X86Instruction copied = bounded ? emitted.code.records[call_record + 1] : (X86Instruction){ 0 };
+    const bool completed = bounded && definition.bytes == 8 && definition.class == BUSTER_TIER1_ALLOCATE_GPR && definition.reg < 16 && definition.reg != X86_REGISTER_RAX &&
+                           copied.form == X86_FORM_MOV_R64_RM64 && copied.mode == BUSTER_X86_REGISTER_DIRECT && copied.reg == definition.reg && copied.rm == X86_REGISTER_RAX;
+    tier1_emit_test_expect(test, completed, "a scalar call result is defined only after its actual ABI result copy, never at the suspended call's PC");
+    bool absent = certified;
+    for (uint32_t n = 0; absent && n < function.instruction_count; n += 1)
+    {
+        if (function.op[n] == IR_PARAM || function.op[n] == IR_RET)
+        {
+            absent = emitted.debug_definitions[n].first == UINT32_MAX && emitted.debug_definitions[n].end == UINT32_MAX;
+        }
+    }
+    tier1_emit_test_expect(test, absent, "entry parameters and returns do not acquire fabricated scalar definition kernels");
+    Tier1EmitOptions plain_options = options;
+    plain_options.sources = false;
+    Tier1EmitResult plain = { 0 };
+    const Tier1EmitError plain_error = planned ? tier1_emit_function(&plan, &plain_options, test->allowed, &test->output, &test->scratch, &plain, &node) : TIER1_EMIT_INVALID;
+    const bool same = certified && plain_error == TIER1_EMIT_OK && plain.debug_definitions == NULL && plain.origins == NULL &&
+                      plain.code.count == emitted.code.count && plain.code.branch_count == emitted.code.branch_count && plain.reference_count == emitted.reference_count &&
+                      memcmp(plain.code.records, emitted.code.records, (uint64_t)plain.code.count * sizeof(X86Instruction)) == 0 &&
+                      memcmp(plain.code.branches, emitted.code.branches, (uint64_t)plain.code.branch_count * 4) == 0 &&
+                      memcmp(plain.code.targets, emitted.code.targets, (uint64_t)plain.code.branch_count * 4) == 0 &&
+                      memcmp(plain.references, emitted.references, (uint64_t)plain.reference_count * sizeof(LinkReference)) == 0;
+    tier1_emit_test_expect(test, same, "proving debug definitions without --verify changes no instructions, branches or symbolic references");
+    bool room = completed;
+    Tier1DebugDefinition* candidates = room ? ir_allocate(&test->input, function.instruction_count, sizeof(Tier1DebugDefinition), &room) : NULL;
+    tier1_emit_test_expect(test, room, "the call definition fixture supplies candidate storage for real emitted-code mutations");
+    for (uint32_t mutant = 0; room && mutant < 4; mutant += 1)
+    {
+        const uint32_t at = call_record + 1;
+        const uint32_t origin = emitted.origins[at];
+        switch (mutant)
+        {
+            case 0: emitted.code.records[at].form = X86_FORM_MOV_R32_RM32; break;
+            case 1: emitted.code.records[at].rm = X86_REGISTER_RDX; break;
+            case 2: emitted.origins[at] = tier1_origin(TIER1_ORIGIN_NODE, call + 1); break;
+            case 3: emitted.code.records[call_record].form = X86_FORM_NOP; break;
+        }
+        const uint64_t output_mark = test->output.length;
+        const uint64_t scratch_mark = test->scratch.length;
+        Tier1CertEmittedStats stats = { 0 };
+        const Tier1CertEmittedReason reason = tier1_certificate_emitted_check_debug(&plan, &emitted, &test->output, &test->scratch, candidates, NULL, &stats);
+        tier1_emit_test_expect(test, reason >= TIER1_CERT_EMITTED_REFUSED && test->output.length == output_mark && test->scratch.length == scratch_mark,
+                               "wrong result width, wrong value, shifted completion origin and a missing call cannot prove debug definitions");
+        emitted.code.records[at] = copied;
+        emitted.origins[at] = origin;
+        emitted.code.records[call_record] = called;
+    }
+    const uint32_t position = 2 * (emitted.cfg_input.block_count - function.block_count) + 2 * call + 1;
+    const uint32_t moves = tier1_origin(TIER1_ORIGIN_MOVE, position);
+    bool argument_checked = false;
+    for (uint32_t r = 0; room && !argument_checked && r < call_record; r += 1)
+    {
+        const X86Instruction record = emitted.code.records[r];
+        const bool argument = emitted.origins[r] == moves && record.form == X86_FORM_MOV_R64_RM64 && record.mode == BUSTER_X86_REGISTER_DIRECT &&
+                              (record.reg == X86_REGISTER_RDI || record.reg == X86_REGISTER_RSI) && record.reg != record.rm;
+        if (argument)
+        {
+            emitted.code.records[r].reg = record.rm;
+            Tier1CertEmittedStats stats = { 0 };
+            const Tier1CertEmittedReason reason = tier1_certificate_emitted_check_debug(&plan, &emitted, &test->output, &test->scratch, candidates, NULL, &stats);
+            tier1_emit_test_expect(test, reason == TIER1_CERT_EMITTED_CHECK && candidates[call].first == definition.first && candidates[call].end == definition.end,
+                                   "a matching call-result kernel is still refused when the full certificate finds a stale argument value");
+            emitted.code.records[r] = record;
+            argument_checked = true;
+        }
+    }
+    tier1_emit_test_expect(test, argument_checked, "the debug definition's full value-flow refusal mutates an actual call argument move");
+    arena_pop_to(&test->output, 0);
+    arena_pop_to(&test->scratch, 0);
+    arena_pop_to(&test->input, 0);
+}
+
 static void tier1_code_certificate_saved(Tier1EmitTest* test, bool vector, Tier1CodeCertificateCounts* counts)
 {
     IrFunction function;
@@ -1083,6 +1190,7 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
     }
     for (uint32_t variant = 0; variant < 2; variant += 1)
     {
+        tier1_code_certificate_debug(test, variant != 0);
         tier1_code_certificate_saved(test, variant != 0, &counts);
     }
     for (uint32_t variant = 0; variant < 2; variant += 1)

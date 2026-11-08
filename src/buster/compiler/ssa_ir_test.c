@@ -1079,12 +1079,22 @@ static void ssa_ir_test_debug(SsaIrTestTally* tally)
             .kind = IR_DEBUG_CONSTANT,
             .bytes = 8,
         };
+        IrDebugBinding bindings[] =
+        {
+            { .literal = 17, .local = 0, .entry = 5, .value = BUSTER_IR_NONE, .anchor = 4, .kind = IR_DEBUG_BIND_CONSTANT, .bytes = 8, .type = IR_I64 },
+            { .local = 0, .entry = 13, .value = 11, .anchor = 11, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+        };
+        uint8_t binding_flags[4] = { 0 };
         const IrDebugInfo seed =
         {
             .entry_count = 17,
             .local_count = 4,
             .scalars = &literal,
             .scalar_count = 1,
+            .bindings = bindings,
+            .binding_count = BUSTER_ARRAY_LENGTH(bindings),
+            .binding_flags = binding_flags,
+            .first_block_end = 11,
         };
         ready = ssa_ir_test_expect(tally, ir_debug_create(&input, &function, &seed), "allocate original source identities");
         if (ready)
@@ -1111,6 +1121,9 @@ static void ssa_ir_test_debug(SsaIrTestTally* tally)
             exact = exact && debug->locals[0] == 1 && debug->locals[1] == 3 && debug->scalar_count == 1 &&
                     debug->scalars != function.debug->scalars && debug->scalars[0].local == 0 && debug->scalars[0].entry == 5 &&
                     debug->scalars[0].value == 17 && debug->scalars[0].bytes == 8 && debug->scalars[0].kind == IR_DEBUG_CONSTANT;
+            exact = exact && debug->binding_count == 2 && debug->bindings[0].anchor == 2 && debug->bindings[1].value == 2 &&
+                    debug->bindings[1].anchor == 2 && debug->bindings[1].entry == 13 && debug->bindings[1].kind == IR_DEBUG_BIND_VALUE &&
+                    debug->bindings != function.debug->bindings && debug->binding_flags != function.debug->binding_flags;
             for (uint32_t i = 0; exact && i < BUSTER_ARRAY_LENGTH(origins); i += 1)
             {
                 exact = debug->origins[i] == origins[i] && result->op[i] == function.op[origins[i]];
