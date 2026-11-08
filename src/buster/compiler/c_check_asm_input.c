@@ -1224,9 +1224,11 @@ static CheckAsmError check_asm_operand_error(const CheckInput* input, const Chec
         result = CHECK_ASM_ERROR_BIT_INT;
     }
     else if (write && graph->ops[source->node] == CHECK_OP_CAST && graph->operand0[source->node] < stream->count &&
-             check_stream_value(stream, graph->operand0[source->node]).category == CHECK_LVALUE)
+             check_stream_value(stream, graph->operand0[source->node]).category == CHECK_LVALUE &&
+             check_action_kind(types, type_unqualified(type_strip_aligned(types, check_stream_type(stream, source->node)))) != BUSTER_TYPE_KIND_VOID)
     {
-        // Through the casts to the same type, or between integers and pointers of one width (IgnoreParenNoopCasts).
+        // Through the casts to the same type, or between integers and pointers of one width (IgnoreParenNoopCasts). A cast
+        // to void is no cast clang names: its result is no lvalue, so the operand is an output's invalid lvalue instead.
         uint32_t at = source->node;
         bool through = true;
         for (uint32_t steps = 0; through && steps < graph->count && graph->ops[at] == CHECK_OP_CAST && graph->operand0[at] < stream->count; steps += 1)

@@ -83,9 +83,12 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "    __asm__(\"\" : : \"m\"(inc));\n    __asm__(\"\" : \"=r\"(x) : \"0\"((F)1.0f));\n"
         "    __asm__(\"\" : \"=r\"(x), \"=r\"(2) : \"m\"(3));\n    __asm__(\"\" : \"=r\"((int)x), \"=r\"(1), \"=r\"((long)x));\n"
         "    __asm__(\"\" : \"=r\"(x) : \"0\"(1.0), \"m\"(2));\n    __asm__(\"\" : \"=r\"(((unsigned)(x))));\n}\n",
-        // Without a graph's error too.
+        // Without a graph's error too; a cast to void is no cast clang names, so its operand is an output's invalid
+        // lvalue (review on #1795).
         "int x;\nvoid a(void)\n{\n    __asm__(\"\" : \"=r\"(1));\n    __asm__(\"\" : : \"m\"(1));\n"
-        "    __asm__(\"\" : \"=r\"((long)x), \"=r\"(x) : \"0\"(1.0));\n}\n",
+        "    __asm__(\"\" : \"=r\"((long)x), \"=r\"(x) : \"0\"(1.0));\n"
+        "    __asm__(\"\" : \"=r\"((void)x));\n    __asm__(\"\" : \"=r\"((void)(int)x), \"=r\"((int)x));\n"
+        "    __asm__(\"\" : \"=r\"(x) : \"r\"((void)x));\n}\n",
         // A graph's error in one body: the others' common warnings, -Wuninitialized before it and none after it, and their
         // -Wreturn-type, runtime, -Wswitch, -Wformat and -Wempty-body warnings (#1447: a second reading without that body).
         "struct S { int a; } s;\n"
