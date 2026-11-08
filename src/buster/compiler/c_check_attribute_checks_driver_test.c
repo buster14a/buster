@@ -811,7 +811,10 @@ static void check_test_driver_checks_attributes(CheckTest* test, const char* cla
         "int f(int, int) __attribute__((diagnose_as_builtin(__builtin_abs, 2), diagnose_as_builtin(__builtin_abs, 1)));\n",
         "int f(int x) __attribute__((diagnose_as_builtin((__builtin_abs), 1)));\n",
         "int f(int x) __attribute__((diagnose_as_builtin(((x)), 1)));\n",
-        // diagnose_as_builtin on K&R definitions (#1447): the declarations' types compare, not the promoted prototype's.
+    };
+    // diagnose_as_builtin on K&R definitions (#1447, gnu89's identifier lists): the declarations' types compare, not the
+    // promoted prototype's, as clang's ParmVarDecl types do.
+    static const char* const kr89[] = {
         "int f(a, b) __attribute__((diagnose_as_builtin(__builtin_abs, 2)))\nint a;\nint b;\n{ return a + b; }\n",
         "int f(a, b) __attribute__((diagnose_as_builtin(__builtin_abs, 2)))\nint a;\nchar b;\n{ return a + b; }\n",
         "int f(a) __attribute__((diagnose_as_builtin(__builtin_abs, 1)))\nshort a;\n{ return a; }\n",
@@ -860,11 +863,13 @@ static void check_test_driver_checks_attributes(CheckTest* test, const char* cla
     snprintf(source, sizeof(source), "%s/checks-attributes.c", directory);
     const uint32_t plain = BUSTER_ARRAY_LENGTH(units);
     const uint32_t optioned = plain + BUSTER_ARRAY_LENGTH(flagged) * BUSTER_ARRAY_LENGTH(options);
-    const uint32_t total = optioned + BUSTER_ARRAY_LENGTH(implicit);
+    const uint32_t kr = optioned + BUSTER_ARRAY_LENGTH(implicit);
+    const uint32_t total = kr + BUSTER_ARRAY_LENGTH(kr89);
     for (uint32_t unit = 0; expected_lines != NULL && actual_lines != NULL && unit < total; unit += 1)
     {
         const uint32_t flag = unit - plain;
-        const char* text = unit < plain ? units[unit] : unit < optioned ? flagged[flag % BUSTER_ARRAY_LENGTH(flagged)] : implicit[unit - optioned];
+        const char* text = unit < plain ? units[unit] : unit < optioned ? flagged[flag % BUSTER_ARRAY_LENGTH(flagged)] :
+                           unit < kr ? implicit[unit - optioned] : kr89[unit - kr];
         char* option = unit < plain || unit >= optioned ? NULL : (char*)options[flag / BUSTER_ARRAY_LENGTH(flagged)];
         char* standard = unit < optioned ? "-std=gnu23" : "-std=gnu89";
         const bool made = parse_test_write(source, text, strlen(text));
