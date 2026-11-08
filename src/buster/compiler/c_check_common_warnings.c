@@ -1207,6 +1207,9 @@ struct CheckCommonFacts
     // The tokens of the bodies clang ends after the unit's first error (check_common_flush), or null: none, in a unit without
     // one.
     const uint8_t* flushed;
+    // The plain `x = y` assignments, a bit per node, -Wself-assign's candidates (check_common_self_assigns), or null where it
+    // can't warn.
+    uint64_t* self_assigns;
 };
 
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
@@ -2045,7 +2048,54 @@ static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t 
     }
 }
 
-// A runtime warning at a node's own root: a self-assignment or a constant subscript past its bound.
+// Whether `node` is a plain `x = y`, a -Wself-assign candidate (check_common_self_assigns).
+static bool check_common_self_assign_candidate(const CheckGraph* graph, uint32_t node)
+{
+    const uint32_t left = graph->operand0[node];
+    const uint32_t right = graph->operand1[node];
+    return graph->ops[node] == CHECK_OP_ASSIGN && left < graph->count && right < graph->count && graph->ops[left] == CHECK_OP_VALUE &&
+           graph->ops[right] == CHECK_OP_VALUE;
+}
+
+// -Wself-assign: clang's DiagnoseSelfAssignment is a plain Diag where Sema builds the assignment, not a runtime-behavior
+// one, so it warns at the operator as the assignment completes, in unreachable code and a constant condition's or a
+// selection's other arm too, and only an unevaluated operand (sizeof's) drops it (check_common_report_evaluated). A variable's
+// own name alone: member, subscript and indirection lvalues never warn, whatever object they reach. The candidates are the
+// facts' (CheckCommonFacts.self_assigns), in node order.
+static void check_common_self_assigns(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
+                                      CheckWarningSpelling* spell, const CheckCommonFacts* facts, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    for (uint32_t word = 0; facts->self_assigns != NULL && !pp->fatal && word < (graph->count + 63) / 64; word += 1)
+    {
+        for (uint64_t bits = facts->self_assigns[word]; bits != 0 && !pp->fatal; bits &= bits - 1)
+        {
+            const uint32_t node = word * 64 + (uint32_t)__builtin_ctzll(bits);
+            const uint32_t token = graph->tokens[node];
+            const CheckValue left_value = check_stream_value(stream, graph->operand0[node]);
+            const CheckValue right_value = check_stream_value(stream, graph->operand1[node]);
+            const bool volatile_object = (type_qualifiers(type_strip_aligned(types, left_value.type)) & BUSTER_TYPE_VOLATILE) != 0;
+            if (!volatile_object && left_value.category == CHECK_LVALUE && right_value.category == CHECK_LVALUE && left_value.object != 0 &&
+                left_value.object == right_value.object && left_value.offset == 0 && right_value.offset == 0 && !check_common_from_macro(parser, pp, token) &&
+                !check_common_from_macro(parser, pp, graph->tokens[graph->operand0[node]]) &&
+                !check_common_from_macro(parser, pp, graph->tokens[graph->operand1[node]]))
+            {
+                const uint64_t mark = scratch->length;
+                const String8 type_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, left_value.type, 0);
+                if (type_name.length != 0)
+                {
+                    const char* message = check_warning_text(scratch, "explicitly assigning value of variable of type %.*s to itself",
+                                                              (int)type_name.length, type_name.pointer);
+                    check_common_report_evaluated(parser, pp, input, token, token, PP_DIAGNOSTIC_SEMANTIC, CHECK_WARNING_ID_SELF_ASSIGN, true, message,
+                                                  NULL, 0, scratch);
+                }
+                arena_pop_to(scratch, mark);
+            }
+        }
+    }
+}
+
+// A runtime warning at a node's own root: a constant subscript past its bound.
 // A conditional has no warning of its own — its arms report at its slot instead.
 static void check_common_own(CheckCommonEmission* emission, uint32_t node)
 {
@@ -2058,36 +2108,8 @@ static void check_common_own(CheckCommonEmission* emission, uint32_t node)
     Arena* scratch = emission->scratch;
     const CheckGraph* graph = &input->graph;
     const CheckOp op = graph->ops[node];
-    const uint32_t token = graph->tokens[node];
     const bool evaluated = check_common_emit_evaluated(emission, node);
-    if (op == CHECK_OP_ASSIGN && evaluated)
-    {
-        const uint32_t left = graph->operand0[node];
-        const uint32_t right = graph->operand1[node];
-        const CheckValue left_value = left < graph->count ? check_stream_value(stream, left) : (CheckValue){ 0 };
-        const CheckValue right_value = right < graph->count ? check_stream_value(stream, right) : (CheckValue){ 0 };
-        const bool volatile_object = left < graph->count &&
-            (type_qualifiers(type_strip_aligned(types, left_value.type)) & BUSTER_TYPE_VOLATILE) != 0;
-        // Clang's -Wself-assign only covers a variable's own name: `x = x` warns, while member,
-        // subscript and indirection lvalues never do — so `u.a = u.b`, `s.m = s.m` and `a[i] = a[i]`
-        // all stay silent regardless of the object and offset they resolve to.
-        const bool plain_lvalues = left < graph->count && right < graph->count &&
-                                   graph->ops[left] == CHECK_OP_VALUE && graph->ops[right] == CHECK_OP_VALUE;
-        if (!volatile_object && plain_lvalues && left_value.category == CHECK_LVALUE &&
-            right_value.category == CHECK_LVALUE && left_value.object != 0 && left_value.object == right_value.object &&
-            left_value.offset == 0 && right_value.offset == 0 && !check_common_from_macro(parser, pp, token) &&
-            !check_common_from_macro(parser, pp, graph->tokens[left]) && !check_common_from_macro(parser, pp, graph->tokens[right]))
-        {
-            const String8 type_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, left_value.type, 0);
-            if (type_name.length != 0)
-            {
-                const char* message = check_warning_text(scratch, "explicitly assigning value of variable of type %.*s to itself",
-                                                          (int)type_name.length, type_name.pointer);
-                check_common_report_deferred(parser, pp, input, token, CHECK_WARNING_ID_SELF_ASSIGN, true, message, NULL, 0, scratch);
-            }
-        }
-    }
-    else if (op == CHECK_OP_SUBSCRIPT && evaluated)
+    if (op == CHECK_OP_SUBSCRIPT && evaluated)
     {
         const uint32_t array = graph->operand0[node];
         const uint32_t index = graph->operand1[node];
@@ -4460,7 +4482,8 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
     const bool comparison = enabled->sign_compare && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
     // A source comma's left-operand marker is the arithmetic scan's (check_common_arithmetic_own).
     const bool comma = op == CHECK_OP_COMMA && graph->tokens[node] < parser->tokens.count && parser->tokens.kinds[graph->tokens[node]] == PARSE_KIND_COMMA;
-    const uint8_t result = (uint8_t)(check_common_candidate_bits(parser, graph, stream, types, node, enabled->self_assign) |
+    // (A self-assignment is no walk's: check_common_self_assigns gives it, in unreachable code too.)
+    const uint8_t result = (uint8_t)(check_common_candidate_bits(parser, graph, stream, types, node, false) |
                                      (division || shift || comma ? BUSTER_CHECK_REACH_ARITHMETIC : 0u) | (comparison ? BUSTER_CHECK_REACH_SIGN : 0u) |
                                      (shift ? BUSTER_CHECK_REACH_SHIFT : 0u));
     return result;
@@ -7779,8 +7802,14 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
     uint32_t* parents = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : NULL;
     uint8_t* used = count != 0 && enabled->uninitialized ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : NULL;
     uint8_t* reach = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
+    uint64_t* self_assigns = count != 0 && enabled->self_assign ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, ((uint64_t)count + 63) / 64) : NULL;
     uint8_t* evaluated = NULL;
-    const bool allocated = parents != NULL && (used != NULL || !enabled->uninitialized) && reach != NULL;
+    const bool allocated = parents != NULL && (used != NULL || !enabled->uninitialized) && reach != NULL && (self_assigns != NULL || !enabled->self_assign ||
+                           count == 0);
+    if (allocated && self_assigns != NULL)
+    {
+        memset(self_assigns, 0, (((uint64_t)count + 63) / 64) * sizeof(uint64_t));
+    }
     const bool walk = allocated && vector && check_common_facts_tree(graph, stream, types, parents, used);
     if (walk)
     {
@@ -7791,6 +7820,10 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
         for (uint32_t node = check_common_next_op(graph, &own, &owners, true); node < count; node = check_common_next_op(graph, &own, &owners, true))
         {
             uint8_t bits = check_common_own_reach(parser, graph, stream, types, node, enabled);
+            if (self_assigns != NULL && check_common_self_assign_candidate(graph, node))
+            {
+                self_assigns[node >> 6] |= UINT64_C(1) << (node & 63);
+            }
             for (uint32_t at = node; bits != 0 && at < count; at = parents[at])
             {
                 bits &= (uint8_t)~reach[at];
@@ -7813,6 +7846,10 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
             // A comma's left operand and a cast to void's, statement-level or explicit, drop their operand's result.
             const bool discards = used != NULL && check_common_discards(graph, stream, types, node);
             uint8_t bits = check_common_own_reach(parser, graph, stream, types, node, enabled);
+            if (self_assigns != NULL && check_common_self_assign_candidate(graph, node))
+            {
+                self_assigns[node >> 6] |= UINT64_C(1) << (node & 63);
+            }
             const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
             {
@@ -7851,7 +7888,7 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
     {
         check_common_flush(graph, parents, flushed, parser->tokens.count, evaluated);
     }
-    *facts = (CheckCommonFacts){ .parents = parents, .used = used, .evaluated = evaluated, .reach = reach, .flushed = flushed };
+    *facts = (CheckCommonFacts){ .parents = parents, .used = used, .evaluated = evaluated, .reach = reach, .flushed = flushed, .self_assigns = self_assigns };
     const bool result = count == 0 || evaluated != NULL;
     return result;
 }
@@ -8585,6 +8622,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     {
         check_common_exhausted(pp);
     }
+    check_common_self_assigns(parser, pp, input, stream, types, &spell, &facts, scratch);
     check_common_graph_warnings(parser, pp, input, stream, types, &spell, &facts, program, shifts, scratch);
     check_common_return_stack(parser, pp, input, stream, types, scratch);
     if (enabled.uninitialized)
