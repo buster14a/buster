@@ -1791,6 +1791,14 @@ static void check_common_call_argument(CheckCommonEmission* emission, uint32_t i
 
 // An implicit scalar conversion precedes the source expression's nested conversions. Calls carry their
 // conversions on argument edges instead and schedule them immediately before each argument subtree.
+static bool check_common_bitfield_assignment(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node,
+                                             uint32_t* bit_width, __int128* original, __int128* truncated);
+static void check_common_bitfield_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                          TypeTable* types, CheckWarningSpelling* spell, uint32_t source, uint32_t bit_width,
+                                          __int128 original, __int128 truncated, uint32_t token, uint32_t publication, bool initialization,
+                                          Arena* scratch);
+static uint32_t check_common_full_expression_end(const Parser* parser, const CheckGraph* graph, const uint32_t* parents, uint32_t node);
+
 static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t node)
 {
     const CheckGraph* graph = &emission->input->graph;
@@ -1812,7 +1820,21 @@ static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t 
             check_common_int_in_bool(emission->parser, emission->pp, emission->input, stream, emission->types, source, emission->parents,
                                      emission->at_once, emission->scratch);
         }
-        if (source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
+        // A constant a bit-field's assignment truncates (#1447): clang's AnalyzeAssignment warns of it alone, at the `=`, as the
+        // full expression completes, in unreachable code too, and leaves out the value's own conversion.
+        uint32_t bit_width = 0;
+        __int128 original = 0;
+        __int128 truncated = 0;
+        const bool bitfield = op == CHECK_OP_ASSIGN && (evaluated || (emission->emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0) &&
+                              check_common_bitfield_assignment(graph, stream, emission->types, node, &bit_width, &original, &truncated);
+        if (bitfield)
+        {
+            const uint32_t publication = emission->at_once != BUSTER_CHECK_NONE ? emission->at_once :
+                                         check_common_full_expression_end(emission->parser, graph, emission->parents, node);
+            check_common_bitfield_warning(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, source, bit_width,
+                                          original, truncated, graph->tokens[node], publication, false, emission->scratch);
+        }
+        if (!bitfield && source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
             check_common_conversion_source(check_stream_constant_kind(stream, source), arms) &&
             (flags & BUSTER_CHECK_CONVERT_ATOMIC) == 0 &&
             (evaluated || ((emission->emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0 &&
@@ -3807,6 +3829,9 @@ static void check_common_conversion_warning(const Parser* parser, Preprocessor* 
 // A brace initializer's part whose conversion reports at once (check_common_initializer_conversions): a floating literal's,
 // an integer constant's that fills a non-character target's width exactly (#1447, check_common_same_width), or a
 // conditional's or a comma's, whose arms carry either.
+static bool check_common_initializer_bitfield(const CheckInput* input, const CheckStream* stream, const TypeTable* types, const CheckInitPart* part,
+                                              __int128* original, __int128* truncated);
+
 static bool check_common_initializer_literal(const Parser* parser, const CheckInput* input, const CheckStream* stream,
                                               const TypeTable* types, const CheckInitPart* part)
 {
@@ -3814,8 +3839,10 @@ static bool check_common_initializer_literal(const Parser* parser, const CheckIn
     bool is_signed = false;
     const bool target = part->kind == CHECK_INIT_VALUE && part->node < stream->count && check_common_integer(types, part->conversion.type, &width, &is_signed);
     const CheckValue value = target && check_common_integer_constant(stream, part->node) ? check_stream_value(stream, part->node) : (CheckValue){ 0 };
+    __int128 original = 0;
+    __int128 truncated = 0;
     return target &&
-           (check_common_conversion_arms(&input->graph, part->node) ||
+           (check_common_conversion_arms(&input->graph, part->node) || check_common_initializer_bitfield(input, stream, types, part, &original, &truncated) ||
             (check_common_bool_target(types, part->conversion.type) && check_common_bool_candidate(&input->graph, part->node)) ||
             (type_kind(types, type_unqualified(type_strip_aligned(types, check_stream_type(stream, part->node)))) == BUSTER_TYPE_KIND_FLOATING &&
              check_common_floating_literal(parser, &input->graph, part->node)) ||
@@ -3824,6 +3851,18 @@ static bool check_common_initializer_literal(const Parser* parser, const CheckIn
 }
 
 static bool check_common_constant_changes(const TypeTable* types, const CheckStream* stream, uint32_t source, TypeId target);
+static bool check_common_bitfield_truncates(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, TypeId field, uint32_t bit_width,
+                                            uint32_t source, __int128* original, __int128* truncated);
+
+// A brace initializer's bit-field part whose constant its bit-field truncates (#1447, check_common_bitfield_truncates).
+static bool check_common_initializer_bitfield(const CheckInput* input, const CheckStream* stream, const TypeTable* types, const CheckInitPart* part,
+                                              __int128* original, __int128* truncated)
+{
+    const bool result = part->kind == CHECK_INIT_VALUE && part->bit_width != 0 && part->node < stream->count &&
+                        (part->conversion.flags & BUSTER_CHECK_CONVERT_ATOMIC) == 0 &&
+                        check_common_bitfield_truncates(&input->graph, stream, types, part->conversion.type, part->bit_width, part->node, original, truncated);
+    return result;
+}
 
 // An integer constant's value-changing conversion in a brace initializer's part (#1447, -Wconstant-conversion), or a
 // conditional's or a comma's, whose arms carry the conversion (check_common_conversion_warning_at): the walk's leaf
@@ -4006,6 +4045,105 @@ static bool check_common_constant_changes(const TypeTable* types, const CheckStr
     return result;
 }
 
+// A constant's truncation by the bit-field it is stored in (#1447, clang's AnalyzeBitFieldAssignment): the bit-field of
+// `bit_width` bits and type `field` (no _Bool's), the constant node `source`'s value, of its own type, past parentheses and
+// implicit conversions. Its width is its type's, or, for a `-` or a `~` of a negative or unsigned value, its significant
+// bits; a value no wider than the bit-field is kept, and another one is truncated to the bit-field's width and extended back
+// as the bit-field's signedness says. A truncation that changes it warns: of a 1 in a one-bit bit-field, as
+// -Wsingle-bit-bitfield-constant-conversion's. `*original` and `*truncated` are the two values.
+static bool check_common_bitfield_truncates(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, TypeId field, uint32_t bit_width,
+                                            uint32_t source, __int128* original, __int128* truncated)
+{
+    uint32_t field_width = 0;
+    bool field_signed = false;
+    uint32_t width = 0;
+    bool is_signed = false;
+    bool result = false;
+    TypeId type = 0;
+    const bool constant = bit_width != 0 && bit_width < 128 && source < graph->count && check_common_integer_constant(stream, source);
+    const unsigned __int128 integer = constant ? check_common_stream_integer(stream, source, &type) : 0;
+    // A value whose bits are below 2^(w-1), which a w-bit bit-field of either signedness holds, as the 0s and 1s stored in
+    // flags are, is kept before any type is read.
+    if (constant && integer >= ((unsigned __int128)1 << (bit_width - 1)) && type_unqualified(type_strip_aligned(types, field)) != BUSTER_TYPE_BOOL &&
+        check_common_integer(types, field, &field_width, &field_signed))
+    {
+        if (check_common_integer(types, type, &width, &is_signed) && width != 0)
+        {
+            *original = check_common_integer_bits(integer, width, is_signed);
+            const CheckOp op = graph->ops[source];
+            uint32_t original_width = width;
+            if ((op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT) && (!is_signed || *original < 0))
+            {
+                // APInt's significant bits of the value's bits, read as signed: its bit length past its sign bits, and one.
+                const __int128 bits = check_common_integer_bits(integer, width, true);
+                const unsigned __int128 magnitude = (unsigned __int128)(bits < 0 ? ~bits : bits);
+                const uint64_t high = (uint64_t)(magnitude >> 64);
+                const uint32_t length = high != 0 ? 128u - (uint32_t)__builtin_clzll(high) :
+                                        (uint64_t)magnitude != 0 ? 64u - (uint32_t)__builtin_clzll((uint64_t)magnitude) : 0u;
+                original_width = length + 1u;
+            }
+            if (original_width > bit_width)
+            {
+                const unsigned __int128 bits = (unsigned __int128)*original & check_action_mask(bit_width);
+                const bool negative = field_signed && ((bits >> (bit_width - 1)) & 1) != 0;
+                *truncated = negative ? (__int128)(bits | ~check_action_mask(bit_width)) : (__int128)bits;
+                result = *truncated != *original;
+            }
+        }
+    }
+    return result;
+}
+
+// The bit-field truncation's warning (check_common_bitfield_truncates) at `token`, published at `publication`: clang's
+// Diag, as an assignment's full expression completes, but in an unevaluated operand, or, in an unevaluated operand too, as
+// an `initialization` is checked. The constant's type is spelled as written, its typedef's name and all.
+static void check_common_bitfield_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                          TypeTable* types, CheckWarningSpelling* spell, uint32_t source, uint32_t bit_width,
+                                          __int128 original, __int128 truncated, uint32_t token, uint32_t publication, bool initialization,
+                                          Arena* scratch)
+{
+    const String8 name = check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, source),
+                                                   check_input_operand_type_spelling(input, parser, source));
+    if (name.length != 0)
+    {
+        const bool single = bit_width == 1 && original == 1;
+        char from[48];
+        char to[48];
+        check_common_number(from, sizeof(from), original);
+        check_common_number(to, sizeof(to), truncated);
+        const char* message = check_warning_text(scratch, "implicit truncation from %.*s to %sbit-field changes value from %s to %s", (int)name.length,
+                                                  name.pointer, single ? "a one-bit wide " : "", from, to);
+        const uint32_t id = single ? CHECK_WARNING_ID_SINGLE_BIT_BITFIELD_CONSTANT_CONVERSION : CHECK_WARNING_ID_BITFIELD_CONSTANT_CONVERSION;
+        if (initialization)
+        {
+            const uint32_t publication_source = publication < parser->tokens.count ? parser->tokens.sources[publication] : pp->output.count;
+            check_common_report_published_phase(parser, pp, input, token, publication_source, PP_DIAGNOSTIC_DEFERRED, id, false, message, NULL, 0, scratch);
+        }
+        else
+        {
+            check_common_report_evaluated(parser, pp, input, token, publication, PP_DIAGNOSTIC_DEFERRED, id, false, message, NULL, 0, scratch);
+        }
+    }
+}
+
+// An assignment's bit-field truncation (check_common_bitfield_truncates): its left operand's bit-field, its right operand's
+// constant.
+static bool check_common_bitfield_assignment(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node,
+                                             uint32_t* bit_width, __int128* original, __int128* truncated)
+{
+    const uint32_t left = graph->operand0[node];
+    const uint32_t right = graph->operand1[node];
+    bool result = false;
+    if (graph->ops[node] == CHECK_OP_ASSIGN && left < graph->count && right < graph->count && (check_stream_flags(stream, left) & BUSTER_CHECK_BIT_FIELD) != 0 &&
+        check_common_integer_constant(stream, right))
+    {
+        const CheckValue field = check_stream_value(stream, left);
+        *bit_width = field.bit_width;
+        result = check_common_bitfield_truncates(graph, stream, types, field.type, field.bit_width, right, original, truncated);
+    }
+    return result;
+}
+
 // The walks' candidates at `node` (BUSTER_CHECK_REACH_*), by what their tests read of the graph and the stream. The
 // conversion walk's (BUSTER_CHECK_REACH_CONVERSION), which gives every implicit conversion's warning: a constant an
 // initialization's, an assignment's, a conversion's or a call's argument's conversion may change, an integer one only where
@@ -4033,8 +4171,15 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
             {
                 const uint32_t flags = stream->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1u : 0u].flags;
                 const bool assignment = (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0;
+                uint32_t bit_width = 0;
+                __int128 original = 0;
+                __int128 truncated = 0;
+                // Or a constant a bit-field's assignment truncates (#1447, check_common_bitfield_assignment), which only an
+                // assignment of an integer constant reads.
                 conversion = assignment && (constant != CHECK_CONSTANT_INTEGER || arms ||
-                                            check_common_constant_changes(types, stream, source, check_stream_type(stream, node)));
+                                            check_common_constant_changes(types, stream, source, check_stream_type(stream, node)) ||
+                                            (op == CHECK_OP_ASSIGN &&
+                                             check_common_bitfield_assignment(graph, stream, types, node, &bit_width, &original, &truncated)));
             }
             if (!conversion && check_common_bool_candidate(graph, source))
             {
@@ -4218,6 +4363,22 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
     // The initializer is one full expression: its parts' conversions, nested ones too, complete at its end.
     const uint32_t end = check_common_sparse_get(input->initializer_ends, declaration);
     emission->at_once = end <= parser->tokens.count ? end : BUSTER_CHECK_NONE;
+    // Its constants its bit-fields truncate (#1447): clang's CheckBitFieldInitialization's Diag, as each member is initialized,
+    // so in initializer order, before the full expression's conversions, at each value's first token (its grouping parenthesis,
+    // if any), in unreachable code and unevaluated operands too.
+    for (uint32_t p = 0; p < plan->count && !pp->fatal; p += 1)
+    {
+        const CheckInitPart* part = plan->parts + p;
+        const uint32_t root = part->node;
+        __int128 original = 0;
+        __int128 truncated = 0;
+        if (part->kind == CHECK_INIT_VALUE && root < graph->count && stream->diagnostics[root] == CHECK_DIAG_NONE &&
+            check_common_initializer_bitfield(input, stream, emission->types, part, &original, &truncated))
+        {
+            check_common_bitfield_warning(parser, pp, input, stream, emission->types, emission->spell, root, part->bit_width, original, truncated,
+                                          part->token, emission->at_once, true, emission->scratch);
+        }
+    }
     for (uint32_t p = plan->count; p != 0 && !pp->fatal; p -= 1)
     {
         const CheckInitPart* part = plan->parts + p - 1;
@@ -4590,6 +4751,11 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                 source_contexts |= source < graph->count &&
                                    (check_stream_constant_kind(stream, source) == CHECK_CONSTANT_FLOATING || check_common_conversion_arms(graph, source) ||
                                     check_common_bool_candidate(graph, source));
+                // A bit-field's truncation, which clang's Diag gives in unreachable code too (#1447).
+                uint32_t bit_width = 0;
+                __int128 original = 0;
+                __int128 truncated = 0;
+                source_contexts |= check_common_bitfield_assignment(graph, stream, types, node, &bit_width, &original, &truncated);
             }
             source_contexts |= evaluated[node] == 0 && check_common_truth_candidate(graph, stream, node);
             if (evaluated[node] == 0 && op == CHECK_OP_CALL && graph->argument_offsets != NULL && graph->argument_counts != NULL)

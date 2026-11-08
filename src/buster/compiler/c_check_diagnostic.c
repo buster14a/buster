@@ -139,6 +139,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wunused-result", "-Wunused-value", "ignoring return value of function declared with 'warn_unused_result' attribute" },
     { "-Wint-in-bool-context", NULL, "converting the result of '<<' to a boolean; did you mean to compare with '0'?" },
     { "-Wtautological-constant-compare", "-Wtautological-compare", "converting the result of '?:' with integer constants to a boolean always evaluates to 'true'" },
+    { "-Wbitfield-constant-conversion", "-Wconstant-conversion", "implicit truncation to bit-field changes value" },
+    { "-Wsingle-bit-bitfield-constant-conversion", "-Wbitfield-constant-conversion", "implicit truncation to a one-bit wide bit-field changes value" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
