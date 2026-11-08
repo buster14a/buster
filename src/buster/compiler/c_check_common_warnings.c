@@ -886,14 +886,25 @@ struct CheckCommonEnabled
     bool uninitialized;
 };
 
-// Runtime count warnings already rendered by the legacy driver, in token order. Their groups and this sparse
-// handoff live in the preprocessor arena, beyond the driver's scratch. The originals stay queued until the common
-// traversal is ready, so a failed program construction retains them without changing severity or warning counts.
+// A folded shift's runtime warnings the legacy driver words (#1394): its counts and its negative left operand, clang's
+// DiagRuntimeBehavior ones, in token order, each its report's text and place (the text in the preprocessor's arena,
+// beyond the driver's scratch). The common walk reports each where it reaches the shift, among its own runtime warnings,
+// and none it proves unevaluated (check_common_shift_unreached); whatever no walk reports is reported in the end
+// (check_common_shift_finish), so that a failed program construction keeps them all. A warning is counted, or fails the
+// unit as an error, only when it is reported.
 typedef struct CheckCommonShiftWarning CheckCommonShiftWarning;
 struct CheckCommonShiftWarning
 {
     uint32_t token;
-    PPDiagnosticRecord* record;
+    uint32_t source;
+    uint32_t publication;
+    uint8_t severity;
+    uint8_t phase;
+    // In an unselected static-selection arm or controlling expression, which check_common_shift_span leaves to the
+    // selection's walk (CheckCommonShiftExtras), in its order, or to the end (review on #1778).
+    bool selection;
+    // NULL once reported or dropped.
+    const char* message;
 };
 
 typedef struct CheckCommonShiftWarnings CheckCommonShiftWarnings;
@@ -902,7 +913,6 @@ struct CheckCommonShiftWarnings
     CheckCommonShiftWarning* records;
     uint32_t count;
     uint32_t capacity;
-    uint32_t detached_count;
 };
 
 // Detached static-selection arms have no CFG block in Clang, so their queued runtime count diagnostics are still
@@ -923,70 +933,23 @@ struct CheckCommonShiftExtras
     uint32_t count;
 };
 
-// Detach only the saved runtime count groups. Their order in the queue is their token order, so one forward scan
-// removes them without searching once per warning. Required-constant diagnostics and every other family stay put.
-static void check_common_shift_detach(Preprocessor* pp, CheckCommonShiftWarnings* shifts)
+// A stashed warning's report, once.
+static void check_common_shift_report(Preprocessor* pp, CheckCommonShiftWarning* warning)
 {
-    if (shifts != NULL && shifts->count != 0)
+    if (warning->message != NULL)
     {
-        uint32_t next = 0;
-        PPDiagnosticRecord* previous = NULL;
-        for (PPDiagnosticRecord* record = pp->diagnostic_first; record != NULL && next < shifts->count;)
-        {
-            PPDiagnosticRecord* following = record->next;
-            if (record == shifts->records[next].record)
-            {
-                if (previous != NULL)
-                {
-                    previous->next = following;
-                }
-                else
-                {
-                    pp->diagnostic_first = following;
-                }
-                if (pp->diagnostic_last == record)
-                {
-                    pp->diagnostic_last = previous;
-                }
-                record->next = NULL;
-                next += 1;
-            }
-            else
-            {
-                previous = record;
-            }
-            record = following;
-        }
-        shifts->detached_count = next;
+        pp_diagnose_output_phase(pp, (PPSeverity)warning->severity, warning->source, warning->publication, (PPDiagnosticPhase)warning->phase, "%s",
+                                 warning->message);
+        warning->message = NULL;
     }
 }
 
-// Requeue an existing group as a whole: its owner, source location, notes and mapped severity never change, and it
-// was already counted. Nulling its handoff slot prevents a repeated expression visit from publishing it twice.
-static void check_common_shift_append(Preprocessor* pp, CheckCommonShiftWarning* warning)
-{
-    PPDiagnosticRecord* record = warning->record;
-    if (record != NULL)
-    {
-        if (pp->diagnostic_last != NULL)
-        {
-            pp->diagnostic_last->next = record;
-        }
-        else
-        {
-            pp->diagnostic_first = record;
-        }
-        record->next = NULL;
-        pp->diagnostic_last = record;
-        warning->record = NULL;
-    }
-}
-
-// The saved count groups at this operator, placed among new runtime diagnostics by the arithmetic walk.
+// The stashed warnings at this operator, reported where the arithmetic walk places them among its new runtime
+// diagnostics: whether it has any.
 static bool check_common_shift_replay(Preprocessor* pp, CheckCommonShiftWarnings* shifts, uint32_t token)
 {
     uint32_t first = 0;
-    uint32_t last = shifts != NULL ? shifts->detached_count : 0;
+    uint32_t last = shifts != NULL ? shifts->count : 0;
     const uint32_t count = last;
     while (first < last)
     {
@@ -998,22 +961,234 @@ static bool check_common_shift_replay(Preprocessor* pp, CheckCommonShiftWarnings
     const bool result = first < count && shifts->records[first].token == token;
     for (uint32_t i = first; i < count && shifts->records[i].token == token; i += 1)
     {
-        check_common_shift_append(pp, shifts->records + i);
+        check_common_shift_report(pp, shifts->records + i);
     }
     return result;
 }
 
-// A traversal can stop at a fatal diagnostic or fail for lack of scratch. No previously collected warning may
-// disappear: retain any groups the walk did not visit, in their original relative order.
+static uint8_t* check_common_unselected(const CheckGraph* graph, const Parser* parser, Arena* scratch);
+static void check_common_body_reached(const CheckProgram* program, const CheckProgramBody* body, uint8_t* seen, uint32_t* queue);
+static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
+                                       const CheckProgram* program, const uint32_t* parents, Arena* scratch);
+
+// The node of the statement condition `token` is in, its closing parenthesis's (CHECK_OP_CONDITION, a switch's
+// CHECK_OP_POSITIVE), or BUSTER_CHECK_NONE: the parse tree's climb from it to that parenthesis, short of a statement's or a
+// block's end.
+static uint32_t check_common_condition_root(const Parser* parser, const CheckInput* input, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t result = BUSTER_CHECK_NONE;
+    bool climbing = true;
+    for (uint32_t at = token, steps = 0; climbing && at < count && steps < count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[at];
+        const bool condition = role == PARSE_ROLE_CLOSE_CONDITION && at < input->token_count;
+        result = condition ? input->token_nodes[at] : result;
+        climbing = !condition && role != PARSE_ROLE_TERMINATOR && role != PARSE_ROLE_OPEN_BLOCK && role != PARSE_ROLE_CLOSE_BLOCK &&
+                   role != PARSE_ROLE_OPEN_BODY && role != PARSE_ROLE_CLOSE_BODY && parser->tree.parents[at] != at;
+        at = parser->tree.parents[at];
+    }
+    return result;
+}
+
+// Whether the place of the statement at `keyword`, whose condition closes at `close`, is reached in its function's control
+// program: a folded condition's statement whose arm has no expression has no program entry of its own (review on #1778).
+// Within its enclosing block, its place follows the block's last entry before it: it is reached where that entry is and
+// falls through, or where a jump lands there from a label before the statement — a goto's or a case's source label before
+// it, or a preceding statement's own end, a jump from within the block. A label past it (a goto's, a case's, an enclosing
+// statement's end) lands at the same entry but not at the place. The first statement of its block, whose place follows no
+// entry of the block, is reached where the block's next entry is, unless a source label comes between. A place the program
+// can't locate is taken as reached.
+static bool check_common_place_reached(const Parser* parser, const CheckProgram* program, uint32_t keyword, uint32_t close, Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t scope = close < count ? parser->tree.parents[close] : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; scope < count && steps < count && parser->tree.roles[scope] != PARSE_ROLE_CLOSE_BLOCK &&
+                             parser->tree.roles[scope] != PARSE_ROLE_CLOSE_BODY && parser->tree.parents[scope] != scope; steps += 1)
+    {
+        scope = parser->tree.parents[scope];
+    }
+    const bool closed = scope < count && (parser->tree.roles[scope] == PARSE_ROLE_CLOSE_BLOCK || parser->tree.roles[scope] == PARSE_ROLE_CLOSE_BODY);
+    // (Its opening brace, its closing one's child.)
+    uint32_t open = BUSTER_CHECK_NONE;
+    for (uint32_t at = closed ? scope : 0; at != 0 && open == BUSTER_CHECK_NONE;)
+    {
+        at -= 1;
+        const uint8_t role = parser->tree.roles[at];
+        open = parser->tree.parents[at] == scope && (role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_OPEN_BODY) ? at : BUSTER_CHECK_NONE;
+    }
+    const CheckProgramBody* body = NULL;
+    for (uint32_t b = 0; open < count && program != NULL && program->controls != NULL && program->input != NULL && b < program->body_count; b += 1)
+    {
+        const CheckProgramBody* candidate = program->bodies + b;
+        body = candidate->opening <= open && (body == NULL || candidate->opening > body->opening) ? candidate : body;
+    }
+    bool result = true;
+    if (body != NULL && body->count != 0 && body->count == body->entry_count)
+    {
+        const uint64_t mark = scratch->length;
+        uint8_t* seen = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, body->count);
+        uint32_t* queue = seen != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, body->count) : NULL;
+        if (queue != NULL)
+        {
+            check_common_body_reached(program, body, seen, queue);
+            const CheckControl* entries = program->controls + body->first;
+            uint32_t before = BUSTER_CHECK_NONE;
+            uint32_t after = BUSTER_CHECK_NONE;
+            for (uint32_t i = 0; i < body->count; i += 1)
+            {
+                const uint32_t token = entries[i].token;
+                before = token >= open && token < keyword ? i : before;
+                after = after == BUSTER_CHECK_NONE && token >= keyword && token <= scope ? i : after;
+            }
+            if (before != BUSTER_CHECK_NONE)
+            {
+                const CheckControlKind kind = entries[before].kind;
+                const uint32_t place = before + 1;
+                result = seen[before] != 0 && kind != CHECK_CONTROL_RETURN && kind != CHECK_CONTROL_END && kind != CHECK_CONTROL_JUMP &&
+                         kind != CHECK_CONTROL_JUMP_INDIRECT;
+                for (uint32_t i = 0; !result && i < body->count; i += 1)
+                {
+                    const CheckControl* entry = entries + i;
+                    const bool jump = entry->kind >= CHECK_CONTROL_BRANCH_FALSE;
+                    const bool source = jump && entry->token < count && parser->tokens.kinds[entry->token] == PARSE_KIND_GOTO;
+                    const uint32_t label = source ? check_common_sparse_get(program->input->label_targets, entry->token) : BUSTER_CHECK_NONE;
+                    const CheckProgramCase* item = entry->kind == CHECK_CONTROL_CASE && program->cases != NULL ? program->cases + entry->target : NULL;
+                    // (A branch whose condition the program knows is taken only one way, as check_common_body_reached's.)
+                    bool truth = false;
+                    const bool known = jump && entry->kind != CHECK_CONTROL_JUMP && check_program_branch_truth(program, entry->node, entry->node, &truth);
+                    const bool taken = !known || truth == (entry->kind == CHECK_CONTROL_BRANCH_TRUE);
+                    result = seen[i] != 0 &&
+                             ((jump && taken && entry->target == place && (source ? label < keyword : entry->token >= open && entry->token < keyword)) ||
+                              (item != NULL && item->target == place && item->token < keyword) ||
+                              entry->kind == CHECK_CONTROL_ASM || (entry->kind == CHECK_CONTROL_JUMP_INDIRECT && place < body->count &&
+                                                                   entries[place].kind == CHECK_CONTROL_LABEL));
+                }
+            }
+            else if (after != BUSTER_CHECK_NONE)
+            {
+                bool labeled = false;
+                for (uint32_t at = keyword; at < entries[after].token && at < count; at += 1)
+                {
+                    labeled |= parser->tree.roles[at] == PARSE_ROLE_LABEL || parser->tree.roles[at] == PARSE_ROLE_CLOSE_CASE;
+                }
+                result = labeled || seen[after] != 0;
+            }
+        }
+        arena_pop_to(scratch, mark);
+    }
+    return result;
+}
+
+// Whether the statement whose condition's root is `condition` is reached, by `reached`, the evaluation with no range dropped.
+// A statement the program drops whole, its keyword too (a constant condition's other branch, an `else if` past a true one),
+// is not. Another's folded condition has no program entry of its own, so the first kept root of its executed arm stands
+// for it (whose nodes come between the condition's operand and its root), reached where the statement is; a static
+// selection's controlling expression and unselected arms (`unselected`), roots no evaluation reaches, never stand for it.
+// A statement with no such root, an empty arm's, is reached where its place in the program is (check_common_place_reached;
+// reviews on #1778).
+static bool check_common_condition_reached(const Parser* parser, const CheckGraph* graph, const CheckProgram* program, const uint32_t* parents,
+                                           const uint8_t* unselected, const uint8_t* reached, uint32_t condition, Arena* scratch)
+{
+    const uint32_t close = graph->tokens[condition];
+    const uint32_t open = check_common_opener(parser, close);
+    const bool kept = program == NULL || program->dropped_range_count == 0 || open == BUSTER_CHECK_NONE || open == 0 ||
+                      !check_program_token_dropped(program, open - 1);
+    const uint32_t operand = graph->operand0[condition];
+    uint32_t found = BUSTER_CHECK_NONE;
+    bool past = false;
+    for (uint32_t node = operand < condition ? operand + 1 : condition; kept && !past && found == BUSTER_CHECK_NONE && node < graph->count; node += 1)
+    {
+        const uint32_t token = graph->tokens[node];
+        const bool candidate = node != condition && parents[node] == BUSTER_CHECK_NONE && token > close && unselected[node] == 0 &&
+                               (program == NULL || program->dropped_range_count == 0 || !check_program_token_dropped(program, token));
+        // (A root within the statement: its token's parse-tree climb reaches the condition's closing parenthesis.)
+        uint32_t at = token;
+        for (uint32_t steps = 0; candidate && at < parser->tokens.count && at != close && steps < parser->tokens.count && parser->tree.parents[at] != at;
+             steps += 1)
+        {
+            at = parser->tree.parents[at];
+        }
+        found = candidate && at == close ? node : BUSTER_CHECK_NONE;
+        past = candidate && at != close;
+    }
+    const bool result = kept && (found < graph->count ? reached[found] != 0 :
+                                 open == BUSTER_CHECK_NONE || open == 0 || check_common_place_reached(parser, program, open - 1, close, scratch));
+    return result;
+}
+
+// The stashed warnings from `first` to `last`, the tokens of a root no walk enters, reported where that root stands in the
+// roots' order (those check_common_shift_unreached kept).
+static void check_common_shift_span(Preprocessor* pp, CheckCommonShiftWarnings* shifts, uint32_t first, uint32_t last)
+{
+    uint32_t low = 0;
+    uint32_t high = shifts->count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = shifts->records[middle].token < first;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    for (uint32_t i = low; i < shifts->count && shifts->records[i].token <= last; i += 1)
+    {
+        if (!shifts->records[i].selection)
+        {
+            check_common_shift_report(pp, shifts->records + i);
+        }
+    }
+}
+
+// The stashed warnings the walk never reached whose shift it proved unevaluated, dropped: clang's runtime shift
+// diagnostics drop themselves in code no path reaches — after a return, a goto or an endless loop, in a constant
+// condition's other branch. Only a complete walk (`evaluated` known, no fatal diagnostic) proves a node unevaluated. Two
+// unevaluated places still warn, as clang's Sema builds them where its CFG has them (review on #1778): an unselected
+// _Generic association or __builtin_choose_expr arm (check_common_unselected), which has no CFG block, and a reachable
+// statement's condition that folds to a constant, whose range the program drops (check_control_drop) though its condition's
+// own root stays evaluated. Their marks are made only where a warning would otherwise drop.
+static void check_common_shift_unreached(const Parser* parser, Preprocessor* pp, CheckCommonShiftWarnings* shifts, const CheckInput* input,
+                                         const CheckStream* stream, const TypeTable* types, const CheckProgram* program, const uint32_t* parents,
+                                         const uint8_t* evaluated, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint8_t* unselected = NULL;
+    const uint8_t* reached = NULL;
+    bool marked = false;
+    for (uint32_t i = 0; shifts != NULL && evaluated != NULL && !pp->fatal && i < shifts->count; i += 1)
+    {
+        const uint32_t token = shifts->records[i].token;
+        const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+        const uint32_t condition = node < graph->count && evaluated[node] == 0 ? check_common_condition_root(parser, input, token) : BUSTER_CHECK_NONE;
+        bool drop = node < graph->count && evaluated[node] == 0;
+        if (drop && !marked)
+        {
+            // The evaluation with no range dropped: the unreachable code's alone.
+            CheckProgram whole = program != NULL ? *program : (CheckProgram){ 0 };
+            whole.dropped_range_count = 0;
+            unselected = check_common_unselected(graph, parser, scratch);
+            reached = check_common_evaluated(graph, stream, types, parser, program != NULL ? &whole : NULL, parents, scratch);
+            marked = true;
+        }
+        drop &= reached != NULL && unselected != NULL &&
+                !(condition < graph->count && check_common_condition_reached(parser, graph, program, parents, unselected, reached, condition, scratch));
+        uint32_t root = node;
+        for (uint32_t steps = 0; node < graph->count && evaluated[node] == 0 && parents[root] < graph->count && steps < graph->count; steps += 1)
+        {
+            root = parents[root];
+        }
+        drop &= unselected != NULL && unselected[node] == 0 && unselected[root] == 0;
+        shifts->records[i].message = drop ? NULL : shifts->records[i].message;
+        shifts->records[i].selection = !drop && unselected != NULL && node < graph->count && (unselected[node] != 0 || unselected[root] != 0);
+    }
+}
+
+// A traversal can stop at a fatal diagnostic or fail for lack of scratch, and a unit with errors may run none. No
+// stashed warning the walks didn't drop may disappear: report the rest, in their order.
 static void check_common_shift_finish(Preprocessor* pp, CheckCommonShiftWarnings* shifts)
 {
-    if (shifts != NULL && shifts->detached_count != 0)
+    for (uint32_t i = 0; shifts != NULL && i < shifts->count; i += 1)
     {
-        for (uint32_t i = 0; i < shifts->detached_count; i += 1)
-        {
-            check_common_shift_append(pp, shifts->records + i);
-        }
-        shifts->detached_count = 0;
+        check_common_shift_report(pp, shifts->records + i);
     }
 }
 
@@ -1791,6 +1966,14 @@ static void check_common_call_argument(CheckCommonEmission* emission, uint32_t i
 
 // An implicit scalar conversion precedes the source expression's nested conversions. Calls carry their
 // conversions on argument edges instead and schedule them immediately before each argument subtree.
+static bool check_common_bitfield_assignment(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node,
+                                             uint32_t* bit_width, __int128* original, __int128* truncated);
+static void check_common_bitfield_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                          TypeTable* types, CheckWarningSpelling* spell, uint32_t source, uint32_t bit_width,
+                                          __int128 original, __int128 truncated, uint32_t token, uint32_t publication, bool initialization,
+                                          Arena* scratch);
+static uint32_t check_common_full_expression_end(const Parser* parser, const CheckGraph* graph, const uint32_t* parents, uint32_t node);
+
 static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t node)
 {
     const CheckGraph* graph = &emission->input->graph;
@@ -1812,7 +1995,21 @@ static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t 
             check_common_int_in_bool(emission->parser, emission->pp, emission->input, stream, emission->types, source, emission->parents,
                                      emission->at_once, emission->scratch);
         }
-        if (source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
+        // A constant a bit-field's assignment truncates (#1447): clang's AnalyzeAssignment warns of it alone, at the `=`, as the
+        // full expression completes, in unreachable code too, and leaves out the value's own conversion.
+        uint32_t bit_width = 0;
+        __int128 original = 0;
+        __int128 truncated = 0;
+        const bool bitfield = op == CHECK_OP_ASSIGN && (evaluated || (emission->emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0) &&
+                              check_common_bitfield_assignment(graph, stream, emission->types, node, &bit_width, &original, &truncated);
+        if (bitfield)
+        {
+            const uint32_t publication = emission->at_once != BUSTER_CHECK_NONE ? emission->at_once :
+                                         check_common_full_expression_end(emission->parser, graph, emission->parents, node);
+            check_common_bitfield_warning(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, source, bit_width,
+                                          original, truncated, graph->tokens[node], publication, false, emission->scratch);
+        }
+        if (!bitfield && source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
             check_common_conversion_source(check_stream_constant_kind(stream, source), arms) &&
             (flags & BUSTER_CHECK_CONVERT_ATOMIC) == 0 &&
             (evaluated || ((emission->emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0 &&
@@ -3807,6 +4004,9 @@ static void check_common_conversion_warning(const Parser* parser, Preprocessor* 
 // A brace initializer's part whose conversion reports at once (check_common_initializer_conversions): a floating literal's,
 // an integer constant's that fills a non-character target's width exactly (#1447, check_common_same_width), or a
 // conditional's or a comma's, whose arms carry either.
+static bool check_common_initializer_bitfield(const CheckInput* input, const CheckStream* stream, const TypeTable* types, const CheckInitPart* part,
+                                              __int128* original, __int128* truncated);
+
 static bool check_common_initializer_literal(const Parser* parser, const CheckInput* input, const CheckStream* stream,
                                               const TypeTable* types, const CheckInitPart* part)
 {
@@ -3814,8 +4014,10 @@ static bool check_common_initializer_literal(const Parser* parser, const CheckIn
     bool is_signed = false;
     const bool target = part->kind == CHECK_INIT_VALUE && part->node < stream->count && check_common_integer(types, part->conversion.type, &width, &is_signed);
     const CheckValue value = target && check_common_integer_constant(stream, part->node) ? check_stream_value(stream, part->node) : (CheckValue){ 0 };
+    __int128 original = 0;
+    __int128 truncated = 0;
     return target &&
-           (check_common_conversion_arms(&input->graph, part->node) ||
+           (check_common_conversion_arms(&input->graph, part->node) || check_common_initializer_bitfield(input, stream, types, part, &original, &truncated) ||
             (check_common_bool_target(types, part->conversion.type) && check_common_bool_candidate(&input->graph, part->node)) ||
             (type_kind(types, type_unqualified(type_strip_aligned(types, check_stream_type(stream, part->node)))) == BUSTER_TYPE_KIND_FLOATING &&
              check_common_floating_literal(parser, &input->graph, part->node)) ||
@@ -3824,6 +4026,18 @@ static bool check_common_initializer_literal(const Parser* parser, const CheckIn
 }
 
 static bool check_common_constant_changes(const TypeTable* types, const CheckStream* stream, uint32_t source, TypeId target);
+static bool check_common_bitfield_truncates(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, TypeId field, uint32_t bit_width,
+                                            uint32_t source, __int128* original, __int128* truncated);
+
+// A brace initializer's bit-field part whose constant its bit-field truncates (#1447, check_common_bitfield_truncates).
+static bool check_common_initializer_bitfield(const CheckInput* input, const CheckStream* stream, const TypeTable* types, const CheckInitPart* part,
+                                              __int128* original, __int128* truncated)
+{
+    const bool result = part->kind == CHECK_INIT_VALUE && part->bit_width != 0 && part->node < stream->count &&
+                        (part->conversion.flags & BUSTER_CHECK_CONVERT_ATOMIC) == 0 &&
+                        check_common_bitfield_truncates(&input->graph, stream, types, part->conversion.type, part->bit_width, part->node, original, truncated);
+    return result;
+}
 
 // An integer constant's value-changing conversion in a brace initializer's part (#1447, -Wconstant-conversion), or a
 // conditional's or a comma's, whose arms carry the conversion (check_common_conversion_warning_at): the walk's leaf
@@ -4006,6 +4220,105 @@ static bool check_common_constant_changes(const TypeTable* types, const CheckStr
     return result;
 }
 
+// A constant's truncation by the bit-field it is stored in (#1447, clang's AnalyzeBitFieldAssignment): the bit-field of
+// `bit_width` bits and type `field` (no _Bool's), the constant node `source`'s value, of its own type, past parentheses and
+// implicit conversions. Its width is its type's, or, for a `-` or a `~` of a negative or unsigned value, its significant
+// bits; a value no wider than the bit-field is kept, and another one is truncated to the bit-field's width and extended back
+// as the bit-field's signedness says. A truncation that changes it warns: of a 1 in a one-bit bit-field, as
+// -Wsingle-bit-bitfield-constant-conversion's. `*original` and `*truncated` are the two values.
+static bool check_common_bitfield_truncates(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, TypeId field, uint32_t bit_width,
+                                            uint32_t source, __int128* original, __int128* truncated)
+{
+    uint32_t field_width = 0;
+    bool field_signed = false;
+    uint32_t width = 0;
+    bool is_signed = false;
+    bool result = false;
+    TypeId type = 0;
+    const bool constant = bit_width != 0 && bit_width < 128 && source < graph->count && check_common_integer_constant(stream, source);
+    const unsigned __int128 integer = constant ? check_common_stream_integer(stream, source, &type) : 0;
+    // A value whose bits are below 2^(w-1), which a w-bit bit-field of either signedness holds, as the 0s and 1s stored in
+    // flags are, is kept before any type is read.
+    if (constant && integer >= ((unsigned __int128)1 << (bit_width - 1)) && type_unqualified(type_strip_aligned(types, field)) != BUSTER_TYPE_BOOL &&
+        check_common_integer(types, field, &field_width, &field_signed))
+    {
+        if (check_common_integer(types, type, &width, &is_signed) && width != 0)
+        {
+            *original = check_common_integer_bits(integer, width, is_signed);
+            const CheckOp op = graph->ops[source];
+            uint32_t original_width = width;
+            if ((op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT) && (!is_signed || *original < 0))
+            {
+                // APInt's significant bits of the value's bits, read as signed: its bit length past its sign bits, and one.
+                const __int128 bits = check_common_integer_bits(integer, width, true);
+                const unsigned __int128 magnitude = (unsigned __int128)(bits < 0 ? ~bits : bits);
+                const uint64_t high = (uint64_t)(magnitude >> 64);
+                const uint32_t length = high != 0 ? 128u - (uint32_t)__builtin_clzll(high) :
+                                        (uint64_t)magnitude != 0 ? 64u - (uint32_t)__builtin_clzll((uint64_t)magnitude) : 0u;
+                original_width = length + 1u;
+            }
+            if (original_width > bit_width)
+            {
+                const unsigned __int128 bits = (unsigned __int128)*original & check_action_mask(bit_width);
+                const bool negative = field_signed && ((bits >> (bit_width - 1)) & 1) != 0;
+                *truncated = negative ? (__int128)(bits | ~check_action_mask(bit_width)) : (__int128)bits;
+                result = *truncated != *original;
+            }
+        }
+    }
+    return result;
+}
+
+// The bit-field truncation's warning (check_common_bitfield_truncates) at `token`, published at `publication`: clang's
+// Diag, as an assignment's full expression completes, but in an unevaluated operand, or, in an unevaluated operand too, as
+// an `initialization` is checked. The constant's type is spelled as written, its typedef's name and all.
+static void check_common_bitfield_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                          TypeTable* types, CheckWarningSpelling* spell, uint32_t source, uint32_t bit_width,
+                                          __int128 original, __int128 truncated, uint32_t token, uint32_t publication, bool initialization,
+                                          Arena* scratch)
+{
+    const String8 name = check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, source),
+                                                   check_input_operand_type_spelling(input, parser, source));
+    if (name.length != 0)
+    {
+        const bool single = bit_width == 1 && original == 1;
+        char from[48];
+        char to[48];
+        check_common_number(from, sizeof(from), original);
+        check_common_number(to, sizeof(to), truncated);
+        const char* message = check_warning_text(scratch, "implicit truncation from %.*s to %sbit-field changes value from %s to %s", (int)name.length,
+                                                  name.pointer, single ? "a one-bit wide " : "", from, to);
+        const uint32_t id = single ? CHECK_WARNING_ID_SINGLE_BIT_BITFIELD_CONSTANT_CONVERSION : CHECK_WARNING_ID_BITFIELD_CONSTANT_CONVERSION;
+        if (initialization)
+        {
+            const uint32_t publication_source = publication < parser->tokens.count ? parser->tokens.sources[publication] : pp->output.count;
+            check_common_report_published_phase(parser, pp, input, token, publication_source, PP_DIAGNOSTIC_DEFERRED, id, false, message, NULL, 0, scratch);
+        }
+        else
+        {
+            check_common_report_evaluated(parser, pp, input, token, publication, PP_DIAGNOSTIC_DEFERRED, id, false, message, NULL, 0, scratch);
+        }
+    }
+}
+
+// An assignment's bit-field truncation (check_common_bitfield_truncates): its left operand's bit-field, its right operand's
+// constant.
+static bool check_common_bitfield_assignment(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node,
+                                             uint32_t* bit_width, __int128* original, __int128* truncated)
+{
+    const uint32_t left = graph->operand0[node];
+    const uint32_t right = graph->operand1[node];
+    bool result = false;
+    if (graph->ops[node] == CHECK_OP_ASSIGN && left < graph->count && right < graph->count && (check_stream_flags(stream, left) & BUSTER_CHECK_BIT_FIELD) != 0 &&
+        check_common_integer_constant(stream, right))
+    {
+        const CheckValue field = check_stream_value(stream, left);
+        *bit_width = field.bit_width;
+        result = check_common_bitfield_truncates(graph, stream, types, field.type, field.bit_width, right, original, truncated);
+    }
+    return result;
+}
+
 // The walks' candidates at `node` (BUSTER_CHECK_REACH_*), by what their tests read of the graph and the stream. The
 // conversion walk's (BUSTER_CHECK_REACH_CONVERSION), which gives every implicit conversion's warning: a constant an
 // initialization's, an assignment's, a conversion's or a call's argument's conversion may change, an integer one only where
@@ -4033,8 +4346,15 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
             {
                 const uint32_t flags = stream->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1u : 0u].flags;
                 const bool assignment = (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0;
+                uint32_t bit_width = 0;
+                __int128 original = 0;
+                __int128 truncated = 0;
+                // Or a constant a bit-field's assignment truncates (#1447, check_common_bitfield_assignment), which only an
+                // assignment of an integer constant reads.
                 conversion = assignment && (constant != CHECK_CONSTANT_INTEGER || arms ||
-                                            check_common_constant_changes(types, stream, source, check_stream_type(stream, node)));
+                                            check_common_constant_changes(types, stream, source, check_stream_type(stream, node)) ||
+                                            (op == CHECK_OP_ASSIGN &&
+                                             check_common_bitfield_assignment(graph, stream, types, node, &bit_width, &original, &truncated)));
             }
             if (!conversion && check_common_bool_candidate(graph, source))
             {
@@ -4218,6 +4538,22 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
     // The initializer is one full expression: its parts' conversions, nested ones too, complete at its end.
     const uint32_t end = check_common_sparse_get(input->initializer_ends, declaration);
     emission->at_once = end <= parser->tokens.count ? end : BUSTER_CHECK_NONE;
+    // Its constants its bit-fields truncate (#1447): clang's CheckBitFieldInitialization's Diag, as each member is initialized,
+    // so in initializer order, before the full expression's conversions, at each value's first token (its grouping parenthesis,
+    // if any), in unreachable code and unevaluated operands too.
+    for (uint32_t p = 0; p < plan->count && !pp->fatal; p += 1)
+    {
+        const CheckInitPart* part = plan->parts + p;
+        const uint32_t root = part->node;
+        __int128 original = 0;
+        __int128 truncated = 0;
+        if (part->kind == CHECK_INIT_VALUE && root < graph->count && stream->diagnostics[root] == CHECK_DIAG_NONE &&
+            check_common_initializer_bitfield(input, stream, emission->types, part, &original, &truncated))
+        {
+            check_common_bitfield_warning(parser, pp, input, stream, emission->types, emission->spell, root, part->bit_width, original, truncated,
+                                          part->token, emission->at_once, true, emission->scratch);
+        }
+    }
     for (uint32_t p = plan->count; p != 0 && !pp->fatal; p -= 1)
     {
         const CheckInitPart* part = plan->parts + p - 1;
@@ -4590,6 +4926,11 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                 source_contexts |= source < graph->count &&
                                    (check_stream_constant_kind(stream, source) == CHECK_CONSTANT_FLOATING || check_common_conversion_arms(graph, source) ||
                                     check_common_bool_candidate(graph, source));
+                // A bit-field's truncation, which clang's Diag gives in unreachable code too (#1447).
+                uint32_t bit_width = 0;
+                __int128 original = 0;
+                __int128 truncated = 0;
+                source_contexts |= check_common_bitfield_assignment(graph, stream, types, node, &bit_width, &original, &truncated);
             }
             source_contexts |= evaluated[node] == 0 && check_common_truth_candidate(graph, stream, node);
             if (evaluated[node] == 0 && op == CHECK_OP_CALL && graph->argument_offsets != NULL && graph->argument_counts != NULL)
@@ -4635,7 +4976,6 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
     }
     if (extras_ready && work_nodes != NULL && work_kinds != NULL)
     {
-        check_common_shift_detach(pp, shifts);
         const CheckCommonInitializerKeys initializer_keys = check_common_initializer_roots(parser, pp, input, stream, types, program, evaluated,
                                                                                           &source_contexts, scratch);
         const uint32_t initializer_count = initializer_keys.literal_count;
@@ -4728,6 +5068,9 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         uint32_t next_integer = initializer_keys.integer_count != 0 ? (uint32_t)(initializer_keys.integer[0] >> 32) : UINT32_MAX;
         uint32_t walked = 0;
         bool any_walked = false;
+        // The stashed shift warnings no walk will reach, dropped or kept, before the roots' order: a kept one in an unevaluated
+        // root (a folded condition's) is reported where that root stands (check_common_shift_span).
+        check_common_shift_unreached(parser, pp, shifts, input, stream, types, program, parents, evaluated, scratch);
         for (uint32_t node = check_common_root_order_next(graph, parents, &order, vector); node < graph->count && !pp->fatal;
              node = check_common_root_order_next(graph, parents, &order, vector))
         {
@@ -4754,6 +5097,10 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                     initializer += 1;
                 }
                 next_init = initializer < initializer_count ? (uint32_t)(initializers[initializer] >> 32) : UINT32_MAX;
+            }
+            if (root && evaluated[node] == 0 && shifts != NULL && shifts->count != 0)
+            {
+                check_common_shift_span(pp, shifts, check_common_emission_subtree_start(&emission, graph->tokens[node]), graph->tokens[node]);
             }
             check_common_root_frames(&emission, node);
             if (emission.work_count != 0)

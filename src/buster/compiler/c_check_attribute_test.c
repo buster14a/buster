@@ -946,6 +946,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         },
         {
             .name = "GNU vector machine mode requires power of two",
+            // Recovered (#1447): the type stays as it was, as clang leaves it.
+            .recovered = true,
             .source = "typedef int V __attribute__((mode(V3SI)));\n",
             .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "mode",
@@ -1280,6 +1282,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         },
         {
             .name = "invalid vector element count",
+            // Recovered (#1447): the type stays as it was, as clang leaves it.
+            .recovered = true,
             .source = "typedef int V __attribute__((vector_size(3)));\n",
             .error = CHECK_ATTRIBUTE_ERROR_VECTOR,
             .error_word = "vector_size",
@@ -1290,6 +1294,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         },
         {
             .name = "zero vector element count",
+            // Recovered (#1447): the type stays as it was, as clang leaves it.
+            .recovered = true,
             .source = "typedef int V __attribute__((vector_size(0)));\n",
             .error = CHECK_ATTRIBUTE_ERROR_VECTOR,
             // clang's "zero vector size" is at the attribute (check_input_vector_size).
@@ -1300,6 +1306,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         },
         {
             .name = "invalid machine mode spelling",
+            // Recovered (#1447), as clang goes on from it.
+            .recovered = true,
             .source = "typedef int I __attribute__((mode(NO_SUCH_MODE)));\n",
             .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "mode",
@@ -1309,6 +1317,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         },
         {
             .name = "wrong machine mode class",
+            // Recovered (#1447), as clang goes on from it.
+            .recovered = true,
             .source = "typedef float I __attribute__((mode(SI)));\n",
             .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "mode",

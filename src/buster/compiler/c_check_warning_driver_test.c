@@ -353,6 +353,38 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .options = { "-Wno-literal-conversion" },
     },
     {
+        // A block's declaration with linkage (an extern object, a function) belongs to the translation unit in clang, so
+        // it is never an unused variable or function; the block's own static, register and automatic objects are (#1447).
+        .name = "a block's extern declarations are never unused",
+        .source = "void f(void) { extern int x; }\nvoid g(void) { extern int y; (void)y; }\nvoid h(void) { extern int z(void); }\n"
+                  "void k(void) { extern int w __attribute__((unused)); }\nvoid m(void) { extern int v; { extern int v; v = 1; } }\n"
+                  "int q;\nvoid n(void) { extern int q; }\nstatic int s5;\nvoid o(void) { extern int s5; (void)s5; }\n"
+                  "void p(void) { extern int arr[]; extern int a, b; (void)b; }\nvoid s(void) { static int st; register int r; int loc; }\n"
+                  "void t(void) { int y4; { extern int y4; } }\n",
+        .options = { "-Wall" },
+        .warnings = 4,
+    },
+    {
+        // A use through a block's declaration with linkage uses the outer entity it redeclares, through nested blocks too;
+        // a block's extern that nothing uses leaves a file-scope static unused (#1447).
+        .name = "a use through a block's extern declaration uses the outer entity",
+        .source = "static void sf(void);\nvoid o(void) { extern void sf(void); sf(); }\nstatic void sf(void) {}\nstatic int t;\n"
+                  "void p(void) { { extern int t; } }\nstatic int u;\nvoid q(void) { { extern int u; { extern int u; (void)u; } } }\n",
+        .options = { "-Wall" },
+        .warnings = 1,
+    },
+    {
+        // Clang's error at a block's extern declarator with an initializer, __private_extern__ too, not a generic one.
+        .name = "a block's extern declaration with an initializer",
+        .source = "int y;\nvoid f(void) { extern int y = 2, z; (void)z; }\n",
+        .errors = 1,
+    },
+    {
+        .name = "a block's private extern declaration with an initializer",
+        .source = "void f(void) { __private_extern__ int x = 1; }\n",
+        .errors = 1,
+    },
+    {
         .name = "floating literal conversion parent group disabled",
         .source = "int a=1.5;\n",
         .options = { "-Wno-conversion" },
