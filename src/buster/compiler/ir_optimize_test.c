@@ -1246,6 +1246,7 @@ static int ir_optimize_text_print_fixtures(void);
 
 #include "ir_optimize_simd_test.c"
 #include "ir_optimize_layout_test.c"
+#include "ir_if_convert_test.c"
 
 static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
 {
@@ -1282,6 +1283,7 @@ static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
         ir_optimize_test_ir(&test);
         ir_optimize_test_layout(&test);
         ir_optimize_test_simd(&test);
+        ir_if_convert_tests(&test);
         ir_optimize_text_tests(&test);
         printf("ir-optimize: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;

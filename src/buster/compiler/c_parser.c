@@ -13306,7 +13306,8 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
     // The parse's temporaries, each step's popped after it (ParseOptions.scratch).
     Arena* temporary = parser->options.scratch != 0 ? parser->options.scratch : &parser->scratch;
     const uint64_t temporary_mark = temporary->length;
-    bool scalar = result && parser->options.scalar;
+    const bool scalar_path = BUSTER_SCALAR_PATH(parser->options.scalar);
+    bool scalar = result && scalar_path;
     if (result && !scalar)
     {
         // The vector path, with the scalar parser on what it flags; an error there sends the whole unit to the scalar
@@ -13329,11 +13330,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
                 .diagnostics = parser->diagnostics,
                 .diagnostic_capacity = parser->diagnostic_capacity,
             };
-            // Preserve the requested parser protocol on scalar hosts, using the kernels' scalar twins.
-            // The fallback and its whole-unit retry are part of that protocol, independent of host ISA.
-            const ParseKernelResult vector = BUSTER_HOST_VECTOR ? parse_vector(&parser->kernels, &input, parser->predeclared, &parser->buffers)
-                                                                 : parse_twins(&parser->kernels, &input, parser->predeclared, parser->buffers.typed,
-                                                                               parser->buffers.statements);
+            const ParseKernelResult vector = parse_vector(&parser->kernels, &input, parser->predeclared, &parser->buffers);
             parser->statistics.fallback_items = vector.fallback.items;
             parser->statistics.fallback_tokens = vector.fallback.tokens;
             parser->statistics.flagged_tokens = vector.flagged_tokens;
@@ -13349,7 +13346,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
         }
         arena_pop_to(temporary, temporary_mark);
     }
-    if (result && scalar && !parser->options.scalar)
+    if (result && scalar && !scalar_path)
     {
         // The fallback's declarations may have left typedef names' meanings changed: the scalar parser starts afresh.
         result = parse_prepare_meanings(parser, pp->table);
