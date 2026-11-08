@@ -3178,7 +3178,8 @@ static bool check_common_displaced_root(const Parser* parser, const CheckGraph* 
 }
 
 // The displaced roots (check_common_displaced_root), each its operand's node above its own, in their operands' order
-// (c_bindings_sort's stable radix sort of the operands, through `temporary`): their count, the sorted keys in `*sorted`,
+// (c_bindings_sort's stable radix sort of the operands, through `temporary`, which the closers' order, nearly always
+// their operands', usually spares): their count, the sorted keys in `*sorted`,
 // each root marked BUSTER_CHECK_EMITTED_DISPLACED in `emitted`, which the root order skips where it stands. At most half
 // the graph's nodes are displaced: each has an operand and a node between them. They are found from the parser's
 // closers, a statement's condition's `)` (its node the token's) and a for clause's `)` (the discard of its increment's
@@ -3191,6 +3192,8 @@ static uint32_t check_common_displaced_roots(const Parser* parser, const CheckIn
     const uint32_t tokens = input->token_nodes != NULL && input->token_count < parser->tokens.count ? input->token_count : parser->tokens.count;
     CheckCommonScan scan = { 0 };
     uint32_t count = 0;
+    uint64_t last = 0;
+    bool ordered = true;
     for (uint32_t token = input->token_nodes != NULL ? check_common_next_token(parser, tokens, BUSTER_CHECK_NONE, closers, BUSTER_ARRAY_LENGTH(closers), &scan, vector) :
                                                        tokens;
          token < tokens; token = check_common_next_token(parser, tokens, BUSTER_CHECK_NONE, closers, BUSTER_ARRAY_LENGTH(closers), &scan, vector))
@@ -3207,12 +3210,15 @@ static uint32_t check_common_displaced_roots(const Parser* parser, const CheckIn
         const uint32_t node = value < graph->count && role == PARSE_ROLE_CLOSE_FOR ? parents[value] : value;
         if (node < graph->count && check_common_displaced_root(parser, graph, parents, node) && (emitted[node] & BUSTER_CHECK_EMITTED_DISPLACED) == 0)
         {
+            const uint64_t key = ((uint64_t)graph->operand0[node] << 32) | node;
             emitted[node] |= BUSTER_CHECK_EMITTED_DISPLACED;
-            items[count++] = ((uint64_t)graph->operand0[node] << 32) | node;
+            ordered &= key > last;
+            last = key;
+            items[count++] = key;
         }
     }
     const uint32_t varying = graph->count != 0 ? UINT32_MAX >> __builtin_clz(graph->count) : 0;
-    *sorted = count != 0 ? c_bindings_sort(items, temporary, count, vector, varying) : items;
+    *sorted = !ordered ? c_bindings_sort(items, temporary, count, vector, varying) : items;
     return count;
 }
 
