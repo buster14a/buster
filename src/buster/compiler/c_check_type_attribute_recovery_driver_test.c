@@ -64,7 +64,7 @@ static void check_test_driver_type_attribute_recovery(CheckTest* test, const cha
         "_Alignas(-1) int a4, b4;\n_Alignas(3) _Alignas(5) int a5, b5;\n__attribute__((aligned(3))) __attribute__((aligned(5))) int a6, b6;\n"
         "__attribute__((aligned(3))) int a7, b7 __attribute__((aligned(5)));\n_Alignas(3) static int a8, b8;\nint _Alignas(3) a9[2], *b9;\n",
         "struct S { _Alignas(3) int a, b; __attribute__((aligned(3))) int c, d : 3, e; };\n"
-        "void f(void) { _Alignas(3) int a = \"x\", b; _Alignas(3) static int c, d; extern _Alignas(3) int e, g; }\n"
+        "void f(void) { _Alignas(3) int a = \"x\", b; _Alignas(3) static int c, d; extern _Alignas(3) int e, g; __attribute__((aligned(3))) int h, i; }\n"
         "_Alignas(3) int i = 1, j = \"x\";\n_Alignas(3) int k; _Alignas(3) int l, m, o;\n"
         "__attribute__((aligned(3), section(1))) int p, r;\n__attribute__((aligned(3), nonnull(1))) int s, t;\nint after = \"a\";\n",
     };
