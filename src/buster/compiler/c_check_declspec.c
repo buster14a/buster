@@ -42,6 +42,7 @@
     X(COMPLEX, "complex") \
     X(TYPEDEF, "typedef") \
     X(EXTERN, "extern") \
+    X(PRIVATE_EXTERN, "__private_extern__") \
     X(STATIC, "static") \
     X(AUTO, "auto") \
     X(REGISTER, "register") \
@@ -240,6 +241,7 @@ static __attribute__((noinline, cold)) bool check_declspec_error(const Parser* p
             switch (name)
             {
                 case C_NAME_EXTERN: new_storage = CHECK_DECLSPEC_EXTERN; break;
+                case C_NAME_PRIVATE_EXTERN: new_storage = CHECK_DECLSPEC_PRIVATE_EXTERN; break;
                 case C_NAME_STATIC: new_storage = CHECK_DECLSPEC_STATIC; break;
                 case C_NAME_AUTO: new_storage = CHECK_DECLSPEC_AUTO; break;
                 case C_NAME_REGISTER: new_storage = CHECK_DECLSPEC_REGISTER; break;

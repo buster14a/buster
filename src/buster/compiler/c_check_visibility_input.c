@@ -303,7 +303,8 @@ static void check_input_visibility_declare(CheckInputReader* reader, uint32_t to
             high = middle;
         }
     }
-    uint8_t visibility = low != 0 ? history->records[low - 1].after : 0;
+    const bool private_extern = reader->declaration_storage[token] == C_NAME_PRIVATE_EXTERN;
+    uint8_t visibility = private_extern ? 3 : low != 0 ? history->records[low - 1].after : 0;
     const CheckInputAttributes* attributes = check_sparse_wide_present(reader->output->attributes) ? check_input_attributes_at(reader->output, token) : NULL;
     bool explicit_visibility = false;
     for (uint32_t a = 0; attributes != NULL && a < attributes->count; a += 1)

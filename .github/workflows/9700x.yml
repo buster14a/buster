@@ -224,6 +224,12 @@ jobs:
           EVIDENCE_NIGHTLY: ${{ vars.BUSTER_NIGHTLY }}
         run: bash tools/ci/nightly.sh evidence "$RUNNER_TEMP/evidence"
 
+  # One verified release-input acquisition before any hosted shard starts.
+  prepare-hosted-tools:
+    needs: [changes, evidence, agent-guide-size, dco-hooks]
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}
+    uses: ./.github/workflows/prepare-hosted-tools.yml
+
   test:
     name: Tests on Ubuntu 26.04 (Clang 23, ${{ matrix.host_arch }}, ${{ matrix.sanitizer }}, O${{ matrix.optimization }}, shard ${{ matrix.shard }} of 4)
     # A pull request's run stops at its first failure. GitHub has no fail-fast across jobs, so its tests wait for the
@@ -231,8 +237,8 @@ jobs:
     # after them would change a qualification that can't pass. Pushes to main, the daily run and dispatched runs test
     # regardless, so that every row reports.
     # A nightly dispatch whose commit's earlier run qualified its plain rows reuses them (`evidence`), and runs none.
-    needs: [changes, evidence, agent-guide-size, dco-hooks]
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}
+    needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]
+    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}
     runs-on: ubuntu-26.04
     # The sanitizer rows run their shard of the inventory on runners whose detectors make it several times slower; the
     # driver's in-process commands take tens of minutes each there. Unsharded, the plain rows took up to 80 minutes and the
@@ -274,6 +280,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+
+      - name: Restore verified hosted release inputs
+        uses: ./.github/actions/hosted-tools
+        with:
+          artifact-name: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
 
       - name: Install official Clang 23.1.4 and test tools
         run: bash tools/ci/setup-hosted.sh
@@ -544,9 +555,9 @@ jobs:
 
   fuzz:
     name: libFuzzer (ASan + UBSan + leaks, ${{ matrix.entry }})
-    needs: [changes, evidence]
+    needs: [changes, evidence, prepare-hosted-tools]
     # Like the sanitizer rows, not on pull requests, nor in the `plain` scope.
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}
+    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     strategy:
@@ -577,6 +588,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+
+      - name: Restore verified hosted release inputs
+        uses: ./.github/actions/hosted-tools
+        with:
+          artifact-name: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
 
       - name: Install official Clang, sanitizer and libFuzzer runtimes
         run: bash tools/ci/setup-hosted.sh

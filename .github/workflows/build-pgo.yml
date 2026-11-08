@@ -6,10 +6,10 @@ name: build.sh PGO
 # settings' checks (cmake/BusterSettings.cmake) make them before any tree is configured.
 on:
   pull_request:
-    paths: [build.sh, CMakeLists.txt, 'cmake/**', tools/ci/setup-build-tools.sh, .github/workflows/build-pgo.yml]
+    paths: [build.sh, CMakeLists.txt, 'cmake/**', tools/ci/setup-build-tools.sh, tools/ci/hosted-release.sh, tools/ci/hosted-tools.lock, .github/workflows/build-pgo.yml]
   push:
     branches: [main]
-    paths: [build.sh, CMakeLists.txt, 'cmake/**', tools/ci/setup-build-tools.sh, .github/workflows/build-pgo.yml]
+    paths: [build.sh, CMakeLists.txt, 'cmake/**', tools/ci/setup-build-tools.sh, tools/ci/hosted-release.sh, tools/ci/hosted-tools.lock, .github/workflows/build-pgo.yml]
   workflow_dispatch:
 
 permissions:
