@@ -234,7 +234,8 @@ the copy. Everything else in the callee's tables is appended to `G`'s:
 
 - **once per caller and callee:** its locals (`local_classes`, `local_flags`,
   `local_sizes`, `local_alignments`; a parameter becomes a plain local), its
-  operations (`Tier0Operation` rows) and its x87 and vector constants;
+  operations (`Tier0Operation` rows), its x87 constants and its vector
+  constants together with their `vector_constant_bytes` width column;
 - **once per site:** its call rows (`call_targets`, `call_first`,
   `call_argument_counts`, `call_variadic`, `calls`, `call_result_objects`,
   `call_tails`) and their arguments' rows (`argument_locations`,
@@ -481,7 +482,8 @@ this one's, and needs its own issue.
     of each, and each program run natively with and without the splice on the
     generator's eight inputs, which must give the same results and globals;
   - hand-written fixtures for every row of the binding and result tables,
-    forwarding and its near misses, nested callees, recursive cycles entered
+    mixed-width vector constants and their width column, forwarding and its
+    near misses, nested callees, recursive cycles entered
     from different callers and orders, the same callee at different remaining
     depths, cold and warm caches, the depth bound, a
     callee of every refused kind (each keeping its calls), compatible and
