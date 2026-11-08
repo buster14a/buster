@@ -2150,116 +2150,6 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
     return valid;
 }
 
-// A rejected unit's common warnings (#1447): clang's for the bodies its errors don't reach. The bodies that hold one of
-// `errors` (tokens) are left out of a second reading of the unit (check_input_selected, as -flazy-system-headers' bodies
-// are), whose program, where it is valid, gives the -Wreturn-type and common warnings of the others: what clang gives of
-// them, the bodies after the unit's first error flushed (check_driver_flushed_bodies). Its other warnings are the first
-// reading's, which the caller published. Nothing where an error lies outside every body, or the reading isn't valid. Only
-// a rejected unit pays for it; the type table, input and program are its own, and the arenas' pushes stay to the unit's end.
-static void check_driver_rejected_common(const Parser* parser, const Parser* original, Preprocessor* pp, const uint32_t* errors, uint32_t error_count,
-                                         bool scalar, bool return_warning, CheckWarningSeverity return_baseline, CheckCommonShiftWarnings* shifts,
-                                         bool publish_unused, uint32_t publication_end, Arena* arena, Arena* scratch)
-{
-    const uint32_t count = parser->tokens.count;
-    uint32_t body_count = 0;
-    for (uint32_t token = 0; token < count; token += 1)
-    {
-        body_count += parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY;
-    }
-    CBodyRange* ranges = body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CBodyRange, body_count) : NULL;
-    uint8_t* mask = ranges != NULL ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
-    uint32_t found = 0;
-    bool valid = mask != NULL && error_count != 0 && c_environment_bodies(&parser->tree, count, ranges, body_count, &found) && found == body_count;
-    if (valid)
-    {
-        memset(mask, 0, (uint64_t)count + 1);
-    }
-    for (uint32_t e = 0; valid && e < error_count; e += 1)
-    {
-        // The body whose tokens hold the error: the last one to begin at or before it.
-        const uint32_t token = errors[e];
-        uint32_t low = 0;
-        uint32_t high = body_count;
-        while (low < high)
-        {
-            const uint32_t middle = low + (high - low) / 2;
-            const bool before = ranges[middle].begin <= token;
-            low = before ? middle + 1 : low;
-            high = before ? high : middle;
-        }
-        valid = low != 0 && token < ranges[low - 1].end;
-        if (valid)
-        {
-            memset(mask + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
-        }
-    }
-    valid = valid && check_lazy_mask_valid(parser, mask);
-    const TypeCapacity capacity = {
-        .types = count <= (1u << 27) ? count * 4 + 64 : 0,
-        .parameters = count,
-        .tags = count,
-        .members = count,
-    };
-    const uint64_t type_bytes = type_capacity_bytes(capacity);
-    const uint64_t index_bytes = type_index_capacity_bytes(capacity);
-    Arena type_arena = valid ? arena_reserve_small(type_bytes, type_bytes) : (Arena){ 0 };
-    Arena index_arena = valid ? arena_reserve_small(index_bytes, BUSTER_TYPE_INDEX_SMALL_BYTES) : (Arena){ 0 };
-    TypeTable types = { 0 };
-    valid = valid && capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
-    CheckInput input = { 0 };
-    valid = valid && check_input_selected(&input, parser, pp, &types, arena, scratch, mask) && !input.resource && (input.report_count == 0 || input.recovered_valid);
-    const CheckOptions check_options = { .scalar = scalar };
-    CheckStream stream = { 0 };
-    valid = valid && check_graph_run(&types, &input.graph, arena, scratch, &check_options, &stream) && stream.report_count == 0 &&
-            check_input_packed_finalize(&input, parser, &types, &stream, scratch) && check_input_warning_graph(&input, parser, &types, &stream, arena, scratch);
-    CheckAsms asms = { 0 };
-    CheckInitializers initializers = { 0 };
-    valid = valid && check_asms_run(&asms, &input, &stream, &types, arena, scratch) &&
-            check_initializers_run_events(&initializers, &input, &stream, parser, &types, arena, scratch, NULL, NULL);
-    const CheckProgramOptions program_options = check_request_program_options(pp, (CheckProgramOptions){
-        .initializers = &initializers,
-        .asms = &asms,
-        .scalar = scalar,
-        .return_warnings = return_warning,
-        .noreturn_warnings = true,
-    });
-    CheckProgram program;
-    valid = valid && check_program(&program, parser, &input, &stream, &types, program_options, arena, scratch);
-    if (valid && publish_unused)
-    {
-        // The unused declarations' warnings, where the first reading gave none: a reader's error ends that pass. The
-        // unit-end ones are left out, as a rejected unit's are.
-        const uint64_t unused_mark = scratch->length;
-        CheckWarningEvent* unused = input.warning_events.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckWarningEvent, input.warning_events.count) : NULL;
-        CheckWarningEvents selected = { .events = unused };
-        for (uint32_t i = 0; unused != NULL && i < input.warning_events.count; i += 1)
-        {
-            const CheckWarningEvent* event = input.warning_events.events + i;
-            if (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER ||
-                event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION)
-            {
-                unused[selected.count++] = *event;
-            }
-        }
-        CheckWarningEvents view;
-        if (selected.count != 0 && check_driver_rejected_warnings(parser, &selected, true, NULL, scratch, &view))
-        {
-            check_driver_warning_events_at(parser, pp, &input, &types, &view, NULL, publication_end, scratch);
-        }
-        arena_pop_to(scratch, unused_mark);
-    }
-    if (valid)
-    {
-        check_driver_return_reports(parser, original, pp, &program, return_baseline, false);
-        const uint64_t flushed_mark = scratch->length;
-        const uint8_t* flushed = check_driver_flushed_bodies(parser, original, pp, &program, scratch);
-        check_driver_common_warnings(parser, pp, &input, &stream, &types, &program, flushed, shifts, scratch);
-        arena_pop_to(scratch, flushed_mark);
-    }
-    arena_release(&type_arena);
-    arena_release(&index_arena);
-}
-
 // The prefix count of the unit's errors' tokens (check_driver_rejected_warnings): its reader's reports, its graph's and the
 // driver's own. NULL without any, or without room.
 static uint32_t* check_driver_error_counts(const Parser* parser, const CheckInput* input, const CheckStream* stream, const CheckDriverDiagnostic* extra,
@@ -2801,11 +2691,13 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     return result;
 }
 
-static bool check_driver_reports(const Parser* parser, const Parser* original, Preprocessor* pp, uint32_t publication_end,
-                                  const CheckInput* input, const CheckStream* stream, const TypeTable* types,
-                                  const CheckRepair* repair, const CheckInput* original_pragmas, const CheckDriverDiagnostic* extra, uint32_t extra_count,
-                                  const uint32_t* excess_tokens, uint32_t excess_count, bool quiet,
-                                  CheckCommonShiftWarnings* shifts, Arena* scratch)
+// `from`: the first token whose reports, warnings, pragmas' diagnostics and packed members' warnings it publishes, 0 for
+// all of them (check_driver_rejected_common's second reading publishes those past where the first one stopped).
+static bool check_driver_reports_from(const Parser* parser, const Parser* original, Preprocessor* pp, uint32_t publication_end,
+                                      const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                      const CheckRepair* repair, const CheckInput* original_pragmas, const CheckDriverDiagnostic* extra, uint32_t extra_count,
+                                      const uint32_t* excess_tokens, uint32_t excess_count, bool quiet,
+                                      CheckCommonShiftWarnings* shifts, uint32_t from, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     const bool scalar = parser->options.scalar;
@@ -2941,6 +2833,16 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                 firsts[first_count - 1] = earlier ? firsts[i] : firsts[first_count - 1];
             }
         }
+        uint32_t skipped = 0;
+        while (from != 0 && skipped < first_count && (firsts[skipped] >> 32) < from)
+        {
+            skipped += 1;
+        }
+        if (skipped != 0)
+        {
+            memmove(firsts, firsts + skipped, (uint64_t)(first_count - skipped) * sizeof(*firsts));
+            first_count -= skipped;
+        }
         if (reports)
         {
             firsts[first_count] = UINT64_MAX;
@@ -2994,6 +2896,16 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                 warnings[warning_count++] = warnings[i];
             }
         }
+        uint32_t passed = 0;
+        while (from != 0 && passed < warning_count && (warnings[passed] >> 32) < from)
+        {
+            passed += 1;
+        }
+        if (passed != 0)
+        {
+            memmove(warnings, warnings + passed, (uint64_t)(warning_count - passed) * sizeof(*warnings));
+            warning_count -= passed;
+        }
         if (show_warnings)
         {
             warnings[warning_count] = UINT64_MAX;
@@ -3019,9 +2931,21 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
         uint32_t visibility = 0;
         uint32_t pragma = 0;
         uint32_t packed = 0;
+        while (from != 0 && visibility_history != NULL && visibility < visibility_history->count && visibility_history->records[visibility].token < from)
+        {
+            visibility += 1;
+        }
+        while (from != 0 && pragma < pragma_input->fp_pragma_count && pragma_input->fp_pragmas[pragma].token < from)
+        {
+            pragma += 1;
+        }
+        while (from != 0 && packed < input->packed_member_count && input->packed_members[packed].address < from)
+        {
+            packed += 1;
+        }
         uint32_t warning = 0;
         uint32_t report = 0;
-        uint64_t position = 0;
+        uint64_t position = from;
         bool walking = shifts_ready;
         while (walking && !pp->fatal)
         {
@@ -4198,6 +4122,165 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
         &directives->pragma_warnings, NULL, publication_end, scratch);
     arena_pop_to(scratch, mark);
     return pragma_ready && shifts_ready;
+}
+
+static bool check_driver_reports(const Parser* parser, const Parser* original, Preprocessor* pp, uint32_t publication_end,
+                                  const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                  const CheckRepair* repair, const CheckInput* original_pragmas, const CheckDriverDiagnostic* extra, uint32_t extra_count,
+                                  const uint32_t* excess_tokens, uint32_t excess_count, bool quiet,
+                                  CheckCommonShiftWarnings* shifts, Arena* scratch)
+{
+    return check_driver_reports_from(parser, original, pp, publication_end, input, stream, types, repair, original_pragmas, extra, extra_count, excess_tokens,
+                                     excess_count, quiet, shifts, 0, scratch);
+}
+
+// A rejected unit's common warnings (#1447): clang's for the bodies its errors don't reach. The bodies that hold one of
+// `errors` (tokens) are left out of a second reading of the unit (check_input_selected, as -flazy-system-headers' bodies
+// are), whose program, where it is valid, gives the -Wreturn-type and common warnings of the others: what clang gives of
+// them, the bodies after the unit's first error flushed (check_driver_flushed_bodies). Its other warnings are the first
+// reading's, which the caller published, but those the first reading lacks: its events' (by kind and token), and past
+// `stop`, where a reader's error ended its walk, its reports' and warnings'. Nothing where an error lies outside every body, or the reading isn't valid. Only
+// a rejected unit pays for it; the type table, input and program are its own, and the arenas' pushes stay to the unit's end.
+static void check_driver_rejected_common(const Parser* parser, const Parser* original, Preprocessor* pp, const uint32_t* errors, uint32_t error_count,
+                                         bool scalar, bool return_warning, CheckWarningSeverity return_baseline, CheckCommonShiftWarnings* shifts,
+                                         const CheckWarningEvents* first, const CheckWarningEvents* first_graph, uint32_t stop,
+                                         uint32_t publication_end, Arena* arena, Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t body_count = 0;
+    for (uint32_t token = 0; token < count; token += 1)
+    {
+        body_count += parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY;
+    }
+    CBodyRange* ranges = body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CBodyRange, body_count) : NULL;
+    uint8_t* mask = ranges != NULL ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
+    uint32_t found = 0;
+    bool valid = mask != NULL && error_count != 0 && c_environment_bodies(&parser->tree, count, ranges, body_count, &found) && found == body_count;
+    if (valid)
+    {
+        memset(mask, 0, (uint64_t)count + 1);
+    }
+    for (uint32_t e = 0; valid && e < error_count; e += 1)
+    {
+        // The body whose tokens hold the error: the last one to begin at or before it.
+        const uint32_t token = errors[e];
+        uint32_t low = 0;
+        uint32_t high = body_count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            const bool before = ranges[middle].begin <= token;
+            low = before ? middle + 1 : low;
+            high = before ? high : middle;
+        }
+        valid = low != 0 && token < ranges[low - 1].end;
+        if (valid)
+        {
+            memset(mask + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
+        }
+    }
+    valid = valid && check_lazy_mask_valid(parser, mask);
+    const TypeCapacity capacity = {
+        .types = count <= (1u << 27) ? count * 4 + 64 : 0,
+        .parameters = count,
+        .tags = count,
+        .members = count,
+    };
+    const uint64_t type_bytes = type_capacity_bytes(capacity);
+    const uint64_t index_bytes = type_index_capacity_bytes(capacity);
+    Arena type_arena = valid ? arena_reserve_small(type_bytes, type_bytes) : (Arena){ 0 };
+    Arena index_arena = valid ? arena_reserve_small(index_bytes, BUSTER_TYPE_INDEX_SMALL_BYTES) : (Arena){ 0 };
+    TypeTable types = { 0 };
+    valid = valid && capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
+    CheckInput input = { 0 };
+    valid = valid && check_input_selected(&input, parser, pp, &types, arena, scratch, mask) && !input.resource && (input.report_count == 0 || input.recovered_valid);
+    const CheckOptions check_options = { .scalar = scalar };
+    CheckStream stream = { 0 };
+    valid = valid && check_graph_run(&types, &input.graph, arena, scratch, &check_options, &stream) && stream.report_count == 0 &&
+            check_input_packed_finalize(&input, parser, &types, &stream, scratch) && check_input_warning_graph(&input, parser, &types, &stream, arena, scratch);
+    CheckAsms asms = { 0 };
+    CheckInitializers initializers = { 0 };
+    valid = valid && check_asms_run(&asms, &input, &stream, &types, arena, scratch) &&
+            check_initializers_run_events(&initializers, &input, &stream, parser, &types, arena, scratch, NULL, NULL);
+    const CheckProgramOptions program_options = check_request_program_options(pp, (CheckProgramOptions){
+        .initializers = &initializers,
+        .asms = &asms,
+        .scalar = scalar,
+        .return_warnings = return_warning,
+        .noreturn_warnings = true,
+    });
+    CheckProgram program;
+    valid = valid && check_program(&program, parser, &input, &stream, &types, program_options, arena, scratch);
+    // The reader's and the graph's warning events the first reading lacks (#1447): a reader's error that ends its
+    // reading leaves the bodies after it without theirs, and every unit without its unused declarations'. The first
+    // reading's own events, published or left out, are its; the others are the rejected unit's (the unit-end ones left out).
+    const uint64_t events_mark = scratch->length;
+    const uint32_t known_count = first->count + first_graph->count;
+    uint64_t* known = valid && known_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, known_count) : NULL;
+    uint64_t* sorting = known != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, known_count) : NULL;
+    const uint64_t* sorted = NULL;
+    if (sorting != NULL)
+    {
+        for (uint32_t i = 0; i < known_count; i += 1)
+        {
+            const CheckWarningEvent* event = i < first->count ? first->events + i : first_graph->events + (i - first->count);
+            known[i] = (uint64_t)event->token << 32 | event->kind;
+        }
+        sorted = c_bindings_sort(known, sorting, known_count, !scalar, UINT32_MAX);
+    }
+    const CheckWarningEvents* readings[] = { &input.warning_events, &stream.warning_events };
+    for (uint32_t r = 0; valid && (known_count == 0 || sorted != NULL) && r < BUSTER_ARRAY_LENGTH(readings); r += 1)
+    {
+        const CheckWarningEvents* events = readings[r];
+        CheckWarningEvent* missing = events->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckWarningEvent, events->count) : NULL;
+        CheckWarningEvents selected = { .events = missing, .notes = events->notes, .note_count = events->note_count };
+        for (uint32_t i = 0; missing != NULL && i < events->count; i += 1)
+        {
+            const uint64_t key = (uint64_t)events->events[i].token << 32 | events->events[i].kind;
+            uint32_t low = 0;
+            uint32_t high = known_count;
+            // (The sort orders the tokens alone: a token's few events are scanned for the kind.)
+            while (low < high)
+            {
+                const uint32_t middle = low + (high - low) / 2;
+                const bool below = sorted[middle] >> 32 < key >> 32;
+                low = below ? middle + 1 : low;
+                high = below ? high : middle;
+            }
+            bool known_event = false;
+            for (uint32_t at = low; !known_event && at < known_count && sorted[at] >> 32 == key >> 32; at += 1)
+            {
+                known_event = sorted[at] == key;
+            }
+            // (Past `stop` the first reading published none of its events.)
+            if (!known_event || events->events[i].token >= stop)
+            {
+                missing[selected.count++] = events->events[i];
+            }
+        }
+        CheckWarningEvents view;
+            if (selected.count != 0 && check_driver_rejected_warnings(parser, &selected, true, NULL, scratch, &view))
+        {
+            check_driver_warning_events_at(parser, pp, &input, &types, &view, NULL, publication_end, scratch);
+        }
+    }
+    arena_pop_to(scratch, events_mark);
+    // Where a reader's error stopped the first reading's walk (`stop`), the second's reports and warnings from there on,
+    // which are its warnings alone: it has no error.
+    if (valid && stop < count)
+    {
+        check_driver_reports_from(parser, original, pp, publication_end, &input, &stream, &types, NULL, NULL, NULL, 0, NULL, 0, false, NULL, stop, scratch);
+    }
+    if (valid)
+    {
+        check_driver_return_reports(parser, original, pp, &program, return_baseline, false);
+        const uint64_t flushed_mark = scratch->length;
+        const uint8_t* flushed = check_driver_flushed_bodies(parser, original, pp, &program, scratch);
+        check_driver_common_warnings(parser, pp, &input, &stream, &types, &program, flushed, shifts, scratch);
+        arena_pop_to(scratch, flushed_mark);
+    }
+    arena_release(&type_arena);
+    arena_release(&index_arena);
 }
 
 static void check_driver_dump(const CheckGraph* graph, const CheckStream* stream, TypeTable* types, Arena* scratch)
@@ -6501,16 +6584,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
                         if (error_tokens != NULL)
                         {
-                            // The first reading's unused declarations' events, which a reader's error leaves it without.
-                            bool unused_events = false;
-                            for (uint32_t i = 0; !unused_events && i < input.warning_events.count; i += 1)
-                            {
-                                const uint32_t kind = input.warning_events.events[i].kind;
-                                unused_events = kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER ||
-                                                kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION;
-                            }
                             check_driver_rejected_common(checking, recovered, pp, error_tokens, error_count, scalar, return_warning, baseline, &shift_warnings,
-                                                         !unused_events && input.report_count != 0, publication_end, arena, scratch);
+                                                         &input.warning_events, &stream.warning_events,
+                                                         input.walk_end != 0 && input.diagnostic_limits == NULL ? input.walk_end : tokens, publication_end, arena,
+                                                         scratch);
                         }
                     }
                     result = pp->errors != 0 ? 1 : result;

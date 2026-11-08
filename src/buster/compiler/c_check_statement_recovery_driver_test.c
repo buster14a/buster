@@ -127,6 +127,18 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "int g(int y){ int w; return 0; }\n"
         "int f(void){ return zz; }\n"
         "int g2(int y){ int w2; return 0; }\n",
+        // A reader's error that ends its walk (a failed static assertion): the other bodies' reader warnings (deprecated uses,
+        // unused variables), before the error and after it, and their common warnings, without the unit-end ones.
+        "int printf(const char *, ...);\n"
+        "int g __attribute__((deprecated));\n"
+        "int pre(int x) { int q; return printf(\"%d\", 1.5) + x + g; }\n"
+        "int f(void) { _Static_assert(0, \"x\"); return 0; }\n"
+        "int post(int x) { int q; int a[2]; if (x = 1) return g; return a[3] + x + printf(\"%d\", 1.5); }\n"
+        "static int unused_static;\n",
+        // The same error in a body with a deprecated use, the next body's given.
+        "int g __attribute__((deprecated));\n"
+        "int f(void) { _Static_assert(0, \"x\"); return g; }\n"
+        "int h(int x) { int w; if (x = 1) return g; return 0; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     static const char* const options[] = { NULL, "-Wall", "-ferror-limit=2", "-w" };

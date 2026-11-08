@@ -4034,8 +4034,11 @@ left out of a second reading of the unit, by `check_input_selected` as
 `-flazy-system-headers`' bodies are. Where that reading is valid, its program
 gives the other bodies' `-Wreturn-type` and common warnings, the bodies after
 the unit's first error flushed as above. Where a reader's error left the first
-reading without its unused declarations' warnings, the second's are given,
-without the unit-end ones. Nothing is given where an error lies outside every
+reading without some of its warnings, the second's are given, without the
+unit-end ones: its warning events the first reading lacks (by kind and token),
+and, where a reader's error ended the first reading's walk
+(`CheckInput.walk_end`), every report and warning of the second from there on
+(`check_driver_reports_from`). Nothing is given where an error lies outside every
 body. Only a rejected unit reads twice.
 
 The driver publishes its reports after `check_program`, so that a control
@@ -4057,8 +4060,7 @@ The later phases are left:
   with an error outside every body (a file-scope initializer's, a
   declaration's) still gets none. The warnings clang gives within a body that
   holds an error (its `-Wparentheses` before or after an expression's error)
-  are still left out, and so are a reader-error unit's other reader warnings
-  than the unused declarations'.
+  are still left out.
 - **Lanes.** Bodies don't carry their recovered reports; they fall back to
   source order instead.
 - **Shared `_Alignas`.** An `_Alignas` shared by several declarators gives its
