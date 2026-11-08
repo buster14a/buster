@@ -42,7 +42,7 @@ struct CheckProgramSelection
 
 // The roots a declaration's `attributes` make its definition: used (but not retain, which keeps the section of a
 // definition that is emitted without making it one: clang 23 emits no unreferenced static with retain alone, #147),
-// x86's interrupt (whose handler adds an implicit used, #147), constructor and destructor.
+// x86's interrupt (whose handler adds an implicit used, #147), constructor, destructor and cpu_specific (#1447).
 static uint32_t check_program_attribute_roots(const CheckInputAttributes* attributes, bool function, bool* gnu_inline)
 {
     uint32_t flags = 0;
@@ -53,6 +53,9 @@ static uint32_t check_program_attribute_roots(const CheckInputAttributes* attrib
         {
             flags |= attribute->kind == CHECK_ATTRIBUTE_USED || (attribute->kind == CHECK_ATTRIBUTE_INTERRUPT && !attribute->subject_ignored) ? BUSTER_C_LOWERING_USED : 0;
             flags |= function && attribute->kind == CHECK_ATTRIBUTE_CONSTRUCTOR ? BUSTER_C_LOWERING_CONSTRUCTOR : 0;
+            // A cpu_specific version's body is emitted as clang's resolver may reach it, though no reference names its
+            // object (#1447: references reach the group's f.ifunc).
+            flags |= function && attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ? BUSTER_C_LOWERING_USED : 0;
             flags |= function && attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR ? BUSTER_C_LOWERING_DESTRUCTOR : 0;
             *gnu_inline |= attribute->kind == CHECK_ATTRIBUTE_GNU_INLINE;
         }

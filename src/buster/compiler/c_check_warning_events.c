@@ -88,7 +88,10 @@ enum
     CHECK_WARNING_ID_NULL_DEREFERENCE = 93,
     // A warning diagnose_if's condition gives (#1447, c_check_condition.c): -Wuser-defined-warnings.
     CHECK_WARNING_ID_USER_DEFINED_WARNINGS = 94,
-    CHECK_WARNING_ID_UNUSED_RESULT = 95,
+    // clang's -Wfunction-multiversion (#1447, c_check_cpu_dispatch.c): a cpu_specific or cpu_dispatch CPU list with two
+    // names of one mangling, and a cpu_dispatch function's body.
+    CHECK_WARNING_ID_FUNCTION_MULTIVERSION = 95,
+    CHECK_WARNING_ID_UNUSED_RESULT = 96,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -310,6 +313,10 @@ typedef enum CheckWarningEventKind
     // A warning diagnose_if's condition gives (#1447, c_check_condition.c), at the call's `)` or at the function's use:
     // payload.token the message's first string token, with a CHECK_WARNING_NOTE_DIAGNOSE_IF at the attribute.
     CHECK_WARNING_EVENT_DIAGNOSE_IF,
+    // -Wfunction-multiversion's (#1447): a CPU list's repeated mangling, at the attribute's name, and a cpu_dispatch
+    // function's body, at its `{`.
+    CHECK_WARNING_EVENT_CPU_LIST_DUPLICATE,
+    CHECK_WARNING_EVENT_CPU_DISPATCH_BODY,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
