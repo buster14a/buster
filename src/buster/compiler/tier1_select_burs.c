@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Tier 1's bottom-up rewrite selection (#141's design: Pelegrí-Llopart and Graham, 1988; iburg, Fraser, Hanson and
-// Proebsting, 1992): the vector path's cover of the plan's integer core. Included by tier1_select.c, before its plan.
+// Proebsting, 1992): both host paths' cover of the plan's integer core. Included by tier1_select.c, before its plan.
 //
 // - The grammar is a C table of patterns (tier1_burs_patterns), each a nonterminal's derivation from an operator and its
 //   children's nonterminals, or from another nonterminal (a chain), with a cost: the candidates' structural bounds and
@@ -23,10 +23,10 @@
 // - The plan builds the pattern of each node its code computes from that rule: tier1_select_candidates' candidate of the
 //   rule's kind (tier1_burs_pick), whose walks fill its fields. A node whose operator the grammar doesn't cover, or whose
 //   rule names a candidate the walks didn't make (a walk past BUSTER_TIER1_SELECT_WALK), takes maximal munch's
-//   (tier1_select_munch), the scalar twin's choice: it is the fallback for what the tables don't cover. An address whose
+//   (tier1_select_munch): the common fallback for what the tables don't cover. An address whose
 //   displacement doesn't fit 32 bits is no fold's: its class is the REG leaf's (tier1_burs_displacement), whose pattern is
-//   munch's, the one candidate it has (its constant index in a register, #141) or none, so that the vector path takes or
-//   refuses it as the scalar twin does. The cover is
+//   munch's, the one candidate it has (its constant index in a register, #141) or none, so that both paths take or refuse
+//   it alike. Scalar classification, labeling and rule lookup are independent twins of the vector kernels. The cover is
 //   the cheapest the grammar has for each tree, and the grammar has every candidate the generator makes for the
 //   operators it covers, so it is never costlier than munch's in the grammar's cost: each pattern's structural bound on
 //   its records, not the records the consumer writes (docs/tier1-selection.md has an addition of two loads, which is
@@ -268,8 +268,14 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
     // fuse with them; and a zero extension's own move.
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_ICMP, 0, { TIER1_BURS_REG, TIER1_BURS_REG }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_COMPARE },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_ICMP, 0, { TIER1_BURS_REG, TIER1_BURS_IMM }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_COMPARE_IMMEDIATE },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_ICMP, 0, { TIER1_BURS_REG, TIER1_BURS_LOADF }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_COMPARE },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_ICMP, 0, { TIER1_BURS_LOADF, TIER1_BURS_REG }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_COMPARE },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_ICMP, 0, { TIER1_BURS_LOADF, TIER1_BURS_IMM }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_COMPARE_IMMEDIATE },
     { TIER1_BURS_COND, TIER1_BURS_FAMILY_ICMP, 0, { TIER1_BURS_REG, TIER1_BURS_REG }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
     { TIER1_BURS_COND, TIER1_BURS_FAMILY_ICMP, 0, { TIER1_BURS_REG, TIER1_BURS_IMM }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
+    { TIER1_BURS_COND, TIER1_BURS_FAMILY_ICMP, 0, { TIER1_BURS_REG, TIER1_BURS_LOADF }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
+    { TIER1_BURS_COND, TIER1_BURS_FAMILY_ICMP, 0, { TIER1_BURS_LOADF, TIER1_BURS_REG }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
+    { TIER1_BURS_COND, TIER1_BURS_FAMILY_ICMP, 0, { TIER1_BURS_LOADF, TIER1_BURS_IMM }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
     { TIER1_BURS_COND, TIER1_BURS_FAMILY_ICMP_LINK, 0, { TIER1_BURS_ZCOND, TIER1_BURS_ZERO }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
     { TIER1_BURS_FCOND, TIER1_BURS_FAMILY_ICMP_LINK, 0, { TIER1_BURS_ZFCOND, TIER1_BURS_ZERO }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
     { TIER1_BURS_ZCOND, TIER1_BURS_FAMILY_ZEXT_TRUTH, 0, { TIER1_BURS_COND, BUSTER_TIER1_BURS_NO_KID }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
@@ -769,7 +775,7 @@ static bool tier1_burs_build(uint8_t* working)
     return builder.valid;
 }
 
-// Builds the selector's state tables once (#141): the vector path's plan needs them, and a baked executable has them
+// Builds the selector's state tables once (#141): both host paths' plans need them, and a baked executable has them
 // (baked.c). Any thread may call it; one builds while the others wait for it.
 static __attribute__((unused)) bool tier1_select_initialize(void)
 {
@@ -1216,9 +1222,9 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
 }
 #endif
 
-// Each node's state, a depth level at a time (`level_offsets` and `level_nodes`, the plan's): the scalar twin, node by
-// node, of tier1_burs_label_vector.
-static __attribute__((unused)) void tier1_burs_label_scalar(uint32_t count, const uint32_t* classes, const uint32_t* kids, uint32_t* states)
+// Each node's state, in node order: every visible child precedes its parent (tier1_burs_visible). This scalar twin of
+// tier1_burs_label_vector uses neither vector kernels nor the vector path's level traversal.
+static void tier1_burs_label_scalar(uint32_t count, const uint32_t* classes, const uint32_t* kids, uint32_t* states)
 {
     for (uint32_t node = 0; node < count; node += 1)
     {
@@ -1232,7 +1238,7 @@ static __attribute__((unused)) void tier1_burs_label_scalar(uint32_t count, cons
 }
 
 // Each node's rule: its state's rule of its operator's goal. The scalar twin of tier1_burs_rules_vector.
-static __attribute__((unused)) void tier1_burs_rules_scalar(uint32_t count, const uint32_t* classes, const uint32_t* states, uint32_t* rules)
+static void tier1_burs_rules_scalar(uint32_t count, const uint32_t* classes, const uint32_t* states, uint32_t* rules)
 {
     for (uint32_t node = 0; node < count; node += 1)
     {

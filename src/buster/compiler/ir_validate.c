@@ -106,8 +106,9 @@ static __attribute__((unused)) IrCheck ir_verify_complete(const IrFunction* func
                     .predecessor_offsets = cfg.predecessor_offsets,
                     .predecessors = cfg.predecessors,
                 };
-                // Reserve both possible 64-byte alignment gaps so AUTO picks scalar when its matrix cannot fit.
-                const uint64_t retained = (uint64_t)cfg.block_count * (sizeof(DominatorFrame) + 3 * sizeof(uint32_t)) + 126;
+                // The analyzer's per-block scratch ahead of any matrix (DFS frames and five u32 columns) and both
+                // possible 64-byte alignment gaps stay reserved, so a matrix the budget admits fits.
+                const uint64_t retained = (uint64_t)cfg.block_count * (sizeof(DominatorFrame) + 5 * sizeof(uint32_t)) + 126;
                 const uint64_t available = scratch->capacity - scratch->length;
                 const uint64_t budget = available > retained ? available - retained : 0;
                 const DominatorOptions options = {

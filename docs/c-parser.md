@@ -9,6 +9,13 @@ didn't have, which lets the vector path take only code the scalar parser would
 accept with the same tree. `compiler file.c` runs the preprocessor and the
 parser; nothing is written yet.
 
+The default uses the vector path only on hosts with the full vector instruction
+set. Other host builds and `--scalar` use the scalar parser directly, without
+the vector protocol's workspaces or fallback pass (#1369). The kernel twins
+remain test and benchmark entry points. A vector fallback that requests a
+whole-unit retry still resets the typedef meanings before the scalar parse;
+a directly selected scalar parse prepares them only once.
+
 Salter's [operator fragments](c-parser-fragments.md), the alternative output
 that #104–#107 measured end to end against the postorder, read beside the
 checker's tree walk, lost: the parser keeps the postorder.
@@ -223,6 +230,22 @@ unbalanced closer at the end of the file; after a tag's body, the tokens clang's
 `isValidAfterTypeSpecifier` allows (a `:` before a bit-field's width or a
 `_Generic` association's value), and none on a new line; a missing `,` or `]`
 in a C23 attribute list after the token before it.
+
+A file-scope declaration's leading attribute lists, C23's and GNU's in any
+order, may be followed by `__extension__`s before its specifiers (#1447), as
+clang's `ParseTopLevelDecl` reads the lists before `ParseExternalDeclaration`
+reads each `__extension__` (`BUSTER_PARSE_FRAME_LEADING_ATTRIBUTES`). After a
+specifier, or after a list that follows an `__extension__`, one is clang's
+"expected identifier or '('". A C23 list just after a file-scope
+`__extension__`, and the lists before a static assertion, are "an attribute
+list cannot appear here", at the first list. In a block, attributes before an
+`__extension__` stay the error they are in clang. The checker takes
+`__extension__;` and lists and `__extension__`s alone before a file-scope `;`
+as clang's extra `;`, without "declaration does not declare anything" (a C23
+list keeps its ignored-attribute warning). `__extension__`s before a static
+assertion, at file scope and in a block, are its statement's markers
+(`parse_scalar_extension_assertion`), specifiers of no declaration to the
+checker (`check_input_extension_assertion`).
 
 It is the fallback for what the vector path flags, the oracle every kernel is
 tested against, and the parser of a unit with errors: the vector path sends the

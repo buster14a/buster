@@ -317,6 +317,9 @@ struct CheckProgram
     // (#1282, c_check_tier1_inline.c) expands the calls of a defined function of internal linkage with the first and not
     // the second: the x86 intrinsics' wrappers.
     uint8_t* object_inline;
+    // Whether any declaration of a function has returns_twice. Whole-object call initializers (#1549) use this to
+    // retain their separate result object in bodies that may reenter them. Null where no declaration has it.
+    uint8_t* object_returns_twice;
     // GNU's alias, ifunc and weakref attributes (#147, check_program_aliases): an entry per object a file-scope declaration
     // gives one, in object order; null in a unit without one, the usual one. A selection shares them, but for their states
     // (BUSTER_CHECK_PROGRAM_ALIAS_*, a byte each), which are each program's: its own references and selection decide them.
@@ -540,6 +543,7 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_NOINLINE 32u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_INTERRUPT 64u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_REALIGN 128u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE 256u
 // CheckProgram.object_inline's bits.
 #define BUSTER_CHECK_PROGRAM_INLINE_ALWAYS 1u
 #define BUSTER_CHECK_PROGRAM_INLINE_NEVER 2u
@@ -548,7 +552,8 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 // attribute (CheckProgram.object_naked), a target or target_clones attribute (CheckProgramTargetEvents), one of a
 // callee's that code generation's check of target features reads, always_inline, flatten or noreturn (#775,
 // CheckProgram.attribute_keys), an alias, ifunc or weakref attribute (#147, CheckProgram.aliases), and x86's interrupt
-// (#147, CheckProgram.object_interrupt) and force_align_arg_pointer (#1447, CheckProgram.object_realign).
+// (#147, CheckProgram.object_interrupt), force_align_arg_pointer (#1447, CheckProgram.object_realign), and
+// returns_twice (#1549, CheckProgram.object_returns_twice).
 static uint32_t check_program_attribute_bits(const CheckInputAttributes* attributes)
 {
     uint32_t bits = 0;
@@ -566,7 +571,8 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
         const uint32_t inlining = kind == CHECK_ATTRIBUTE_ALWAYS_INLINE ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALWAYS_INLINE : kind == CHECK_ATTRIBUTE_NOINLINE ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_NOINLINE : 0;
         const uint32_t interrupt = kind == CHECK_ATTRIBUTE_INTERRUPT && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_INTERRUPT : 0;
         const uint32_t realign = kind == CHECK_ATTRIBUTE_FORCE_ALIGN_ARG_POINTER ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_REALIGN : 0;
-        bits |= attribute->ignored ? 0 : bit | inlining | interrupt | realign;
+        const uint32_t twice = kind == CHECK_ATTRIBUTE_RETURNS_TWICE && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE : 0;
+        bits |= attribute->ignored ? 0 : bit | inlining | interrupt | realign | twice;
     }
     return bits;
 }
@@ -791,6 +797,90 @@ static bool check_program_runtime_truth(const CheckProgram* program, uint32_t no
                        value->fault == CHECK_FAULT_NONE &&
                        check_action_truth(program->types, value, truth);
     return known;
+}
+
+// A branch condition's truth as clang's CFG builder prunes its edges (#1447, CFGBuilder::tryEvaluateBool, whose
+// EvaluateAsBooleanCondition ignores side effects), which the -Wreturn-type walk and the runtime warnings' reachability
+// (check_common_body_reached) model: a known value's (check_program_runtime_truth), and a logical operator's that one
+// operand decides though the other isn't known, `0 && x` and `1 || x` by the left and `x && 0` and `x || 1` by the right,
+// or both together, through the condition's own node, conversions, casts and `!`. A conversion keeps the truth of the
+// 0 or 1 such an operator gives, the one value it isn't already known for. A post-order walk on an explicit stack (the
+// call graph's no-recursion rule), BUSTER_CHECK_BRANCH_TRUTH_DEPTH operands deep at most: each frame's node, its depth and
+// whether its operands are pushed, and each value 0 (false), 1 (true) or 2 (unknown), the left operand's first.
+#define BUSTER_CHECK_BRANCH_TRUTH_DEPTH 64u
+#define BUSTER_CHECK_BRANCH_TRUTH_FRAMES (2u * BUSTER_CHECK_BRANCH_TRUTH_DEPTH + 2u)
+static bool check_program_branch_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
+{
+    const CheckGraph* graph = &program->input->graph;
+    uint32_t frames[BUSTER_CHECK_BRANCH_TRUTH_FRAMES];
+    uint8_t levels[BUSTER_CHECK_BRANCH_TRUTH_FRAMES];
+    uint8_t expanded[BUSTER_CHECK_BRANCH_TRUTH_FRAMES];
+    uint8_t values[BUSTER_CHECK_BRANCH_TRUTH_FRAMES];
+    uint32_t top = 1;
+    uint32_t count = 0;
+    frames[0] = condition;
+    levels[0] = 0;
+    expanded[0] = 0;
+    while (top != 0)
+    {
+        const uint32_t at = frames[top - 1];
+        const uint8_t level = levels[top - 1];
+        const CheckOp op = at < graph->count ? graph->ops[at] : CHECK_OP_COUNT;
+        const bool unary = op == CHECK_OP_CONDITION || op == CHECK_OP_CONVERT || op == CHECK_OP_CAST || op == CHECK_OP_NOT;
+        const bool binary = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR;
+        if (expanded[top - 1] == 0)
+        {
+            bool value = false;
+            const bool known = at < graph->count && check_program_runtime_truth(program, node, at, &value);
+            if (!known && level < BUSTER_CHECK_BRANCH_TRUTH_DEPTH && (unary || binary))
+            {
+                // Its operands, the left one on top.
+                expanded[top - 1] = 1;
+                if (binary)
+                {
+                    frames[top] = graph->operand1[at];
+                    levels[top] = (uint8_t)(level + 1);
+                    expanded[top] = 0;
+                    top += 1;
+                }
+                frames[top] = graph->operand0[at];
+                levels[top] = (uint8_t)(level + 1);
+                expanded[top] = 0;
+                top += 1;
+            }
+            else
+            {
+                values[count] = known ? (uint8_t)value : 2u;
+                count += 1;
+                top -= 1;
+            }
+        }
+        else
+        {
+            uint8_t result = 2u;
+            if (unary)
+            {
+                const uint8_t inner = values[count - 1];
+                count -= 1;
+                result = inner == 2u ? 2u : (uint8_t)(inner ^ (op == CHECK_OP_NOT ? 1u : 0u));
+            }
+            else
+            {
+                const uint8_t right = values[count - 1];
+                const uint8_t left = values[count - 2];
+                count -= 2;
+                const uint8_t decider = op == CHECK_OP_LOGICAL_OR ? 1u : 0u;
+                result = left == decider ? left :
+                         left != 2u && right != 2u ? (op == CHECK_OP_LOGICAL_OR ? (uint8_t)(left | right) : (uint8_t)(left & right)) :
+                         left == 2u && right == decider ? right : 2u;
+            }
+            values[count] = result;
+            count += 1;
+            top -= 1;
+        }
+    }
+    *truth = values[0] == 1u;
+    return values[0] != 2u;
 }
 
 static bool check_program_case_value(const CheckProgram* program, uint32_t node, TypeId target, unsigned __int128* result)
@@ -2391,7 +2481,7 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                 {
                     bool truth = false;
                     const bool jump = entry->kind == CHECK_CONTROL_JUMP;
-                    const bool known = pass != 0 && !jump && check_program_runtime_truth(program, entry->node, entry->node, &truth);
+                    const bool known = pass != 0 && !jump && check_program_branch_truth(program, entry->node, entry->node, &truth);
                     const bool taken = truth == (entry->kind == CHECK_CONTROL_BRANCH_TRUE);
                     targets[0] = jump || !known || taken ? entry->target : BUSTER_CHECK_NONE;
                     next = !jump && (!known || !taken);
@@ -3175,6 +3265,23 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
             {
                 program->object_inline[object] |= (uint8_t)(((inlining & BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALWAYS_INLINE) != 0 ? BUSTER_CHECK_PROGRAM_INLINE_ALWAYS : 0) |
                                                             ((inlining & BUSTER_CHECK_PROGRAM_ATTRIBUTE_NOINLINE) != 0 ? BUSTER_CHECK_PROGRAM_INLINE_NEVER : 0));
+            }
+        }
+        if ((function_attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE) != 0)
+        {
+            // Keep the fact by object: a later redeclaration need not repeat the earlier one's attribute records.
+            if (program->object_returns_twice == NULL && room)
+            {
+                program->object_returns_twice = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, (uint64_t)count + 1);
+                room = program->object_returns_twice != NULL;
+                if (room)
+                {
+                    memset(program->object_returns_twice, 0, (uint64_t)count + 1);
+                }
+            }
+            if (room)
+            {
+                program->object_returns_twice[object] = 1;
             }
         }
         if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED) != 0)

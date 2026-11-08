@@ -165,11 +165,10 @@ struct Tier1MasksFixture
     // and EVEX's 512-bit forms, but no EVEX form of an xmm or a ymm register.
     bool foundation;
     // Its machine rows and the moves around them into their roles' registers and out of them (#1283,
-    // Tier1EmitResult.row_moves), by the vector path and by the scalar one (whose allocators assign registers
-    // differently; a host without the vector path runs the scalar one for both), with and without rematerialization:
-    // checked where `rows` isn't 0.
+    // Tier1EmitResult.row_moves), by either production path with and without rematerialization: both use the same
+    // register-assignment policy (#1395). Checked where `rows` isn't 0.
     uint32_t rows;
-    uint32_t row_moves[2];
+    uint32_t row_moves;
     // A row of AVX512-FP16's (#1283's review): its forms are test->fp16's, and it runs natively only where the host has
     // AVX512-FP16 (not the 9700X's Zen 5).
     bool fp16;
@@ -2702,12 +2701,11 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
                 "}\n",
         .model = tier1_masks_test_vector_rows_model,
         // Tier 0's placement moved 25: each vector operand in (17) and each vector result out (8). What is left, by
-        // the vector path's allocation: the merging opmask's first operand in and the result out (its destination is
+        // either path's allocation: the merging opmask's first operand in and the result out (its destination is
         // the second operand's register), the narrow result's move into itself at its width, the narrow operand's
-        // copy at its width, and the tied operand's in and out (its destination is the second's); by the scalar
-        // path's, the narrow result's and the narrow operand's alone.
+        // copy at its width, and the tied operand's in and out (its destination is the second's).
         .rows = 9,
-        .row_moves = { 6, 2 },
+        .row_moves = 6,
     },
     {
         // #1283's review: a gather (the front end's row of _mm512_mask_i32gather_epi32) whose destination can be none of
@@ -2738,9 +2736,9 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
         .prepare = tier1_masks_test_gather_prepare,
         .exclusive = true,
         // Each gather's source copied into zmm16, its mask (which it clears) into a free opmask register and its result
-        // moved out; by the scalar path's allocation, the second's source and index apart, the first's alone.
+        // moved out, on either production path.
         .rows = 2,
-        .row_moves = { 6, 4 },
+        .row_moves = 6,
     },
     {
         // #1283's review: AVX512-FP16's complex multiplication, whose destination can be neither factor's register, #UD
@@ -2773,7 +2771,7 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
         // The first's product moved out of zmm16; the second's third operand copied out of the first factor's register
         // it shares, and its result written in the destination, the dying second factor's register, after it is read.
         .rows = 2,
-        .row_moves = { 2, 2 },
+        .row_moves = 2,
     },
 };
 
@@ -3693,7 +3691,6 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         tier1_masks_test_expect(test, !fixture->spills || (emitted.spill_stores != 0 && emitted.spill_loads != 0), "masks past k1 to k7 are spilled and reloaded");
         tier1_masks_test_expect(test, !fixture->calls || (emitted.call_stores != 0 && emitted.call_loads != 0), "masks live across a call are saved and reloaded");
         tier1_masks_test_expect(test, !fixture->borrows || (emitted.call_stores != 0 && emitted.call_loads != 0), "a machine row short of opmask registers borrows live masks' and reloads them");
-        // A host without the vector path runs the scalar one for both (BUSTER_HOST_VECTOR), and allocates as it does.
         // A gather's and a complex multiplication's destination is none of their sources' registers (#1283's review),
         // which would be #UD: tier1_emit_cfg_row stages its result where the allocation gave the result such a register
         // (a dying index's or factor's), and the encoder's validation, which refuses the function otherwise, passes.
@@ -3711,7 +3708,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         }
         tier1_masks_test_expect(test, !fixture->exclusive || (exclusive != 0 && distinct == exclusive), "a gather's and a complex multiplication's destination is none of their sources' registers");
         tier1_masks_test_expect(test, x86_validate(emitted.code.records, emitted.code.count) == emitted.code.count, "every record the function emits is valid");
-        const uint32_t row_moves = fixture->row_moves[vector && BUSTER_HOST_VECTOR ? 0 : 1];
+        const uint32_t row_moves = fixture->row_moves;
         if (fixture->rows != 0 && !tier1_masks_test_expect(test, emitted.machine_rows == fixture->rows && emitted.row_moves == row_moves, "a fixture's machine rows take the moves into and out of place it counts"))
         {
             printf("test-tier1-masks: %s, %s path: %u rows, %u moves around them (%u and %u expected)\n", fixture->name, vector ? "vector" : "scalar", emitted.machine_rows, emitted.row_moves, fixture->rows, row_moves);

@@ -8,16 +8,28 @@ requirements. [Command index](README.md).
 
 - Tier 1 selection publishes effective uses for `tier1_liveness.c`; the native
   consumer connects required locations, allocation, frames and spill/remat
-  records. Its vector path covers the integer core by bottom-up rewriting over
+  records. Both host paths cover the integer core by bottom-up rewriting over
   state tables `tier1_select_initialize` compiles from a grammar of the
-  candidates' patterns (`tier1_select_burs.c`, baked; labeled 16 nodes a depth
-  level), maximal munch its scalar twin and its fallback; `test-tier1-select`
-  checks the tables and the kernels' twins, which `test-tier1-pipeline` and
-  `benchmark-tier1-select-source` check on every function they plan. Bounded
+  candidates' patterns (`tier1_select_burs.c`, baked). Vector labeling takes
+  16 nodes of a depth level; the independent scalar kernels use the same costs
+  and tie-breaks. Maximal munch remains the grammar's fallback and a separate
+  test reference. `test-tier1-select` checks identical plans and records;
+  `test-tier1-pipeline` checks the kernel twins and complete plans on every
+  function, and `benchmark-tier1-select-source` checks the kernels before timing.
+  `test-checker-driver` requires byte-identical Tier 1 scalar/vector objects for
+  the #1395 regressions at the same target, with either rematerialization mode,
+  including a parameter-free leaf with volatile loads. Both production
+  allocators use the same regular-class level rule; the independent scan remains
+  a test reference, alongside the exact allocation-output comparisons. Bounded
   direct scalar calls preserve live caller registers and publish symbolic CALL
   references. Byte/word memory and integer conversions
   use canonical 32-bit storage; terminal chains retain explicit traps or empty
-  self-loops. Every other function, general CFGs with loops and phis, goes
+  self-loops. Integer comparisons fold single-use loads at their original
+  access width when the final consumer's memory-order proof permits it
+  (#1218), including exact immediate comparisons through zero/sign extension.
+  `test-tier1-select` checks guard-page boundaries, predicates, address aliases
+  and access-order refusals; `test-tier1-emit` checks frame-object comparisons,
+  realignment and fused branches. Every other function, general CFGs with loops and phis, goes
   through `tier1_emit_cfg.c` (#140): `tier1_cfg.c` allocates it and its edges
   move values, before a jump, at a successor's start or in a split critical
   edge's stub. A straight line whose allocation can't place a value (an evicted

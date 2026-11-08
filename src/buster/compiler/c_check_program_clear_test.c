@@ -4,11 +4,11 @@
 // #1376: an automatic object's zeros past BUSTER_CHECK_LOWER_FILL_UNROLLED bytes are one call of memset, as clang -O0's
 // code clears them, rather than a loop of 8-byte stores; a volatile object keeps its stores; an aggregate's copy that
 // writes the object whole needs no clear before it; and a compound literal of the object's size initializes the object
-// in place, without its own object's clear and copy. Include after c_check_program_copy_test.c. Clang is the oracle of
-// the fixtures' results.
+// in place, without its own object's clear and copy. #1549 also lets an unaliased whole-object call initializer use
+// the declared object as its hidden result. Include after c_check_program_copy_test.c. Clang is the result oracle.
 
 // What a unit's lowering makes of its functions, by each path: whether it calls memset (`clears`) and memmove (`moves`),
-// its largest function's typed entries, and how many of its jumps and branches go back (a loop's).
+// its largest function's typed entries and object bytes, its inline copies, and how many jumps go back (a loop's).
 typedef struct CheckTestClearShape CheckTestClearShape;
 struct CheckTestClearShape
 {
@@ -16,6 +16,8 @@ struct CheckTestClearShape
     bool moves;
     uint32_t entries;
     uint32_t backward;
+    uint32_t copies;
+    uint64_t object_bytes;
 };
 
 static bool check_test_program_clear_lower(const char* source, bool scalar, CheckTestClearShape* shape)
@@ -56,11 +58,18 @@ static bool check_test_program_clear_lower(const char* source, bool scalar, Chec
     {
         const Tier0Function* function = &code.lowered.functions[b];
         shape->entries = function->count > shape->entries ? function->count : shape->entries;
+        uint64_t object_bytes = 0;
+        for (uint32_t local = 0; function->local_sizes != NULL && local < function->local_count; local += 1)
+        {
+            object_bytes += function->local_sizes[local];
+        }
+        shape->object_bytes = object_bytes > shape->object_bytes ? object_bytes : shape->object_bytes;
         for (uint32_t i = 0; i < function->count; i += 1)
         {
             const uint8_t kind = function->kinds[i];
             const bool branch = kind == BUSTER_TYPED_JUMP || kind == BUSTER_TYPED_BRANCH_TRUE || kind == BUSTER_TYPED_BRANCH_FALSE;
             shape->backward += branch && function->values[i] <= i;
+            shape->copies += kind == BUSTER_TYPED_COPY;
         }
     }
     parse_release(&parser);
@@ -93,7 +102,24 @@ static void check_test_program_clear_shape(CheckTest* test, const char* source, 
     }
     char description[192];
     snprintf(description, sizeof(description), "%s: both paths lower the same shape", name);
-    check_test_expect(test, memcmp(shapes, shapes + 1, sizeof(shapes[0])) == 0, description);
+    check_test_expect(test, shapes[0].clears == shapes[1].clears && shapes[0].moves == shapes[1].moves && shapes[0].entries == shapes[1].entries &&
+                                shapes[0].backward == shapes[1].backward && shapes[0].copies == shapes[1].copies && shapes[0].object_bytes == shapes[1].object_bytes,
+                      description);
+}
+
+// The result initialization must remove both the copy and its temporary, while the excluded paths retain them.
+// Each fixture has one defined function, so the object's bytes also distinguish a nested call's separate result.
+static void check_test_program_call_initializer_shape(CheckTest* test, const char* source, const char* name, uint32_t copies, bool moves, uint64_t bytes)
+{
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        CheckTestClearShape shape = { 0 };
+        char description[256];
+        const bool lowered = check_test_program_clear_lower(source, path == 0, &shape);
+        snprintf(description, sizeof(description), "%s: %s path emits %u inline copies, memmove %u, and %" PRIu64 " object bytes (got %u, %u, %" PRIu64 ")",
+                 name, path == 0 ? "scalar" : "vector", copies, moves, bytes, shape.copies, shape.moves, shape.object_bytes);
+        check_test_expect(test, lowered && shape.copies == copies && shape.moves == moves && shape.object_bytes == bytes, description);
+    }
 }
 
 static void check_test_program_clears(CheckTest* test, const char* clang)
@@ -130,6 +156,70 @@ static void check_test_program_clears(CheckTest* test, const char* clang)
         snprintf(name, sizeof(name), "initializer-copy-%u", copies[i]);
         check_test_program_clear_shape(test, source, name, false, copies[i] > BUSTER_TIER0_MAX_COPY_BYTES, false, 32);
     }
+    // Hidden-pointer returns use the declared object directly on both sides of the inline-copy threshold. The small
+    // register returns keep their previous result object and copy; this change makes no ABI classification decision.
+    static const uint32_t returns[] = { 1, 8, 16, 17, 24, 128, 256, 257, 4096 };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(returns); i += 1)
+    {
+        char source[512];
+        char name[96];
+        const uint32_t size = returns[i];
+        snprintf(source, sizeof(source), "struct S{unsigned char c[%u];};struct S make(int);int read(const struct S*);"
+                                         "int f(int n){struct S s=make(n);return read(&s);}", size);
+        snprintf(name, sizeof(name), "initializer-call-result-%u", size);
+        check_test_program_call_initializer_shape(test, source, name, size <= 16, false, (uint64_t)size * (size <= 16 ? 2 : 1));
+    }
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(struct S);struct S first(int);int read(const struct S*);"
+                                                    "int f(int n){struct S s=make(first(n));return read(&s);}",
+                                              "initializer-call-nested-result", 0, false, 600);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};int read(const struct S*);"
+                                                    "int f(struct S(*make)(int),int n){struct S s=make(n);return read(&s);}",
+                                              "initializer-call-indirect-result", 0, false, 300);
+    check_test_program_call_initializer_shape(test, "union U{char c[24];long n;};union U make(int);int read(const union U*);"
+                                                    "int f(int n){union U u=make(n);return read(&u);}",
+                                              "initializer-call-union-result", 0, false, 24);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);"
+                                                    "int f(int n){_Alignas(64) struct S s=make(n);return read(&s);}",
+                                              "initializer-call-overaligned-result", 0, false, 300);
+    check_test_program_call_initializer_shape(test, "struct S{_Alignas(16) long a[4];};typedef struct S Low __attribute__((aligned(1)));"
+                                                    "struct S make(int);int read(const Low*);int f(int n){Low s=make(n);return read(&s);}",
+                                              "initializer-call-canonical-alignment", 1, false, 64);
+    check_test_program_call_initializer_shape(test, "struct S{char c[24];};struct S make(int);int read(const volatile struct S*);"
+                                                    "int f(int n){volatile struct S s=make(n);return read(&s);}",
+                                              "initializer-call-volatile-result", 1, false, 48);
+    check_test_program_call_initializer_shape(test, "struct S{volatile char c[24];};struct S make(int);int read(const struct S*);"
+                                                    "int f(int n){struct S s=make(n);return read(&s);}",
+                                              "initializer-call-volatile-member", 1, false, 48);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int,struct S*);int read(const struct S*);"
+                                                    "int f(int n){struct S s=make(n+1+2+3+4+5+6+7+8+9+10+11+12+13+14+15+16,&s);return read(&s);}",
+                                              "initializer-call-self-reference-vector-tail", 0, true, 600);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int publish(struct S*);int read(const struct S*);"
+                                                    "int f(void){struct S s=make(publish(&s));return read(&s);}",
+                                              "initializer-call-self-reference-nested", 0, true, 600);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);"
+                                                    "int f(int n){struct S s;s=make(n);return read(&s);}",
+                                              "assignment-call-keeps-copy", 0, true, 600);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);"
+                                                    "int f(int n){again:;struct S s=make(n);if(n-->0)goto again;return read(&s);}",
+                                              "initializer-call-reentered-keeps-copy", 0, true, 600);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);void*b[5];"
+                                                    "int f(int n){int r=__builtin_setjmp(b);struct S s=make(n+r);return read(&s);}",
+                                              "initializer-call-after-setjmp-keeps-copy", 0, true, 600);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);void*b[5];"
+                                                    "int f(void){struct S s=make(__builtin_setjmp(b));return read(&s);}",
+                                              "initializer-call-nested-setjmp-keeps-copy", 0, true, 600);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);"
+                                                    "typedef long jmp_buf[8];int setjmp(jmp_buf);jmp_buf b;"
+                                                    "int f(int n){if(setjmp(b))n=3;struct S s=make(n);return read(&s);}",
+                                              "initializer-call-library-setjmp-keeps-copy", 0, true, 600);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);"
+                                                    "int resume(void)__attribute__((returns_twice));"
+                                                    "int f(void){int n=resume();struct S s=make(n);return read(&s);}",
+                                              "initializer-call-after-returns-twice-keeps-copy", 0, true, 600);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);"
+                                                    "int resume(void);int resume(void)__attribute__((returns_twice));int resume(void);"
+                                                    "int f(void){struct S s=make(resume());return read(&s);}",
+                                              "initializer-call-redeclared-returns-twice-keeps-copy", 0, true, 600);
     // A union's member smaller than the union leaves bytes the clear writes.
     check_test_program_clear_shape(test, "struct M{char c[200];};union U{struct M m;long l[40];};int read(const union U*,int);"
                                          "int f(const struct M*p,int n){union U u={*p};return read(&u,n);}",
@@ -207,4 +297,17 @@ static void check_test_program_clears(CheckTest* test, const char* clang)
              "dirty(n);bad|=constant(n)<<6;dirty(n);bad|=volatiles(n)<<7;return bad?123456+bad:n;}",
              dirty);
     check_test_program_source(test, source, "initializer-copies-and-literals-on-dirty-stack", clang);
+    check_test_program_source(test,
+        "struct S{long a[40];int flags;};static int calls;"
+        "static struct S make(int n){struct S s;for(int i=0;i<40;i++)s.a[i]=n+i;s.flags=n;calls=calls*3+1;return s;}"
+        "static struct S change(struct S s,int n){s.a[3]+=n;s.flags+=n;calls=calls*3+2;return s;}"
+        "static struct S(*choose(int n))(int){calls=calls*3+(n&1);return make;}"
+        "static struct S self(struct S*p,int n){p->flags=n+9;struct S s=make(p->flags);return s;}"
+        "int tested(int n){calls=0;struct S a=change(make(n),n+1);struct S b=choose(n)(n+2);"
+        "_Alignas(64) struct S c=make(n+3);volatile struct S v=make(n+4);struct S d=self(&d,n+5);"
+        "struct S e=make(n+6);e=change(e,n+7);"
+        "int bad=a.a[3]!=2L*n+4||a.flags!=2*n+1||b.a[39]!=n+41L||b.flags!=n+2||"
+        "c.a[0]!=n+3L||((unsigned long)&c&63)!=0||v.a[39]!=n+43L||v.flags!=n+4||d.flags!=n+14||"
+        "e.a[3]!=2L*n+16||e.flags!=2*n+13;return bad?123456+bad:calls;}",
+        "initializer-call-nesting-aliases-and-alignment", clang);
 }

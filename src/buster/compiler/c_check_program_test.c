@@ -1986,6 +1986,24 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         }
         if (lowered)
         {
+            if (strcmp(name, "library-folds-beside-overloads") == 0 || strcmp(name, "library-folds-selected-ordinary") == 0)
+            {
+                const uint32_t expected = strcmp(name, "library-folds-selected-ordinary") == 0 ? 1 : 0;
+                for (uint32_t p = 0; p < 2; p += 1)
+                {
+                    uint32_t calls = 0;
+                    for (uint32_t b = 0; b < lower[p].count; b += 1)
+                    {
+                        const Tier0Function* function = lower[p].functions + b;
+                        for (uint32_t e = 0; e < function->count; e += 1)
+                        {
+                            const uint32_t kind = function->kinds[e];
+                            calls += kind == BUSTER_TYPED_CALL || kind == BUSTER_TYPED_TAIL_CALL;
+                        }
+                    }
+                    check_test_expect(test, calls == expected, "ordinary library folds leave only the true overload's call on both paths");
+                }
+            }
             if (strcmp(name, "bits-classic-boundary-values") == 0 || strcmp(name, "bits-generic-boundary-values") == 0)
             {
                 // The classic and generic/C23 bit builtins' rows (#1374/#1652): each count's form the target's, on both paths.

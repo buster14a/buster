@@ -771,6 +771,9 @@ struct CheckInput
     // keeps each pointer complemented, so that a null pointer is its NONE (check_input_attributes_at,
     // check_input_set_attributes_at).
     CheckSparseWide attributes;
+    // A kept warn_unused_result typedef can remain in a function's returned type through typeof or compatible
+    // redeclarations, but canonical TypeIds lose that provenance. Keep logical-call discard warnings in such a unit.
+    bool typedef_result_contracts;
     // Ignored asm labels are the only attribute warnings; their writer publishes this upper bound for report collection.
     uint32_t ignored_asm_count;
     bool asm_warnings_prepared;
@@ -3051,6 +3054,31 @@ static bool check_input_free_standing(const Parser* parser, uint32_t first, uint
     return reading && t < end && parser->tokens.kinds[t] == PARSE_KIND_SEMI;
 }
 
+// A free-standing declaration's run of attributes from `token` up to its first later GNU list or alignment specifier,
+// which the specifiers skip as clang applies nothing of them (check_input_attribute_ignored_lists): reading the run whole
+// would apply a GNU list that follows a C23 list (`[[gnu::unused]] __attribute__((unused));`). `end` when the run has
+// none, or a list it cannot bound, whose error the whole read reports.
+static uint32_t check_input_ignored_group_after(const Parser* parser, uint32_t token, uint32_t end)
+{
+    uint32_t t = token;
+    uint32_t bound = end;
+    bool reading = true;
+    while (reading && check_input_attribute_starts(parser, t, end))
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const bool ignored = t > token && (kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_ALIGNAS);
+        const bool grouped = kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_ASM;
+        const uint32_t open = kind == PARSE_KIND_L_SQUARE ? t : t + 1;
+        const bool opened = open < end && (parser->tokens.kinds[open] == PARSE_KIND_L_PAREN || parser->tokens.kinds[open] == PARSE_KIND_L_SQUARE);
+        const uint32_t close = grouped && opened ? parser->tree.parents[open] : BUSTER_CHECK_NONE;
+        const bool bounded = close > open && close < end;
+        bound = ignored ? t : bound;
+        reading = !ignored && (!grouped || bounded);
+        t = !reading ? t : grouped ? close + 1 : t + 1;
+    }
+    return bound;
+}
+
 // An attribute-only null declaration has no declaration specifiers to warn about. GNU lists are parsed and ignored;
 // C23 lists are applied to the null declaration, so their subject diagnostics still run.
 static bool check_input_attribute_only(const Parser* parser, uint32_t first, uint32_t end)
@@ -3071,6 +3099,12 @@ static bool check_input_attribute_only(const Parser* parser, uint32_t first, uin
         {
             break;
         }
+    }
+    // A file-scope one's `__extension__`s after them (#1447), which clang's ParseExternalDeclaration reads past to the
+    // `;`; not an attribute after one, a declaration specifier there.
+    while (attribute && token < end && parser->tokens.kinds[token] == PARSE_KIND_EXTENSION)
+    {
+        token += 1;
     }
     return attribute && token == end;
 }
@@ -3865,7 +3899,8 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
                 // A type or storage specifier can split the keyword's attribute reads into separate lists.
                 check_input_duplicate_specifier(reader, i, C_NAME_NORETURN);
             }
-            valid &= check_input_read_attributes(reader, &i, end, &attributes);
+            const uint32_t run_end = reader->specifier_free_standing ? check_input_ignored_group_after(parser, i, end) : end;
+            valid &= check_input_read_attributes(reader, &i, run_end, &attributes);
             if (!valid)
             {
                 break;
@@ -4716,6 +4751,7 @@ static void check_input_alloc_token_evidence(CheckInputReader* reader, uint32_t 
 #include "c_check_generic.c"
 static void check_input_implicit_function(CheckInputReader* reader, uint32_t token);
 // The plain library builtins' calls that clang folds (#148), defined after the implicit declarations below.
+static inline __attribute__((always_inline)) uint32_t check_input_library_declaration(CheckInputReader* reader, uint32_t declaration);
 static inline __attribute__((always_inline)) uint32_t check_input_library_call(CheckInputReader* reader, uint32_t use);
 
 // A constexpr object's value (#793), if its initializer's finish has read it: an integer, floating or null pointer
@@ -7865,6 +7901,36 @@ static __attribute__((noinline, cold)) void check_input_private_extern_warning(C
 
 // Read a declaration's specifiers and its declarators, using parser group boundaries and subtree ends to pass
 // over each initializer. Identifier uses within them are resolved later at their own source positions.
+// Whether `first` starts `__extension__`s before a static assertion (#1447), which clang takes at file scope and in a block:
+// the parser's markers of its statement, no declaration's specifiers.
+static bool check_input_extension_assertion(const Parser* parser, uint32_t first)
+{
+    uint32_t token = first;
+    while (token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_EXTENSION)
+    {
+        token += 1;
+    }
+    return token > first && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_STATIC_ASSERT;
+}
+
+// Whether the file-scope declaration from `first` to its `;` at `end` is GNU attribute lists and then `__extension__`s
+// alone, which clang's ParseExternalDeclaration reads as an extra `;` after them (#1447), with no warning by default.
+static bool check_input_extra_semi(const CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    uint32_t token = first;
+    while (token < end && parser->tokens.kinds[token] == PARSE_KIND_ATTRIBUTE && check_input_attribute_starts(parser, token, end))
+    {
+        token = check_input_skip_attributes(parser, token, end);
+    }
+    const uint32_t extensions = token;
+    while (token < end && parser->tokens.kinds[token] == PARSE_KIND_EXTENSION)
+    {
+        token += 1;
+    }
+    return reader->function_body == BUSTER_CHECK_NONE && token == end && token > extensions;
+}
+
 static void check_input_declaration(CheckInputReader* reader, uint32_t first)
 {
     const Parser* parser = reader->parser;
@@ -7995,7 +8061,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 check_input_warning(reader, CHECK_WARNING_ID_MISSING_DECLARATIONS, CHECK_WARNING_EVENT_TYPEDEF_NAMELESS, specifiers,
                                     CHECK_WARNING_COMPLETE_AFTER_DELIMITER, i);
             }
-            else if (!tag)
+            else if (!tag && !check_input_extra_semi(reader, first, i))
             {
                 check_input_warning(reader, CHECK_WARNING_ID_MISSING_DECLARATIONS, CHECK_WARNING_EVENT_EMPTY_DECLARATION, specifiers,
                                     CHECK_WARNING_COMPLETE_AFTER_DELIMITER, i);
@@ -8756,7 +8822,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             if (kind == C_BINDING_FUNCTION)
             {
                 check_input_noderef_redeclaration(reader, token, previous);
-                check_input_format_inherit(reader, token, previous);
+                check_input_contract_inherit(reader, token, previous);
             }
             // A typedef's redeclaration merges its attributes too (#1447); a declaration with linkage's are merged below.
             if (kind == C_BINDING_TYPEDEF && reader->merged_attributes)
@@ -8847,10 +8913,10 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                     const uint32_t first = reader->objects[previous];
                     const bool first_valid = first != 0 && first <= reader->parser->tokens.count &&
                                              reader->declaration_kinds[first - 1] == C_BINDING_FUNCTION && reader->objects[first - 1] == first;
-                    const uint32_t format_previous = linked_visible ? previous : first_valid ? first - 1 : BUSTER_CHECK_NONE;
-                    if (format_previous < reader->parser->tokens.count && check_input_declaration_visible(reader, format_previous, point))
+                    const uint32_t contract_previous = linked_visible ? previous : first_valid ? first - 1 : BUSTER_CHECK_NONE;
+                    if (contract_previous < reader->parser->tokens.count && check_input_declaration_visible(reader, contract_previous, point))
                     {
-                        check_input_format_inherit(reader, token, format_previous);
+                        check_input_contract_inherit(reader, token, contract_previous);
                     }
                 }
                 check_input_naked_inherit(reader, token, previous);
@@ -8969,7 +9035,7 @@ static __attribute__((noinline)) void check_input_library_names(CheckInputReader
 }
 
 // The mark of a call of `declaration`, a function with external linkage whose name, `name`, shares its low 6 bits with a
-// fold's (check_input_library_call): BUSTER_CHECK_LIBRARY_CALL and the fold's index where it is one and clang makes the
+// fold's (check_input_library_declaration): BUSTER_CHECK_LIBRARY_CALL and the fold's index where it is one and clang makes the
 // declaration the builtin, else 0.
 static __attribute__((noinline)) uint32_t check_input_library_match(CheckInputReader* reader, uint32_t declaration, IdentId name)
 {
@@ -8983,6 +9049,21 @@ static __attribute__((noinline)) uint32_t check_input_library_match(CheckInputRe
                          pp_library_builtin(&reader->pp->options, intern_bytes(table, name), intern_length(table, name)) &&
                          check_library_plain_prototype(reader->types, reader->declared_types[declaration], index);
     return library ? BUSTER_CHECK_LIBRARY_CALL | index : 0;
+}
+
+// The same declaration permission serves named calls and immutable overload candidates. The latter publish it only
+// for ordinary declarations, after inheriting attributes from their earlier declarations (#1234).
+static inline __attribute__((always_inline)) uint32_t check_input_library_declaration(CheckInputReader* reader, uint32_t declaration)
+{
+    if (!reader->library_names_known)
+    {
+        check_input_library_names(reader);
+    }
+    const Parser* parser = reader->parser;
+    const IdentId name = declaration < parser->tokens.count ? parser->tokens.names[declaration] : 0;
+    const bool candidate = name != 0 && ((reader->library_names_mask >> (name & 63)) & 1) != 0 && check_input_linkage(reader->declaration_bits, declaration) == 2 &&
+                           reader->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+    return candidate ? check_input_library_match(reader, declaration, name) : 0;
 }
 
 // The member that marks a call whose designator, at `use`, names the unit's declaration of a plain library builtin that
@@ -9002,10 +9083,7 @@ static inline __attribute__((always_inline)) uint32_t check_input_library_call(C
     const IdentId spelled = use < parser->tokens.count ? parser->tokens.names[use] : 0;
     const bool masked = ((reader->library_names_mask >> (spelled & 63)) & 1) != 0 && parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER;
     const uint32_t declaration = masked ? reader->output->declarations[use] : BUSTER_CHECK_NONE;
-    const IdentId name = declaration < parser->tokens.count ? parser->tokens.names[declaration] : 0;
-    const bool candidate = name != 0 && ((reader->library_names_mask >> (name & 63)) & 1) != 0 && check_input_linkage(reader->declaration_bits, declaration) == 2 &&
-                           reader->declaration_kinds[declaration] == C_BINDING_FUNCTION;
-    return candidate ? check_input_library_match(reader, declaration, name) : 0;
+    return masked ? check_input_library_declaration(reader, declaration) : 0;
 }
 
 #include "c_check_literal_table_input.c"
@@ -9738,9 +9816,14 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             {
                 check_input_local_labels(reader, i);
             }
-            else
+            else if (!check_input_extension_assertion(parser, declaration_first))
             {
                 check_input_declaration(reader, declaration_first);
+            }
+            else
+            {
+                // The markers carry nothing to their statement, as a declaration's specifiers carry nothing.
+                reader->ignored[i] = true;
             }
         }
         if (__builtin_expect((role == PARSE_ROLE_OPEN_BLOCK) | (role == PARSE_ROLE_OPEN_BODY) | (role == PARSE_ROLE_OPEN_FOR) | (role == PARSE_ROLE_OPEN_CONDITION), 0) &&

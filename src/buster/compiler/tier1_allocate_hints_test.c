@@ -133,19 +133,20 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
         for (uint32_t hinted = 0; hinted < 2; hinted += 1)
         {
             input.hint_values = hinted != 0 ? hint_values : 0;
-            for (uint32_t path = 0; path < 2; path += 1)
+            for (uint32_t path = 0; path < 3; path += 1)
             {
                 const uint64_t saved = arena->length;
                 Tier1Allocation output = { 0 };
-                const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : tier1_allocate_scalar(&input, arena, &output);
+                const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : path == 1 ? tier1_allocate_scalar(&input, arena, &output) : tier1_allocate_scan_reference(&input, arena, &output);
                 const bool produced = error == TIER1_ALLOCATION_OK && output.fragment_count == 4;
                 tier1_allocation_test_expect(tally, produced && tier1_allocation_verify(&input, &output), "hint trace allocates");
                 if (produced)
                 {
                     const bool kept = output.registers[2] == output.registers[0] && output.registers[3] == output.registers[1];
-                    // The common path swaps them without hints; the scan, lowest free first, keeps them anyway.
+                    // Both production paths swap them without hints; the independent scan, lowest free first, keeps
+                    // them anyway. The fixture distinguishes assignment policies even on a baseline host (#1395).
                     const bool swapped = output.registers[2] == output.registers[1] && output.registers[3] == output.registers[0];
-                    tier1_allocation_test_expect(tally, hinted != 0 ? kept : (path == 0 && BUSTER_HOST_VECTOR ? swapped : kept), hinted != 0 ? "a hinted range keeps its value's register" : "the level rule alone gives the ranges each other's registers");
+                    tier1_allocation_test_expect(tally, hinted != 0 ? kept : (path < 2 ? swapped : kept), hinted != 0 ? "a hinted range keeps its value's register" : "the level rule alone gives the ranges each other's registers");
                 }
                 arena_pop_to(arena, saved);
             }
@@ -293,18 +294,21 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
         const uint64_t saved = arena->length;
         Tier1Allocation vector = { 0 };
         Tier1Allocation scalar = { 0 };
+        Tier1Allocation scan = { 0 };
         const Tier1AllocationError vector_error = tier1_allocate(&input, arena, &vector);
         const Tier1AllocationError scalar_error = tier1_allocate_scalar(&input, arena, &scalar);
-        tier1_allocation_test_expect(tally, vector_error == scalar_error && (vector_error == TIER1_ALLOCATION_OK || (constrained && vector_error == TIER1_ALLOCATION_CONSTRAINT)), "hinted ranges allocate on both paths alike");
-        if (vector_error == TIER1_ALLOCATION_OK && scalar_error == TIER1_ALLOCATION_OK)
+        const Tier1AllocationError scan_error = tier1_allocate_scan_reference(&input, arena, &scan);
+        tier1_allocation_test_expect(tally, vector_error == scalar_error && vector_error == scan_error && (vector_error == TIER1_ALLOCATION_OK || (constrained && vector_error == TIER1_ALLOCATION_CONSTRAINT)), "hinted ranges allocate on both paths and the scan alike");
+        if (vector_error == TIER1_ALLOCATION_OK && scalar_error == TIER1_ALLOCATION_OK && scan_error == TIER1_ALLOCATION_OK)
         {
-            tier1_allocation_test_expect(tally, tier1_allocation_verify(&input, &vector) && tier1_allocation_verify(&input, &scalar), "hinted ranges pass the interval verifier");
-            tier1_allocation_test_expect(tally, tier1_allocation_test_occupancy(&input, &vector) && tier1_allocation_test_occupancy(&input, &scalar), "hinted ranges pass the occupancy oracle");
+            tier1_allocation_test_expect(tally, tier1_allocation_verify(&input, &vector) && tier1_allocation_verify(&input, &scalar) && tier1_allocation_verify(&input, &scan), "hinted ranges pass the interval verifier");
+            tier1_allocation_test_expect(tally, tier1_allocation_test_occupancy(&input, &vector) && tier1_allocation_test_occupancy(&input, &scalar) && tier1_allocation_test_occupancy(&input, &scan), "hinted ranges pass the occupancy oracle");
+            tier1_allocation_test_expect(tally, tier1_allocation_test_equal(&input, &vector, &scalar), "hinted production paths choose identical allocation output");
             // A class the common path colors, against the reference; the classes are colored in order, sharing `last`.
             uint8_t reference[128];
             uint8_t last[25];
             memset(last, UINT8_MAX, sizeof(last));
-            for (uint32_t class = 0; BUSTER_HOST_VECTOR && !constrained && class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
+            for (uint32_t class = 0; !constrained && class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
             {
                 if (tier1_allocation_test_hinted_levels(&input, class, reference, last))
                 {
@@ -321,5 +325,5 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
         }
         arena_pop_to(arena, saved);
     }
-    tier1_allocation_test_expect(tally, !BUSTER_HOST_VECTOR || compared > 1000, "the hint reference compares many colored classes");
+    tier1_allocation_test_expect(tally, compared > 1000, "the hint reference compares many colored classes");
 }

@@ -543,8 +543,10 @@ static void tier1_emit_test_saves_twins(Tier1EmitTest* test)
 // 8-bit displacement's edge, through stores, loads and an addition fused into a memory operand; shape 1 reaches one
 // object through an indexed address the accesses fold whole; shape 2 reads an over-aligned object, which realigns the
 // frame; shape 3 keeps an address value the stores share; shape 4 reaches one object from the entry block past the
-// walk's block (a store and a load through two single-use addresses, verified as a round trip). Every access must
-// execute natively to its oracle's value, with no object address keeping its lea.
+// walk's block (a store and a load through two single-use addresses, verified as a round trip). Shapes 5 and 7 fold a
+// qword load into a materialized comparison and a branch; shapes 6 and 8 compare a promoted byte and signed word
+// directly in an over-aligned object (#1218). Every access must execute natively to its oracle's value, with no
+// object address keeping its lea.
 static uint64_t tier1_emit_test_object_oracle(uint32_t shape, uint64_t a, uint64_t b)
 {
     uint64_t result = 0;
@@ -552,9 +554,25 @@ static uint64_t tier1_emit_test_object_oracle(uint32_t shape, uint64_t a, uint64
     {
         result = a + 2 * b;
     }
-    else
+    else if (shape < 5)
     {
         result = a + b;
+    }
+    else if (shape == 5)
+    {
+        result = a < b;
+    }
+    else if (shape == 6)
+    {
+        result = (uint8_t)a > 127;
+    }
+    else if (shape == 7)
+    {
+        result = a < b ? a : b;
+    }
+    else
+    {
+        result = (int16_t)a < -17 ? a : b;
     }
     return result;
 }
@@ -578,9 +596,15 @@ static bool tier1_emit_test_object_fixture(Tier1EmitTest* test, uint32_t shape, 
     {
         sizes = (IrSizes){ .instruction_count = 10, .block_count = 1, .slot_count = 2, .address_count = 1, .parameter_count = 2 };
     }
-    else
+    else if (shape == 4)
     {
         sizes = (IrSizes){ .instruction_count = 9, .block_count = 2, .slot_count = 1, .parameter_count = 2 };
+    }
+    else
+    {
+        const bool narrow = shape == 6 || shape == 8;
+        const bool branch = shape >= 7;
+        sizes = (IrSizes){ .instruction_count = (narrow ? 14u : 11u) + branch, .block_count = branch ? 3u : 1u, .constant_count = narrow, .slot_count = 1, .address_count = 1, .parameter_count = 2 };
     }
     bool ok = ir_create(&test->input, &sizes, function) == IR_OK;
     if (ok)
@@ -669,7 +693,7 @@ static bool tier1_emit_test_object_fixture(Tier1EmitTest* test, uint32_t shape, 
             tier1_emit_test_node(function, 8, IR_ADD, IR_I64, 7, 0);
             tier1_emit_test_node(function, 9, IR_RET, IR_VOID, 8, BUSTER_IR_NONE);
         }
-        else
+        else if (shape == 4)
         {
             // The object in the entry block past the walk's block, as the producer's preheader does: one store and one
             // load through two single-use addresses of the same object, both folded, verified as a round trip.
@@ -683,6 +707,65 @@ static bool tier1_emit_test_object_fixture(Tier1EmitTest* test, uint32_t shape, 
             tier1_emit_test_node(function, 6, IR_LOAD, IR_I64, 3, BUSTER_IR_NONE);
             tier1_emit_test_node(function, 7, IR_ADD, IR_I64, 6, 0);
             tier1_emit_test_node(function, 8, IR_RET, IR_VOID, 7, BUSTER_IR_NONE);
+        }
+        else
+        {
+            const bool narrow = shape == 6 || shape == 8;
+            const bool branch = shape >= 7;
+            const IrType type = shape == 6 ? IR_I8 : shape == 8 ? IR_I16 : IR_I64;
+            const IrType promoted = shape == 6 ? IR_I32 : IR_I64;
+            function->slots[0] = (IrSlot){ .size = narrow ? 64u : 16u, .alignment = narrow ? 32u : 8u, .type = (uint8_t)type, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+            function->addresses[0] = (IrAddress){ .offset = 8, .scale = 1 };
+            uint32_t next = 2;
+            const uint32_t stored = narrow ? next++ : 0;
+            if (narrow)
+            {
+                tier1_emit_test_node(function, stored, IR_TRUNC, type, 0, BUSTER_IR_NONE);
+            }
+            const uint32_t store_object = next++;
+            const uint32_t store_address = next++;
+            tier1_emit_test_node(function, store_object, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, store_address, IR_ADDRESS, IR_PTR, store_object, BUSTER_IR_NONE);
+            function->c[store_address] = 0;
+            tier1_emit_test_node(function, next++, IR_STORE, IR_VOID, store_address, stored);
+            const uint32_t load_object = next++;
+            const uint32_t load_address = next++;
+            const uint32_t load = next++;
+            tier1_emit_test_node(function, load_object, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, load_address, IR_ADDRESS, IR_PTR, load_object, BUSTER_IR_NONE);
+            function->c[load_address] = 0;
+            tier1_emit_test_node(function, load, IR_LOAD, type, load_address, BUSTER_IR_NONE);
+            uint32_t left = load;
+            uint32_t right = 1;
+            if (narrow)
+            {
+                left = next++;
+                right = next++;
+                tier1_emit_test_node(function, left, shape == 6 ? IR_ZEXT : IR_SEXT, promoted, load, BUSTER_IR_NONE);
+                tier1_emit_test_node(function, right, IR_CONST, promoted, 0, BUSTER_IR_NONE);
+                function->constants[0].low = shape == 6 ? 127 : (uint64_t)-17;
+            }
+            const uint32_t compared = next++;
+            tier1_emit_test_node(function, compared, IR_ICMP, IR_I1, left, right);
+            function->c[compared] = shape == 6 ? IR_GT : shape == 8 ? IR_LT : IR_ULT;
+            if (branch)
+            {
+                const uint32_t jumped = next++;
+                tier1_emit_test_node(function, jumped, IR_CBR, IR_VOID, compared, 1);
+                function->c[jumped] = 2;
+                function->block_offsets[1] = next;
+                tier1_emit_test_node(function, next++, IR_RET, IR_VOID, 0, BUSTER_IR_NONE);
+                function->block_offsets[2] = next;
+                tier1_emit_test_node(function, next++, IR_RET, IR_VOID, 1, BUSTER_IR_NONE);
+                function->block_offsets[3] = next;
+            }
+            else
+            {
+                const uint32_t extended = next++;
+                tier1_emit_test_node(function, extended, IR_ZEXT, IR_I64, compared, BUSTER_IR_NONE);
+                tier1_emit_test_node(function, next++, IR_RET, IR_VOID, extended, BUSTER_IR_NONE);
+            }
+            ok = next == sizes.instruction_count;
         }
     }
     return ok;
@@ -713,10 +796,12 @@ static void tier1_emit_test_execute_object(Tier1EmitTest* test, uint32_t shape, 
     }
     if (ready)
     {
+        static const uint64_t compare_edges[] = { 0, 127, 128, 255, 32767, 32768, 65518, 65519, 65520, UINT64_MAX };
         uint64_t random = UINT64_C(0x1f2b3c4d5e6f7081) + shape;
         for (uint32_t sample = 0; sample < 32; sample += 1)
         {
-            const uint64_t a = sample < 4 ? UINT64_MAX << sample : tier1_emit_test_random(&random);
+            const uint64_t a = shape >= 5 && sample < sizeof(compare_edges) / sizeof(compare_edges[0]) ? compare_edges[sample] :
+                              sample < 4 ? UINT64_MAX << sample : tier1_emit_test_random(&random);
             const uint64_t b = sample < 4 ? UINT64_MAX >> sample : tier1_emit_test_random(&random);
             const uint64_t actual = tier1_emit_test_call(executable, a, b);
             tier1_emit_test_expect(test, actual == tier1_emit_test_object_oracle(shape, a, b), "native object access equals independent oracle");
@@ -733,35 +818,44 @@ static void tier1_emit_test_execute_object(Tier1EmitTest* test, uint32_t shape, 
 // object's offset plus the walked displacement, with no lea left but the address values the stores keep.
 static void tier1_emit_test_objects(Tier1EmitTest* test)
 {
-    for (uint32_t shape = 0; shape < 5; shape += 1)
+    for (uint32_t shape = 0; shape < 9; shape += 1)
     {
         for (uint32_t vector = 0; vector < 2; vector += 1)
         {
-            for (uint32_t flags = 0; flags < (shape == 2 ? 2 : 1); flags += 1)
+            for (uint32_t flags = 0; flags < (shape == 2 || shape >= 5 ? 2 : 1); flags += 1)
             {
                 test->terms = shape;
-                IrFunction function;
+                IrFunction function = { 0 };
                 const bool created = tier1_emit_test_object_fixture(test, shape, &function);
                 tier1_emit_test_expect(test, created, "construct original object IR");
                 Tier1SelectPlan plan;
                 uint32_t node = BUSTER_IR_NONE;
-                uint32_t dominance_enter[2] = {0, 1};
-                uint32_t dominance_leave[2] = {2, 2};
-                const IrDominance preheader = { .enter = dominance_enter, .leave = dominance_leave, .block_count = 2 };
-                const Tier1SelectError selected = created ? tier1_select_plan(&function, shape == 4 ? &preheader : 0, &test->output, &test->scratch, vector != 0, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+                // Every non-entry block is an immediate child of entry: the preheader's one successor or the two
+                // comparison exits. Cross-block uses, including the exits' returned parameters, need this proof.
+                uint32_t dominance_enter[3] = { 0, 1, 2 };
+                uint32_t dominance_leave[3] = { function.block_count, 2, 3 };
+                const IrDominance dominance = { .enter = dominance_enter, .leave = dominance_leave, .block_count = function.block_count };
+                const Tier1SelectError selected = created ? tier1_select_plan(&function, function.block_count > 1 ? &dominance : 0, &test->output, &test->scratch, vector != 0, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
                 tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select real object IR");
                 if (selected == TIER1_SELECT_OK)
                 {
+                    Tier1EmitDiagnostic diagnostic = { 0 };
                     const Tier1EmitOptions options = {
                         .certify = true,
+                        .diagnostic = &diagnostic,
                         .register_mask = tier1_liveness_register_mask(),
-                        .frame_flags = shape == 2 && flags == 1 ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
+                        .frame_flags = flags == 1 ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
                         .vector = vector != 0,
                         .rematerialize = true,
                     };
                     Tier1EmitResult emitted;
                     const uint64_t scratch_mark = test->scratch.length;
                     const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node);
+                    if (error != TIER1_EMIT_OK && test->failures < 20)
+                    {
+                        fprintf(stderr, "tier1-emit: object emission (shape=%u, vector=%u, frame_flags=0x%x, error=%u, error_node=%u, cause=%u, cause_error=%u)\n",
+                                shape, vector, options.frame_flags, (unsigned)error, node, (unsigned)diagnostic.cause, diagnostic.error);
+                    }
                     tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "object pipeline emits through the CFG consumer");
                     if (error == TIER1_EMIT_OK)
                     {
@@ -779,6 +873,7 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
                         }
                         tier1_emit_test_expect(test, !object_lea, "no object address keeps its lea");
                         bool placed = true;
+                        uint32_t compared = 0;
                         int32_t low = INT32_MAX;
                         int32_t high = INT32_MIN;
                         for (uint32_t n = 0; n < function.instruction_count; n += 1)
@@ -787,7 +882,7 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
                             const uint32_t rule = pattern->rule;
                             const bool memory = !plan.covered[n] && pattern->stack_object != BUSTER_IR_NONE &&
                                                 (rule == TIER1_RULE_LOAD || rule == TIER1_RULE_LOAD_ADDRESS || rule == TIER1_RULE_STORE || rule == TIER1_RULE_STORE_ADDRESS || rule == TIER1_RULE_ADDRESS ||
-                                                 rule == TIER1_RULE_LOAD_OPERAND);
+                                                 rule == TIER1_RULE_LOAD_OPERAND || pattern->compare_memory);
                             if (memory)
                             {
                                 const uint32_t first = emitted.code.node_first[n];
@@ -796,6 +891,26 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
                                 const bool found = span != 0 && tier1_emit_cfg_object(&function, &emitted, pattern->stack_object, &offset);
                                 int32_t total = 0;
                                 const X86Instruction* record = found && !__builtin_add_overflow(offset, pattern->displacement, &total) ? &emitted.code.records[first + span - 1] : 0;
+                                if (pattern->compare_memory && record != 0)
+                                {
+                                    record = 0;
+                                    uint32_t accesses = 0;
+                                    bool consumed = false;
+                                    for (uint32_t r = first; r < first + span; r += 1)
+                                    {
+                                        const X86Instruction* candidate = &emitted.code.records[r];
+                                        const X86Effects* effects = x86_effects(candidate->form);
+                                        if (effects->operation == X86_OPERATION_CMP && (candidate->mode & BUSTER_X86_MODE_MEMORY) != 0)
+                                        {
+                                            record = candidate;
+                                            accesses += 1;
+                                            placed &= effects->width == (shape == 6 ? 1 : shape == 8 ? 2 : 8);
+                                        }
+                                        consumed |= record != 0 && effects->operation == (shape >= 7 ? X86_OPERATION_JCC : X86_OPERATION_SETCC);
+                                    }
+                                    compared += 1;
+                                    placed &= accesses == 1 && consumed && (rule == TIER1_RULE_BRANCH_COMPARE) == (shape >= 7);
+                                }
                                 placed &= record != 0 && record->rm == (uint8_t)emitted.frame.base_register && record->displacement == total;
                                 low = record != 0 && total < low ? total : low;
                                 high = record != 0 && total > high ? total : high;
@@ -806,9 +921,19 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
                         {
                             tier1_emit_test_expect(test, placed && low < 128 && high >= 128, "the emitted displacements straddle the 8-bit edge");
                         }
-                        if (shape == 2)
+                        if (shape == 2 || shape == 6 || shape == 8)
                         {
                             tier1_emit_test_expect(test, emitted.frame.realigned, "the over-aligned object realigns the frame");
+                        }
+                        if (shape >= 5)
+                        {
+                            bool folded = true;
+                            for (uint32_t n = 0; n < function.instruction_count; n += 1)
+                            {
+                                folded &= function.op[n] != IR_LOAD || plan.covered[n] != 0;
+                            }
+                            tier1_emit_test_expect(test, compared == 1 && folded, "one frame-object CMP covers the load before its boolean result or branch");
+                            tier1_emit_test_expect(test, emitted.frame.frame_pointer == (shape == 6 || shape == 8 || flags == 1), "comparison fixtures keep the requested or realignment frame pointer");
                         }
                         tier1_emit_test_expect(test, test->scratch.length == scratch_mark, "object emission returns scratch");
                         tier1_emit_test_execute_object(test, shape, &function, &emitted);

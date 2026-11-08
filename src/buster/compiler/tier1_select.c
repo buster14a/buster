@@ -621,6 +621,7 @@ struct Tier1SelectHoles
     uint8_t condition;
     uint8_t scale;
     bool compare_immediate;
+    bool compare_memory;
     bool sign_result;
     // The pattern's no-ops (Tier1SelectPattern.nops).
     uint8_t nops;
@@ -704,7 +705,23 @@ static X86Instruction tier1_select_shift(X86Operation operation, uint32_t width,
 
 static void tier1_select_compare(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
 {
-    if (holes->compare_immediate)
+    if (holes->compare_memory)
+    {
+        X86Instruction record = holes->memory;
+        if (holes->compare_immediate)
+        {
+            record.form = holes->width == 1 ? X86_FORM_CMP_RM8_IMM8 : holes->width == 2 ? X86_FORM_CMP_RM16_IMM16 :
+                          holes->width == 8 ? X86_FORM_CMP_RM64_IMM32 : X86_FORM_CMP_RM32_IMM32;
+            record.immediate = (int32_t)holes->immediate;
+        }
+        else
+        {
+            record.form = holes->width == 8 ? X86_FORM_CMP_R64_RM64 : X86_FORM_CMP_R32_RM32;
+            record.reg = holes->left;
+        }
+        tier1_select_append(result, record);
+    }
+    else if (holes->compare_immediate)
     {
         tier1_select_request(result, X86_OPERATION_CMP, holes->width, holes->left, (int64_t)holes->immediate, tier1_select_condition_flags[holes->condition]);
     }
@@ -1437,7 +1454,11 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         // A zeroed destination stays canonical when setcc writes its low byte. Clear before the comparison where the
         // destination is independent of its inputs. An aliased input must be read first; mov-immediate then preserves
         // the flags, unlike the xor zero idiom. Neither sequence depends on a partial-register result's movzx.
-        const bool aliases = destination == holes->left || (!holes->compare_immediate && destination == holes->right);
+        const bool aliases = holes->compare_memory ?
+                                 ((!holes->compare_immediate && destination == holes->left) ||
+                                  ((holes->memory.mode & BUSTER_X86_MODE_BASE) != 0 && destination == holes->memory.rm) ||
+                                  ((holes->memory.mode & BUSTER_X86_MODE_INDEX) != 0 && destination == holes->memory.index)) :
+                                 destination == holes->left || (!holes->compare_immediate && destination == holes->right);
         if (!aliases)
         {
             tier1_select_append(&result, tier1_select_register_record(X86_FORM_XOR_R32_RM32, destination, destination));
@@ -2214,6 +2235,9 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
 // source carries that width only when tier1_select_canonical certified it, and any other COPY leaves source_width zero.
 // A COPY's source_width is the plan's record of that certificate, which both paths' plans must agree on; the emitter
 // doesn't read it, since a copy in its own register is nothing at every width (#1116, tier1_select_expand).
+// A comparison with compare_memory reads values[1:2] as its address's base/index, and values[0] as the other register
+// (NONE for a memory/immediate comparison). Its width is the exact access width; its predicate already accounts for
+// operand swapping or a zero extension removed from the load. Its frame object is patched into the CMP, not SETcc/JMP.
 // `fold_count` counts the nodes the pattern computes itself rather than reads (maximal munch's rank): which nodes the
 // code leaves out follows from what the chosen patterns read (tier1_select_plan). For TIER1_RULE_ADDRESS,
 // TIER1_RULE_LOAD, TIER1_RULE_LOAD_ADDRESS, TIER1_RULE_LOAD_OPERAND, TIER1_RULE_STORE, TIER1_RULE_STORE_ADDRESS and a
@@ -2237,6 +2261,7 @@ struct Tier1SelectPattern
     uint8_t fold_count;
     uint8_t intrinsic_cost;
     bool compare_immediate;
+    bool compare_memory;
     // A test's: no-ops the node's expansion writes before its rule's records, which take its sequence to its room and
     // past it (#989's review). Every pattern the selector makes has none.
     uint8_t nops;
@@ -2255,14 +2280,14 @@ struct Tier1SelectPlan
     uint32_t* effective_use_offsets;
     uint32_t* effective_use_values;
     uint32_t effective_use_count;
-    // The scalar path's subtree costs: each node's pattern's intrinsic cost and its distinct tree children's costs
-    // (tier1_select_pattern_cost), its candidates made children first. Nothing reads them after the plan: munch ranks by
-    // rule and folds, and estimated_cost sums the intrinsic costs. The vector path makes most patterns before their tree
-    // children's (the walk back), so its column counts a tree child's cost only where the child's pattern was made first,
-    // and a covered node's is 0.
+    // Candidate construction's working costs (tier1_select_pattern_cost). Both production paths build most patterns
+    // before their tree children's (the walk back), so a tree child's cost is included only where its pattern was made
+    // first; a covered node's unbuilt pattern has cost 0. The BURS tables choose the cover independently of this column,
+    // and estimated_cost sums the selected patterns' intrinsic costs. The tests' maximal-munch reference builds children
+    // first, so its column contains complete subtree costs.
     // Working the subtree costs out again children first took selection on the frozen sqlite3.c from 222.9 core cycles
     // per IR instruction to 241.3 (the 9700X, #1117's review), for a column nothing reads; a consumer that needs them on
-    // the vector path works them out so.
+    // either production path works them out so.
     uint32_t* costs;
     uint64_t estimated_cost;
     uint64_t arena_bytes;
@@ -3667,6 +3692,78 @@ static bool tier1_select_comparison(const Tier1SelectForest* forest, uint32_t ro
     return result;
 }
 
+static inline __attribute__((always_inline)) bool tier1_select_memory(const Tier1SelectForest* forest, uint32_t node, uint32_t pointer, Tier1SelectPattern* pattern, uint32_t first);
+
+// Fold a comparison's single-use load at the final consumer, including a fused branch or extended truth result. A
+// promoted byte/word/dword can be compared at its memory width only against a constant that the same extension
+// represents exactly. In particular, signed comparisons of a zero-extended load become unsigned narrow comparisons.
+// No truncation, shared extension, observable access or intervening memory operation can be hidden by this pattern.
+// The grammar prices direct load folds explicitly. Promotion removal is a legality-dependent refinement: its
+// grammar cost conservatively retains the extension/load even though this candidate emits neither separately.
+static inline __attribute__((always_inline)) void tier1_select_add_comparison(const Tier1SelectForest* forest, uint32_t node, Tier1SelectCandidates* candidates, Tier1SelectPattern pattern)
+{
+    static const uint8_t swapped[IR_PREDICATE_COUNT] =
+    {
+        IR_EQ,
+        IR_NE,
+        IR_GT,
+        IR_GE,
+        IR_LT,
+        IR_LE,
+        IR_UGT,
+        IR_UGE,
+        IR_ULT,
+        IR_ULE,
+    };
+    const IrFunction* function = forest->function;
+    const uint32_t left = pattern.values[0];
+    const uint32_t right = pattern.values[1];
+    const bool immediate = pattern.compare_immediate;
+    const bool right_load = !immediate && tier1_select_load_folds(forest, node, right);
+    uint32_t load = right_load ? right : left;
+    uint32_t extension = BUSTER_IR_NONE;
+    bool zero_extended = false;
+    bool representable = true;
+    uint64_t bits = pattern.immediate;
+    if (immediate && (function->op[load] == IR_ZEXT || function->op[load] == IR_SEXT))
+    {
+        extension = load;
+        load = function->a[extension];
+        zero_extended = function->op[extension] == IR_ZEXT;
+        const uint32_t source_width = tier1_select_memory_width(function->type[load]);
+        representable = source_width != 0 && source_width < pattern.width && tier1_select_tree_child(forest, node, extension);
+        if (representable)
+        {
+            const uint64_t sign = UINT64_C(1) << (source_width * 8 - 1);
+            const uint64_t mask = (sign << 1) - 1;
+            const uint64_t result_mask = pattern.width == 8 ? UINT64_MAX : UINT32_MAX;
+            bits &= mask;
+            const uint64_t extended = zero_extended ? bits : (bits ^ sign) - sign;
+            representable = (extended & result_mask) == (pattern.immediate & result_mask);
+        }
+    }
+    const uint32_t memory_width = tier1_select_memory_width(function->type[load]);
+    if (representable && memory_width != 0 && (extension != BUSTER_IR_NONE || memory_width == pattern.width) && tier1_select_load_folds(forest, node, load))
+    {
+        pattern.compare_memory = true;
+        pattern.width = (uint8_t)memory_width;
+        pattern.values[0] = immediate ? BUSTER_IR_NONE : right_load ? left : right;
+        pattern.immediate = bits;
+        pattern.condition = !immediate && !right_load ? swapped[pattern.condition] : pattern.condition;
+        if (zero_extended && pattern.condition >= IR_LT && pattern.condition <= IR_GE)
+        {
+            pattern.condition += IR_ULT - IR_LT;
+        }
+        tier1_select_fold(forest, node, load, &pattern);
+        if (extension != BUSTER_IR_NONE)
+        {
+            tier1_select_fold(forest, node, extension, &pattern);
+        }
+        tier1_select_memory(forest, node, function->a[load], &pattern, 1);
+    }
+    tier1_select_add_candidate(forest, node, candidates, pattern);
+}
+
 // The comparison `tested`, an FCMP of F32 or F64 values by <, <=, > or >= that only `root`'s pattern uses, as the
 // pattern's own (#141, TIER1_RULE_FLOAT_BRANCH_COMPARE): ucomis of its operands, swapped for < and <=, and the unsigned
 // condition that reads its flags, UGT (ja) for a strict one and UGE (jae) for the other, which are false for unordered
@@ -3856,10 +3953,10 @@ static inline __attribute__((always_inline)) bool tier1_select_memory(const Tier
     return address.folds != 0;
 }
 
-// Inlined at each of its two calls, the scalar path's batch (tier1_select_cover_munch) and the bottom-up path's pattern
+// Inlined at each of its two calls, the test reference's batch (tier1_select_cover_munch) and the bottom-up path's pattern
 // (tier1_select_burs_pattern), and so are its helpers (tier1_select_add_candidate, tier1_select_memory,
 // tier1_select_load_folds), whose inlining clang decided by their callers. With a second caller, clang outlined it, its
-// 356 bytes returned through memory, and inlined fewer of its helpers: the scalar path's selection took 304 core cycles
+// 356 bytes returned through memory, and inlined fewer of its helpers: the former scalar maximal-munch path took 304 core cycles
 // per IR instruction on the frozen sqlite3.c and 841 instructions, against 274 and 747 before the second caller and 276
 // and 752 inlined by force, in tier1_select_cover_munch (benchmark-tier1-select-source, the 9700X). One copy out of line
 // for both calls took 300 and 815.
@@ -4602,7 +4699,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.rule = folded.compare_immediate ? TIER1_RULE_COMPARE_IMMEDIATE : TIER1_RULE_COMPARE;
             folded.source_width = 0;
             folded.intrinsic_cost = 3;
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_comparison(forest, node, &candidates, folded);
         }
     }
     else if ((op == IR_NEG || op == IR_NOT) && integer)
@@ -4897,7 +4994,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.width = (uint8_t)tier1_select_width(function->type[a]);
         base.condition = (uint8_t)c;
         base.intrinsic_cost = 3;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_comparison(forest, node, &candidates, base);
         uint64_t immediate = 0;
         if (tier1_select_constant(function, b, &immediate) && tier1_select_immediate_fits(base.width, immediate))
         {
@@ -4906,7 +5003,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.immediate = immediate;
             base.compare_immediate = true;
             tier1_select_fold(forest, node, b, &base);
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_comparison(forest, node, &candidates, base);
         }
     }
     else if (op == IR_SELECT && width != 0)
@@ -4980,7 +5077,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         if (tested != BUSTER_IR_NONE && tier1_select_comparison(forest, node, tested, negated, &folded))
         {
             folded.rule = TIER1_RULE_BRANCH_COMPARE;
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_comparison(forest, node, &candidates, folded);
         }
         else if (tested != BUSTER_IR_NONE && tier1_select_float_comparison(forest, node, tested, negated, &folded))
         {
@@ -5086,8 +5183,8 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     return candidates;
 }
 
-// The scalar oracle is maximal munch: most covered nodes first. A switch fixes ties independently of the vector
-// minimum-cost selection. Both share legality, not the choice of cheapest cover. Both prefer a power-of-two
+// Maximal munch: most covered nodes first. A switch fixes ties independently of minimum-cost selection. This is both
+// paths' fallback outside the BURS grammar and the tests' independent reference cover. Both prefer a power-of-two
 // multiply's shift to its three-operand immediate IMUL (#1217's latency penalty). A
 // division by a register ranks below every rule for a constant divisor, which covers its constant even where the
 // constant has other uses (and so doesn't count among the folds), as the costed cover always prefers them.
@@ -5174,9 +5271,9 @@ static __attribute__((noinline)) bool tier1_select_burs_pattern(const Tier1Selec
     return valid;
 }
 
-// The scalar path's cover, and a host's without the vector path: each node's candidates, a depth level at a time, 16 nodes
-// a batch, and maximal munch's choice (tier1_select_munch). Returns the first node in the levels' order without a
-// candidate as the error's. A function of its own (#141): inside the plan, where the bottom-up path's columns are live
+// The tests' independent maximal-munch cover: each node's candidates, a depth level at a time, 16 nodes a batch, and
+// tier1_select_munch's choice. Neither production path uses this cover. Returns the first node in the levels' order
+// without a candidate as the error's. A function of its own (#141): inside the plan, where the bottom-up path's columns are live
 // across it, its inlined candidates spilled, 37 more instructions per IR instruction on the frozen sqlite3.c.
 static __attribute__((noinline)) Tier1SelectError tier1_select_cover_munch(const Tier1SelectForest* forest, const uint32_t* level_offsets, const uint32_t* level_nodes, uint32_t maximum_depth,
                                                                            Tier1SelectPlan* plan, uint32_t* failed_node)
@@ -5270,7 +5367,9 @@ static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1
     return pending_count;
 }
 
-static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, bool verify, Tier1SelectPlan* result, uint32_t* error_node)
+// `costed` is true for both public entry points. Tests may set it false for the independent maximal-munch reference;
+// `vector` changes only kernel implementations, never the cover's cost model or tie-breaking.
+static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, bool verify, bool costed, Tier1SelectPlan* result, uint32_t* error_node)
 {
     (void)vector;
 
@@ -5472,19 +5571,20 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         .known_bits = known_bits,
         .vectors = error == TIER1_SELECT_OK && ir_function_has_vectors_path(function, vector),
     };
-    // The vector path's cover is the bottom-up rewrite's (tier1_select_burs.c): each node's class and visible children,
-    // its state a depth level at a time, and its rule. The patterns of the nodes whose operators the grammar doesn't cover
-    // are munch's, made here in the levels' order, as the scalar path makes every node's, so that a node either path
-    // refuses is refused at the same place; the others' are made as the code needs them, in the walk below.
-    // A host without the vector path (BUSTER_VECTOR_PATH) takes the scalar path's munch alone.
-    const bool burs = error == TIER1_SELECT_OK && BUSTER_VECTOR_PATH(vector);
+    // Both host paths use the bottom-up rewrite's cover (tier1_select_burs.c): each node's class and visible children,
+    // its state, and its rule. The independent scalar kernels visit nodes one at a time; the vector kernels label depth
+    // levels in batches. Both read the same grammar's costs and tie-breaks. Nodes outside that grammar take munch's,
+    // made in the levels' order on either path so that unsupported nodes are refused at the same place. Other patterns
+    // are made as the code needs them, in the walk below. Only the tests' reference disables the costed cover.
+    const bool burs = error == TIER1_SELECT_OK && costed;
     uint32_t* classes = 0;
     uint32_t* rules = 0;
     uint8_t* built = 0;
-#if BUSTER_HOST_VECTOR
     uint32_t* kids = 0;
     uint32_t* states = 0;
+#if BUSTER_HOST_VECTOR
     uint32_t* words = 0;
+#endif
     if (burs)
     {
         bool ok = tier1_select_initialize();
@@ -5494,14 +5594,27 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         states = ir_allocate(scratch, count, 4, &ok);
         rules = ir_allocate(scratch, count, 4, &ok);
         built = ir_allocate(scratch, count, 1, &ok);
-        words = ir_allocate(scratch, count, 4, &ok);
+#if BUSTER_HOST_VECTOR
+        words = BUSTER_VECTOR_PATH(vector) ? ir_allocate(scratch, count, 4, &ok) : 0;
+#endif
         error = ok || error != TIER1_SELECT_OK ? error : TIER1_SELECT_ERROR_MEMORY;
     }
     if (burs && error == TIER1_SELECT_OK)
     {
-        tier1_burs_classify_vector(&forest, users, words, classes, kids);
-        tier1_burs_label_vector(maximum_depth, level_offsets, level_nodes, count, classes, kids, states);
-        tier1_burs_rules_vector(count, classes, states, rules);
+#if BUSTER_HOST_VECTOR
+        if (vector)
+        {
+            tier1_burs_classify_vector(&forest, users, words, classes, kids);
+            tier1_burs_label_vector(maximum_depth, level_offsets, level_nodes, count, classes, kids, states);
+            tier1_burs_rules_vector(count, classes, states, rules);
+        }
+        else
+#endif
+        {
+            tier1_burs_classify_scalar(&forest, users, classes, kids);
+            tier1_burs_label_scalar(count, classes, kids, states);
+            tier1_burs_rules_scalar(count, classes, states, rules);
+        }
         const Tier1SelectPattern none = {
             .values = {BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE},
             .stack_object = BUSTER_IR_NONE,
@@ -5511,7 +5624,6 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             plan.patterns[node] = none;
         }
     }
-#endif
     for (uint32_t position = 0; burs && error == TIER1_SELECT_OK && position < count; position += 1)
     {
         const uint32_t node = level_nodes[position];
@@ -5638,7 +5750,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
 // first, which refuses what the plan can't read.
 static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, Tier1SelectPlan* result, uint32_t* error_node)
 {
-    return tier1_select_plan_checked(function, dominance, output, scratch, vector, true, result, error_node);
+    return tier1_select_plan_checked(function, dominance, output, scratch, vector, true, true, result, error_node);
 }
 
 // The plan of a function its caller has verified with `dominance`, as ir_optimize verifies its result: the same plan as
@@ -5646,7 +5758,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
 // cycles (#141). Unverified IR here may be read outside its columns.
 static Tier1SelectError tier1_select_plan_verified(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, Tier1SelectPlan* result, uint32_t* error_node)
 {
-    return tier1_select_plan_checked(function, dominance, output, scratch, vector, false, result, error_node);
+    return tier1_select_plan_checked(function, dominance, output, scratch, vector, false, true, result, error_node);
 }
 
 static X86Instruction tier1_select_memory_holes(const Tier1SelectPattern* pattern, const uint8_t* registers, uint32_t first)
@@ -5681,6 +5793,7 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
         .condition = pattern->condition,
         .scale = pattern->scale,
         .compare_immediate = pattern->compare_immediate,
+        .compare_memory = pattern->compare_memory,
         .sign_result = pattern->sign_result,
         .nops = pattern->nops,
     };
@@ -5715,6 +5828,10 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
         break;
     default:
         break;
+    }
+    if (pattern->compare_memory)
+    {
+        holes.memory = tier1_select_memory_holes(pattern, registers, 1);
     }
     return holes;
 }

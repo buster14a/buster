@@ -2126,6 +2126,26 @@ What the lowering covers past scalars (#145's programs):
   would cost 2 to 4.5 times the stores. `sqlite3.c`'s compile time doesn't
   change (+0.0007% instructions); the compiler's own `main.c` makes 171 more
   memset calls and 1.9% less text.
+  A whole-object initializer whose one value is a call (`T x = f(...);`)
+  can use `x` as the call's hidden result object (#1549), removing the separate
+  temporary and copy before either backend sees the stream. The result and
+  destination must be the same unqualified record type, with matching sizes,
+  no volatile part and enough alignment for the result's canonical ABI type.
+  Register returns retain their previous path. The immutable source binding
+  column is scanned only across that initializer, 16 tokens at a time on the
+  vector path with a scalar tail and twin: any reference to `x`, even inside
+  another argument's call, retains the temporary. Bodies with source labels
+  or a reference to a known returns-twice function retain it too, because
+  reentry can find a destination whose address escaped after an earlier
+  initialization. The first candidate scans that body's bindings and
+  intrinsic IDs once and caches the latter decision, before any argument
+  tasks run, so an initializer's nested `__builtin_setjmp` is covered too.
+  The existing declaration pass records `returns_twice` by object when it
+  occurs, so a later redeclaration cannot hide an earlier attribute.
+  The destination is an explicit argument to this call's lowering, so nested
+  argument and callee calls retain their own result objects. Assignments
+  continue to evaluate into a separate result and copy afterwards. This is a
+  code-shape change; the #1376 measurements above do not measure this change.
   Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
   plans use a readonly byte image and one call to the target C library's
   `memcpy` (#598). The call returns the destination and discards it, which is the
@@ -4068,8 +4088,9 @@ unless `--keep` or a failure.
 
 `c_check_common_warnings.c`, included by the driver, reports the expression
 warnings that need the completed graph or the parser's operator tree:
-`-Wdivision-by-zero`, `-Wconstant-conversion`, `-Wliteral-conversion`, `-Warray-bounds`,
-`-Wsign-compare`, `-Wunused-comparison`, `-Wunused-value`,
+`-Wdivision-by-zero`, `-Wnull-dereference`, `-Wconstant-conversion`,
+`-Wliteral-conversion`, `-Warray-bounds`, `-Wsign-compare`,
+`-Wunused-comparison`, `-Wunused-value`,
 `-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
 bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
 `-Wreturn-stack-address`, `-Wformat`/`-Wformat-security`, `-Wswitch`,
@@ -4140,6 +4161,31 @@ expression, parenthesized or not; a comma operand with a call, assignment or
 increment has an effect and does not get the left-operand warning. Its reports
 complete with the function's closing brace, as Clang's do, after the body's
 own warnings and before an unused declaration's.
+Discarded scalar `&&` and `||` expressions also stay quiet when either
+operand's result path accepts discard (#1390): an ordinary direct call,
+assignment, increment, volatile read, or a nested logical expression with
+one of those operands. Commas follow their right operand (including the
+literal-zero sequencing idiom), ordinary conditionals follow their value
+arms, omitted-middle conditionals follow only their false arm, and statement
+expressions follow their final result. A call beneath arithmetic, a comparison,
+an explicit nonvoid cast, or a conditional's condition does not silence the
+unused logical result. The rule is syntactic even for a short-circuited operand.
+Accepted `pure`, `const`, and `warn_unused_result` function contracts retain
+the logical warning and inherit per kind through compatible source-visible
+redeclarations, without changing earlier uses or leaking block declarations.
+Plain library calls without discard contracts follow ordinary calls; implicit
+const/pure contracts such as `abs` and `isalpha` retain warnings. Disabling a
+builtin removes only its implicit contract, while explicit source contracts
+still apply. Internal-linkage library spellings remain ordinary functions.
+Indirect calls, calls resolved through overload tables, option-sensitive
+floating builtin contracts and tagged return contracts remain outside this
+logical-warning slice. A unit containing
+an accepted `warn_unused_result` typedef conservatively keeps the existing
+logical-call warnings: canonical result types do not retain the typedef and
+`typeof` provenance needed to rule out such contracts safely.
+The original fixtures in `c_check_logical_unused_driver_test.c` compare the
+complete Clang output, warning policy, scalar/vector paths and requested lanes
+in syntax-only and object modes.
 `-Warray-bounds` reports a direct array object, including a nested subscript
 such as `b[1][5]` at `b`, treats a zero extent as unknown, and leaves
 struct-member arrays to a full bounds analysis. `-Wunused-function` reports a
@@ -4184,7 +4230,8 @@ Literal floating-to-integer conversions warn for the supported initializer, assi
 
 The graph's passes share their facts, `check_common_facts`, which give each
 node its parent, whether another node uses its value, whether it is evaluated,
-a conditional's or comma's arm effect, and its reach: a bit each for whether
+a conditional's or comma's arm effect, a separate logical-discard fact in the
+same byte, and its reach: a bit each for whether
 its subtree holds a node whose own warning may fire, a division by a constant
 zero, a comparison, or an implicit conversion of a literal (#1340, #1453). A node's own bit counts only where its tests can
 warn (`check_common_own_candidate`): a constant whose value an initialization's,
@@ -7271,6 +7318,36 @@ arguments against the function. The checker now gives these as clang does.
   constant evaluator reads alone (`__builtin_offsetof`'s designators,
   `__builtin_types_compatible_p`'s type names) and a `typeof`'s operand,
   which clang evaluates again when its type is variably modified.
+- **Indirection through a null pointer** (`-Wnull-dereference`, #1447, clang's
+  `CheckForNullPointerDereference`): "indirection of non-volatile null pointer
+  will be deleted, not trap" with its note "consider using __builtin_trap() or
+  qualifying pointer with 'volatile'", both at the `*`, of a `*` whose operand
+  is a null pointer constant through casts (an integer constant 0 once the
+  casts are passed: `*(int *)0`, `*(char *)(void *)0L`, `*(int *)(1 - 1)`; or,
+  in C23, any expression of type `nullptr_t` once the casts and conversions are
+  passed: `*(int *)nullptr` and a `nullptr_t` variable's), of a type neither
+  volatile nor an array's or a function's
+  (`check_common_null_dereference`), where an lvalue conversion or an
+  assignment (a compound one's too) reads it: not under `&`, `.` or an
+  increment, nor through a pointer variable, `->` or a subscript. As clang's
+  `DiagRuntimeBehavior`, reachable and evaluated code alone, at the body's end
+  with the division warnings (the division scan's, `check_common_div_own`).
+- **Unreachable code, as clang's CFG prunes it** (#1447). The runtime
+  warnings (division by zero, array bounds, null dereference) skip an
+  initializer after a `return` or in a dead branch, as they already skipped
+  its expression statements: `check_common_unreachable` clears its scalar and
+  braced roots and makes them barriers that no discarding parent re-evaluates.
+  A constant `if`'s dropped ranges are left out too. A branch condition's truth
+  (`check_program_branch_truth`, clang's `tryEvaluateBool`) also counts a
+  logical operator that one operand decides though the other isn't known:
+  `x && 0` and `x || 1`, through `!`, casts and conversions. That covers
+  `if (n && 0)`'s body, `if (n || 1)`'s else and `while (n && 0)`'s body, and,
+  as clang's `VisitConditionalOperator` and `VisitLogicalOperator` prune them,
+  `(n && 0) ? A : B`'s `A`, `(n || 1) ? A : B`'s `B` and `(n && 0) && A`'s `A`
+  (`check_common_operand_mask` takes the same truth where the condition's value
+  isn't constant).
+  `-Wreturn-type`'s walk takes the same truth, so `if (n || 1) return 1;` ends
+  a function without the warning.
 - **A const variable's assignment.** "cannot assign to variable 'x' with
   const-qualified type 'const int'" with clang's "variable 'x' declared const
   here" note at its name, as clang's `DiagnoseConstAssignment` walks to it:

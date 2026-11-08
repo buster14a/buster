@@ -373,8 +373,9 @@ static SsaError ssa_analyze(SsaWork* work, bool vector)
             .predecessor_offsets = work->result.predecessor_offsets,
             .predecessors = work->result.predecessors,
         };
+        // The vector path's frontier matrix is a bitset either way; its tree takes AUTO's solver (#1352).
         const DominatorOptions options = {
-            .path = BUSTER_VECTOR_PATH(vector) ? DOMINATOR_VECTOR : DOMINATOR_SCALAR,
+            .path = BUSTER_VECTOR_PATH(vector) ? DOMINATOR_AUTO : DOMINATOR_SCALAR,
             .outputs = BUSTER_VECTOR_PATH(vector) ? BUSTER_DOMINATOR_FRONTIERS : 0,
             .max_matrix_bytes = BUSTER_SSA_DOMINANCE_BYTES,
         };
