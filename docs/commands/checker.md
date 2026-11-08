@@ -237,7 +237,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   full expression's conversions, and the tree walk skips it. Roots the reader adds after what follows their operand (a
   statement's condition, a switch's, or a `for` increment's discard) are taken where their
   operand stands (`check_common_displaced_roots`), so a condition's warnings precede its body's, as clang analyzes it.
-  A statement expression's inner statements still warn before the enclosing root's own divisions and counts.
+  A statement expression's statements are roots of their own, ahead of its enclosing expression's in node order: the
+  arithmetic scan takes each one's whole visit (`check_common_inner_roots`, a `ROOT` frame) where it enters the statement
+  expression, so they warn between what the enclosing expression built before it and after it, as clang builds them, a
+  displaced condition's first. Its last value, its statement's and the statement expression's, is scanned once. Still
+  different: a short-circuited or unreachable statement expression's statements warn, and a comparison as its last
+  value warns as a comparison where clang says "expression result unused".
   `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both
   shift directions, narrow promotions, 128-bit and bit-precise widths, compound assignments, side effects, macros
   and warning policy. The shared default-warning harness covers syntax checking and object publication through
