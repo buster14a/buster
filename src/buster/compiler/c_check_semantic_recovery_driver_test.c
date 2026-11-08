@@ -65,6 +65,18 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "__attribute__((constructor(\"x\"))) void a9(void);\n__attribute__((visibility(1))) int a10;\nvoid u(void) { a5(1); a6(2); }\n",
         // An enumerator's attribute of no enumerator's subject.
         "enum G { G0 __attribute__((mode(SI))), G1 __attribute__((mode(SI))) };\n",
+        // Phase 2: a redeclaration that conflicts with the visible declaration is dropped, its name's later uses finding
+        // the earlier one, with clang's wording and note for each kind of conflict.
+        "int a;\nfloat a;\nint b = 1;\ndouble b = 2;\nextern int c;\nextern float c;\nextern int d;\nfloat d;\n"
+        "int use(void) { return a + b + c + d; }\nfloat *p = &a;\n",
+        "typedef int T;\ntypedef float T;\nT v;\nint T2;\ntypedef int T2;\nint f(void);\nint f;\nint w = sizeof(T);\n",
+        "int f(int);\nint f(double);\nint g(int) { return 0; }\nint g(double);\nint h(int);\ndouble h(int x) { int u; return x << 40; }\n"
+        "static int s;\nint s;\nint k = 1;\nint k = 2;\nint call(void) { return f(1) + g(2) + h(3); }\n",
+        // A block's, and clang's unused-variable warnings of no scope in which an error occurred (a body's from its
+        // definition's start).
+        "void f(int p)\n{\n    int x;\n    float x;\n    int y = 1;\n    long y = 2;\n    (void)y;\n    if (y = 2) {}\n}\n"
+        "void g(void) { int x; int x; }\nvoid h(void) { extern int e; extern float e; }\nvoid i(void) { int unused; }\n",
+        "__attribute__((nonnull(5))) void f(int *p) { int u; }\nvoid g(void) { int v; { int w; } }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     static const char* const options[] = { NULL, "-Wall", "-ferror-limit=2", "-w" };
