@@ -42,10 +42,11 @@
 //   callee-saved registers, rbp among them without a frame pointer (`six`, #1116: its branch and join keep it off the
 //   straight-line consumer, which takes no callee-saved register, and its FDE must save rbp in a row whose CFA is rsp's),
 //   two returns each after its own epilogue (`early`, the
-//   first one's teardown remembered and restored), a loop whose latch's jump is the code's last record, so that its
-//   frame is open and its one return a teardown of its own (`spin`), a realigned frame (`aligned`), with a frame
-//   pointer, the same open (`aligned_spin`) and with two returns (`aligned_early`), and a leaf whose spills are in the
-//   red zone below an unmoved rsp (`red_leaf`: gdb's `break *leaf` finds a library's `leaf` once the program runs).
+//   first one's teardown remembered and restored), a loop whose single-target computed-goto latch stays after its
+//   return under block placement, so that its frame is open and its one return a teardown of its own (`spin`), a
+//   realigned frame (`aligned`), with a frame pointer, the same open (`aligned_spin`) and with two returns
+//   (`aligned_early`), and a leaf whose spills are in the red zone below an unmoved rsp (`red_leaf`: gdb's `break *leaf`
+//   finds a library's `leaf` once the program runs).
 //   --tier1-report's counts must show those shapes: two open frames at least, four returns published as tails (early's
 //   and aligned_early's first, spin's and aligned_spin's) and a red zone; and readelf -wF's table of each function's
 //   FDE, from its entry's row, its own: as many rows after the entry's with the CFA rsp+8 (each at a return's ret)
@@ -263,6 +264,9 @@ static const char check_unwind_test_trap_text[] =
     "}\n";
 
 // The Tier 1 fixture (#177, see the file's comment): main, which calls printf, is Tier 0's; the others Tier 1's.
+// spin and aligned_spin use a computed goto back to their body so the lowerer's last dispatch block stays after the
+// return: block placement (#1218) treats its indirect terminator as opaque. Their single target needs no indirect-edge
+// stub, and every emitted instruction still runs during the three iterations. Keep the open-frame coverage assertions.
 static const char check_unwind_test_tier1_text[] =
     "#include <execinfo.h>\n"
     "#include <stdio.h>\n"
@@ -345,12 +349,14 @@ static const char check_unwind_test_tier1_text[] =
     "    long rounds = 0;\n"
     "    for (;;)\n"
     "    {\n"
+    "    again:\n"
     "        total += depth();\n"
     "        rounds += 1;\n"
     "        if (rounds == n)\n"
     "        {\n"
     "            return total / rounds;\n"
     "        }\n"
+    "        goto *&&again;\n"
     "    }\n"
     "}\n"
     "\n"
@@ -367,12 +373,14 @@ static const char check_unwind_test_tier1_text[] =
     "    int rounds = 0;\n"
     "    for (;;)\n"
     "    {\n"
+    "    again:\n"
     "        total += depth() + values[rounds & 3] - n - (rounds & 3) + (int)((unsigned long)values & 63);\n"
     "        rounds += 1;\n"
     "        if (rounds == n)\n"
     "        {\n"
     "            return total / rounds;\n"
     "        }\n"
+    "        goto *&&again;\n"
     "    }\n"
     "}\n"
     "\n"

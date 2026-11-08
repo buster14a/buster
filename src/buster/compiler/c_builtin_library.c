@@ -471,6 +471,71 @@ static __attribute__((unused)) bool cbuiltin_library_spell(const char* encoding,
     return valid && !text.full;
 }
 
+// Whether a builtin row's attributes make its parameter `index` (from 0) nonnull: its N attribute's list ("N:0,2:"), which
+// clang's GetBuiltinType gives the parameter's type as _Nonnull (#1447).
+static __attribute__((unused)) bool cbuiltin_library_nonnull(const char* attributes, uint32_t length, uint32_t index)
+{
+    bool result = false;
+    uint32_t i = 0;
+    while (i + 1 < length)
+    {
+        const bool list = attributes[i] == 'N' && attributes[i + 1] == ':';
+        uint32_t at = list ? i + 2 : i + 1;
+        uint32_t value = 0;
+        bool digits = false;
+        while (list && at < length && attributes[at] != ':')
+        {
+            const char c = attributes[at];
+            const bool digit = c >= '0' && c <= '9';
+            result |= !digit && digits && value == index;
+            value = digit ? value * 10u + (uint32_t)(c - '0') : 0;
+            digits = digit;
+            at += 1;
+        }
+        result |= list && digits && value == index;
+        i = list ? at + 1 : at;
+    }
+    return result;
+}
+
+// One parameter's type of a builtin's prototype (#1447, diagnose_as_builtin's error of mismatched types), as clang's
+// TypePrinter spells the builtin's declaration's parameter: the `index`th (from 0) of `encoding`'s parameters, as
+// cbuiltin_library_spell_type spells it (size_t's __size_t where `sugared` says, which *sized then says; restrict as `c99`
+// says), with " _Nonnull" where its row's N attribute lists it and `sugared` says. Into `buffer` of `capacity` bytes,
+// NUL-terminated. False where it and the parameters before it aren't spelled so, or it doesn't fit.
+static __attribute__((unused)) bool cbuiltin_library_spell_parameter(const char* encoding, uint32_t length, const char* attributes, uint32_t attributes_length,
+                                                                     uint32_t index, bool sugared, bool c99, char* buffer, uint32_t capacity, bool* sized)
+{
+    char skipped[128];
+    CBuiltinLibraryText skip = {
+        .bytes = skipped,
+        .capacity = sizeof(skipped),
+        .restrict_spelling = "restrict",
+    };
+    CBuiltinLibraryText text = {
+        .bytes = buffer,
+        .capacity = capacity,
+        .full = capacity == 0,
+        .restrict_spelling = c99 ? "restrict" : "__restrict",
+    };
+    uint32_t position = 0;
+    bool ignored = false;
+    bool valid = cbuiltin_library_spell_type(encoding, length, &position, sugared, &ignored, &skip);
+    for (uint32_t i = 0; valid && i < index; i += 1)
+    {
+        skip.length = 0;
+        skip.full = false;
+        valid = position < length && encoding[position] != '.' && cbuiltin_library_spell_type(encoding, length, &position, sugared, &ignored, &skip);
+    }
+    *sized = false;
+    valid = valid && position < length && encoding[position] != '.' && cbuiltin_library_spell_type(encoding, length, &position, sugared, sized, &text);
+    if (valid && sugared && cbuiltin_library_nonnull(attributes, attributes_length, index))
+    {
+        cbuiltin_library_append(&text, " _Nonnull");
+    }
+    return valid && !text.full;
+}
+
 // The header that clang's note names for a row's header token (Builtins::getHeaderName), NULL for NO_HEADER or a token
 // the plain rows don't use.
 static __attribute__((unused)) const char* cbuiltin_library_header(const char* token)

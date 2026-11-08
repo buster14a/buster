@@ -737,6 +737,108 @@ static bool ir_optimize_test_jumps(Arena* arena, IrFunction* f, uint32_t blocks,
     return created;
 }
 
+// #1729's joins: a `?:` chain of `arms` tests of the parameter, each arm's value and the default's meeting at one
+// join's phi, as long chains and nested ifs lower. Blocks 0 to arms - 1 test, arms to 2 * arms are the arms (the last
+// the default) and 2 * arms + 1 is the join. Kind 0's arms are distinct constants (the phi goes overdefined at its
+// second), kind 1's the parameter's sums (the nested ifs' `a += i`), kind 2's one constant (which the phi keeps).
+static bool ir_optimize_test_chain(Arena* arena, IrFunction* f, uint32_t arms, uint32_t kind)
+{
+    const IrSizes sizes = {
+        .instruction_count = 5 * (uint64_t)arms + 5,
+        .block_count = 2 * (uint64_t)arms + 2,
+        .constant_count = 2 * (uint64_t)arms + 1,
+        .extra_count = 2 * ((uint64_t)arms + 1),
+        .parameter_count = 1,
+    };
+    const bool created = arms != 0 && ir_create(arena, &sizes, f) == IR_OK;
+    if (created)
+    {
+        f->result_type = IR_I64;
+        f->parameter_types[0] = IR_I64;
+        ir_optimize_test_instruction(f, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        uint32_t at = 1;
+        for (uint32_t test = 0; test < arms; test += 1)
+        {
+            f->block_offsets[test] = test == 0 ? 0 : at;
+            f->constants[test].low = test;
+            ir_optimize_test_instruction(f, at, IR_CONST, IR_I64, test, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(f, at + 1, IR_ICMP, IR_I1, 0, at, IR_EQ);
+            ir_optimize_test_instruction(f, at + 2, IR_CBR, IR_VOID, at + 1, arms + test, test + 1 == arms ? 2 * arms : test + 1);
+            at += 3;
+        }
+        for (uint32_t arm = 0; arm <= arms; arm += 1)
+        {
+            f->block_offsets[arms + arm] = at;
+            f->constants[arms + arm].low = kind == 2 ? 7 : 2 * (uint64_t)arm + 1;
+            if (kind == 1)
+            {
+                ir_optimize_test_instruction(f, at, IR_ADD, IR_I64, 0, 0, BUSTER_IR_NONE);
+            }
+            else
+            {
+                ir_optimize_test_instruction(f, at, IR_CONST, IR_I64, arms + arm, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            ir_optimize_test_instruction(f, at + 1, IR_BR, IR_VOID, 2 * arms + 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            f->extra[arm * 2] = arms + arm;
+            f->extra[arm * 2 + 1] = at;
+            at += 2;
+        }
+        f->block_offsets[2 * arms + 1] = at;
+        f->block_offsets[2 * arms + 2] = at + 2;
+        ir_optimize_test_instruction(f, at, IR_PHI, IR_I64, 0, arms + 1, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, at + 1, IR_RET, IR_VOID, at, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    }
+    return created;
+}
+
+// A phi's visits met every incoming value, each found by scanning its predecessor's successors, so a join of n arms
+// cost n per visit and was visited about n times (#1729). Each kind's chains run through both twins against the
+// independent executor; a long chain bounds the incoming values examined on both paths to a few per arm, and kind 2's
+// phi must still fold to its constant.
+static void ir_optimize_test_joins(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
+{
+    for (uint32_t kind = 0; kind < 3; kind += 1)
+    {
+        for (uint32_t arms = 1; arms <= 21; arms += 4)
+        {
+            IrFunction function = { 0 };
+            const bool created = ir_optimize_test_chain(input, &function, arms, kind);
+            ir_optimize_test_expect(test, created && ir_verify(&function, scratch, 0).error == IR_OK, "join chain fixture verifies");
+            for (uint32_t passes = 0; created && passes < 8; passes += 1)
+            {
+                ir_optimize_test_compare(test, &function, vector, scalar, scratch, passes);
+            }
+            arena_pop_to(input, 0);
+        }
+        const uint32_t arms = 4096;
+        IrFunction function = { 0 };
+        const bool created = ir_optimize_test_chain(input, &function, arms, kind);
+        ir_optimize_test_expect(test, created, "long join chain fixture allocation");
+        for (uint32_t path = BUSTER_IR_OPTIMIZE_VECTOR; created && path <= BUSTER_IR_OPTIMIZE_SCALAR; path += 1)
+        {
+            const uint64_t mark = vector->length;
+            IrOptimizeOptions options = ir_optimize_options();
+            options.path = path;
+            IrOptimizeResult result = { 0 };
+            const IrCheck check = ir_optimize(&function, vector, scratch, options, &result);
+            ir_optimize_test_expect(test, check.error == IR_OK, "long join chain optimizes");
+            if (check.error == IR_OK)
+            {
+                ir_optimize_test_expect(test, result.sccp_phi_incoming <= 4 * ((uint64_t)arms + 1), "a join's phi examines its incoming values a bounded number of times");
+            }
+            if (check.error == IR_OK && kind == 2)
+            {
+                const IrFunction* g = &result.function;
+                const uint32_t ret = g->instruction_count - 1;
+                const bool folded = g->op[ret] == IR_RET && g->op[g->a[ret]] == IR_CONST && g->constants[g->a[g->a[ret]]].low == 7;
+                ir_optimize_test_expect(test, folded, "a join of one constant still folds to it");
+            }
+            arena_pop_to(vector, mark);
+        }
+        arena_pop_to(input, 0);
+    }
+}
+
 static void ir_optimize_test_threading(IrOptimizeTest* test, Arena* scratch)
 {
     uint32_t direct[129];
@@ -862,7 +964,7 @@ static void ir_optimize_test_entry_phi(IrOptimizeTest* test, Arena* input, Arena
         ir_optimize_test_instruction(&f, 3, IR_BR, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         const IrCheck verified = ir_verify(&f, scratch, 0);
         ir_optimize_test_expect(test, verified.error == IR_ERROR_PHI && verified.instruction == 0, "shared IR rejects phi with unreachable entry predecessor");
-        for (uint32_t passes = 0; passes < 8; passes += 1)
+        for (uint32_t passes = 0; passes < 16; passes += 1)
         {
             for (uint32_t scalar = 0; scalar < 2; scalar += 1)
             {
@@ -1057,7 +1159,7 @@ static void ir_optimize_test_records(IrOptimizeTest* test, Arena* input, Arena* 
         IrFunction f = { 0 };
         const bool created = kind < 3 ? ir_optimize_test_labels(input, &f, kind) : ir_optimize_test_aggregate_call(input, &f);
         ir_optimize_test_expect(test, created && ir_verify(&f, scratch, 0).error == IR_OK, "labels and ABI records fixtures verify");
-        for (uint32_t passes = 0; created && passes < 8; passes += 1)
+        for (uint32_t passes = 0; created && passes < 16; passes += 1)
         {
             ir_optimize_test_compare(test, &f, vector, scalar, scratch, passes);
         }
@@ -1175,7 +1277,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             IrFunction function = { 0 };
             const bool created = ir_optimize_test_diamond(&input, &function, kind);
             ir_optimize_test_expect(test, created, "diamond fixture allocation");
-            for (uint32_t passes = 0; created && passes < 8; passes += 1)
+            for (uint32_t passes = 0; created && passes < 16; passes += 1)
             {
                 ir_optimize_test_compare(test, &function, &vector, &scalar, &scratch, passes);
             }
@@ -1184,7 +1286,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
         IrFunction loop = { 0 };
         const bool loop_created = ir_optimize_test_loop(&input, &loop);
         ir_optimize_test_expect(test, loop_created, "loop fixture allocation");
-        for (uint32_t passes = 0; loop_created && passes < 8; passes += 1)
+        for (uint32_t passes = 0; loop_created && passes < 16; passes += 1)
         {
             ir_optimize_test_compare(test, &loop, &vector, &scalar, &scratch, passes);
         }
@@ -1194,7 +1296,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             IrFunction effects = { 0 };
             const bool effects_created = ir_optimize_test_effects(&input, &effects, kind != 0);
             ir_optimize_test_expect(test, effects_created, "effects fixture allocation");
-            for (uint32_t passes = 0; effects_created && passes < 8; passes += 1)
+            for (uint32_t passes = 0; effects_created && passes < 16; passes += 1)
             {
                 ir_optimize_test_compare(test, &effects, &vector, &scalar, &scratch, passes);
             }
@@ -1202,7 +1304,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             IrFunction switch_function = { 0 };
             const bool switch_created = ir_optimize_test_switch(&input, &switch_function, kind != 0);
             ir_optimize_test_expect(test, switch_created, "switch fixture allocation");
-            for (uint32_t passes = 0; switch_created && passes < 8; passes += 1)
+            for (uint32_t passes = 0; switch_created && passes < 16; passes += 1)
             {
                 ir_optimize_test_compare(test, &switch_function, &vector, &scalar, &scratch, passes);
             }
@@ -1213,6 +1315,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             if (jumps_created)
             {
                 ir_optimize_test_compare(test, &jumps, &vector, &scalar, &scratch, 7);
+                ir_optimize_test_compare(test, &jumps, &vector, &scalar, &scratch, 15);
             }
             arena_pop_to(&input, 0);
         }
@@ -1221,6 +1324,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
         ir_optimize_test_vector_compares(test, &input, &vector, &scratch);
         ir_optimize_test_limits(test, &input, &vector, &scratch);
         ir_optimize_test_entry_phi(test, &input, &vector, &scratch);
+        ir_optimize_test_joins(test, &input, &vector, &scalar, &scratch);
         for (uint32_t length = 0; length < 130; length += 1)
         {
             IrFunction function = { 0 };
@@ -1244,6 +1348,7 @@ static void ir_optimize_text_tests(IrOptimizeTest* test);
 static int ir_optimize_text_print_fixtures(void);
 
 #include "ir_optimize_simd_test.c"
+#include "ir_optimize_layout_test.c"
 #include "ir_if_convert_test.c"
 
 static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
@@ -1279,6 +1384,7 @@ static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
         ir_optimize_test_folds(&test);
         ir_optimize_test_fold_guards(&test);
         ir_optimize_test_ir(&test);
+        ir_optimize_test_layout(&test);
         ir_optimize_test_simd(&test);
         ir_if_convert_tests(&test);
         ir_optimize_text_tests(&test);

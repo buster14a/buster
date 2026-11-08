@@ -17,6 +17,11 @@ requirements. [Command index](README.md).
   #175's hand-written `tests/ir/optimize/*.ir` before/after pairs in the text form
   through both parser paths, both twins, the canonical printer and the
   independent executor (`--print-text` prints them for review).
+  #1729's join chains (arms of distinct constants, of the parameter's sums and
+  of one constant, meeting at one phi) run through both twins against the
+  executor, and chains of 4,096 arms bound the incoming values SCCP's phi
+  transfers examine (`sccp_phi_incoming`) to four per arm on both paths, which
+  the worklist path exceeded before the change.
   #1450's SIMD fixtures exercise constant lane folding against the lane model
   and interpreter, wide phi/bitcast propagation, exact-bit splats, GVN's complete
   vector payload keys and LICM's integer-lane motion on both paths. A floating
@@ -27,6 +32,14 @@ requirements. [Command index](README.md).
   and `benchmark-ir-optimize-passes` include preparation and rewriting costs.
   [The optimization guide](../../docs/ir-optimization.md) records supported inputs
   and the source-corpus and target measurements still required for #139.
+
+The optional `BUSTER_IR_OPTIMIZE_LAYOUT` pass (#1218) changes the rewrite's
+block visitation order, using `ir_optimize_layout.c`'s fall-through chains.
+Only the C driver's final Tier 1 optimization enables it by default; other
+optimizer clients retain their existing order. The ordinary and retained-analysis
+entry points both verify the resulting SSA and remapped CFG. See the
+[Tier 1 command guide](tier1.md#block-placement-and-critical-edge-fall-through-1218)
+for its ordering policy, regression coverage and measurement boundaries.
 
 ## Bounded scalar if-conversion (#1382)
 

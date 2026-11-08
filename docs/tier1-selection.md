@@ -25,7 +25,12 @@ patterns are:
 - 32/64-bit negation, complement, add, subtract, multiply, and/or/xor;
   immediate forms; shifts by a constant
   strictly below the operand width; multiplication by powers of two and by
-  3, 5 or 9; add/shift and three-operand addition through `lea`.
+  3, 5 or 9; add/shift and three-operand addition through `lea`. After
+  allocation, an unscaled base-plus-index sum with zero displacement uses
+  `add` when the destination is either input register (#1217), removing the
+  SIB byte. Flags are dead between IR nodes. Folded frame operands have their
+  final base and object offset before this decision; a nonzero displacement
+  or an `rsp` base keeps `lea`.
 - Explicit `IR_ADDRESS` base + index × scale + signed disp32, loads and stores,
   and folding those addresses into memory operands. Byte/word loads zero-extend
   into registers, while stores write exactly one/two bytes. An address whose
@@ -34,14 +39,17 @@ patterns are:
   register (its node's `mov`) as the index and the offset the displacement,
   which no user folds; one whose offset alone doesn't fit 32 bits is still
   refused. An
-  access's address is walked (`tier1_select_address`, #140) through the nodes
-  only its pattern uses, at most 8 of them: the `inttoptr` and `ptrtoint` the
+  access's address is walked (`tier1_select_address`, #140) through pure
+  address nodes in its block, at most 8 of them: the `inttoptr` and `ptrtoint` the
   typed stream's integers put around every address, addresses (one after
   another while the operand has room for their one index), constant indices
   and 64-bit additions of constants, which join the displacement while it fits
   32 bits. `s->z[2]` is then one `mov` from `[s + 24]` rather than three
-  conversions, two `lea`s and the constants' moves; a pointer that is a value
-  (a ptrtoint or an inttoptr of such a chain) is one `lea`. The index sheds the
+  conversions, two `lea`s and the constants' moves. Memory operands can each
+  fold a shared address chain (#1217); its producer remains when another
+  selected user still needs the address value. A pointer that is a value
+  (a ptrtoint or an inttoptr of a single-use chain) is one `lea`; address-valued
+  roots retain the single-use restriction. The index sheds the
   constants added to it (`tier1_select_index`): a 64-bit addition of a constant
   on either side, or a subtraction of one, joins the displacement scaled while
   it fits 32 bits, so that `p[i + 100]` of a 64-bit `i` is `[p + i * 4 + 400]`
@@ -58,7 +66,8 @@ patterns are:
   offset the `lea` takes. The object may live in the entry block past the
   walk's block: the producer materializes every slot address in the preheader,
   which dominates every use, and the address is pure with a function-global
-  offset. Longer cross-block chains stay unfolded. A displacement the object's
+  offset. Memory operands can fold this leaf even when it has several users;
+  an escaping address still materializes. Longer cross-block chains stay unfolded. A displacement the object's
   offset pushes past 32 bits refuses emission rather than truncating.
 - C's truth values (`tier1_select_truth`, #140): the lowering gives `a < b` as
   `zext (icmp lt a, b)`, which `if`, `!`, `&&` and `||` compare with zero again,
@@ -683,7 +692,7 @@ uses. The passes are:
    right operand is a constant, a load or a shift, whether a load folds into its
    single user past no barrier, whether an address's displacement fits 32 bits);
    and its visible children, those a pattern may fold (a tree child, a constant,
-   or a frame object's single address in the entry block), any other operand
+   or a frame object's address in its block or the entry block), any other operand
    being the register leaf's state. A frame object's address, and an address
    whose constant index or offset doesn't fit 32 bits, take the scalar rule;
 2. labels: each node's state, a table lookup on its operator and its children's

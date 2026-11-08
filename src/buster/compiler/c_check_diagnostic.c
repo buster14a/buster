@@ -134,6 +134,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wfour-char-constants", NULL, "multi-character character constant" },
     { NULL, NULL, "character constant too long for its type" },
     { "-Wnull-dereference", NULL, "indirection of non-volatile null pointer will be deleted, not trap" },
+    { "-Wuser-defined-warnings", NULL, "user-defined warning" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

@@ -5,9 +5,11 @@
 // modular_format where a redeclaration merges its entity's attributes (check_input_attribute_merge_checks, from
 // check_input_bind), modular_format's format (check_input_modular_format), and TCB's warnings at calls once the unit's
 // bindings are resolved (check_input_tcb_calls). A declaration's own checks are c_check_attribute.c's
-// (check_input_attribute_checks). None of these attributes changes what a program does in C on x86-64 Linux. Their
-// units are rare: each check scans the unit's attributed declarations (check_input_attributed_next), as the late
-// attributes' do, and a lane that reads one refuses (check_input_attribute_read_item), so these run in source order.
+// (check_input_attribute_checks), but diagnose_as_builtin's, which read the builtins' catalogue and the unit's library
+// declarations (check_input_attribute_diagnose_builtin). None of these attributes changes what a program does in C on
+// x86-64 Linux. Their units are rare: each check scans the unit's attributed declarations (check_input_attributed_next),
+// as the late attributes' do, and a lane that reads one refuses (check_input_attribute_read_item), so these run in
+// source order.
 // Included by c_check_input.c after c_check_implicit_input.c, whose library builtins it reads.
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -720,6 +722,192 @@ static const BuiltinIntrinsicInfo* check_input_checks_library(CheckInputReader* 
                   type_same_canonical(reader->types, decoded.types.function_type, declared) == TYPE_ANSWER_YES;
     }
     return builtin ? info : NULL;
+}
+
+// diagnose_as_builtin's checks (#1447, clang's handleDiagnoseAsBuiltinAttr), on a function of type `function` named at `name`
+// whose declarator's named parameters CheckInputReader.attribute_parameters links. Its first argument names a builtin
+// function (getBuiltinID): a name no declaration hides of one of the catalogue's builtins this language has but a library
+// function's, which clang declares implicitly, or the unit's declaration of a library function that is its builtin
+// (check_input_checks_library); any other first argument is clang's error at its expression's place. Then its builtin's
+// parameters (its prototype as GetBuiltinType declares it, past any custom checking) must be as many as its other
+// arguments, each of which is the index, from 1, of the function's parameter whose type (canonical, unqualified) is that
+// builtin parameter's: in 32 bits (checkUInt32Argument's errors), within the function's parameters. Refused by name where
+// clang's diagnostics are its own (an undeclared library function's implicit declaration, a builtin's name in another
+// expression, a redeclared builtin), where it crashes (an index of 0), where the checker can't spell a builtin parameter's
+// type in its error, and for more than 32 arguments. A definition's identifier list compares its parameters by their
+// declarations' types, the promoted prototype's standing aside (clang's ParmVarDecl types). Nothing else changes: the
+// -Wfortify-source warnings it would give the function's calls, as a builtin's, the checker doesn't make. Whether the
+// declaration goes on.
+static bool check_input_attribute_diagnose_builtin(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, TypeId function,
+                                                   uint32_t name)
+{
+    const Parser* parser = reader->parser;
+    TypeTable* types = reader->types;
+    const InternTable* table = reader->pp->table;
+    const uint32_t first = attribute->argument_first;
+    const uint32_t first_end = check_input_checks_argument_end(parser, first, attribute->argument_end);
+    const bool lone = first_end == first + 1 && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER;
+    const uint32_t word = lone ? parser->tokens.names[first] : 0;
+    const uint32_t handle = lone ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, word) : 0;
+    const uint8_t bound = handle != 0 ? reader->bindings.kind[handle - 1] : 0;
+    const BuiltinIntrinsicInfo* row = lone ? builtin_intrinsic_lookup((const char*)intern_bytes(table, word), intern_length(table, word)) : NULL;
+    const bool library = row != NULL && memchr(row->attributes, 'f', row->attributes_length) != NULL;
+    const PPOptions* options = &reader->pp->options;
+    const bool language = row != NULL && (strcmp(row->language_token, "ALL_LANGUAGES") == 0 ||
+                                          (strcmp(row->language_token, "ALL_GNU_LANGUAGES") == 0 && options->language.gnu) ||
+                                          (strcmp(row->language_token, "C23_LANG") == 0 && options->language.standard >= 2023));
+    const BuiltinIntrinsicInfo* info = NULL;
+    bool refused = attribute->argument_count > 32;
+    if (!refused && lone && handle == 0)
+    {
+        info = row != NULL && !library && language ? row : NULL;
+        refused = info == NULL;
+    }
+    else if (!refused && lone && bound == C_BINDING_FUNCTION)
+    {
+        info = check_input_checks_library(reader, reader->bindings.declaration[handle - 1]);
+        refused = row != NULL && !library;
+    }
+    else if (!refused && lone)
+    {
+        refused = bound == C_BINDING_TYPEDEF;
+    }
+    // A builtin's name in parentheses alone is no builtin's reference, at its first `(`; in any other expression it is clang's
+    // "builtin functions must be directly called" first.
+    uint32_t opened = 0;
+    while (!lone && first + opened < first_end && parser->tokens.kinds[first + opened] == PARSE_KIND_L_PAREN)
+    {
+        opened += 1;
+    }
+    const bool parenthesized = opened != 0 && first + 2 * opened + 1 == first_end && parser->tokens.kinds[first + opened] == PARSE_KIND_IDENTIFIER &&
+                               parser->tree.parents[first] == first_end - 1;
+    for (uint32_t token = first; !refused && !lone && !parenthesized && token < first_end; token += 1)
+    {
+        const uint32_t spelled = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ? parser->tokens.names[token] : 0;
+        refused = spelled != 0 && c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, spelled) == 0 &&
+                  builtin_intrinsic_lookup((const char*)intern_bytes(table, spelled), intern_length(table, spelled)) != NULL;
+    }
+    // The builtin's parameters, its prototype decoded without its custom checking, as clang's declaration of it has them.
+    CheckInputIntrinsicDeclaration decoded = { 0 };
+    if (!refused && info != NULL)
+    {
+        BuiltinIntrinsicInfo plain = *info;
+        plain.attributes = "";
+        plain.attributes_length = 0;
+        plain.custom_typechecking = false;
+        decoded = check_input_intrinsic_decode(reader, &plain);
+        reader->output->resource |= decoded.types.status == BUILTIN_INTRINSIC_TYPES_CAPACITY;
+        refused = decoded.types.status != BUILTIN_INTRINSIC_TYPES_SUCCESS;
+    }
+    const bool prototyped = (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
+    uint32_t parameter_count = 0;
+    const TypeId* parameter_types = type_parameters(types, function, &parameter_count);
+    const uint32_t declared = prototyped ? parameter_count : 0;
+    refused |= !prototyped && reader->attribute_parameters != 0;
+    // A K&R definition's type counts its parameters' promoted types, but clang compares the declarations' own:
+    // subject_identifier_list's parameters' declared types, in the same order, stand in for the type's.
+    if (!refused && reader->subject_identifier_list && reader->attribute_parameters != 0)
+    {
+        const uint32_t names = reader->attribute_parameters - 1;
+        uint32_t count = 0;
+        for (uint32_t parameter = names; parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(reader->parameter_next, parameter))
+        {
+            count += 1;
+        }
+        TypeId* kr = arena_push_array(reader->scratch, count, sizeof(TypeId), 4);
+        reader->output->resource |= kr == 0;
+        if (kr != NULL)
+        {
+            uint32_t k = 0;
+            for (uint32_t parameter = names; parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(reader->parameter_next, parameter))
+            {
+                kr[k++] = reader->declared_types[parameter];
+            }
+            parameter_types = kr;
+        }
+    }
+    bool valid = !refused;
+    if (refused)
+    {
+        check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+    }
+    else if (info == NULL)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, check_input_expression_location(parser, first, first_end), CHECK_ARGUMENT_BUILTIN_FUNCTION, 1);
+        valid = false;
+    }
+    else if (attribute->argument_count - 1 != decoded.types.parameter_count)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_BUILTIN_COUNT, decoded.types.parameter_count);
+        valid = false;
+    }
+    uint32_t argument = first_end + 1;
+    for (uint32_t i = 1; valid && i < attribute->argument_count; i += 1)
+    {
+        const uint32_t stop = check_input_checks_argument_end(parser, argument, attribute->argument_end);
+        const bool evaluated = ((attribute->constants >> i) & 1u) != 0 && attribute->argument_values != NULL;
+        const bool wide = ((attribute->wide >> i) & 1u) != 0;
+        const uint64_t index = evaluated ? (uint32_t)attribute->argument_values[i] : 0;
+        const uint64_t named = (uint64_t)name << 32;
+        if (!evaluated)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PARAMETER_INTEGER, i + 1);
+            valid = false;
+        }
+        else if (wide)
+        {
+            check_input_attribute_too_large(reader, attributes, attribute, argument, stop, attribute->argument_values[i]);
+            valid = false;
+        }
+        else if (index == 0)
+        {
+            // clang's handler reads the parameter before the first, and crashes.
+            check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+            valid = false;
+        }
+        else if (index > declared)
+        {
+            const uint32_t before = reader->output->report_count;
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_BUILTIN_BOUNDS, declared);
+            if (reader->output->report_count > before)
+            {
+                reader->output->reports[before].value = index | named;
+            }
+            valid = false;
+        }
+        else if (type_same_canonical(types, type_unqualified(decoded.types.parameters[i - 1]), type_unqualified(parameter_types[index - 1])) != TYPE_ANSWER_YES)
+        {
+            // The function's parameter's type as its declaration has it (its typedef's spelling where its adjustment kept
+            // it), and the builtin's as clang spells it, which the driver spells again from its row.
+            char spelling[256];
+            bool sized = false;
+            const bool spellable = cbuiltin_library_spell_parameter(info->encoding, info->encoding_length, info->attributes, info->attributes_length, i - 1, true,
+                                                                    parser->language.standard >= 1999, spelling, sizeof(spelling), &sized);
+            const uint32_t place = name < parser->tokens.count ? check_input_checks_parameter_place(reader, name, (uint32_t)index - 1) : BUSTER_CHECK_NONE;
+            const TypeId parameter = parameter_types[index - 1];
+            const bool declarator = place < parser->tokens.count && parser->tokens.kinds[place] == PARSE_KIND_IDENTIFIER && reader->declaration_kinds[place] == C_BINDING_OBJECT;
+            const TypeId own = declarator ? reader->declared_types[place] : 0;
+            const bool spelled = declarator && own != 0 && type_unqualified(type_strip_aligned(types, own)) == type_unqualified(type_strip_aligned(types, parameter));
+            if (!spellable)
+            {
+                check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+            }
+            else
+            {
+                const uint32_t before = reader->output->report_count;
+                check_input_attribute_argument_error(reader, attributes, attribute, argument, CHECK_ARGUMENT_BUILTIN_TYPES, i);
+                if (reader->output->report_count > before)
+                {
+                    reader->output->reports[before].value = index | named;
+                    reader->output->reports[before].type = spelled ? own : parameter;
+                    reader->output->reports[before].type_spelling = spelled ? check_input_typedef_spelling(reader->output, parser, place) : 0;
+                }
+            }
+            valid = false;
+        }
+        argument = stop + 1;
+    }
+    return valid;
 }
 
 // modular_format's format (#1447, clang's checkAttributesAfterMerging: err_modular_format_attribute_no_format): a function's

@@ -217,6 +217,7 @@ static void check_input_overload_uses(CheckInputReader* reader, const CheckStrea
 }
 
 #include "c_check_noderef_graph.c"
+#include "c_check_condition_graph.c"
 
 // Whether graph node `node` is a call clang's BuildResolvedCallExpr sees (#147, check_input_interrupt_calls): a call, or a
 // builtin's, but those clang parses as no call (va_arg, convertvector, bit_cast and __builtin_available, keywords' forms).
@@ -773,6 +774,11 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                 }
                 else if (op == CHECK_OP_CALL)
                 {
+                    // diagnose_if's and enable_if's conditions at the call (#1447, c_check_condition_graph.c).
+                    if (input->condition_declaration_count != 0)
+                    {
+                        check_input_condition_call(&reader, stream, types, node);
+                    }
                     const uint32_t begin = graph->argument_offsets[node];
                     for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
                     {

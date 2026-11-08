@@ -118,7 +118,9 @@ static const char check_test_tier1_divide_main[] =
 // it in a loop; tier1_classify's switch is a jump table, with values live across it; tier1_pick jumps once through a ?:
 // of two labels' addresses; tier1_both enters a label directly and through its table, where a phi meets values that stay
 // live apart, so that each edge into it has moves and the indirect jump's has a stub, where the label's symbol goes;
-// tier1_once loads its target from its table; tier1_single can jump to one label alone.
+// tier1_once loads its target from its table; tier1_single can jump to one label alone. tier1_tables has two switch
+// tables (#1217), with holes, signed and unsigned nonzero lower bounds, whose dispatches share each table's address.
+// tier1_table_loop keeps one table base before its loop and dispatches with movsxd, add and jmp on each iteration.
 static const char check_test_tier1_labels_source[] =
     "#include <stdio.h>\n"
     "static long tier1_interpret(const unsigned char* code, long n)\n"
@@ -212,6 +214,43 @@ static const char check_test_tier1_labels_source[] =
     "only:\n"
     "    return x + 1;\n"
     "}\n"
+    "static long tier1_tables(int x, unsigned long y)\n"
+    "{\n"
+    "    long r = 13;\n"
+    "    switch (x)\n"
+    "    {\n"
+    "        case -3: r += 5; break;\n"
+    "        case -2: r ^= 7; break;\n"
+    "        case 0: r -= 11; break;\n"
+    "        case 2: r *= 3; break;\n"
+    "        default: r += 17; break;\n"
+    "    }\n"
+    "    switch (y)\n"
+    "    {\n"
+    "        case 18446744073709551611ul: r += x; break;\n"
+    "        case 18446744073709551612ul: r ^= x; break;\n"
+    "        case 18446744073709551614ul: r += x * 3; break;\n"
+    "        case 18446744073709551615ul: r -= x * 5; break;\n"
+    "        default: r -= x; break;\n"
+    "    }\n"
+    "    return r;\n"
+    "}\n"
+    "static long tier1_table_loop(long n)\n"
+    "{\n"
+    "    long r = 0;\n"
+    "    for (long i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        switch (i & 7)\n"
+    "        {\n"
+    "        case 0: r += 3; break;\n"
+    "        case 1: r ^= 5; break;\n"
+    "        case 2: r -= 7; break;\n"
+    "        case 3: r += i; break;\n"
+    "        default: r ^= i; break;\n"
+    "        }\n"
+    "    }\n"
+    "    return r;\n"
+    "}\n"
     "int main(void)\n"
     "{\n"
     "    static const unsigned char program[] = { 0, 1, 2, 0, 1, 1, 2, 0, 3 };\n"
@@ -219,6 +258,13 @@ static const char check_test_tier1_labels_source[] =
     "    printf(\"%d %d\\n\", tier1_pick(1), tier1_pick(0));\n"
     "    printf(\"%ld %ld %ld %ld\\n\", tier1_both(5), tier1_both(6), tier1_both(8), tier1_both(-3));\n"
     "    printf(\"%d %d %d %d\\n\", tier1_once(0), tier1_once(1), tier1_once(2), tier1_single(41));\n"
+    "    unsigned long sum = 0;\n"
+    "    for (int i = -8; i <= 8; i += 1)\n"
+    "    {\n"
+    "        sum = sum * 33 + (unsigned long)tier1_tables(i, (unsigned long)i);\n"
+    "    }\n"
+    "    printf(\"%lu\\n\", sum);\n"
+    "    printf(\"%ld %ld %ld %ld\\n\", tier1_table_loop(0), tier1_table_loop(1), tier1_table_loop(17), tier1_table_loop(257));\n"
     "    return 0;\n"
     "}\n";
 
@@ -1034,6 +1080,9 @@ static uint32_t check_test_tier1_function(const char* path, const char* name, X8
     free(bytes);
     return valid ? (uint32_t)decoded.count : 0;
 }
+
+#include "c_check_tier1_table_targets_test.c"
+#include "c_check_tier1_table_entry_test.c"
 
 // The status flags (CF, PF, AF, ZF, SF and OF) live before decoded record `index`, given those live after it, live[index]:
 // those it reads, and those live after it that it neither writes nor leaves undefined (x86_semantics.c).
@@ -1891,6 +1940,70 @@ static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, c
             check_test_expect(test, decoded && registers[1] == 1 && memory[1] == 0, "tier1_classify's switch is one indirect jump through a register");
             check_test_expect(test, decoded && registers[3] == 0 && memory[3] == 0, "tier1_single's jump to its one label is a direct jump");
             check_test_expect(test, decoded && registers[4] == 1 && trailing[4] != 0, "tier1_both's indirect jump has a stub after it, for the label its edge moves into");
+            uint32_t table_relocations = 0;
+            const uint32_t table_records = decoded ? check_test_tier1_function(object, "tier1_tables", records, CHECK_TEST_TIER1_LABELS_RECORDS, offsets, types, &table_relocations) : 0;
+            uint32_t table_addresses = 0;
+            uint32_t table_jumps = 0;
+            for (uint32_t i = 0; i < table_records; i += 1)
+            {
+                const X86Instruction* instruction = &records[i].instruction;
+                const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
+                table_addresses += form == X86_FORM_LEA_R64_M && instruction->mode == BUSTER_X86_MEMORY_RIP;
+                table_jumps += form == X86_FORM_JMP_RM64 && instruction->mode == BUSTER_X86_REGISTER_DIRECT;
+            }
+            check_test_expect(test, table_records != 0 && table_jumps == 2 && table_addresses == 2 && table_relocations == 2,
+                              "each of two switches shares one relocated table address between its signed load and target addition");
+            uint32_t loop_relocations = 0;
+            const uint32_t loop_records = decoded ? check_test_tier1_function(object, "tier1_table_loop", records, CHECK_TEST_TIER1_LABELS_RECORDS, offsets, types, &loop_relocations) : 0;
+            uint32_t loop_addresses = 0;
+            uint32_t loop_jumps = 0;
+            uint32_t loop_address = loop_records;
+            uint32_t loop_base = UINT32_MAX;
+            uint32_t dispatch = loop_records;
+            bool triples = true;
+            for (uint32_t i = 0; i < loop_records; i += 1)
+            {
+                const X86Instruction* instruction = &records[i].instruction;
+                const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
+                if (form == X86_FORM_LEA_R64_M && instruction->mode == BUSTER_X86_MEMORY_RIP)
+                {
+                    loop_addresses += 1;
+                    loop_address = i;
+                    loop_base = instruction->reg;
+                }
+                if (form == X86_FORM_JMP_RM64 && instruction->mode == BUSTER_X86_REGISTER_DIRECT)
+                {
+                    loop_jumps += 1;
+                    dispatch = i;
+                    triples &= i >= 2;
+                    if (i >= 2)
+                    {
+                        const X86Instruction* load = &records[i - 2].instruction;
+                        const X86Instruction* add = &records[i - 1].instruction;
+                        const uint32_t add_form = add->form & BUSTER_X86_FORM_NUMBER;
+                        const bool reversed = add_form == X86_FORM_ADD_RM64_R64;
+                        const uint32_t destination = reversed ? add->rm : add->reg;
+                        const uint32_t source_register = reversed ? add->reg : add->rm;
+                        triples &= (load->form & BUSTER_X86_FORM_NUMBER) == X86_FORM_MOVSXD_R64_RM32 && load->mode == BUSTER_X86_MEMORY_BASE_INDEX(2) &&
+                                   load->displacement == 0 && load->rm == loop_base && load->reg != loop_base &&
+                                   (reversed || add_form == X86_FORM_ADD_R64_RM64) && add->mode == BUSTER_X86_REGISTER_DIRECT &&
+                                   destination == load->reg && source_register == loop_base && instruction->rm == destination;
+                    }
+                }
+            }
+            check_test_expect(test, loop_records != 0 && loop_jumps == 1 && triples,
+                              "each loop dispatch is adjacent movsxd [base + index*4], add base and jmp through the same target register");
+            uint32_t loop_targets[4] = { 0 };
+            const bool table_resolved = loop_addresses == 1 && loop_address < loop_records && records[loop_address].length >= 4 &&
+                                        check_test_tier1_table_targets(object, "tier1_table_loop", records[loop_address].offset,
+                                                                       records[loop_address].offset + records[loop_address].length - 4, loop_targets, false);
+            const bool entry = table_resolved && check_test_tier1_table_entry(records, loop_records, loop_address, dispatch, loop_targets);
+            check_test_expect(test, loop_addresses == 1 && loop_relocations == 1 && entry,
+                              "the loop's one relocated table base is reached at entry and no direct or table edge reenters it");
+            if (entry && rematerialize == 0 && path == 0)
+            {
+                check_test_tier1_table_entry_controls(test, object, records, loop_records, loop_address, dispatch, loop_targets);
+            }
             unlink(output);
             unlink(object);
         }

@@ -255,6 +255,16 @@ typedef enum CheckInputMessage
     // service routine, at its callee (check_input_interrupt_calls).
     CHECK_INPUT_INTERRUPT_HANDLER,
     CHECK_INPUT_INTERRUPT_CALLED,
+    // diagnose_if's and enable_if's (#1447, c_check_condition.c): an error diagnose_if's condition gives, its message at the
+    // call's `)` (or at the use of a function whose condition no argument decides), its note "from 'diagnose_if' attribute
+    // on 'f':" at the attribute (`note_token`), the message's first string token plus one in `detail` and the function's
+    // name's token in `value`; a call no enable_if condition admits, "no matching function for call to 'f'" at the callee,
+    // its note "candidate disabled: M" at the function's declaration (`note_token`), M's token plus one in `detail`; and a
+    // use of a function with a condition that isn't always true other than a call's, "cannot take address of function 'f'
+    // because it has one or more non-tautological enable_if conditions", at the outermost `(` around the name (`value`).
+    CHECK_INPUT_DIAGNOSE_IF_ERROR,
+    CHECK_INPUT_ENABLE_IF_CALL,
+    CHECK_INPUT_ENABLE_IF_ADDRESS,
 } CheckInputMessage;
 
 // CHECK_INPUT_INTERRUPT_HANDLER's details: the rule x86's handler finds broken (its result isn't void; it hasn't one or two
@@ -396,6 +406,9 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_UNEVALUATED_ESCAPE] = "invalid escape sequence in an unevaluated string literal",
     [CHECK_INPUT_INTERRUPT_HANDLER] = "x86-64 'interrupt' attribute only applies to functions that have a 'void' return type",
     [CHECK_INPUT_INTERRUPT_CALLED] = "interrupt service routine cannot be called directly",
+    [CHECK_INPUT_DIAGNOSE_IF_ERROR] = "diagnose_if attribute error",
+    [CHECK_INPUT_ENABLE_IF_CALL] = "no matching function for call",
+    [CHECK_INPUT_ENABLE_IF_ADDRESS] = "cannot take address of function because it has one or more non-tautological enable_if conditions",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -805,6 +818,15 @@ struct CheckInput
     // (check_input_overload_uses, #147).
     CheckInputMarkedMember* marked_overloads;
     uint32_t marked_overload_count;
+    // diagnose_if's and enable_if's conditions (#1447, c_check_condition.c): every one read, in the arena, in the order read;
+    // and each function declaration where any holds (its own or an earlier redeclaration's), in ascending order of its name's
+    // token, for the uses' and calls' diagnostics. Null and 0 in a unit without them.
+    struct CheckCondition* conditions;
+    uint32_t condition_count;
+    uint32_t condition_capacity;
+    struct CheckConditionDeclaration* condition_declarations;
+    uint32_t condition_declaration_count;
+    uint32_t condition_declaration_capacity;
     uint8_t* availability_contexts;
     // The availability attributes' warnings' texts (#1447, CheckInputAvailabilityText), in the output arena, grown by doubling.
     CheckInputAvailabilityText* availability_texts;
@@ -1796,6 +1818,8 @@ struct CheckInputReader
     bool late_attributes;
     // Whether a deprecated or unavailable attribute was read, for its uses' diagnostics (check_input_deprecated_uses).
     bool deprecated_attributes;
+    // Whether a diagnose_if or enable_if attribute was read, for its conditions (#1447, c_check_condition.c).
+    bool condition_attributes;
     // Whether an enforce_tcb or enforce_tcb_leaf attribute was read, for its calls' warnings (#1447, check_input_tcb_calls),
     // and whether one of them or a modular_format was, for its redeclarations' checks (check_input_attribute_merge_checks).
     bool tcb_attributes;
@@ -4904,11 +4928,13 @@ static bool check_input_ownership_indices(CheckInputReader* reader, const CheckI
 }
 
 // Whether a generic attribute's integer arguments are its handler's parameter indices, evaluated where it is read (#1447,
-// CheckInputAttribute.constants): 1 for callback's (any argument but a lone name), 2 for swift_async's (its second), else 0.
+// CheckInputAttribute.constants): 1 for callback's (any argument but a lone name), 2 for swift_async's (its second), 3 for
+// diagnose_as_builtin's (each after its first, in 32 bits as clang's checkUInt32Argument reads them), else 0.
 static uint32_t check_input_checked_indices(CheckInputReader* reader, const CheckInputAttribute* attribute)
 {
     const String8 name = check_input_attribute_name(reader, attribute->name);
-    return check_input_attribute_equal(name, "callback") ? 1u : check_input_attribute_equal(name, "swift_async") && attribute->argument_count == 2 ? 2u : 0u;
+    return check_input_attribute_equal(name, "callback") ? 1u : check_input_attribute_equal(name, "swift_async") && attribute->argument_count == 2 ? 2u :
+           check_input_attribute_equal(name, "diagnose_as_builtin") ? 3u : 0u;
 }
 
 // A type argument's type (#147, CheckInputAttribute.argument_type): a C23 attribute's lone typedef name, which its tokens
@@ -4970,18 +4996,6 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
                                attribute->kind == CHECK_ATTRIBUTE_ALLOC_ALIGN || attribute->kind == CHECK_ATTRIBUTE_FORMAT;
         const bool tag_type = reader->tag_attributes && (attribute->kind == CHECK_ATTRIBUTE_REGPARM || attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE);
         attribute->ignored |= tag_type;
-        if (attribute->kind == CHECK_ATTRIBUTE_ENABLE_IF)
-        {
-            uint32_t first = 0;
-            uint32_t end = 0;
-            int64_t value = 0;
-            // glibc uses enable_if(1, "") only to prefer a wrapper. Conditional candidate filtering remains unsupported.
-            valid = check_input_attribute_argument(attribute, 0, &first, &end) && check_input_constant_ice(reader, first, end, &value) && value != 0;
-            if (!valid)
-            {
-                check_input_attribute_error(reader, &parsed, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
-            }
-        }
         if (attribute->deferred != NULL)
         {
             // Its earlier handler error wins once the declaration accepts the attribute. In particular a malformed
@@ -5056,6 +5070,7 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
                 int64_t value = 0;
                 bool wide = false;
                 const bool constant = which == 1 ? !lone && check_input_constant_u32(reader, first, stop, &value, &wide) :
+                                      which == 3 ? argument != 0 && check_input_constant_u32(reader, first, stop, &value, &wide) :
                                       argument == 1 && check_input_constant_ice(reader, first, stop, &value);
                 attribute->argument_values[argument] = value;
                 attribute->constants |= constant ? 1u << argument : 0u;
@@ -6665,6 +6680,7 @@ static void check_input_mark_member(CheckInputReader* reader, uint32_t index, co
 #include "c_check_enum_input.c"
 #include "c_check_counted_by_input.c"
 #include "c_check_thread_safety_input.c"
+#include "c_check_condition.c"
 
 // The first of the function specifier inline's tokens in [first, end), a declaration's specifiers, or BUSTER_CHECK_NONE.
 static uint32_t check_input_inline_token(const Parser* parser, uint32_t first, uint32_t end)
@@ -8365,6 +8381,12 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             reader->attribute_parameters = 0;
             reader->subject_function_list = BUSTER_CHECK_NONE;
             valid = valid && check_input_attribute_definition(reader, attributes, subject);
+            // diagnose_if's and enable_if's conditions (#1447, c_check_condition.c), in the function's parameter scope, after the
+            // ones its previous declaration has.
+            if (valid && reader->condition_attributes && function && !is_typedef)
+            {
+                valid = check_input_conditions(reader, attributes, name, type, parameters, function_list, previous_declaration);
+            }
             // clang's lifetimebound on a parameter of a function that returns void (#147, checkLifetimeBoundAttr), at the
             // attribute: of a function's declaration alone.
             if (valid && function && !is_typedef && reader->declarator_lifetimebound != BUSTER_CHECK_NONE)
@@ -12831,6 +12853,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             if (reader.tcb_attributes && complete_translation_unit && !input->resource)
             {
                 check_input_tcb_calls(&reader);
+            }
+            if (input->condition_declaration_count != 0 && complete_translation_unit && !input->resource)
+            {
+                check_input_condition_uses(&reader);
             }
             if (reader.deprecated_attributes && complete_translation_unit && !input->resource)
             {

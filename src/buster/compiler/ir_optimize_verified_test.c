@@ -107,7 +107,8 @@ static void ir_verified_test_case(IrOptimizeTest* test, const IrFunction* input,
         ir_optimize_test_expect(test, ir_optimize_test_equal(&expected.function, &actual.function), "verified handoff: unchanged optimized IR");
         ir_optimize_test_expect(test, expected.folded == actual.folded && expected.removed_blocks == actual.removed_blocks &&
                                 expected.removed_instructions == actual.removed_instructions && expected.sccp_visits == actual.sccp_visits &&
-                                expected.sccp_sweeps == actual.sccp_sweeps && expected.dce_visits == actual.dce_visits &&
+                                expected.sccp_sweeps == actual.sccp_sweeps && expected.sccp_phi_incoming == actual.sccp_phi_incoming &&
+                                expected.dce_visits == actual.dce_visits &&
                                 expected.dce_sweeps == actual.dce_sweeps && expected.worklist_fallback == actual.worklist_fallback &&
                                 expected.scratch_bytes == actual.scratch_bytes,
                                 "verified handoff: unchanged transformation statistics");
@@ -373,7 +374,7 @@ static void ir_verified_tests(IrOptimizeTest* test)
         ir_optimize_test_expect(test, created, "verified handoff: original fixture allocation");
         for (uint32_t path = BUSTER_IR_OPTIMIZE_AUTO; created && path <= BUSTER_IR_OPTIMIZE_SCALAR; path += 1)
         {
-            for (uint32_t passes = 0; passes < 8; passes += 1)
+            for (uint32_t passes = 0; passes < 16; passes += 1)
             {
                 ir_verified_test_case(test, &function, &output, &analyses, &reference, &scratch, passes, path, false, false);
             }

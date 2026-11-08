@@ -2636,7 +2636,8 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
 // The jump tables the lowering makes of `source`'s switches (#136's item 7), by both paths: `tables` of them, with
 // `entries` entries in all, as clang -O0's rule gives them (check_lower_switch_table). The program must list exactly
 // its SWITCH controls with four CASE controls or more after them, in the controls' order (CheckProgram.switches), as a
-// scan of its controls finds them.
+// scan of its controls finds them. Each table's address is made once and duplicated for its load and signed-offset
+// addition (#1217), with one symbol patch even when several tables share a function.
 static void check_test_program_tables(CheckTest* test, const char* source, const char* name, uint32_t tables, uint32_t entries)
 {
     static InternTable identifiers;
@@ -2669,12 +2670,31 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
         const CheckProgramOptions options = { .initializers = &plans, .asms = &asms, .identifiers = &identifiers, .scalar = path == 0 };
         const bool lowered_ok = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) &&
                                 check_program_lower(&lowered, &program, path == 0, &output, &scratch);
+        char description[256];
         uint32_t total = 0;
         for (uint32_t t = 0; lowered_ok && t < lowered.table_count; t += 1)
         {
-            total += lowered.tables[t].count;
+            const CheckLowerTable* table = lowered.tables + t;
+            const Tier0Function* function = table->function < program.body_count ? lowered.functions + table->function : NULL;
+            const uint32_t address = table->address;
+            const uint64_t symbol = (uint64_t)lowered.case_symbol_base + t;
+            const bool shared = function != NULL && address < function->count && function->count - address >= 2 &&
+                                function->kinds[address] == BUSTER_TYPED_GLOBAL_ADDRESS && function->values[address] == symbol &&
+                                function->kinds[address + 1] == BUSTER_TYPED_DUP && function->classes[address + 1] == BUSTER_TYPED_CLASS_U64;
+            uint32_t references = 0;
+            for (uint32_t i = 0; function != NULL && i < function->count; i += 1)
+            {
+                references += function->kinds[i] == BUSTER_TYPED_GLOBAL_ADDRESS && function->values[i] == symbol;
+            }
+            uint32_t listed_addresses = 0;
+            for (uint32_t k = 0; function != NULL && function->table_addresses != NULL && k < function->table_count; k += 1)
+            {
+                listed_addresses += function->table_addresses[k] == address && address < function->table_jumps[k];
+            }
+            snprintf(description, sizeof(description), "%s: the %s path shares table %u's one patched address", name, path == 0 ? "scalar" : "vector", t);
+            check_test_expect(test, shared && references == 1 && listed_addresses == 1, description);
+            total += table->count;
         }
-        char description[256];
         snprintf(description, sizeof(description), "%s: %u jump tables of %u entries by the %s path (clang -O0's rule: %u of %u)", name,
                  lowered_ok ? lowered.table_count : 0, total, path == 0 ? "scalar" : "vector", tables, entries);
         check_test_expect(test, lowered_ok && lowered.table_count == tables && total == entries, description);
@@ -4099,6 +4119,17 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "int c='\\x{43}'+'\\o{104}'*3+'\\E'*5+'\\z'*7;unsigned long h=0;for(int i=0;s[i];i++)h=h*31+(unsigned char)s[i];"
             "for(int i=0;u[i];i++)h=h*37+u[i];for(int i=0;w[i];i++)h=h*41+(unsigned)w[i];return (int)(h%1000003)+c+n;}",
             "extended-escapes", clang);
+        // Named universal character names (#1447, unicode_name_strict): names, aliases and names made by rule (CJK,
+        // Hangul, Egyptian), in strings of each width, character constants, an identifier and a macro's name, their values
+        // against clang's build.
+        check_test_program_source(test,
+            "#define \\N{GREEK SMALL LETTER BETA}(x) ((x)*2)\n"
+            "int tested(int n){const char*s=\"\\N{LATIN SMALL LETTER E WITH ACUTE}\\N{SNOWMAN}\\N{GRINNING FACE}\\N{CJK UNIFIED IDEOGRAPH-4E00}\\N{HANGUL SYLLABLE GAG}\";"
+            "const unsigned short*u=u\"\\N{GRINNING FACE}\\N{GREEK SMALL LETTER ALPHA}\\N{NBSP}\";const int*w=L\"\\N{LATIN CAPITAL LETTER GHA}\\N{EGYPTIAN HIEROGLYPH-13460}\";"
+            "int c=L'\\N{SNOWMAN}'+(int)U'\\N{GRINNING FACE}'*3+u'\\N{BYTE ORDER MARK}'*5;int \\N{GREEK SMALL LETTER ALPHA}=n;unsigned long h=0;"
+            "for(int i=0;s[i];i++)h=h*31+(unsigned char)s[i];for(int i=0;u[i];i++)h=h*37+u[i];for(int i=0;w[i];i++)h=h*41+(unsigned)w[i];"
+            "return (int)(h%1000003)+c+\\u03b1+\\N{GREEK SMALL LETTER BETA}(\xCE\xB1);}",
+            "named-universal-character-names", clang);
         // x86's force_align_arg_pointer (#1447, Tier0Function.realign_stack): a function entered with rsp 8 bytes off a call's
         // alignment (an inline asm call that aligns rsp below the red zone, then moves it by 8) realigns its frame, so that
         // an object aligned to 16 is; with a call of its own and with a variable-length array (a realigned frame with a
@@ -4115,6 +4146,18 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             ":\"=a\"(r):\"r\"(f):\"rbx\",\"rcx\",\"rdx\",\"rsi\",\"rdi\",\"r8\",\"r9\",\"r10\",\"r11\",\"memory\",\"cc\");return r;}"
             "int tested(int n){return (int)(misaligned(leaf)+misaligned(calls)*1000+misaligned(vla)*100000+leaf()+calls()+vla())+n;}",
             "force-align-arg-pointer", clang);
+        // clang's NEON vectors on x86-64 (#1447): GNU vectors of a kind of their own, laid out, passed and computed as GNU
+        // vectors of their element and count, to and from which those convert; a polynomial one, and a NEON vector a mode
+        // attribute keeps.
+        check_test_program_source(test,
+            "typedef int N4 __attribute__((neon_vector_type(4)));typedef int G4 __attribute__((vector_size(16)));"
+            "typedef float F2 __attribute__((neon_vector_type(2)));typedef short P4 __attribute__((neon_polyvector_type(4)));"
+            "typedef N4 M2 __attribute__((mode(DI)));"
+            "static N4 add(N4 a,N4 b){return a+b;}static F2 scale(F2 v,float s){return v*s;}"
+            "int tested(int n){N4 a={n,n+1,n+2,n+3};G4 g={1,2,3,4};N4 c=add(a,g);G4 d=c*2;F2 f=scale((F2){n*0.5f,1.5f},3.0f);"
+            "P4 p={(short)n,2,3,4};p=p+p;M2 m=(M2)c;"
+            "return d[0]+d[3]+(int)(f[0]*2)+(int)f[1]+p[0]+p[3]+(int)(m[1]&0xffff)+(int)sizeof(M2)+(int)sizeof(F2);}",
+            "neon-vectors", clang);
         // Variable-length arrays aligned past 16 bytes (their storage rounded up within a larger allocation), beside a fixed
         // object aligned to 128 (a realigned frame with a base, r15, since the arrays move rsp), across calls with stack
         // arguments whose outgoing area the allocations keep aligned.
