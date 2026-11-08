@@ -89,7 +89,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
   `CheckDriverPart`; `--cpu-dispatch-only` runs the `cpu_specific` and
   `cpu_dispatch` section alone, #1447; `--semantic-recovery-only` runs
-  `c_check_semantic_recovery_driver_test.c` alone, the whole output and status
+  `c_check_semantic_recovery_driver_test.c` and `c_check_statement_recovery_driver_test.c` alone, the whole output and status
   of semantic error recovery's fixtures against clang's on the vector, scalar
   and two-lane deferred paths, and `-c`'s refusal of each: `docs/c-checker.md`'s
   "Semantic error recovery", #1447). Its library-builtin comparisons are pinned to Clang
@@ -248,7 +248,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   follow every division and count of their root. Roots the reader adds after what follows their operand (a
   statement's condition, a switch's, or a `for` increment's discard) are taken where their
   operand stands (`check_common_displaced_roots`), so a condition's warnings precede its body's, as clang analyzes it.
-  A statement expression's inner statements still warn before the enclosing root's own divisions and counts.
+  A statement expression's statements are roots of their own, ahead of its enclosing expression's in node order: the
+  arithmetic scan takes each one's whole visit (`check_common_inner_roots`, a `ROOT` frame) where it enters the statement
+  expression, so they warn between what the enclosing expression built before it and after it, as clang builds them, a
+  displaced condition's first. Its last value, its statement's and the statement expression's, is scanned once. Still
+  different: a short-circuited or unreachable statement expression's statements warn, and a comparison as its last
+  value warns as a comparison where clang says "expression result unused".
   `c_check_int_in_bool_driver_test.c` (#1447) compares clang's `-Wint-in-bool-context` and the
   `-Wtautological-constant-compare` forms of a `<<` or a conditional converted to `_Bool` (`docs/c-checker.md`)
   with complete pinned-Clang output at each policy, both paths and with `-c`.

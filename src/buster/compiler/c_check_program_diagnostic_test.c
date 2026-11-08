@@ -228,9 +228,9 @@ static void check_test_program_diagnostics(CheckTest* test, const char* clang)
     check_test_program_diagnostic(test, "int f(double n){switch(n){}return *1;}", PARSE_ROLE_CLOSE_CONDITION, 1, false);
     check_test_program_diagnostic(test, "int f(int n){switch(n){case 3 ... 1:;}return *1;}", PARSE_ROLE_CLOSE_CASE, 0, false);
     check_test_program_diagnostic(test, "int f(int n){switch(n){case 1:;}switch(n){case 1:;}return *1;}", PARSE_ROLE_CLOSE_CASE, 0, false);
-    check_test_program_diagnostic(test, "int f(int n){int x=*1;switch(n){case 1:;case 1:;}return x;}", PARSE_ROLE_CLOSE_CASE, 0, false);
+    check_test_program_diagnostic(test, "int f(int n){int x=*1;switch(n){case 1:;case 1:;}return x;}", PARSE_ROLE_CLOSE_CASE, 2, false);
     check_test_program_diagnostic(test, "int f(int n){switch(n){case 1:;case *1:;}return 0;}", PARSE_ROLE_CLOSE_CASE, 0, false);
-    check_test_program_diagnostic(test, "int f(int n){switch(n){case 1:;case 1:;return *1;}return 0;}", PARSE_ROLE_CLOSE_CASE, 0, false);
+    check_test_program_diagnostic(test, "int f(int n){switch(n){case 1:;case 1:;return *1;}return 0;}", PARSE_ROLE_CLOSE_CASE, 2, false);
     // A missing name in a switch's statements leaves its cases, whose duplicate clang reports at the switch's end (#1077).
     check_test_program_diagnostic(test, "int f(int n){switch(n){case 1:;case 1:;return missing;}return 0;}", PARSE_ROLE_CLOSE_CASE, 2, true);
     static const struct
@@ -249,7 +249,7 @@ static void check_test_program_diagnostics(CheckTest* test, const char* clang)
         { "int f(int n){switch(n){\ncase 1:;\ncase 1:;\ndefault:;\ndefault:;\n}return *1;}\n", 3, PARSE_ROLE_CLOSE_CASE, false },
         { "int f(int n){switch(n){\ncase 1:;\ncase 1:;\nswitch(n){case 2:;\ncase 2:;}\n}return *1;}\n", 4, PARSE_ROLE_CLOSE_CASE, false },
         { "int f(int n){switch(n)case 1:\ncase 1:\nswitch(n){case 2:;\ncase 2:;}\nreturn *1;}\n", 4, PARSE_ROLE_CLOSE_CASE, false },
-        { "int f(int n){switch(n){\ncase 1:;\ncase 1:;\nreturn *1;\n}return 0;}\n", 0, PARSE_ROLE_CLOSE_CASE, false },
+        { "int f(int n){switch(n){\ncase 1:;\ncase 1:;\nreturn *1;\n}return 0;}\n", 2, PARSE_ROLE_CLOSE_CASE, false },
         { "int f(int n){switch(n){\ncase 1:;\ncase 1:;\nreturn missing;\n}return 0;}\n", 2, PARSE_ROLE_CLOSE_CASE, true },
         { "int f(double n){switch(\nn\n){}return *1;}\n", 1, PARSE_ROLE_CLOSE_CONDITION, false },
     };

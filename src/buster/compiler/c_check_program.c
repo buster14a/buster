@@ -2071,8 +2071,10 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
                     check_program_fail(writer->program, CHECK_PROGRAM_INVALID, jump);
                 }
             }
-            else
+            else if ((kind != PARSE_KIND_BREAK && kind != PARSE_KIND_CONTINUE) || !input->recovered_valid)
             {
+                // (A `break` or `continue` outside its loop, whose error the reader recovered from, #1447's semantic
+                // recovery, phase 3, is clang's invalid statement, which does nothing: its unit is never emitted.)
                 check_program_fail(writer->program, CHECK_PROGRAM_UNSUPPORTED, jump);
             }
         }

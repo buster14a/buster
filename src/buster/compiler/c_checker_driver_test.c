@@ -6646,6 +6646,7 @@ static void check_test_driver_declspec_literals(CheckTest* test, const char* cla
 #include "c_check_label_attribute_driver_test.c"
 #include "c_check_resume_driver_test.c"
 #include "c_check_semantic_recovery_driver_test.c"
+#include "c_check_statement_recovery_driver_test.c"
 #include "c_check_empty_declaration_driver_test.c"
 #include "c_check_block_attribute_driver_test.c"
 #include "c_check_resume_corpus_test.c"
@@ -8224,6 +8225,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary && semantic_recovery_only)
     {
         check_test_driver_semantic_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+        check_test_driver_statement_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
     }
     const char* clang_arguments[] = { "-std=gnu17", "-w" };
     if (temporary && !focused && !lazy && check_test_driver_takes())
@@ -8342,6 +8344,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_semantic_recovery(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_statement_recovery(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
