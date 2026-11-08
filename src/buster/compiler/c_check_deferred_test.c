@@ -335,6 +335,9 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "recovered-redeclarations-in-bodies",
       "int f(void) { struct S { int x; } a; float a; a.x = 1; return a.x; }\n"
       "int g(void) { typedef struct Q { int y; } T; typedef long T; T q = { 2 }; return q.y; }\nint h(void) { enum E { A } e; int e; return 0; }\n", true },
+    { "recovered-tag-redefinitions",
+      "int f(void) { struct L { int a; }; struct L { long b; } v; v.b = 0; struct L w; w.a = 1; return w.a; }\n"
+      "int g(void) { enum E { A, B }; enum E { C, A }; return C + B; }\nint h(void) { return 2; }\n", true },
     { "recovered-control", "int f(void) { break; return 0; }\nint g(void) { continue; return 1; }\nint h(void) { return 2; }\n", true },
     // A type conflict notes the entity's latest earlier declaration, even another body's block-scope one, which neither
     // the top level's walk nor another body's lane has read: source order's, at file scope and in a body. One whose
