@@ -5338,11 +5338,11 @@ static void tier0_test_aggregate_break(uint32_t b, Tier0TestCaller* caller, Tier
             callee->function.preserve_general = 1u << X86_REGISTER_RBX;
             break;
         case 68:
-            callee->function.preserve_vectors = 16;
+            callee->function.preserve_vectors = 0xffffu;
             callee->function.preserve_vector_bytes = 8;
             break;
         case 69:
-            callee->function.preserve_vectors = 32;
+            callee->function.preserve_vectors = 0xffffffffu;
             callee->function.preserve_vector_bytes = 32;
             break;
         case 70:

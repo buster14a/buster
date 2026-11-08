@@ -389,6 +389,17 @@ static const CheckDriverDefaultWarningFixture check_driver_unused_result_fixture
         .warnings = 3,
     },
     {
+        // Discarded values among runtime shift-count warnings (#1394): each keeps clang's order, the counts' before the
+        // unused-value markers they precede, in commas, conditionals, logical operators and selections.
+        .name = "ignored results among shift-count warnings",
+        .source = "__attribute__((warn_unused_result)) int w(int);\n"
+                  "void f(int x, int n, int a) {\n"
+                  "  x << 40, w(1); n ? x << 40 : x >> -1; (x << 33) && a; a || (x >> 40); (w(x << 40), 0);\n"
+                  "  _Generic(n, int: x, default: x << 40); n ? w(x << 33) : w(x >> 33);\n"
+                  "}\n",
+        .warnings = 17,
+    },
+    {
         .name = "ignored results of library functions without builtins",
         .source = "int abs(int);\n"
                   "double rint(double);\n"

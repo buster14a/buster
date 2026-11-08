@@ -5099,7 +5099,7 @@ static void check_test_driver_diagnostic_capacity(CheckTest* test)
         for (uint32_t phase = 0; phase < 2; phase += 1)
         {
             scratch.capacity = mark + phase * 2 * sizeof(uint64_t);
-            const bool ready = check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, NULL, NULL, NULL, NULL, NULL, 0, NULL, 0, false, &scratch);
+            const bool ready = check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, NULL, NULL, NULL, NULL, NULL, 0, NULL, 0, false, NULL, &scratch);
             check_test_expect(test, !ready && scratch.length == mark && *sentinel == UINT64_C(0x73516A93) && pp.errors == 0,
                               "diagnostic allocation failure restores scratch and publishes no partial diagnostics");
         }
@@ -5534,7 +5534,7 @@ static void check_test_driver_reports(CheckTest* test)
                 const CheckInput* original = apart ? &pragmas : NULL;
                 outcomes[variant] = memory != NULL &&
                                     (variant == 0 ? check_test_driver_reports_dense(&parser, &pp, &input, &stream, &types.table, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch) :
-                                                    check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, &stream, &types.table, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch));
+                                                    check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, &stream, &types.table, NULL, original, extra, extra_count, excess, excess_count, quiet, NULL, &scratch));
                 pp.options.diagnostics = NULL;
                 if (memory != NULL)
                 {
@@ -7530,6 +7530,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_condition_driver_test.c"
 #include "c_check_unused_result_driver_test.c"
 #include "c_check_format_bitint_driver_test.c"
+#include "c_check_shift_count_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
 
 // The terminal CLI may leave mappings for exit, but callers that go on compiling must retain the reusable command's
@@ -8320,6 +8321,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_default_warnings(&test, clang, executable, directory);
             check_test_driver_logical_unused(&test, clang, executable, directory);
             check_test_driver_format_bitints(&test, clang, executable, directory);
+            check_test_driver_shift_counts(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
@@ -8454,6 +8456,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_conventions(&test, clang, executable, directory);
+                check_test_driver_convention_diagnostics(&test, clang, executable, directory);
                 check_test_driver_preserving_frames(&test, clang, executable, directory);
                 check_test_driver_interrupt_handlers(&test, clang, executable, directory);
             }
