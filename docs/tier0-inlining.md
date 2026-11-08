@@ -286,6 +286,109 @@ its sites reach:
   is refused, and its sites stay calls.
 
 The depth is bounded by `BUSTER_TIER0_INLINE_DEPTH` (16). A site past it
-stays a call; `<immintrin.h>`'s deepest chain is four. Each lane expands a
+stays a call. `<immintrin.h>`'s chains are a few calls long (a masked form, its
+unmasked form, a `_mm*_set*` under that); the implementation counts them on
+clang 23's headers. Each lane expands a
 callee at most once an emission, and the expansion depends only on the callee
 and the bodies it reaches, so every lane's expansion of it is the same bytes.
+
+## Data-parallel: the splice's vector path and its twin
+
+Sites are rare among a caller's entries: a call is a few percent of a stream's
+entries. The work is copying `F`'s entries between them and the callees' entries
+at them, and rebasing values, all of which is wide and branch-free. In
+`tier0_inline.c`, beside `tier0.c`:
+
+1. **Sites.** 64 entries at a time, `vpcmpeqb` of the kinds against `CALL`
+   gives a mask. Each set bit (`tzcnt`) reads its row's target and the caller's
+   callee table (by `SymbolId`, as `check_tier1_inline_table`'s), and appends
+   the entry to the site list if the callee is ready. The site list, in entry
+   order, has each site's growth: its bindings, body and result binding, less
+   the `CALL`.
+2. **Starts.** `start[i] = i + growth(sites before i)` is a step function. It is
+   written one segment between two sites at a time, by `iota + delta` stores of
+   16 lanes. The scalar twin writes it entry by entry.
+3. **The caller's segments.** `kinds` and `classes` are copied 64 bytes at a
+   time (masked at the tail), and `values` 8 at a time. The lanes whose kind is
+   a branch (a `vpermb` of the kind through a 64-byte table of meanings) gather
+   `start[value]` (`vpgatherqq`, masked: a stream's branches are a small share
+   of its entries).
+4. **The sites.** The bindings are a few scalar writes. The callee's expanded
+   body is copied as a segment is, and its values rebased: a `vpermb` of the
+   kind through the meanings table gives each lane's meaning, `CONST`'s turned
+   into the x87 or vector constants' meaning by a compare of the class; a
+   `vpermq` of the copy's bases by meaning gives each lane's base, and a masked
+   add applies it. A meaning of none adds 0.
+5. **Tables.** Appended with `memcpy`, then rebased in place the same way:
+   `call_first` by the site's argument rows' base, and `call_result_objects` by
+   the locals' base where it isn't 0.
+
+The scalar twin (`tier0_inline_scalar`) does each step an entry at a time, with
+a `switch` over the kind for the meaning. Both give identical bytes in every
+column, which the tests compare. The tests' reference rebases from the
+contract's text, written in the test, and doesn't use either path's table.
+`--scalar` runs the twin, so `test-c-testsuite`'s comparison of the two paths'
+executables compares them too.
+
+Every load is masked to its array or reads within its padding, and the
+tests put every column's end at a `PROT_NONE` page, as `test-tier0` does for
+the validator (#569).
+
+## Where it runs in the emission
+
+`check_program_emit_lanes` lowers, compiles, sizes and encodes each function as
+lane items (#151). #1282 already splits that into two epochs when Tier 1 inlines
+(`CheckEmitRun.tier1_inline`, `CHECK_EMIT_HALF_LOWER` then
+`CHECK_EMIT_HALF_CODE`), so that every callee's typed stream exists before any
+caller's code. Tier 0's inlining takes the same schedule:
+
+- **The table.** `check_tier1_inline_table` becomes the shared
+  `check_inline_table`, built once a unit for either tier. A unit with no
+  always_inline function of internal linkage gets none, and runs one epoch as
+  now: no barrier, cache or allocation, and no new code on its path.
+- **Lowering epoch.** Every part is lowered, as for `--tier1`.
+- **Code epoch.** For each body of its part, a lane expands the callees the
+  body's sites need (its cache), splices the body into `G` in the lane's
+  scratch, and compiles `G` by Tier 0. A body without a site compiles `F`
+  directly, without a copy.
+- **Merge.** The calling thread adds the atoms in source order, as now, but
+  skips each callee that nothing still needs (below).
+
+`--tier1` compiles a body by Tier 1 first, from `F`, with #1282's inliner. Only
+a body Tier 1 refuses comes to Tier 0, and the splice then gives it the same
+calls inlined. `--tier0-no-inline` (the control, as `--tier1-no-inline` is)
+compiles every `F` as it is, every site a call.
+
+Holding every part's lowered stream until the code epoch costs memory, which
+#1282 pays already under `--tier1`. A cheaper schedule lowers only the callees
+before the parts, and lowers each other body in its part's code epoch. The
+first version takes #1282's schedule, which exists and is tested, and the
+measurements decide whether the other pays.
+
+## The callee's own code
+
+A callee is emitted only if something still references it after the splices,
+as clang emits none of an always_inline function it inlined everywhere. Before
+the merge adds the atoms, one pass counts the references to each callee's
+symbol:
+
+- the `LinkReference`s of every compiled body's code but the callee's own: a
+  kept call (`CALL`, a site that stayed a call), an address (`GLOBAL_ADDRESS`),
+  and those that inlined copies brought in;
+- the data atoms' fixups (a function pointer in a static initializer);
+- the symbols that the inline assembly's templates name (`check_program_emit_asm_symbols`).
+
+A callee with no reference, that isn't one of the selection's roots
+(`check_program_select`: `used`, `retain`, a constructor or destructor, an
+alias's target), isn't added: no atom, symbol, `-g` rows or unwind table
+entry. The count is a vector scan of the reference columns into a bitset by
+symbol, deterministic whatever the lanes' order. A callee's code is still
+compiled in the code epoch, since it's a part's body like any other. Dropping
+it at the merge wastes that small compile in exchange for no third epoch.
+`--lower-all` (#129's test option) keeps every callee.
+
+The `--symbols` comparison with clang -O0's objects (`c_lowering_symbols.c`)
+documents a local always_inline function as a difference (`inlined`). Once
+callees are dropped, its Tier 0 objects define what clang's do. The reason stays
+for `--tier0-no-inline`, and for the callees that keep a call, which clang's
+code would also call.
