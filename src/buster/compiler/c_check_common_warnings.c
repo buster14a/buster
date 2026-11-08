@@ -1240,16 +1240,19 @@ static uint32_t check_common_truth_operands(const CheckGraph* graph, uint32_t no
     return assertion + count;
 }
 
-// Whether a truth context's operand is a `<<` or a conditional (#1447, check_common_bool_candidate), whose conversion to
-// _Bool DiagnoseIntInBoolContext may warn of.
-static bool check_common_truth_bool(const CheckGraph* graph, uint32_t node)
+// Whether a truth context's operand may warn of its conversion to _Bool: a floating constant's literal conversion, or a
+// `<<`'s or a conditional's DiagnoseIntInBoolContext (#1447): check_common_truth_floating's test and
+// check_common_bool_candidate's in one pass over the operands, for the walks' candidates.
+static bool check_common_truth_candidate(const CheckGraph* graph, const CheckStream* stream, uint32_t node)
 {
     uint32_t operands[3];
     const uint32_t count = check_common_truth_operands(graph, node, operands);
     bool result = false;
     for (uint32_t i = 0; i < count; i += 1)
     {
-        result |= check_common_bool_candidate(graph, operands[i]);
+        const uint32_t operand = operands[i];
+        result |= operand < graph->count && (check_common_bool_candidate(graph, operand) ||
+                                             (operand < stream->count && check_stream_constant_kind(stream, operand) == CHECK_CONSTANT_FLOATING));
     }
     return result;
 }
@@ -3802,7 +3805,7 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
     else if (op == CHECK_OP_NOT || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITION || op == CHECK_OP_CONDITIONAL)
     {
         // (A static assertion's operand, a root, takes its bit after the facts' pass: check_common_assertion_reach.)
-        conversion = check_common_truth_floating(graph, stream, node) || check_common_truth_bool(graph, node);
+        conversion = check_common_truth_candidate(graph, stream, node);
     }
     const uint8_t result = (uint8_t)((own ? BUSTER_CHECK_REACH_TREE : 0u) | (conversion ? BUSTER_CHECK_REACH_CONVERSION : 0u));
     return result;
@@ -4120,7 +4123,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                                    (check_stream_constant_kind(stream, source) == CHECK_CONSTANT_FLOATING || check_common_conversion_arms(graph, source) ||
                                     check_common_bool_candidate(graph, source));
             }
-            source_contexts |= evaluated[node] == 0 && (check_common_truth_floating(graph, stream, node) || check_common_truth_bool(graph, node));
+            source_contexts |= evaluated[node] == 0 && check_common_truth_candidate(graph, stream, node);
             if (evaluated[node] == 0 && op == CHECK_OP_CALL && graph->argument_offsets != NULL && graph->argument_counts != NULL)
             {
                 for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
@@ -4228,7 +4231,8 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         for (uint32_t node = check_common_next_root(parents, graph->count, &roots, vector); node < graph->count && !pp->fatal;
              node = check_common_next_root(parents, graph->count, &roots, vector))
         {
-            const uint32_t operand = graph->ops[node] == CHECK_OP_CAST && graph->operand0[node] < node ? graph->operand0[node] : node;
+            // (A pending plan's key is below its first root past it: only then is the root's operand read.)
+            const uint32_t operand = next_integer < node && graph->ops[node] == CHECK_OP_CAST && graph->operand0[node] < node ? graph->operand0[node] : node;
             while (next_integer < operand && !pp->fatal)
             {
                 check_common_initializer_integers(&emission, program, (uint32_t)initializer_keys.integer[integer]);
