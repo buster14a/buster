@@ -3822,10 +3822,13 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
         // "redefinition of 'S'" at the name with a note at the earlier definition, then reads the body as an anonymous
         // tag's, so the later uses of the name find the first. The report is recovered: the walk goes on. C23 allows a
         // compatible redefinition and words an incompatible one otherwise (N3037), which the checker refuses as before.
-        const TypeId earlier = valid && same_scope && body && !fixed && !redefinition && parser->language.standard < 2023 ? reader->declared_types[reader->bindings.declaration[previous - 1]] : 0;
+        // A fixed enum listed again with the same base is one too; with another base, the mismatch below.
+        const TypeId earlier = valid && same_scope && body && !redefinition && parser->language.standard < 2023 ? reader->declared_types[reader->bindings.declaration[previous - 1]] : 0;
         const uint32_t earlier_tag = earlier != 0 && type_kind(reader->types, earlier) == kind ? reader->types->types.index[type_index(earlier)] : 0;
-        const bool again = earlier_tag != 0 && (kind != BUSTER_TYPE_KIND_ENUM || reader->enum_fixed[earlier_tag] == BUSTER_CHECK_ENUM_NONE) &&
-                           type_is_complete(reader->types, earlier);
+        const uint8_t earlier_state = earlier_tag != 0 && kind == BUSTER_TYPE_KIND_ENUM ? reader->enum_fixed[earlier_tag] : BUSTER_CHECK_ENUM_NONE;
+        const bool again = earlier_tag != 0 && type_is_complete(reader->types, earlier) &&
+                           (kind != BUSTER_TYPE_KIND_ENUM || (earlier_state == BUSTER_CHECK_ENUM_NONE && !fixed) ||
+                            (earlier_state == BUSTER_CHECK_ENUM_LISTED && fixed && reader->types->types.base[type_index(earlier)] == underlying));
         if (again)
         {
             const uint32_t before = reader->output->report_count;
@@ -3844,6 +3847,8 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
             valid = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
         }
         const bool anonymous = redefinition || again;
+        // A body that a mismatched enum's declaration drops, past which the tag ends.
+        bool skipped = false;
         if (valid && previous != 0 && !anonymous && (same_scope || (!body && !forward)))
         {
             const uint32_t old = reader->bindings.declaration[previous - 1];
@@ -3856,8 +3861,33 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
                                                        (!fixed || reader->types->types.base[type_index(type)] == underlying));
             if (!valid && type_kind(reader->types, type) == kind && kind == BUSTER_TYPE_KIND_ENUM)
             {
-                // A base that differs from the enum's (or that it hadn't), clang reports at the name.
-                check_input_report(reader, declaration, CHECK_INPUT_DECLARATION);
+                // A base that differs from the enum's, or that it hadn't or had (#1447): clang's CheckEnumRedeclaration at
+                // the name, its note at the earlier declaration, after which ActOnTag drops the declaration, its body and
+                // its enumerators too. The report is recovered; the name keeps the earlier enum.
+                const CheckRedeclarationKind mismatch = state == BUSTER_CHECK_ENUM_NONE ? CHECK_REDECLARATION_ENUM_NONFIXED :
+                                                        !fixed ? CHECK_REDECLARATION_ENUM_FIXED : CHECK_REDECLARATION_ENUM_BASE;
+                // A fixed enum listed again with its base is a redefinition, C23's own (N3037), which keeps the refusal.
+                const bool listed_again = fixed && body && state == BUSTER_CHECK_ENUM_LISTED && reader->types->types.base[type_index(type)] == underlying;
+                const bool known = state != BUSTER_CHECK_ENUM_MODED && (state != BUSTER_CHECK_ENUM_NONE || fixed) && !listed_again;
+                const uint32_t before = reader->output->report_count;
+                check_input_report_subject(reader, declaration, known ? CHECK_INPUT_REDECLARATION : CHECK_INPUT_DECLARATION, old);
+                if (known && reader->output->report_count == before + 1 && !reader->output->resource)
+                {
+                    CheckInputReport* report = reader->output->reports + before;
+                    report->detail = mismatch;
+                    report->note_token = old;
+                    report->note_kind = CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
+                    report->type = underlying;
+                    report->value = tag != 0 ? reader->types->types.base[type_index(type)] : 0;
+                }
+                valid = known && reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
+                const uint32_t close = valid && body ? parser->tree.parents[i] : 0;
+                for (uint32_t t = i; valid && body && t <= close && close < end; t += 1)
+                {
+                    reader->ignored[t] = true;
+                }
+                skipped = valid && body && close > i && close < end;
+                i = skipped ? close + 1 : i;
             }
             reader->output->declarations[declaration] = old;
             reader->declared_types[declaration] = type;
@@ -3922,8 +3952,8 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
         // The tag's attributes as clang's ActOnTag takes them (#147): a definition's with its earlier declarations', a
         // declaration's or a reference's kept for its definition or warned of after it; those after a reference's name are
         // its declarators' (the specifiers read them: the tag ends at the name), and a bare declaration's ignored.
-        const bool bare = !body && i < end && parser->tokens.kinds[i] == PARSE_KIND_SEMI;
-        valid = valid && check_input_tag_attributes(reader, token, declaration, type, body, bare, after_name, colon, i);
+        const bool bare = (!body || skipped) && i < end && parser->tokens.kinds[i] == PARSE_KIND_SEMI;
+        valid = valid && check_input_tag_attributes(reader, token, declaration, type, body && !skipped, bare, after_name, colon, i);
         if (valid)
         {
             reader->ignored[token] = true;
@@ -7096,8 +7126,10 @@ static bool check_input_tag_frame(CheckInputReader* reader, CheckTagFrame* frame
     const uint32_t body = check_input_tag_body(parser, token, end);
     const uint32_t close = body < end ? parser->tree.parents[body] : end;
     const TypeId type = check_input_tag(reader, token, end, true);
-    const bool valid = type != 0 && body < end && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE && close > body && close < end && *depth < capacity;
-    if (valid)
+    // A body a mismatched enum's declaration drops (#1447) has no frame.
+    const bool dropped = type != 0 && body < end && reader->tag_ends[token] > body;
+    const bool valid = type != 0 && body < end && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE && close > body && close < end && (dropped || *depth < capacity);
+    if (valid && !dropped)
     {
         frames[*depth] = (CheckTagFrame)
         {
@@ -7139,10 +7171,18 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
     uint32_t depth = 0;
     uint32_t member_count = 0;
     uint32_t failed_token = token;
+    // A mismatched enum's declaration drops its body (#1447, check_input_tag_identity), whose tag ends past it: no frame
+    // reads it, and its enumerators aren't declared.
+    bool dropped = false;
     if (valid)
     {
         const TypeId type = check_input_tag(reader, token, end, true);
         valid = type != 0;
+        dropped = valid && reader->tag_ends[token] > open;
+    }
+    if (valid && !dropped)
+    {
+        const TypeId type = reader->tag_types[token];
         frames[depth++] = (CheckTagFrame)
         {
             .type = type,

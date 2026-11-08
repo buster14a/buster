@@ -183,6 +183,52 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // no node and keeps its error (third review on #1791).
         "int c = undecl, d[] = 6;\nunknown_type z;\n",
         "int c = undecl;\nint d[] = 6;\nint e[] = (5);\nint f2[] = undecl2 + 1;\nint g[] = (int)7;\nunknown_type z;\n",
+        // An enum redeclared with another fixed underlying type, without the one it had, or with one it hadn't: clang's
+        // CheckEnumRedeclaration words and notes, after which the declaration, its body and its enumerators are dropped
+        // and the name keeps the earlier enum (#1447). Typedef'd bases are spelled with their "aka", and an enum in a
+        // record is read so too.
+        "enum E : int;\n"
+        "enum E : long;\n"
+        "enum F : short { P };\n"
+        "enum F : int;\n"
+        "enum G { Q };\n"
+        "enum G : int;\n"
+        "enum H : int;\n"
+        "enum H { R };\n"
+        "int x = undeclared;\n",
+        "typedef long L;\n"
+        "typedef int I;\n"
+        "enum E : I;\n"
+        "enum E : L;\n"
+        "enum F : I { F1 };\n"
+        "enum F : int;\n"
+        "enum F f;\n"
+        "int s = sizeof(f);\n"
+        "enum H : short;\n"
+        "enum H { R = 1 };\n"
+        "_Static_assert(sizeof(R) == 4, \"r\");\n"
+        "_Static_assert(sizeof(enum H) == 2, \"h\");\n",
+        "enum A : short { A1 };\n"
+        "enum A : int { A2 };\n"
+        "int a = A2;\n"
+        "enum B { B1 };\n"
+        "enum B : int { B2 };\n"
+        "int b = B2;\n"
+        "enum C : int;\n"
+        "enum C : long { C1 };\n"
+        "int c = C1;\n"
+        "enum D : int;\n"
+        "enum D;\n"
+        "enum D : int { D1 };\n"
+        "int d = D1;\n",
+        "void h(void) { enum K : char { K1 }; enum K : int { K2 }; int k = K2; }\n"
+        "void m(void) { enum N { N1 }; enum N : int; }\n",
+        "struct T { enum Z : int { Z1 } a; enum Z : long { Z2 } b; int c; };\n"
+        "int z = Z2;\n"
+        "struct U { enum Y : short { Y1 } a; };\n"
+        "enum Y : char;\n"
+        "struct T t;\n"
+        "int s = sizeof(t.c);\n",
         // A block's, and clang's unused-variable warnings of no scope in which an error occurred (a body's from its
         // definition's start).
         "void f(int p)\n{\n    int x;\n    float x;\n    int y = 1;\n    long y = 2;\n    (void)y;\n    if (y = 2) {}\n}\n"
@@ -239,7 +285,9 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // The note is at the definition when a forward declaration or a use comes first (review on #1788).
         "struct S;\nstruct S { int a; };\nstruct S { int b; };\nstruct S { int c; };\nstruct T x;\nstruct T { int a; };\n"
         "struct T { int b; };\nenum E *pe;\nenum E { A };\nenum E { B };\n"
-        "void f(void) { struct L *p; struct L { int a; }; struct L { int b; }; (void)p; }\n",
+        "void f(void) { struct L *p; struct L { int a; }; struct L { int b; }; (void)p; }\n"
+        // A fixed enum listed again with its base, at file and block scope.
+        "enum FE : int { FA, FB };\nenum FE : int { FC, FD };\nint fx = FC + FB;\nvoid fg(void) { enum FL : char { FL1 }; enum FL : char { FL2 }; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     // The tag redefinitions, the last three fixtures, are gnu17's alone: C23 allows a compatible one and words an

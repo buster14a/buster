@@ -20,6 +20,11 @@ typedef enum CheckRedeclarationKind
     CHECK_REDECLARATION_TYPEDEF,
     // A name redeclared as another kind of entity (#1447, phase 2): "redefinition of 'X' as different kind of symbol".
     CHECK_REDECLARATION_KIND,
+    // An enum redeclared with another fixed underlying type (the report's type, the earlier's its value), without the
+    // fixed type it had, or with one it hadn't (#1447): clang's CheckEnumRedeclaration.
+    CHECK_REDECLARATION_ENUM_BASE,
+    CHECK_REDECLARATION_ENUM_FIXED,
+    CHECK_REDECLARATION_ENUM_NONFIXED,
 } CheckRedeclarationKind;
 
 // Whether the declaration of `token`, a declarator's name, says extern or __private_extern__: a storage-class specifier
