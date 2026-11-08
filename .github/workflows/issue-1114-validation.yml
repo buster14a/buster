@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SOURCE_REF: 370e07dfc9663b9001fea520a01f31146be294f3
+  SOURCE_REF: 9c1b1d574919e47ccd980f5ab630add5e75fed11
   BUSTER_HOST_ARCH: x86-64
   BUSTER_DEBUG_INFO: '0'
   BUSTER_LINKER: lld
@@ -38,7 +38,9 @@ jobs:
           timeout 180s ./build/compiler test-ir
           timeout 180s ./build/compiler test-ir-lowering
           timeout 180s ./build/compiler test-ir-optimize
+          timeout 180s ./build/compiler test-ir-gvn
           timeout 180s ./build/compiler test-ir-sroa
+          timeout 180s ./build/compiler test-tier1-emit
           timeout 180s ./build/compiler test-tier1-schedule
       - name: Debugger value and output regressions
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
