@@ -1675,6 +1675,8 @@ struct CheckInputReader
     uint16_t* warning_index;
     uint32_t warning_index_base;
     bool warning_index_ready;
+    // While deferred constant contexts run on lanes, only disjoint token bytes may be written.
+    bool parallel_warning_ranges;
     uint32_t* declaration_specifiers;
     TypeId* declaration_deduced;
     TypeId* declaration_bases;
