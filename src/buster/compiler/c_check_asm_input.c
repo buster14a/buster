@@ -1149,7 +1149,8 @@ struct CheckAsmDiagnostic
     uint32_t token;
 };
 
-// Diagnose only complete original statements before the caller's cutoff and every existing input/graph error.
+// Diagnose only complete original statements before the caller's cutoff and every existing input error (a graph's error
+// declines only the statements whose operands read it).
 // Clang elaborates every operand before checking asm constraints, so an unresolved later operand in the same
 // statement takes precedence. Checked dependency closures and matching output roots are required; missing or
 // tainted roots are declined. True means the scan completed, even on a semantic error. Nothing is published.
@@ -1180,10 +1181,8 @@ static bool check_asms_diagnose(CheckAsmDiagnostic* result, const CheckInput* in
         const uint32_t position = input->reports[i].recovered ? cutoff : input->reports[i].completion != 0 ? input->reports[i].completion : input->reports[i].token;
         cutoff = position < cutoff ? position : cutoff;
     }
-    for (uint32_t i = 0; valid && i < stream->report_count; i += 1)
-    {
-        cutoff = stream->reports[i].token < cutoff ? stream->reports[i].token : cutoff;
-    }
+    // Not the graph's reports: an expression's error ends nothing but what reads it (#1447's semantic recovery, phase 3),
+    // which `complete` declines, as clang checks each operand of a statement whose other operands are in error.
     const bool needed = valid && input->asm_count != 0 && stream->count != 0;
     uint8_t* complete = needed ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, stream->count) : NULL;
     if (needed && complete == NULL)

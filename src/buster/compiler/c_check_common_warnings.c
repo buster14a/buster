@@ -1029,6 +1029,9 @@ struct CheckCommonFacts
     uint8_t* evaluated;
     // What each node's subtree holds for the expression walk (BUSTER_CHECK_REACH_*).
     uint8_t* reach;
+    // The tokens of the bodies clang ends after the unit's first error (check_common_flush), or null: none, in a unit without
+    // one.
+    const uint8_t* flushed;
 };
 
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
@@ -1088,6 +1091,8 @@ typedef struct CheckCommonEmission
     CheckCommonShiftExtras* shift_extras;
     const uint8_t* evaluated;
     const uint32_t* parents;
+    // The flushed bodies' tokens (CheckCommonFacts.flushed), or null.
+    const uint8_t* flushed;
     // Separate ownership for the ordinary tree, detached count scans, count publication, the conversion visit and the
     // literal-only source context (BUSTER_CHECK_EMITTED_*).
     uint8_t* emitted;
@@ -1493,7 +1498,9 @@ static void check_common_shift_count(CheckCommonEmission* emission, uint32_t nod
     }
     // Constant if/switch folding removes dead arms before the control walk can mark their roots unreachable.
     // Their ordinary counts stay quiet; detached static-selection arms still have no CFG block in Clang.
-    const bool dropped = !detached && emission->program != NULL && check_program_token_dropped(emission->program, token);
+    // A flushed body's arms are evaluated whatever its folds (check_common_flush).
+    const bool dropped = !detached && emission->program != NULL && (emission->flushed == NULL || token >= emission->parser->tokens.count || emission->flushed[token] == 0) &&
+                         check_program_token_dropped(emission->program, token);
     if (!emitted && !replayed && !ice && ((retained | suppressed) & counts) == 0 && left < graph->count && right < graph->count &&
         !check_common_integer_constant(stream, left) && check_common_integer_constant(stream, right) && !dropped)
     {
@@ -4477,6 +4484,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             .shift_extras = &shift_extras,
             .evaluated = evaluated,
             .parents = parents,
+            .flushed = facts->flushed,
             .emitted = emitted,
             .at_once = BUSTER_CHECK_NONE,
             .reach = reach,
@@ -7207,6 +7215,51 @@ static uint8_t* check_common_evaluated_tree(const CheckGraph* graph, const Check
     return result;
 }
 
+// The evaluation of a body clang ends after the unit's first error (#1447's semantic recovery, phase 3): its
+// AnalysisBasedWarnings::IssueWarnings, finding an uncompilable error, builds no CFG and flushes every runtime-behavior
+// warning the body queued (DiagRuntimeBehavior, DiagIfReachable), reachable or not. So in such a body (`flushed`, by its
+// tokens) a node is evaluated where its root is and no `sizeof` or `_Alignof` on its way leaves it out, which clang never
+// queues: the arms of a constant or decided condition, the short-circuited operands, a static selection's other arms and
+// the statements no control reaches are. A node's parents follow it (check_common_facts), so one pass down from the last
+// node sets each from its parent, which both paths' evaluation leaves for this pass alike.
+static void check_common_flush(const CheckGraph* graph, const uint32_t* parents, const uint8_t* flushed, uint32_t token_count, uint8_t* evaluated)
+{
+    for (uint32_t node = graph->count; node-- > 0;)
+    {
+        if (graph->tokens[node] < token_count && flushed[graph->tokens[node]] != 0)
+        {
+            const CheckOp op = graph->ops[node];
+            evaluated[node] = parents[node] == BUSTER_CHECK_NONE ? 1 : evaluated[node];
+            uint32_t mask = UINT32_MAX;
+            if (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF)
+            {
+                // A variably modified type's bound is evaluated even in sizeof, as check_common_operand_mask has it.
+                const uint32_t operand = graph->operand0[node];
+                mask = operand < graph->count && (graph->ops[operand] == CHECK_OP_VLA_BOUND || graph->ops[operand] == CHECK_OP_VLA_EXTENT) ? 1u : 0u;
+            }
+            const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
+            {
+                if (operands[i] < node && parents[operands[i]] == node)
+                {
+                    evaluated[operands[i]] = evaluated[node] != 0 && (mask & (1u << i)) != 0;
+                }
+            }
+            if (check_graph_has_arguments(op) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
+            {
+                for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
+                {
+                    const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
+                    if (argument < node && parents[argument] == node)
+                    {
+                        evaluated[argument] = evaluated[node] != 0 && (i >= 32 || (mask & (1u << i)) != 0);
+                    }
+                }
+            }
+        }
+    }
+}
+
 // The graph's facts (CheckCommonFacts) into `facts`: each node's parent, whether its value is used (where -Wuninitialized
 // reads it) and its reach, then which nodes are evaluated. The scalar path makes them in one pass over the nodes in graph
 // order, so that its operands' and arguments' already hold; an operand that doesn't precede its node, which the graph's
@@ -7216,7 +7269,8 @@ static uint8_t* check_common_evaluated_tree(const CheckGraph* graph, const Check
 // where scratch can't hold them. (Whether a discarded value warns is check_common_unused_of's, asked only of a discarded
 // one.)
 static bool check_common_facts(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
-                               const CheckProgram* program, const CheckCommonEnabled* enabled, Arena* scratch, CheckCommonFacts* facts)
+                               const CheckProgram* program, const CheckCommonEnabled* enabled, const uint8_t* flushed, Arena* scratch,
+                               CheckCommonFacts* facts)
 {
     const uint32_t count = graph->count;
     const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
@@ -7291,7 +7345,11 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
         check_common_assertion_reach(graph, stream, reach);
         evaluated = check_common_evaluated(graph, stream, types, parser, program, parents, scratch);
     }
-    *facts = (CheckCommonFacts){ .parents = parents, .used = used, .evaluated = evaluated, .reach = reach };
+    if (evaluated != NULL && flushed != NULL)
+    {
+        check_common_flush(graph, parents, flushed, parser->tokens.count, evaluated);
+    }
+    *facts = (CheckCommonFacts){ .parents = parents, .used = used, .evaluated = evaluated, .reach = reach, .flushed = flushed };
     const bool result = count == 0 || evaluated != NULL;
     return result;
 }
@@ -7936,9 +7994,13 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                                  target < graph->count && check_stream_category(stream, target) == CHECK_LVALUE &&
                                  check_stream_object(stream, target) == declaration + 1;
             }
+            // A body clang ends after the unit's first error gets no CFG analysis (check_common_flush), and so no
+            // -Wuninitialized.
+            const uint32_t declared_body = facts->flushed != NULL ? check_common_sparse_get(input->declaration_bodies, declaration) : BUSTER_CHECK_NONE;
+            const bool analysed = declared_body >= parser->tokens.count || facts->flushed[declared_body] == 0;
             if (local && !parameter && scalar && braced && self_initialization)
             {
-                if (!braced_written)
+                if (!braced_written && analysed)
                 {
                     const char* message = check_warning_text(scratch, "variable '%.*s' is uninitialized when used within its own initialization",
                                                               (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
@@ -7965,8 +8027,11 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                 const uint32_t body = check_common_sparse_get(input->declaration_bodies, declaration);
                 const uint32_t brace = body < parser->tokens.count ? parser->tree.parents[body] : BUSTER_CHECK_NONE;
                 const uint32_t publication = brace < parser->tokens.count ? check_driver_publication_position(parser, pp, brace + 1, pp->output.count) : pp->output.count;
-                check_common_report_published(parser, pp, input, read_token, publication, CHECK_WARNING_ID_UNINITIALIZED, true, message,
-                                              self_initialization ? NULL : &note, self_initialization ? 0u : 1u, scratch);
+                if (analysed)
+                {
+                    check_common_report_published(parser, pp, input, read_token, publication, CHECK_WARNING_ID_UNINITIALIZED, true, message,
+                                                  self_initialization ? NULL : &note, self_initialization ? 0u : 1u, scratch);
+                }
             }
             else if (parameter && scalar && !addressed[declaration] && first_use_read[declaration] == BUSTER_CHECK_NONE &&
                      written[declaration] != 0 && statement_write[declaration] != 0)
@@ -7984,8 +8049,11 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
     }
 }
 
+// `flushed`: the tokens of the bodies clang ends after the unit's first error (check_common_flush), or null in a unit
+// without one.
 static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                         TypeTable* types, const CheckProgram* program, CheckCommonShiftWarnings* shifts, Arena* scratch)
+                                         TypeTable* types, const CheckProgram* program, const uint8_t* flushed, CheckCommonShiftWarnings* shifts,
+                                         Arena* scratch)
 {
     if (parser == NULL || pp == NULL || input == NULL || stream == NULL || pp->fatal)
     {
@@ -8011,7 +8079,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     check_common_dangling_else(parser, pp, input, scratch);
     check_common_switches(parser, pp, input, stream, types, &spell, program, scratch);
     CheckCommonFacts facts = { 0 };
-    if (!check_common_facts(&input->graph, stream, types, parser, program, &enabled, scratch, &facts))
+    if (!check_common_facts(&input->graph, stream, types, parser, program, &enabled, flushed, scratch, &facts))
     {
         check_common_exhausted(pp);
     }
