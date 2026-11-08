@@ -70,6 +70,14 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
     {
         result = check_warning_text(scratch, "redefinition of enumerator '%.*s'", (int)name.length, name.pointer);
     }
+    else if (report->message == CHECK_INPUT_ARRAY_LITERAL_MISMATCH)
+    {
+        // GNU's array initialized by a compound literal of another array type (#1447): both types as written.
+        const String8 array = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
+        const String8 literal = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, 0);
+        result = array.length == 0 || literal.length == 0 ? NULL : check_warning_text(scratch, "cannot initialize array of type %.*s with array of type %.*s",
+                                                                                     (int)array.length, array.pointer, (int)literal.length, literal.pointer);
+    }
     else if ((report->message == CHECK_INPUT_REDECLARATION || report->message == CHECK_INPUT_CONFLICTING_TYPES) && token < count && name.length != 0)
     {
         const uint32_t previous = report->subject - 1;

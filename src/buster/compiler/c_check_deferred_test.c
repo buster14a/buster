@@ -358,6 +358,11 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "recovered-unsized-arrays-in-two-bodies",
       "int f(void) { char loc[] = 1; int p[] = (5); return 0; }\nint g(void) { struct V { int x; }; struct V w[] = 3; int c[] = (int){7}; return 0; }\n"
       "int h(void) { int ok[] = { 1, 2 }; return ok[1]; }\n", true },
+    // An array's mismatched compound literal (#1447) in two bodies, its value a TypeId of an array type a body makes,
+    // which the merged table remaps; and a matched one, whose initializer is the literal's body.
+    { "recovered-array-literal-mismatch-in-two-bodies",
+      "int f(void) { int x[3] = (int[2]){1, 2}; int y[] = (int[2]){3, 4}; return y[1]; }\n"
+      "int g(void) { struct P { int p; }; struct P q[1] = (struct P[2]){{1}, {2}}; return 0; }\nint h(void) { return 2; }\n", true },
     { "recovered-control", "int f(void) { break; return 0; }\nint g(void) { continue; return 1; }\nint h(void) { return 2; }\n", true },
     // A type conflict notes the entity's latest earlier declaration, even another body's block-scope one, which neither
     // the top level's walk nor another body's lane has read: source order's, at file scope and in a body. One whose

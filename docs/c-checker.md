@@ -4073,6 +4073,23 @@ A unit without other errors whose `check_asms_run` or `check_program` fails
 runs these diagnoses, so only a failing unit pays for them.
 `CheckDriverDiagnostic.note` carries a note through the reports' walk.
 
+A rejected unit's other bodies get the warnings clang gives them
+(`check_driver_rejected_common`). The bodies holding one of its errors (its
+reader's, its graph's, its asm, control, initializer and musttail errors) are
+left out of a second reading of the unit, by `check_input_selected` as
+`-flazy-system-headers`' bodies are. Where that reading is valid, its program
+gives the other bodies' `-Wreturn-type` and common warnings, the bodies after
+the unit's first error flushed as above. Where a reader's error left the first
+reading without its unused declarations' warnings, the second's are given,
+without the unit-end ones. Nothing is given where an error lies outside every
+body. Only a rejected unit reads twice.
+
+The driver publishes its reports after `check_program`, so that a control
+error it finds is among the unit's errors: as for the reader's and the graph's,
+its scopes' unused variables and the unit-end warnings are left out
+(`check_driver_rejected_warnings`). `c_check_statement_recovery_driver_test.c`
+compares fixtures of graph, control, asm and reader errors with clang.
+
 Every declaration's failed initializer is given, as clang gives each
 (phase 2): `int a[2] = 5; int b[2] = 6;` has two errors where it had the
 first alone. `check_initializers_diagnose_warnings` already visited every
@@ -4105,12 +4122,22 @@ shields a name in a statement before its last, its value
 (`check_init_undeclared_poisons`). The report keeps its initializer's first
 token (`value`) for this; only a unit with another error drops one. A
 parenthesized initializer, a cast, a scalar's compound literal or an array's
-compound literal that is only part of the initializer is no list either; an
-array's compound literal that is all of it (GNU's, `int z[] =
-(int[2]){1,2};`, which clang accepts), even inside parentheses, is still
-refused, on main too. Clang's typo correction ("did you mean"), which buster
-lacks, keeps a misspelled name's initializer a value, so there clang gives the
-error where buster doesn't.
+compound literal that is only part of the initializer is no list either. An
+array's compound literal that is all of it, even inside parentheses, is GNU's
+array initializer, which clang accepts (#1447): `check_input_initializer_finish`
+(which `prepare` schedules for an array whose initializer is parenthesized)
+takes it where its element type is the array's, qualifiers too, and its size
+the array's or the array has none. The literal's body is then the array's
+initializer in the sparse columns, so the size inference, the initializers'
+run and the emission read `{1, 2}` as the array's own; an array of unknown
+size takes the literal's size (`((int[3]){1})` makes `int[3]`), the literal's
+own completed type where it had none (`(int[]){1, 2}`). Any other array type
+is clang's "cannot initialize array of type 'int[3]' with array of type
+'int[2]'" at the name (`CHECK_INPUT_ARRAY_LITERAL_MISMATCH`, its value the
+literal's TypeId, which lanes remap), recovered, the array keeping its type and
+no initializer. Clang's typo correction ("did you mean"), which buster lacks,
+keeps a misspelled name's initializer a value, so there clang gives the error
+where buster doesn't.
 
 Type attributes' errors don't stop the reader either (`check_input_attribute_type`).
 What clang 23 does with each is followed:
@@ -4198,11 +4225,13 @@ The later phases are left:
   (`k + 1`'s `+`), and `sizeof` of an incomplete type reads "incomplete type
   is not permitted here" at the `sizeof`, where clang's names the type at its
   operand; both on main too.
-- **Units with a graph's or a reader's error.** These, other than a recovered
-  one, still don't reach `check_program`. They get none of its diagnostics:
-  the common warnings, their runtime warnings included. Nor does a unit whose
-  `check_program` finds a control error. Its unused-variable warnings
-  aren't suppressed in the error's scopes.
+- **Errors outside the bodies, and a body's own warnings.** A rejected unit's
+  bodies that hold no error get their common warnings (above), but a unit
+  with an error outside every body (a file-scope initializer's, a
+  declaration's) still gets none. The warnings clang gives within a body that
+  holds an error (its `-Wparentheses` before or after an expression's error)
+  are still left out, and so are a reader-error unit's other reader warnings
+  than the unused declarations'.
 
 ### What the lowering costs (#531)
 

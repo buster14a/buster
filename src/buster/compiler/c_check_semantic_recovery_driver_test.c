@@ -229,6 +229,25 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum Y : char;\n"
         "struct T t;\n"
         "int s = sizeof(t.c);\n",
+        // GNU's array initialized by a compound literal of its array type (#1447): the same element type and size or none
+        // (the literal's size then the array's, `(int[]){…}`'s once its own initializer finished); another array type's
+        // "cannot initialize array of type 'int[3]' with array of type 'int[2]'", recovered.
+        "int a[] = (int[2]){1, 2};\n"
+        "int b[2] = (int[2]){3, 4};\n"
+        "int c[3] = (int[2]){5, 6};\n"
+        "int d[1] = (int[2]){7, 8};\n"
+        "char s[] = (char[]){\"hi\"};\n"
+        "int e[] = ((int[3]){1});\n"
+        "_Static_assert(sizeof(a) == 8 && sizeof(e) == 12, \"\");\n"
+        "void f(void) { int x[] = (int[2]){1, 2}; int y[2] = (int[]){3, 4}; (void)x; (void)y; }\n",
+        "int a1[] = (long[2]){1, 2};\n"
+        "unsigned a2[] = (int[2]){1, 2};\n"
+        "const int a3[] = (int[2]){1, 2};\n"
+        "int a4[] = (const int[2]){1, 2};\n"
+        "int a5[2][2] = (int[2][2]){{1, 2}, {3, 4}};\n"
+        "int a6[] = (int[2]){1, 2, 3};\n"
+        "char a7[] = (char[2]){\"abc\"};\n"
+        "int a8[] = (int[2]){1} + 0;\n",
         // An enumerator whose name is another kind of the scope's (an object, a typedef, a parameter, a local): clang's
         // "redefinition of 'K'" with its note at the earlier declaration, the enumerator dropped and the next implicit
         // value restarting at 0, of int or of the fixed type (#1447).
