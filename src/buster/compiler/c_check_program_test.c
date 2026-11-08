@@ -4146,6 +4146,18 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             ":\"=a\"(r):\"r\"(f):\"rbx\",\"rcx\",\"rdx\",\"rsi\",\"rdi\",\"r8\",\"r9\",\"r10\",\"r11\",\"memory\",\"cc\");return r;}"
             "int tested(int n){return (int)(misaligned(leaf)+misaligned(calls)*1000+misaligned(vla)*100000+leaf()+calls()+vla())+n;}",
             "force-align-arg-pointer", clang);
+        // clang's NEON vectors on x86-64 (#1447): GNU vectors of a kind of their own, laid out, passed and computed as GNU
+        // vectors of their element and count, to and from which those convert; a polynomial one, and a NEON vector a mode
+        // attribute keeps.
+        check_test_program_source(test,
+            "typedef int N4 __attribute__((neon_vector_type(4)));typedef int G4 __attribute__((vector_size(16)));"
+            "typedef float F2 __attribute__((neon_vector_type(2)));typedef short P4 __attribute__((neon_polyvector_type(4)));"
+            "typedef N4 M2 __attribute__((mode(DI)));"
+            "static N4 add(N4 a,N4 b){return a+b;}static F2 scale(F2 v,float s){return v*s;}"
+            "int tested(int n){N4 a={n,n+1,n+2,n+3};G4 g={1,2,3,4};N4 c=add(a,g);G4 d=c*2;F2 f=scale((F2){n*0.5f,1.5f},3.0f);"
+            "P4 p={(short)n,2,3,4};p=p+p;M2 m=(M2)c;"
+            "return d[0]+d[3]+(int)(f[0]*2)+(int)f[1]+p[0]+p[3]+(int)(m[1]&0xffff)+(int)sizeof(M2)+(int)sizeof(F2);}",
+            "neon-vectors", clang);
         // Variable-length arrays aligned past 16 bytes (their storage rounded up within a larger allocation), beside a fixed
         // object aligned to 128 (a realigned frame with a base, r15, since the arrays move rsp), across calls with stack
         // arguments whose outgoing area the allocations keep aligned.

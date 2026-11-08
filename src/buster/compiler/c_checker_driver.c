@@ -468,6 +468,51 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_SOURCE_EQUAL: snprintf(text, capacity, "expected '=' after %.*s", (int)literal.length, literal.pointer); break;
         case CHECK_ARGUMENT_UNEXPECTED_SEMI: snprintf(text, capacity, "unexpected ';' before ')'"); break;
         case CHECK_ARGUMENT_OBJC_VARIABLES: snprintf(text, capacity, "'%s' attribute only applies to variables", parsed); break;
+        case CHECK_ARGUMENT_NEON_SIZE: snprintf(text, capacity, "Neon vector size must be 64 or 128 bits"); break;
+        case CHECK_ARGUMENT_BUILTIN_FUNCTION: snprintf(text, capacity, "'%s' attribute requires parameter %u to be a builtin function", parsed, number); break;
+        case CHECK_ARGUMENT_BUILTIN_COUNT:
+        case CHECK_ARGUMENT_BUILTIN_BOUNDS:
+        case CHECK_ARGUMENT_BUILTIN_TYPES:
+        {
+            // diagnose_as_builtin's (#1447): its builtin by its first argument's name, the function by its name's token in
+            // the value's high half, the index in its low half; and a mismatched builtin parameter's type as clang spells
+            // the builtin's declaration's (cbuiltin_library_spell_parameter), with its aka where it has __size_t.
+            const String8 builtin = at + 2 < count ? check_driver_attribute_spelling(parser, pp, at + 2, false) : (String8){ "", 0 };
+            const uint32_t function = (uint32_t)(value >> 32);
+            const String8 named = function < count ? check_driver_attribute_spelling(parser, pp, function, false) : (String8){ "", 0 };
+            const uint32_t index = (uint32_t)value;
+            const uint32_t error = detail & 0xffu;
+            if (error == CHECK_ARGUMENT_BUILTIN_COUNT)
+            {
+                char takes[48];
+                snprintf(takes, sizeof(takes), number == 0 ? "takes no arguments" : number == 1 ? "takes one argument" : "takes exactly %u arguments", number);
+                snprintf(text, capacity, "'%s' attribute references function '%.*s', which %s", parsed, (int)builtin.length, builtin.pointer, takes);
+            }
+            else if (error == CHECK_ARGUMENT_BUILTIN_BOUNDS)
+            {
+                snprintf(text, capacity, "'%s' attribute references parameter %u, but the function '%.*s' has only %u parameters", parsed, index, (int)named.length,
+                         named.pointer, number);
+            }
+            else
+            {
+                const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup(builtin.pointer, (uint32_t)builtin.length);
+                const bool c99 = parser->language.standard >= 1999;
+                char sugared[256];
+                char plain[256];
+                bool sized = false;
+                bool unsugared = false;
+                const bool spelled = info != NULL &&
+                                     cbuiltin_library_spell_parameter(info->encoding, info->encoding_length, info->attributes, info->attributes_length, number - 1, true, c99,
+                                                                      sugared, sizeof(sugared), &sized) &&
+                                     cbuiltin_library_spell_parameter(info->encoding, info->encoding_length, info->attributes, info->attributes_length, number - 1, false, c99,
+                                                                      plain, sizeof(plain), &unsugared);
+                char builtin_type[560];
+                snprintf(builtin_type, sizeof(builtin_type), sized ? "'%s' (aka '%s')" : "'%s'", spelled ? sugared : "", plain);
+                snprintf(text, capacity, "'%s' attribute parameter types do not match: parameter %u of function '%.*s' has type %.*s, but parameter %u of function '%.*s' has type %s",
+                         parsed, index, (int)named.length, named.pointer, (int)literal.length, literal.pointer, number, (int)builtin.length, builtin.pointer, builtin_type);
+            }
+            break;
+        }
         case CHECK_ARGUMENT_DIAGNOSTIC_TYPE: snprintf(text, capacity, "invalid diagnostic type for '%s'; use \"error\" or \"warning\" instead", parsed); break;
         case CHECK_ARGUMENT_WARNING_GROUP: snprintf(text, capacity, "unknown warning group '%.*s'", (int)literal.length, literal.pointer); break;
         case CHECK_ARGUMENT_NEVER_CONSTANT: snprintf(text, capacity, "'%s' attribute expression never produces a constant expression", parsed); break;
@@ -2726,7 +2771,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         {
                             // An attribute argument's error (#147) as clang's handler words it; a parser's "expected ')'" with
                             // its note at the arguments' `(`.
-                            char text[320];
+                            char text[768];
                             const CheckInputReport* report = input->reports + index;
                             const uint64_t type_mark = scratch->length;
                             // (The type an underaligned _Alignas names, as clang prints it: check_driver_warning_type.)
@@ -2737,7 +2782,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_SIZEOF ||
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_BINARY ||
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_CALLBACK_COUNT ||
-                                                (report->detail & 0xffu) == CHECK_ARGUMENT_SWIFT_ASYNC_BLOCK) &&
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_SWIFT_ASYNC_BLOCK ||
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_BUILTIN_TYPES) &&
                                                report->type != 0;
                             CheckWarningSpelling spell = { .count = pp->table->count };
                             spell.bytes = typed ? BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count) : NULL;
