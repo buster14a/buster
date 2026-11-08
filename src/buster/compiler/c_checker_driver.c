@@ -686,15 +686,17 @@ struct CheckDriverDiagnostic
     const char* note;
 };
 
-// Room for `more` diagnostics after the `count` of `*list`, which `*capacity` holds: a bigger list in `arena` with them
-// copied, where it hasn't. False, and the list as it was, where the arena has none.
+// Room for `more` diagnostics after the `count` of `*list`, which `*capacity` holds, and for the few single ones the
+// driver adds after a list (BUSTER_CHECK_DRIVER_ADDITIONAL_SINGLES): a bigger list in `arena` with them copied, where it
+// hasn't. False, and the list as it was, where the arena has none.
+#define BUSTER_CHECK_DRIVER_ADDITIONAL_SINGLES 8u
 static bool check_driver_additional_room(CheckDriverDiagnostic** list, uint32_t* capacity, uint32_t count, uint64_t more, Arena* arena)
 {
-    bool result = (uint64_t)count + more <= *capacity;
-    // (With room for the few single diagnostics the driver adds after a list.)
-    if (!result && (uint64_t)count + more + 8 <= UINT32_MAX)
+    const uint64_t needed = (uint64_t)count + more + BUSTER_CHECK_DRIVER_ADDITIONAL_SINGLES;
+    bool result = needed <= *capacity;
+    if (!result && needed <= UINT32_MAX)
     {
-        const uint32_t grown = (uint32_t)(count + more + 8);
+        const uint32_t grown = (uint32_t)needed;
         CheckDriverDiagnostic* pushed = BUSTER_ARENA_PUSH_ARRAY(arena, CheckDriverDiagnostic, grown);
         if (pushed != NULL)
         {
