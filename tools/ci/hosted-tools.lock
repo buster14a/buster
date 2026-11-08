@@ -1,7 +1,7 @@
 # buster-hosted-inputs-v1 linux-x86_64 ubuntu-26.04
 # name version sha256 upstream-url; installed layout is owned by the setup scripts.
 # mirror REGISTRY/REPOSITORY sha256:MANIFEST pins a reviewed GHCR publication of these exact bytes (docs/hosted-toolchain.md).
-mirror ghcr.io/buster14a/buster-hosted-inputs unpublished
+mirror ghcr.io/buster14a/buster-hosted-inputs sha256:01ad04c2ec4def5a0ec9260c716d549e19f8959a1042fa13a139e6d9c9624fb9
 llvm 23.1.4 efdd1dbd089b99bfcfcde7b8eb1236163f2e88df5a981cca4f783ec9cb5e0378 https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.4/LLVM-23.1.4-Linux-X64.tar.zst
 llvm-license 23.1.4 8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee https://raw.githubusercontent.com/llvm/llvm-project/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/llvm/LICENSE.TXT
 cmake 4.4.3 d6c83076c575bc00b823522ac974bda66d0af05d6ddc30e739c12385cf32c6cc https://github.com/Kitware/CMake/releases/download/v4.4.3/cmake-4.4.3-linux-x86_64.tar.gz
