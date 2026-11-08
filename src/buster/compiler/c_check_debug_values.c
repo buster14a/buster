@@ -173,14 +173,15 @@ static void check_debug_value_type(CheckDebugValues* values, TypeId type)
         debug_uleb(info, CHECK_DEBUG_VOID);
         debug_string(info, BUSTER_S8("void"));
     }
-    else if (kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_ATOMIC || kind == BUSTER_TYPE_KIND_ALIGNED)
+    else if (kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_ATOMIC || kind == BUSTER_TYPE_KIND_ALIGNED ||
+             kind == BUSTER_TYPE_KIND_QUALIFIED)
     {
         debug_uleb(info, kind == BUSTER_TYPE_KIND_POINTER ? CHECK_DEBUG_POINTER : kind == BUSTER_TYPE_KIND_ATOMIC ? CHECK_DEBUG_ATOMIC : CHECK_DEBUG_TYPEDEF);
         if (kind == BUSTER_TYPE_KIND_POINTER)
         {
             debug_integer(info, 8, 1);
         }
-        else if (kind == BUSTER_TYPE_KIND_ALIGNED)
+        else if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED)
         {
             debug_string(info, BUSTER_S8(""));
         }

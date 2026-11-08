@@ -3873,20 +3873,48 @@ diagnosis cutoffs skip recovered reports. As in clang, a unit with any error
 publishes no unit-end warning: no unused file-scope object's and no unused
 function's (`check_driver_rejected_warnings`).
 
-A body that recovers an error goes to source order, as one with a report does.
-So does a top level, before its bodies are dealt to lanes. Error-free units
-take none of this: their recovered lists stay empty, and the driver copies
-their warning events only on an error.
+Deferred bodies (#1447's lanes item) carry their recovered reports through the
+lanes: a unit whose only errors are recovered keeps its deferred, multi-lane
+schedule. A lane starts each body with an empty list of its own, and the body's
+result keeps it. Each cut keeps the top level's count at the body's opening.
+The merge (`check_deferred_recovered`) rebuilds the unit's list in the order
+source order's reader finds them, by those counts:
+
+- the top level's reports before each body's opening;
+- then the body's;
+- and the top level's after the last body.
+
+Each report's TypeIds take the merged table's (`check_deferred_report`): the
+type it names, and the two whose `value` holds one, a redeclaration's prior type
+and an attribute expression's second operand's type. Every other `value` is a
+token, a count or a pair of tokens, and tokens, declarations and names are the
+unit's already. `check_input_recovered_publish` then appends them
+as source order's does.
+
+One recovered note isn't merged: an object's type conflict notes the entity's
+latest earlier declaration, even a block-scope one in another body. The deferred
+top level hasn't read the bodies it skipped, and a lane hasn't read the other
+bodies. So the scan back from the declaration sends the unit to source order
+when it reaches another body's closing brace before its match. A body with a report it doesn't recover still goes to
+source order, as does a top level with one. Error-free units take none of this:
+their recovered lists stay empty, and the driver copies their warning events
+only on an error.
 
 `test-checker-driver --semantic-recovery-only`
 (`c_check_semantic_recovery_driver_test.c`) compares the whole output and
 status with clang 23:
 
-- by the vector path, the scalar one and deferred bodies on two lanes;
+- by the vector path, the scalar one, and deferred bodies on one, two and
+  three lanes;
 - under gnu17 and gnu23;
 - with no option, `-Wall`, `-ferror-limit=2` and `-w`.
 
-It also checks that `-c` of each fixture is refused with no object written.
+It also checks that `-c` of each fixture is refused with no object written. The
+deferred readings are `-c`'s, on one, two and three lanes: `-fsyntax-only`
+starts no lanes, so a deferred `-fsyntax-only` reading is source order's. The
+driver reads `--scalar`'s in source order; `test-checker-deferred` compares the
+deferred reader with both paths, and its merge with its scalar twins, on its
+recovered fixtures too.
 The fixtures cover each pass above, shared records, two errors in one list,
 missing names and a control error after a recovered error, block declarations,
 exclusions, `_Alignas`, a dropped `format`, and enumerators.
@@ -3964,6 +3992,13 @@ do:
   implicit value restarts at 0 of `int` or of the fixed type
   (`CheckTagFrame.restart`), and an enum left with no enumerator is
   complete as `unsigned int`.
+- **An enumerator whose name is another kind of the scope's** (an object, a
+  typedef, a parameter, a local) gives clang's "redefinition of 'K'", with
+  "previous definition is here" at the earlier declaration, and is dropped the
+  same way. (A name declared after an enumerator is the redeclaration's
+  "redefinition of 'K' as different kind of symbol" instead.) Clang's
+  `-Wvisibility` of a tag declared in a prototype, which the checker doesn't
+  give at all, is left out of its fixtures.
 
 Phase 3 covers statements after an error:
 
@@ -3990,9 +4025,81 @@ Phase 3 covers statements after an error:
 Error-free units take none of this: the flushed marks need an error, the
 uninitialized pass reads them only when there are some, and the diagnose
 paths run only on a rejected unit. `c_check_statement_recovery_driver_test.c`,
-in the same section, compares its fixtures as above. The asm and control
-errors after a graph's error are compared by place and severity alone: those
-diagnose paths give one generic message, not clang's wording.
+in the same section, compares its fixtures as above, the asm and control
+errors' whole text too.
+
+The asm and control errors give every one, in clang's words, after a graph's
+error and in a unit without one:
+
+- **Control.** `check_program_diagnose_all` lists each constraint error
+  (`CheckProgramConstraint`), with the token of its "previous case defined
+  here" note. A switch's conflicts come in clang's order
+  (`ActOnFinishSwitchStmt`), all published at the switch's end:
+  - the defaults, by a reverse walk of the order clang makes them in: a
+    default is made once its own statement is parsed, so one labelling
+    another comes first;
+  - the singletons in converted value order, each noting the one before;
+  - the nonempty ranges by their low values, each noting the last singleton
+    within it, or else the range before it, whose high value it names.
+
+  A condition of no integer type is "statement requires expression of integer
+  type ('T' invalid)" at the switch, by its typedef's name. So is a pointer or
+  record condition, which the graph's promotion refuses
+  (`check_semantic_expression`). A case value's error is the reader's alone:
+  clang drops the case.
+- **Asm.** `check_asms_diagnose_all` gives each failing statement's first
+  error (`CheckAsmFailure`, after `Sema::ActOnGCCAsmStmt`): an output's
+  memory-constraint bit-field, `_BitInt`, incomplete type or lvalue, then an
+  input's bit-field, memory-only lvalue, register `void`, `_BitInt` and
+  incomplete type. A tie's comes after every operand's own. A GNU lvalue cast
+  output gives `-Winvalid-gnu-asm-cast`'s error at the lvalue, through the
+  casts that don't change its value, and doesn't end its statement. Clang
+  names an output "input" in the bit-field and `_BitInt` errors, and an input
+  "output"; the words follow it. An incomplete type's error has the tag's
+  forward declaration note.
+
+A unit without other errors whose `check_asms_run` or `check_program` fails
+runs these diagnoses, so only a failing unit pays for them.
+`CheckDriverDiagnostic.note` carries a note through the reports' walk.
+
+Every declaration's failed initializer is given, as clang gives each
+(phase 2): `int a[2] = 5; int b[2] = 6;` has two errors where it had the
+first alone. `check_initializers_diagnose_warnings` already visited every
+declaration and kept the earliest failure; it now also lists each one
+(`CheckInitDiagnostic.failures`, `CheckInitFailure`), copied into `output` after
+its walk's arenas are rolled back, and the driver gives each with its own
+conversion's words and a static object's second "not a compile-time constant"
+error. Only a unit whose initializers failed takes this path.
+
+An array of unknown size whose initializer is no list nor a string of its
+element (`int y[] = 5;`) gets clang's `FK_ArrayNeedsInitList` error at its
+name, worded by the literal its element takes: "or string literal" for a
+character, "or wide string literal" for `int`, `unsigned short` and
+`unsigned int` (wchar_t's, char16_t's and char32_t's), the list alone
+otherwise (`CHECK_INPUT_DIRECT_INITIALIZER_ARRAY`'s detail,
+`CheckInputArrayList`). `check_input_initializer_finish` recovers the report;
+the array keeps its unknown size, as clang's invalid declaration does, and its
+initializer leaves the sparse columns, so the initializers' run doesn't see it.
+As clang checks the initializer first, the report completes at the
+initializer's end, after the initializer's own diagnostics, and an extern
+array loses its -Wextern-initializer event. Clang gives no such error where
+the initializer is no valid value. The driver decides that once the
+expressions are checked (`check_init_listless_drop`, which removes the
+report): an undeclared name in it isn't shielded by a statement expression,
+or the initializer's outermost node is diagnosed, of no valid type or
+incomplete as the initializers' diagnosis counts it. An initializer with no
+node keeps its report: a rejected unit's retained graph ends at its first
+missing name, so a later valid initializer has none. A statement expression
+shields a name in a statement before its last, its value
+(`check_init_undeclared_poisons`). The report keeps its initializer's first
+token (`value`) for this; only a unit with another error drops one. A
+parenthesized initializer, a cast, a scalar's compound literal or an array's
+compound literal that is only part of the initializer is no list either; an
+array's compound literal that is all of it (GNU's, `int z[] =
+(int[2]){1,2};`, which clang accepts), even inside parentheses, is still
+refused, on main too. Clang's typo correction ("did you mean"), which buster
+lacks, keeps a misspelled name's initializer a value, so there clang gives the
+error where buster doesn't.
 
 Type attributes' errors don't stop the reader either (`check_input_attribute_type`).
 What clang 23 does with each is followed:
@@ -4006,10 +4113,17 @@ What clang 23 does with each is followed:
   (`int` with `SF`), or a base of no integer or floating type (a struct, a
   pointer), is clang's error too, but `AddModeAttr` still installs the mode's
   type: `float v __attribute__((mode(SI)))` is an `unsigned int`
-  (`check_input_attribute_mode`'s `installed`). Clang installs a type even in
-  an enum (`double` as its integer type), which the type table doesn't hold,
-  so an enum's mode error recovers only where clang installs nothing. The enum
-  is then as without the mode.
+  (`check_input_attribute_mode`'s `installed`).
+- **An enum's `mode`.** Where clang installs nothing, the enum is as without
+  the mode. Clang installs a floating type even in an enum (`double` as its
+  integer type), which the type table doesn't hold. Such an enum gets the
+  signed integer of that type's size and alignment
+  (`check_input_mode_enum_integer`: `HF` a `short`, `SF` an `int`, `DF` a
+  `long`, `XF` and `TF` an `__int128`), which gives it clang's layout. Its
+  conversions are clang's too: a floating value converts into it silently,
+  since `-Wliteral-conversion` takes no enumeration target, and an integer
+  gets `-Wconstant-conversion` at the integer's width. A complex mode, whose
+  alignment no integer has, still stops the reader.
 
 In each case the declaration stays valid and the attribute is ignored, as in
 phase 1.
@@ -4019,8 +4133,8 @@ given for each. The subject checks already repeat theirs. Two errors are given
 before them, once per list, and are now repeated
 (`CheckInputAttributeRepeat`):
 
-- an `aligned` or `_Alignas` value's error, which the reader recovers and drops
-  the record for;
+- an `aligned` value's error, which the reader recovers and drops the record
+  for;
 - a specifiers' `mode` error, which the specifiers' type gives.
 
 The list keeps a copy of each report. Its copies share it, since each
@@ -4029,33 +4143,55 @@ the list keeps the original. Each later one gives the copy again, completing
 with its own waiting errors (`check_input_attribute_repeats`). Error-free
 lists have no repeats.
 
+`_Alignas`'s errors are each declarator's, in the order of clang's
+`handleAlignedAttr` and `CheckAlignasUnderalignment`
+(`check_input_alignas_declarator`):
+
+1. **Its place.** A declarator that can't take one gets the place's error for
+   each `_Alignas`:
+   - a function or a typedef: "only applies to variables and fields";
+   - a parameter, a bit-field or a register variable: "cannot be applied to".
+     A K&R definition's parameter declarations are parameters too. The parser
+     takes their first `_Alignas` groups as the function declarator's suffix,
+     so the declarator step ends before them.
+2. **Its value.** The reader keeps the value's error on the record
+   (`CheckInputAttribute.deferred`) instead of giving it when the list is
+   read, and each declarator that may take the `_Alignas` gives it. The value
+   has no power of 2, is no integer constant ("'aligned' attribute requires
+   integer constant", at the argument, as clang names it), or is past 2^32
+   ("requested alignment must be 4294967296 bytes or smaller", `aligned`'s
+   too).
+3. **The underalignment**, after the values' errors, at the last `_Alignas`
+   that stands.
+
+A declaration that declares nothing (`_Alignas(3) int;`, a member with no name
+that isn't an anonymous record) has none of them, as clang declares nothing
+for it. Each error recovers, so the declaration stays valid, with only the
+alignments that stand.
+
 `c_check_type_attribute_recovery_driver_test.c` compares its fixtures as above.
 These differences remain:
 
-- An enum's mode of the other kind (`enum __attribute__((mode(SF))) E`) still
-  stops the reader.
+- An enum's complex mode of the other kind (`enum __attribute__((mode(SC)))
+  E`) still stops the reader.
 - An enum's vector mode after its body gives its deprecation warning twice (on
   main too).
-- A shared `_Alignas` on a function declarator gives the value's error, where
-  clang gives its subject's ("only applies to variables and fields"). So does
-  an `_Alignas` of a typedef.
-- `_Alignas`'s non-constant and too-large values still give the generic error
-  and stop the reader.
 
 The later phases are left:
 
 - **Invalid declarations.** Not covered by phase 2:
-  - an invalid initializer the reader reports;
   - C23's incompatible tag redefinitions (above).
 
-  These still stop the reader.
+  These still stop the reader. A non-constant initializer's error is at its
+  first token, where clang's is at the operand that isn't constant
+  (`k + 1`'s `+`), and `sizeof` of an incomplete type reads "incomplete type
+  is not permitted here" at the `sizeof`, where clang's names the type at its
+  operand; both on main too.
 - **Units with a graph's or a reader's error.** These, other than a recovered
   one, still don't reach `check_program`. They get none of its diagnostics:
-  the common warnings, their runtime warnings included. The asm and control
-  diagnose paths give only the unit's first error, in generic words, and a
-  duplicate case has no "previous case" note on either path.
-- **Lanes.** Bodies don't carry their recovered reports; they fall back to
-  source order instead.
+  the common warnings, their runtime warnings included. Nor does a unit whose
+  `check_program` finds a control error. Its unused-variable warnings
+  aren't suppressed in the error's scopes.
 
 ### What the lowering costs (#531)
 
@@ -7128,10 +7264,10 @@ arguments against the function. The checker now gives these as clang does.
     error first, as neither has subjects. `objc_gc(weak)` and
     `objc_gc(strong)` on a pointer make a garbage-collection qualifier that
     changes the type (`int *__weak`, which redeclarations, `_Generic` and the
-    types' spellings see): they are refused by name, and so are both
-    attributes' C23
-    spellings, which apply to other types than GNU's (clang 23 crashes on
-    `[[clang::objc_gc(weak)]]`).
+    types' spellings see): the type table's extended qualifier (#1447, "The
+    type qualifiers' attributes" below). Both attributes' C23 spellings, which
+    apply to other types than GNU's (clang 23 crashes on
+    `[[clang::objc_gc(weak)]]`), are refused by name.
   - `diagnose_as_builtin` (`check_input_attribute_diagnose_builtin`,
     `c_check_attribute_checks_input.c`), clang's handleDiagnoseAsBuiltinAttr:
     its first argument names a builtin function, as getBuiltinID finds one: a
@@ -7199,28 +7335,77 @@ arguments against the function. The checker now gives these as clang does.
   applied to a declaration" after a count's error, as `btf_type_tag`'s now are
   too.
 
-  The type qualifiers' attributes stay refused by name (#1447): GNU's
-  `address_space(N)`, the OpenCL address spaces (`opencl_global`,
-  `opencl_local`, `opencl_constant`, `opencl_private`, `opencl_generic`,
-  `opencl_global_device`, `opencl_global_host`), which clang 23 takes in C as
-  address spaces too (`'__global int *'`, the last two with -Wdeprecated-attributes'
-  "''opencl_global_device'' attribute is deprecated and may be removed in a
-  future version of Clang"), and `objc_gc(weak)` and `objc_gc(strong)` (`int
-  *__weak`). Each is one of clang's Qualifiers that is part of a type's
-  identity, which a TypeId's three qualifier bits don't hold: making them a
-  type's needs an extended qualifier's record that the table's consumers see
-  through as they see through ALIGNED, and the conversions' checks with
-  clang's words ("assigning to 'int *' from '__attribute__((address_space(1)))
-  int *' changes address space of pointer", "automatic variable qualified with
-  an address space", "multiple address spaces specified for type", a pointer
-  subtraction's and a conditional's "pointers to non-overlapping address
-  spaces"), where the checker's pointer conversions mostly say "incompatible
-  operand or conversion types"; clang also spells a type whose attribute a
-  user's macro wrote by the macro's name (MacroQualifiedType: `'AS1 int *'`).
-  Code generation then needs `%gs`, `%fs` and `%ss` memory operands for
-  address spaces 256, 257 and 258 (`__seg_gs`, `__seg_fs`), which clang's
-  -O0 code uses (`mov %gs:0x10,%eax`); any other address space is the default
-  one's code on x86-64.
+  The type qualifiers' attributes (#1447): GNU's `address_space(N)`, the
+  OpenCL address spaces (`opencl_global`, `opencl_local`, `opencl_constant`,
+  `opencl_private`, `opencl_generic`, `opencl_global_device`,
+  `opencl_global_host`), which clang 23 takes in C as address spaces too, and
+  `objc_gc(weak)` and `objc_gc(strong)`, are clang's extended qualifiers, part
+  of a type's identity: the type table's `QUALIFIED` record (docs/c-types.md's
+  "Extended qualifiers"), made by `type_extend`. An address space applies where
+  clang's processTypeAttrs applies it: the specifiers' type
+  (check_input_attribute_type), a pointer's chunk's pointer or a group's type
+  outside it (CheckDeclaratorPart.spaces, which CheckInputAttribute.space_applied
+  keeps from the whole type), and the whole type after the declarator; an
+  array's space is its element's. clang's checks are made in its order
+  (check_input_address_space): a function type's "function type may not be
+  qualified with an address space", address_space's count ("takes one
+  argument", before its subject, as a type attribute's), its argument ("requires
+  an integer constant", "address space is negative", "address space is larger
+  than the maximum supported (8388580)"), "multiple address spaces specified
+  for type", and -Wduplicate-decl-specifier's "multiple identical address spaces
+  specified for type"; the deprecated OpenCL spaces' -Wdeprecated-attributes
+  warning (with clang's doubled quotes) comes from the parser, at the attribute.
+  The declarations a space can't qualify are clang's errors at their names: an
+  automatic variable, a parameter (as declared, through a typedef), a member,
+  and a function's compound literal (at its `(`). objc_gc's weak and strong
+  qualify the type where check_input_attribute_objc's distribution handles
+  them, the declarator's outer levels made again from there
+  (check_input_objc_requalify), with clang's "multiple garbage collection
+  attributes specified for type" and -Wignored-attributes' `__weak` warnings
+  on an automatic variable and a member.
+
+  Types print as clang's (`'__attribute__((address_space(1))) int *'`,
+  `'const __global int *'`, `'int *__weak'`, `'__attribute__((address_space(1)))
+  T *'`). Compatibility needs equal extended qualifiers, so redeclarations and
+  `_Generic` see them; `__builtin_types_compatible_p` and `typeof_unqual` drop
+  them, as clang's getUnqualifiedType does, and a value has none. A member's
+  lvalue takes its record's space (not its garbage collection qualifier).
+  Pointer conversions follow clang's checkPointerTypesForAssignment: a pointee's
+  space the target's doesn't include (clang's isAddressSpaceSupersetOf in C:
+  equal spaces, OpenCL's generic over every space but constant, global over its
+  device and host parts; the default space and a target's, 0 among them, over
+  no other) is the error "changes address space of pointer", worded by the
+  conversion (assigning, initializing, returning, and passing with clang's note at
+  the parameter: c_check_semantic_diagnostic.c's check_semantic_address_space);
+  a garbage collection qualifier changed is the discarded qualifiers' warning.
+  A subtraction's and a conditional's pointers to spaces neither of which
+  includes the other are clang's "pointers to non-overlapping address spaces"
+  error (a conditional's at its `?`); a conditional of overlapping spaces is
+  clang's C result, the composite without the spaces (one type keeps its own,
+  and a void pointee takes the other's), and comparisons and casts take any
+  spaces.
+
+  Lowering: clang's x86 target maps address spaces 256, 257 and 258
+  (`__seg_gs`, `__seg_fs`) to the `%gs`, `%fs` and `%ss` segments, whose loads
+  and stores need a segment override that Tier 0's and Tier 1's memory operands
+  don't carry (the encoder has the prefixes, which only thread-local storage's
+  forms use). A load or store in one of those spaces is refused by name ("a load
+  or store in a segment's address space", check_lower_segment_access, where a
+  unit has such a type at all: CheckLowerWriter.segments); taking an address
+  there is compiled. Any other space's code is the default space's, as clang's.
+
+  What differs from clang: C23's spellings (`[[clang::address_space(1)]]` and
+  the others), which slide from a declaration to its specifiers with clang's
+  deprecation warning, are refused by name; clang names a type whose space a
+  macro wrote by the macro (MacroQualifiedType: `'AS1 int *'`), where the
+  attribute is spelled out here, and spells a group's leading space where it was
+  written (`'int (__attribute__((address_space(1))) *)[3]'`); a garbage
+  collection qualifier inside a function's level is refused by name, and the
+  specifiers' one that moves to a pointer whose chunk has another is
+  "multiple garbage collection attributes" at the chunk's, where clang's is at
+  the specifiers'. The discarded qualifiers' warning keeps the checker's generic
+  wording for these pointers as for any. A vector's element loses its space, as
+  it loses its `ALIGNED`.
 
   Other targets' calling conventions (`aarch64_sve_pcs`,
   `aarch64_vector_pcs`, `m68k_rtd`, `pcs`) are conventions x86-64 hasn't, as
@@ -7790,16 +7975,15 @@ arguments against the function. The checker now gives these as clang does.
     warning on a pointer is at the attribute with the macro's notes, where
     clang puts it at the macro's immediate expansion, and clang names either
     attribute `__weak` or `__strong` when the outermost macro is spelled so;
-    `objc_gc(weak)`, `objc_gc(strong)` and both C23 spellings are refused (see
-    above). In a `_Generic` association's type their warnings aren't made,
-    and a `typeof` type name that starts with a GNU attribute isn't read as
+    objc_gc's and objc_ownership's C23 spellings are refused (see above). In a
+    `_Generic` association's type their warnings aren't made, and a `typeof` type name that starts with a GNU attribute isn't read as
     one, as for every attribute there. `availability` on a tag's
     redeclaration isn't compared with the earlier one's. As everywhere, a
     declaration's first error ends the unit: a shared specifiers'
     `objc_ownership` with a count's error warns and errs for the first
     declarator alone, and a TCB function's call clang declares implicitly
     with an error (C99 and later) has no `-Wtcb-enforcement` warning after
-    it. `address_space` and OpenCL's address spaces are refused (see above).
+    it.
     `diagnose_as_builtin`'s calls have no `-Wfortify-source` warnings, as no
     call has. A C23 NEON vector attribute after a typedef's or a tag's name
     gets the deprecation warning where clang's error is "cannot be applied to

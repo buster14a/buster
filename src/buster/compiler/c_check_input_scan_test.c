@@ -1184,6 +1184,8 @@ static __attribute__((noinline)) void check_test_identifier_leaves(CheckTest* te
         TYPE_KINDS,
         TOKENS,
         CLASSES,
+        PARENTS,
+        ROLES,
         COLUMNS,
     };
     uint8_t* mappings[COLUMNS];
@@ -1207,6 +1209,9 @@ static __attribute__((noinline)) void check_test_identifier_leaves(CheckTest* te
         const uint32_t acting = check_test_random(test) % (count + 1);
         Parser parser = { 0 };
         parser.tokens.count = count;
+        // The tree's parents and roles, which mark a register object's unparenthesized names (check_input_register_flags).
+        parser.tree.parents = check_test_scan_column(mappings[PARENTS] + page, count, 4);
+        parser.tree.roles = check_test_scan_column(mappings[ROLES] + page, count, 1);
         TypeTable table = { 0 };
         table.types.count = type_count;
         table.types.kind = check_test_scan_column(mappings[TYPE_KINDS] + page, type_count, 1);
@@ -1241,6 +1246,8 @@ static __attribute__((noinline)) void check_test_identifier_leaves(CheckTest* te
             check_input_set_bit(input.declaration_bits, i, BUSTER_CHECK_BITS_THREAD_LOCAL, (uint8_t)(check_test_random(test) % 2));
             check_input_set_bit(reader.declaration_bits, i, BUSTER_CHECK_BITS_REGISTER, (uint8_t)(check_test_random(test) % 2));
             reader.declaration_flags[i] = (uint8_t)check_test_random(test);
+            parser.tree.parents[i] = check_test_random(test) % (count + 1);
+            parser.tree.roles[i] = check_test_random(test) % 2 != 0 ? PARSE_ROLE_CLOSE_GROUP : PARSE_ROLE_ASSIGN;
             if (input.overload_heads != NULL)
             {
                 input.overload_heads[i] = check_test_random(test) % 3 == 0 ? check_test_random(test) : 0;

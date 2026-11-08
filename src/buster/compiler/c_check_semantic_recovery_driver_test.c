@@ -5,8 +5,10 @@
 // gives and then drops the attribute for leaves its declaration valid, so the checker goes on to the declaration's other
 // attributes, the declaration itself and the unit's later declarations (check_input_attribute_recover, CheckInput's
 // recovered reports). On original fixtures, the whole output, line for line, and the status, by the vector path, the
-// scalar one and deferred bodies on two lanes, under gnu17 and gnu23 and the warning and error-limit options; and -c of
-// each, which must be refused with no object written. Include after c_check_resume_driver_test.c, whose reader this
+// scalar one and deferred bodies (whose bodies carry their recovered reports through the lanes) on one, two and three
+// lanes, under gnu17 and gnu23 and the warning and error-limit options; and -c of each, which must be refused with no
+// object written. The deferred readings are -c's, since -fsyntax-only starts no lanes; the driver reads --scalar's in
+// source order, and test-checker-deferred checks the deferred reader's scalar twins. Include after c_check_resume_driver_test.c, whose reader this
 // takes.
 
 // The legacy preprocessor omits #warning's option suffix (the initializer/constant timing controls have the same
@@ -152,6 +154,60 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int visible_plain;\n"
         "void declare_visible_plain(void) { extern int visible_plain; (void)visible_plain; }\n_Thread_local int visible_plain;\n"
         "int *use_block_tls(void) { return &block_tls; }\nint *use_block_plain(void) { return &block_plain; }\n",
+        // Every declaration's failed initializer, not only the first's (#1447, phase 2): arrays, records and pointers, at
+        // file and block scope, a static object's braced conversion, and an error of the walk's between them.
+        "struct P { int x; int y; };\nint a[2] = 5;\nstruct P p = { .z = 1 };\nvoid f(void)\n{\n    int b[2] = 6;\n    struct P q = 3;\n"
+        "    char c[1] = 7;\n    (void)b; (void)q; (void)c;\n}\nstatic int *sp = { 1.5 };\nint n = undeclared;\nstruct P r = { 1, 2, 3 };\nint e[3] = 8;\n",
+        "int k;\nstatic int s1 = k;\nint a[2] = 5;\nstruct Q { char *p; } qs = { 4 };\nstatic struct Q qq = { 5L };\nint u(void) { int w; return 0; }\n",
+        // A pointer converted to int at file scope, each one's conversion and its "not a compile-time constant" (relayed
+        // from the type attributes' session).
+        "int x = \"str\";\nint y = \"two\";\nint z = 5;\nint w = \"three\";\n",
+        // An array of unknown size whose initializer is no list: clang's words by its element's literal, recovered, the
+        // array keeping its unknown size.
+        "int y[] = 5;\nchar c[] = 6;\nstruct S { int x; };\nstruct S sa[] = 3;\nshort ss[] = 4;\nunsigned short us[] = 4;\n"
+        "static int z[] = 2;\nvoid i(void) { int fine; }\nvoid h(void) { char loc[] = 1; int unused; }\nint a2[2] = 7;\n"
+        "int g(void) { return y[0] + c[0]; }\n",
+        // Its error after the initializer's own, none where the initializer names an undeclared identifier, and an extern
+        // array's without -Wextern-initializer; a parenthesized initializer, a cast and a scalar's compound literal are no
+        // list either (review on #1791).
+        "int u1[] = undecl_fn2();\nint u2[] = undecl;\nint u3[] = undecl + 1;\nint u4[] = sizeof(undecl2);\nextern int e[] = 7;\n"
+        "int h[] = (5);\nint i[] = (int)6;\nint j[] = (int){7};\nint n[] = 4, o[] = 5;\n",
+        // None where the initializer is no valid value: a missing name outside a statement expression or in its value, a
+        // missing member, a called non-function; one where a statement expression shields the name in an earlier
+        // statement; and an array's compound literal only a prefix of the initializer (second review on #1791).
+        "struct S { int a; };\nint f(void);\nint x;\nvoid g(void) { int u[] = ({ undecl; 5; }); }\n"
+        "void h(void) { int u[] = ({ int y = undecl2; 5; }); }\nvoid k(void) { int u[] = ({ sizeof(undecl3); 5; }); }\n"
+        "void n(void) { int u[] = ({ int z = ({ undecl8; 1; }); 5; }); }\nvoid q(void) { int u[] = ({ if (1) undecl10 = 2; 5; }); }\n"
+        "void r(void) { int u[] = (undecl11); }\nint v1[] = ((struct S){0}).nosuch;\nint v4[] = (int[2]){1,2} + x;\nint v6[] = undecl6 + 1;\n",
+        // A unit the reader rejects, whose retained graph ends at its first missing name: a later array's initializer has
+        // no node and keeps its error (third review on #1791).
+        "int c = undecl, d[] = 6;\nunknown_type z;\n",
+        "int c = undecl;\nint d[] = 6;\nint e[] = (5);\nint f2[] = undecl2 + 1;\nint g[] = (int)7;\nunknown_type z;\n",
+        // An enumerator whose name is another kind of the scope's (an object, a typedef, a parameter, a local): clang's
+        // "redefinition of 'K'" with its note at the earlier declaration, the enumerator dropped and the next implicit
+        // value restarting at 0, of int or of the fixed type (#1447).
+        "int K;\n"
+        "enum E { K, L };\n"
+        "int use(void) { return K + L + undeclared; }\n",
+        "enum E { A, B };\n"
+        "int A;\n"
+        "float B(void);\n"
+        "typedef int A2;\n"
+        "enum F { A2 };\n"
+        "int use(void) { return A + B; }\n",
+        "void f(int P)\n"
+        "{\n"
+        "    enum { P, Q } e;\n"
+        "    int x = Q;\n"
+        "    (void)e; (void)x;\n"
+        "}\n",
+        "int K;\n"
+        "enum E { J = 5, K, M };\n"
+        "_Static_assert(M == 0, \"m\");\n"
+        "typedef long T;\n"
+        "enum F : short { U = 7, T, V };\n"
+        "_Static_assert(V == 0 && sizeof(V) == 2, \"v\");\n"
+        "void w(void) { int loc; enum { loc, after } e; (void)e; (void)loc; }\n",
         // A block's, and clang's unused-variable warnings of no scope in which an error occurred (a body's from its
         // definition's start).
         "void f(int p)\n{\n    int x;\n    float x;\n    int y = 1;\n    long y = 2;\n    (void)y;\n    if (y = 2) {}\n}\n"
@@ -173,6 +229,25 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // A statement expression has its own inner scope; its error is also within the enclosing for scope.
         "void compound(void) { for (int j = ({ int k; 0; }); ; ) break; int x; float x; }\n"
         "void compound_error(void) { for (int j = ({ int k; int x; float x; 0; }); ; ) break; }\n",
+        // Recovered errors in several bodies, between the top level's, which the deferred reader's merge puts back in
+        // source order's (#1447, lanes): attributes', a block's redeclarations naming types the bodies make, a typedef's,
+        // statements outside their loops, and the bodies' warnings beside them.
+        "int t1 __attribute__((aligned(3)));\n"
+        "int f(void) { int a __attribute__((aligned(5))); int unused; return 0; }\n"
+        "int t2 __attribute__((aligned(7)));\n"
+        "int g(void) { int b __attribute__((aligned(9))); return 1; }\n"
+        "int t3 __attribute__((aligned(11)));\n"
+        "int h(int p) { if (p = 2) {} return p; }\n"
+        "int k(void) { struct S { int x; } a; float a; a.x = 1; return a.x; }\n"
+        "int m(void) { typedef struct Q { int y; } T; typedef long T; T q = { 2 }; return q.y; }\n"
+        "int n(void) { break; int u; return 0; }\n"
+        "int o(int p) { continue; return p << 40; }\n"
+        "typedef int U;\nint q(void) { U x = 2; return x; }\nint U;\n",
+        // An attribute expression's invalid operands, both of a type the body makes after an earlier body made its own:
+        // the merge maps both operands' types, the second's held in the report's value (review on #1794).
+        "int g(void) { struct G { int x; } gv; return gv.x; }\n"
+        "int f(void)\n{\n    struct S { int a; } s;\n    int x __attribute__((annotate(\"n\", s + s))) = 0;\n    return x;\n}\n"
+        "int h(void) { struct H { int y; } hv; return hv.y; }\n",
         // A repeated enumerator, dropped: the next one's implicit value restarts at 0 (of int, or of a fixed type), and
         // an enum left with none is unsigned int's.
         "enum A { X = 5 };\nenum B { Y = 3, X, Z };\n_Static_assert(Z == 0, \"z\");\n"
@@ -220,32 +295,51 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
                 arguments[count] = NULL;
                 char* expected = NULL;
                 const int oracle = check_test_driver_spawn(arguments, &expected);
+                // The deferred readings' arguments: -c's, of no object (-fsyntax-only starts no lanes).
+                char* compile[16] = { (char*)executable, (char*)standards[s], "-c", "-o", object, "-fno-caret-diagnostics", source };
+                uint32_t compile_count = 7;
+                if (options[o] != NULL)
+                {
+                    compile[compile_count++] = (char*)options[o];
+                }
                 check_test_semantic_recovery_lookahead(expected);
                 const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
                 check_test_expect(test, lines && oracle != 0, "semantic recovery: clang rejects the fixture and its lines are read");
-                for (uint32_t mode = 0; lines && mode < 3; mode += 1)
+                // The vector path, the scalar one, and deferred bodies on 1, 2 and 3 lanes.
+                static const char* const mode_lanes[] = { NULL, NULL, "1", "2", "3" };
+                for (uint32_t mode = 0; lines && mode < BUSTER_ARRAY_LENGTH(mode_lanes); mode += 1)
                 {
                     arguments[0] = (char*)executable;
                     uint32_t at = count;
+                    char** spawned = arguments;
                     if (mode == 1)
                     {
                         arguments[at++] = "--scalar";
+                        arguments[at] = NULL;
                     }
-                    else if (mode == 2)
+                    else if (mode_lanes[mode] != NULL)
                     {
-                        arguments[at++] = "--deferred-bodies";
-                        arguments[at++] = "--lanes";
-                        arguments[at++] = "2";
+                        at = compile_count;
+                        compile[at++] = "--deferred-bodies";
+                        compile[at++] = "--lanes";
+                        compile[at++] = (char*)mode_lanes[mode];
+                        compile[at] = NULL;
+                        spawned = compile;
+                        unlink(object);
                     }
-                    arguments[at] = NULL;
+                    else
+                    {
+                        arguments[at] = NULL;
+                    }
                     char* actual = NULL;
-                    const int status = check_test_driver_spawn(arguments, &actual);
+                    const int status = check_test_driver_spawn(spawned, &actual);
+                    const bool written = spawned == compile && access(object, F_OK) == 0;
                     check_test_semantic_recovery_lookahead(actual);
                     const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
                     char description[8192];
                     snprintf(description, sizeof(description), "semantic recovery %u, %s %s, mode %u: status %d (clang %d), lines\n%s(clang\n%s)", f, standards[s],
                              options[o] != NULL ? options[o] : "", mode, status, oracle, actual_lines, expected_lines);
-                    check_test_expect(test, same && (status != 0) == (oracle != 0), description);
+                    check_test_expect(test, same && (status != 0) == (oracle != 0) && !written, description);
                     free(actual);
                 }
                 free(expected);

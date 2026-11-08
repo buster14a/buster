@@ -573,6 +573,13 @@ The behavior was checked in the pinned Clang 23.1.4 source, revision
 [SemaChecking.cpp](https://github.com/llvm/llvm-project/blob/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/clang/lib/Sema/SemaChecking.cpp).
 No upstream implementation or fixture is imported.
 
+`c_check_address_space_driver_test.c` adds original fixtures for the address
+spaces and objc_gc's qualifiers (#1447) to `test-checker-driver` through the same
+harness: their declarations, spellings and errors, the conversions' errors and
+notes, the conditionals' types (by `_Generic`), and the segments' accesses that
+the lowering refuses (`-fsyntax-only` alone). Each one's whole output equals
+Clang's on both kernels, at each policy and lane count.
+
 `c_check_format_bitint_driver_test.c` adds 25 original fixtures to
 `test-checker-driver` through the shared default-warning harness. Independent
 warning counts and complete Clang diagnostics cover narrow and equal-width

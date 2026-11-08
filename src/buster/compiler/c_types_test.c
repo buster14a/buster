@@ -2300,6 +2300,95 @@ static bool type_test_compatibility(void)
 // ---------------------------------------------------------------------------------------------------------------------
 // Printing
 
+// The extended qualifiers (#1447, QUALIFIED): type_extend's normalizations (a space on an array is its element's, under
+// an aligned typedef's ALIGNED, with the TypeId's own qualifiers kept, and none on a function type), what the readers see
+// through it (size, alignment, completeness, kind), compatibility and composite types, clang's spellings, and the spaces'
+// inclusions (clang's isAddressSpaceSupersetOf in C).
+static bool type_test_extended(Arena* arena)
+{
+    TypeTestTally tally = { 0 };
+    TypeTestTable test;
+    if (type_test_expect(&tally, type_test_table_open(&test, 4000), "extended qualifiers", "the table can't be made"))
+    {
+        TypeTable* table = &test.table;
+        const uint32_t as1 = BUSTER_TYPE_SPACE_TARGET + 1;
+        const uint32_t as2 = BUSTER_TYPE_SPACE_TARGET + 2;
+        const TypeId int1 = type_extend(table, BUSTER_TYPE_INT, as1);
+        type_test_expect(&tally, int1 != 0 && type_kind(table, int1) == BUSTER_TYPE_KIND_QUALIFIED && type_extend(table, BUSTER_TYPE_INT, as1) == int1,
+                         "extended qualifiers", "an int's space is one type");
+        type_test_expect(&tally, type_extended_qualifiers(table, int1) == as1 && type_strip_aligned(table, int1) == BUSTER_TYPE_INT &&
+                         type_size(table, int1) == 4 && type_alignment_log2(table, int1) == 2 && type_is_complete(table, int1) &&
+                         type_arithmetic_code(table, int1) == BUSTER_TYPE_CODE_INT, "extended qualifiers", "the readers see through a space");
+        type_test_expect(&tally, type_extend(table, BUSTER_TYPE_INT | BUSTER_TYPE_CONST, as1) == (int1 | BUSTER_TYPE_CONST), "extended qualifiers",
+                         "const stays in the TypeId");
+        type_test_expect(&tally, type_extend(table, int1, as2) == type_extend(table, BUSTER_TYPE_INT, as2) && type_unextend(table, int1, BUSTER_TYPE_SPACE_MASK) == BUSTER_TYPE_INT,
+                         "extended qualifiers", "a space replaces a space, and is dropped");
+        const TypeId array = type_array(table, type_array(table, BUSTER_TYPE_INT, 3), 2);
+        const TypeId spaced = type_extend(table, array | BUSTER_TYPE_VOLATILE, as1);
+        type_test_expect(&tally, spaced == (type_array(table, type_array(table, int1, 3), 2) | BUSTER_TYPE_VOLATILE) && type_extended_qualifiers(table, spaced) == 0 &&
+                         type_object_qualifiers(table, spaced) == as1, "extended qualifiers", "an array's space is its element's");
+        const TypeId aligned = type_aligned(table, BUSTER_TYPE_INT, 4);
+        const TypeId aligned1 = type_extend(table, aligned, as1);
+        type_test_expect(&tally, type_kind(table, aligned1) == BUSTER_TYPE_KIND_ALIGNED && type_alignment_log2(table, aligned1) == 4 &&
+                         type_extended_qualifiers(table, aligned1) == as1 && type_strip_alignment(table, aligned1) == int1 &&
+                         type_strip_aligned(table, aligned1) == BUSTER_TYPE_INT, "extended qualifiers", "an aligned typedef keeps its alignment over a space");
+        const TypeId function = type_function(table, BUSTER_TYPE_INT, 0, 0, BUSTER_TYPE_FLAG_PROTOTYPE);
+        type_test_expect(&tally, type_extend(table, function, as1) == 0 && table->last_error == TYPE_ERROR_OPERAND, "extended qualifiers",
+                         "a function type takes no space");
+        type_test_expect(&tally, type_atomic(table, int1) == 0 && table->last_error == TYPE_ERROR_ATOMIC, "extended qualifiers", "_Atomic of a space");
+        // An incomplete struct's space, completed later: its size and alignment are the struct's then.
+        const TypeId record = type_tag(table, BUSTER_TYPE_KIND_STRUCT, 1);
+        const TypeId record1 = type_extend(table, record, as1);
+        const TypeMember member = type_test_member(2, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_NOT_BIT_FIELD);
+        type_complete_record(table, record, &member, 1, (TypeRecordAttributes){ 0 });
+        type_test_expect(&tally, type_size(table, record1) == 8 && type_alignment_log2(table, record1) == 3 && type_is_complete(table, record1), "extended qualifiers",
+                         "a space of a struct completed later");
+        // A garbage collection qualifier's pointer as a member lays out as the pointer; a space's member is refused.
+        const TypeId weak = type_extend(table, type_pointer(table, BUSTER_TYPE_INT), BUSTER_TYPE_GC_WEAK);
+        const TypeMember members[2] = { type_test_member(3, BUSTER_TYPE_CHAR, BUSTER_TYPE_NOT_BIT_FIELD), type_test_member(4, weak, BUSTER_TYPE_NOT_BIT_FIELD) };
+        const TypeId holder = type_test_record(table, BUSTER_TYPE_KIND_STRUCT, members, 2, (TypeRecordAttributes){ 0 });
+        type_test_expect(&tally, holder != 0 && type_size(table, holder) == 16 && type_test_offset(table, holder, 1) == 64, "extended qualifiers", "a __weak pointer member");
+        bool flexible = false;
+        const TypeMember spaced_member = type_test_member(5, int1, BUSTER_TYPE_NOT_BIT_FIELD);
+        type_test_expect(&tally, type_check_member(table, &spaced_member, true, &flexible) == TYPE_ERROR_MEMBER, "extended qualifiers", "a space's member");
+        // Compatibility: one space, another space, none; a garbage collection qualifier too; composite types keep a space
+        // inside.
+        const TypeId p1 = type_pointer(table, int1);
+        type_test_merge(&tally, table, p1, type_pointer(table, BUSTER_TYPE_INT), 0, "AS1 int * and int *");
+        type_test_merge(&tally, table, p1, type_pointer(table, type_extend(table, BUSTER_TYPE_INT, as2)), 0, "AS1 int * and AS2 int *");
+        type_test_merge(&tally, table, p1, type_pointer(table, type_extend(table, BUSTER_TYPE_INT, as1)), p1, "AS1 int * and itself");
+        type_test_merge(&tally, table, weak, type_pointer(table, BUSTER_TYPE_INT), 0, "int *__weak and int *");
+        const TypeId open1 = type_pointer(table, type_extend(table, type_incomplete_array(table, BUSTER_TYPE_INT), as1));
+        const TypeId three1 = type_pointer(table, type_extend(table, type_array(table, BUSTER_TYPE_INT, 3), as1));
+        type_test_merge(&tally, table, open1, three1, three1, "AS1 int (*)[] and AS1 int (*)[3]");
+        type_test_merge(&tally, table, open1, type_pointer(table, type_array(table, BUSTER_TYPE_INT, 3)), 0, "AS1 int (*)[] and int (*)[3]");
+        // (Canonically one type, which merges to the left one, as clang's mergeTypes.)
+        type_test_merge(&tally, table, type_pointer(table, aligned1), p1, type_pointer(table, aligned1), "a pointer to an aligned typedef's space and to the space");
+        // clang's spellings.
+        bool printed = type_test_prints(table, p1, 0, "__attribute__((address_space(1))) int *", arena);
+        printed &= type_test_prints(table, type_pointer(table, type_extend(table, BUSTER_TYPE_INT | BUSTER_TYPE_CONST, BUSTER_TYPE_SPACE_GLOBAL)), 0, "const __global int *", arena);
+        printed &= type_test_prints(table, type_extend(table, BUSTER_TYPE_INT, BUSTER_TYPE_SPACE_GLOBAL_HOST), 0, "__global_host int", arena);
+        printed &= type_test_prints(table, weak, 0, "int *__weak", arena);
+        printed &= type_test_prints(table, type_extend(table, type_pointer(table, BUSTER_TYPE_INT) | BUSTER_TYPE_CONST, as2), 0,
+                                    "int *const __attribute__((address_space(2)))", arena);
+        printed &= type_test_prints(table, three1, 0, "__attribute__((address_space(1))) int (*)[3]", arena);
+        printed &= type_test_prints(table, type_extend(table, BUSTER_TYPE_INT, BUSTER_TYPE_SPACE_TARGET), 0, "__attribute__((address_space(0))) int", arena);
+        printed &= type_test_prints(table, type_extend(table, type_pointer(table, weak), BUSTER_TYPE_GC_STRONG | as1), 0,
+                                    "int *__weak *__attribute__((address_space(1))) __strong", arena);
+        type_test_expect(&tally, printed, "extended qualifiers", "a spelling differs from clang's");
+        // The spaces' inclusions, the matrix clang 23 gives in C.
+        type_test_expect(&tally, type_space_includes(as1, as1) && !type_space_includes(as1, BUSTER_TYPE_SPACE_DEFAULT) && !type_space_includes(BUSTER_TYPE_SPACE_DEFAULT, as1) &&
+                         type_space_includes(BUSTER_TYPE_SPACE_GENERIC, BUSTER_TYPE_SPACE_DEFAULT) && type_space_includes(BUSTER_TYPE_SPACE_GENERIC, as1) &&
+                         !type_space_includes(BUSTER_TYPE_SPACE_GENERIC, BUSTER_TYPE_SPACE_CONSTANT) &&
+                         type_space_includes(BUSTER_TYPE_SPACE_GLOBAL, BUSTER_TYPE_SPACE_GLOBAL_DEVICE) &&
+                         !type_space_includes(BUSTER_TYPE_SPACE_GLOBAL_DEVICE, BUSTER_TYPE_SPACE_GLOBAL) &&
+                         !type_space_includes(BUSTER_TYPE_SPACE_DEFAULT, BUSTER_TYPE_SPACE_TARGET), "extended qualifiers", "a space's inclusion differs from clang's");
+        type_test_table_close(&test);
+    }
+    type_test_report("extended qualifiers", tally);
+    return tally.failures == 0;
+}
+
 static bool type_test_printing(Arena* arena)
 {
     TypeTestTally tally = { 0 };
@@ -4621,6 +4710,7 @@ static int run_type_tests(int argc, char** argv)
         passed = type_test_composite_chains() && passed;
         passed = type_test_scratch_exhaustion() && passed;
         passed = type_test_printing(&arena) && passed;
+        passed = type_test_extended(&arena) && passed;
         passed = type_test_clang(seed, (uint32_t)count, clang, keep) && passed;
         result = passed ? 0 : 1;
     }
