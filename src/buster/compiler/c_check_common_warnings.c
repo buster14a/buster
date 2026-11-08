@@ -1066,7 +1066,7 @@ static uint32_t check_common_emission_subtree_start(CheckCommonEmission* emissio
 
 static void check_common_emit_push(CheckCommonEmission* emission, uint32_t node, uint8_t kind);
 static void check_common_emit_run(CheckCommonEmission* emission);
-static void check_common_root_frames(CheckCommonEmission* emission, uint32_t node);
+static inline __attribute__((always_inline)) void check_common_root_frames(CheckCommonEmission* emission, uint32_t node);
 static void check_common_own(CheckCommonEmission* emission, uint32_t node);
 
 // The `expr, 0` idiom: a literal integer 0 result stays silent — it exists to sequence the left operand's
@@ -2525,7 +2525,8 @@ static void check_common_emit_root(CheckCommonEmission* emission, uint32_t node)
 // A root's visit in the roots' order, its walks' frames pushed to run next (#1447): a discarded call's result at once, an
 // unevaluated statement's comma's, conditional's or selection's call, then its walks, or its statement's unused-value
 // marker alone where it reaches nothing, or a dead root's detached static-selection arms.
-static void check_common_root_frames(CheckCommonEmission* emission, uint32_t node)
+// Always inlined, as the roots' loop's body it was (#1447); hot caller: check_common_graph_warnings, once per root.
+static inline __attribute__((always_inline)) void check_common_root_frames(CheckCommonEmission* emission, uint32_t node)
 {
     const Parser* parser = emission->parser;
     const CheckGraph* graph = &emission->input->graph;
@@ -3941,32 +3942,32 @@ struct CheckCommonRootOrder
 // is marked BUSTER_CHECK_EMITTED_DISPLACED, which the roots' order skips, and its statement expression and the nodes up to its
 // enclosing root reach the arithmetic scan. Their count, as keys of the statement expression's node and the root (a displaced
 // one's operand, the place check_common_displaced_roots gives it, so that its order among the statements is the same),
-// sorted, in `*sorted`. The vector scan finds the statement expressions (check_common_next_op), and each one's walk back over
-// its own nodes, a parse-tree climb each, is scalar: it visits no node outside a statement expression but the one it stops
-// at, so that a unit with few pays for their nodes alone (SQLite's, whose headers' macros have some, +0.0x% instructions).
+// sorted, in `*sorted`. The reader's list of statement expressions finds them, and each one's walk back over its own nodes,
+// a parse-tree climb each, is scalar: it visits no node outside a statement expression but the one it stops at, so that a
+// unit with few pays for their nodes alone.
 static uint32_t check_common_inner_roots(const Parser* parser, const CheckInput* input, const CheckStream* stream, const uint32_t* parents,
                                          const uint8_t* evaluated, uint8_t* reach, uint8_t* emitted, uint64_t* items, uint64_t* temporary,
                                          uint64_t** sorted, bool vector)
 {
-    static const CheckOp values[] = { CHECK_OP_STATEMENT_VALUE };
     const CheckGraph* graph = &input->graph;
     const uint32_t tokens = parser->tokens.count;
-    const CheckCommonOps ops = check_common_ops(values, BUSTER_ARRAY_LENGTH(values));
-    CheckCommonScan scan = { 0 };
     uint32_t count = 0;
-    // Inner statement expressions first, in node order, so that a root is its innermost one's.
-    for (uint32_t value = parser->tree.depths != NULL ? check_common_next_op(graph, &ops, &scan, vector) : graph->count; value < graph->count;
-         value = check_common_next_op(graph, &ops, &scan, vector))
+    // The reader's statement expressions (CheckInput.regions), each opened before those it holds: backwards, inner ones come
+    // first, so that a root is its innermost one's. A unit without one reads nothing.
+    for (uint32_t region = parser->tree.depths != NULL && input->token_nodes != NULL ? input->region_count : 0; region-- > 0;)
     {
-        // The statement expression's block's `}`, which a group's `)`, its node's token, closes right after.
-        const uint32_t close = graph->tokens[value];
+        // The statement expression's node, its `)`'s, and its block's `}`, which that `)` closes right after.
+        const uint32_t close = input->regions[region].closing;
+        const uint32_t value = close < input->token_count ? input->token_nodes[close] : BUSTER_CHECK_NONE;
         const uint32_t brace = close != 0 && close < tokens ? close - 1 : BUSTER_CHECK_NONE;
+        const bool statement = value < graph->count && graph->ops[value] == CHECK_OP_STATEMENT_VALUE && brace < tokens &&
+                               parser->tree.roles[brace] == PARSE_ROLE_CLOSE_BLOCK && evaluated[value] != 0;
         uint32_t enclosing = value;
-        for (uint32_t steps = 0; parents[enclosing] < graph->count && steps < graph->count; steps += 1)
+        for (uint32_t steps = 0; statement && parents[enclosing] < graph->count && steps < graph->count; steps += 1)
         {
             enclosing = parents[enclosing];
         }
-        if (brace < tokens && parser->tree.roles[brace] == PARSE_ROLE_CLOSE_BLOCK && evaluated[value] != 0 && evaluated[enclosing] != 0 &&
+        if (statement && evaluated[enclosing] != 0 &&
             stream->diagnostics[enclosing] == CHECK_DIAG_NONE)
         {
             // Its statements' nodes come just before its own, their tokens under its `}`: the walk back from it stops at the
@@ -4178,7 +4179,10 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                 next_init = initializer < initializer_count ? (uint32_t)(initializers[initializer] >> 32) : UINT32_MAX;
             }
             check_common_root_frames(&emission, node);
-            check_common_emit_run(&emission);
+            if (emission.work_count != 0)
+            {
+                check_common_emit_run(&emission);
+            }
         }
         // The plans whose first node follows every root.
         for (; initializer < initializer_count && !pp->fatal; initializer += 1)
