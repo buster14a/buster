@@ -898,7 +898,11 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
             exact = rounded < 0x1p128L && (unsigned __int128)rounded == magnitude;
             number = negative ? -rounded : rounded;
         }
-        if (exact && (isnan(number) || (long double)(__float128)number == number))
+        // The compact quad NaN representation cannot preserve the top-aligned payload of a narrower format.
+        // Refuse these conversions until the checker can represent all binary128 fraction bits.
+        const TypeId from = type_unqualified(type_strip_aligned(table, source));
+        const bool narrow_nan = value->constant_kind == CHECK_CONSTANT_FLOATING && from != BUSTER_TYPE_FLOAT128 && isnan(number);
+        if (exact && !narrow_nan && (isnan(number) || (long double)(__float128)number == number))
         {
             value->floating = number;
             value->constant_kind = CHECK_CONSTANT_FLOATING;

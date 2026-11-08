@@ -114,6 +114,14 @@ static const struct
       BUSTER_CHECK_TEST_FLOAT_CONSTANTS_HASH
       "static __float128 q[]={0,1.5,-1.5,1.5q,1.5Q,0.1,0.1f,1.5L,18446744073709551615ULL,-9223372036854775807LL,(__int128)1<<100};"
       "int tested(int n){unsigned x=2166136261u;x=hash(x,q,sizeof q);return (int)(x^(unsigned)n);}" },
+    // Narrow NaNs are not folded into the compact quad representation. Runtime conversion must still
+    // quiet signaling inputs and put their payloads in the target format's high fraction bits.
+    { "float-constants-narrow-nan-to-quad-runtime",
+      BUSTER_CHECK_TEST_FLOAT_CONSTANTS_HASH
+      "__float128 f(int n){switch(n&3){case 0:return (__float128)__builtin_nans(\"\");"
+      "case 1:return (__float128)__builtin_nan(\"1\");case 2:return (__float128)-__builtin_nansf(\"\");"
+      "default:return (__float128)__builtin_nanl(\"0x1234\");}}"
+      "int tested(int n){__float128 q=f(n);return (int)hash(2166136261u,&q,sizeof q);}" },
     { "float-constants-in-code",
       BUSTER_CHECK_TEST_FLOAT_CONSTANTS_HASH
       "int tested(int n){unsigned x=2166136261u;int k=n&3;"
