@@ -100,6 +100,11 @@ enum
     // -Wall. Its constant forms, and a conditional of integer constants, are -Wtautological-constant-compare's, on by default.
     CHECK_WARNING_ID_INT_IN_BOOL_CONTEXT = 101,
     CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE = 102,
+    // A constant a bit-field's assignment or initialization truncates (#1447, clang's AnalyzeBitFieldAssignment):
+    // -Wbitfield-constant-conversion, and its 1 to a signed one-bit bit-field, -Wsingle-bit-bitfield-constant-conversion
+    // under it, both under -Wconstant-conversion and on by default.
+    CHECK_WARNING_ID_BITFIELD_CONSTANT_CONVERSION = 103,
+    CHECK_WARNING_ID_SINGLE_BIT_BITFIELD_CONSTANT_CONVERSION = 104,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -412,7 +417,9 @@ struct CheckWarningPayload
     TypeId second_type;
     // An IdentId in source consumers; standalone graph clients need not include the interner.
     uint32_t name;
-    // Related TU parser token when the kind uses one, or NO_SOURCE. Kinds without a related location ignore it;
+    // Related TU parser token when the kind uses one, or NO_SOURCE. UNUSED_VARIABLE retains a for-header's closing
+    // parenthesis here, separate from completion at the body's end, so rejected-unit filtering finds the scope's start.
+    // Other UNUSED_VARIABLE scopes have NO_SOURCE. Kinds without a related location ignore it;
     // their zero-initialized field is also a valid token whenever a primary can be published.
     uint32_t token;
     uint32_t data;

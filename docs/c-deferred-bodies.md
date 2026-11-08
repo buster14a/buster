@@ -286,7 +286,9 @@ sees (complete, size, transparent) source order's.
 The reader merges what source order makes at a body's position. A unit goes to
 source order, said with the reason:
 
-- the top level reports an error, or its walk stops;
+- the top level reports an error, or its walk stops (a recovered error,
+  #1447, is merged: see "Semantic error recovery" in
+  [c-checker.md](c-checker.md));
 - the unit has overloadable functions, whose sets later declarations join;
 - a body's declaration with linkage (`extern`, a function at block scope)
   that changes what later declarations see (below): its entity's first
@@ -296,7 +298,8 @@ source order, said with the reason:
   follows it: a file-scope union a block's typedef makes so, or a definition's
   parameter-list union its body defines so;
 - a body's walk reports an error (a later phase's error is merged like any
-  other: the phases run on the merged state);
+  other: the phases run on the merged state; so is an error the walk recovers
+  from, which the body's result carries);
 - a table runs out of room.
 
 A body's declaration with linkage is the file-scope entity's, and source

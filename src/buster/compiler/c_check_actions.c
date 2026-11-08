@@ -50,6 +50,10 @@ typedef enum CheckFault
 #define BUSTER_CHECK_FLOAT_LITERAL 0x02u
 #define BUSTER_CHECK_BIT_FIELD 0x04u
 #define BUSTER_CHECK_REGISTER 0x08u
+// A register object's own name, unparenthesized (#1447): clang's DefaultFunctionArrayConversion rejects the decay of a
+// register array only when it is a DeclRefExpr, at that name; a parenthesized name, a member array of a register record
+// and a subscript's array decay quietly, though the & operator still rejects them (BUSTER_CHECK_REGISTER).
+#define BUSTER_CHECK_REGISTER_NAME 0x1000000u
 #define BUSTER_CHECK_SIDE_EFFECT 0x10u
 #define BUSTER_CHECK_ICE_UNEVALUATED 0x20u
 #define BUSTER_CHECK_NULL_POINTER 0x40u
@@ -893,11 +897,40 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
             value->constant_kind = CHECK_CONSTANT_NONE;
         }
     }
-    else if (target_kind == BUSTER_TYPE_KIND_FLOATING && value->constant_kind == CHECK_CONSTANT_FLOATING &&
-             type_unqualified(type_strip_aligned(table, source)) == BUSTER_TYPE_FLOAT128 &&
-             type_unqualified(type_strip_aligned(table, destination)) == BUSTER_TYPE_FLOAT128)
+    else if (target_kind == BUSTER_TYPE_KIND_FLOATING &&
+             type_unqualified(type_strip_aligned(table, destination)) == BUSTER_TYPE_FLOAT128 &&
+             (value->constant_kind == CHECK_CONSTANT_INTEGER || value->constant_kind == CHECK_CONSTANT_FLOATING))
     {
-        // A __float128 constant (a constant builtin's, check_action_quad_bits) to its own type, which changes nothing.
+        // A __float128 constant from an integer or a narrower floating constant (#1250). CheckValue holds a long
+        // double, so accept only a value that conversion preserves exactly; a 128-bit integer may not be exact.
+        // A __float128 source (a constant builtin's, check_action_quad_bits) to its own type changes nothing.
+        bool exact = true;
+        long double number = value->floating;
+        if (value->constant_kind == CHECK_CONSTANT_INTEGER)
+        {
+            const unsigned __int128 mask = check_action_mask(source_width);
+            const unsigned __int128 bits = value->integer & mask;
+            const bool negative = source_signed && (bits >> (source_width - 1)) != 0;
+            const unsigned __int128 magnitude = negative ? (0 - bits) & mask : bits;
+            const long double rounded = (long double)magnitude;
+            // A 128-bit integer is exact here only when its magnitude survives the long double exactly; a value that
+            // rounds to 2^128 is past the cast's range and is refused.
+            exact = rounded < 0x1p128L && (unsigned __int128)rounded == magnitude;
+            number = negative ? -rounded : rounded;
+        }
+        // The compact quad NaN representation cannot preserve the top-aligned payload of a narrower format.
+        // Refuse these conversions until the checker can represent all binary128 fraction bits.
+        const TypeId from = type_unqualified(type_strip_aligned(table, source));
+        const bool narrow_nan = value->constant_kind == CHECK_CONSTANT_FLOATING && from != BUSTER_TYPE_FLOAT128 && isnan(number);
+        if (exact && !narrow_nan && (isnan(number) || (long double)(__float128)number == number))
+        {
+            value->floating = number;
+            value->constant_kind = CHECK_CONSTANT_FLOATING;
+        }
+        else
+        {
+            check_action_set_fault(value, CHECK_FAULT_UNSUPPORTED_CONSTANT, node);
+        }
     }
     else if (target_kind == BUSTER_TYPE_KIND_FLOATING && (value->constant_kind == CHECK_CONSTANT_INTEGER || value->constant_kind == CHECK_CONSTANT_FLOATING))
     {
@@ -970,7 +1003,7 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
     }
     value->type = destination;
     value->category = CHECK_RVALUE;
-    value->flags &= ~(BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER | BUSTER_CHECK_NULL_POINTER);
+    value->flags &= ~(BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME | BUSTER_CHECK_NULL_POINTER);
     if (!target_integer)
     {
         value->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM);
@@ -1017,7 +1050,7 @@ static CheckValue check_action_operand_value(TypeTable* table, const CheckAction
     const uint8_t kind = type_kind(table, plain);
     if (__builtin_expect(type_kind_is_array(kind), 0))
     {
-        if ((value.flags & BUSTER_CHECK_REGISTER) != 0)
+        if ((value.flags & BUSTER_CHECK_REGISTER_NAME) != 0)
         {
             check_action_diagnose(result, CHECK_DIAG_REGISTER_ADDRESS, index);
         }
@@ -1030,7 +1063,7 @@ static CheckValue check_action_operand_value(TypeTable* table, const CheckAction
         {
             value.type = pointer;
             value.category = CHECK_RVALUE;
-            value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER);
+            value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME);
             if (!action->context.constant_evaluated && (value.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 && value.constant_kind == CHECK_CONSTANT_ADDRESS)
             {
                 value.constant_kind = CHECK_CONSTANT_NONE;
@@ -1088,7 +1121,7 @@ static CheckValue check_action_operand_value(TypeTable* table, const CheckAction
         }
         value.type = type_conversion_operand(table, value.type);
         value.category = CHECK_RVALUE;
-        value.flags &= ~(BUSTER_CHECK_REGISTER | BUSTER_CHECK_VOLATILE_PART);
+        value.flags &= ~(BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME | BUSTER_CHECK_VOLATILE_PART);
         conversion->type = value.type;
         conversion->flags |= BUSTER_CHECK_CONVERT_LVALUE;
     }
@@ -2127,6 +2160,11 @@ static void check_action_pointer_arithmetic(TypeTable* table, const CheckAction*
             result->value.category = action->op == CHECK_OP_SUBSCRIPT ? CHECK_LVALUE : CHECK_RVALUE;
             result->value.flags |= pointer.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_RESTRICTED | BUSTER_CHECK_NONNULL_ADDRESS);
             result->value.flags |= action->op == CHECK_OP_SUBSCRIPT && (pointer.flags & BUSTER_CHECK_INACTIVE_UNION_ADDRESS) != 0 ? BUSTER_CHECK_INACTIVE_UNION_READ : 0;
+            // A subscript of a register array its decay didn't reject (BUSTER_CHECK_REGISTER_NAME) is a register object's
+            // element, whose address clang's & operator rejects, as getPrimaryDecl climbs an array's subscripts.
+            const CheckValue* array = action->operands + (reverse ? 1 : 0);
+            result->value.flags |= action->op == CHECK_OP_SUBSCRIPT && (array->flags & (BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME)) == BUSTER_CHECK_REGISTER &&
+                                   type_kind_is_array(check_action_kind(table, array->type)) ? BUSTER_CHECK_REGISTER : 0;
             uint64_t index_bits = 0;
             const uint64_t stride = check_action_pointer_stride(table, pointer.type);
             if (!check_action_runtime_size(table, type_element(table, pointer.type)) && pointer.constant_kind == CHECK_CONSTANT_ADDRESS &&
@@ -2629,7 +2667,7 @@ static void check_action_update(TypeTable* table, const CheckAction* action, Che
                 result->value = before;
             }
             result->value.category = CHECK_RVALUE;
-            result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_REGISTER);
+            result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME);
             result->value.flags |= BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_MODIFICATION;
             if (result->value.fault != CHECK_FAULT_NONE)
             {

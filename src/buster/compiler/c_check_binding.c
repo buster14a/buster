@@ -121,7 +121,8 @@ static bool check_input_parameter_marks(const CheckInput* input, const Parser* p
     return valid;
 }
 
-// Nearest statement terminator, or scope-closing brace, including `token` itself (#1378). `parents` is a private copy
+// Nearest statement terminator, or scope's closing brace/for-header parenthesis, including `token` itself (#1378, #1784).
+// A for-header's subtree ends with its body, where the scope completes. `parents` is a private copy
 // of the parser's count entries, used for this predicate alone, or NULL for an uncached walk. With a copy, compress
 // each walked path to its answer: a comma chain
 // shared by many declarators is visited once, without a new retained token column. Missing parents and cycles compress
@@ -139,7 +140,7 @@ static uint32_t check_input_cached_ancestor(const Parser* parser, uint32_t token
     while (ancestor < count && steps < count)
     {
         const uint8_t role = roles[ancestor];
-        found = scope ? role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_COMPOUND_BODY :
+        found = scope ? role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_COMPOUND_BODY || role == PARSE_ROLE_CLOSE_FOR :
                         role == PARSE_ROLE_TERMINATOR;
         if (found)
         {
@@ -186,7 +187,7 @@ static uint32_t check_input_operation_events(const CBindings* events, uint8_t op
 }
 
 // -Wunused-variable, -Wunused-function and -Wunused-parameter facts, from the resolved binding events: a declaration
-// no use names. The declaration's own body decides the completion, as clang reports it after the function.
+// no use names. Its lexical scope decides completion; a for initializer's scope includes the entire loop statement.
 // Its three passes act at declare events alone, and read the chains' columns only at them: the vector path visits the
 // declare events (`list`, `visited` of them, check_input_operation_events), where it visited every event, most of them
 // uses, in each pass, with a branch on each one's operation; the scalar path, its twin, visits every event (`list` null
@@ -200,6 +201,8 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
     const uint32_t count = parser->tokens.count;
     uint32_t* scope_parents = NULL;
     uint64_t scope_work = 0;
+    CheckWarningBuffer pending = { .arena = reader->scratch };
+    bool pending_for = false;
     uint32_t* chain_first = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count);
     uint32_t* chain_definition = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count);
     // A declaration inherits an earlier declaration's unused/used mark, as clang's redeclarations do: an attribute on
@@ -260,10 +263,13 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
         const bool main_file = !file_scope || check_input_in_main_file(reader, token);
         const bool const_variable = file_scope && check_input_type_const(reader->types, reader->declared_types[token]);
         const bool declaration_used = parameter || local ? used_tokens[token] != 0 : used[event] != 0;
+        // A block's declaration with linkage (an extern object, any function) belongs to the translation unit, not the
+        // function, in clang (its semantic context, which ShouldDiagnoseUnusedDecl reads), so it is never unused; a
+        // local's is one without linkage (#1447).
         const bool selected = events->operation[event] == C_BINDING_DECLARE && events->key[event] / events->name_capacity == C_BINDING_ORDINARY &&
                               token < count && !implicit && !inline_function && !declaration_used && !check_input_unused_suppressed(output, token, kind) &&
                               chain_marked[event] == 0 && main_file &&
-                              (parameter || local || (token < count && check_input_linkage(output->declaration_bits, token) == 1));
+                              (parameter || check_input_linkage(output->declaration_bits, token) == (local ? 0u : 1u));
         const uint32_t first = events->operation[event] == C_BINDING_DECLARE ? chain_first[event] : event;
         const uint32_t chosen = chain_definition[first] != 0 ? chain_definition[first] : events->declaration[first];
         const uint32_t id = kind == C_BINDING_FUNCTION ? CHECK_WARNING_ID_UNUSED_FUNCTION :
@@ -273,10 +279,10 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
                                     parameter ? CHECK_WARNING_EVENT_UNUSED_PARAMETER : CHECK_WARNING_EVENT_UNUSED_VARIABLE;
         if (selected && token == chosen && !reported[token])
         {
-            // Clang publishes a declaration's unused warning when the scope holding it completes — the nearest
-            // enclosing `}` — rather than at its function's end, so an inner block's warnings order before the
-            // function-level ones. Only block, body and compound braces close a scope: a `struct S { } s`
-            // declaration walks past its type's own braces without stopping. A file-scope entity — an unused
+            // Clang publishes a declaration's unused warning when its scope completes: the nearest enclosing block,
+            // body or compound brace, or the end of a for statement whose initializer declares it. The for-header's
+            // `)` anchors that scope; its subtree ends after the entire body, including unbraced/nested controls.
+            // A `struct S { } s` declaration walks past its type's own braces. A file-scope entity — an unused
             // function or a `static` object — waits for the translation unit's end, where every later
             // declaration could still have used it; sorting there keeps declaration order.
             uint32_t closing = BUSTER_CHECK_NONE;
@@ -296,17 +302,27 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
                 const uint32_t parent = parser->tree.parents[token];
                 closing = parent != token ? check_input_cached_ancestor(parser, parent, scope_parents, true, &scope_work) : BUSTER_CHECK_NONE;
             }
+            const bool for_scope = closing < count && parser->tree.roles[closing] == PARSE_ROLE_CLOSE_FOR;
+            const uint32_t completion = for_scope ? reader->ends[closing] : closing;
             const CheckWarningEvent warning = {
                 .id = id,
                 .kind = event_kind,
                 .token = token,
                 .source = BUSTER_CHECK_WARNING_NO_SOURCE,
                 .flags = BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
-                .completion_kind = closing < count ? CHECK_WARNING_COMPLETE_AFTER_DELIMITER : CHECK_WARNING_COMPLETE_TU_END,
-                .completion = closing < count ? closing : BUSTER_CHECK_NONE,
-                .payload = { .name = parser->tokens.names[token] },
+                .completion_kind = completion < count ? CHECK_WARNING_COMPLETE_AFTER_DELIMITER : CHECK_WARNING_COMPLETE_TU_END,
+                .completion = completion < count ? completion : BUSTER_CHECK_NONE,
+                .payload = {
+                    .name = parser->tokens.names[token],
+                    .token = event_kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE && for_scope ? closing : BUSTER_CHECK_WARNING_NO_SOURCE,
+                },
             };
-            if (!valid || !check_input_warning_event(reader, &warning, NULL, 0))
+            // From the first for initializer, stage this pass's remaining unused events privately: nested scopes
+            // can share a statement end and must publish inner first. Their declarations follow that initializer;
+            // no earlier warning can share its completion. Already published views remain immutable.
+            pending_for |= for_scope;
+            valid = valid && (pending_for ? check_warning_append(&pending, &warning, NULL, 0) : check_input_warning_event(reader, &warning, NULL, 0));
+            if (!valid)
             {
                 output->resource = true;
             }
@@ -315,6 +331,26 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
                 reported[token] = 1;
             }
         }
+    }
+    const uint32_t warnings = pending.count;
+    const CheckWarningEvent* const staged = pending.events;
+    uint64_t* keys = valid && warnings > 1 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, (uint64_t)warnings * 2) : NULL;
+    valid &= warnings <= 1 || keys != NULL;
+    uint32_t varying = 0;
+    for (uint32_t i = 0; valid && warnings > 1 && i < warnings; i += 1)
+    {
+        const CheckWarningEvent* event = staged + i;
+        const uint32_t scope = event->payload.token != BUSTER_CHECK_WARNING_NO_SOURCE ? event->payload.token : event->completion;
+        // Equal completions have nested scopes: the later anchor is the inner one. Other boundaries are sorted by
+        // the diagnostic collector. Stable keys preserve a scope's declaration order and translation-unit order.
+        const uint32_t order = scope < count ? count - scope : count;
+        keys[i] = (uint64_t)order << 32 | i;
+        varying |= order;
+    }
+    const uint64_t* ordered = valid && warnings > 1 ? c_bindings_sort(keys, keys + warnings, warnings, !BUSTER_SCALAR_PATH(parser->options.scalar), varying) : NULL;
+    for (uint32_t i = 0; valid && i < warnings; i += 1)
+    {
+        valid = check_input_warning_event(reader, staged + (ordered != NULL ? (uint32_t)ordered[i] : i), NULL, 0);
     }
     output->resource |= !valid;
 }
@@ -425,21 +461,34 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
                         // A use binds the whole declaration chain: a prototype and its definition are one entity,
                         // and a use of either makes every declaration in the chain used. A declaration that an earlier
                         // use's walk marked ends the walk: that walk went on from it to the chain's start, as every
-                        // declaration of a chain has the key and the depth of the walk's first (#529).
+                        // declaration of a chain has the key and the depth of the walk's first (#529). A block's
+                        // declaration with linkage redeclares the outer one with linkage it hides, so the walk goes on
+                        // out to it: `static int s; void f(void) { extern int s; (void)s; }` uses s, as clang marks the
+                        // entity's every redeclaration (#1447).
+                        // (Linkage is read only where the walk would cross a depth, which few chains do.)
                         uint32_t at = handle;
+                        uint32_t depth = events->depth[handle - 1];
+                        uint32_t last = BUSTER_CHECK_NONE;
                         for (uint32_t steps = 0; at != 0 && steps < events->count; steps += 1)
                         {
                             const uint32_t declaration = at - 1;
+                            const uint32_t token = events->declaration[declaration];
+                            const bool crossing = events->depth[declaration] != depth;
+                            const bool outward = crossing && events->depth[declaration] < depth && last < count && token < count &&
+                                                 check_input_linkage(output->declaration_bits, last) != 0 &&
+                                                 check_input_linkage(output->declaration_bits, token) != 0;
                             if (events->operation[declaration] != C_BINDING_DECLARE || events->key[declaration] != events->key[handle - 1] ||
-                                events->depth[declaration] != events->depth[handle - 1] || used[declaration] != 0)
+                                (crossing && !outward) || used[declaration] != 0)
                             {
                                 break;
                             }
                             used[declaration] = 1;
-                            if (events->declaration[declaration] < count)
+                            if (token < count)
                             {
-                                used_tokens[events->declaration[declaration]] = 1;
+                                used_tokens[token] = 1;
                             }
+                            depth = events->depth[declaration];
+                            last = token;
                             at = events->previous[declaration];
                         }
                     }

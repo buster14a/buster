@@ -22,7 +22,7 @@ static const char* check_driver_action_message(CheckDiagnostic diagnostic)
         case CHECK_DIAG_INCOMPATIBLE: result = "incompatible operand or conversion types"; break;
         case CHECK_DIAG_INCOMPLETE: result = "incomplete type is not permitted here"; break;
         case CHECK_DIAG_BIT_FIELD: result = "invalid use of a bit-field"; break;
-        case CHECK_DIAG_REGISTER_ADDRESS: result = "address of register object requested"; break;
+        case CHECK_DIAG_REGISTER_ADDRESS: result = "address of register variable requested"; break;
         case CHECK_DIAG_MEMBER: result = "no such member in the record type"; break;
         case CHECK_DIAG_CALL: result = "called object is not a function or function pointer"; break;
         case CHECK_DIAG_ARGUMENT_COUNT: result = "incorrect number of arguments"; break;
@@ -216,6 +216,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_MS_STRUCT_ALIGNMENT: result = "ms_struct bit-field storage with non-power-of-two size is not supported"; break;
         case CHECK_INPUT_INTERRUPT_HANDLER: result = "x86-64 'interrupt' attribute only applies to functions that have a 'void' return type"; break;
         case CHECK_INPUT_INTERRUPT_CALLED: result = "interrupt service routine cannot be called directly"; break;
+        case CHECK_INPUT_BLOCK_EXTERN_INITIALIZER: result = "declaration of block scope identifier with linkage cannot have an initializer"; break;
         case CHECK_INPUT_DIAGNOSE_IF_ERROR: result = "diagnose_if attribute error"; break;
         case CHECK_INPUT_ENABLE_IF_CALL: result = "no matching function for call"; break;
         case CHECK_INPUT_ENABLE_IF_ADDRESS: result = "cannot take address of function because it has one or more non-tautological enable_if conditions"; break;
@@ -289,6 +290,8 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_PARAMETER_INTEGER: snprintf(text, capacity, "'%s' attribute requires parameter %u to be an integer constant", parsed, number); break;
         case CHECK_ARGUMENT_EXT_VECTOR_INTEGER: snprintf(text, capacity, "ext_vector_type attribute requires an integer constant"); break;
         case CHECK_ARGUMENT_ALIGNMENT_POWER: snprintf(text, capacity, "%s", check_driver_alignment_power); break;
+        case CHECK_ARGUMENT_ALIGNAS_INTEGER_CONSTANT: snprintf(text, capacity, "'aligned' attribute requires integer constant"); break;
+        case CHECK_ARGUMENT_ALIGNMENT_TOO_LARGE: snprintf(text, capacity, "requested alignment must be 4294967296 bytes or smaller"); break;
         case CHECK_ARGUMENT_ZERO_VECTOR: snprintf(text, capacity, "zero vector size"); break;
         case CHECK_ARGUMENT_REGPARM_RANGE: snprintf(text, capacity, "'regparm' parameter must be between 0 and 6 inclusive"); break;
         case CHECK_ARGUMENT_OUT_OF_BOUNDS: snprintf(text, capacity, "'%s' attribute parameter %u is out of bounds", parsed, number); break;
@@ -636,6 +639,10 @@ static const char* check_driver_input_report_message(const CheckInput* input, co
            section != NULL ? section->text.pointer : optimize != NULL ? optimize->text.pointer : fp != NULL ? check_input_fp_error_message(fp->error) :
            layout != NULL ? "this pragma cannot appear in struct declaration" :
            report->message == CHECK_INPUT_INTERRUPT_HANDLER ? check_driver_interrupt_message(report->detail) :
+           report->message == CHECK_INPUT_DIRECT_INITIALIZER_ARRAY && report->detail == CHECK_INPUT_ARRAY_LIST_WIDE ?
+           "array initializer must be an initializer list or wide string literal" :
+           report->message == CHECK_INPUT_DIRECT_INITIALIZER_ARRAY && report->detail == CHECK_INPUT_ARRAY_LIST_ONLY ?
+           "array initializer must be an initializer list" :
            report->message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (report->detail & 0xffu) == CHECK_ARGUMENT_ALIGNMENT_POWER ?
            check_driver_alignment_power : check_driver_input_message(report->message);
 }
@@ -2028,6 +2035,74 @@ static const char* check_driver_pointer_conversion_message(const Parser* parser,
     return result;
 }
 
+// A folded left shift's -Wshift-negative-value and -Wshift-overflow as clang's DiagnoseBadShiftValues words them: a
+// negative left operand's undefined shift, or the significant bits the nonnegative result needs, ResultBits =
+// significant bits of the left operand (its bit length and a sign bit) plus the count, printed as an unsigned
+// hexadecimal of that width, against the bits of the left operand's (promoted) type, its typedef spelled as written.
+// A shift whose node or operands the stream doesn't hold keeps the generic text.
+static const char* check_driver_shift_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                              const TypeTable* types, CheckWarningSpelling* spell, uint32_t token, uint32_t warning, Arena* scratch)
+{
+    const char* result = check_diagnostic_message(warning);
+    const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+    const CheckGraph* graph = stream != NULL ? stream->graph : NULL;
+    const bool shift = types != NULL && graph != NULL && node < stream->count && graph->ops[node] == CHECK_OP_SHIFT_LEFT &&
+                       graph->operand0[node] < stream->count && graph->operand1[node] < stream->count;
+    if (warning == CHECK_WARNING_SHIFT_NEGATIVE_VALUE)
+    {
+        result = "shifting a negative signed value is undefined";
+    }
+    else if (shift)
+    {
+        const uint32_t left = graph->operand0[node];
+        const uint32_t right = graph->operand1[node];
+        const TypeId type = check_stream_type(stream, node);
+        uint32_t width = 0;
+        bool is_signed = false;
+        uint32_t count_width = 0;
+        bool count_signed = false;
+        if (check_action_integer_type(types, type, &width, &is_signed) && width != 0 && width <= 128 &&
+            check_action_integer_type(types, check_stream_type(stream, right), &count_width, &count_signed) &&
+            check_stream_constant_kind(stream, left) == CHECK_CONSTANT_INTEGER && check_stream_constant_kind(stream, right) == CHECK_CONSTANT_INTEGER)
+        {
+            const unsigned __int128 value = check_stream_value(stream, left).integer & check_action_mask(width);
+            const uint32_t count = (uint32_t)(check_stream_value(stream, right).integer & 0xffu);
+            const uint32_t length = value == 0 ? 0 : (uint64_t)(value >> 64) != 0 ? 128u - (uint32_t)__builtin_clzll((uint64_t)(value >> 64)) :
+                                                                                   64u - (uint32_t)__builtin_clzll((uint64_t)value);
+            // The hexadecimal digits of value << count: those of value << (count % 4), three 64-bit limbs wide, then
+            // count / 4 zeros.
+            const uint32_t nibble = count % 4u;
+            uint64_t limbs[3] = { (uint64_t)value, (uint64_t)(value >> 64), 0 };
+            limbs[2] = nibble != 0 ? limbs[1] >> (64u - nibble) : 0;
+            limbs[1] = nibble != 0 ? limbs[1] << nibble | limbs[0] >> (64u - nibble) : limbs[1];
+            limbs[0] = limbs[0] << nibble;
+            char digits[64 + 1];
+            uint32_t used = 0;
+            bool leading = true;
+            for (uint32_t i = 48; i != 0; i -= 1)
+            {
+                const uint32_t digit = (uint32_t)(limbs[(i - 1) / 16] >> (((i - 1) % 16) * 4)) & 0xfu;
+                leading = leading && digit == 0 && i != 1;
+                if (!leading)
+                {
+                    digits[used] = "0123456789ABCDEF"[digit];
+                    used += 1;
+                }
+            }
+            digits[used] = 0;
+            const uint32_t spelling = check_stream_type(stream, left) == type ? check_input_operand_type_spelling(input, parser, left) : 0;
+            const String8 name = check_driver_warning_type(parser, pp, input, types, spell, scratch, type, spelling);
+            if (name.length != 0)
+            {
+                result = check_warning_text(scratch, "signed shift result (0x%s%.*s) requires %u bits to represent, but %.*s only has %u bits", digits,
+                                            (int)(count / 4u), "00000000000000000000000000000000000000000000000000000000000000000000",
+                                            length + count + 1u, (int)name.length, name.pointer, width);
+            }
+        }
+    }
+    return result;
+}
+
 // A legacy warning's command-line and source policy: the same sparse group mapping the event warnings use, so
 // -Wno-NAME, -Werror=NAME and -Wno-everything reach the dense warning bits too.
 static CheckWarningSeverity check_driver_legacy_severity(Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t warning, bool default_ignored)
@@ -2047,8 +2122,9 @@ static CheckWarningSeverity check_driver_legacy_severity(Preprocessor* pp, const
 // - ActOnEndOfTranslationUnit gives no unused file-scope declaration's warning once an error has occurred, so a rejected
 //   unit's unused functions' and file-scope objects' warnings, which complete at the unit's end, are left out;
 // - ActOnPopScope gives no unused-variable warning of a scope in which an error occurred (Scope's
-//   hasUnrecoverableErrorOccurred), from its `{` to its `}`, nested scopes' errors among them; a function body's scope is
-//   open from its definition's start, as ActOnStartOfFunctionDef handles the definition's declarator inside it.
+//   hasUnrecoverableErrorOccurred), from its opening to its end, nested scopes' errors among them; a for initializer's
+//   scope runs from its header through the body's end, and a function body's scope opens at its definition's start,
+//   as ActOnStartOfFunctionDef handles the definition's declarator inside it.
 // `rejected` says the unit has an error; `errors`, where its reports locate some, counts them before each token (a prefix
 // count, check_driver_error_counts), else is NULL. A unit without an error publishes its events as they are, with no copy;
 // another publishes a copy in `scratch`. Whether there was room.
@@ -2069,9 +2145,14 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
             const bool unused = event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION;
             const bool unit_end = unused && event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
             const uint32_t close = unused && event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER ? event->completion : count;
-            // The scope's `{`, whose parent is its `}`: before the declaration, within the scope.
+            // The scope's opening delimiter, before the declaration. A for initializer retains its header's `)`
+            // separately from completion at the statement's end; a later error in the enclosing block isn't its own.
+            const uint32_t anchor = event->payload.token;
+            const bool for_scope = event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE && anchor < count && parser->tree.roles[anchor] == PARSE_ROLE_CLOSE_FOR;
+            const uint32_t delimiter = for_scope ? anchor : close;
+            const uint8_t opening_kind = for_scope ? PARSE_KIND_L_PAREN : PARSE_KIND_L_BRACE;
             uint32_t open = close < count && event->token < close ? event->token : 0;
-            while (open > 0 && !(parser->tree.parents[open] == close && parser->tokens.kinds[open] == PARSE_KIND_L_BRACE))
+            while (open > 0 && !(parser->tree.parents[open] == delimiter && parser->tokens.kinds[open] == opening_kind))
             {
                 open -= 1;
             }
@@ -2830,15 +2911,18 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
         {
             warnings[warning_count] = UINT64_MAX;
         }
-        // Runtime constant-count groups will join the common arithmetic walk's new count diagnostics (#1394).
-        // Keep their original records queued until that walk is ready, so a failed program retains every group.
-        // Only units with count warnings allocate this sparse handoff, with room for both bits at each token.
+        // Runtime constant-count groups will join the common arithmetic walk's new count diagnostics (#1394), and so will
+        // a folded shift's negative left operand, clang's runtime -Wshift-negative-value too, which the walk drops where the
+        // shift is unevaluated (check_common_shift_unreached). Keep their original records queued until that walk is ready,
+        // so a failed program retains every group. Only units with these warnings allocate this sparse handoff, with room
+        // for each bit at each token.
         if (shifts != NULL && pp->options.collect_diagnostics)
         {
             uint64_t capacity = 0;
             for (uint32_t i = 0; i < warning_count; i += 1)
             {
-                const uint32_t flags = (uint32_t)(warnings[i] >> 16) & (CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW);
+                const uint32_t flags = (uint32_t)(warnings[i] >> 16) &
+                                       (CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW | CHECK_WARNING_SHIFT_NEGATIVE_VALUE);
                 capacity += (uint32_t)__builtin_popcount(flags);
             }
             shifts->records = capacity != 0 && capacity <= UINT32_MAX ? arena_push_array(&pp->arena, capacity, sizeof(CheckCommonShiftWarning),
@@ -2936,23 +3020,40 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         uint32_t located = token;
                         const char* message = warning_flag == CHECK_WARNING_POINTER_SIGN || warning_flag == CHECK_WARNING_DISCARDED_QUALIFIERS ?
                                               check_driver_pointer_conversion_message(parser, pp, input, stream, types, &spell, token, warning_flag, &located, scratch) :
+                                              (warning_flag & (CHECK_WARNING_SHIFT_NEGATIVE_VALUE | CHECK_WARNING_SHIFT_OVERFLOW)) != 0 ?
+                                              check_driver_shift_message(parser, pp, input, stream, types, &spell, token, warning_flag, scratch) :
                                               check_diagnostic_message(warning_flag);
-                        PPDiagnosticRecord* previous = pp->diagnostic_last;
-                        pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[located], publication, phase, "%s%s", message, suffix);
                         const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
-                        if (shifts != NULL && shifts->records != NULL && phase == PP_DIAGNOSTIC_DEFERRED &&
-                            (warning_flag & (CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW)) != 0 &&
-                            node < input->graph.count && check_common_shift_op(input->graph.ops[node]) &&
-                            pp->diagnostic_last != previous)
+                        const bool stashed = shifts != NULL && shifts->records != NULL && phase == PP_DIAGNOSTIC_DEFERRED &&
+                                             (warning_flag & (CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW |
+                                                              CHECK_WARNING_SHIFT_NEGATIVE_VALUE)) != 0 &&
+                                             node < input->graph.count && check_common_shift_op(input->graph.ops[node]);
+                        if (stashed)
                         {
-                            if (shifts->count < shifts->capacity)
+                            // The common walk reports it (CheckCommonShiftWarnings), or drops it where unevaluated.
+                            const char* text = check_warning_text(scratch, "%s%s", message, suffix);
+                            const uint64_t length = text != NULL ? strlen(text) : 0;
+                            char* owned = text != NULL && shifts->count < shifts->capacity ? arena_push(&pp->arena, length + 1u, 1) : NULL;
+                            if (owned != NULL)
                             {
-                                shifts->records[shifts->count++] = (CheckCommonShiftWarning){ token, pp->diagnostic_last };
+                                memcpy(owned, text, length + 1u);
+                                shifts->records[shifts->count++] = (CheckCommonShiftWarning){
+                                    .token = token,
+                                    .source = parser->tokens.sources[located],
+                                    .publication = publication,
+                                    .severity = (uint8_t)pp_severity,
+                                    .phase = (uint8_t)phase,
+                                    .message = owned,
+                                };
                             }
                             else
                             {
                                 shifts_ready = false;
                             }
+                        }
+                        else
+                        {
+                            pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[located], publication, phase, "%s%s", message, suffix);
                         }
                     }
                 }
@@ -3635,9 +3736,10 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                 }
                             }
                         }
-                        else if (phase == 0 && (kind == CHECK_INPUT_REDECLARATION || kind == CHECK_INPUT_CONFLICTING_TYPES) && token < count &&
-                                 input->reports[index].detail > CHECK_REDECLARATION_GENERIC &&
-                                 input->reports[index].detail <= CHECK_REDECLARATION_KIND)
+                        else if (phase == 0 && token < count &&
+                                 (((kind == CHECK_INPUT_REDECLARATION || kind == CHECK_INPUT_CONFLICTING_TYPES) &&
+                                   input->reports[index].detail > CHECK_REDECLARATION_GENERIC && input->reports[index].detail <= CHECK_REDECLARATION_KIND) ||
+                                  (kind == CHECK_INPUT_ENUMERATOR_REDEFINITION && input->reports[index].note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION)))
                         {
                             const CheckInputReport* conflict = input->reports + index;
                             const uint32_t previous = conflict->note_token;
@@ -5958,6 +6060,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 ready = ready && check_input_packed_finalize(&input, checking, &types, &stream, scratch);
                 ready = ready && check_input_warning_graph(&input, checking, &types, &stream, output_arena, scratch);
                 check_clock_mark(stage_clock, CHECK_STAGE_CHECK_EXPRESSIONS);
+                if (ready && input.recovered_published != 0)
+                {
+                    // An array's recovered "array initializer must be an initializer list" whose initializer is no valid
+                    // value, which clang reports alone (#1447).
+                    check_init_listless_drop(&input, checking, &stream, &types, scratch);
+                }
                 if (ready)
                 {
                     // The musttail returns' errors (c_check_musttail.c), each clang's, with the three below.
@@ -6050,29 +6158,57 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             earlier.token = initializers.token;
                             earlier.completion = initializers.completion;
                         }
-                        if ((diagnosed && earlier.status != CHECK_INIT_OK) || earlier.status == CHECK_INIT_RESOURCE ||
-                            (!diagnosed && initializers.status != CHECK_INIT_OK))
+                        // The other declarations' failed initializers (#1447, phase 2), which clang reports too: room for
+                        // two diagnostics each beside the first's.
+                        const uint32_t others = diagnosed && earlier.status != CHECK_INIT_OK && earlier.status != CHECK_INIT_RESOURCE ? earlier.failure_count : 0;
+                        CheckDriverDiagnostic* widened = others > 1 ?
+                            BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverDiagnostic, 5 + (uint64_t)musttails.count + 2 * (uint64_t)others) : NULL;
+                        if (widened != NULL)
                         {
-                            // A subobject's failed conversion is clang's words of it (#147), at its place.
-                            uint32_t place = earlier.token;
-                            const char* conversion = earlier.status == CHECK_INIT_INVALID ?
-                                check_driver_initializer_conversion(checking, checking_pp, &input, &stream, &types, earlier.failed_type, earlier.failed_source - 1,
-                                                                    earlier.failed_declaration, earlier.token, &place, output_arena) : NULL;
-                            const char* message = conversion != NULL ? conversion : earlier.status == CHECK_INIT_MEMBER ?
-                                check_driver_initializer_field_message(checking, checking_pp, &input, &types, earlier.failed_type, earlier.token, output_arena) :
-                                check_driver_initializer_message(earlier.status);
-                            place = conversion != NULL ? place : earlier.token;
-                            additional[additional_count++] = (CheckDriverDiagnostic){ place,
-                                message != NULL ? message : "initializer checking capacity exhausted", place, earlier.completion };
-                            // A static object's braced subobject whose conversion clang warns of and makes, where its value is
-                            // then no constant: clang's second error at it (check_init_value_nonconstant, #147).
-                            if (conversion != NULL && earlier.failed_source != 0 && earlier.failed_declaration < input.token_count &&
-                                check_input_bit(input.declaration_bits, earlier.failed_declaration, BUSTER_CHECK_BITS_STATIC) != 0 &&
-                                check_init_value_nonconstant(&stream, &types, earlier.failed_type, earlier.failed_source - 1))
+                            memcpy(widened, additional, (uint64_t)additional_count * sizeof(CheckDriverDiagnostic));
+                            additional = widened;
+                        }
+                        const uint32_t failure_total = widened != NULL ? others + 1 : 1;
+                        for (uint32_t f = 0; f < failure_total; f += 1)
+                        {
+                            const CheckInitFailure* other = f != 0 ? earlier.failures + (f - 1) : NULL;
+                            // The first is `earlier`'s own, which the list holds too.
+                            const bool repeated = other != NULL && other->token == earlier.token && other->failed_declaration == earlier.failed_declaration &&
+                                                  other->status == earlier.status;
+                            const CheckInitFailure failure = other != NULL ? *other : (CheckInitFailure){
+                                .status = earlier.status,
+                                .failed_type = earlier.failed_type,
+                                .failed_source = earlier.failed_source,
+                                .failed_declaration = earlier.failed_declaration,
+                                .token = earlier.token,
+                                .completion = earlier.completion,
+                            };
+                            const bool given = other != NULL ? !repeated :
+                                               (diagnosed && earlier.status != CHECK_INIT_OK) || earlier.status == CHECK_INIT_RESOURCE ||
+                                               (!diagnosed && initializers.status != CHECK_INIT_OK);
+                            if (given)
                             {
-                                // (Repeated: at the conversion's own place, which the reports' walk would keep alone.)
-                                additional[additional_count++] = (CheckDriverDiagnostic){ place, check_driver_initializer_message(CHECK_INIT_NON_CONSTANT), place,
-                                                                                          earlier.completion, true };
+                                // A subobject's failed conversion is clang's words of it (#147), at its place.
+                                uint32_t place = failure.token;
+                                const char* conversion = failure.status == CHECK_INIT_INVALID ?
+                                    check_driver_initializer_conversion(checking, checking_pp, &input, &stream, &types, failure.failed_type, failure.failed_source - 1,
+                                                                        failure.failed_declaration, failure.token, &place, output_arena) : NULL;
+                                const char* message = conversion != NULL ? conversion : failure.status == CHECK_INIT_MEMBER ?
+                                    check_driver_initializer_field_message(checking, checking_pp, &input, &types, failure.failed_type, failure.token, output_arena) :
+                                    check_driver_initializer_message(failure.status);
+                                place = conversion != NULL ? place : failure.token;
+                                additional[additional_count++] = (CheckDriverDiagnostic){ place,
+                                    message != NULL ? message : "initializer checking capacity exhausted", place, failure.completion };
+                                // A static object's braced subobject whose conversion clang warns of and makes, where its value is
+                                // then no constant: clang's second error at it (check_init_value_nonconstant, #147).
+                                if (conversion != NULL && failure.failed_source != 0 && failure.failed_declaration < input.token_count &&
+                                    check_input_bit(input.declaration_bits, failure.failed_declaration, BUSTER_CHECK_BITS_STATIC) != 0 &&
+                                    check_init_value_nonconstant(&stream, &types, failure.failed_type, failure.failed_source - 1))
+                                {
+                                    // (Repeated: at the conversion's own place, which the reports' walk would keep alone.)
+                                    additional[additional_count++] = (CheckDriverDiagnostic){ place, check_driver_initializer_message(CHECK_INIT_NON_CONSTANT), place,
+                                                                                              failure.completion, true };
+                                }
                             }
                         }
                         if (diagnosed)
@@ -6240,6 +6376,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             arena_pop_to(scratch, flushed_mark);
                         }
                     }
+                    // The folded shifts' stashed runtime warnings no common walk reported or dropped (a unit with errors runs
+                    // none).
+                    check_common_shift_finish(pp, &shift_warnings);
                     result = pp->errors != 0 ? 1 : result;
                     check_clock_mark(stage_clock, CHECK_STAGE_CHECK_PROGRAM);
                     // The backend reads the program, not the preprocessor's output: only its diagnostics do, which ask for it

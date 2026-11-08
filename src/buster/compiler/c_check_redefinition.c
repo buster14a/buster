@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Keep ordinary declaration conflicts' reasons and prior source locations. This is diagnostic metadata only:
-// the binding checks still reject exactly the same declarations and stop at the same error.
+// the binding checks still reject exactly the same declarations and retain their recovery behavior.
 typedef enum CheckRedeclarationKind
 {
     CHECK_REDECLARATION_GENERIC,
@@ -14,6 +14,8 @@ typedef enum CheckRedeclarationKind
     CHECK_REDECLARATION_PARAMETER,
     CHECK_REDECLARATION_STATIC,
     CHECK_REDECLARATION_NON_STATIC,
+    CHECK_REDECLARATION_THREAD_LOCAL,
+    CHECK_REDECLARATION_NON_THREAD_LOCAL,
     // A typedef's redefinition with another type (#1447, phase 2): "typedef redefinition with different types ('N' vs 'O')".
     CHECK_REDECLARATION_TYPEDEF,
     // A name redeclared as another kind of entity (#1447, phase 2): "redefinition of 'X' as different kind of symbol".
@@ -69,8 +71,8 @@ static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t 
         const bool same_kind = kind == reader->declaration_kinds[previous];
         const uint32_t linkage = check_input_linkage(reader->declaration_bits, token);
         const uint32_t earlier_linkage = check_input_linkage(reader->declaration_bits, previous);
-        const bool same_tls = check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) ==
-                              check_input_bit(reader->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL);
+        const bool current_tls = check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL);
+        const bool same_tls = current_tls == check_input_bit(reader->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL);
         const uint32_t definition = reader->definition_origins != NULL ? reader->definition_origins[previous] : 0;
         const uint32_t current_definition = reader->definition_origins != NULL ? reader->definition_origins[token] : 0;
         const bool object = kind == C_BINDING_OBJECT;
@@ -82,7 +84,7 @@ static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t 
             detail = same_kind ? CHECK_REDECLARATION_TYPEDEF : CHECK_REDECLARATION_KIND;
             note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
         }
-        else if (same_kind && same_tls && (object || function))
+        else if (same_kind && (object || function))
         {
             if (object && compatible == TYPE_ANSWER_NO)
             {
@@ -106,6 +108,12 @@ static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t 
                 {
                     detail = function ? CHECK_REDECLARATION_FUNCTION_TYPE : CHECK_REDECLARATION_OBJECT_TYPE;
                 }
+                // A duplicate local declaration is a redefinition before clang checks TLS. A repeatable declaration's
+                // TLS mismatch follows the type and linkage checks, but precedes the check for two definitions.
+                else if (object && repeatable && !same_tls)
+                {
+                    detail = current_tls ? CHECK_REDECLARATION_THREAD_LOCAL : CHECK_REDECLARATION_NON_THREAD_LOCAL;
+                }
                 else if (compatible == TYPE_ANSWER_YES && (!repeatable || (current_definition != 0 && definition != 0)))
                 {
                     detail = CHECK_REDECLARATION_DEFINITION;
@@ -121,17 +129,29 @@ static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t 
             // f(void) { extern int y; }` then g's `extern double y;`, review on #1453): the last declaration before `token`
             // of the same name, kind and object, which linkage gave it. A function's (MergeFunctionDecl) notes the
             // declaration its lookup found, `previous`, never another block's. (A scan back over the tokens, on the error
-            // path alone: a unit's checking ends at its error.)
+            // path alone.) TLS conflicts instead note the visible declaration, as function conflicts do.
             const uint32_t name = reader->parser->tokens.names[token];
             const uint32_t entity = reader->objects != NULL ? reader->objects[previous] : 0;
             uint32_t latest = BUSTER_CHECK_NONE;
             const bool conflict = object && detail == CHECK_REDECLARATION_OBJECT_TYPE && linkage != 0 && earlier_linkage != 0 && entity != 0;
-            for (uint32_t t = token; conflict && latest == BUSTER_CHECK_NONE && t > previous + 1;)
+            // Bodies read apart (c_check_deferred.c, #1447) haven't read one another's declarations: a deferred top level
+            // hasn't read the bodies it skipped, nor a lane the other bodies. A scan that reaches another body's closing
+            // brace before its declaration sends the unit to source order.
+            const uint8_t* roles = reader->parser->tree.roles;
+            const bool apart = (reader->deferred != 0 || reader->lane) && roles != NULL;
+            bool crossed = false;
+            for (uint32_t t = token; conflict && latest == BUSTER_CHECK_NONE && !crossed && t > previous + 1;)
             {
                 t -= 1;
-                const bool same = reader->parser->tokens.names[t] == name && reader->declaration_kinds[t] == kind &&
+                crossed = apart && roles[t] == PARSE_ROLE_CLOSE_BODY;
+                const bool same = !crossed && reader->parser->tokens.names[t] == name && reader->declaration_kinds[t] == kind &&
                                   check_input_linkage(reader->declaration_bits, t) != 0 && reader->objects[t] == entity && reader->declared_types[t] != 0;
                 latest = same ? t : BUSTER_CHECK_NONE;
+            }
+            check_input_lane_refuse(reader, crossed && reader->lane, "a body's redeclaration notes another body's declaration");
+            if (crossed && reader->deferred != 0)
+            {
+                check_deferred_note_scan(reader);
             }
             if (latest < token && latest != previous)
             {

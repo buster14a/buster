@@ -952,7 +952,7 @@ static void check_builtin_misc_more(TypeTable* table, const CheckBuiltinMiscActi
             output->action.value.category = CHECK_RVALUE;
             output->action.value.flags |= (operand.flags & BUSTER_CHECK_INACTIVE_UNION_READ) != 0 ? BUSTER_CHECK_INACTIVE_UNION_ADDRESS : 0;
             output->action.value.flags &= ~(BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL |
-                                            BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER | BUSTER_CHECK_VOLATILE_PART);
+                                            BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME | BUSTER_CHECK_VOLATILE_PART);
             if (!input->context.constant_evaluated && (operand.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 && output->action.value.constant_kind == CHECK_CONSTANT_ADDRESS &&
                 output->action.value.object != 0 && !designator)
             {
