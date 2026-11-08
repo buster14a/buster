@@ -28,6 +28,13 @@ static void check_test_driver_redefinitions(CheckTest* test, const char* clang, 
         "int f(void); static int f(void);\n",
         "#define NAME a\nint NAME=1; int NAME=2;\n",
         "void f(int x, int y, int x);\n",
+        // An extern declaration's type conflict is clang's "redeclaration", in a block and at file scope (#1447).
+        "int x;\nvoid f(void) { extern double x; }\n",
+        "void f(void) { extern int y; }\nvoid g(void) { extern double y; }\n",
+        "int a;\nextern double a;\n",
+        "extern int b;\nextern double b;\n",
+        // Its note is the entity's latest earlier declaration, another block's out of scope.
+        "int y;\nvoid f(void) { extern int y; }\nvoid g(void) { extern double y; }\n",
     };
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/redefinition.c", directory);
