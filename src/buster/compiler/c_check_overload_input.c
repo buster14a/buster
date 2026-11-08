@@ -193,6 +193,7 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
         else
         {
             const uint32_t current = input->graph.overload_candidate_count++;
+            candidate.library_call = (candidate.flags & BUSTER_CHECK_OVERLOADABLE) == 0 ? check_input_library_declaration(reader, token) : 0;
             reader->overload_candidates[current] = candidate;
             input->overload_heads[token] = current + 1;
             reader->objects[token] = candidate.object;

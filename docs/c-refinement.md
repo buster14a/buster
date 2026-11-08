@@ -231,11 +231,13 @@ change the compiler's output.
 An identifier's lookup key is its spelling after translation phases 1 and 2:
 trigraphs (when enabled) and line splices are removed, and each UCN becomes the
 UTF-8 of its code point, as clang interns it. So `fo\<newline>o` is `foo`, and
-`é`, `é` and `\U000000E9` are one identifier. A named UCN (`\N{...}`)
-stays as written, without its line splices, because the table has no character
-names (an open question in #116). The preprocessor refuses an identifier with
-one, so no identifier spelled that way reaches the compiler (#452, and
-"Not yet" in [the preprocessor's design](c-preprocessor.md)).
+`é`, `é` and `\U000000E9` are one identifier. A named UCN (`\N{...}`) is its
+character's UTF-8 too (#1447), by Unicode's names (`c_unicode_names.c`): within
+an identifier by a name exactly Unicode's, and where it starts the identifier
+also by a name that is one loosely (case, spaces, underscores and medial
+hyphens aside), as clang's lexer recovers from a misspelled one after its
+error. So `\N{LATIN SMALL LETTER E WITH ACUTE}`, `\u00e9` and `é` are one
+identifier too.
 
 Differences from #116's sketch, each deliberate:
 
@@ -1140,8 +1142,8 @@ the 360 files it lists for `main.c` with the compiler's options.
 - **Interning from several threads** (#150) is `docs/c-files.md`'s: each lane
   refines into a table of its own, and a merge gives the shared table's ids in
   the order of first occurrences, so that they don't depend on the lanes.
-- **Named UCNs:** intern them by their code point, which needs Unicode's name
-  table, or diagnose them (#116's open question).
+- **Named UCNs** are interned by their code points (#1447), which answers
+  #116's open question.
 
 ## Boundary audit #298
 

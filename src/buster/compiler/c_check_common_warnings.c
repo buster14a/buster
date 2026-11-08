@@ -748,8 +748,8 @@ typedef struct CheckCommonEmission
     const uint8_t* evaluated;
     const uint32_t* parents;
     uint8_t* emitted;
-    // Whether a discarded arm is quiet: an effect or explicit void cast along its value path. CONDITIONAL answers
-    // its arms', COMMA its result operand's, SELECT its chosen value's; others are checked directly (check_common_arm_of).
+    // The existing arm-discard fact and the stricter logical-operand fact (BUSTER_CHECK_DISCARD_*).
+    // CONDITIONAL answers its arms', COMMA its result operand's, SELECT its chosen value's.
     // Children precede parents in the graph, so one ascending pass fills it and every query stays iterative.
     const uint8_t* arm_effects;
     // What each node's subtree holds for the walks (BUSTER_CHECK_REACH_*), so that a walk enters only the subtrees where
@@ -888,6 +888,9 @@ static bool check_common_literal_zero(const Parser* parser, const CheckStream* s
     return result;
 }
 
+#define BUSTER_CHECK_DISCARD_ARM 0x01u
+#define BUSTER_CHECK_DISCARD_LOGICAL 0x02u
+
 // Whether an arm's value path accepts discard: an effect or an explicit cast to void. Conditional, comma and
 // selected-value results use postorder facts, so nested void casts stay quiet while inner diagnostics still run.
 // An implicit conversion is not an explicit discard, and a side effect off the comma's result path is not enough.
@@ -898,13 +901,24 @@ static bool check_common_arm_of(const CheckGraph* graph, const CheckStream* stre
     const bool void_cast = op == CHECK_OP_CAST &&
                            type_kind(types, type_unqualified(type_strip_aligned(types, check_stream_type(stream, node)))) == BUSTER_TYPE_KIND_VOID;
     const bool result = node < graph->count && (void_cast ||
-                        (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA || op == CHECK_OP_SELECT ? arm_effects[node] != 0 : check_common_node_effect(graph, node)));
+                        (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA || op == CHECK_OP_SELECT || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR ?
+                         (arm_effects[node] & BUSTER_CHECK_DISCARD_ARM) != 0 : check_common_node_effect(graph, node)));
     return result;
 }
 
 static bool check_common_arm_at(const CheckCommonEmission* emission, uint32_t node)
 {
     return check_common_arm_of(&emission->input->graph, emission->stream, emission->types, emission->arm_effects, node);
+}
+
+// Only logical roots add to the existing statement/comma discard policy. Other wrappers keep their old handling.
+static bool check_common_node_effect_at(const CheckCommonEmission* emission, uint32_t node)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const bool result = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR ? check_common_arm_at(emission, node) :
+                        check_common_node_effect(graph, node);
+    return result;
 }
 
 // One conditional, comma or selected-value entry, after every operand's entry.
@@ -917,6 +931,110 @@ static bool check_common_arm_effect(const CheckGraph* graph, const CheckStream* 
     const bool result = op == CHECK_OP_CONDITIONAL ? check_common_arm_of(graph, stream, types, arm_effects, first) || check_common_arm_of(graph, stream, types, arm_effects, second) :
                         op == CHECK_OP_COMMA ? check_common_arm_of(graph, stream, types, arm_effects, first) :
                         op == CHECK_OP_SELECT ? check_common_arm_of(graph, stream, types, arm_effects, graph->operand0[node]) : check_common_node_effect(graph, node);
+    return result;
+}
+
+// An ordinary direct call whose result Clang allows to be discarded. The use's visible declaration owns its
+// inherited contracts; a later annotation, an expired block declaration or an overloaded candidate must not leak.
+// Library declarations without discard contracts behave as ordinary calls. Const/pure and conditional floating
+// contracts retain the warning; the latter's option-sensitive relaxation and indirect calls remain separate work.
+// Units with a result-contract typedef also keep their warning: canonical types do not retain its returned-type sugar.
+static bool check_common_logical_call(const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                      const Parser* parser, const Preprocessor* pp, uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    uint32_t callee = graph->operand0[node];
+    for (uint32_t steps = 0; callee < graph->count && steps < graph->count; steps += 1)
+    {
+        const CheckOp op = graph->ops[callee];
+        if (op != CHECK_OP_SELECT && op != CHECK_OP_ADDRESS && op != CHECK_OP_DEREFERENCE && op != CHECK_OP_CONVERT)
+        {
+            break;
+        }
+        callee = graph->operand0[callee];
+    }
+    const uint32_t token = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+    const uint32_t declaration = input->declarations != NULL && token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
+    const TypeId type = node < stream->count ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, node))) : 0;
+    bool result = !input->typedef_result_contracts && declaration < input->token_count && token < parser->tokens.count && input->declaration_kinds != NULL &&
+                  input->declaration_kinds[declaration] == C_BINDING_FUNCTION && check_stream_overload_head(stream, callee) == 0 &&
+                  type != 0 && type_kind(types, type) != BUSTER_TYPE_KIND_ENUM;
+    if (result)
+    {
+        const CheckInputAttributes* attributes = check_sparse_wide_present(input->attributes) ? check_input_attributes_at(input, declaration) : NULL;
+        for (uint32_t i = 0; result && attributes != NULL && i < attributes->count; i += 1)
+        {
+            const CheckInputAttribute* attribute = attributes->records + i;
+            const bool contract = attribute->kind == CHECK_ATTRIBUTE_CONST || attribute->kind == CHECK_ATTRIBUTE_PURE ||
+                                  attribute->kind == CHECK_ATTRIBUTE_WARN_UNUSED_RESULT;
+            result = !contract || attribute->ignored || attribute->subject_ignored;
+        }
+        const uint32_t name = parser->tokens.names[token];
+        const bool library = result && input->declaration_bits != NULL && check_input_linkage(input->declaration_bits, declaration) == 2 &&
+                             pp_library_builtin(&pp->options, intern_bytes(pp->table, name), intern_length(pp->table, name));
+        if (library)
+        {
+            const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)intern_bytes(pp->table, name), intern_length(pp->table, name));
+            // Clang's implicit const/pure attributes are c/U. Keep e/g's conditional floating contracts conservative.
+            result = info != NULL && memchr(info->attributes, 'c', info->attributes_length) == NULL &&
+                     memchr(info->attributes, 'U', info->attributes_length) == NULL &&
+                     memchr(info->attributes, 'e', info->attributes_length) == NULL &&
+                     memchr(info->attributes, 'g', info->attributes_length) == NULL;
+        }
+    }
+    return result;
+}
+
+// Clang asks whether discarding each logical operand would itself warn, not whether any descendant has an effect.
+// Thus f()+x, (f(),x), and a nonvoid cast still warn. This separate bit leaves existing nonlogical discard policy
+// unchanged while carrying the precise result path through wrappers. It is syntactic, including short-circuited arms.
+static bool check_common_logical_operand(const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                         const Parser* parser, const Preprocessor* pp, const uint8_t* arm_effects, uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const TypeId type = node < stream->count ? type_strip_aligned(types, check_stream_type(stream, node)) : 0;
+    bool result = false;
+    if (node < graph->count && node < stream->count)
+    {
+        if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA || op == CHECK_OP_SELECT || op == CHECK_OP_CONVERT ||
+            op == CHECK_OP_STATEMENT_VALUE || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
+        {
+            result = (arm_effects[node] & BUSTER_CHECK_DISCARD_LOGICAL) != 0;
+        }
+        else if (op == CHECK_OP_CALL)
+        {
+            result = check_common_logical_call(input, stream, types, parser, pp, node);
+        }
+        else
+        {
+            const bool volatile_read = type != 0 && (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) != 0 &&
+                                       check_stream_category(stream, node) == CHECK_LVALUE && !type_kind_is_array(type_kind(types, type));
+            result = volatile_read || (op == CHECK_OP_CAST && type != 0 && type_kind(types, type) == BUSTER_TYPE_KIND_VOID) ||
+                     op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN) ||
+                     op == CHECK_OP_VARARGS || op == CHECK_OP_BUILTIN_ATOMIC;
+        }
+    }
+    return result;
+}
+
+static bool check_common_logical_fact(const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                      const Parser* parser, const Preprocessor* pp, const uint8_t* arm_effects, uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    const CheckOp op = graph->ops[node];
+    const uint32_t first = op == CHECK_OP_COMMA || op == CHECK_OP_CONDITIONAL ? graph->operand1[node] : graph->operand0[node];
+    const uint32_t second = op == CHECK_OP_CONDITIONAL ? graph->operand2[node] : graph->operand1[node];
+    const bool omitted = op == CHECK_OP_CONDITIONAL && graph->operand0[node] == first;
+    bool result = !omitted && check_common_logical_operand(input, stream, types, parser, pp, arm_effects, first);
+    if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
+    {
+        result |= check_common_logical_operand(input, stream, types, parser, pp, arm_effects, second);
+    }
+    else if (op == CHECK_OP_COMMA)
+    {
+        result |= check_common_literal_zero(parser, stream, graph, first);
+    }
     return result;
 }
 
@@ -967,12 +1085,66 @@ static void check_common_emit_kids(CheckCommonEmission* emission, uint32_t node,
 static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t node);
 static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node);
 
-// The division-warning visit one scan frame runs after its subtree: `emit_children`'s other half.
+// A dereference clang warns its optimizer deletes (#1447, -Wnull-dereference, clang's CheckForNullPointerDereference):
+// `*` of a null pointer constant through casts (its operand an integer constant 0 once the casts are passed, or any
+// expression of type nullptr_t once the conversions are passed too, as IgnoreParenCasts and isNullPointerConstant find
+// it), of a type that is neither volatile nor an array's or a function's, whose value an lvalue conversion would read.
+// Whether its value is read is check_common_div_own's.
+static bool check_common_null_dereference(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
+{
+    bool result = false;
+    if (node < graph->count && graph->ops[node] == CHECK_OP_DEREFERENCE)
+    {
+        uint32_t operand = graph->operand0[node];
+        for (uint32_t steps = 0; operand < graph->count && graph->ops[operand] == CHECK_OP_CAST && steps < graph->count; steps += 1)
+        {
+            operand = graph->operand0[operand];
+        }
+        uint32_t inner = operand;
+        for (uint32_t steps = 0; inner < graph->count && (graph->ops[inner] == CHECK_OP_CAST || graph->ops[inner] == CHECK_OP_CONVERT) && steps < graph->count;
+             steps += 1)
+        {
+            inner = graph->operand0[inner];
+        }
+        const TypeId inner_type = inner < graph->count ? check_stream_type(stream, inner) : 0;
+        const TypeId inner_bare = inner_type != 0 ? type_unqualified(type_strip_aligned(types, inner_type)) : 0;
+        // (Every dereference asks, as the reach is made: the constant first, which nearly none has.)
+        if ((check_common_integer_constant(stream, operand) && check_stream_value(stream, operand).integer == 0) ||
+            (inner_bare != 0 && type_kind(types, inner_bare) == BUSTER_TYPE_KIND_NULLPTR))
+        {
+            const TypeId type = check_stream_type(stream, node);
+            const TypeId bare = type != 0 ? type_unqualified(type_strip_aligned(types, type)) : 0;
+            const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_VOID;
+            result = (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) == 0 && !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION &&
+                     kind != BUSTER_TYPE_KIND_VOID;
+        }
+    }
+    return result;
+}
+
+// The division-warning visit one scan frame runs after its subtree: `emit_children`'s other half. A null dereference's
+// too (check_common_null_dereference), which clang's DiagRuntimeBehavior defers to the body's end with them: reachable,
+// evaluated and read, as an lvalue conversion or an assignment's (or a compound one's) destination reads it, not where its
+// address is taken, a member of it named or it is stepped, with clang's note at the same `*`.
 static void check_common_div_own(CheckCommonEmission* emission, uint32_t node)
 {
     const CheckGraph* graph = &emission->input->graph;
     const CheckOp op = graph->ops[node];
-    if (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER)
+    if (op == CHECK_OP_DEREFERENCE && check_common_null_dereference(graph, emission->stream, emission->types, node))
+    {
+        const uint32_t parent = emission->parents != NULL ? emission->parents[node] : BUSTER_CHECK_NONE;
+        const CheckOp parent_op = parent < graph->count ? graph->ops[parent] : CHECK_OP_COUNT;
+        const bool unread = parent_op == CHECK_OP_ADDRESS || (parent_op == CHECK_OP_MEMBER && graph->operand0[parent] == node) ||
+                            (parent_op >= CHECK_OP_PRE_INCREMENT && parent_op <= CHECK_OP_POST_DECREMENT);
+        if (!unread)
+        {
+            const uint32_t star = graph->tokens[node];
+            const CheckCommonNote note = { star, "consider using __builtin_trap() or qualifying pointer with 'volatile'" };
+            check_common_report_deferred(emission->parser, emission->pp, emission->input, star, CHECK_WARNING_ID_NULL_DEREFERENCE, false,
+                                         "indirection of non-volatile null pointer will be deleted, not trap", &note, 1, emission->scratch);
+        }
+    }
+    else if (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER)
     {
         const uint32_t divisor = graph->operand1[node];
         const uint32_t contexts = graph->contexts != NULL ? graph->contexts[node] : 0;
@@ -1323,7 +1495,7 @@ static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t no
     const uint32_t left_result = check_common_result_root(graph, left_node);
     const bool left_effect = left_node < graph->count ?
                              (graph->ops[left_node] == CHECK_OP_CONDITIONAL ? check_common_arm_at(emission, left_node) :
-                              check_common_node_effect(graph, left_result)) :
+                              check_common_node_effect_at(emission, left_result)) :
                              check_common_expression_has_effect(parser, left_start, comma);
     // A left operand that resolves to a literal 0 through commas of its own stays quiet, like the
     // `expr, 0` result does — a bare `0, x` still reports the `0`, and so does a conditional's `0` arm.
@@ -1431,7 +1603,7 @@ static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node)
         const bool right_zero = check_common_literal_zero(parser, stream, graph, zero_node);
         const bool right_effect = right_node < graph->count ?
                                   (graph->ops[right_node] == CHECK_OP_CONDITIONAL ? check_common_arm_at(emission, right_node) :
-                                   check_common_node_effect(graph, right_result)) :
+                                   check_common_node_effect_at(emission, right_result)) :
                                   check_common_expression_has_effect(parser, right_start, parent);
         if (right_start < parent && !right_void && !right_zero && !right_effect)
         {
@@ -1497,7 +1669,7 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
              !(role == PARSE_ROLE_CLOSE_CAST && check_common_void_cast(parser, emission->pp, emission->input, emission->stream, emission->types, token)) &&
              parser->tokens.kinds[token] != PARSE_KIND_L_PAREN &&
              parser->tokens.kinds[token] != PARSE_KIND_PLUSPLUS && parser->tokens.kinds[token] != PARSE_KIND_MINUSMINUS &&
-             !check_common_node_effect(graph, node))
+             !check_common_node_effect_at(emission, node))
     {
         // A discarded member read points at the member's name, like the comma's left operand does.
         const uint32_t report = role == PARSE_ROLE_CLOSE_CAST ? check_common_cast_opener(parser, token) :
@@ -2414,8 +2586,10 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
     const CheckOp op = graph->ops[node];
     const uint32_t divisor = graph->operand1[node];
     TypeId divisor_type = 0;
-    const bool division = (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && check_common_integer_constant(stream, divisor) &&
-                          check_common_stream_integer(stream, divisor, &divisor_type) == 0;
+    // (A null dereference's in the division scan too, check_common_div_own.)
+    const bool division = ((op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && check_common_integer_constant(stream, divisor) &&
+                           check_common_stream_integer(stream, divisor, &divisor_type) == 0) ||
+                          (op == CHECK_OP_DEREFERENCE && check_common_null_dereference(graph, stream, types, node));
     const bool comparison = enabled->sign_compare && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
     const uint8_t result = (uint8_t)((check_common_own_candidate(parser, graph, stream, types, node, enabled->self_assign) ? BUSTER_CHECK_REACH_TREE : 0u) |
                                      (division ? BUSTER_CHECK_REACH_DIVISION : 0u) | (comparison ? BUSTER_CHECK_REACH_SIGN : 0u));
@@ -4381,7 +4555,7 @@ static void check_common_body_reached(const CheckProgram* program, const CheckPr
         {
             bool truth = false;
             const bool jump = entry->kind == CHECK_CONTROL_JUMP;
-            const bool known = !jump && check_program_runtime_truth(program, entry->node, entry->node, &truth);
+            const bool known = !jump && check_program_branch_truth(program, entry->node, entry->node, &truth);
             const bool taken = truth == (entry->kind == CHECK_CONTROL_BRANCH_TRUE);
             targets[0] = jump || !known || taken ? entry->target : BUSTER_CHECK_NONE;
             next = !jump && (!known || !taken);
@@ -4444,9 +4618,11 @@ static void check_common_body_reached(const CheckProgram* program, const CheckPr
 // or after a `for (;;)` that cannot fall through, evaluates nothing — clang's -Wuninitialized, unused-result,
 // bounds and division checks all stay silent there. The entries whose `node` names a source expression's
 // value — evaluates, returns, branch and switch conditions, indirect jumps, variable bounds and statement
-// results — clear their root here, which keeps the node's whole operand chain unevaluated.
+// results — clear their root here, which keeps the node's whole operand chain unevaluated. Initializer entries
+// name a plan instead of a node. Their part roots and scalar conversion roots also become propagation barriers:
+// a declaration's unreferenced discard wrapper must not make its unreachable initializer evaluated again.
 static bool check_common_unreachable(const CheckProgram* program, const CheckGraph* graph,
-                                     uint8_t* evaluated, Arena* scratch)
+                                     uint8_t* evaluated, uint8_t** blocked, Arena* scratch)
 {
     bool valid = true;
     for (uint32_t b = 0; valid && b < program->body_count; b += 1)
@@ -4457,7 +4633,7 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
             continue;
         }
         // Each body's marks and queue in the same scratch as the last body's, cache-warm, given back after it.
-        const uint64_t mark = scratch->length;
+        uint64_t mark = scratch->length;
         uint8_t* seen = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, body->count);
         uint32_t* queue = CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, body->count);
         if (seen == NULL || queue == NULL)
@@ -4476,6 +4652,40 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
             if (expression && seen[i] == 0 && entries[i].node < graph->count)
             {
                 evaluated[entries[i].node] = 0;
+            }
+            if (kind == CHECK_CONTROL_INITIALIZE && seen[i] == 0 && program->initializers != NULL &&
+                entries[i].target < program->initializers->count && *blocked == NULL)
+            {
+                // (The barriers' bytes, which a unit without such an initializer never takes. They outlive this body's
+                // marks and queue, whose scratch is given back above them, so that the next bodies' don't reuse them.)
+                *blocked = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count);
+                valid = *blocked != NULL;
+                if (valid)
+                {
+                    memset(*blocked, 0, graph->count);
+                    mark = scratch->length;
+                }
+            }
+            if (valid && kind == CHECK_CONTROL_INITIALIZE && seen[i] == 0 && program->initializers != NULL &&
+                entries[i].target < program->initializers->count)
+            {
+                const uint32_t declaration = entries[i].token;
+                const uint32_t scalar = declaration < program->input->token_count ?
+                                        check_common_sparse_get(program->input->initializer_nodes, declaration) : BUSTER_CHECK_NONE;
+                if (scalar < graph->count)
+                {
+                    evaluated[scalar] = 0;
+                    (*blocked)[scalar] = 1;
+                }
+                const CheckInitializer* plan = program->initializers->plans + entries[i].target;
+                for (uint32_t part = 0; part < plan->count; part += 1)
+                {
+                    if (plan->parts[part].kind == CHECK_INIT_VALUE && plan->parts[part].node < graph->count)
+                    {
+                        evaluated[plan->parts[part].node] = 0;
+                        (*blocked)[plan->parts[part].node] = 1;
+                    }
+                }
             }
         }
         arena_pop_to(scratch, mark);
@@ -4688,8 +4898,12 @@ static bool check_common_discards(const CheckGraph* graph, const CheckStream* st
 
 // The operands and arguments of `node` that its evaluation evaluates, as check_common_evaluated's reverse pass reads them:
 // an operand's or argument's bit `i`, any at 32 and past. A sizeof's or alignof's operand isn't, but a variably modified
-// type's bound; nor is a constant condition's unselected arm.
-static uint32_t check_common_operand_mask(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
+// type's bound; nor is a constant condition's unselected arm, nor the arm of a condition one operand of a logical
+// operator decides though the other isn't known (`x && 0`, `x || 1`, through `!` and casts), which clang's CFG builder
+// leaves unreachable for the runtime warnings (#1447, tryEvaluateBool in VisitConditionalOperator and
+// VisitLogicalOperator: check_program_branch_truth, with the unit's program).
+static uint32_t check_common_operand_mask(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const CheckProgram* program,
+                                          uint32_t node)
 {
     const CheckOp op = graph->ops[node];
     uint32_t mask = UINT32_MAX;
@@ -4708,7 +4922,12 @@ static uint32_t check_common_operand_mask(const CheckGraph* graph, const CheckSt
         const uint32_t condition = graph->operand0[node];
         const CheckValue condition_value = condition < graph->count ? check_stream_value(stream, condition) : (CheckValue){ 0 };
         bool truth = false;
-        if (condition < graph->count && check_action_truth(types, &condition_value, &truth))
+        bool known = condition < graph->count && check_action_truth(types, &condition_value, &truth);
+        if (!known && program != NULL && condition < graph->count)
+        {
+            known = check_program_branch_truth(program, node, condition, &truth);
+        }
+        if (known)
         {
             mask = op == CHECK_OP_CONDITIONAL ? (truth ? 3u : 5u) :
                    ((op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth)) ? 1u : 3u;
@@ -4726,9 +4945,14 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
     {
         for (uint32_t node = 0; node < graph->count; node += 1)
         {
-            evaluated[node] = parents[node] == BUSTER_CHECK_NONE;
+            // Exclude dropped ranges before propagating evaluation.
+            evaluated[node] = parents[node] == BUSTER_CHECK_NONE &&
+                              (program == NULL || program->dropped_range_count == 0 || !check_program_token_dropped(program, graph->tokens[node]));
         }
-        if (program != NULL && program->controls != NULL && !check_common_unreachable(program, graph, evaluated, scratch))
+        // An unreachable initializer's roots, which no parent makes evaluated (check_common_unreachable); NULL in a unit
+        // without one, whose propagation then reads no barrier.
+        uint8_t* blocked = NULL;
+        if (program != NULL && program->controls != NULL && !check_common_unreachable(program, graph, evaluated, &blocked, scratch))
         {
             result = NULL;
         }
@@ -4743,11 +4967,11 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
                 continue;
             }
             const CheckOp op = graph->ops[node];
-            const uint32_t mask = check_common_operand_mask(graph, stream, types, node);
+            const uint32_t mask = check_common_operand_mask(graph, stream, types, program, node);
             const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
             {
-                if (operands[i] < graph->count && (i >= 32 || (mask & (1u << i)) != 0))
+                if (operands[i] < graph->count && (blocked == NULL || blocked[operands[i]] == 0) && (i >= 32 || (mask & (1u << i)) != 0))
                 {
                     evaluated[operands[i]] = 1;
                 }
@@ -4757,7 +4981,7 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
                 for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
                 {
                     const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
-                    if (argument < graph->count && (i >= 32 || (mask & (1u << i)) != 0))
+                    if (argument < graph->count && (blocked == NULL || blocked[argument] == 0) && (i >= 32 || (mask & (1u << i)) != 0))
                     {
                         evaluated[argument] = 1;
                     }
@@ -4768,8 +4992,8 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
     return result;
 }
 
-// The operators whose own reach (check_common_own_reach) may have a bit: check_common_own_candidate's, a division's and a
-// comparison's.
+// The operators whose own reach (check_common_own_reach) may have a bit: check_common_own_candidate's, a null dereference's
+// (#1447, check_common_div_own's), a division's and a comparison's.
 static const CheckOp check_common_reach_ops[] =
 {
     CHECK_OP_INITIALIZE,
@@ -4778,6 +5002,7 @@ static const CheckOp check_common_reach_ops[] =
     CHECK_OP_CALL,
     CHECK_OP_SUBSCRIPT,
     CHECK_OP_COMMA,
+    CHECK_OP_DEREFERENCE,
     CHECK_OP_DIVIDE,
     CHECK_OP_REMAINDER,
     CHECK_OP_LESS,
@@ -4795,6 +5020,10 @@ static const CheckOp check_common_arm_ops[] =
     CHECK_OP_CONDITIONAL,
     CHECK_OP_COMMA,
     CHECK_OP_SELECT,
+    CHECK_OP_CONVERT,
+    CHECK_OP_STATEMENT_VALUE,
+    CHECK_OP_LOGICAL_AND,
+    CHECK_OP_LOGICAL_OR,
 };
 static const CheckOp check_common_mask_ops[] =
 {
@@ -4931,6 +5160,40 @@ static bool check_common_facts_tree(const CheckGraph* graph, const CheckStream* 
     return result;
 }
 
+// Clears the nodes from the `depth` on `stack` with every node below them (operands and arguments) that is still
+// evaluated, a worklist's walk: check_common_evaluated_tree's, which visits each node once in its tree.
+static void check_common_clear_below(const CheckGraph* graph, uint8_t* evaluated, uint32_t* stack, uint32_t depth)
+{
+    const uint32_t count = graph->count;
+    while (depth != 0)
+    {
+        const uint32_t at = stack[--depth];
+        if (evaluated[at] != 0)
+        {
+            evaluated[at] = 0;
+            const uint32_t children[] = { graph->operand0[at], graph->operand1[at], graph->operand2[at] };
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(children); i += 1)
+            {
+                if (children[i] < count)
+                {
+                    stack[depth++] = children[i];
+                }
+            }
+            if (check_graph_has_arguments(graph->ops[at]) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
+            {
+                for (uint32_t i = 0; i < graph->argument_counts[at]; i += 1)
+                {
+                    const uint32_t argument = graph->argument_nodes[graph->argument_offsets[at] + i];
+                    if (argument < count)
+                    {
+                        stack[depth++] = argument;
+                    }
+                }
+            }
+        }
+    }
+}
+
 // check_common_evaluated's vector path, over the tree check_common_facts_tree found: a node is evaluated where its root is
 // and no node on its way there leaves its operand out (check_common_operand_mask). So every node a parent reads starts
 // evaluated, and then the roots the control and selection walks left out and the operands the masks leave out (their
@@ -4946,9 +5209,13 @@ static uint8_t* check_common_evaluated_tree(const CheckGraph* graph, const Check
     {
         for (uint32_t node = 0; node < count; node += 1)
         {
-            evaluated[node] = parents[node] == BUSTER_CHECK_NONE;
+            // (A dropped range's root, as check_common_evaluated leaves it out.)
+            evaluated[node] = parents[node] == BUSTER_CHECK_NONE &&
+                              (program == NULL || program->dropped_range_count == 0 || !check_program_token_dropped(program, graph->tokens[node]));
         }
-        if (program != NULL && program->controls != NULL && !check_common_unreachable(program, graph, evaluated, scratch))
+        // An unreachable initializer's roots under a parent (check_common_unreachable's barriers), cleared below.
+        uint8_t* blocked = NULL;
+        if (program != NULL && program->controls != NULL && !check_common_unreachable(program, graph, evaluated, &blocked, scratch))
         {
             result = NULL;
         }
@@ -4981,7 +5248,7 @@ static uint8_t* check_common_evaluated_tree(const CheckGraph* graph, const Check
             }
             else
             {
-                const uint32_t mask = check_common_operand_mask(graph, stream, types, node);
+                const uint32_t mask = check_common_operand_mask(graph, stream, types, program, node);
                 const uint32_t slots[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
                 for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(slots); i += 1)
                 {
@@ -4992,32 +5259,15 @@ static uint8_t* check_common_evaluated_tree(const CheckGraph* graph, const Check
                 }
                 node = check_common_next_op(graph, &masked, &masks, true);
             }
-            while (depth != 0)
+            check_common_clear_below(graph, evaluated, stack, depth);
+        }
+        // Each barrier, with every node below it: the scalar walk's evaluation never reaches them.
+        for (uint32_t node = 0; blocked != NULL && node < count; node += 1)
+        {
+            if (blocked[node] != 0)
             {
-                const uint32_t at = stack[--depth];
-                if (evaluated[at] != 0)
-                {
-                    evaluated[at] = 0;
-                    const uint32_t children[] = { graph->operand0[at], graph->operand1[at], graph->operand2[at] };
-                    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(children); i += 1)
-                    {
-                        if (children[i] < count)
-                        {
-                            stack[depth++] = children[i];
-                        }
-                    }
-                    if (check_graph_has_arguments(graph->ops[at]) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
-                    {
-                        for (uint32_t i = 0; i < graph->argument_counts[at]; i += 1)
-                        {
-                            const uint32_t argument = graph->argument_nodes[graph->argument_offsets[at] + i];
-                            if (argument < count)
-                            {
-                                stack[depth++] = argument;
-                            }
-                        }
-                    }
-                }
+                stack[0] = node;
+                check_common_clear_below(graph, evaluated, stack, 1);
             }
         }
     }
@@ -5031,9 +5281,10 @@ static uint8_t* check_common_evaluated_tree(const CheckGraph* graph, const Check
 // order (check_common_facts_tree), visits only the nodes that may have a bit of their own reach and carries each bit up to
 // the first ancestor that has it, whose ancestors all do; computes the arm effects of the operators that have them, found
 // 16 at a time; and takes the evaluated nodes by check_common_evaluated_tree. False where scratch can't hold them.
-static bool check_common_facts(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
+static bool check_common_facts(const CheckInput* input, const CheckStream* stream, const TypeTable* types, const Parser* parser, const Preprocessor* pp,
                                const CheckProgram* program, const CheckCommonEnabled* enabled, Arena* scratch, CheckCommonFacts* facts)
 {
+    const CheckGraph* graph = &input->graph;
     const uint32_t count = graph->count;
     const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
     uint32_t* parents = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : NULL;
@@ -5062,7 +5313,11 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
         CheckCommonScan armed = { 0 };
         for (uint32_t node = check_common_next_op(graph, &arms, &armed, true); node < count; node = check_common_next_op(graph, &arms, &armed, true))
         {
-            arm_effects[node] = check_common_arm_effect(graph, stream, types, arm_effects, node);
+            const CheckOp op = graph->ops[node];
+            const bool logical = check_common_logical_fact(input, stream, types, parser, pp, arm_effects, node);
+            const bool arm = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR ? logical :
+                             check_common_arm_effect(graph, stream, types, arm_effects, node);
+            arm_effects[node] = (uint8_t)((arm ? BUSTER_CHECK_DISCARD_ARM : 0u) | (logical ? BUSTER_CHECK_DISCARD_LOGICAL : 0u));
         }
         evaluated = check_common_evaluated_tree(graph, stream, types, parser, program, parents, scratch);
     }
@@ -5109,9 +5364,13 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
                 }
             }
             reach[node] = bits;
-            if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA || op == CHECK_OP_SELECT)
+            if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA || op == CHECK_OP_SELECT || op == CHECK_OP_CONVERT ||
+                op == CHECK_OP_STATEMENT_VALUE || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
             {
-                arm_effects[node] = check_common_arm_effect(graph, stream, types, arm_effects, node);
+                const bool logical = check_common_logical_fact(input, stream, types, parser, pp, arm_effects, node);
+                const bool arm = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR ? logical :
+                                 check_common_arm_effect(graph, stream, types, arm_effects, node);
+                arm_effects[node] = (uint8_t)((arm ? BUSTER_CHECK_DISCARD_ARM : 0u) | (logical ? BUSTER_CHECK_DISCARD_LOGICAL : 0u));
             }
         }
         evaluated = check_common_evaluated(graph, stream, types, parser, program, parents, scratch);
@@ -5832,7 +6091,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     check_common_dangling_else(parser, pp, input, scratch);
     check_common_switches(parser, pp, input, stream, types, &spell, program, scratch);
     CheckCommonFacts facts = { 0 };
-    if (!check_common_facts(&input->graph, stream, types, parser, program, &enabled, scratch, &facts))
+    if (!check_common_facts(input, stream, types, parser, pp, program, &enabled, scratch, &facts))
     {
         check_common_exhausted(pp);
     }

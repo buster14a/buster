@@ -8,16 +8,28 @@ requirements. [Command index](README.md).
 
 - Tier 1 selection publishes effective uses for `tier1_liveness.c`; the native
   consumer connects required locations, allocation, frames and spill/remat
-  records. Its vector path covers the integer core by bottom-up rewriting over
+  records. Both host paths cover the integer core by bottom-up rewriting over
   state tables `tier1_select_initialize` compiles from a grammar of the
-  candidates' patterns (`tier1_select_burs.c`, baked; labeled 16 nodes a depth
-  level), maximal munch its scalar twin and its fallback; `test-tier1-select`
-  checks the tables and the kernels' twins, which `test-tier1-pipeline` and
-  `benchmark-tier1-select-source` check on every function they plan. Bounded
+  candidates' patterns (`tier1_select_burs.c`, baked). Vector labeling takes
+  16 nodes of a depth level; the independent scalar kernels use the same costs
+  and tie-breaks. Maximal munch remains the grammar's fallback and a separate
+  test reference. `test-tier1-select` checks identical plans and records;
+  `test-tier1-pipeline` checks the kernel twins and complete plans on every
+  function, and `benchmark-tier1-select-source` checks the kernels before timing.
+  `test-checker-driver` requires byte-identical Tier 1 scalar/vector objects for
+  the #1395 regressions at the same target, with either rematerialization mode,
+  including a parameter-free leaf with volatile loads. Both production
+  allocators use the same regular-class level rule; the independent scan remains
+  a test reference, alongside the exact allocation-output comparisons. Bounded
   direct scalar calls preserve live caller registers and publish symbolic CALL
   references. Byte/word memory and integer conversions
   use canonical 32-bit storage; terminal chains retain explicit traps or empty
-  self-loops. Every other function, general CFGs with loops and phis, goes
+  self-loops. Integer comparisons fold single-use loads at their original
+  access width when the final consumer's memory-order proof permits it
+  (#1218), including exact immediate comparisons through zero/sign extension.
+  `test-tier1-select` checks guard-page boundaries, predicates, address aliases
+  and access-order refusals; `test-tier1-emit` checks frame-object comparisons,
+  realignment and fused branches. Every other function, general CFGs with loops and phis, goes
   through `tier1_emit_cfg.c` (#140): `tier1_cfg.c` allocates it and its edges
   move values, before a jump, at a successor's start or in a split critical
   edge's stub. A straight line whose allocation can't place a value (an evicted
@@ -150,10 +162,51 @@ each with one `cmp`/`test` and no `setcc`; missing functions fail the test.
 Failed commands and execution are fatal, and failure artifacts are retained.
 CI builds the supervisor with its configured sanitizer flags as well.
 
-This regression is not #1218's program-performance acceptance. Folding memory
-operands and changing block layout are separate work; the speedtest1/Lua
-compare-and-branch counts and 9700X runtime evidence remain necessary before
-closing the issue. No runtime improvement is inferred from the peephole alone.
+This regression is not #1218's program-performance acceptance. The
+speedtest1/Lua compare-and-branch counts and 9700X runtime evidence remain
+necessary before closing the issue. No runtime improvement is inferred from
+the peephole alone.
+
+## Block placement and critical-edge fall-through (#1218)
+
+The C driver's final Tier 1 optimization enables `BUSTER_IR_OPTIMIZE_LAYOUT`.
+The shared optimizer's default options leave it off. `ir_optimize_layout.c`
+orders surviving blocks into fall-through chains during the existing rewrite,
+before selection, allocation and final SSA verification. Entry remains first.
+Unconditional edges take priority over conditional ones, natural-loop back
+edges over ordinary incoming edges, and existing adjacency breaks equal
+priorities. A cycle loses one fall-through link, preferring to keep its loop
+back edge. This can place a loop's body before its test while retaining the
+entry jump to the test. No instruction crosses a control-flow edge.
+
+The rewrite's existing maps rename values, phi inputs and predecessor IDs,
+direct and switch targets, call arguments, and computed-goto labels. ABI
+records, vector constants and machine rows retain their established ownership.
+The emitter and certificates still consume contiguous blocks and monotonically
+ordered records. When both conditional edges need move stubs, the emitter puts
+the stub targeting the next physical block last, allowing its moves to fall
+through without an additional jump.
+
+`test-ir-optimize` exercises all 16 combinations of SCCP, dead-code removal,
+CFG cleanup and layout on the existing semantic fixtures, including loops,
+phis, switches, labels, calls and volatile effects. New fixtures cover reversed
+chains of 0 through 65 blocks with forward SSA references and call argument
+lists, irreducible control flow, moved aggregate calls and vector payloads.
+The scalar/vector results must match, independently interpreted behavior must
+agree, and every chain jump must target the following block. Retained-analysis
+tests rebuild CFG and dominance after layout. `test-tier1-emit` additionally
+checks both critical-edge stub orientations with actual native execution.
+
+The ordering is a static heuristic, not a profile. Its compile-time cost and
+program run time need locked 9700X measurements. The staged rank kernel follows
+the optimizer's resolved scalar/vector path: its existing AUTO heuristic
+selects scalar for the recorded corpus functions, while forced-vector tests
+check the exact twin. That SCCP heuristic is not a measured layout crossover.
+#1218's <=1.3x Clang `-O2`
+dynamic compare/branch count remains a separate measured gate, using #1189's
+unchanged classifier and the same speedtest1 and five Lua inputs. Raw evidence
+belongs in `buster14a/buster-performance`; normal correctness tests do not
+establish that gate.
 
 ## Address-arithmetic selection regressions
 
@@ -165,18 +218,36 @@ memory-order and shared-load counterexamples, and full-width pointer-integer
 addition folded into a memory operand. `test-x86-target-selection` also
 reaches these fixtures through the existing memory-plan tests.
 
+Memory operands may also fold shared same-block pointer conversions,
+full-width additions and address nodes. Each access publishes the original
+base/index as its effective uses; the shared producer remains only when another
+selected user needs its address value. A frame address may be shared in its
+block or the entry preheader. The walk still stops at narrow arithmetic,
+additional indices, out-of-range displacements and longer cross-block chains.
+This folds address computation without moving, merging or widening an access.
+`test-tier1-emit` executes shared and escaping frame/offset addresses with
+rematerialization on and off, kept frame pointers and realigned frames.
+
+`tier1_address_coalesce_test.c` checks that a simple unscaled, undisplaced
+base-plus-index uses `add` when allocation puts the result in either input
+register. This removes the SIB byte while keeping one instruction. Other
+destinations, scales, displacements and `rsp` bases retain `lea`. Folded frame
+operands have their final base and offset before this decision. Both selector paths execute the
+32-bit, 64-bit and pointer fixtures against the independent IR interpreter.
+Flags are dead between IR nodes, as required by the existing emitter contract.
+
 The immediate-multiply candidate and both corresponding BURS productions
 have cost 3, versus 2 for a copy and shift and 1 for a 3/5/9 multiply's lea.
 This is a latency-biased selection heuristic, not a measured runtime result
 or an instruction-count bound. Signed loads retain their exact access width
-in the selected pattern's `source_width`; its `width` is the 32- or 64-bit
+in the selected pattern's `width`; its `source_width` is the 32- or 64-bit
 result. Their existing single-use, same-block and memory-barrier checks
 remain mandatory. I8-to-I16 sign extensions keep their canonicalization,
 and narrow arithmetic is never widened by the address walk.
 
 These local rules do not establish #1217's corpus-wide acceptance targets.
-Repeated frame/symbol-address rematerialization and table-base hoisting
-still need separate allocation/IR evidence. Record speedtest1/Lua dynamic
+Address values that escape, register pressure and table-base placement still
+need corpus evidence. Record speedtest1/Lua dynamic
 counts and approved-host runtime results in `buster14a/buster-performance`,
 not in this source repository; use `measure-tier1-programs` for the runtime
 comparison described above.

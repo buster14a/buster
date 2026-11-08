@@ -127,12 +127,15 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
     diagnostic/location comparisons; contextual recovery beyond 8/64/256
     repairs with earlier macro snapshots retained, and failure injection for
     allocation, data-index exhaustion and an unchanged recovery mask (#285);
-  - named UCNs (`\N{...}`, #452), refused where the lexer reads one in a token
-    (an identifier, a pp-number or an unknown token): in active text, a macro's
-    definition once and an unused argument, `#if` and `#elif` lines, after line
-    splices and as a trigraph, beside `\u`, `\U` and UTF-8 spellings, and with
-    names no character has; and no error in a skipped group, a literal or a
-    comment, whose `-E` text is clang's;
+  - named UCNs (`\N{...}`, #1447), their characters in identifiers (a macro's
+    name too), whose `-E` text is the character's UTF-8, and in `#if`'s
+    character constants; where one starts a token, a name not Unicode's is an
+    error with clang's note of a loose match, and a basic or control
+    character's an error; in active text, a macro's definition once and an
+    unused argument, `#if` and `#elif` lines, after line splices and as a
+    trigraph, beside `\u`, `\U` and UTF-8 spellings; and no error in a skipped
+    group (but a basic or control character's, which clang gives there and
+    buster doesn't, as for `\u`), a literal or a comment;
   - `#embed`: its data, parameters, errors and files, and where `-E` prints it;
   - #119's includes, in files and links the case makes: header names written out
     and computed, `#include_next` through three directories, an inactive group's
@@ -166,12 +169,12 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   guards and unread tails, short reads, EOF and failed calls, plus guarded malformed/truncated records. The generic
   raw `getdents64` syscall wrapper unpoisons only a positive returned range; no listing semantic or EMFILE-policy
   change is implied by that instrumentation boundary;
-  the named UCNs' places (`pp_test_named_ucns`): each error at its UCN's backslash, by both kernels, and with
-  `--clang` where clang's `-pedantic` warning that a named UCN is its extension is, or for a name no character has
-  its error, three columns before it (clang reads one past an identifier's first character silently); one in an
-  identifier of 40,000, each an error within 10 s (`pp_test_named_ucn_scaling`); and one, or a trigraph's `??/`,
-  across the edges of the 64-byte chunks, the 4 KB words of refinement's backslash bitmap and 4 KB windows, by
-  both kernels, whole and a window at a time (`pp_test_named_ucn_boundaries`);
+  the named UCNs' errors and notes (`pp_test_named_ucns`, #1447): each case's lines as written for it, by both
+  kernels, and with `--clang` as clang's (clang reads one within an identifier silently); 40,000 in one identifier,
+  no error, and 40,000 misspelled ones in a row, each an error found by a loose binary search, each within 10 s
+  (`pp_test_named_ucn_scaling`); and a name no character has, or its trigraph's `??/`, across the edges of the
+  64-byte chunks, the 4 KB words of refinement's backslash bitmap and 4 KB windows, by both kernels, whole and a
+  window at a time (`pp_test_named_ucn_boundaries`);
   the prelude's failures (#361): the command line's arena push and its `-D`/`-U` and
   `-include` files each failed in turn (the arena cut short, the data table full), each
   a fatal error that stops the prelude and fails the run, beside controls that

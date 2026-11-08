@@ -2,8 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Entry-rooted dominators, frontiers and natural loops for a borrowed CSR CFG. Include after lane.c.
-// dominators_analyze validates both CSR views, computes reachable reverse postorder, solves by AVX-512 set
-// intersection or scalar Cooper-Harvey-Kennedy, then builds the tree and the requested frontier/loop sets.
+// dominators_analyze validates both CSR views, computes reachable reverse postorder and DFS preorder, solves by
+// AVX-512 set intersection or scalar SEMI-NCA, then builds the tree and the requested frontier/loop sets.
 // All input-dependent walks use explicit stacks. No source or implementation from another compiler is copied.
 //
 // The caller owns the input arrays throughout the call; each offsets array has block_count + 1 u32 elements,
@@ -106,6 +106,15 @@ struct DominatorFrame
 {
     uint32_t block;
     uint32_t next;
+};
+
+// SEMI-NCA's virtual forest, indexed by DFS preorder number: a processed vertex's ancestor link, compressed toward
+// its tree's unprocessed root, and the least semidominator number on the path up to, excluding, that root.
+typedef struct DominatorLink DominatorLink;
+struct DominatorLink
+{
+    uint32_t ancestor;
+    uint32_t least;
 };
 
 static __attribute__((unused)) DominatorOptions dominators_options(void);
@@ -228,7 +237,9 @@ static DominatorStatus dominators_validate(const DominatorCfg* cfg, Arena* scrat
     return status;
 }
 
-static void dominators_order(const DominatorCfg* cfg, Dominators* result, DominatorFrame* stack, uint32_t* dfs_begin, uint32_t* dfs_end)
+// One DFS from entry: each block's preorder number (dfs_begin) and subtree end, each number's block and DFS parent
+// number, and RPO.
+static void dominators_order(const DominatorCfg* cfg, Dominators* result, DominatorFrame* stack, uint32_t* dfs_begin, uint32_t* dfs_end, uint32_t* vertices, uint32_t* parents)
 {
     const uint32_t count = cfg->block_count;
     memset(result->rpo_index, 0xff, (uint64_t)count * sizeof(uint32_t));
@@ -238,6 +249,8 @@ static void dominators_order(const DominatorCfg* cfg, Dominators* result, Domina
     uint32_t finished = 0;
     uint64_t depth = 1;
     dfs_begin[cfg->entry] = 0;
+    vertices[0] = cfg->entry;
+    parents[0] = 0;
     stack[0] = (DominatorFrame){
         .block = cfg->entry,
         .next = cfg->successor_offsets[cfg->entry],
@@ -251,6 +264,8 @@ static void dominators_order(const DominatorCfg* cfg, Dominators* result, Domina
             frame->next += 1;
             if (dfs_begin[target] == BUSTER_DOMINATOR_NONE)
             {
+                vertices[entered] = target;
+                parents[entered] = dfs_begin[frame->block];
                 dfs_begin[target] = entered;
                 entered += 1;
                 stack[depth] = (DominatorFrame){
@@ -286,47 +301,79 @@ static void dominators_order(const DominatorCfg* cfg, Dominators* result, Domina
     }
 }
 
-static uint32_t dominators_intersect(const Dominators* result, uint32_t a, uint32_t b)
+// The least semidominator number on number's processed path, up to and excluding the first ancestor numbered below
+// processed. Compression points every vertex on that path at the excluded ancestor, carrying the path's minimum.
+static uint32_t dominators_evaluate(DominatorLink* links, uint32_t* stack, uint32_t number, uint32_t processed)
 {
-    while (a != b)
+    uint32_t result = links[number].least;
+    if (links[number].ancestor >= processed)
     {
-        if (result->rpo_index[a] > result->rpo_index[b])
+        uint64_t depth = 0;
+        uint32_t top = number;
+        do
         {
-            a = result->idom[a];
-        }
-        else
+            stack[depth] = top;
+            depth += 1;
+            top = links[top].ancestor;
+        } while (links[top].ancestor >= processed);
+        const uint32_t root = links[top].ancestor;
+        uint32_t least = links[top].least;
+        do
         {
-            b = result->idom[b];
-        }
+            depth -= 1;
+            DominatorLink* link = &links[stack[depth]];
+            link->ancestor = root;
+            least = link->least < least ? link->least : least;
+            link->least = least;
+        } while (depth != 0);
+        result = least;
     }
-    return a;
+    return result;
 }
 
-static void dominators_scalar(const DominatorCfg* cfg, Dominators* result)
+// SEMI-NCA in DFS preorder numbers: semidominators in decreasing order through the compressed forest of processed
+// vertices, then each idom is the nearest common dominator-tree ancestor of its DFS parent and semidominator, by a
+// walk up the finished tree that is short unless a deep block has many DFS children dominated from far above it.
+// One pass; parents is overwritten by the idom numbers.
+static void dominators_scalar(const DominatorCfg* cfg, Dominators* result, const uint32_t* dfs_begin, const uint32_t* vertices, uint32_t* parents, uint32_t* semi, DominatorLink* links, uint32_t* stack)
 {
+    const uint32_t reachable = result->reachable_count;
+    for (uint32_t number = 0; number < reachable; number += 1)
+    {
+        links[number] = (DominatorLink){
+            .ancestor = parents[number],
+            .least = number,
+        };
+    }
+    for (uint32_t number = reachable - 1; number != 0; number -= 1)
+    {
+        const uint32_t block = vertices[number];
+        uint32_t least = parents[number];
+        for (uint32_t edge = cfg->predecessor_offsets[block]; edge < cfg->predecessor_offsets[(uint64_t)block + 1]; edge += 1)
+        {
+            const uint32_t source = dfs_begin[cfg->predecessors[edge]];
+            if (source != BUSTER_DOMINATOR_NONE)
+            {
+                const uint32_t candidate = source <= number ? source : dominators_evaluate(links, stack, source, number + 1);
+                least = candidate < least ? candidate : least;
+            }
+        }
+        semi[number] = least;
+        links[number].least = least;
+    }
     memset(result->idom, 0xff, (uint64_t)cfg->block_count * sizeof(uint32_t));
     result->idom[cfg->entry] = cfg->entry;
-    bool changed;
-    do
+    for (uint32_t number = 1; number < reachable; number += 1)
     {
-        changed = false;
-        result->iterations += 1;
-        for (uint32_t order = 1; order < result->reachable_count; order += 1)
+        uint32_t candidate = parents[number];
+        while (candidate > semi[number])
         {
-            const uint32_t block = result->rpo[order];
-            uint32_t immediate = BUSTER_DOMINATOR_NONE;
-            for (uint32_t edge = cfg->predecessor_offsets[block]; edge < cfg->predecessor_offsets[(uint64_t)block + 1]; edge += 1)
-            {
-                const uint32_t source = cfg->predecessors[edge];
-                if (result->idom[source] != BUSTER_DOMINATOR_NONE)
-                {
-                    immediate = immediate == BUSTER_DOMINATOR_NONE ? source : dominators_intersect(result, source, immediate);
-                }
-            }
-            changed = changed || result->idom[block] != immediate;
-            result->idom[block] = immediate;
+            candidate = parents[candidate];
         }
-    } while (changed);
+        parents[number] = candidate;
+        result->idom[vertices[number]] = vertices[candidate];
+    }
+    result->iterations += 1;
 }
 
 static bool dominators_bit(const uint64_t* row, uint32_t bit)
@@ -486,6 +533,9 @@ static bool dominators_dominates(const Dominators* dominators, uint32_t dominato
     return result;
 }
 
+// Each predecessor's walk climbs the tree to the block's idom. One that reaches a runner whose frontier already holds
+// the block stops: an earlier predecessor's walk passed there and marked the same chain on up (#1352). That keeps the
+// walks to the frontiers' total size plus the edges, where a join of many predecessors under a deep chain was quadratic.
 static void dominators_frontiers(const DominatorCfg* cfg, Dominators* result)
 {
     memset(result->frontiers, 0, (uint64_t)cfg->block_count * result->row_words * sizeof(uint64_t));
@@ -499,7 +549,7 @@ static void dominators_frontiers(const DominatorCfg* cfg, Dominators* result)
             uint32_t runner = cfg->predecessors[edge];
             if (result->rpo_index[runner] != BUSTER_DOMINATOR_NONE)
             {
-                while (runner != stop)
+                while (runner != stop && !dominators_bit(result->frontiers + (uint64_t)runner * result->row_words, block))
                 {
                     dominators_set(result->frontiers + (uint64_t)runner * result->row_words, block);
                     runner = runner == cfg->entry ? BUSTER_DOMINATOR_NONE : result->idom[runner];
@@ -839,6 +889,8 @@ static DominatorStatus dominators_analyze(Arena* arena, Arena* scratch, const Do
         uint32_t* dfs_begin = 0;
         uint32_t* dfs_end = 0;
         uint32_t* workspace = 0;
+        uint32_t* dfs_vertex = 0;
+        uint32_t* dfs_parent = 0;
         if (status == DOMINATOR_OK && count != 0)
         {
             candidate.idom = arena_push_array(arena, count, sizeof(uint32_t), _Alignof(uint32_t));
@@ -852,17 +904,21 @@ static DominatorStatus dominators_analyze(Arena* arena, Arena* scratch, const Do
             dfs_begin = arena_push_array(scratch, count, sizeof(uint32_t), _Alignof(uint32_t));
             dfs_end = arena_push_array(scratch, count, sizeof(uint32_t), _Alignof(uint32_t));
             workspace = arena_push_array(scratch, count, sizeof(uint32_t), _Alignof(uint32_t));
-            if (candidate.idom == 0 || candidate.rpo == 0 || candidate.rpo_index == 0 || candidate.tree_offsets == 0 || candidate.tree_children == 0 || candidate.preorder == 0 || candidate.subtree_end == 0 || frames == 0 || dfs_begin == 0 || dfs_end == 0 || workspace == 0)
+            dfs_vertex = arena_push_array(scratch, count, sizeof(uint32_t), _Alignof(uint32_t));
+            dfs_parent = arena_push_array(scratch, count, sizeof(uint32_t), _Alignof(uint32_t));
+            if (candidate.idom == 0 || candidate.rpo == 0 || candidate.rpo_index == 0 || candidate.tree_offsets == 0 || candidate.tree_children == 0 || candidate.preorder == 0 || candidate.subtree_end == 0 || frames == 0 || dfs_begin == 0 || dfs_end == 0 || workspace == 0 || dfs_vertex == 0 || dfs_parent == 0)
             {
                 status = DOMINATOR_NO_MEMORY;
             }
         }
         if (status == DOMINATOR_OK && count != 0)
         {
-            dominators_order(cfg, &candidate, frames, dfs_begin, dfs_end);
+            dominators_order(cfg, &candidate, frames, dfs_begin, dfs_end, dfs_vertex, dfs_parent);
+            // AUTO solves by SEMI-NCA: on the 9700X it beats the bit matrix at every measured size, real and synthetic
+            // (#1352, docs/dominators.md). The matrix solver stays the explicit VECTOR path and SEMI-NCA's test twin.
             const uint64_t vector_bytes = matrix_bytes + row_bytes;
-            candidate.path = options.path == DOMINATOR_SCALAR || vector_bytes > options.max_matrix_bytes ? DOMINATOR_SCALAR : DOMINATOR_VECTOR;
-            if (options.path == DOMINATOR_VECTOR && candidate.path != DOMINATOR_VECTOR)
+            candidate.path = options.path == DOMINATOR_VECTOR ? DOMINATOR_VECTOR : DOMINATOR_SCALAR;
+            if (candidate.path == DOMINATOR_VECTOR && vector_bytes > options.max_matrix_bytes)
             {
                 status = DOMINATOR_MATRIX_LIMIT;
             }
@@ -885,7 +941,19 @@ static DominatorStatus dominators_analyze(Arena* arena, Arena* scratch, const Do
             }
             else if (status == DOMINATOR_OK)
             {
-                dominators_scalar(cfg, &candidate);
+                const uint64_t phase_start = scratch->length;
+                DominatorLink* links = arena_push_array(scratch, candidate.reachable_count, sizeof(DominatorLink), _Alignof(DominatorLink));
+                uint32_t* stack = arena_push_array(scratch, candidate.reachable_count, sizeof(uint32_t), _Alignof(uint32_t));
+                if (links == 0 || stack == 0)
+                {
+                    status = DOMINATOR_NO_MEMORY;
+                }
+                else
+                {
+                    dominators_scalar(cfg, &candidate, dfs_begin, dfs_vertex, dfs_parent, workspace, links, stack);
+                }
+                dominators_record_scratch(&candidate, scratch, scratch_start);
+                arena_pop_to(scratch, phase_start);
             }
         }
         if (status == DOMINATOR_OK && count != 0)

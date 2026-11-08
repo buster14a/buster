@@ -488,6 +488,37 @@ static uint64_t ssa_ir_test_hash(const IrFunction* function)
     return hash;
 }
 
+// A serialized comparison checks logical columns and side tables without comparing arena pointers or padding.
+// In particular it exposes different phi order or value numbering after independent construction (#1395).
+static bool ssa_ir_test_identical(const IrFunction* first, const IrFunction* second, Arena* scratch)
+{
+    const IrFunction* functions[2] = { first, second };
+    char* text[2] = { 0 };
+    size_t lengths[2] = { 0 };
+    bool same = true;
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        FILE* stream = open_memstream(&text[path], &lengths[path]);
+        bool printed = false;
+        if (stream != NULL)
+        {
+            printed = ir_print(functions[path], scratch, stream) == IR_OK;
+            const bool closed = fclose(stream) == 0;
+            printed = printed && closed;
+        }
+        same = same && printed;
+    }
+    same = same && lengths[0] == lengths[1] && memcmp(text[0], text[1], lengths[0]) == 0;
+    if (!same && text[0] != NULL && text[1] != NULL)
+    {
+        fprintf(stderr, "  SSA IR vector/scalar order differs:\n%.*s\n%.*s\n", (int)(lengths[0] < 4096 ? lengths[0] : 4096), text[0],
+                (int)(lengths[1] < 4096 ? lengths[1] : 4096), text[1]);
+    }
+    free(text[0]);
+    free(text[1]);
+    return same;
+}
+
 static uint32_t ssa_ir_test_count(const IrFunction* function, IrOp op)
 {
     uint32_t count = 0;
@@ -1554,6 +1585,9 @@ static void ssa_ir_test_lifetimes(SsaIrTestTally* tally)
         IrFunction twin = { 0 };
         if (read && ssa_ir_test_promote(tally, &parsed, &output, &twin_output, &scratch, &promoted, &twin))
         {
+            // The counter (slot 2) is read before the sum (slot 1) and the scoped value (slot 0): discovery order
+            // differs between constructors, but the published phis and every rewritten operand must be identical.
+            ssa_ir_test_expect(tally, ssa_ir_test_identical(&promoted, &twin, &scratch), "independent promotion publishes identical loop phi order and value IDs");
             for (uint32_t form = 0; form < 2; form += 1)
             {
                 const IrFunction* function = form == 0 ? &promoted : &twin;
@@ -1564,6 +1598,10 @@ static void ssa_ir_test_lifetimes(SsaIrTestTally* tally)
                 }
                 header_phis[pass] = form == 0 ? phis : header_phis[pass];
                 ssa_ir_test_expect(tally, phis == header_phis[pass], "both paths place the header's phis alike");
+                const uint32_t first = function->block_offsets[1];
+                const uint32_t compared = first + phis;
+                ssa_ir_test_expect(tally, phis != 0 && compared < function->block_offsets[2] && function->op[compared] == IR_ICMP && function->a[compared] == compared - 1,
+                                   "the first-read counter is the last local-ordered header phi, including on baseline hosts");
             }
             const uint64_t arguments[1] = { 10 };
             ssa_ir_test_execute(tally, &parsed, 1, 0, arguments, 1, &execution, 25, "the lifetime fixture in memory");

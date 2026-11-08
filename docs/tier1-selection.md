@@ -25,7 +25,12 @@ patterns are:
 - 32/64-bit negation, complement, add, subtract, multiply, and/or/xor;
   immediate forms; shifts by a constant
   strictly below the operand width; multiplication by powers of two and by
-  3, 5 or 9; add/shift and three-operand addition through `lea`.
+  3, 5 or 9; add/shift and three-operand addition through `lea`. After
+  allocation, an unscaled base-plus-index sum with zero displacement uses
+  `add` when the destination is either input register (#1217), removing the
+  SIB byte. Flags are dead between IR nodes. Folded frame operands have their
+  final base and object offset before this decision; a nonzero displacement
+  or an `rsp` base keeps `lea`.
 - Explicit `IR_ADDRESS` base + index × scale + signed disp32, loads and stores,
   and folding those addresses into memory operands. Byte/word loads zero-extend
   into registers, while stores write exactly one/two bytes. An address whose
@@ -34,14 +39,17 @@ patterns are:
   register (its node's `mov`) as the index and the offset the displacement,
   which no user folds; one whose offset alone doesn't fit 32 bits is still
   refused. An
-  access's address is walked (`tier1_select_address`, #140) through the nodes
-  only its pattern uses, at most 8 of them: the `inttoptr` and `ptrtoint` the
+  access's address is walked (`tier1_select_address`, #140) through pure
+  address nodes in its block, at most 8 of them: the `inttoptr` and `ptrtoint` the
   typed stream's integers put around every address, addresses (one after
   another while the operand has room for their one index), constant indices
   and 64-bit additions of constants, which join the displacement while it fits
   32 bits. `s->z[2]` is then one `mov` from `[s + 24]` rather than three
-  conversions, two `lea`s and the constants' moves; a pointer that is a value
-  (a ptrtoint or an inttoptr of such a chain) is one `lea`. The index sheds the
+  conversions, two `lea`s and the constants' moves. Memory operands can each
+  fold a shared address chain (#1217); its producer remains when another
+  selected user still needs the address value. A pointer that is a value
+  (a ptrtoint or an inttoptr of a single-use chain) is one `lea`; address-valued
+  roots retain the single-use restriction. The index sheds the
   constants added to it (`tier1_select_index`): a 64-bit addition of a constant
   on either side, or a subtraction of one, joins the displacement scaled while
   it fits 32 bits, so that `p[i + 100]` of a 64-bit `i` is `[p + i * 4 + 400]`
@@ -58,7 +66,8 @@ patterns are:
   offset the `lea` takes. The object may live in the entry block past the
   walk's block: the producer materializes every slot address in the preheader,
   which dominates every use, and the address is pure with a function-global
-  offset. Longer cross-block chains stay unfolded. A displacement the object's
+  offset. Memory operands can fold this leaf even when it has several users;
+  an escaping address still materializes. Longer cross-block chains stay unfolded. A displacement the object's
   offset pushes past 32 bits refuses emission rather than truncating.
 - C's truth values (`tier1_select_truth`, #140): the lowering gives `a < b` as
   `zext (icmp lt a, b)`, which `if`, `!`, `&&` and `||` compare with zero again,
@@ -135,6 +144,36 @@ patterns are:
   no load folds past. Other atomic operations reach it as calls of the unit's leaves. A fence of a constant order is the IR's `fence` (`TIER1_RULE_FENCE`): `mfence` for a thread fence of `seq_cst`
   and no records for the others, a barrier no selection moves an access across. A volatile load remains a separate
   access; a store retains its original order and access width.
+- Integer comparisons can fold a single-use load into `cmp` under the same
+  access-order proof (#1218), including a materialized boolean, an extended
+  truth value and a fused conditional branch. Either operand may be a direct
+  32- or 64-bit load; a load originally on the left swaps the predicate when
+  the other register becomes the left operand. The latest legal load is
+  selected when both operands load, preserving their original access order.
+  A zero/sign extension of a byte, word or dword load can be removed when
+  comparing with an immediate that the same extension represents exactly.
+  The memory access keeps the source width, and a signed predicate on a
+  removed zero extension becomes unsigned. Arbitrary register comparisons
+  through an extension, truncations, shared values and observable accesses
+  remain unfolded. Immediate admission still uses the comparison width, so
+  some representable narrowed immediates, such as an I32 zero extension to
+  I64 compared with `0xffffffff`, remain conservative misses. Direct-load
+  productions include their savings in the BURS grammar; promoted-load
+  removal is a legality-dependent candidate refinement whose grammar cost
+  conservatively still includes the removed load/extension. Exact pricing
+  would need comparison-aware promotion classes.
+
+  The proof runs at the final consumer, so a branch or truth extension cannot
+  move an access past an operation after the original comparison. Both address
+  values remain effective uses. A boolean destination overlapping an address
+  register or the other operand is cleared with a flag-preserving move after
+  `cmp`. Frame addresses are resolved before pattern expansion, exposing the
+  actual base to this alias check and placing the displacement on `cmp`
+  rather than its following `setcc` or branch records. Guard-page predicate
+  tests, access-order fixtures and realigned frame-object execution cover
+  these cases in `test-tier1-select` and `test-tier1-emit`. This implements
+  compare-load folding; #1218's broader branch-layout, workload instruction
+  count and runtime acceptance remain separate.
 - The IR's `intrinsic` (#141): `mulhu` is `TIER1_RULE_MULTIPLY_HIGH` (one operand in `rax`, `mul` of the other, its
   `rdx` the result, saved around as a division's fixed registers are), and the x86 builtins' `pdep`, `pext`, `bzhi`
   and `bextr` of an `I32` or an `I64` are `TIER1_RULE_INTRINSIC`, their one VEX instruction of the width
@@ -586,7 +625,7 @@ or allocation; counts and capacities cannot silently wrap.
 | `covered[n]` | Byte flag: a covered node emits no instruction and has no allocated definition |
 | `effective_use_offsets[n+1]` | u32 CSR offsets by original node |
 | `effective_use_values[effective_use_count]` | u32 value IDs actually read by that node's chosen pattern |
-| `costs[n]` | u32 bottom-up subtree costs under the structural cost model |
+| `costs[n]` | u32 working candidate costs; includes children already built, not complete subtree costs |
 | `estimated_cost` | Sum of intrinsic costs of uncovered nodes |
 | `arena_bytes` | Exact retained arena charge, including alignment and reserved output capacity |
 
@@ -610,9 +649,9 @@ groups ready nodes by depth. All nodes in a depth are ready before the next
 depth begins. Candidate generation checks the bounded C patterns and their
 operand, type, immediate, memory-order and single-use constraints.
 
-The vector path covers the integer core by bottom-up rewriting
+Both host paths cover the integer core by bottom-up rewriting (#1395)
 (`tier1_select_burs.c`, #141's design: Pelegrí-Llopart and Graham's BURS, as
-iburg and burg build it). Its grammar is a C table of 69 patterns, each
+iburg and burg build it). Its grammar is a C table of patterns, each
 a nonterminal's derivation from an operator and its children's nonterminals, or
 from another nonterminal, at the structural cost below; a pattern stands for one
 candidate kind of `tier1_select_candidates`, an inner one (an address's piece,
@@ -638,27 +677,35 @@ and `test-baked-tables` build them where the executable isn't baked. The bound
 and table sizes are `BUSTER_TIER1_BURS_*`; table generation fails if the
 grammar exceeds a table's fixed capacity.
 
-A plan then takes four passes over the function's nodes, each 16 nodes a
-vector with an exact scalar twin (`tier1_burs_*_scalar`):
+A plan then takes four passes over the function's nodes. On a vector host,
+classification, labeling and rule lookup process 16 nodes at a time; `--scalar`
+and baseline hosts run the independent `tier1_burs_*_scalar` kernels. Both use
+the same costs and deterministic ties: fixed-order grammar expansion and chain
+closure replace a rule only for a strictly cheaper derivation, keeping the first
+derivation on a tie. Then `tier1_burs_pick` takes its first matching candidate, except
+that a walked load, store or copy supersedes its plain candidate. Host ISA
+therefore changes how selection runs, not the selected cover or its effective
+uses. The passes are:
 
 1. classes: each node's operator, from its IR operation and type and what the
    candidates' rules read of its operands (a constant's class bits, whether a
    right operand is a constant, a load or a shift, whether a load folds into its
    single user past no barrier, whether an address's displacement fits 32 bits);
    and its visible children, those a pattern may fold (a tree child, a constant,
-   or a frame object's single address in the entry block), any other operand
+   or a frame object's address in its block or the entry block), any other operand
    being the register leaf's state. A frame object's address, and an address
    whose constant index or offset doesn't fit 32 bits, take the scalar rule;
 2. labels: each node's state, a table lookup on its operator and its children's
-   representers, gathered, a depth level at a time;
+   representers; vector gathers visit one depth level at a time, while the
+   scalar twin visits nodes in order, since every visible child precedes its
+   parent;
 3. rules: each node's rule for its goal, a statement's or a register's;
 4. patterns: the node's candidate of its rule's kind, which
    `tier1_select_candidates`' walks fill (`tier1_burs_pick`). A node of an
    operator the grammar doesn't cover (calls, phis, floating arithmetic, masks
    and the rest) takes maximal munch's, made for every such node in the levels'
-   order, as the scalar twin makes every node's, so that a node either path
-   refuses is refused at the same place; the covered nodes' patterns are made
-   as the walk below needs them. A rule whose candidate the walks didn't make (a
+   order on both paths, so that a node either path refuses is refused at the
+   same place; the covered nodes' patterns are made as the walk below needs them. A rule whose candidate the walks didn't make (a
    walk past `BUSTER_TIER1_SELECT_WALK`) takes munch's too.
 
 The cover is the cheapest the grammar has for each tree, and the grammar has
@@ -667,8 +714,10 @@ costlier than munch's in the grammar's cost. That cost is each pattern's
 structural bound on its records, not the records the consumer writes: an
 addition of two loads costs 3 as `lea` of the two loads' registers and 4 as a
 load and an `add` from memory, whose records are 3 and 2 (`mov`, `mov`, `lea`
-against `mov`, `add`). In aggregate the vector path writes fewer records. At
-#1190's head, by `--tier1 --tier1-report`: on the frozen `sqlite3.c` with the
+against `mov`, `add`). Before #1395, only the vector path used the costed
+cover, and the scalar production path used maximal munch. The following
+historical measurements compare those different algorithms. At #1190's head,
+by `--tier1 --tier1-report`: on the frozen `sqlite3.c` with the
 records' flags (`-DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0
 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE`, its 2,668 functions), 346,741
 against the scalar twin's 348,554 (338,926 against 340,658 without the flags,
@@ -690,15 +739,17 @@ comparison, however deep their walks went (#140). A pattern's `fold_count` is
 only maximal munch's rank. An iterative pass publishes the effective-use CSR.
 There is no recursive tree walk or speculative input load.
 
-The scalar twin uses a switch to rank maximal-munch patterns by coverage and
-rule priority. It deliberately does not call the vector minimum-cost chooser.
-For example, it can prefer a power-of-two multiply's shift while the costed
-cover prefers the single-record immediate `imul`. Tests compare executed
-results and require the vector cover's cost to be no higher. A division by a
-register ranks below every rule for a constant divisor, which covers the constant
-even where the constant has other uses and so doesn't count among the folds: both
-paths take a constant divisor's rule wherever there is one, as the costed cover,
-whose `TIER1_RULE_DIVIDE` costs 8 against the others' 1, 2, 5 and 7, always did.
+Maximal munch remains a separate test reference and both paths' fallback
+outside the grammar. It ranks candidates by coverage and a switch's rule
+priority, independently of the BURS costs and tables. The tests execute its
+cover and both costed covers against the original IR and require the costed
+cover's estimate to be no higher than the reference's. The scalar production
+path does not use maximal munch for grammar-covered nodes. Both algorithms
+prefer `lea` for multiplication by 3, 5 and 9, and a shift for a power of two
+under #1217's immediate-`imul` penalty. A division by a register ranks below
+every constant-divisor rule even when the constant has other uses and does not
+count among the folds, as the costed cover, whose `TIER1_RULE_DIVIDE` costs 8
+against the others' 1, 2, 5 and 7, always did.
 
 The current cost is a **structural upper bound on record count**, including
 possible copies and operand-overlap repairs. It is not a measured latency,
@@ -1321,8 +1372,9 @@ is k0.
 
 ## Tests and benchmark
 
-`test-tier1-select` checks both original-IR covers, real records and native
-execution in a child process. Its independent arithmetic/IR oracles cover
+`test-tier1-select` checks identical scalar/vector costed plans and emitted
+records, plus an independent maximal-munch reference. All three execute in a
+child process against the original IR. Its independent arithmetic/IR oracles cover
 constant boundaries, aliasing registers, shifts, signed/unsigned comparisons,
 selects, addresses, exact memory access widths, volatile loads, intervening
 stores and multiply-used loads. Failure tests distinguish invalid IR,
@@ -1344,13 +1396,28 @@ children must be the scalar one's, both kernels' states and rules alike, and
 every node of a class the grammar covers must have a candidate. The same check
 runs on every function `test-tier1-pipeline` plans and every function
 `benchmark-tier1-select-source` selects, outside its time, where a difference
-fails the benchmark. The plan's `costs` column is the scalar path's subtree
-costs, which `test-tier1-select` and `test-tier1-pipeline` check against the
-definition worked out from the function alone (`tier1_select_test_plan_costs`).
-Nothing reads it after the plan, and the bottom-up path, which makes a pattern
-before its tree children's, leaves its children's costs out: working them out
-again children first took selection on the frozen `sqlite3.c` from 222.9 core
-cycles per IR instruction to 241.3 on the 9700X (`Tier1SelectPlan`'s header).
+fails the benchmark. `test-tier1-pipeline` also replans each function through
+the other host path and compares patterns, coverage, working costs and effective
+uses field by field. The independent maximal-munch reference builds children
+first, so its `costs` column contains complete subtree costs; the selector test
+checks those against the definition worked out from the function alone
+(`tier1_select_test_plan_costs`). Both production paths keep the previous costed
+path's lazy working costs: when a pattern is built before its children, their
+costs are left out. Nothing reads this column after the plan. There is no new
+subtree recomputation pass; historically that pass took selection on the frozen
+`sqlite3.c` from 222.9 core cycles per IR instruction to 241.3 on the 9700X
+(`Tier1SelectPlan`'s header).
+
+`test-checker-driver` compiles the #1395 arithmetic, address and load-add-loop
+regressions through `--tier1` and `--tier1 --scalar` for the same baseline
+target, with and without rematerialization. Every fixture function must select
+through Tier 1, the complete object files must be byte-identical, and each
+linked object must print the independent Clang build's output. Baseline-host
+builds exercise the scalar production route; native builds exercise both kernel
+routes when their host supports the full vector path. A parameter-free leaf
+with four volatile loads isolates unrestricted register allocation from phi
+ordering. Both production allocators now use the same level-rule policy; the
+independent scan remains a test reference ([allocation guide](tier1-allocation.md)).
 
 `test-tier1-select --manifest` writes CSV with separate origins for actual
 `plan` emission, direct `expansion` fixtures and test `wrapper` records. Every
@@ -1449,7 +1516,8 @@ cost. The shapes hold no loads, so these are the costs, not the fold's gains.
 Issue #141's Done-when is met; whether it closes is the owner's call. The 9700X
 measurements its Done-when asks for are recorded in
 [buster-performance](https://github.com/buster14a/buster-performance/tree/70a6b824ba7917e62968b0baabed847dd7d9fd0c/docs/measurements/tier1-reciprocal-141-2026-11-01),
-at #1001's heads and at its merge with main, `cc3387f`:
+at #1001's heads and at its merge with main, `cc3387f`. These measurements
+predate #1395's scalar production BURS path; they do not measure that change:
 
 - **Programs**, by the driver's `--tier1` (each function Tier 1's pipeline
   takes by Tier 1, the others by Tier 0), against Tier 0, clang -O0 and clang

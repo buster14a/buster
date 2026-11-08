@@ -250,6 +250,51 @@ static const CheckSourceFixture check_library_source_fixtures[] =
         .rejected = false,
     },
     {
+        .name = "library folds: ordinary declarations beside overloads in constant contexts",
+        .source = "int ov(int) __attribute__((overloadable));double ov(double) __attribute__((overloadable));\n"
+                  "unsigned long strlen(const char*);int strcmp(const char*, const char*);int memcmp(const void*, const void*, unsigned long);\n"
+                  "static const unsigned long n = strlen(\"abcd\");_Static_assert(strcmp(\"a\", \"c\") == -1, \"ordinary\");\n"
+                  "enum { length = strlen(\"abc\") };int a[strlen(\"abc\")];\n"
+                  "int f(int x){switch(x){case memcmp(\"ab\", \"ad\", 2):return length;}return 0;}\n",
+        .rejected = false,
+    },
+    {
+        .name = "library folds: the selected ordinary declaration precedes its overload",
+        .source = "unsigned long strlen(const char*);unsigned long strlen(int) __attribute__((overloadable));\n"
+                  "static const unsigned long n = strlen(\"abcd\");_Static_assert(strlen(\"abc\") == 3, \"ordinary first\");\n",
+        .rejected = false,
+    },
+    {
+        .name = "library folds: the selected ordinary declaration follows its overload",
+        .source = "unsigned long strlen(int) __attribute__((overloadable));unsigned long strlen(const char*);\n"
+                  "static const unsigned long n = strlen(\"abcd\");_Static_assert(strlen(\"abc\") == 3, \"ordinary last\");\n",
+        .rejected = false,
+    },
+    {
+        .name = "library folds: an overloadable declaration of the same prototype is no builtin",
+        .source = "unsigned long strlen(const char*) __attribute__((overloadable));\n"
+                  "static const unsigned long n = strlen(\"abcd\");\n",
+        .rejected = true,
+    },
+    {
+        .name = "library folds: another prototype beside overloads is no builtin",
+        .source = "int ov(int) __attribute__((overloadable));int strlen(const char*);\n"
+                  "static const int n = strlen(\"abcd\");\n",
+        .rejected = true,
+    },
+    {
+        .name = "library folds: a static declaration beside overloads is no builtin",
+        .source = "int ov(int) __attribute__((overloadable));static unsigned long strlen(const char* s){return 0;}\n"
+                  "static const unsigned long n = strlen(\"abcd\");\n",
+        .rejected = true,
+    },
+    {
+        .name = "library folds: an argument's side effect beside overloads is no constant",
+        .source = "int ov(int) __attribute__((overloadable));unsigned long strlen(const char*);int calls;\n"
+                  "static const unsigned long n = strlen((++calls, \"abcd\"));\n",
+        .rejected = true,
+    },
+    {
         .name = "library folds: a builtin clang doesn't fold is no constant",
         .source = "static const double d = __builtin_sin(0.0);\n",
         .rejected = true,
@@ -483,6 +528,30 @@ static __attribute__((noinline)) void check_test_library_programs(CheckTest* tes
         "r+=strcmp(\"a\",\"c\")*50000+strncmp(\"abc\",\"abz\",3)*60000+memcmp(\"ab\",\"ad\",2)*70000+(int)strlen(k)*80000+__builtin_strcmp(k,\"aa\")*90000;"
         "r+=__builtin_strcmp(touch(),\"abc\")*100000+calls;return r+n;}",
         "library-folds-in-code", clang);
+    // An unrelated overload set puts ordinary declarations through overload selection too (#1234). Each plain
+    // fold still lowers without a call, including the original strlen case, on both checker and lowering paths.
+    // Keep the overload definitions private: the paired oracle renames ordinary global identifiers, not mangled names.
+    check_test_program_source(test,
+        "static int ov(int x) __attribute__((overloadable)){return x;}static double ov(double x) __attribute__((overloadable)){return x;}"
+        "unsigned long strlen(const char*);int strcmp(const char*,const char*);int strncmp(const char*,const char*,unsigned long);"
+        "int memcmp(const void*,const void*,unsigned long);int bcmp(const void*,const void*,unsigned long);"
+        "unsigned long wcslen(const int*);int wcscmp(const int*,const int*);int wcsncmp(const int*,const int*,unsigned long);int wmemcmp(const int*,const int*,unsigned long);"
+        "static const char k[]=\"abcd\";int tested(int n){return n+(int)strlen(\"abcd\")+(int)strlen(k+1)+strcmp(\"a\",\"c\")*3+strncmp(\"abc\",\"abz\",3)*5+memcmp(\"ab\",\"ad\",2)*7"
+        "+bcmp(\"ab\",\"ad\",2)*11+(int)wcslen(L\"xyz\")*13+wcscmp(L\"a\",L\"c\")*17+wcsncmp(L\"abc\",L\"abz\",3)*19+wmemcmp(L\"ab\",L\"ad\",2)*23;}",
+        "library-folds-beside-overloads", clang);
+    check_test_program_source(test,
+        "unsigned long strlen(const char*);static unsigned long strlen(int x) __attribute__((overloadable)){return 100+(x&7);}"
+        "int tested(int n){return (int)strlen(\"abcd\")+(int)strlen(n);}",
+        "library-folds-selected-ordinary", clang);
+    check_test_program_source(test,
+        "static int calls;static unsigned long strlen(const char*s) __attribute__((overloadable)){calls++;return 30+(unsigned char)s[0];}"
+        "static unsigned long strlen(int x) __attribute__((overloadable)){calls+=3;return x&7;}"
+        "int tested(int n){calls=0;unsigned long a=strlen(\"abcd\"),b=strlen(n);return (int)(a+10*b)+1000*calls;}",
+        "library-overloads-remain-calls", clang);
+    check_test_program_source(test,
+        "int ov(int) __attribute__((overloadable));unsigned long strlen(const char*);"
+        "int tested(int n){int calls=0;int length=(int)strlen((++calls,\"abcd\"));return n+length+10*calls;}",
+        "library-folds-preserve-overload-argument-effects", clang);
     // fmax, fmin and their _num kin of the harness's special values (zeros, infinities, quiet and signaling NaNs,
     // subnormals), each of a call of the library's function against clang's llvm.maxnum and llvm.maximumnum. clang's
     // x86 code of llvm.maxnum and llvm.minnum (maxsd or minsd beside a NaN's select) gives its first operand of two

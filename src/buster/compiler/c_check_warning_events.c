@@ -80,9 +80,15 @@ enum
     // An unknown escape sequence in an unevaluated string literal, before its error (#147): the driver's alone, no event's.
     CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE = 88,
     CHECK_WARNING_ID_VOID_PTR_DEREFERENCE = 89,
+    // An ordinary character constant of more than one character (#1447): two or three, or past four, -Wmultichar's; four,
+    // -Wfour-char-constants' (ignored by default); past four, clang's warning of no option too.
+    CHECK_WARNING_ID_MULTICHAR = 90,
+    CHECK_WARNING_ID_FOUR_CHAR_CONSTANTS = 91,
+    CHECK_WARNING_ID_CHARACTER_TOO_LONG = 92,
+    CHECK_WARNING_ID_NULL_DEREFERENCE = 93,
     // clang's -Wfunction-multiversion (#1447, c_check_cpu_dispatch.c): a cpu_specific or cpu_dispatch CPU list with two
     // names of one mangling, and a cpu_dispatch function's body.
-    CHECK_WARNING_ID_FUNCTION_MULTIVERSION = 90,
+    CHECK_WARNING_ID_FUNCTION_MULTIVERSION = 94,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -294,6 +300,13 @@ typedef enum CheckWarningEventKind
     // An indirection through a pointer to void (#147, clang's CheckIndirectionOperand: -Wvoid-ptr-dereference), at its `*`:
     // payload.first_type the operand's type, payload.data its typedef's spelling.
     CHECK_WARNING_EVENT_VOID_PTR_DEREFERENCE,
+    // An unknown escape sequence of an evaluated literal (#1447, -Wunknown-escape-sequence): payload.data is its
+    // backslash's offset in the literal's token, payload.name its character.
+    CHECK_WARNING_EVENT_UNKNOWN_ESCAPE,
+    // A multi-character character constant's warnings (#1447): -Wmultichar's or -Wfour-char-constants', and past four
+    // characters "character constant too long for its type", each the description's message.
+    CHECK_WARNING_EVENT_MULTICHAR,
+    CHECK_WARNING_EVENT_CHARACTER_TOO_LONG,
     // -Wfunction-multiversion's (#1447): a CPU list's repeated mangling, at the attribute's name, and a cpu_dispatch
     // function's body, at its `{`.
     CHECK_WARNING_EVENT_CPU_LIST_DUPLICATE,
