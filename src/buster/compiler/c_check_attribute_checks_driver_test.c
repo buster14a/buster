@@ -3,7 +3,8 @@
 //
 // clang's checks-only attributes (#1447): availability, external_source_symbol, enforce_tcb, enforce_tcb_leaf, callback,
 // swift_async, ns_error_domain, objc_ownership, objc_gc, modular_format and diagnose_as_builtin, force_align_arg_pointer's
-// subjects (whose code c_check_program_test.c's run tests) and the NEON vectors' types, by the driver against clang, on original
+// subjects (whose code c_check_program_test.c's run tests), the NEON vectors' types and patchable_function_entry's checks
+// (whose code c_check_patchable_driver_test.c tests), by the driver against clang, on original
 // fixtures: each unit's whole output (diagnostics, their places, their order and the attribute as each message names it)
 // must be clang's by both paths, in GNU C23. Valid uses, wrong subjects and wrong arguments for each, their handlers'
 // checks, availability's merges across redeclarations, -Wtcb-enforcement's calls, and objc_gc's and objc_ownership's types
@@ -662,6 +663,68 @@ static void check_test_driver_checks_attributes(CheckTest* test, const char* cla
         "void k(void) { __attribute__((force_align_arg_pointer)) int local; (void)local; }\n",
         "void f(void) __attribute__((force_align_arg_pointer(1)));\n",
         "[[gnu::force_align_arg_pointer]] void h(void);\n",
+        // patchable_function_entry (#1447, check_input_patchable_entry; its code is c_check_patchable_driver_test.c's): a
+        // function's, its count, offset and section, on a declaration, a definition and after the definition (clang's
+        // warning that drops it, with its note); its handler's errors, in its order (each argument no integer constant,
+        // past 32 bits or negative, an offset past the count, an empty section) and its parser's (a section of no string
+        // literal, an undeclared name), its counts' errors, and its subjects' warnings, which come first; and gnu::'s and
+        // the keyword's spellings, as each message names them.
+        "__attribute__((patchable_function_entry(3))) void f(void);\nvoid f(void) {}\n",
+        "__attribute__((patchable_function_entry(3, 1))) void f(void) {}\n",
+        "__attribute__((patchable_function_entry(0))) void f(void) {}\n",
+        "void f(void) __attribute__((patchable_function_entry(2, 2, \"sec\")));\nvoid f(void) {}\n",
+        "__attribute__((patchable_function_entry(3))) void f(void);\n__attribute__((patchable_function_entry(4))) void f(void);\nvoid f(void) {}\n",
+        "void m(void) {}\nvoid m(void) __attribute__((patchable_function_entry(4)));\n",
+        "void m(void) __attribute__((patchable_function_entry(1))) {}\nvoid m(void) __attribute__((patchable_function_entry(4)));\n",
+        "int n;\n__attribute__((patchable_function_entry(n))) void f(void);\n",
+        "int n;\n__attribute__((patchable_function_entry(1, n))) void f(void);\n",
+        "int n;\n__attribute__((patchable_function_entry(n, 5))) void f(void);\n",
+        "__attribute__((patchable_function_entry(1, n))) void f(void);\n",
+        "__attribute__((patchable_function_entry(1.0))) void f(void);\n",
+        "__attribute__((patchable_function_entry(\"a\"))) void f(void);\n",
+        "__attribute__((patchable_function_entry(-1))) void f(void);\n",
+        "__attribute__((patchable_function_entry(3, -1))) void f(void);\n",
+        "__attribute__((patchable_function_entry(-1, 5))) void f(void);\n",
+        "__attribute__((patchable_function_entry(-1LL))) void f(void);\n",
+        "__attribute__((patchable_function_entry(1, -1LL))) void f(void);\n",
+        "__attribute__((patchable_function_entry(4294967296))) void f(void);\n",
+        "__attribute__((patchable_function_entry(3, 4294967296))) void f(void);\n",
+        "__attribute__((patchable_function_entry(4294967295, 4294967295))) void f(void);\n",
+        "__attribute__((patchable_function_entry(2147483648u, 'a'))) void f(void);\n",
+        "__attribute__((patchable_function_entry(2, 3))) void f(void);\n",
+        "__attribute__((patchable_function_entry(0, 1))) void f(void);\n",
+        "__attribute__((patchable_function_entry(1, 2, \"x\"))) void f(void);\n",
+        "__attribute__((patchable_function_entry(1, 0, \"\"))) void f(void);\n",
+        "__attribute__((patchable_function_entry(1, 0, 3))) void f(void);\n",
+        "__attribute__((patchable_function_entry(1, 0, \"a\" \"b\"))) void f(void);\n",
+        "__attribute__((patchable_function_entry)) void f(void);\n",
+        "__attribute__((patchable_function_entry())) void f(void);\n",
+        "__attribute__((patchable_function_entry(1, 2, \"a\", 4))) void f(void);\n",
+        "__attribute__((patchable_function_entry(1, 0, \"x\"), patchable_function_entry(-1))) void f(void);\n",
+        "__attribute__((patchable_function_entry(1))) int v;\n",
+        "__attribute__((patchable_function_entry(-1))) int v;\n",
+        "int n;\n__attribute__((patchable_function_entry(n))) int v;\n",
+        "__attribute__((patchable_function_entry(1, 2, \"a\", 4))) int v;\n",
+        "__attribute__((patchable_function_entry)) int v;\n",
+        "__attribute__((patchable_function_entry(1, 0, 3))) int v;\n",
+        "__attribute__((patchable_function_entry(1))) void (*fp)(void);\n",
+        "typedef void T(void) __attribute__((patchable_function_entry(1)));\n",
+        "struct __attribute__((patchable_function_entry(1))) S { int a; };\n",
+        "struct S { int x __attribute__((patchable_function_entry(1))); };\n",
+        "void g(int a __attribute__((patchable_function_entry(1))));\n",
+        "void k(void) { __attribute__((patchable_function_entry(1))) int local; (void)local; }\n",
+        "void k(void) { void e(void) __attribute__((patchable_function_entry(2))); e(); }\n",
+        "[[gnu::patchable_function_entry(2, 1)]] void h(void);\n",
+        "[[gnu::patchable_function_entry(-1)]] void h(void);\n",
+        "[[gnu::patchable_function_entry(1, 2)]] void h(void);\n",
+        "[[gnu::patchable_function_entry(1, 0, \"\")]] void h(void);\n",
+        "[[gnu::patchable_function_entry]] void h(void);\n",
+        "[[gnu::patchable_function_entry(1)]] int v;\n",
+        "int n;\n[[__gnu__::__patchable_function_entry__(n)]] void h(void);\n",
+        "[[clang::patchable_function_entry(1)]] void h(void);\n",
+        "__attribute__((__patchable_function_entry__(1, 2))) void h(void);\n",
+        "__attribute__((__patchable_function_entry__(4294967296))) void h(void);\n",
+        "__attribute__((__patchable_function_entry__(1, 0, \"\", 3))) void h(void);\n",
         // clang's NEON vectors (#1447): their elements (each permitted type, a polynomial vector's, and others), sizes, counts and
         // arguments, their places (a declarator's, a pointer's, a member's, a parameter's, a tag's, the C23 spellings' with
         // their deprecation, a statement's), their compatibility with GNU vectors, their mode, sizes and spellings.
@@ -830,6 +893,7 @@ static void check_test_driver_checks_attributes(CheckTest* test, const char* cla
         "__attribute__((objc_gc(foo))) int *p;\n",
         "__attribute__((objc_gc(weak))) int x;\n",
         "__attribute__((force_align_arg_pointer)) int v;\n",
+        "__attribute__((patchable_function_entry(1))) int v;\nvoid m(void) {}\nvoid m(void) __attribute__((patchable_function_entry(4)));\n",
         "void g(void);\n__attribute__((enforce_tcb(\"x\"))) void f(void) { g(); }\n__attribute__((availability(macos, introduced=17))) void h(void);\n",
         "[[clang::neon_vector_type(4)]] int x;\nint y [[clang::neon_vector_type(2)]];\n",
         "int v __attribute__((diagnose_as_builtin(__builtin_abs, 1)));\n",

@@ -62,6 +62,13 @@ static const CheckDriverDefaultWarningFixture check_driver_int_in_bool_fixtures[
         .notes = 2,
     },
     {
+        .name = "_Atomic _Bool targets take no int-in-bool warning, unlike a plain _Bool",
+        .source = "_Atomic _Bool fret(int x){return x<<1;}void take(_Atomic _Bool);void g(int x,int y){_Atomic _Bool l;l=x<<1;(void)l;_Atomic _Bool m=x<<2;"
+                  "_Atomic _Bool n=y?2:3;_Bool p=y?2:3;take(x<<3);(void)m;(void)n;(void)p;}\n",
+        .options = { "-Wall" },
+        .warnings = 1,
+    },
+    {
         .name = "int-in-bool-context suppression keeps the tautological forms",
         .source = "int f(int x){if(x<<2)return 1;if(1<<2)return 2;if(x?2:3)return 3;return x<<40?1:0;}\n",
         .options = { "-Wall", "-Wno-int-in-bool-context" },

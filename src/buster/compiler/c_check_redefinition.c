@@ -16,30 +16,31 @@ typedef enum CheckRedeclarationKind
     CHECK_REDECLARATION_NON_STATIC,
 } CheckRedeclarationKind;
 
-// Whether the declaration of `token`, a declarator's name, says extern or __private_extern__: up its declarator's chunks
-// (a pointer's `*`, groups, other declarators' commas, an initialized declarator's `=`) to its specifiers, then along
-// them. Clang words an object's type conflict by whether the new declaration is a definition before its initializer is
-// read (diagnoseVarDeclTypeMismatch's isThisDeclarationADefinition), so an extern one is a "redeclaration" even with an
-// initializer, and any other one (a tentative definition too) a "redefinition" (#1447, review on #1453).
+// Whether the declaration of `token`, a declarator's name, says extern or __private_extern__: a storage-class specifier
+// back from the name to its declaration's boundary (check_input_declaration_boundary's roles), over its declarator's chunks
+// (arrays, groups, pointers), the declarators before it and its specifiers whatever they spell (`_Alignas(8)`,
+// `_BitInt(8)`), and past a tag's body, whose members' terminators are no boundary of this declaration. Clang words an
+// object's type conflict by whether the new declaration is a definition before its initializer is read
+// (diagnoseVarDeclTypeMismatch's isThisDeclarationADefinition), so an extern one is a "redeclaration" even with an
+// initializer, and any other one (a tentative definition too) a "redefinition" (#1447, review on #1453). A storage class
+// is its declaration's specifier alone: a tag's member or a prototype's parameter can't say extern.
 static bool check_input_redeclaration_extern(const Parser* parser, uint32_t token)
 {
-    const uint32_t count = parser->tokens.count;
-    uint32_t up = token < count ? parser->tree.parents[token] : count;
-    for (uint32_t steps = 0; up < count && steps < count; steps += 1)
-    {
-        const uint8_t role = parser->tree.roles[up];
-        const bool chunk = role == PARSE_ROLE_CLOSE_FUNCTION || role == PARSE_ROLE_CLOSE_CALL || role == PARSE_ROLE_CLOSE_GROUP ||
-                           role == PARSE_ROLE_CLOSE_ATTRIBUTE || role == PARSE_ROLE_COMMA || role == PARSE_ROLE_ASSIGN ||
-                           (role == PARSE_ROLE_PREFIX && parser->tokens.kinds[up] == PARSE_KIND_STAR);
-        up = chunk ? parser->tree.parents[up] : up;
-        steps = chunk ? steps : count;
-    }
+    const uint8_t* roles = parser->tree.roles;
     bool result = false;
-    for (uint32_t steps = 0; up < count && steps < count && !result && parser->tree.roles[up] == PARSE_ROLE_SPECIFIER; steps += 1)
+    bool scanning = token < parser->tokens.count;
+    uint32_t depth = 0;
+    for (uint32_t at = token; scanning && at > 0;)
     {
-        const uint32_t name = parser->tokens.names[up];
-        result = name == C_NAME_EXTERN || name == C_NAME_PRIVATE_EXTERN;
-        up = parser->tree.parents[up];
+        at -= 1;
+        const uint8_t role = roles[at];
+        const uint32_t name = parser->tokens.names[at];
+        depth += role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_ENUM;
+        depth -= (role == PARSE_ROLE_OPEN_STRUCT || role == PARSE_ROLE_OPEN_ENUM) && depth != 0;
+        result = depth == 0 && role == PARSE_ROLE_SPECIFIER && (name == C_NAME_EXTERN || name == C_NAME_PRIVATE_EXTERN);
+        const bool boundary = role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_CLOSE_BLOCK ||
+                              role == PARSE_ROLE_OPEN_BODY || role == PARSE_ROLE_CLOSE_BODY;
+        scanning = !result && (depth != 0 || !boundary);
     }
     return result;
 }
@@ -98,15 +99,16 @@ static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t 
                                  (object && check_input_bit(reader->declaration_bits, previous, BUSTER_CHECK_BITS_TENTATIVE)) ||
                                  (object && earlier_linkage == 0);
             note_kind = defined ? CHECK_INPUT_NOTE_PREVIOUS_DEFINITION : CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
-            // A type conflict of an entity with linkage notes its latest earlier declaration, as clang's redeclaration chain
-            // does, though another block's, out of scope here (`int y; void f(void) { extern int y; }` then g's `extern
-            // double y;`, review on #1453): the last declaration before `token` of the same name, kind and object, which
-            // linkage gave it. (A scan back over the tokens, on the error path alone: a unit's checking ends at its error.)
+            // An object's type conflict with linkage notes its latest earlier declaration, as clang's MergeVarDecl does (it
+            // merges with the most recent declaration first), though another block's, out of scope here (`int y; void
+            // f(void) { extern int y; }` then g's `extern double y;`, review on #1453): the last declaration before `token`
+            // of the same name, kind and object, which linkage gave it. A function's (MergeFunctionDecl) notes the
+            // declaration its lookup found, `previous`, never another block's. (A scan back over the tokens, on the error
+            // path alone: a unit's checking ends at its error.)
             const uint32_t name = reader->parser->tokens.names[token];
             const uint32_t entity = reader->objects != NULL ? reader->objects[previous] : 0;
             uint32_t latest = BUSTER_CHECK_NONE;
-            const bool conflict = (detail == CHECK_REDECLARATION_OBJECT_TYPE || detail == CHECK_REDECLARATION_FUNCTION_TYPE) && linkage != 0 &&
-                                  earlier_linkage != 0 && entity != 0;
+            const bool conflict = object && detail == CHECK_REDECLARATION_OBJECT_TYPE && linkage != 0 && earlier_linkage != 0 && entity != 0;
             for (uint32_t t = token; conflict && latest == BUSTER_CHECK_NONE && t > previous + 1;)
             {
                 t -= 1;

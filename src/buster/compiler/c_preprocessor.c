@@ -392,6 +392,9 @@ struct PPOptions
     bool no_diagnostic_summary;
     // -dM: -E prints the macros defined at the end (pp_print_macros) instead of the tokens.
     bool dump_macros;
+    // -H (#1380): each header the unit enters, as clang prints it (pp_show_include). It records the history as the
+    // unit runs (no defer_history), so that the headers' lines and the diagnostics come out in the order clang's do.
+    bool show_includes;
     // --clang-features: the feature queries (__has_builtin, __has_attribute, __has_feature, __has_extension,
     // __has_c_attribute, __has_constexpr_builtin) answer as clang 23 does, from pp_features_*: the oracle's mode
     // (#125). By default they answer what buster implements (pp_implemented_*; #123, #148, #154).
@@ -1619,6 +1622,8 @@ struct Preprocessor
     // (pp_enter_file).
     bool include_limit_reached;
     uint32_t main_file;
+    // -H's lines, from the main file's run on (pp_show_include): not the prelude's -include files, nor a quiet run's.
+    bool showing_includes;
     // The predefines' file data (clang's <built-in> buffer), whose __STDC macros clang reports as builtin when they are
     // redefined or undefined (pp_language_defined); BUSTER_PP_NONE before it is read.
     uint32_t predefines_data;
@@ -13243,6 +13248,24 @@ static void pp_continue_relex(Preprocessor* pp, uint32_t file_context, uint32_t 
     }
 }
 
+// -H (#1380): a header the main file's run entered, as clang 23 prints it on the diagnostics' stream: a dot per level
+// below the main file, a space and the file's path as the line markers spell it. The prelude's -include files and the
+// headers they include aren't shown (clang's are its predefines buffer's), and neither is a file that a guard or
+// #pragma once skipped, nor one the depth limit refused. -E prints the lines among the preprocessor's diagnostics, as
+// clang does; the checker's driver collects those (PPOptions.collect_diagnostics), so the lines come before them.
+static void pp_show_include(Preprocessor* pp, uint32_t file)
+{
+    if (pp->showing_includes && pp->include_depth != 0)
+    {
+        FILE* stream = pp->options.diagnostics != 0 ? pp->options.diagnostics : stderr;
+        for (uint32_t level = 0; level < pp->include_depth; level += 1)
+        {
+            fputc('.', stream);
+        }
+        fprintf(stream, " %.*s\n", (int)pp->files[file].path_length, pp->files[file].path);
+    }
+}
+
 // Enters a file (prepared on first use) included at `include_location` from range `parent`, unless its guard is defined
 // or #pragma once read it. The inclusion is as much a system header as the file and as the includer there are, as
 // clang has it (HandleHeaderIncludeOrImport): a file included from a system header is one too. As in clang, an
@@ -13293,6 +13316,7 @@ static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint
             pp->file_change_location = pp->ranges[range].base;
             pp_note_system_run(pp, range, pp->ranges[range].base, pp->ranges[range].system);
             pp->include_depth += pp->context_count > 1;
+            pp_show_include(pp, file);
         }
     }
 }
@@ -18802,7 +18826,7 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     pp->table = table;
     // A deferred history records nothing until pp_history_ensure (PPOptions.defer_history); its run prints no
     // diagnostic (pp_run), but this setup's are printed, its fatal errors among them.
-    pp->history_deferred = options->defer_history && !options->no_history;
+    pp->history_deferred = options->defer_history && !options->no_history && !options->show_includes;
     pp->history_quiet = options->quiet;
     pp->options.no_history |= pp->history_deferred;
     const PPPrepare prepare = pp_prepare_options(options);
@@ -19404,6 +19428,7 @@ static bool pp_run_main(Preprocessor* pp, uint32_t file)
 {
     pp->main_file = file;
     pp->include_depth = 0;
+    pp->showing_includes = pp->options.show_includes && !pp->options.quiet;
     pp_run_file(pp, file);
     pp_resolve_keywords(pp);
     return pp->errors == 0 && !pp->fatal;
@@ -19534,6 +19559,7 @@ static void pp_history_record(Preprocessor* pp, bool report)
     options.no_history = false;
     options.defer_history = false;
     options.quiet = !report;
+    options.show_includes = false;
     options.timing = false;
     options.files = pp->cache;
     options.dependencies.enabled = false;
@@ -19810,6 +19836,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_output_ensure(Preprocessor* pp)
         options.no_history = true;
         options.defer_history = false;
         options.quiet = true;
+        options.show_includes = false;
         options.collect_diagnostics = false;
         options.timing = false;
         options.files = pp->cache;
@@ -22552,6 +22579,10 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
         {
             options->dump_macros = true;
         }
+        else if (strcmp(argument, "-H") == 0)
+        {
+            options->show_includes = true;
+        }
         else if (strcmp(argument, "--clang-features") == 0)
         {
             options->clang_features = true;
@@ -22905,7 +22936,7 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler -E/-M/-MM [-MD/-MMD] [-MF file] [-MT target] [-MQ target] [-MP] [-P] [-o file] [-x c] [-I dir] [-isystem dir] [-D name[=value]] [-U name] [-include file] [-dM] [options] file...\n");
+        fprintf(stderr, "usage: compiler -E/-M/-MM [-MD/-MMD] [-MF file] [-MT target] [-MQ target] [-MP] [-P] [-o file] [-x c] [-I dir] [-isystem dir] [-D name[=value]] [-U name] [-include file] [-dM] [-H] [options] file...\n");
     }
     else
     {

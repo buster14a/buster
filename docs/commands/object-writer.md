@@ -44,6 +44,11 @@ requirements. [Command index](README.md).
   IFUNC against the IFUNC. Then an arena too small for an object
   (`OBJECT_ERROR_FULL`), an addend past int64 (`OBJECT_ERROR_RANGE`), and links
   with an absolute symbol, referenced and not, which `object_prepare` refuses;
+  and linked descriptors (#1447, `ObjectAtomSection.link`: patchable function
+  entries' `SHF_LINK_ORDER` sections), a section per link whose `sh_link` is
+  its atom's section (`.text`'s, or a function section's), with the malformed
+  ones (no link, another unit's atom or a later class's, a link without the
+  flag) refused with `OBJECT_ERROR_RANGE`;
 - debug (`object_debug_test.c`, #395): each unit of those sets and of the link
   made by hand with a debug.c unit of its functions (`ObjectOptions.debug`),
   shuffled, as one unit and as two, finalized at random addresses, with and

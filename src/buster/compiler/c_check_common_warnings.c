@@ -900,7 +900,6 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
 static void check_common_conversion_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
                                             TypeId target, bool evaluated, const uint32_t* parents, uint32_t at_once, Arena* scratch);
-static bool check_common_atomic_destination(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node);
 static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                          TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
                                          TypeId target, const uint32_t* parents, uint32_t at_once, uint8_t leaves, Arena* scratch);
@@ -1566,6 +1565,7 @@ static void check_common_call_argument(CheckCommonEmission* emission, uint32_t i
         const CheckConversion conversion = stream->argument_conversions[index];
         const bool arms = check_common_conversion_arms(graph, argument);
         if (argument < graph->count && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (conversion.flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
+            (conversion.flags & BUSTER_CHECK_CONVERT_ATOMIC) == 0 &&
             !check_common_conversion_source(check_stream_constant_kind(stream, argument), arms) && check_common_bool_candidate(graph, argument) &&
             (check_common_emit_evaluated(emission, argument) || (emission->emitted[argument] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0) &&
             check_common_bool_target(emission->types, prototype ? conversion.type : type_default_argument_promote(emission->types, conversion.type)))
@@ -1575,7 +1575,8 @@ static void check_common_call_argument(CheckCommonEmission* emission, uint32_t i
                                      emission->at_once, emission->scratch);
         }
         if (argument < graph->count && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && !check_common_query_suppressed(graph, argument) &&
-            (conversion.flags & BUSTER_CHECK_CONVERT_CAST) == 0 && check_common_conversion_source(check_stream_constant_kind(stream, argument), arms) &&
+            (conversion.flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
+            check_common_conversion_source(check_stream_constant_kind(stream, argument), arms) &&
             (check_common_emit_evaluated(emission, argument) || ((emission->emitted[argument] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0 &&
              (check_stream_constant_kind(stream, argument) == CHECK_CONSTANT_FLOATING || arms))))
         {
@@ -1605,7 +1606,7 @@ static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t 
         const bool assigned = source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0;
         if (assigned && !check_common_conversion_source(check_stream_constant_kind(stream, source), arms) && check_common_bool_candidate(graph, source) &&
             (evaluated || (emission->emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0) &&
-            check_common_bool_target(emission->types, check_stream_type(stream, node)) && !check_common_atomic_destination(graph, stream, emission->types, node))
+            (flags & BUSTER_CHECK_CONVERT_ATOMIC) == 0 && check_common_bool_target(emission->types, check_stream_type(stream, node)))
         {
             // A `<<` converted to _Bool (#1447): DiagnoseIntInBoolContext's alone; a constant one's is its leaf's (check_common_conversion_warning).
             check_common_int_in_bool(emission->parser, emission->pp, emission->input, stream, emission->types, source, emission->parents,
@@ -1613,7 +1614,7 @@ static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t 
         }
         if (source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
             check_common_conversion_source(check_stream_constant_kind(stream, source), arms) &&
-            !check_common_atomic_destination(graph, stream, emission->types, node) &&
+            (flags & BUSTER_CHECK_CONVERT_ATOMIC) == 0 &&
             (evaluated || ((emission->emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0 &&
              (check_stream_constant_kind(stream, source) == CHECK_CONSTANT_FLOATING || arms))))
         {
@@ -3282,27 +3283,15 @@ static bool check_common_character_type(const TypeTable* types, TypeId type)
 // Diag's (DiagnoseFloatingImpCast, CheckBoolLikeConversion), at once, as its full expression completes: `at_once`, or the
 // end check_common_full_expression_end finds up `parents`. Its phase there, after the lexer's lookahead, puts it before
 // whatever the next statement or declarator reports from that token. Where either may report is unchanged.
-// Whether `target` takes clang's implicit-conversion value warnings: a builtin type, which clang's CheckImplicitConversion
-// reads (a BuiltinType), not an enumeration or an _Atomic type, to which clang gives neither -Wconstant-conversion nor
-// -Wliteral-conversion (#1447, review on #1453), though check_common_integer reads their integer types.
-static bool check_common_conversion_target(const TypeTable* types, TypeId target)
+// Whether `target` takes clang's implicit-conversion value warnings (#1447, review on #1453). CheckImplicitConversion gives
+// -Wliteral-conversion a builtin target alone (DiagnoseFloatingImpCast reads a BuiltinType), so not an enumeration, whose
+// integer type check_common_integer reads, but -Wconstant-conversion an enumeration too, by its integer type's range. An
+// _Atomic type takes neither. (An _Atomic destination's conversion is to its value type: BUSTER_CHECK_CONVERT_ATOMIC.)
+static bool check_common_conversion_target(const TypeTable* types, TypeId target, bool floating)
 {
     const TypeId bare = target != 0 ? type_unqualified(type_strip_aligned(types, target)) : 0;
     const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_VOID;
-    const bool result = bare != 0 && kind != BUSTER_TYPE_KIND_ENUM && kind != BUSTER_TYPE_KIND_ATOMIC;
-    return result;
-}
-
-// Whether an implicit conversion's destination is an _Atomic object: an assignment's left operand's or an initialization's
-// declared type (CheckGraph.types). The conversion's own type is the atomic's value type, which the lowering converts to,
-// so check_common_conversion_target can't see it there; clang's conversion value warnings skip it (#1447).
-static bool check_common_atomic_destination(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
-{
-    const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
-    const uint32_t left = op == CHECK_OP_ASSIGN ? graph->operand0[node] : BUSTER_CHECK_NONE;
-    TypeId type = left < graph->count ? check_stream_type(stream, left) : op == CHECK_OP_INITIALIZE && graph->types != NULL ? graph->types[node] : 0;
-    type = type != 0 ? type_unqualified(type_strip_aligned(types, type)) : 0;
-    const bool result = type != 0 && type_kind(types, type) == BUSTER_TYPE_KIND_ATOMIC;
+    const bool result = bare != 0 && kind != BUSTER_TYPE_KIND_ATOMIC && (!floating || kind != BUSTER_TYPE_KIND_ENUM);
     return result;
 }
 
@@ -3311,7 +3300,7 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
                                             TypeId target, const uint32_t* parents, uint32_t at_once, uint8_t leaves, Arena* scratch)
 {
     __int128 converted = 0;
-    const bool plain = check_common_conversion_target(types, target);
+    const bool plain = check_common_conversion_target(types, target, false);
     const bool width = plain && value->constant_kind == CHECK_CONSTANT_INTEGER && check_common_same_width(types, value, target);
     const uint8_t kind = width ? BUSTER_CHECK_LEAVES_WIDTH : BUSTER_CHECK_LEAVES_INTEGER;
     const bool listed_character = width && (leaves & BUSTER_CHECK_LEAVES_LISTED) != 0 && check_common_character_type(types, target);
@@ -3347,7 +3336,8 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
                                         CHECK_WARNING_ID_CONSTANT_CONVERSION, false, message, NULL, 0, scratch);
         }
     }
-    else if (plain && value->constant_kind == CHECK_CONSTANT_FLOATING && (leaves & BUSTER_CHECK_LEAVES_FLOATING) != 0)
+    else if (value->constant_kind == CHECK_CONSTANT_FLOATING && (leaves & BUSTER_CHECK_LEAVES_FLOATING) != 0 &&
+             check_common_conversion_target(types, target, true))
     {
         const CheckGraph* graph = &input->graph;
         uint32_t width = 0;
@@ -3917,8 +3907,8 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
             // Range initializers have one conversion per selected element, even when every write uses
             // the same source node. The graph's expression is traversed once; its conversions remain distinct.
             // (Not a compound literal's in an unevaluated query's operand: check_common_query_suppressed.)
-            const TypeId element = part->type != 0 ? type_unqualified(type_strip_aligned(emission->types, part->type)) : 0;
-            const bool atomic = element != 0 && type_kind(emission->types, element) == BUSTER_TYPE_KIND_ATOMIC;
+            // (An _Atomic element converts to its value type, so the planner marks it: BUSTER_CHECK_CONVERT_ATOMIC.)
+            const bool atomic = (part->conversion.flags & BUSTER_CHECK_CONVERT_ATOMIC) != 0;
             if (!atomic && !check_common_query_suppressed(graph, root) && check_common_initializer_literal(parser, input, stream, emission->types, part))
             {
                 const CheckValue value = check_stream_value(stream, root);
@@ -3961,8 +3951,8 @@ static void check_common_initializer_integers(CheckCommonEmission* emission, con
     {
         const CheckInitPart* part = plan->parts + p - 1;
         const uint32_t root = part->node;
-        const TypeId element = part->type != 0 ? type_unqualified(type_strip_aligned(emission->types, part->type)) : 0;
-        const bool atomic = element != 0 && type_kind(emission->types, element) == BUSTER_TYPE_KIND_ATOMIC;
+        // (An _Atomic element converts to its value type, so the planner marks it: BUSTER_CHECK_CONVERT_ATOMIC.)
+        const bool atomic = (part->conversion.flags & BUSTER_CHECK_CONVERT_ATOMIC) != 0;
         if (!atomic && part->kind == CHECK_INIT_VALUE && root < graph->count && stream->diagnostics[root] == CHECK_DIAG_NONE &&
             (evaluated == NULL || evaluated[root] != 0) && !check_common_query_suppressed(graph, root) &&
             check_common_initializer_integer(input, stream, emission->types, part))
@@ -7497,13 +7487,17 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
         // unit's first candidate read, so a unit without one pays nothing.
         uint8_t* sizeof_known = NULL;
         bool sizeof_failed = false;
-        // A local declaration is one with a body, an entry of its column: no other warns.
+        // A local declaration is one with a body, an entry of its column: no other warns. A compound literal's unnamed
+        // object has one too, but it is no variable, and clang's -Wuninitialized follows variables alone: the literal's
+        // own value, at its closing `}`, would otherwise be a read inside its initializer's range, a self-use. The
+        // variables its initializer reads keep their own warnings.
         for (uint32_t declaration = check_common_next_entry(input->declaration_bodies, 0, count, vector); valid && declaration < count;
              declaration = check_common_next_entry(input->declaration_bodies, declaration + 1, count, vector))
         {
             const bool local = input->declaration_kinds[declaration] == C_BINDING_OBJECT && check_common_sparse_get(input->declaration_bodies, declaration) < parser->tokens.count &&
                                !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) &&
-                               !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL);
+                               !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) &&
+                               !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND);
             const bool parameter = local && parameters[declaration] != 0;
             const bool plain = local && !parameter && !addressed[declaration];
             const TypeId type = local ? input->declared_types[declaration] : 0;

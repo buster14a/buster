@@ -1111,6 +1111,10 @@ static const char* const predefines_test_option_sets[] = {
     "-fcf-protection=bogus -fcf-protection", "-fgnuc-version=1.2.3.4 -fgnuc-version=5", "-Obogus -O2", "-O2 -Obogus", "-mabi=ms -mabi=sysv", "-mabi=sysv -mabi=ms",
     "--target=bogus --target=x86_64-linux-gnu", "-std=bogus -std=c17", "-std=c17 -std=bogus", "-ffp-model=bogus -ffp-model=fast",
     "-ffp-eval-method=bogus -ffp-eval-method=source", "-mapx-features=bogus -mapx-features=egpr",
+    // -fpatchable-function-entry= (#1447, predefines_patchable): no macro, its last value checked as clang's driver checks it.
+    "-fpatchable-function-entry=3", "-fpatchable-function-entry=3,1,sec,tion", "-fpatchable-function-entry=x", "-fpatchable-function-entry=2,3",
+    "-fpatchable-function-entry=4294967296", "-fpatchable-function-entry=3,1,", "-fpatchable-function-entry=x -fpatchable-function-entry=2,1",
+    "-fpatchable-function-entry=2,1 -fpatchable-function-entry=+2",
     // -Ofast as the last -O ignores every -ffp-model= but aggressive without reading its value (#109's seed 1101).
     "-Ofast -ffp-model=bogus", "-ffp-model=bogus -Ofast", "-O2 -Ofast -ffp-model=bogus", "-Ofast -O2 -ffp-model=bogus", "-Ofast -ffp-model=bogus -fno-fast-math",
     "-ffp-model=bogus -Ofast -ffp-model=precise", "-ffp-model=bogus -Ofast -O3",

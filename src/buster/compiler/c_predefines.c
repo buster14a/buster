@@ -868,6 +868,9 @@ struct PredefinesOptions
     // changes no macro but whether both tiers' frames and dynamic allocations probe the stack a page at a time (#177,
     // predefines_stack_clash).
     uint8_t stack_clash_protection;
+    // The last -fpatchable-function-entry=N[,M[,SECTION]]'s value, or null (#1447): the NOPs every function without a
+    // patchable_function_entry attribute gets, which changes no macro (predefines_patchable).
+    const char* patchable_function_entry;
     // -fcommon (the last of it and -fno-common): every tentative definition of external linkage a common symbol (#147),
     // which changes no macro.
     bool common;
@@ -1769,6 +1772,10 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
     else if (strcmp(argument, "-fstack-clash-protection") == 0 || strcmp(argument, "-fno-stack-clash-protection") == 0)
     {
         options->stack_clash_protection = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
+    }
+    else if (predefines_starts(argument, "-fpatchable-function-entry="))
+    {
+        options->patchable_function_entry = argument + sizeof("-fpatchable-function-entry=") - 1;
     }
     else if (strcmp(argument, "-fcommon") == 0 || strcmp(argument, "-fno-common") == 0)
     {
@@ -2807,6 +2814,8 @@ static bool predefines_sanitizers(PredefinesOptions* options)
 // The options clang's driver reads only the last of, after every option (an earlier invalid one doesn't count): -mtune,
 // -mfpmath=, -mcmodel=, -mabi=, -fveclib=, -O, -fgnuc-version=, -fcf-protection=, -fopenmp='s runtime, -flto= and
 // -fvisibility=. Sets the values they give (fpmath, code_model, openmp) and reports clang's errors; false after one.
+static bool predefines_patchable(const PredefinesOptions* options, uint32_t* count, uint32_t* offset, const char** section);
+
 static bool predefines_finish_options(PredefinesOptions* options)
 {
     bool result = true;
@@ -2883,6 +2892,20 @@ static bool predefines_finish_options(PredefinesOptions* options)
     if (options->cf_protection_invalid != 0)
     {
         fprintf(stderr, "error: invalid value '%s' in '%s'\n", options->cf_protection_invalid + 16, options->cf_protection_invalid);
+        result = false;
+    }
+    // -fpatchable-function-entry='s last value (#1447, predefines_patchable), as clang's driver checks it.
+    uint32_t patchable_count = 0;
+    uint32_t patchable_offset = 0;
+    const char* patchable_section = 0;
+    if (!predefines_patchable(options, &patchable_count, &patchable_offset, &patchable_section))
+    {
+        fprintf(stderr, "error: invalid argument '%s' to -fpatchable-function-entry=\n", options->patchable_function_entry);
+        result = false;
+    }
+    else if (patchable_offset > patchable_count)
+    {
+        fprintf(stderr, "error: the second argument of '-fpatchable-function-entry' must be smaller than the first argument\n");
         result = false;
     }
     // OpenMP's runtime is checked only when OpenMP is on. libgomp's gets no _OPENMP from clang: only libomp's (and its
@@ -3673,6 +3696,38 @@ static __attribute__((unused)) uint8_t predefines_frame_pointer(const Predefines
 static __attribute__((unused)) bool predefines_stack_clash(const PredefinesOptions* options)
 {
     return options->stack_clash_protection == BUSTER_PREDEFINES_ON;
+}
+
+// -fpatchable-function-entry=N[,M[,SECTION]]'s value (#1447), as clang's driver reads the last one: N, then optionally a
+// comma and M, then optionally a comma and a section of at least one byte (commas and all), each number decimal digits that
+// fit in 32 bits, unsigned (clang's consumeInteger). Whether it is one, with them in *count, *offset and *section (the
+// option's own NUL-terminated string, or null without one); 0, 0 and null without the option. predefines_finish_options
+// refuses M past N.
+static bool predefines_patchable(const PredefinesOptions* options, uint32_t* count, uint32_t* offset, const char** section)
+{
+    const char* value = options->patchable_function_entry;
+    uint64_t numbers[2] = { 0, 0 };
+    uint32_t given = 0;
+    bool valid = true;
+    const char* cursor = value != 0 ? value : "";
+    for (uint32_t n = 0; value != 0 && valid && n < 2 && (n == 0 || *cursor == ','); n += 1)
+    {
+        cursor += n != 0 ? 1 : 0;
+        valid = *cursor >= '0' && *cursor <= '9';
+        while (valid && *cursor >= '0' && *cursor <= '9')
+        {
+            numbers[n] = numbers[n] * 10 + (uint64_t)(*cursor - '0');
+            valid = numbers[n] <= UINT32_MAX;
+            cursor += 1;
+        }
+        given += 1;
+    }
+    const bool named = valid && given == 2 && *cursor == ',' && cursor[1] != 0;
+    valid = valid && (*cursor == 0 || named);
+    *count = valid ? (uint32_t)numbers[0] : 0;
+    *offset = valid ? (uint32_t)numbers[1] : 0;
+    *section = named ? cursor + 1 : 0;
+    return valid;
 }
 
 // The macros the target and the options decide, as #define lines, into `buffer` (`capacity` bytes, at least

@@ -2307,6 +2307,65 @@ static bool object_test_objects(uint64_t seed, Arena* arena)
                                "a malformed section descriptor rejects before grouping and leaves no output", i);
         }
     }
+    // Linked descriptors (#1447, ObjectAtomSection.link): unit 0's two DATA atoms each in a patchable function entries'
+    // section linked to one of its TEXT atoms, writable, allocated and SHF_LINK_ORDER, a section each, whose sh_link is the
+    // TEXT atom's section's index (.text's, or with function sections .text.entry's and .text's: the second atom has no
+    // symbol at its start); a descriptor of SHF_LINK_ORDER without a link, with one of another unit or of a later class,
+    // and a link without the flag, are malformed.
+    if (hand_named != 0)
+    {
+        ObjectAtomSection* linked = BUSTER_ARENA_PUSH_ARRAY(arena, ObjectAtomSection, hand.atoms.count);
+        object_test_expect(&tally, linked != 0, "room for linked section descriptors", 0);
+        // The hand link's atoms: entry's code (1), load's (2), the strings (4), the data (6 and 7), .bss (8), unit 2's data (9).
+        static const struct
+        {
+            AtomId link;
+            uint64_t flags;
+        } malformed[] = {
+            { 0, SHF_ALLOC | SHF_WRITE | SHF_LINK_ORDER },
+            { 9, SHF_ALLOC | SHF_WRITE | SHF_LINK_ORDER },
+            { 8, SHF_ALLOC | SHF_WRITE | SHF_LINK_ORDER },
+            { 1, SHF_ALLOC | SHF_WRITE },
+        };
+        for (uint32_t m = 0; linked != 0 && m <= BUSTER_ARRAY_LENGTH(malformed) * 2; m += 1)
+        {
+            const bool valid = m >= BUSTER_ARRAY_LENGTH(malformed);
+            const uint32_t function_sections = valid ? m - BUSTER_ARRAY_LENGTH(malformed) : 0;
+            memset(linked, 0, (uint64_t)hand.atoms.count * sizeof(ObjectAtomSection));
+            for (uint32_t k = 0; k < 2; k += 1)
+            {
+                linked[6 + k] = (ObjectAtomSection){
+                    .name = BUSTER_S8("__patchable_function_entries"),
+                    .type = SHT_PROGBITS,
+                    .flags = valid ? SHF_ALLOC | SHF_WRITE | SHF_LINK_ORDER : malformed[m].flags,
+                    .link = valid ? 1 + k : malformed[m].link,
+                };
+            }
+            const ObjectOptions object_options = { .function_sections = function_sections != 0, .atom_sections = linked, .atom_section_count = hand.atoms.count };
+            const uint64_t before = arena->length;
+            const Object built = object_build(&hand, &units, &symbols, 0, object_options, BUSTER_S8("linked.c"), arena);
+            object_test_expect(&tally, valid || (built.error == OBJECT_ERROR_RANGE && built.bytes == 0 && arena->length == before),
+                               "a malformed linked section descriptor rejects and leaves no output", m);
+            ObjectView view = { 0 };
+            char error[256] = { 0 };
+            const bool opened = valid && built.error == OBJECT_ERROR_NONE && object_view_open(&view, built.bytes, built.size, false, error, sizeof(error));
+            object_test_expect(&tally, !valid || opened, "linked section descriptors' object", m);
+            uint32_t found = 0;
+            for (uint64_t index = 1; opened && index < view.section_count; index += 1)
+            {
+                const char* name = object_view_section_name(&view, index);
+                const Elf64_Shdr* header = &view.sections[index];
+                const char* target = name != 0 && strcmp(name, "__patchable_function_entries") == 0 ? object_view_section_name(&view, header->sh_link) : 0;
+                const char* wanted = function_sections != 0 && found == 0 ? ".text.entry" : ".text";
+                const bool right = target != 0 && strcmp(target, wanted) == 0 && header->sh_type == SHT_PROGBITS &&
+                                   header->sh_flags == (SHF_ALLOC | SHF_WRITE | SHF_LINK_ORDER) && header->sh_info == 0 && header->sh_addralign == 8;
+                object_test_expect(&tally, target == 0 || right, "a linked section's header names its atom's section", m);
+                found += target != 0 ? 1 : 0;
+            }
+            object_test_expect(&tally, !opened || found == 2, "a linked section per link", m);
+            arena_pop_to(arena, before);
+        }
+    }
     for (uint32_t sections = 0; hand_named != 0 && sections < 4; sections += 1)
     {
         const ObjectOptions object_options = {

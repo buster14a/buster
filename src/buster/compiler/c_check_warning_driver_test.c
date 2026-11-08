@@ -58,6 +58,35 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 6,
     },
     {
+        // A brace element's destination is _Atomic by its declared type, which its plan part records stripped (#1447).
+        .name = "conversion warnings skip atomic initializer elements",
+        .source = "_Atomic char ga[1] = { 1.5 };\nstruct S { _Atomic char c; int i; };\nstruct S gs = { 1.5, 2.5 };\nvoid f(void) {\n"
+                  "  _Atomic char a[2] = { 1.5, 2 };\n  struct S s = { 3.5, 4.5 };\n  struct { _Atomic int x; double d; } t = { .x = 5.5, .d = 1 };\n"
+                  "  (void)a; (void)s; (void)t;\n}\n",
+        .warnings = 2,
+    },
+    {
+        // A return's or a prototype argument's _Atomic destination too, for either warning, beside the int, char and
+        // plain parameter ones that still warn (review on #1453).
+        .name = "conversion warnings skip atomic returns and arguments",
+        .source = "_Atomic int f(void) { return 3.5; }\n_Atomic int gpar(_Atomic int);\nvoid h(void) { gpar(3.5); }\n"
+                  "_Atomic char g(void) { return 300; }\nvoid gc(_Atomic char);\nvoid kc(void) { gc(300); }\n"
+                  "struct S { int i; _Atomic int m; };\nvoid k(void) { struct S t; t.m = 3.5; t.m = 5000000000LL; (void)t; }\n"
+                  "int fi(void) { return 2.5; }\nvoid pi(int);\nvoid hp(void) { pi(2.5); }\nchar fc(void) { return 300; }\n",
+        .warnings = 3,
+    },
+    {
+        // An enumeration takes -Wconstant-conversion by its integer type's range, though not -Wliteral-conversion, in
+        // every position (review on #1453). (A brace element takes neither yet: #1759.)
+        .name = "constant conversions to enumerations",
+        .source = "enum Small : signed char { X };\nenum Small e = 300;\nenum Small rs(void) { return 300; }\n"
+                  "void ca(enum Small);\nvoid cc(void) { ca(300); }\n"
+                  "void as(void) { enum Small s; s = 300; (void)s; }\nenum FB : _Bool { FA };\nenum FB fb = 2;\n"
+                  "enum E { A, B };\nenum E ee = 5000000000LL;\nenum Small lit = 2.5;\n",
+        .warnings = 6,
+        .c23 = true,
+    },
+    {
         .name = "floating literal assignment return and call conversions",
         .source = "int f(void){int a;a=1.5;return -2.5;}\nvoid g(int);void h(void){g(3.5);}\n",
         .warnings = 3,
@@ -409,6 +438,16 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .name = "literal conversions precede constant conversions in one brace initializer",
         .source = "char a[4]={300,1.5,301,2.5};void f(void){char b[4]={303,5.5,304,6.5};int y=7.5;(void)b;(void)y;}\n",
         .warnings = 9,
+    },
+    {
+        .name = "brace members of an enumeration warn by its integer type's range",
+        .source = "enum Small:signed char{S0};struct T{enum Small m;int i;}st={300,1};enum Small sa[2]={1,301};\n",
+        .warnings = 2,
+        .c23 = true,
+    },
+    {
+        .name = "_Atomic brace elements and members take no constant conversion",
+        .source = "_Atomic short a0[2]={32768,1};struct{_Atomic char c;int i;}s={300,1};void f(void){_Atomic short a3[2]={32768,70000};(void)a3;}\n",
     },
     {
         .name = "brace constant conversion suppression keeps literal conversions",
@@ -1419,6 +1458,41 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
                   "int g(int n) {\n  int a = n + 1;\n  if (n > 1) n = a;\n  int b = n + 2;\n  if (n > 2) n = b;\n"
                   "  int c = n + 3;\n  if (n > 3) n = c;\n  int d = n + 4;\n  if (n > 4) n = d;\n  return n;\n}\n",
         .options = { "-Wall" },
+    },
+    {
+        // A compound literal's unnamed object is no variable for -Wuninitialized (#1447): its own value, at its closing
+        // `}`, is no read within its own initialization. Scalar, pointer, array and struct literals in initializers and
+        // assignments, at file scope, in loops, under `&` and nested, say nothing.
+        .name = "compound literals are no variables for -Wuninitialized",
+        .source = "struct S { int x; int y; };\nstruct T { int n; int *p; };\n"
+                  "int *gp = &(int){ 4 };\nstruct S *gs = &(struct S){ .x = 3 };\nint *gq = (int[]){ 5, 6 };\n"
+                  "int scalars(void) {\n  int e = (int){ 4 };\n  long l;\n  l = (long){ 5 };\n  int *q;\n  q = (int *){ 0 };\n"
+                  "  return e + (int)l + (q != 0) + *gp + gs->x + gq[1];\n}\n"
+                  "int aggregates(void) {\n  int a[2] = { (int){ 1 }, (int){ 2 } };\n  int z = { (int){ 3 } };\n"
+                  "  struct S s = (struct S){ .x = 1 };\n  struct S m = { .x = (int){ 1 } };\n  int *p = (int[2]){ 1, 2 };\n"
+                  "  s = (struct S){ .y = 2 };\n  return a[0] + z + s.x + m.x + p[1];\n}\n"
+                  "int loops(int n) {\n  int total = 0;\n"
+                  "  for (int i = 0; i < n; i += 1) { int e = (int){ i }; total += e + (int){ 2 }; }\n"
+                  "  while (n > 0) { int d = (int){ n }; total += d; n -= 1; }\n  return total;\n}\n"
+                  "int addresses(void) {\n  int *p = &(int){ 4 };\n  int **pp = &(int *){ &(int){ 5 } };\n  return *p + **pp;\n}\n"
+                  "int nested(void) {\n  int e = (int){ (int){ 4 } };\n  struct T t = (struct T){ .n = (int){ 1 }, .p = &(int){ 2 } };\n"
+                  "  int a = (int){ (int){ (int){ 3 } } + 1 };\n  return e + t.n + *t.p + a;\n}\n",
+        .options = { "-Wall" },
+    },
+    {
+        // The variables a compound literal's initializer reads keep their warnings (#1447): an uninitialized one is used
+        // here, directly or through a nested literal or an assignment's, and the declared variable itself inside its
+        // own initializer's literal, braced or not, is used within its own initialization.
+        .name = "compound literal initializers keep their variables' uninitialized reads",
+        .source = "int reads(void) {\n  int u;\n  int e = (int){ u };\n  return e;\n}\n"
+                  "int self(void) {\n  int x = (int){ x };\n  return x;\n}\n"
+                  "int nested(void) {\n  int u;\n  int v;\n  int e = (int){ (int){ u } + v };\n  return e;\n}\n"
+                  "int assigned(void) {\n  int x;\n  x = (int){ x };\n  return x;\n}\n"
+                  "int braced(void) {\n  int y = { (int){ y } };\n  return y;\n}\n"
+                  "int pointer(void) {\n  int *p = (int *){ p };\n  return p != 0;\n}\n",
+        .options = { "-Wall" },
+        .warnings = 7,
+        .notes = 4,
     },
     {
         // A logical operator one operand decides though the other isn't known (#1447, clang's CFG tryEvaluateBool):
