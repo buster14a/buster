@@ -203,6 +203,9 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_MS_STRUCT_ALIGNMENT: result = "ms_struct bit-field storage with non-power-of-two size is not supported"; break;
         case CHECK_INPUT_INTERRUPT_HANDLER: result = "x86-64 'interrupt' attribute only applies to functions that have a 'void' return type"; break;
         case CHECK_INPUT_INTERRUPT_CALLED: result = "interrupt service routine cannot be called directly"; break;
+        case CHECK_INPUT_DIAGNOSE_IF_ERROR: result = "diagnose_if attribute error"; break;
+        case CHECK_INPUT_ENABLE_IF_CALL: result = "no matching function for call"; break;
+        case CHECK_INPUT_ENABLE_IF_ADDRESS: result = "cannot take address of function because it has one or more non-tautological enable_if conditions"; break;
     }
     return result;
 }
@@ -465,6 +468,9 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_SOURCE_EQUAL: snprintf(text, capacity, "expected '=' after %.*s", (int)literal.length, literal.pointer); break;
         case CHECK_ARGUMENT_UNEXPECTED_SEMI: snprintf(text, capacity, "unexpected ';' before ')'"); break;
         case CHECK_ARGUMENT_OBJC_VARIABLES: snprintf(text, capacity, "'%s' attribute only applies to variables", parsed); break;
+        case CHECK_ARGUMENT_DIAGNOSTIC_TYPE: snprintf(text, capacity, "invalid diagnostic type for '%s'; use \"error\" or \"warning\" instead", parsed); break;
+        case CHECK_ARGUMENT_WARNING_GROUP: snprintf(text, capacity, "unknown warning group '%.*s'", (int)literal.length, literal.pointer); break;
+        case CHECK_ARGUMENT_NEVER_CONSTANT: snprintf(text, capacity, "'%s' attribute expression never produces a constant expression", parsed); break;
         case CHECK_ARGUMENT_SOURCE_STRING:
             snprintf(text, capacity, "expected string literal for %s in 'external_source_symbol' attribute",
                      number == 0 ? "language name" : number == 1 ? "source container name" : "USR");
@@ -2259,6 +2265,47 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                   "cannot use type '%.*s' within '#pragma clang fp eval_method'; type is set according to the default eval method for the translation unit",
                                                   (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
+                        else if (phase == 0 && (kind == CHECK_INPUT_DIAGNOSE_IF_ERROR || kind == CHECK_INPUT_ENABLE_IF_CALL || kind == CHECK_INPUT_ENABLE_IF_ADDRESS) &&
+                                 token < count)
+                        {
+                            // diagnose_if's and enable_if's errors (#1447, c_check_condition.c): the message, decoded and
+                            // joined, with its note at the attribute ("from 'diagnose_if' attribute on 'f':") or at the
+                            // function's declaration ("candidate disabled: M"); the function named by its declaration's name.
+                            const CheckInputReport* report = input->reports + index;
+                            const String8 message = report->detail != 0 ? check_warning_strings_value(parser, pp, report->detail - 1, scratch) : (String8){ 0 };
+                            const uint32_t named = kind != CHECK_INPUT_ENABLE_IF_CALL && report->value < count ? (uint32_t)report->value : token;
+                            const uint32_t function = parser->tokens.names[named];
+                            const String8 function_name = { .pointer = (char*)intern_bytes(pp->table, function), .length = intern_length(pp->table, function) };
+                            char noted[512];
+                            if (kind == CHECK_INPUT_DIAGNOSE_IF_ERROR)
+                            {
+                                snprintf(noted, sizeof(noted), "from 'diagnose_if' attribute on '%.*s':", (int)function_name.length, function_name.pointer);
+                            }
+                            else
+                            {
+                                snprintf(noted, sizeof(noted), "candidate disabled: %.*s", (int)message.length, message.pointer);
+                            }
+                            const PPOutputDiagnosticNote note = {
+                                .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
+                                .message = noted,
+                            };
+                            const uint32_t notes = report->note_token < count && kind != CHECK_INPUT_ENABLE_IF_ADDRESS ? 1u : 0u;
+                            if (kind == CHECK_INPUT_DIAGNOSE_IF_ERROR)
+                            {
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, notes, "%.*s", (int)message.length, message.pointer);
+                            }
+                            else if (kind == CHECK_INPUT_ENABLE_IF_CALL)
+                            {
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, notes, "no matching function for call to '%.*s'",
+                                                            (int)function_name.length, function_name.pointer);
+                            }
+                            else
+                            {
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 0,
+                                                            "cannot take address of function '%.*s' because it has one or more non-tautological enable_if conditions",
+                                                            (int)function_name.length, function_name.pointer);
+                            }
+                        }
                         else if (phase == 0 && kind == CHECK_INPUT_UNAVAILABLE_USE && token < count)
                         {
                             // A use of what an unavailable attribute marks (#147, check_input_deprecated_uses): its name, the
@@ -2719,7 +2766,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             const uint8_t* spelling_bytes = NULL;
                             const uint32_t spelling_length = spelling_buffer != NULL ? pp_spelling(pp, pp->output.kinds[at], pp->output.values[at], pp->output.locations[at],
                                                                                                    spelling_buffer, &spelling_bytes) : 0;
-                            String8 literal = (report->detail & 0xffu) == CHECK_ARGUMENT_CODE_MODEL && token < count ? check_warning_string_text(parser, pp, token, scratch) :
+                            String8 literal = ((report->detail & 0xffu) == CHECK_ARGUMENT_CODE_MODEL || (report->detail & 0xffu) == CHECK_ARGUMENT_WARNING_GROUP) && token < count ?
+                                                    check_warning_string_text(parser, pp, token, scratch) :
                                                     string_token < count ? check_warning_strings_value(parser, pp, string_token, scratch) :
                                                     spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling) :
                                                     captured && parser->tokens.names[report->value] != 0 ? check_driver_attribute_spelling(parser, pp, report->value, false) :

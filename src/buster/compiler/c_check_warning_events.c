@@ -86,6 +86,8 @@ enum
     CHECK_WARNING_ID_FOUR_CHAR_CONSTANTS = 91,
     CHECK_WARNING_ID_CHARACTER_TOO_LONG = 92,
     CHECK_WARNING_ID_NULL_DEREFERENCE = 93,
+    // A warning diagnose_if's condition gives (#1447, c_check_condition.c): -Wuser-defined-warnings.
+    CHECK_WARNING_ID_USER_DEFINED_WARNINGS = 94,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -304,6 +306,9 @@ typedef enum CheckWarningEventKind
     // characters "character constant too long for its type", each the description's message.
     CHECK_WARNING_EVENT_MULTICHAR,
     CHECK_WARNING_EVENT_CHARACTER_TOO_LONG,
+    // A warning diagnose_if's condition gives (#1447, c_check_condition.c), at the call's `)` or at the function's use:
+    // payload.token the message's first string token, with a CHECK_WARNING_NOTE_DIAGNOSE_IF at the attribute.
+    CHECK_WARNING_EVENT_DIAGNOSE_IF,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -334,6 +339,8 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_PREVIOUS_ATTRIBUTE,
     // "'f' declared here" (clang's note_entity_declared_at), payload.name the entity's name.
     CHECK_WARNING_NOTE_DECLARED_HERE,
+    // "from 'diagnose_if' attribute on 'f':" (#1447), payload.name the function's name.
+    CHECK_WARNING_NOTE_DIAGNOSE_IF,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 
