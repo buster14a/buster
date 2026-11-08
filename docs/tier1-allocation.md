@@ -113,6 +113,7 @@ values without that uniform view. It does not silently ignore spill plans.
 
 Actual spill values have dense `spill_ids[value]` and the inverse compact
 `spill_values[spill_count]`. Values requiring no slot have id `UINT32_MAX`.
+(Over a CFG, a phi web's values may share a slot: "Allocation over a CFG".)
 `Tier1FrameSlots.indices` can borrow `spill_values` alongside the producer's
 value-indexed size, alignment and conservative lifetime columns. Rematerialized
 values allocate no spill slot unless another interval of the same value really
@@ -415,6 +416,21 @@ Locations are `class * 32 + register` for registers,
 `temp_slots` marks for the frame to reserve. A move whose source is
 `BUSTER_TIER1_CFG_REMATERIALIZE` recomputes its value into its destination.
 `BUSTER_TIER1_CFG_SPILL` is 32 per class, 96 with the opmask class.
+
+With `slot_widths`, which Tier 1's emission gives as each value's slot bytes, a
+phi web's spilled values share one slot (`tier1_cfg_share_slots`, #1216), after
+the allocation and before the edges' moves. A phi and each operand of its class
+and width, both spilled somewhere, join where no value already sharing either
+one's slot is live at another's definition: in SSA, two ranges overlap exactly
+there. An edge then moves nothing for an operand already in its phi's slot,
+where a dispatch loop's values that rest in memory went slot to slot through
+the scratch register on every handler's back edge. A slot keeps its first value
+in `spill_values`, every value its id in `spill_ids`, and the frame sizes the
+slot's row by the hull of all its values' intervals. At most 32 values share a
+slot, since each join checks every pair of the two slots' values.
+`tier1_cfg_verify` refuses a store over another value its slot still holds;
+`tier1_allocation_verify`, which takes a slot to hold one value, checks the CFG
+tests' allocations with a slot per spilled value.
 
 ### The opmask class (#179)
 

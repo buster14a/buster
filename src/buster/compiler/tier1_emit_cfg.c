@@ -715,6 +715,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     uint32_t* predecessor_offsets = ok ? ir_allocate(output, (uint64_t)blocks + 1, 4, &ok) : 0;
     uint32_t* predecessors = ok ? ir_allocate(output, (uint64_t)edges + 1, 4, &ok) : 0;
     uint8_t* classes = ok ? ir_allocate(output, (uint64_t)value_count + 1, 1, &ok) : 0;
+    uint8_t* slot_widths = ok ? ir_allocate(output, (uint64_t)value_count + 1, 1, &ok) : 0;
     uint32_t* allowed = ok ? ir_allocate(output, (uint64_t)value_count + 1, 4, &ok) : 0;
     uint32_t* defined = ok ? ir_allocate(output, (uint64_t)value_count + 1, 4, &ok) : 0;
     uint32_t* definitions = ok ? ir_allocate(output, (uint64_t)value_count + 1, 4, &ok) : 0;
@@ -778,6 +779,8 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             const uint32_t node = value_nodes[v];
             const uint32_t op = function->op[node];
             classes[v] = node_classes[node];
+            // A slot's bytes, the frame row's (tier1_emit_cfg_row_bytes): a phi web shares a slot only at one width.
+            slot_widths[v] = (uint8_t)prepared->sizes[node];
             const bool vector_value = classes[v] == BUSTER_TIER1_ALLOCATE_VECTOR;
             allowed[v] = classes[v] == BUSTER_TIER1_ALLOCATE_MASK ? BUSTER_TIER1_EMIT_MASK_REGISTERS : vector_value ? vector_registers : registers;
             // A parameter's incoming register, its place's (#141): a general one, or an xmm one for a floating value.
@@ -926,6 +929,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             .predecessor_offsets = predecessor_offsets,
             .predecessors = predecessors,
             .classes = classes,
+            .slot_widths = slot_widths,
             .allowed_registers = allowed,
             .definition_registers = defined,
             .definitions = definitions,
@@ -1202,7 +1206,7 @@ static Tier1EmitError tier1_emit_cfg_lifetimes(const IrFunction* function, const
     return error;
 }
 
-// The frame: each spilled value's slot over its intervals' hull (a phi's widened to its predecessors' ends), the general
+// The frame: each slot over its values' intervals' hull (a phi's widened to its predecessors' ends), the general
 // registers' caller-save rows, the opmask registers' a call saves, the xmm registers' (#141), and each class's temporary
 // slot where a move used it, in that row order, then the frame objects.
 static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, Arena* output, Arena* scratch, Tier1EmitResult* emitted)
@@ -1234,26 +1238,37 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
     }
     for (uint32_t k = 0; error == TIER1_EMIT_OK && k < spills; k += 1)
     {
-        const uint32_t v = cfg->allocation.spill_values[k];
-        const uint32_t node = emitted->value_nodes[v];
-        uint32_t start = input->position_count;
-        uint32_t end = 0;
-        for (uint32_t i = cfg->value_interval_offsets[v]; i < cfg->value_interval_offsets[v + 1]; i += 1)
-        {
-            start = cfg->intervals.starts[i] < start ? cfg->intervals.starts[i] : start;
-            end = cfg->intervals.ends[i] > end ? cfg->intervals.ends[i] : end;
-        }
-        // A phi's slot is written at its predecessors' ends, where the phi isn't live yet.
-        const uint32_t home = phis[v] != 0 ? tier1_cfg_block_of(input, input->definitions[v]) : 0;
-        for (uint32_t e = phis[v] != 0 ? input->predecessor_offsets[home] : 0; phis[v] != 0 && e < input->predecessor_offsets[home + 1]; e += 1)
-        {
-            const uint32_t exit = input->block_starts[input->predecessors[e] + 1] - 1;
-            start = exit < start ? exit : start;
-            end = exit + 1 > end ? exit + 1 : end;
-        }
-        prepared->starts[node] = start;
-        prepared->ends[node] = end;
+        const uint32_t node = emitted->value_nodes[cfg->allocation.spill_values[k]];
+        prepared->starts[node] = input->position_count;
+        prepared->ends[node] = 0;
         indices[k] = node;
+    }
+    // A phi web's values share a slot (tier1_cfg_share_slots): its row's hull is all of theirs, kept in its first value's
+    // column.
+    for (uint32_t v = 0; error == TIER1_EMIT_OK && v < input->value_count; v += 1)
+    {
+        const uint32_t k = cfg->allocation.spill_ids[v];
+        if (k < spills)
+        {
+            const uint32_t node = indices[k];
+            uint32_t start = prepared->starts[node];
+            uint32_t end = prepared->ends[node];
+            for (uint32_t i = cfg->value_interval_offsets[v]; i < cfg->value_interval_offsets[v + 1]; i += 1)
+            {
+                start = cfg->intervals.starts[i] < start ? cfg->intervals.starts[i] : start;
+                end = cfg->intervals.ends[i] > end ? cfg->intervals.ends[i] : end;
+            }
+            // A phi's slot is written at its predecessors' ends, where the phi isn't live yet.
+            const uint32_t home = phis[v] != 0 ? tier1_cfg_block_of(input, input->definitions[v]) : 0;
+            for (uint32_t e = phis[v] != 0 ? input->predecessor_offsets[home] : 0; phis[v] != 0 && e < input->predecessor_offsets[home + 1]; e += 1)
+            {
+                const uint32_t exit = input->block_starts[input->predecessors[e] + 1] - 1;
+                start = exit < start ? exit : start;
+                end = exit + 1 > end ? exit + 1 : end;
+            }
+            prepared->starts[node] = start;
+            prepared->ends[node] = end;
+        }
     }
     // The rows past the spills, each its column: the general registers' call saves (those a call or a fixed register's
     // sequence saves, each its register's column: #177), the opmask registers' (one column per register), the temporary
