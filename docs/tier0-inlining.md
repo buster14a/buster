@@ -294,8 +294,7 @@ and the bodies it reaches, so every lane's expansion of it is the same bytes.
 
 ## Data-parallel: the splice's vector path and its twin
 
-Sites are rare among a caller's entries: a call is a few percent of a stream's
-entries. The work is copying `F`'s entries between them and the callees' entries
+Sites are rare among a caller's entries. The work is copying `F`'s entries between them and the callees' entries
 at them, and rebasing values, all of which is wide and branch-free. In
 `tier0_inline.c`, beside `tier0.c`:
 
@@ -473,7 +472,8 @@ On the 9700X, under the lock, CPU 2, a `znver5` build, before and after:
   with and without `--tier0-no-inline`.
 - Compile time, by `measure-compile`, the `--time-stages` laps and a new
   inlining lap: `sqlite3.c` (no callee; must not move) and the compiler's
-  `main.c` at `-march=znver5` (thousands of sites). The splice and the second
+  `main.c` at `-march=znver5`, whose sources spell 35,900 intrinsic calls of 1,032
+different intrinsics (a `grep` of `src/buster/compiler/*.c`). The splice and the second
   validation against the Tier 0 work that the calls' code no longer needs.
 - `main.c`'s object: its size, and the callees it no longer defines.
 - The self-built compiler (`tools/ci/selfhost.c`'s build): `benchmark-lexer`,
