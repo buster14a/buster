@@ -289,6 +289,9 @@ typedef enum CheckDiagnostic
 #define BUSTER_CHECK_CONVERT_CAST 0x40u
 #define BUSTER_CHECK_CONVERT_NULL 0x80u
 #define BUSTER_CHECK_CONVERT_TRANSPARENT_UNION 0x100u
+// An initializer element's destination is an _Atomic object (#1447): the conversion is to its value type, which its type
+// says, so that the conversion warnings, which clang gives no atomic destination, can still tell (c_check_initializer.c).
+#define BUSTER_CHECK_CONVERT_ATOMIC 0x200u
 
 #define CHECK_WARNING_DISCARDED_QUALIFIERS 0x01u
 #define CHECK_WARNING_GNU_CONSTANT 0x02u

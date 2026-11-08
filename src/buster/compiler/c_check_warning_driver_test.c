@@ -58,6 +58,14 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 6,
     },
     {
+        // A brace element's destination is _Atomic by its declared type, which its plan part records stripped (#1447).
+        .name = "conversion warnings skip atomic initializer elements",
+        .source = "_Atomic char ga[1] = { 1.5 };\nstruct S { _Atomic char c; int i; };\nstruct S gs = { 1.5, 2.5 };\nvoid f(void) {\n"
+                  "  _Atomic char a[2] = { 1.5, 2 };\n  struct S s = { 3.5, 4.5 };\n  struct { _Atomic int x; double d; } t = { .x = 5.5, .d = 1 };\n"
+                  "  (void)a; (void)s; (void)t;\n}\n",
+        .warnings = 2,
+    },
+    {
         .name = "floating literal assignment return and call conversions",
         .source = "int f(void){int a;a=1.5;return -2.5;}\nvoid g(int);void h(void){g(3.5);}\n",
         .warnings = 3,

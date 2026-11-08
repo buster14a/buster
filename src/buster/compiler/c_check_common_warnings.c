@@ -3573,8 +3573,8 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
             // Range initializers have one conversion per selected element, even when every write uses
             // the same source node. The graph's expression is traversed once; its conversions remain distinct.
             // (Not a compound literal's in an unevaluated query's operand: check_common_query_suppressed.)
-            const TypeId element = part->type != 0 ? type_unqualified(type_strip_aligned(emission->types, part->type)) : 0;
-            const bool atomic = element != 0 && type_kind(emission->types, element) == BUSTER_TYPE_KIND_ATOMIC;
+            // (An _Atomic element converts to its value type, so the planner marks it: BUSTER_CHECK_CONVERT_ATOMIC.)
+            const bool atomic = (part->conversion.flags & BUSTER_CHECK_CONVERT_ATOMIC) != 0;
             if (!atomic && !check_common_query_suppressed(graph, root) && check_common_initializer_literal(parser, input, stream, emission->types, part))
             {
                 const CheckValue value = check_stream_value(stream, root);

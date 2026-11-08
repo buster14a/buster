@@ -2377,6 +2377,9 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                         }
                     }
                 }
+                CheckConversion conversion = converted.conversions[0];
+                conversion.flags |= type_kind(walker->types, type_strip_aligned(walker->types, destination)) == BUSTER_TYPE_KIND_ATOMIC ?
+                                    BUSTER_CHECK_CONVERT_ATOMIC : 0;
                 const CheckInitPart part = {
                     .kind = CHECK_INIT_VALUE,
                     .type = selected->type,
@@ -2386,7 +2389,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                     .bit_offset = selected->offset,
                     .bit_width = selected->width,
                     .value = converted.value,
-                    .conversion = converted.conversions[0],
+                    .conversion = conversion,
                 };
                 check_init_append(walker, &part);
             }
