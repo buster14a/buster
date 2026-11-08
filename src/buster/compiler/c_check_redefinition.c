@@ -17,19 +17,22 @@ typedef enum CheckRedeclarationKind
 } CheckRedeclarationKind;
 
 // Whether the declaration of `token`, a declarator's name, says extern or __private_extern__: a storage-class specifier
-// back from the name to its declaration's boundary (check_input_declaration_boundary's roles), over its declarator's chunks
-// (arrays, groups, pointers), the declarators before it and its specifiers whatever they spell (`_Alignas(8)`,
-// `_BitInt(8)`), and past a tag's body, whose members' terminators are no boundary of this declaration. Clang words an
-// object's type conflict by whether the new declaration is a definition before its initializer is read
+// back from the name to its declaration's boundary (check_input_declaration_boundary's roles), over its declarator's
+// chunks (arrays, groups, pointers), the declarators before it and its specifiers whatever they spell (`_Alignas(8)`,
+// `_BitInt(8)`). A tag's body and anything parenthesized (a statement expression in a `typeof` or in an earlier
+// declarator's initializer) are skipped: their terminators and storage classes are none of this declaration's. Clang
+// words an object's type conflict by whether the new declaration is a definition before its initializer is read
 // (diagnoseVarDeclTypeMismatch's isThisDeclarationADefinition), so an extern one is a "redeclaration" even with an
 // initializer, and any other one (a tentative definition too) a "redefinition" (#1447, review on #1453). A storage class
 // is its declaration's specifier alone: a tag's member or a prototype's parameter can't say extern.
 static bool check_input_redeclaration_extern(const Parser* parser, uint32_t token)
 {
     const uint8_t* roles = parser->tree.roles;
+    const uint8_t* kinds = parser->tokens.kinds;
     bool result = false;
     bool scanning = token < parser->tokens.count;
     uint32_t depth = 0;
+    uint32_t parentheses = 0;
     for (uint32_t at = token; scanning && at > 0;)
     {
         at -= 1;
@@ -37,10 +40,13 @@ static bool check_input_redeclaration_extern(const Parser* parser, uint32_t toke
         const uint32_t name = parser->tokens.names[at];
         depth += role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_ENUM;
         depth -= (role == PARSE_ROLE_OPEN_STRUCT || role == PARSE_ROLE_OPEN_ENUM) && depth != 0;
-        result = depth == 0 && role == PARSE_ROLE_SPECIFIER && (name == C_NAME_EXTERN || name == C_NAME_PRIVATE_EXTERN);
+        parentheses += kinds[at] == PARSE_KIND_R_PAREN;
+        parentheses -= kinds[at] == PARSE_KIND_L_PAREN && parentheses != 0;
+        const bool outside = depth == 0 && parentheses == 0;
+        result = outside && role == PARSE_ROLE_SPECIFIER && (name == C_NAME_EXTERN || name == C_NAME_PRIVATE_EXTERN);
         const bool boundary = role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_CLOSE_BLOCK ||
                               role == PARSE_ROLE_OPEN_BODY || role == PARSE_ROLE_CLOSE_BODY;
-        scanning = !result && (depth != 0 || !boundary);
+        scanning = !result && (!outside || !boundary);
     }
     return result;
 }
