@@ -773,6 +773,10 @@ static void check_program_lanes_settle(CheckProgramLanes* lanes)
 // thread's first maps, protects and faults in none of their pages again (#442). Never released: the thread's largest
 // unit's columns, of which only the pages its bodies touched are resident.
 static _Thread_local Arena check_program_thread_columns;
+// Lane 0's cache of Tier 0's expanded inline callees without lanes (#1398, c_check_tier0_inline.c): the calling thread's,
+// as its columns are, so that an emission without lanes inlines what one with them does and makes the same object.
+// Its pages are popped by the next emission's first use; never released.
+static _Thread_local CheckTier0InlineLane check_program_thread_inline;
 
 // A body's code, as its lane made it (check_program_emit_code): its bytes, encoded after branch sizing; each marked
 // instruction's end (x86_encode's fixup ends) and each label's offset (or UINT32_MAX for a record past the code), and a
@@ -1576,7 +1580,7 @@ static bool check_program_emit_lane_arenas(CheckEmitRun* run, CheckEmitLane* lan
         lane->columns = &arenas->scratch;
     }
     lane->tier1 = run->tier1_outcomes != NULL ? &run->lanes->arenas[index].tier1 : NULL;
-    lane->tier0_inline = run->tier0_inline != NULL ? &run->lanes->arenas[index].tier0_inline : NULL;
+    lane->tier0_inline = run->tier0_inline == NULL ? NULL : run->lanes != NULL ? &run->lanes->arenas[index].tier0_inline : &check_program_thread_inline;
     return valid;
 }
 
@@ -2803,7 +2807,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // with --tier1, and Tier 0's for the bodies it compiles. A unit without them runs one epoch.
     CheckTier1Inline tier1_inline = { 0 };
     const bool tier1_inlines = tier1 && run.tier1_outcomes != 0 && !lanes->tier1_no_inline;
-    const bool tier0_inlines = valid && lanes != NULL && !lanes->tier0_no_inline;
+    const bool tier0_inlines = valid && (lanes == NULL || !lanes->tier0_no_inline);
     if ((tier1_inlines || tier0_inlines) && check_tier1_inline_table(program, &result->lowered, access_count, scratch, &tier1_inline))
     {
         run.inline_table = &tier1_inline;

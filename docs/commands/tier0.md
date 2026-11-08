@@ -315,7 +315,8 @@ does are there.
   entries and locals for `-g`'s rows.
 - `src/buster/compiler/c_check_tier0_inline.c`: the emission's use of it
   (`check_tier0_inline_body`), each lane's cache of expanded callees
-  (`CheckTier0InlineLane`). The emission builds the callees' table once a unit
+  (`CheckTier0InlineLane`; an emission without lanes takes the calling thread's,
+  so that it makes the object `-c` does). The emission builds the callees' table once a unit
   for either tier (`check_tier1_inline_table`), and a unit with a callee runs
   #1282's two epochs (`CheckEmitRun.inline_table`): every part's lowering, then
   every part's code.
