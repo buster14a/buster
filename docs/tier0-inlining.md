@@ -143,3 +143,149 @@ the caller's target including the callee's. Every other call stays a call.
 A callee whose stream fails any rule is never inlined, and its calls stay calls.
 That is a property of the callee alone, so it is decided once per callee, before
 any caller is spliced (below).
+
+## The splice
+
+The splice reads a caller's stream, `F`, and the expanded streams of its sites'
+callees (see "Callees that call callees"), and writes a new stream, `G`. `F` is
+left as it was: `--tier1` lowers its IR from `F`, and #1282's inliner does its
+own inlining there.
+
+### Binding the arguments
+
+At a `CALL` the arguments are on the stacks, the first pushed first, and the
+callee's parameters are its locals `0` to `parameter_count - 1`, in order
+(`Tier0Function`: "the locals (parameters first, in order)"). The site's copy of
+the callee therefore starts with one binding per parameter, the last first, each
+taking the value on top:
+
+| parameter | the argument on the stack | the binding |
+| --- | --- | --- |
+| a value of a class (`argument_sizes[a] == 0`) | the value | `SET_LOCAL p` of the class |
+| an object of 4, 8, 16, 32 or 64 bytes of a vector, mask, F80 or I128/U128 local class | its address (U64) | `LOAD` of the class and size, then `SET_LOCAL p` |
+| any other object (a struct or union by value) | its address (U64) | `SET_LOCAL t` (U64), `LOCAL_ADDRESS p`, `LOCAL t`, `COPY size` |
+| an object of size 0 | its address (U64) | `DISCARD` |
+
+`t` is one U64 local per caller for every copy's struct bindings. A struct of
+more than `BUSTER_TIER0_MAX_COPY_BYTES` (256) keeps its call, so a binding never
+needs the runtime's `memmove`. The table follows the parameters' own entries:
+the `LOAD` and `SET_LOCAL` of a vector of an object of the vector's size are
+exactly what the contract defines ("Vectors ... LOCAL, STORE_LOCAL and SET_LOCAL
+(of an object of the vector's size, all of whose bytes they read or write)").
+
+When the callee's first `n` entries are `LOCAL 0` to `LOCAL n - 1`, its
+parameters' only reads, of value classes, the argument values are already where
+those reads would push them. The bindings and the reads are both dropped
+(**forwarding**). That is the shape of a wrapper of scalars and pointers,
+`_mm_loadu_si128(p)`'s for one. A vector parameter's argument is an address,
+not a value, so forwarding a vector argument needs the caller's side changed
+too: see "Later steps".
+
+### The result
+
+The callee's last entry is its only `RETURN` (or, for a void function, its
+stream ends without one, and its body is all its entries). The copy drops it, and
+the call's result is bound as the call's row says:
+
+| the callee's result | the binding |
+| --- | --- |
+| `VOID` | nothing |
+| a value of a class | nothing: the `RETURN`'s operand is on the stack, where the `CALL` would have pushed its result |
+| an aggregate in registers (`result_size > 0`, the `RETURN`'s operand its bytes' address, U64), at a call whose `call_result_objects[c]` is `1 + R` | of a vector local class's size: `LOAD` of it, `SET_LOCAL R`; else `SET_LOCAL t`, `LOCAL_ADDRESS R`, `LOCAL t`, `COPY result_size` |
+| an aggregate in memory (`AbiReturn` `MEMORY`, a hidden pointer) | not a callee: it keeps its call (first version) |
+
+A vector result of 16, 32 or 64 bytes returns in a register under the targets
+that have that register. Under `-mno-avx` a `__m256` returns in memory, and its
+wrappers keep their calls there, as do structs of more than 16 bytes.
+
+### Rebasing the callee's entries
+
+Each copied entry's `value` means one of a few things, by its kind and, for
+`CONST`, its class (`tier0.c`, "The kinds"). The copy adds one base per meaning,
+from a table:
+
+| meaning | kinds | the base |
+| --- | --- | --- |
+| a local | `LOCAL`, `LOCAL_ADDRESS`, `STORE_LOCAL`, `SET_LOCAL` | the callee's locals' base in `G` |
+| a local in the high bits | `ATOMIC_CAS` (from `BUSTER_TYPED_CAS_LOCAL_SHIFT`) | the same, shifted |
+| an entry | `BRANCH_FALSE`, `BRANCH_TRUE`, `JUMP`, `JUMP_VALUE` | the copy's first body entry in `G` |
+| a call row | `CALL` | the site's call rows' base |
+| an operation | `X86` | the callee's operations' base |
+| a constant | `CONST` of F80 (an `x87_constants` index), `CONST` of VECTOR (a `vector_constants` index) | the callee's constants' bases |
+| none | every other kind and class (a symbol's id is the unit's, the same in both streams) | 0 |
+
+A target equal to the callee's entry count, its end, becomes the entry after
+the copy. Everything else in the callee's tables is appended to `G`'s:
+
+- **once per caller and callee:** its locals (`local_classes`, `local_flags`,
+  `local_sizes`, `local_alignments`; a parameter becomes a plain local), its
+  operations (`Tier0Operation` rows) and its x87 and vector constants;
+- **once per site:** its call rows (`call_targets`, `call_first`,
+  `call_argument_counts`, `call_variadic`, `calls`, `call_result_objects`,
+  `call_tails`) and their arguments' rows (`argument_locations`,
+  `argument_classes`, `argument_sizes`). The contract doesn't promise that a
+  row has only one `CALL`, and a copy per site doesn't need it to.
+
+Sharing the locals between a caller's sites of one callee is sound because no two
+of them are ever live at once. A site's locals live from its first binding to
+its last entry. Its arguments, any other site among them included, are
+evaluated before its first binding. A callee doesn't reach itself (the cycle
+rule below). So the frame grows by each distinct callee's frame once, as a
+call's would, rather than by each site's. The locals' alignment carries over: a
+`__m256` parameter is an object aligned to 32, which makes a caller that had
+none realign its frame (`Tier0Frame.alignment_log2`), as clang -O0's does.
+
+### The caller's own entries
+
+Every entry of `F` that isn't a site is copied as it is, but for the targets:
+where `start[i]` is the first entry of `G` that entry `i` of `F` became, a
+target `k` becomes `start[k]`, and the end, `count`, becomes `G`'s count. A
+site's first `G` entry is its first binding, so a target at a call
+(`f();`'s, whose `CALL` is the statement's first entry) reaches the copy's
+start. The function's flags take the callee's: `vectors`, `masks`, `x87` and
+`int128` are each the OR of the caller's and its callees'. `vector_bytes` is
+the caller's: its target includes the callee's, so its vector transport
+covers the callee's entries.
+
+The other columns:
+
+- **Lifetimes** (`lifetime_entries`, read only by `ir_lower`) are the caller's
+  own, rebased by `start`. `G` reaches only Tier 0, which ignores them, but they
+  keep `G` a valid stream.
+- **Source tokens** for `-g` (`CheckProgramLowered.entry_tokens`): a copied
+  entry keeps its token, and every entry of a site's copy takes the `CALL`'s.
+  `c_check_debug.c` keeps rows only in the function's own file, so an inlined
+  wrapper's lines from a header would have been dropped anyway. A step onto
+  the call's line is what gdb shows of an intrinsic now too, with no
+  `DW_TAG_inlined_subroutine` (#1114's).
+
+Then `G` goes through `tier0_validate`, as the lowering's own streams do. If it
+refuses `G`, or anything above runs out of room, the caller compiles `F`, every
+site of it a call, and the callees' kept-call counters (below) count each one.
+
+## Callees that call callees
+
+`<immintrin.h>`'s masked forms call unmasked ones:
+`_mm256_mask_add_epi32(W, U, A, B)` is
+`__builtin_ia32_selectd_256(U, _mm256_add_epi32(A, B), W)`. A caller's site
+therefore splices the callee's **expanded** stream: the callee's own stream with
+its sites already spliced, so that one level of splicing at the caller takes
+everything.
+
+Each lane keeps a cache of expanded callees, as #1282's keeps prepared ones
+(`CheckTier1Lane.inline_cache`): an arena, and a state per callee body
+(unprepared, in progress, ready, refused) for the emission's generation. A
+lane expands a callee when a caller's site first needs it, by a walk with an
+explicit stack (the coding style's rule against recursion) over the callees
+its sites reach:
+
+- a callee whose sites are all ready is spliced into its expanded stream and
+  marked ready;
+- a site whose callee is in progress closes a cycle, and stays a call;
+- a callee that fails eligibility, or whose expansion `tier0_validate` refuses,
+  is refused, and its sites stay calls.
+
+The depth is bounded by `BUSTER_TIER0_INLINE_DEPTH` (16). A site past it
+stays a call; `<immintrin.h>`'s deepest chain is four. Each lane expands a
+callee at most once an emission, and the expansion depends only on the callee
+and the bodies it reaches, so every lane's expansion of it is the same bytes.
