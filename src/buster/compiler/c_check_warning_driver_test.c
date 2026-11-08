@@ -563,6 +563,25 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .c23 = true,
     },
     {
+        // clang's extra `;` of attribute lists alone (#1447): only the C23 lists warn, whatever the GNU lists' order.
+        .name = "attribute-only declaration warns only for its C23 lists",
+        .source = "[[gnu::unused]] __attribute__((unused));\n"
+                  "[[gnu::unused]] __attribute__((unused)) [[gnu::unused]] __attribute__((unused));\n"
+                  "__attribute__((unused)) [[gnu::unused]] __attribute__((aligned(8)));\n"
+                  "[[gnu::unused]] __attribute__((deprecated, packed)) [[gnu::unused]];\n"
+                  "[[gnu::unused]] __attribute__((unknown_gnu));\n"
+                  "[[unknown_c23]] __attribute__((unknown_gnu));\n",
+        .warnings = 8,
+        .c23 = true,
+    },
+    {
+        .name = "attribute-only declaration's GNU lists stay quiet without ignored-attribute warnings",
+        .source = "[[gnu::unused]] __attribute__((unused));\n[[unknown_c23]] __attribute__((unknown_gnu));\n",
+        .options = { "-Wno-ignored-attributes" },
+        .warnings = 1,
+        .c23 = true,
+    },
+    {
         .name = "null conversion source push pop retains named policy",
         .source = "#pragma clang diagnostic push\n#pragma clang diagnostic ignored \"-Wnon-literal-null-conversion\"\n"
                   "int*quiet=1-1;\n#pragma clang diagnostic pop\nint*loud=2-2;\n",

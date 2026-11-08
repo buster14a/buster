@@ -3011,6 +3011,31 @@ static bool check_input_free_standing(const Parser* parser, uint32_t first, uint
     return reading && t < end && parser->tokens.kinds[t] == PARSE_KIND_SEMI;
 }
 
+// A free-standing declaration's run of attributes from `token` up to its first later GNU list or alignment specifier,
+// which the specifiers skip as clang applies nothing of them (check_input_attribute_ignored_lists): reading the run whole
+// would apply a GNU list that follows a C23 list (`[[gnu::unused]] __attribute__((unused));`). `end` when the run has
+// none, or a list it cannot bound, whose error the whole read reports.
+static uint32_t check_input_ignored_group_after(const Parser* parser, uint32_t token, uint32_t end)
+{
+    uint32_t t = token;
+    uint32_t bound = end;
+    bool reading = true;
+    while (reading && check_input_attribute_starts(parser, t, end))
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const bool ignored = t > token && (kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_ALIGNAS);
+        const bool grouped = kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_ASM;
+        const uint32_t open = kind == PARSE_KIND_L_SQUARE ? t : t + 1;
+        const bool opened = open < end && (parser->tokens.kinds[open] == PARSE_KIND_L_PAREN || parser->tokens.kinds[open] == PARSE_KIND_L_SQUARE);
+        const uint32_t close = grouped && opened ? parser->tree.parents[open] : BUSTER_CHECK_NONE;
+        const bool bounded = close > open && close < end;
+        bound = ignored ? t : bound;
+        reading = !ignored && (!grouped || bounded);
+        t = !reading ? t : grouped ? close + 1 : t + 1;
+    }
+    return bound;
+}
+
 // An attribute-only null declaration has no declaration specifiers to warn about. GNU lists are parsed and ignored;
 // C23 lists are applied to the null declaration, so their subject diagnostics still run.
 static bool check_input_attribute_only(const Parser* parser, uint32_t first, uint32_t end)
@@ -3826,7 +3851,8 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
         }
         if (check_input_attribute_starts(parser, i, end))
         {
-            valid &= check_input_read_attributes(reader, &i, end, &attributes);
+            const uint32_t run_end = reader->specifier_free_standing ? check_input_ignored_group_after(parser, i, end) : end;
+            valid &= check_input_read_attributes(reader, &i, run_end, &attributes);
             if (!valid)
             {
                 break;
