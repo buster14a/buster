@@ -2655,13 +2655,52 @@ static void tier0_test_frame_alignment(Tier0TestTally* tally, uint64_t seed)
     }
 }
 
-// A copy's scratch register, its stacks' first free one (an XMM one from 16 bytes, a general one below), must be in
-// the frame's clobbers after either selection, so that no local makes it its home; past the tables, selection says the
-// function is too deep, and the compile takes the values to the deep slots. On copies above every count of integer and
-// floating values, of each size class, with both paths' code compared. The values are then folded in postorder, each
-// consumer's last operand the entry before it: the doubles summed onto a zero pushed above them, the sum converted, and
-// the integers summed onto that. The zero takes one more floating depth, so that 16 doubles are too deep for the
-// tables whatever the copy.
+// A small aggregate's copy moves 8 bytes at a time, so that a 16-byte load doesn't span two 8-byte stores (#1375); a
+// larger one keeps 16-byte moves. The record count and forms are what the caller reserves and branch sizing sees.
+static void tier0_test_copy_widths(Tier0TestTally* tally)
+{
+    static const struct
+    {
+        uint32_t size;
+        uint32_t records;
+        bool wide;
+    } cases[] =
+    {
+        { 8, 2, false },
+        { 15, 4, false },
+        { 16, 4, false },
+        { 24, 6, false },
+        { 32, 8, false },
+        { 33, 6, true },
+        { 40, 6, true },
+        { 64, 8, true },
+        { 256, 32, true },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        X86Instruction records[64];
+        Tier0Writer writer = { records, 0, 0, 0 };
+        tier0_copy(&writer, X86_REGISTER_RSP, 0, X86_REGISTER_RDI, 0, cases[i].size, X86_REGISTER_RAX, 15);
+        bool ok = writer.count == cases[i].records && tier0_copy_records(cases[i].size) == cases[i].records;
+        for (uint32_t r = 0; ok && r < writer.count; r += 1)
+        {
+            const uint32_t form = records[r].form;
+            const bool wide = form == X86_FORM_MOVUPS_X_XM || form == X86_FORM_MOVUPS_XM_X;
+            const bool narrow = form == X86_FORM_MOV_R64_RM64 || form == X86_FORM_MOV_RM64_R64;
+            ok = cases[i].wide ? wide : narrow;
+        }
+        tier0_test_expect(tally, ok, "copies", "a copy of %u bytes: %u records, %s", cases[i].size, writer.count,
+                          cases[i].wide ? "16-byte moves" : "8-byte moves");
+    }
+}
+
+// A copy's scratch register, its stacks' first free one (an XMM one above BUSTER_TIER0_COPY_NARROW_BYTES, a general
+// one below), must be in the frame's clobbers after either selection, so that no local makes it its home; past the
+// tables, selection says the function is too deep, and the compile takes the values to the deep slots. On copies above
+// every count of integer and floating values, of each size class, with both paths' code compared. The values are then
+// folded in postorder, each consumer's last operand the entry before it: the doubles summed onto a zero pushed above
+// them, the sum converted, and the integers summed onto that. The zero takes one more floating depth, so that 16
+// doubles are too deep for the tables whatever the copy.
 static void tier0_test_copies(Tier0TestTally* tally)
 {
     enum
@@ -2675,7 +2714,7 @@ static void tier0_test_copies(Tier0TestTally* tally)
     uint8_t local_flags[2] = { BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN };
     uint32_t local_sizes[2] = { BUSTER_TIER0_MAX_COPY_BYTES, BUSTER_TIER0_MAX_COPY_BYTES };
     uint8_t local_alignments[2] = { 4, 4 };
-    static const uint32_t sizes[] = { 1, 3, 8, 15, 16, 40, 256 };
+    static const uint32_t sizes[] = { 1, 3, 8, 15, 16, 32, 33, 40, 256 };
     Arena arena = arena_reserve(1ull << 28);
     for (uint32_t integers = 0; integers <= 13; integers += 1)
     {
@@ -2758,7 +2797,7 @@ static void tier0_test_copies(Tier0TestTally* tally)
                     (void)tier0_select(&function, &entries, &frames[0], &errors[0]);
                     (void)tier0_select_vector(&function, &entries, &frames[1], &errors[1]);
                 }
-                const bool wide = sizes[s] >= 16;
+                const bool wide = sizes[s] > BUSTER_TIER0_COPY_NARROW_BYTES;
                 const uint32_t depth = ready ? entries.depths[copy] : 0;
                 const uint32_t floating = ready ? entries.floating_depths[copy] : 0;
                 const bool too_deep = floatings >= BUSTER_TIER0_FLOATING_DEPTHS || (wide ? floating >= BUSTER_TIER0_FLOATING_DEPTHS : depth >= BUSTER_TIER0_INTEGER_DEPTHS);
@@ -6235,6 +6274,7 @@ static int run_tier0_tests(int argc, char** argv)
             }
             {
                 Tier0TestTally tally = { 0, 0 };
+                tier0_test_copy_widths(&tally);
                 tier0_test_copies(&tally);
                 tier0_test_report("copies", tally);
                 total.checks += tally.checks;
