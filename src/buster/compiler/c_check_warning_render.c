@@ -1188,6 +1188,12 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_EXTERN_INITIALIZER:
             result = "'extern' variable has an initializer";
             break;
+        case CHECK_WARNING_EVENT_CPU_LIST_DUPLICATE:
+            result = "CPU list contains duplicate entries; attribute ignored";
+            break;
+        case CHECK_WARNING_EVENT_CPU_DISPATCH_BODY:
+            result = "body of cpu_dispatch function will be ignored";
+            break;
         case CHECK_WARNING_EVENT_VECTOR_MODE:
             result = "specifying vector types with the 'mode' attribute is deprecated; use the 'vector_size' attribute instead";
             break;

@@ -268,6 +268,10 @@ typedef enum CheckInputMessage
     CHECK_INPUT_DIAGNOSE_IF_ERROR,
     CHECK_INPUT_ENABLE_IF_CALL,
     CHECK_INPUT_ENABLE_IF_ADDRESS,
+    // clang's cpu_specific and cpu_dispatch multiversioning (#1447, c_check_cpu_dispatch.c): `detail` which of its errors
+    // (CheckCpuDispatchError), `attribute` a CPU's token the message names, `value` 1 for cpu_dispatch's option, and a note
+    // at `note_token` where it has one.
+    CHECK_INPUT_CPU_DISPATCH,
 } CheckInputMessage;
 
 // CHECK_INPUT_INTERRUPT_HANDLER's details: the rule x86's handler finds broken (its result isn't void; it hasn't one or two
@@ -413,6 +417,7 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_DIAGNOSE_IF_ERROR] = "diagnose_if attribute error",
     [CHECK_INPUT_ENABLE_IF_CALL] = "no matching function for call",
     [CHECK_INPUT_ENABLE_IF_ADDRESS] = "cannot take address of function because it has one or more non-tautological enable_if conditions",
+    [CHECK_INPUT_CPU_DISPATCH] = "invalid cpu_specific or cpu_dispatch declaration",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -947,6 +952,9 @@ struct CheckInput
     // bodies of a large unit (check_input_sparse_arena, #764, #847): the tests require it of those readings and of no
     // other.
     bool rare_columns_shared;
+    // Whether a function's declaration has a cpu_specific or cpu_dispatch attribute (#1447): only then does the program
+    // look for those functions' versions (c_check_program_cpu_dispatch.c).
+    bool cpu_dispatch;
     bool resource;
 };
 
@@ -1808,6 +1816,14 @@ struct CheckInputReader
     uint32_t function_end;
     uint32_t function_body;
     bool naked_functions;
+    // Whether a function's declaration has a cpu_specific or cpu_dispatch attribute (#1447): only then does binding ask
+    // whether a declaration is a version apart (check_input_cpu_dispatch_match).
+    bool cpu_dispatch;
+    // The cpu_specific and cpu_dispatch declarations clang makes invalid (#1447): bound apart, and skipped by the later
+    // declarations' rules, as clang's lookup skips them. In the arena, `cpu_invalid_count` of them.
+    uint32_t* cpu_invalid;
+    uint32_t cpu_invalid_count;
+    uint32_t cpu_invalid_capacity;
     // #619: the walk's declarations that the section settings and conflicts read (check_input_section_declaration), from
     // the first setting's position or section attribute's token on (section_record_from, BUSTER_CHECK_NONE before
     // either; check_input_attribute_read_item lowers it to each section attribute's token as it reads one).
@@ -8532,7 +8548,18 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             }
             if (attributes_valid && function && !is_typedef)
             {
+                const uint32_t multiversion_reports = reader->output->multiversion_report_count;
                 check_input_attribute_multiversion(reader, attributes, name, first_attributes, first_declaration, is_inline, first_inline);
+                if (reader->cpu_dispatch && reader->output->multiversion_report_count == multiversion_reports)
+                {
+                    // clang's cpu_specific and cpu_dispatch rules against the declaration before (#1447): a declaration
+                    // they refuse is invalid, which later ones' rules skip.
+                    const IdentId identifier = parser->tokens.names[name];
+                    const bool main_function = !reader->pp->options.freestanding && intern_length(reader->pp->table, identifier) == 4 &&
+                                               memcmp(intern_bytes(reader->pp->table, identifier), "main", 4) == 0;
+                    check_input_cpu_dispatch_declaration(reader, attributes, name, type, previous_handle, is_inline, is_static, main_function,
+                                                         kind == PARSE_KIND_L_BRACE ? i : BUSTER_CHECK_NONE);
+                }
             }
             valid &= file || storage != C_NAME_EXTERN || !initialized;
             valid &= check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, initialized, thread_local);
@@ -8877,6 +8904,14 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         (reader->output->function_flags[linked_library - 1] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0 &&
         (reader->output->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) == 0;
     check_input_inherit_abi(reader, token, old, overload);
+    // A cpu_specific or cpu_dispatch declaration (#1447) of another version than the visible one before it is an entity of
+    // its own, bound apart; one of an earlier version's redeclares that one, its definitions one entity's.
+    bool versions = false;
+    const uint32_t version = reader->cpu_dispatch && kind == C_BINDING_FUNCTION && old != 0 ? check_input_cpu_dispatch_match(reader, token, old, &versions) : BUSTER_CHECK_NONE;
+    if (version != BUSTER_CHECK_NONE)
+    {
+        check_input_cpu_dispatch_redeclare(reader, token, version);
+    }
     if (old == 0 && reader->scope_count == 0)
     {
         const TypeId predefined = check_input_predefined_type(reader, name);
@@ -8890,7 +8925,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
         }
     }
-    if (!overload && old != 0 && (reader->bindings.depth[old - 1] == reader->scope_count || linked_visible))
+    if (!overload && !versions && old != 0 && (reader->bindings.depth[old - 1] == reader->scope_count || linked_visible))
     {
         const uint32_t previous = reader->bindings.declaration[old - 1];
         const TypeAnswer compatible = kind == C_BINDING_TYPEDEF ? type_same_canonical(reader->types, reader->declared_types[previous], reader->declared_types[token]) :
@@ -8943,7 +8978,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
         }
     }
-    if (!overload && check_input_linkage(reader->declaration_bits, token) != 0 && reader->output->report_count == 0)
+    if (!overload && !versions && check_input_linkage(reader->declaration_bits, token) != 0 && reader->output->report_count == 0)
     {
         // Lexical scope restoration does not create a new externally linked entity. Keep its compatibility and
         // object identity for the translation unit, while only a visible declaration contributes to the source

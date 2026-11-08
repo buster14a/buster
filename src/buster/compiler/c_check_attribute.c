@@ -1865,6 +1865,16 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
                 // format(1, 2, 3) therefore gets only the subject warning, just as format(printf, 2, 3) does.
                 valid = check_input_attribute_defer(reader, attributes, attribute, before, saved, saved_first, saved_end);
             }
+            else if (!valid && (attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH))
+            {
+                // handleCPUSpecificAttr's check, after the subject, at the attribute (#1447), as format's.
+                const CheckInputAttributeError saved = attributes->error;
+                const uint32_t saved_first = attributes->error_first;
+                const uint32_t saved_end = attributes->error_end;
+                const uint32_t before = reader->output->report_count;
+                check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_IDENTIFIER, 0);
+                valid = check_input_attribute_defer(reader, attributes, attribute, before, saved, saved_first, saved_end);
+            }
         }
         else if (valid && string)
         {
@@ -5271,11 +5281,6 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
             active_kind = CHECK_MULTIVERSION_TARGET;
         }
     }
-    bool pair = false;
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        pair |= incompatible[i];
-    }
     if (active != BUSTER_CHECK_NONE)
     {
         const uint32_t bad = check_input_attribute_multiversion_disallowed(attributes, active_kind, incompatible, active, inline_function);
@@ -5284,24 +5289,11 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
             check_input_report_multiversion(reader, name, CHECK_INPUT_MULTIVERSION_ATTRIBUTE, (uint8_t)active_kind,
                                             attributes->records[bad].name_token, BUSTER_CHECK_NONE, CHECK_INPUT_NOTE_NONE, 0);
         }
-        else if (cpu && !target && !clones && !pair)
-        {
-            // CPU dispatch's code generation isn't supported. With no target, target_clones or compatibility error to
-            // report, retaining the declaration would let -c write a call to a plain symbol the source doesn't define
-            // (#839's review). A disallowed attribute above is clang's multiversioning error, not this refusal.
-            for (uint32_t i = 0; i < attributes->count; i += 1)
-            {
-                CheckInputAttribute* attribute = attributes->records + i;
-                if (!attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH))
-                {
-                    check_input_report(reader, attribute->name_token, CHECK_INPUT_UNSUPPORTED);
-                    attribute->ignored = true;
-                }
-            }
-        }
     }
     arena_pop_to(reader->scratch, mark);
 }
+
+#include "c_check_cpu_dispatch.c"
 
 // clang's check of each attribute's subject (#147, its generated diagAppertainsToDecl, c_check_attribute_subjects.inc):
 // a declaration that is none of `subjects`' kinds an attribute's row names gets clang's warning that the attribute only
@@ -7510,7 +7502,15 @@ static bool check_input_attribute_definition(CheckInputReader* reader, CheckInpu
         attribute->ignored |= kind == CHECK_ATTRIBUTE_IFUNC && !subject.function;
         const bool aliasing = kind == CHECK_ATTRIBUTE_ALIAS || (kind == CHECK_ATTRIBUTE_IFUNC && subject.function) ||
                               (kind == CHECK_ATTRIBUTE_WEAKREF && attribute->argument_count != 0 && !subject.is_typedef && subject.file);
-        if (attribute->kind == CHECK_ATTRIBUTE_NO_BUILTIN)
+        if ((kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || kind == CHECK_ATTRIBUTE_CPU_DISPATCH) && subject.function)
+        {
+            // clang's handler checks each CPU's name (#1447, c_check_cpu_dispatch.c); an error drops the attribute, and
+            // clang goes on with the declaration.
+            reader->cpu_dispatch = true;
+            reader->output->cpu_dispatch = true;
+            check_input_cpu_dispatch_options(reader, attribute);
+        }
+        else if (attribute->kind == CHECK_ATTRIBUTE_NO_BUILTIN)
         {
             attribute->ignored |= !subject.function;
             valid = !subject.function || subject.function_definition;

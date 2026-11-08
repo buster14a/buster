@@ -7098,6 +7098,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 #include "c_check_attribute_arguments_driver_test.c"
 #include "c_check_attribute_checks_driver_test.c"
 #include "c_check_patchable_driver_test.c"
+#include "c_check_cpu_dispatch_driver_test.c"
 #include "c_check_parse_note_driver_test.c"
 #include "c_check_operand_driver_test.c"
 #include "c_check_convention_driver_test.c"
@@ -7665,6 +7666,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     const char* executable = NULL;
     bool lazy = false;
     bool sign_compare_only = false;
+    // --cpu-dispatch-only: the cpu_specific and cpu_dispatch section alone (#1447).
+    bool cpu_dispatch_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -7679,6 +7682,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--sign-compare-only") == 0)
         {
             sign_compare_only = true;
+        }
+        else if (strcmp(argv[i], "--cpu-dispatch-only") == 0)
+        {
+            cpu_dispatch_only = true;
         }
         else if (strcmp(argv[i], "--lazy-system-headers") == 0)
         {
@@ -7698,7 +7705,9 @@ static int run_checker_driver_tests(int argc, char** argv)
             options = false;
         }
     }
-    options &= !sign_compare_only || (!lazy && check_driver_part.count == 1);
+    options &= !(sign_compare_only && cpu_dispatch_only) && (!(sign_compare_only || cpu_dispatch_only) || (!lazy && check_driver_part.count == 1));
+    // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
+    const bool focused = sign_compare_only || cpu_dispatch_only;
     check_test_expect(&test, options, "driver test options are recognized");
     // The library-builtin table is pinned to BUSTER_CLANG_REFERENCE_VERSION: a different clang release is reported with
     // both versions, and the library comparisons then skip only the names that depend on its table (#1131).
@@ -7711,7 +7720,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     // _optimize_pragmas and _kr_policy), whose gates below have no `!lazy`. Every other check runs the same commands
     // either way, so the eager command's run of them is the lazy one's too; repeating them took 90% of the lazy
     // command's time. A section that comes to take `lazy` loses the `!lazy` of its gate.
-    if (!sign_compare_only && !lazy && check_test_driver_takes())
+    if (!focused && !lazy && check_test_driver_takes())
     {
         check_test_driver_warning_order(&test);
         check_test_driver_unselected_roots(&test);
@@ -8187,12 +8196,16 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_sign_compare(&test, clang, executable, directory);
     }
+    if (temporary && cpu_dispatch_only)
+    {
+        check_test_driver_cpu_dispatch(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+    }
     const char* clang_arguments[] = { "-std=gnu17", "-w" };
-    if (temporary && !sign_compare_only && !lazy && check_test_driver_takes())
+    if (temporary && !focused && !lazy && check_test_driver_takes())
     {
         check_test_driver_deep(&test, clang, executable, directory);
     }
-    for (uint32_t i = 0; temporary && !sign_compare_only && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    for (uint32_t i = 0; temporary && !focused && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
         if (check_test_driver_takes())
         {
@@ -8258,7 +8271,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             unlink(source);
         }
     }
-    if (temporary && !sign_compare_only)
+    if (temporary && !focused)
     {
         if (!lazy && check_test_driver_takes())
         {
@@ -8451,6 +8464,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_patchable(&test, clang, executable, directory);
+                check_test_driver_cpu_dispatch(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -8833,7 +8847,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         rmdir(directory);
     }
-    check_test_expect(&test, check_driver_part.taken != 0, "the driver test's part runs some of its checks");
+    check_test_expect(&test, check_driver_part.taken != 0 || focused, "the driver test's part runs some of its checks");
     oracle_cache_report(oracle, "test-checker-driver");
     if (check_driver_part.count > 1)
     {
