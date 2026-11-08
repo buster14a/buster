@@ -435,6 +435,59 @@ static const CheckDriverDefaultWarningFixture check_driver_shift_count_fixtures[
                   "int a(int x){return x<<32;}\n#pragma clang diagnostic pop\nint b(int x){return x<<32;}\n",
         .warnings = 1,
     },
+    // A folded shift's own warnings (#1447): clang's DiagnoseBadShiftValues words -Wshift-negative-value and
+    // -Wshift-overflow, and only the former and the counts are runtime-behavior ones, deferred to the function's end
+    // and dropped where no path reaches.
+    {
+        .name = "folded shifts word their overflow and negative left operands as clang does",
+        .source = "typedef int I;\nint a=0x7fffffff<<2;int b=-1<<3;int c=1<<31;int d=3<<30;long e=0x7fffffffffffffffL<<60;\n"
+                  "__int128 g=(__int128)0x7fffffffffffffffLL<<100;int h=(I)5<<30;int i=(short)1<<31;\n",
+        .warnings = 5,
+    },
+    {
+        .name = "a folded negative shift waits for the function's end while its overflow does not",
+        .source = "int f(int x){int z=-3<<1;char c=300;x=0x7fffffff<<2;c=301;return z+c+x;}\n",
+        .warnings = 4,
+    },
+    {
+        .name = "unreachable folded shifts drop their runtime warnings and keep their overflow",
+        .source = "int a(int x){return x;x=1<<32;x=-1<<1;x=3<<31;x=-1<<2;return x;}\n"
+                  "int b(int x){if(x)return 1;else return 2;x=1<<33;}\n"
+                  "int c(int x){if(0){x=1<<40;x=-1<<2;x=0x7fffffff<<3;}while(0){x=1<<42;}for(;;){}x=-1<<4;}\n"
+                  "void d(int x){goto e;x=-1<<9;e:x=-1<<10;while(1){}x=-1<<11;}\n",
+        .warnings = 3,
+    },
+    {
+        .name = "constant contexts leave a folded negative shift to the constant evaluation",
+        .source = "enum{E=-1<<2};_Static_assert((-1<<1)==-2,\"\");int f(int x){switch(x){case -1<<3:return 1;}"
+                  "int y=sizeof(-1<<4);y+=x?(-1<<5):0;y+=1?0:(-1<<6);return y;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "an unreachable promoted folded shift neither reports nor rejects the unit",
+        .source = "int f(int x){if(x)return 1;else return 0;x=-1<<8;x=1<<40;}\n",
+        .options = { "-Werror=shift-negative-value", "-Werror=shift-count-overflow" },
+    },
+    {
+        .name = "a reachable promoted folded shift rejects the unit",
+        .source = "int f(int x){x=-1<<8;return x;}\n",
+        .options = { "-Werror=shift-negative-value" },
+        .errors = 1,
+    },
+    {
+        .name = "source policy reaches folded shifts' runtime and immediate warnings",
+        .source = "int f(int x){\n#pragma clang diagnostic push\n#pragma clang diagnostic ignored \"-Wshift-negative-value\"\n"
+                  "x=-1<<2;\n#pragma clang diagnostic pop\n#pragma clang diagnostic error \"-Wshift-count-overflow\"\n"
+                  "x=1<<40;x=-2<<1;x=0x7fffffff<<4;if(x)return 0;return x;x=1<<41;}\n",
+        .warnings = 2,
+        .errors = 1,
+    },
+    {
+        .name = "a unit with an error keeps its folded shifts' runtime warnings",
+        .source = "int f(int x){x=-1<<2;x=1<<40;x=undeclared;return x;x=-1<<3;}\n",
+        .warnings = 3,
+        .errors = 1,
+    },
 };
 
 static void check_test_driver_shift_counts(CheckTest* test, const char* clang, const char* executable, const char* directory)

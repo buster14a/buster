@@ -232,6 +232,13 @@ unused-warning fixtures also check exact scope-completion tokens.
   in an unselected statement expression. Retained runtime constant-fold warnings join the count traversal without being
   rendered or counted twice, preserving their order with new runtime warnings and discarded expressions;
   required-constant warnings and groups collected before a failed program keep their original publication.
+  A folded shift's warnings take clang's words (#1447, `check_driver_shift_message`): "shifting a negative signed
+  value is undefined", and "signed shift result (0x…) requires N bits to represent, but 'T' only has W bits", the
+  result's hexadecimal and its significant bits. Its `-Wshift-negative-value` is a runtime one like its counts: the
+  driver stashes both (`CheckCommonShiftWarnings`) rather than reporting them, the common walk reports each at its
+  shift and drops one it proves unevaluated (after a return, a `goto` or an endless loop, in a constant condition's
+  other branch), so that a dropped `-Werror` one neither counts nor rejects the unit, and whatever no walk reached is
+  reported at the end (a unit with errors runs none). `-Wshift-overflow` is no runtime warning, and stays.
   `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both
   shift directions, narrow promotions, 128-bit and bit-precise widths, compound assignments, side effects, macros
   and warning policy. The shared default-warning harness covers syntax checking and object publication through

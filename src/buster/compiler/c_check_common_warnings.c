@@ -735,14 +735,22 @@ struct CheckCommonEnabled
     bool uninitialized;
 };
 
-// Runtime count warnings already rendered by the legacy driver, in token order. Their groups and this sparse
-// handoff live in the preprocessor arena, beyond the driver's scratch. The originals stay queued until the common
-// traversal is ready, so a failed program construction retains them without changing severity or warning counts.
+// A folded shift's runtime warnings the legacy driver words (#1394): its counts and its negative left operand, clang's
+// DiagRuntimeBehavior ones, in token order, each its report's text and place (the text in the preprocessor's arena,
+// beyond the driver's scratch). The common walk reports each where it reaches the shift, among its own runtime warnings,
+// and none it proves unevaluated (check_common_shift_unreached); whatever no walk reports is reported in the end
+// (check_common_shift_finish), so that a failed program construction keeps them all. A warning is counted, or fails the
+// unit as an error, only when it is reported.
 typedef struct CheckCommonShiftWarning CheckCommonShiftWarning;
 struct CheckCommonShiftWarning
 {
     uint32_t token;
-    PPDiagnosticRecord* record;
+    uint32_t source;
+    uint32_t publication;
+    uint8_t severity;
+    uint8_t phase;
+    // NULL once reported or dropped.
+    const char* message;
 };
 
 typedef struct CheckCommonShiftWarnings CheckCommonShiftWarnings;
@@ -751,7 +759,6 @@ struct CheckCommonShiftWarnings
     CheckCommonShiftWarning* records;
     uint32_t count;
     uint32_t capacity;
-    uint32_t detached_count;
 };
 
 // Detached static-selection arms have no CFG block in Clang, so their queued runtime count diagnostics are still
@@ -772,70 +779,23 @@ struct CheckCommonShiftExtras
     uint32_t count;
 };
 
-// Detach only the saved runtime count groups. Their order in the queue is their token order, so one forward scan
-// removes them without searching once per warning. Required-constant diagnostics and every other family stay put.
-static void check_common_shift_detach(Preprocessor* pp, CheckCommonShiftWarnings* shifts)
+// A stashed warning's report, once.
+static void check_common_shift_report(Preprocessor* pp, CheckCommonShiftWarning* warning)
 {
-    if (shifts != NULL && shifts->count != 0)
+    if (warning->message != NULL)
     {
-        uint32_t next = 0;
-        PPDiagnosticRecord* previous = NULL;
-        for (PPDiagnosticRecord* record = pp->diagnostic_first; record != NULL && next < shifts->count;)
-        {
-            PPDiagnosticRecord* following = record->next;
-            if (record == shifts->records[next].record)
-            {
-                if (previous != NULL)
-                {
-                    previous->next = following;
-                }
-                else
-                {
-                    pp->diagnostic_first = following;
-                }
-                if (pp->diagnostic_last == record)
-                {
-                    pp->diagnostic_last = previous;
-                }
-                record->next = NULL;
-                next += 1;
-            }
-            else
-            {
-                previous = record;
-            }
-            record = following;
-        }
-        shifts->detached_count = next;
+        pp_diagnose_output_phase(pp, (PPSeverity)warning->severity, warning->source, warning->publication, (PPDiagnosticPhase)warning->phase, "%s",
+                                 warning->message);
+        warning->message = NULL;
     }
 }
 
-// Requeue an existing group as a whole: its owner, source location, notes and mapped severity never change, and it
-// was already counted. Nulling its handoff slot prevents a repeated expression visit from publishing it twice.
-static void check_common_shift_append(Preprocessor* pp, CheckCommonShiftWarning* warning)
-{
-    PPDiagnosticRecord* record = warning->record;
-    if (record != NULL)
-    {
-        if (pp->diagnostic_last != NULL)
-        {
-            pp->diagnostic_last->next = record;
-        }
-        else
-        {
-            pp->diagnostic_first = record;
-        }
-        record->next = NULL;
-        pp->diagnostic_last = record;
-        warning->record = NULL;
-    }
-}
-
-// The saved count groups at this operator, placed among new runtime diagnostics by the arithmetic walk.
+// The stashed warnings at this operator, reported where the arithmetic walk places them among its new runtime
+// diagnostics: whether it has any.
 static bool check_common_shift_replay(Preprocessor* pp, CheckCommonShiftWarnings* shifts, uint32_t token)
 {
     uint32_t first = 0;
-    uint32_t last = shifts != NULL ? shifts->detached_count : 0;
+    uint32_t last = shifts != NULL ? shifts->count : 0;
     const uint32_t count = last;
     while (first < last)
     {
@@ -847,22 +807,34 @@ static bool check_common_shift_replay(Preprocessor* pp, CheckCommonShiftWarnings
     const bool result = first < count && shifts->records[first].token == token;
     for (uint32_t i = first; i < count && shifts->records[i].token == token; i += 1)
     {
-        check_common_shift_append(pp, shifts->records + i);
+        check_common_shift_report(pp, shifts->records + i);
     }
     return result;
 }
 
-// A traversal can stop at a fatal diagnostic or fail for lack of scratch. No previously collected warning may
-// disappear: retain any groups the walk did not visit, in their original relative order.
+// The stashed warnings the walk never reached whose shift it proved unevaluated, dropped: clang's runtime shift
+// diagnostics drop themselves in code no path reaches — after a return, a goto or a loop that never ends, in a constant
+// condition's other branch. Only a complete walk (`evaluated` known, no fatal diagnostic) proves a node unevaluated.
+static void check_common_shift_unreached(Preprocessor* pp, CheckCommonShiftWarnings* shifts, const CheckInput* input, const uint8_t* evaluated)
+{
+    for (uint32_t i = 0; shifts != NULL && evaluated != NULL && !pp->fatal && i < shifts->count; i += 1)
+    {
+        const uint32_t token = shifts->records[i].token;
+        const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+        if (node < input->graph.count && evaluated[node] == 0)
+        {
+            shifts->records[i].message = NULL;
+        }
+    }
+}
+
+// A traversal can stop at a fatal diagnostic or fail for lack of scratch, and a unit with errors may run none. No
+// stashed warning the walks didn't drop may disappear: report the rest, in their order.
 static void check_common_shift_finish(Preprocessor* pp, CheckCommonShiftWarnings* shifts)
 {
-    if (shifts != NULL && shifts->detached_count != 0)
+    for (uint32_t i = 0; shifts != NULL && i < shifts->count; i += 1)
     {
-        for (uint32_t i = 0; i < shifts->detached_count; i += 1)
-        {
-            check_common_shift_append(pp, shifts->records + i);
-        }
-        shifts->detached_count = 0;
+        check_common_shift_report(pp, shifts->records + i);
     }
 }
 
@@ -3775,7 +3747,6 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
     }
     if (extras_ready && work_nodes != NULL && work_kinds != NULL)
     {
-        check_common_shift_detach(pp, shifts);
         uint32_t initializer_count = 0;
         const uint64_t* initializers = check_common_initializer_roots(parser, pp, input, stream, types, program, evaluated, &source_contexts, &initializer_count, scratch);
         if (source_contexts && parents != NULL)
@@ -3922,6 +3893,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                 check_common_emit_run(&emission);
             }
         }
+        check_common_shift_unreached(pp, shifts, input, evaluated);
     }
     check_common_shift_finish(pp, shifts);
 }
