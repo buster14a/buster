@@ -73,9 +73,15 @@ struct CheckInitializer
     uint32_t count;
     CheckInitStatus status;
     uint32_t failed_token;
-    TypeId failed_type; // The record named by CHECK_INIT_MEMBER; zero for other failures.
+    TypeId failed_type; // The record named by CHECK_INIT_MEMBER, or a failed conversion's target (failed_source's); else zero.
+    // A failed conversion's source node plus one (check_init_fail_conversion), or zero: the driver words its error as clang's
+    // initialization's (#147).
+    uint32_t failed_source;
     uint32_t warning_count;
     uint32_t warning_token;
+    // A value part whose source is floating (#147): the only plans whose literal conversions the common warnings read
+    // (check_common_initializer_roots), so that they never visit the others' parts.
+    bool floating_values;
 };
 
 static __attribute__((unused)) bool check_initializer_run(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
@@ -272,6 +278,18 @@ static void check_init_fail(CheckInitWalker* walker, CheckInitStatus status, uin
         walker->result->status = status;
         walker->result->failed_token = token;
     }
+}
+
+// A subobject's conversion that failed (#147): CHECK_INIT_INVALID at `token` (or its resource failure), its target `type` and
+// its source `node` kept where it is the first failure and an incompatible conversion, for clang's words of it.
+static void check_init_fail_conversion(CheckInitWalker* walker, CheckDiagnostic diagnostic, uint32_t token, TypeId type, uint32_t node)
+{
+    if (walker->result->status == CHECK_INIT_OK && diagnostic == CHECK_DIAG_INCOMPATIBLE)
+    {
+        walker->result->failed_type = type;
+        walker->result->failed_source = node + 1;
+    }
+    check_init_fail(walker, diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
 }
 
 static void check_init_semantic_warning(CheckInitWalker* walker, const CheckWarningEvent* event, const CheckWarningNote* notes, uint32_t count)
@@ -473,6 +491,8 @@ static void check_init_append(CheckInitWalker* walker, const CheckInitPart* part
             }
             *slot = *part;
             walker->result->count += 1;
+            walker->result->floating_values |= part->kind == CHECK_INIT_VALUE && walker->stream != NULL && part->node < walker->stream->count &&
+                                               check_action_kind(walker->types, check_stream_type(walker->stream, part->node)) == BUSTER_TYPE_KIND_FLOATING;
         }
     }
 }
@@ -1958,7 +1978,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
         check_action_scalar(walker->types, &action, &converted);
         if (converted.diagnostic != CHECK_DIAG_NONE)
         {
-            check_init_fail(walker, converted.diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
+            check_init_fail_conversion(walker, converted.diagnostic, token, element, source_node);
         }
         else if (walker->static_storage && !check_value_evaluated_constant(&converted.value))
         {
@@ -1998,7 +2018,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
         check_action_scalar(walker->types, &action, &converted);
         if (converted.diagnostic != CHECK_DIAG_NONE)
         {
-            check_init_fail(walker, converted.diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
+            check_init_fail_conversion(walker, converted.diagnostic, token, destination, node);
         }
         else if (walker->static_storage)
         {
@@ -2325,7 +2345,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
             }
             if (converted.diagnostic != CHECK_DIAG_NONE)
             {
-                check_init_fail(walker, converted.diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
+                check_init_fail_conversion(walker, converted.diagnostic, token, destination, node);
             }
             else if (walker->static_storage && !walker->defer_constants &&
                      !check_value_static_initializer(&converted.value, selected->width != 0))
@@ -2357,6 +2377,9 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                         }
                     }
                 }
+                CheckConversion conversion = converted.conversions[0];
+                conversion.flags |= type_kind(walker->types, type_strip_aligned(walker->types, destination)) == BUSTER_TYPE_KIND_ATOMIC ?
+                                    BUSTER_CHECK_CONVERT_ATOMIC : 0;
                 const CheckInitPart part = {
                     .kind = CHECK_INIT_VALUE,
                     .type = selected->type,
@@ -2366,7 +2389,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                     .bit_offset = selected->offset,
                     .bit_width = selected->width,
                     .value = converted.value,
-                    .conversion = converted.conversions[0],
+                    .conversion = conversion,
                 };
                 check_init_append(walker, &part);
             }

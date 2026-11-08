@@ -1526,6 +1526,19 @@ each token spelled as clang spells it (an identifier's interned name, or its
 spelling as written when it has a UCN). On an empty file it prints clang's
 output byte for byte, apart from `__BUSTER__` and the omitted flag-output macro.
 
+`-H` (#1380), with `-E`, `-fsyntax-only`, `-c` or a link, prints each header the
+unit enters as clang 23 does (`pp_show_include`), on the diagnostics' stream: a
+dot per level below the main file, a space, and the path as the line markers
+spell it. A header that its guard or `#pragma once` skips isn't shown again, and
+neither are the `-include` files nor the headers they include, which clang reads
+from its predefines buffer and doesn't show either. `-H` records the expansion
+history as the unit runs rather than deferring it, so `-E`'s header lines and
+diagnostics interleave as clang's do. The checker's driver collects the
+preprocessor's diagnostics to publish them with its own, so there the header
+lines come before every diagnostic of the unit, where clang interleaves them.
+`c_driver_compatibility_test.c` (`test-checker-driver`) compares the lines with
+clang's byte for byte.
+
 ### The predefined macros
 
 `c_predefines.c` gives the macros that the target and the command-line options
@@ -3487,7 +3500,7 @@ spellings alone would miss this change (#272).
 taskset -c 2 ./build/compiler benchmark-preprocessor --clang path/to/sqlite3.c
 taskset -c 2 ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char \
     src/buster/compiler/main.c
-./build/compiler -E [-P] [-dM] [-o file] [options] file.c
+./build/compiler -E [-P] [-dM] [-H] [-o file] [options] file.c
 ./build/compiler test-preprocessor --generate-targets   # c_predefines.c's generated tables, from clang
 ./build/compiler test-preprocessor --tables src path/to/libc
 taskset -c 2 ./build/compiler benchmark-preprocessor --tables path/to/libc

@@ -5379,7 +5379,14 @@ static bool pp_test_named_ucn_boundaries(const char* directory)
 // from its start took time in proportion to the square of their count. The errors are counted, not printed
 // (PPOptions.quiet): a column is found by reading back to its line's start.
 #define BUSTER_PP_TEST_NAMED_UCNS 40000
+// The scaling oracle is timed under instrumentation too. On hosted TSan the full 40,000-error
+// recovery takes over 13 seconds while reporting every expected error; retain a finite
+// quadratic-regression guard without imposing the ordinary wall-clock budget on TSan.
+#if __has_feature(thread_sanitizer)
+#define BUSTER_PP_TEST_NAMED_UCN_SECONDS 30.0
+#else
 #define BUSTER_PP_TEST_NAMED_UCN_SECONDS 10.0
+#endif
 
 static bool pp_test_named_ucn_scaling(const char* directory)
 {

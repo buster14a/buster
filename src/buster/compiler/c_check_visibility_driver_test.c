@@ -64,7 +64,11 @@ static void check_test_driver_visibility(CheckTest* test, const char* clang, con
         "int prior(void){return outside+hidden+external_hidden+local+protected_value+hidden_again+restored+tls_hidden;}\n"
         "#pragma GCC visibility push(internal)\nint internal_value=8;\n#pragma GCC visibility pop\n"
         "int crossing(void){\n#pragma GCC visibility push(protected)\nreturn 0;}\n"
-        "int after_body=10;\n#pragma GCC visibility pop\n";
+        "int after_body=10;\n#pragma GCC visibility pop\n"
+        "__private_extern__ int private_definition=11;\n"
+        "__private_extern__ int private_redeclared;int private_redeclared=12;\n"
+        "__private_extern__ int external_private;\n"
+        "__private_extern__ int private_function(void){return private_definition+private_redeclared+external_private;}\n";
     static const struct
     {
         const char* name;
@@ -88,6 +92,10 @@ static void check_test_driver_visibility(CheckTest* test, const char* clang, con
         { "internal_value", STV_HIDDEN, STB_GLOBAL },
         { "crossing", STV_DEFAULT, STB_GLOBAL },
         { "after_body", STV_PROTECTED, STB_GLOBAL },
+        { "private_definition", STV_HIDDEN, STB_GLOBAL },
+        { "private_redeclared", STV_HIDDEN, STB_GLOBAL },
+        { "external_private", STV_HIDDEN, STB_GLOBAL },
+        { "private_function", STV_HIDDEN, STB_GLOBAL },
     };
     char path[512];
     char objects[3][512] = { { 0 } };
