@@ -999,6 +999,8 @@ static uint32_t check_common_emission_subtree_start(CheckCommonEmission* emissio
 #define BUSTER_CHECK_EMITTED_TREE 0x01u
 #define BUSTER_CHECK_EMITTED_SHIFT_SCAN 0x02u
 #define BUSTER_CHECK_EMITTED_SHIFT_COUNT 0x04u
+// A source comma's left-operand marker, already run by the arithmetic scan (check_common_arithmetic_own).
+#define BUSTER_CHECK_EMITTED_COMMA_MARKER 0x20u
 
 // What a node's subtree holds for check_common_emit_root's walks, a bit each, in CheckCommonEmission.reach: a node whose
 // own frame or comma stages may warn (check_common_own_candidate), a division by zero or shift by a constant, a comparison where
@@ -1314,6 +1316,16 @@ static void check_common_arithmetic_own(CheckCommonEmission* emission, uint32_t 
     else if (check_common_shift_op(op))
     {
         check_common_shift_count(emission, node, false);
+    }
+    else if (op == CHECK_OP_COMMA && graph->tokens[node] < emission->parser->tokens.count &&
+             emission->parser->tokens.kinds[graph->tokens[node]] == PARSE_KIND_COMMA &&
+             (emission->emitted[node] & BUSTER_CHECK_EMITTED_COMMA_MARKER) == 0)
+    {
+        // A source comma's left operand of no effect: clang's CheckCommaOperands queues its DiagIfReachable as it builds
+        // the comma, among the divisions and shifts built around it, so the tree walk's comma stage leaves it out. A
+        // statement expression's comma is its statement's root's and its enclosing root's too, and warns once.
+        emission->emitted[node] |= BUSTER_CHECK_EMITTED_COMMA_MARKER;
+        check_common_comma_marker(emission, node);
     }
 }
 
@@ -2121,7 +2133,10 @@ static void check_common_emit_run(CheckCommonEmission* emission)
             }
             case BUSTER_CHECK_EMIT_COMMA_TAIL:
             {
-                check_common_comma_marker(emission, node);
+                if (node < graph->count && (emission->emitted[node] & BUSTER_CHECK_EMITTED_COMMA_MARKER) == 0)
+                {
+                    check_common_comma_marker(emission, node);
+                }
                 const uint32_t left_node = node < graph->count ? graph->operand0[node] : BUSTER_CHECK_NONE;
                 const uint32_t right_node = node < graph->count ? graph->operand1[node] : BUSTER_CHECK_NONE;
                 check_common_emit_push(emission, node, BUSTER_CHECK_EMIT_COMMA_END);
@@ -2980,8 +2995,10 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
                           (op == CHECK_OP_DEREFERENCE && check_common_null_dereference(graph, stream, types, node));
     const bool shift = check_common_shift_op(op) && check_common_integer_constant(stream, divisor);
     const bool comparison = enabled->sign_compare && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
+    // A source comma's left-operand marker is the arithmetic scan's (check_common_arithmetic_own).
+    const bool comma = op == CHECK_OP_COMMA && graph->tokens[node] < parser->tokens.count && parser->tokens.kinds[graph->tokens[node]] == PARSE_KIND_COMMA;
     const uint8_t result = (uint8_t)((check_common_own_candidate(parser, graph, stream, types, node, enabled->self_assign) ? BUSTER_CHECK_REACH_TREE : 0u) |
-                                     (division || shift ? BUSTER_CHECK_REACH_ARITHMETIC : 0u) | (comparison ? BUSTER_CHECK_REACH_SIGN : 0u) |
+                                     (division || shift || comma ? BUSTER_CHECK_REACH_ARITHMETIC : 0u) | (comparison ? BUSTER_CHECK_REACH_SIGN : 0u) |
                                      (shift ? BUSTER_CHECK_REACH_SHIFT : 0u));
     return result;
 }
@@ -3142,6 +3159,95 @@ static bool check_common_shift_extras(const Parser* parser, const CheckInput* in
     return valid;
 }
 
+// A root the reader adds after other roots its operand precedes: a statement's condition (CHECK_OP_CONDITION, a switch's
+// CHECK_OP_POSITIVE), which its keyword's closing parenthesis wraps after the body, and a for clause's or a declarator's
+// discard (CHECK_OP_CAST), which the `)` or the `;` adds after the body or the later declarators. Clang analyzes each
+// full expression as it is built, before what follows, so the walks take such a root where its operand stands.
+static bool check_common_displaced_root(const CheckGraph* graph, const uint32_t* parents, uint32_t node)
+{
+    const CheckOp op = graph->ops[node];
+    const uint32_t operand = graph->operand0[node];
+    const bool result = (op == CHECK_OP_CONDITION || op == CHECK_OP_POSITIVE || op == CHECK_OP_CAST) && parents[node] == BUSTER_CHECK_NONE &&
+                        operand < graph->count && operand + 1 < node;
+    return result;
+}
+
+// The displaced roots (check_common_displaced_root), each its operand's node above its own, in their operands' order, into
+// `items` (at most half the graph's nodes: each has an operand and a node between them): their count. A bottom-up merge sort
+// through `temporary`, as no recursion is allowed; nearly every run is sorted already.
+static uint32_t check_common_displaced_roots(const CheckGraph* graph, const uint32_t* parents, uint64_t* items, uint64_t* temporary, bool vector)
+{
+    static const CheckOp wrappers[] = { CHECK_OP_CONDITION, CHECK_OP_POSITIVE, CHECK_OP_CAST };
+    const CheckCommonOps set = check_common_ops(wrappers, BUSTER_ARRAY_LENGTH(wrappers));
+    CheckCommonScan scan = { 0 };
+    uint32_t count = 0;
+    bool sorted = true;
+    for (uint32_t node = check_common_next_op(graph, &set, &scan, vector); node < graph->count; node = check_common_next_op(graph, &set, &scan, vector))
+    {
+        if (check_common_displaced_root(graph, parents, node))
+        {
+            items[count] = ((uint64_t)graph->operand0[node] << 32) | node;
+            sorted &= count == 0 || items[count - 1] < items[count];
+            count += 1;
+        }
+    }
+    uint64_t* from = items;
+    uint64_t* to = temporary;
+    for (uint32_t width = 1; !sorted && width < count; width *= 2)
+    {
+        for (uint32_t start = 0; start < count; start += 2 * width)
+        {
+            const uint32_t middle = count - start > width ? start + width : count;
+            const uint32_t end = count - middle > width ? middle + width : count;
+            uint32_t left = start;
+            uint32_t right = middle;
+            for (uint32_t at = start; at < end; at += 1)
+            {
+                const bool take_left = right >= end || (left < middle && from[left] < from[right]);
+                to[at] = take_left ? from[left] : from[right];
+                left += take_left ? 1u : 0u;
+                right += take_left ? 0u : 1u;
+            }
+        }
+        uint64_t* swap = from;
+        from = to;
+        to = swap;
+    }
+    if (from != items && count != 0)
+    {
+        memcpy(items, from, count * sizeof(uint64_t));
+    }
+    return count;
+}
+
+// The roots in the order the walks take them: check_common_next_root's, with the displaced ones (check_common_displaced_roots)
+// moved ahead of the first root past their operands.
+typedef struct CheckCommonRootOrder CheckCommonRootOrder;
+struct CheckCommonRootOrder
+{
+    CheckCommonScan roots;
+    uint32_t natural;
+    const uint64_t* displaced;
+    uint32_t displaced_count;
+    uint32_t displaced_at;
+};
+
+static uint32_t check_common_root_order_next(const CheckGraph* graph, const uint32_t* parents, CheckCommonRootOrder* order, bool vector)
+{
+    while (order->natural < graph->count && order->displaced_count != 0 && check_common_displaced_root(graph, parents, order->natural))
+    {
+        order->natural = check_common_next_root(parents, graph->count, &order->roots, vector);
+    }
+    const bool moved = order->displaced_at < order->displaced_count && (uint32_t)(order->displaced[order->displaced_at] >> 32) < order->natural;
+    const uint32_t result = moved ? (uint32_t)order->displaced[order->displaced_at] : order->natural;
+    order->displaced_at += moved ? 1u : 0u;
+    if (!moved && order->natural < graph->count)
+    {
+        order->natural = check_common_next_root(parents, graph->count, &order->roots, vector);
+    }
+    return result;
+}
+
 static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                         TypeTable* types, CheckWarningSpelling* spell, const CheckCommonFacts* facts,
                                         const CheckProgram* program, CheckCommonShiftWarnings* shifts, Arena* scratch)
@@ -3214,9 +3320,21 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         // the call an unevaluated statement's comma, conditional or selection leaves as its value (the walk's own where
         // it's evaluated); an initializer's values, which a declaration's `;` casts to void as roots of their own, are
         // read, not discarded.
-        CheckCommonScan roots = { 0 };
-        for (uint32_t node = check_common_next_root(facts->parents, graph->count, &roots, vector); node < graph->count && !pp->fatal;
-             node = check_common_next_root(facts->parents, graph->count, &roots, vector))
+        // The displaced roots (check_common_displaced_root) join the roots' order at their operands, ahead of the later roots
+        // their own nodes follow; a root walk skips them where they stand.
+        const uint32_t displaced_capacity = graph->count / 2 + 1;
+        uint64_t* displaced = CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, displaced_capacity);
+        uint64_t* displaced_temporary = displaced != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, displaced_capacity) : NULL;
+        if (displaced_temporary == NULL)
+        {
+            check_common_exhausted(pp);
+        }
+        const uint32_t displaced_count = displaced_temporary != NULL ?
+                                         check_common_displaced_roots(graph, facts->parents, displaced, displaced_temporary, vector) : 0;
+        CheckCommonRootOrder order = { .displaced = displaced, .displaced_count = displaced_count };
+        order.natural = check_common_next_root(facts->parents, graph->count, &order.roots, vector);
+        for (uint32_t node = check_common_root_order_next(graph, facts->parents, &order, vector); node < graph->count && !pp->fatal;
+             node = check_common_root_order_next(graph, facts->parents, &order, vector))
         {
             const uint32_t expr = check_common_discarded(parser, graph, node);
             const CheckOp expr_op = expr != node && expr < graph->count && facts->parents[node] == BUSTER_CHECK_NONE &&
