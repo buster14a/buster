@@ -1509,14 +1509,16 @@ static bool check_deferred_warnings(CheckWarningBuffer* output, const CheckWarni
     return valid;
 }
 
-// A recovered report in the merged table's ids (#1447): the TypeIds it holds, the type it names and a typed redeclaration's
-// prior type (c_check_redefinition.c), which its `value` holds. Tokens, declarations and names are the unit's.
+// A recovered report in the merged table's ids (#1447): the TypeIds it holds, the type it names, and those its `value`
+// holds: a redeclaration's prior type (c_check_redefinition.c, any detail but the generic one) and an attribute expression's
+// binary operands' second type (c_check_attribute_expression.c). Every other `value` is a token, a count or a pair of
+// tokens; tokens, declarations and names are the unit's.
 static CheckInputReport check_deferred_report(const CheckInputReport* report, const TypeReplayPart* part)
 {
     CheckInputReport result = *report;
     const bool redeclaration = result.message == CHECK_INPUT_REDECLARATION || result.message == CHECK_INPUT_CONFLICTING_TYPES;
-    const bool typed = redeclaration && (result.detail == CHECK_REDECLARATION_OBJECT_TYPE || result.detail == CHECK_REDECLARATION_OBJECT_TYPE_EXTERN ||
-                                         result.detail == CHECK_REDECLARATION_TYPEDEF);
+    const bool binary = result.message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (result.detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_BINARY;
+    const bool typed = (redeclaration && result.detail != CHECK_REDECLARATION_GENERIC) || binary;
     result.type = check_deferred_type(part, result.type);
     result.value = typed ? check_deferred_type(part, (TypeId)result.value) : result.value;
     return result;

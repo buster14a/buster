@@ -338,6 +338,15 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "recovered-tag-redefinitions",
       "int f(void) { struct L { int a; }; struct L { long b; } v; v.b = 0; struct L w; w.a = 1; return w.a; }\n"
       "int g(void) { enum E { A, B }; enum E { C, A }; return C + B; }\nint h(void) { return 2; }\n", true },
+    // TypeIds a report's value holds, of types a later body makes: an attribute expression's second operand's, and a
+    // redeclaration's prior type for each detail (a different kind of symbol here), review on #1794.
+    { "recovered-binary-operands",
+      "int g(void) { struct G { int x; } gv; return gv.x; }\n"
+      "int f(void) { struct S { int a; } s; int x __attribute__((annotate(\"n\", s + s))) = 0; return x; }\n"
+      "int h(void) { struct H { int y; } hv; return hv.y; }\n", true },
+    { "recovered-redeclaration-kind",
+      "int g(void) { struct G { int x; } gv; return gv.x; }\nint f(void) { struct S { int a; } s; typedef int s; return 0; }\n"
+      "int h(void) { return 2; }\n", true },
     { "recovered-control", "int f(void) { break; return 0; }\nint g(void) { continue; return 1; }\nint h(void) { return 2; }\n", true },
     // A type conflict notes the entity's latest earlier declaration, even another body's block-scope one, which neither
     // the top level's walk nor another body's lane has read: source order's, at file scope and in a body. One whose

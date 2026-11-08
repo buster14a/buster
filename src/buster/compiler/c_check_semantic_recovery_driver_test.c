@@ -189,6 +189,11 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int n(void) { break; int u; return 0; }\n"
         "int o(int p) { continue; return p << 40; }\n"
         "typedef int U;\nint q(void) { U x = 2; return x; }\nint U;\n",
+        // An attribute expression's invalid operands, both of a type the body makes after an earlier body made its own:
+        // the merge maps both operands' types, the second's held in the report's value (review on #1794).
+        "int g(void) { struct G { int x; } gv; return gv.x; }\n"
+        "int f(void)\n{\n    struct S { int a; } s;\n    int x __attribute__((annotate(\"n\", s + s))) = 0;\n    return x;\n}\n"
+        "int h(void) { struct H { int y; } hv; return hv.y; }\n",
         // A repeated enumerator, dropped: the next one's implicit value restarts at 0 (of int, or of a fixed type), and
         // an enum left with none is unsigned int's.
         "enum A { X = 5 };\nenum B { Y = 3, X, Z };\n_Static_assert(Z == 0, \"z\");\n"

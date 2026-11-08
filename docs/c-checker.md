@@ -3884,9 +3884,11 @@ source order's reader finds them, by those counts:
 - then the body's;
 - and the top level's after the last body.
 
-Each report's TypeIds take the merged table's: the type it names, and a typed
-redeclaration's prior type, which its `value` holds. Tokens, declarations and
-names are the unit's already. `check_input_recovered_publish` then appends them
+Each report's TypeIds take the merged table's (`check_deferred_report`): the
+type it names, and the two whose `value` holds one, a redeclaration's prior type
+and an attribute expression's second operand's type. Every other `value` is a
+token, a count or a pair of tokens, and tokens, declarations and names are the
+unit's already. `check_input_recovered_publish` then appends them
 as source order's does.
 
 One recovered note isn't merged: an object's type conflict notes the entity's
