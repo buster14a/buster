@@ -4022,6 +4022,45 @@ in the same section, compares its fixtures as above. The asm and control
 errors after a graph's error are compared by place and severity alone: those
 diagnose paths give one generic message, not clang's wording.
 
+Every declaration's failed initializer is given, as clang gives each
+(phase 2): `int a[2] = 5; int b[2] = 6;` has two errors where it had the
+first alone. `check_initializers_diagnose_warnings` already visited every
+declaration and kept the earliest failure; it now also lists each one
+(`CheckInitDiagnostic.failures`, `CheckInitFailure`), copied into `output` after
+its walk's arenas are rolled back, and the driver gives each with its own
+conversion's words and a static object's second "not a compile-time constant"
+error. Only a unit whose initializers failed takes this path.
+
+An array of unknown size whose initializer is no list nor a string of its
+element (`int y[] = 5;`) gets clang's `FK_ArrayNeedsInitList` error at its
+name, worded by the literal its element takes: "or string literal" for a
+character, "or wide string literal" for `int`, `unsigned short` and
+`unsigned int` (wchar_t's, char16_t's and char32_t's), the list alone
+otherwise (`CHECK_INPUT_DIRECT_INITIALIZER_ARRAY`'s detail,
+`CheckInputArrayList`). `check_input_initializer_finish` recovers the report;
+the array keeps its unknown size, as clang's invalid declaration does, and its
+initializer leaves the sparse columns, so the initializers' run doesn't see it.
+As clang checks the initializer first, the report completes at the
+initializer's end, after the initializer's own diagnostics, and an extern
+array loses its -Wextern-initializer event. Clang gives no such error where
+the initializer is no valid value. The driver decides that once the
+expressions are checked (`check_init_listless_drop`, which removes the
+report): an undeclared name in it isn't shielded by a statement expression,
+or the initializer's outermost node is diagnosed, of no valid type or
+incomplete as the initializers' diagnosis counts it. An initializer with no
+node keeps its report: a rejected unit's retained graph ends at its first
+missing name, so a later valid initializer has none. A statement expression
+shields a name in a statement before its last, its value
+(`check_init_undeclared_poisons`). The report keeps its initializer's first
+token (`value`) for this; only a unit with another error drops one. A
+parenthesized initializer, a cast, a scalar's compound literal or an array's
+compound literal that is only part of the initializer is no list either; an
+array's compound literal that is all of it (GNU's, `int z[] =
+(int[2]){1,2};`, which clang accepts), even inside parentheses, is still
+refused, on main too. Clang's typo correction ("did you mean"), which buster
+lacks, keeps a misspelled name's initializer a value, so there clang gives the
+error where buster doesn't.
+
 Type attributes' errors don't stop the reader either (`check_input_attribute_type`).
 What clang 23 does with each is followed:
 
@@ -4101,10 +4140,13 @@ These differences remain:
 The later phases are left:
 
 - **Invalid declarations.** Not covered by phase 2:
-  - an invalid initializer the reader reports;
   - C23's incompatible tag redefinitions (above).
 
-  These still stop the reader.
+  These still stop the reader. A non-constant initializer's error is at its
+  first token, where clang's is at the operand that isn't constant
+  (`k + 1`'s `+`), and `sizeof` of an incomplete type reads "incomplete type
+  is not permitted here" at the `sizeof`, where clang's names the type at its
+  operand; both on main too.
 - **Units with a graph's or a reader's error.** These, other than a recovered
   one, still don't reach `check_program`. They get none of its diagnostics:
   the common warnings, their runtime warnings included. The asm and control
