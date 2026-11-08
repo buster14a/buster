@@ -3743,20 +3743,23 @@ static bool check_common_bitfield_truncates(const CheckGraph* graph, const Check
     uint32_t width = 0;
     bool is_signed = false;
     bool result = false;
-    const bool boolean = type_unqualified(type_strip_aligned(types, field)) == BUSTER_TYPE_BOOL;
-    if (!boolean && bit_width != 0 && bit_width < 128 && source < graph->count && check_common_integer_constant(stream, source) &&
+    TypeId type = 0;
+    const bool constant = bit_width != 0 && bit_width < 128 && source < graph->count && check_common_integer_constant(stream, source);
+    const unsigned __int128 integer = constant ? check_common_stream_integer(stream, source, &type) : 0;
+    // A value whose bits are below 2^(w-1), which a w-bit bit-field of either signedness holds, as the 0s and 1s stored in
+    // flags are, is kept before any type is read.
+    if (constant && integer >= ((unsigned __int128)1 << (bit_width - 1)) && type_unqualified(type_strip_aligned(types, field)) != BUSTER_TYPE_BOOL &&
         check_common_integer(types, field, &field_width, &field_signed))
     {
-        const CheckValue value = check_stream_value(stream, source);
-        if (check_common_integer(types, value.type, &width, &is_signed) && width != 0)
+        if (check_common_integer(types, type, &width, &is_signed) && width != 0)
         {
-            *original = check_common_integer_bits(value.integer, width, is_signed);
+            *original = check_common_integer_bits(integer, width, is_signed);
             const CheckOp op = graph->ops[source];
             uint32_t original_width = width;
             if ((op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT) && (!is_signed || *original < 0))
             {
                 // APInt's significant bits of the value's bits, read as signed: its bit length past its sign bits, and one.
-                const __int128 bits = check_common_integer_bits(value.integer, width, true);
+                const __int128 bits = check_common_integer_bits(integer, width, true);
                 const unsigned __int128 magnitude = (unsigned __int128)(bits < 0 ? ~bits : bits);
                 const uint64_t high = (uint64_t)(magnitude >> 64);
                 const uint32_t length = high != 0 ? 128u - (uint32_t)__builtin_clzll(high) :

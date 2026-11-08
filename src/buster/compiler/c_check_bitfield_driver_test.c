@@ -26,6 +26,12 @@ static const CheckDriverDefaultWarningFixture check_driver_bitfield_fixtures[] =
         .warnings = 5,
     },
     {
+        .name = "a computed negative constant truncates in an unsigned bit-field, and fitting flags stay quiet",
+        .source = "struct S { unsigned u : 3; int b : 3; unsigned v : 1; };\nstruct S g = { 0 - 2, 0 - 4, 1 };\n"
+                  "void f(struct S *p) { struct S t = { .u = 0 - 2, .b = -4, .v = 1 }; p->u = 0 - 2; p->b = 0 - 5; p->v = 1; (void)t; }\n",
+        .warnings = 4,
+    },
+    {
         .name = "an assignment's truncation leaves out its constant conversion and follows clang's walk",
         .source = "struct S { signed char c : 2; unsigned char d : 4; int b : 3; unsigned u : 3; } s;\nint f(int);\n"
                   "void g(int x) {\n    s.c = 200;\n    s.d = 300;\n    s.b = 9, s.b = 10;\n    f(s.b = 12);\n    s.b = s.u = 9;\n    s.b = 1 ? 9 : 2;\n"
