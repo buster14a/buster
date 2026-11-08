@@ -4034,10 +4034,17 @@ What clang 23 does with each is followed:
   (`int` with `SF`), or a base of no integer or floating type (a struct, a
   pointer), is clang's error too, but `AddModeAttr` still installs the mode's
   type: `float v __attribute__((mode(SI)))` is an `unsigned int`
-  (`check_input_attribute_mode`'s `installed`). Clang installs a type even in
-  an enum (`double` as its integer type), which the type table doesn't hold,
-  so an enum's mode error recovers only where clang installs nothing. The enum
-  is then as without the mode.
+  (`check_input_attribute_mode`'s `installed`).
+- **An enum's `mode`.** Where clang installs nothing, the enum is as without
+  the mode. Clang installs a floating type even in an enum (`double` as its
+  integer type), which the type table doesn't hold. Such an enum gets the
+  signed integer of that type's size and alignment
+  (`check_input_mode_enum_integer`: `HF` a `short`, `SF` an `int`, `DF` a
+  `long`, `XF` and `TF` an `__int128`), which gives it clang's layout. Its
+  conversions are clang's too: a floating value converts into it silently,
+  since `-Wliteral-conversion` takes no enumeration target, and an integer
+  gets `-Wconstant-conversion` at the integer's width. A complex mode, whose
+  alignment no integer has, still stops the reader.
 
 In each case the declaration stays valid and the attribute is ignored, as in
 phase 1.
@@ -4047,8 +4054,8 @@ given for each. The subject checks already repeat theirs. Two errors are given
 before them, once per list, and are now repeated
 (`CheckInputAttributeRepeat`):
 
-- an `aligned` or `_Alignas` value's error, which the reader recovers and drops
-  the record for;
+- an `aligned` value's error, which the reader recovers and drops the record
+  for;
 - a specifiers' `mode` error, which the specifiers' type gives.
 
 The list keeps a copy of each report. Its copies share it, since each
@@ -4057,18 +4064,39 @@ the list keeps the original. Each later one gives the copy again, completing
 with its own waiting errors (`check_input_attribute_repeats`). Error-free
 lists have no repeats.
 
+`_Alignas`'s errors are each declarator's, in the order of clang's
+`handleAlignedAttr` and `CheckAlignasUnderalignment`
+(`check_input_alignas_declarator`):
+
+1. **Its place.** A declarator that can't take one gets the place's error for
+   each `_Alignas`:
+   - a function or a typedef: "only applies to variables and fields";
+   - a parameter, a bit-field or a register variable: "cannot be applied to".
+     A K&R definition's parameter declarations are parameters too. The parser
+     takes their first `_Alignas` groups as the function declarator's suffix,
+     so the declarator step ends before them.
+2. **Its value.** The reader keeps the value's error on the record
+   (`CheckInputAttribute.deferred`) instead of giving it when the list is
+   read, and each declarator that may take the `_Alignas` gives it. The value
+   has no power of 2, is no integer constant ("'aligned' attribute requires
+   integer constant", at the argument, as clang names it), or is past 2^32
+   ("requested alignment must be 4294967296 bytes or smaller", `aligned`'s
+   too).
+3. **The underalignment**, after the values' errors, at the last `_Alignas`
+   that stands.
+
+A declaration that declares nothing (`_Alignas(3) int;`, a member with no name
+that isn't an anonymous record) has none of them, as clang declares nothing
+for it. Each error recovers, so the declaration stays valid, with only the
+alignments that stand.
+
 `c_check_type_attribute_recovery_driver_test.c` compares its fixtures as above.
 These differences remain:
 
-- An enum's mode of the other kind (`enum __attribute__((mode(SF))) E`) still
-  stops the reader.
+- An enum's complex mode of the other kind (`enum __attribute__((mode(SC)))
+  E`) still stops the reader.
 - An enum's vector mode after its body gives its deprecation warning twice (on
   main too).
-- A shared `_Alignas` on a function declarator gives the value's error, where
-  clang gives its subject's ("only applies to variables and fields"). So does
-  an `_Alignas` of a typedef.
-- `_Alignas`'s non-constant and too-large values still give the generic error
-  and stop the reader.
 
 The later phases are left:
 

@@ -272,7 +272,8 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
             for (uint32_t i = 0; i < attributes->count; i += 1)
             {
                 const CheckInputAttribute* attribute = &attributes->records[i];
-                if (attribute->kind == CHECK_ATTRIBUTE_ALIGNAS)
+                // (One whose value has an error has no alignment: check_input_alignas_declarator.)
+                if (attribute->kind == CHECK_ATTRIBUTE_ALIGNAS && attribute->deferred == NULL)
                 {
                     check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_ALIGNMENT);
                 }
