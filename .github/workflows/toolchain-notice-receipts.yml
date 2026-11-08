@@ -1,0 +1,25 @@
+# Temporary read-only provenance check; removed before the implementation PR.
+name: Toolchain notice receipts
+on:
+  push:
+    branches: [codex/hosted-ghcr-1768]
+permissions:
+  contents: read
+jobs:
+  receipts:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Verify the exact upstream notice blobs and record their SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+          while read -r name blob url; do
+              timeout --kill-after=5s 240s curl -q --fail --location --proto '=https' --proto-redir '=https' --retry 8 --retry-all-errors --retry-max-time 200 --connect-timeout 15 --max-time 60 --silent --show-error "$url" --output "$RUNNER_TEMP/$name"
+              test "$(git hash-object "$RUNNER_TEMP/$name")" = "$blob"
+              printf 'NOTICE %s %s %s\n' "$name" "$(sha256sum "$RUNNER_TEMP/$name" | cut -c 1-64)" "$url"
+          done <<'INPUTS'
+          ninja-license 131cb1da46d238a296d448fd79acf37160817cf6 https://raw.githubusercontent.com/ninja-build/ninja/v1.13.2/COPYING
+          wild-apache 1b5ec8b78e237b5c3b3d812a7c0a6589d0f7161d https://raw.githubusercontent.com/wild-linker/wild/0.10.0/LICENSE-APACHE
+          wild-mit 31aa79387f27e730e33d871925e152e35e428031 https://raw.githubusercontent.com/wild-linker/wild/0.10.0/LICENSE-MIT
+          INPUTS
