@@ -3016,20 +3016,31 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
         0,
         1
     };
-    for (uint32_t mixed = 0; ready && mixed < 2; mixed += 1)
+    static const uint32_t table_addresses[2] = { 2, 4 };
+    static const uint8_t direct_access[4] = { 0 };
+    for (uint32_t variant = 0; ready && variant < 4; variant += 1)
     {
+        const uint32_t mixed = variant & 1;
+        const bool hoist = variant >= 2;
         Tier0Function tabled = twice;
         tabled.label_tables = mixed != 0 ? one_table : two_tables;
         tabled.table_jumps = mixed != 0 ? table_jumps + 1 : table_jumps;
         tabled.table_count = mixed != 0 ? 1 : 2;
-        ir_lower_test_expect(tally, tier0_validate(&tabled).error == TIER0_OK, "Tier 0 takes the jump tables' columns", 0, 3 + mixed);
-        if (ir_lower_test_lower(tally, &tabled, IR_I32, 4, &output, &twin_output, &scratch, &function, 0, 3 + mixed))
+        tabled.table_addresses = hoist ? table_addresses + mixed : 0;
+        tabled.symbol_access = hoist ? direct_access : 0;
+        tabled.symbol_count = 4;
+        ir_lower_test_expect(tally, tier0_validate(&tabled).error == TIER0_OK && tier0_validate_scalar(&tabled).error == TIER0_OK,
+                             "Tier 0 takes the jump tables' columns", 0, 3 + variant);
+        if (ir_lower_test_lower(tally, &tabled, IR_I32, 4, &output, &twin_output, &scratch, &function, 0, 3 + variant))
         {
             // Each br_indirect lists one label, its one successor: label 0 the goto *'s (mixed) or table 0's, label 1
             // the last table's.
             uint32_t jumps = 0;
             uint32_t listed = 0;
             uint32_t dispatches = 0;
+            uint32_t addresses = 0;
+            uint32_t preheader = 0;
+            bool pairs = true;
             for (uint32_t i = 0; i < function.instruction_count; i += 1)
             {
                 if (function.op[i] == IR_BR_INDIRECT && function.b[i] != BUSTER_IR_NONE && function.c[i] == 1 && function.extra[function.b[i]] < 2)
@@ -3039,15 +3050,23 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
                 }
                 jumps += function.op[i] == IR_BR_INDIRECT;
                 dispatches += function.op[i] == IR_BR && function.a[i] == function.block_count - 1;
+                if (function.op[i] == IR_SYMBOL_ADDR)
+                {
+                    addresses += 1;
+                    preheader += i < function.block_offsets[1];
+                    pairs &= i + 1 < function.instruction_count && function.op[i + 1] == IR_PTRTOINT && function.a[i + 1] == i;
+                }
             }
-            ir_lower_test_expect(tally, jumps == 2 && listed == 3 && dispatches == mixed, "a jump table's jump is a br_indirect of its own table's labels", 0, 3 + mixed);
+            ir_lower_test_expect(tally, jumps == 2 && listed == 3 && dispatches == mixed, "a jump table's jump is a br_indirect of its own table's labels", 0, 3 + variant);
+            ir_lower_test_expect(tally, pairs && addresses == 2 && preheader == (hoist ? tabled.table_count : 0),
+                                 "only explicitly listed table addresses are materialized once in the preheader", 0, 3 + variant);
             for (uint64_t p = 0; p < 2; p += 1)
             {
                 bool fault = false;
                 const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 0, &data, globals, &p, 1, &execution, &fault);
-                ir_lower_test_expect(tally, !fault && actual == (p != 0 ? 10 : 20), "jump tables' jumps go to their labels", 0, 3 + mixed);
+                ir_lower_test_expect(tally, !fault && actual == (p != 0 ? 10 : 20), "jump tables' jumps go to their labels", 0, 3 + variant);
             }
-            ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, 0, 3 + mixed);
+            ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, 0, 3 + variant);
             IrFunction promoted_function =
             {
                 0
@@ -3058,13 +3077,73 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
             {
                 phis += promoted_function.op[i] == IR_PHI;
             }
-            ir_lower_test_expect(tally, check.error == IR_OK && phis == 0, "jump tables' jumps need no phi of their addresses", 0, 3 + mixed);
+            ir_lower_test_expect(tally, check.error == IR_OK && phis == 0, "jump tables' jumps need no phi of their addresses", 0, 3 + variant);
         }
         arena_pop_to(&output, 0);
         arena_pop_to(&twin_output, 0);
         arena_pop_to(&promoted, 0);
         arena_pop_to(&twin_promoted, 0);
     }
+    // #1217: the first table is unreachable, the second jumps back to source entry zero. The preheader must run once,
+    // retain both tables' distinct symbols, and dominate the loop without reinitializing its parameter on a backedge.
+    static const uint8_t loop_kinds[] = {
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_JUMP,
+        BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_JUMP_INDIRECT,
+        BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_JUMP_INDIRECT,
+        BUSTER_TYPED_CONST, BUSTER_TYPED_RETURN,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_RETURN,
+    };
+    static const uint8_t loop_classes[] = {
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_VOID,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+    };
+    static const uint64_t loop_values[] = { 0, 13, 0, 1, 0, 0, 9, 2, 0, 3, 0, 77, 0, 0, 0 };
+    static const uint32_t loop_labels[] = { 11, 0 };
+    static const uint32_t loop_jumps[] = { 8, 10 };
+    static const uint32_t loop_addresses[] = { 7, 9 };
+    Tier0Function loop = twice;
+    loop.kinds = loop_kinds;
+    loop.classes = loop_classes;
+    loop.values = loop_values;
+    loop.count = BUSTER_ARRAY_LENGTH(loop_kinds);
+    loop.label_entries = loop_labels;
+    loop.label_tables = two_tables;
+    loop.table_jumps = loop_jumps;
+    loop.table_addresses = loop_addresses;
+    loop.table_count = 2;
+    if (ready && ir_lower_test_lower(tally, &loop, IR_I32, 4, &output, &twin_output, &scratch, &function, 0, 7))
+    {
+        uint32_t addresses = 0;
+        uint32_t symbols = 0;
+        bool preheader = true;
+        for (uint32_t i = 0; i < function.instruction_count; i += 1)
+        {
+            if (function.op[i] == IR_SYMBOL_ADDR)
+            {
+                addresses += 1;
+                symbols |= function.a[i] == 2 ? 1u : function.a[i] == 3 ? 2u : 0;
+                preheader &= i < function.block_offsets[1];
+            }
+        }
+        ir_lower_test_expect(tally, addresses == 2 && symbols == 3 && preheader,
+                             "an unreachable table does not confuse the later table's preheader value", 0, 7);
+        for (uint64_t p = 0; p < 3; p += 1)
+        {
+            bool fault = false;
+            const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 0, &data, globals, &p, 1, &execution, &fault);
+            ir_lower_test_expect(tally, !fault && actual == 0, "a table backedge to source entry zero preserves the decremented parameter", 0, (uint32_t)p);
+        }
+        ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, 0, 7);
+    }
+    arena_pop_to(&output, 0);
+    arena_pop_to(&twin_output, 0);
+    arena_pop_to(&promoted, 0);
+    arena_pop_to(&twin_promoted, 0);
     // #148's frame address, which the adapter doesn't lower: refused at its entry, as X86 rows are, before anything is
     // allocated (from nonzero marks, so that a rollback to zero would show).
     static const uint8_t frame_kinds[3] =
@@ -3093,6 +3172,70 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
         .block_count = 17,
     };
     const bool marked = ready && BUSTER_ARENA_PUSH_ARRAY(&output, uint8_t, 24) != 0 && BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, 40) != 0;
+    // #1217's optional table-address column is checked before hoisting: no out-of-range read, wrong stack value,
+    // load, GOT or TLS access can enter the preheader. Both validators and both lowerings refuse the same input.
+    typedef struct IrLowerTableAddressBreak IrLowerTableAddressBreak;
+    struct IrLowerTableAddressBreak
+    {
+        const char* name;
+        uint32_t addresses[2];
+        uint8_t kind;
+        uint8_t class;
+        uint64_t symbol;
+        uint8_t access;
+        uint32_t symbols;
+    };
+    static const IrLowerTableAddressBreak address_breaks[] = {
+        { "a table address past the entries", { 10, 4 }, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 2, BUSTER_TIER0_ACCESS_DIRECT, 4 },
+        { "a table address at its jump", { 3, 4 }, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 2, BUSTER_TIER0_ACCESS_DIRECT, 4 },
+        { "table addresses out of order", { 2, 1 }, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 2, BUSTER_TIER0_ACCESS_DIRECT, 4 },
+        { "duplicate table addresses", { 2, 2 }, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 2, BUSTER_TIER0_ACCESS_DIRECT, 4 },
+        { "a table address naming a load", { 2, 4 }, BUSTER_TYPED_GLOBAL, BUSTER_TYPED_CLASS_U64, 2, BUSTER_TIER0_ACCESS_DIRECT, 4 },
+        { "a table address with the wrong class", { 2, 4 }, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_I64, 2, BUSTER_TIER0_ACCESS_DIRECT, 4 },
+        { "a table address with symbol zero", { 2, 4 }, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 0, BUSTER_TIER0_ACCESS_DIRECT, 4 },
+        { "a table address past SymbolId", { 2, 4 }, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, UINT64_C(1) << 32, BUSTER_TIER0_ACCESS_DIRECT, 4 },
+        { "a table address through the GOT", { 2, 4 }, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 2, BUSTER_TIER0_ACCESS_GOT, 4 },
+        { "a local-exec TLS table address", { 2, 4 }, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 2, BUSTER_TIER0_ACCESS_LOCAL_EXEC, 4 },
+        { "an initial-exec TLS table address", { 2, 4 }, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 2, BUSTER_TIER0_ACCESS_INITIAL_EXEC, 4 },
+        { "a table address past the access column", { 2, 4 }, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 2, BUSTER_TIER0_ACCESS_DIRECT, 2 },
+    };
+    for (uint32_t b = 0; marked && b < BUSTER_ARRAY_LENGTH(address_breaks); b += 1)
+    {
+        uint8_t broken_kinds[BUSTER_ARRAY_LENGTH(twice_kinds)];
+        uint8_t broken_classes[BUSTER_ARRAY_LENGTH(twice_classes)];
+        uint64_t broken_values[BUSTER_ARRAY_LENGTH(twice_values)];
+        memcpy(broken_kinds, twice_kinds, sizeof(broken_kinds));
+        memcpy(broken_classes, twice_classes, sizeof(broken_classes));
+        memcpy(broken_values, twice_values, sizeof(broken_values));
+        broken_kinds[2] = address_breaks[b].kind;
+        broken_classes[2] = address_breaks[b].class;
+        broken_values[2] = address_breaks[b].symbol;
+        const uint8_t accesses[4] = { 0, 0, address_breaks[b].access, 0 };
+        Tier0Function broken = twice;
+        broken.kinds = broken_kinds;
+        broken.classes = broken_classes;
+        broken.values = broken_values;
+        broken.label_tables = two_tables;
+        broken.table_jumps = table_jumps;
+        broken.table_addresses = address_breaks[b].addresses;
+        broken.table_count = 2;
+        broken.symbol_access = accesses;
+        broken.symbol_count = address_breaks[b].symbols;
+        const Tier0Check vector = tier0_validate(&broken);
+        const Tier0Check scalar = tier0_validate_scalar(&broken);
+        ir_lower_test_expect(tally, vector.error == TIER0_ERROR_INVALID && scalar.error == TIER0_ERROR_INVALID && vector.node == scalar.node,
+                             address_breaks[b].name, 0, b);
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            const uint64_t output_mark = output.length;
+            const uint64_t scratch_mark = scratch.length;
+            IrFunction result = preserved;
+            const IrCheck check = ir_lower_typed_path(&broken, IR_I32, 4, &output, &scratch, &result, path != 0);
+            ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark && scratch.length == scratch_mark &&
+                                            result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
+                                 address_breaks[b].name, path, b);
+        }
+    }
     for (uint32_t vector = 0; marked && vector < 2; vector += 1)
     {
         const uint64_t output_mark = output.length;

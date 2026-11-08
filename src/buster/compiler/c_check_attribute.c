@@ -1239,27 +1239,36 @@ static bool check_input_attribute_copy(CheckInputReader* reader, const CheckInpu
     return valid;
 }
 
-// A compatible visible bare function redeclaration keeps its predecessor's format contract. Copy only those
+static uint32_t check_input_inherited_contract(const CheckInputAttribute* attribute)
+{
+    const uint32_t bit = attribute->kind == CHECK_ATTRIBUTE_FORMAT ? 1u :
+                         attribute->kind == CHECK_ATTRIBUTE_CONST ? 2u :
+                         attribute->kind == CHECK_ATTRIBUTE_PURE ? 4u :
+                         attribute->kind == CHECK_ATTRIBUTE_WARN_UNUSED_RESULT ? 8u : 0u;
+    const uint32_t result = !attribute->ignored && !attribute->subject_ignored ? bit : 0u;
+    return result;
+}
+
+// A compatible visible function redeclaration keeps its predecessor's format and value-discard contracts. Copy only those
 // records into a new accumulator: neither the predecessor nor already published declaration metadata is mutable.
-static void check_input_format_inherit(CheckInputReader* reader, uint32_t token, uint32_t previous)
+static void check_input_contract_inherit(CheckInputReader* reader, uint32_t token, uint32_t previous)
 {
     // Binding-only clients can omit the optional attribute column entirely.
     const CheckInputAttributes* prior = check_sparse_wide_present(reader->output->attributes) ?
                                         check_input_attributes_at(reader->output, previous) : NULL;
-    bool inherit = false;
+    uint32_t inherit = 0;
     for (uint32_t i = 0; prior != NULL && i < prior->count; i += 1)
     {
-        const CheckInputAttribute* attribute = prior->records + i;
-        inherit |= attribute->kind == CHECK_ATTRIBUTE_FORMAT && !attribute->ignored && !attribute->subject_ignored;
+        inherit |= check_input_inherited_contract(prior->records + i);
     }
     const CheckInputAttributes* own = inherit ? check_input_attributes_at(reader->output, token) : NULL;
-    bool annotated = false;
+    uint32_t annotated = 0;
     for (uint32_t i = 0; own != NULL && i < own->count; i += 1)
     {
-        const CheckInputAttribute* attribute = own->records + i;
-        annotated |= attribute->kind == CHECK_ATTRIBUTE_FORMAT && !attribute->ignored && !attribute->subject_ignored;
+        annotated |= check_input_inherited_contract(own->records + i);
     }
-    if (inherit && !annotated)
+    const uint32_t missing = inherit & ~annotated;
+    if (missing != 0)
     {
         CheckInputAttributes* copy = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1);
         bool valid = copy != NULL;
@@ -1271,7 +1280,7 @@ static void check_input_format_inherit(CheckInputReader* reader, uint32_t token,
         for (uint32_t i = 0; valid && i < prior->count; i += 1)
         {
             const CheckInputAttribute* attribute = prior->records + i;
-            if (attribute->kind == CHECK_ATTRIBUTE_FORMAT && !attribute->ignored && !attribute->subject_ignored)
+            if ((check_input_inherited_contract(attribute) & missing) != 0)
             {
                 valid = check_input_attribute_append(reader, copy, *attribute);
             }
@@ -7003,6 +7012,11 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             attributes->error = attributes->error == CHECK_ATTRIBUTE_ERROR_NONE ? CHECK_ATTRIBUTE_ERROR_ARGUMENTS : attributes->error;
             valid = false;
         }
+        const bool required_typedef = valid && kept && attribute->kind == CHECK_ATTRIBUTE_WARN_UNUSED_RESULT &&
+                                      (declaration & BUSTER_CHECK_SUBJECT_TYPEDEF) != 0;
+        reader->output->typedef_result_contracts |= required_typedef;
+        // A lane's input is private; source-order replay publishes a body's unit-wide result-contract guard.
+        check_input_lane_refuse(reader, reader->lane && required_typedef, "a body declares a result-contract typedef");
     }
     // A kernel's attributes on a function of no GPU kernel's convention (#147, clang's ProcessDeclAttributeList's end).
     if (valid && (declaration & BUSTER_CHECK_SUBJECT_FUNCTION) != 0 && name < parser->tokens.count)

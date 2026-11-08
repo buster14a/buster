@@ -28,6 +28,37 @@ requirements. [Command index](README.md).
   [The optimization guide](../../docs/ir-optimization.md) records supported inputs
   and the source-corpus and target measurements still required for #139.
 
+The optional `BUSTER_IR_OPTIMIZE_LAYOUT` pass (#1218) changes the rewrite's
+block visitation order, using `ir_optimize_layout.c`'s fall-through chains.
+Only the C driver's final Tier 1 optimization enables it by default; other
+optimizer clients retain their existing order. The ordinary and retained-analysis
+entry points both verify the resulting SSA and remapped CFG. See the
+[Tier 1 command guide](tier1.md#block-placement-and-critical-edge-fall-through-1218)
+for its ordering policy, regression coverage and measurement boundaries.
+
+## Bounded scalar if-conversion (#1382)
+
+The C Tier 1 driver runs `ir_if_convert.c` after promotion, wide splitting and
+integer truth simplification, before optimizer preparation. Pure scalar
+diamond/triangle joins become `IR_SELECT`; the existing selector emits `cmov`.
+The pass permits sequential join/head regions such as a two-step clamp, while
+keeping general nested decisions and joins with additional predecessors.
+Each arm has at most four rows, each join at most four phis, and combined
+speculation/select cost at most eight. These are policy bounds, not timings.
+
+`test-ir-optimize` runs `ir_if_convert_test.c`: complete SSA verification,
+independent execution before/after cleanup, exact scalar/vector output,
+every guarded candidate-scan tail, multi-phi edge polarity, both triangle
+orientations, sequential and nested regions, loop-carried values, shared
+switch/call side-table words, allocation rollback, and refusal of unsafe or
+expensive speculation. `test-checker-driver` adds C-source semantic comparison
+against Clang, with both scalar paths and rematerialization settings. Its
+decoded object checks require `cmov` without conditional branches for max,
+clamp and conditional arithmetic, and retain guarding branches for loads,
+division, variable shifts and calls. These use the existing test commands and
+CI shards. Runtime/compile-time measurements on the approved host remain
+necessary; this change makes no measured performance claim.
+
 ## Dominator path policy (#1352)
 
 The AUTO transformation heuristic still chooses scalar SCCP/DCE/CFG kernels

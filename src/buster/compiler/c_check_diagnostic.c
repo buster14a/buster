@@ -129,6 +129,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wmultichar", NULL, "multi-character character constant" },
     { "-Wfour-char-constants", NULL, "multi-character character constant" },
     { NULL, NULL, "character constant too long for its type" },
+    { "-Wnull-dereference", NULL, "indirection of non-volatile null pointer will be deleted, not trap" },
     { "-Wuser-defined-warnings", NULL, "user-defined warning" },
 };
 

@@ -105,6 +105,12 @@ int main(void)
     const Pair changed = indirect(original);
     Large large = { { 2, 3, 5, 7, 11, [BUSTER_INTERPRETER_LARGE_WORDS - 1] = 23 } };
     const Large returned = change_large(large);
+    // The outer initializer owns its return storage; the nested call still needs a separate result object (#1549).
+    const Large nested = change_large(change_large(large));
+    Large (*large_indirect)(Large) = change_large;
+    const Large indirect_large = large_indirect(large);
+    Large assigned = large;
+    assigned = change_large(assigned);
     const div_t quotient = div(20, 6);
     const long sum = collect(8, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 2.5, 4.75L, original);
     const long tail = stacked(1, 2, 3, 4, 5, 6, 7, 8L, 9L);
@@ -123,6 +129,9 @@ int main(void)
                        original.first == 11 && original.second == 13 && changed.first == 18 && changed.second == 39 &&
                        large.values[4] == 11 && returned.values[4] == 13 && returned.values[32] == 0 &&
                        large.values[BUSTER_INTERPRETER_LARGE_WORDS - 1] == 23 && returned.values[BUSTER_INTERPRETER_LARGE_WORDS - 1] == 25 &&
+                       nested.values[4] == 15 && nested.values[BUSTER_INTERPRETER_LARGE_WORDS - 1] == 27 &&
+                       indirect_large.values[4] == 13 && indirect_large.values[BUSTER_INTERPRETER_LARGE_WORDS - 1] == 25 &&
+                       assigned.values[4] == 13 && assigned.values[BUSTER_INTERPRETER_LARGE_WORDS - 1] == 25 &&
                        quotient.quot == 3 && quotient.rem == 2 &&
                        sum == 66 && tail == 45 && collect_register_only(3, 5L, 7L) == 15 && collect_aligned(0, aligned) == 161 && labels(0) == 17 && labels(1) == 29 && bytes[63] == 3;
     printf("typed source: %d\n", passed);

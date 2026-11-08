@@ -621,6 +621,7 @@ struct Tier1SelectHoles
     uint8_t condition;
     uint8_t scale;
     bool compare_immediate;
+    bool compare_memory;
     bool sign_result;
     // The pattern's no-ops (Tier1SelectPattern.nops).
     uint8_t nops;
@@ -704,7 +705,23 @@ static X86Instruction tier1_select_shift(X86Operation operation, uint32_t width,
 
 static void tier1_select_compare(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
 {
-    if (holes->compare_immediate)
+    if (holes->compare_memory)
+    {
+        X86Instruction record = holes->memory;
+        if (holes->compare_immediate)
+        {
+            record.form = holes->width == 1 ? X86_FORM_CMP_RM8_IMM8 : holes->width == 2 ? X86_FORM_CMP_RM16_IMM16 :
+                          holes->width == 8 ? X86_FORM_CMP_RM64_IMM32 : X86_FORM_CMP_RM32_IMM32;
+            record.immediate = (int32_t)holes->immediate;
+        }
+        else
+        {
+            record.form = holes->width == 8 ? X86_FORM_CMP_R64_RM64 : X86_FORM_CMP_R32_RM32;
+            record.reg = holes->left;
+        }
+        tier1_select_append(result, record);
+    }
+    else if (holes->compare_immediate)
     {
         tier1_select_request(result, X86_OPERATION_CMP, holes->width, holes->left, (int64_t)holes->immediate, tier1_select_condition_flags[holes->condition]);
     }
@@ -1374,8 +1391,21 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     case TIER1_RULE_ADDRESS:
     {
         X86Instruction record = holes->memory;
-        record.reg = destination;
-        record.form = width == 8 ? X86_FORM_LEA_R64_M : X86_FORM_LEA_R32_M;
+        // A coalesced base + index needs no separate destination: add has the same value and avoids LEA's SIB byte
+        // (#1217's table-offset addition). Flags never cross an IR node boundary. An rsp base retains LEA; the CFG
+        // consumer resolves folded frame operands to their final base and displacement before this decision.
+        const bool add = record.mode == BUSTER_X86_MEMORY_BASE_INDEX(0) && record.displacement == 0 && record.rm != X86_REGISTER_RSP &&
+                         (destination == record.rm || destination == record.index);
+        if (add)
+        {
+            const uint8_t other = destination == record.rm ? record.index : record.rm;
+            record = tier1_select_register_record(width == 8 ? X86_FORM_ADD_R64_RM64 : X86_FORM_ADD_R32_RM32, destination, other);
+        }
+        else
+        {
+            record.reg = destination;
+            record.form = width == 8 ? X86_FORM_LEA_R64_M : X86_FORM_LEA_R32_M;
+        }
         tier1_select_append(&result, record);
         break;
     }
@@ -1437,7 +1467,11 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         // A zeroed destination stays canonical when setcc writes its low byte. Clear before the comparison where the
         // destination is independent of its inputs. An aliased input must be read first; mov-immediate then preserves
         // the flags, unlike the xor zero idiom. Neither sequence depends on a partial-register result's movzx.
-        const bool aliases = destination == holes->left || (!holes->compare_immediate && destination == holes->right);
+        const bool aliases = holes->compare_memory ?
+                                 ((!holes->compare_immediate && destination == holes->left) ||
+                                  ((holes->memory.mode & BUSTER_X86_MODE_BASE) != 0 && destination == holes->memory.rm) ||
+                                  ((holes->memory.mode & BUSTER_X86_MODE_INDEX) != 0 && destination == holes->memory.index)) :
+                                 destination == holes->left || (!holes->compare_immediate && destination == holes->right);
         if (!aliases)
         {
             tier1_select_append(&result, tier1_select_register_record(X86_FORM_XOR_R32_RM32, destination, destination));
@@ -2214,6 +2248,9 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
 // source carries that width only when tier1_select_canonical certified it, and any other COPY leaves source_width zero.
 // A COPY's source_width is the plan's record of that certificate, which both paths' plans must agree on; the emitter
 // doesn't read it, since a copy in its own register is nothing at every width (#1116, tier1_select_expand).
+// A comparison with compare_memory reads values[1:2] as its address's base/index, and values[0] as the other register
+// (NONE for a memory/immediate comparison). Its width is the exact access width; its predicate already accounts for
+// operand swapping or a zero extension removed from the load. Its frame object is patched into the CMP, not SETcc/JMP.
 // `fold_count` counts the nodes the pattern computes itself rather than reads (maximal munch's rank): which nodes the
 // code leaves out follows from what the chosen patterns read (tier1_select_plan). For TIER1_RULE_ADDRESS,
 // TIER1_RULE_LOAD, TIER1_RULE_LOAD_ADDRESS, TIER1_RULE_LOAD_OPERAND, TIER1_RULE_STORE, TIER1_RULE_STORE_ADDRESS and a
@@ -2237,6 +2274,7 @@ struct Tier1SelectPattern
     uint8_t fold_count;
     uint8_t intrinsic_cost;
     bool compare_immediate;
+    bool compare_memory;
     // A test's: no-ops the node's expansion writes before its rule's records, which take its sequence to its room and
     // past it (#989's review). Every pattern the selector makes has none.
     uint8_t nops;
@@ -3667,6 +3705,78 @@ static bool tier1_select_comparison(const Tier1SelectForest* forest, uint32_t ro
     return result;
 }
 
+static inline __attribute__((always_inline)) bool tier1_select_memory(const Tier1SelectForest* forest, uint32_t node, uint32_t pointer, Tier1SelectPattern* pattern, uint32_t first);
+
+// Fold a comparison's single-use load at the final consumer, including a fused branch or extended truth result. A
+// promoted byte/word/dword can be compared at its memory width only against a constant that the same extension
+// represents exactly. In particular, signed comparisons of a zero-extended load become unsigned narrow comparisons.
+// No truncation, shared extension, observable access or intervening memory operation can be hidden by this pattern.
+// The grammar prices direct load folds explicitly. Promotion removal is a legality-dependent refinement: its
+// grammar cost conservatively retains the extension/load even though this candidate emits neither separately.
+static inline __attribute__((always_inline)) void tier1_select_add_comparison(const Tier1SelectForest* forest, uint32_t node, Tier1SelectCandidates* candidates, Tier1SelectPattern pattern)
+{
+    static const uint8_t swapped[IR_PREDICATE_COUNT] =
+    {
+        IR_EQ,
+        IR_NE,
+        IR_GT,
+        IR_GE,
+        IR_LT,
+        IR_LE,
+        IR_UGT,
+        IR_UGE,
+        IR_ULT,
+        IR_ULE,
+    };
+    const IrFunction* function = forest->function;
+    const uint32_t left = pattern.values[0];
+    const uint32_t right = pattern.values[1];
+    const bool immediate = pattern.compare_immediate;
+    const bool right_load = !immediate && tier1_select_load_folds(forest, node, right);
+    uint32_t load = right_load ? right : left;
+    uint32_t extension = BUSTER_IR_NONE;
+    bool zero_extended = false;
+    bool representable = true;
+    uint64_t bits = pattern.immediate;
+    if (immediate && (function->op[load] == IR_ZEXT || function->op[load] == IR_SEXT))
+    {
+        extension = load;
+        load = function->a[extension];
+        zero_extended = function->op[extension] == IR_ZEXT;
+        const uint32_t source_width = tier1_select_memory_width(function->type[load]);
+        representable = source_width != 0 && source_width < pattern.width && tier1_select_tree_child(forest, node, extension);
+        if (representable)
+        {
+            const uint64_t sign = UINT64_C(1) << (source_width * 8 - 1);
+            const uint64_t mask = (sign << 1) - 1;
+            const uint64_t result_mask = pattern.width == 8 ? UINT64_MAX : UINT32_MAX;
+            bits &= mask;
+            const uint64_t extended = zero_extended ? bits : (bits ^ sign) - sign;
+            representable = (extended & result_mask) == (pattern.immediate & result_mask);
+        }
+    }
+    const uint32_t memory_width = tier1_select_memory_width(function->type[load]);
+    if (representable && memory_width != 0 && (extension != BUSTER_IR_NONE || memory_width == pattern.width) && tier1_select_load_folds(forest, node, load))
+    {
+        pattern.compare_memory = true;
+        pattern.width = (uint8_t)memory_width;
+        pattern.values[0] = immediate ? BUSTER_IR_NONE : right_load ? left : right;
+        pattern.immediate = bits;
+        pattern.condition = !immediate && !right_load ? swapped[pattern.condition] : pattern.condition;
+        if (zero_extended && pattern.condition >= IR_LT && pattern.condition <= IR_GE)
+        {
+            pattern.condition += IR_ULT - IR_LT;
+        }
+        tier1_select_fold(forest, node, load, &pattern);
+        if (extension != BUSTER_IR_NONE)
+        {
+            tier1_select_fold(forest, node, extension, &pattern);
+        }
+        tier1_select_memory(forest, node, function->a[load], &pattern, 1);
+    }
+    tier1_select_add_candidate(forest, node, candidates, pattern);
+}
+
 // The comparison `tested`, an FCMP of F32 or F64 values by <, <=, > or >= that only `root`'s pattern uses, as the
 // pattern's own (#141, TIER1_RULE_FLOAT_BRANCH_COMPARE): ucomis of its operands, swapped for < and <=, and the unsigned
 // condition that reads its flags, UGT (ja) for a strict one and UGE (jae) for the other, which are false for unordered
@@ -3752,17 +3862,20 @@ static uint32_t tier1_select_index(const Tier1SelectForest* forest, uint32_t roo
     return index;
 }
 
-// The address continued from `address.base` through the nodes that only `root`'s pattern uses, at most
+// The address continued from `address.base` through the pure nodes `root`'s pattern can encode, at most
 // BUSTER_TIER1_SELECT_WALK of them: the conversions between a pointer and its 64 bits that the typed stream's integers
 // put around every address (`inttoptr`, `ptrtoint`), a 64-bit addition of a constant, and addresses, each taken whole
 // while the operand has room for its index, a constant index joining the displacement, and while the displacement fits
 // 32 bits. A frame object's address ends the walk: its offset joins the displacement at emission, from the frame's
-// layout, with the frame's base register, so no value is read for it. The object may live in the entry block past the
-// walk's block: the producer materializes every slot address there, which dominates every use. No narrowed address or
+// layout, with the frame's base register, so no value is read for it. A memory operand may take shared address nodes
+// too: other users that need their values keep them live through the effective uses. An address-valued root keeps
+// the single-use rule, so it doesn't duplicate a shared lea. The object may live in the entry block past the walk's
+// block: the producer materializes every slot address there, which dominates every use. No narrowed address or
 // speculative load is introduced: the walk stops at the base, the first node it can't take.
-static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, uint32_t root, Tier1SelectAddress address)
+static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, uint32_t root, Tier1SelectAddress address, bool shared)
 {
     const IrFunction* function = forest->function;
+    const uint32_t root_block = forest->blocks[root];
     bool walking = address.object == BUSTER_IR_NONE;
     for (uint32_t step = 0; walking && step < BUSTER_TIER1_SELECT_WALK; step += 1)
     {
@@ -3774,7 +3887,8 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
         uint64_t constant = 0;
         uint32_t constant_node = BUSTER_IR_NONE;
         uint8_t peeled = 0;
-        bool taken = tier1_select_tree_child(forest, root, node);
+        const uint32_t block = forest->blocks[node];
+        bool taken = node < root && block == root_block && (shared || forest->uses[node] == 1);
         if (taken && op == IR_ADDRESS)
         {
             const IrAddress operand = function->addresses[function->c[node]];
@@ -3812,16 +3926,11 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
                 }
             }
         }
-        else if (taken && op == IR_STACK_ADDR && tier1_select_stack_object(function, a))
+        else if (op == IR_STACK_ADDR && tier1_select_stack_object(function, a) && node < root && (shared || forest->uses[node] == 1) &&
+                 (block == root_block || block == 0))
         {
-            next.object = a;
-            next.base = BUSTER_IR_NONE;
-        }
-        else if (op == IR_STACK_ADDR && tier1_select_stack_object(function, a) && forest->blocks[node] == 0 && forest->uses[node] == 1 && node < root)
-        {
-            // The same past its block: the producer materializes every slot address in the entry block, which dominates
-            // every use, and the address is pure with a function-global offset, so no value is read for it anywhere.
-            // Longer cross-block chains stay unfolded.
+            // A stable frame base and object offset cost no allocated register at a memory use, even when another use
+            // keeps the address itself. Only this leaf may cross the entry block; longer cross-block chains stay put.
             next.object = a;
             next.base = BUSTER_IR_NONE;
             taken = true;
@@ -3846,7 +3955,7 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
 // with its scale and displacement. Returns whether the walk took anything.
 static inline __attribute__((always_inline)) bool tier1_select_memory(const Tier1SelectForest* forest, uint32_t node, uint32_t pointer, Tier1SelectPattern* pattern, uint32_t first)
 {
-    const Tier1SelectAddress address = tier1_select_address(forest, node, (Tier1SelectAddress){ .base = pointer, .index = BUSTER_IR_NONE, .object = BUSTER_IR_NONE });
+    const Tier1SelectAddress address = tier1_select_address(forest, node, (Tier1SelectAddress){ .base = pointer, .index = BUSTER_IR_NONE, .object = BUSTER_IR_NONE }, true);
     pattern->values[first] = address.base;
     pattern->values[first + 1] = address.index;
     pattern->stack_object = address.object;
@@ -4297,7 +4406,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.intrinsic_cost = 1;
         // A pointer's 64 bits, or the pointer of 64 bits, from an address: the address's lea, or the copy of what the
         // conversions around it convert.
-        const Tier1SelectAddress address = op == IR_INTTOPTR || op == IR_PTRTOINT ? tier1_select_address(forest, node, (Tier1SelectAddress){ .base = a, .index = BUSTER_IR_NONE, .object = BUSTER_IR_NONE })
+        const Tier1SelectAddress address = op == IR_INTTOPTR || op == IR_PTRTOINT ? tier1_select_address(forest, node, (Tier1SelectAddress){ .base = a, .index = BUSTER_IR_NONE, .object = BUSTER_IR_NONE }, false)
                                                                                   : (Tier1SelectAddress){ .base = a, .index = BUSTER_IR_NONE, .object = BUSTER_IR_NONE };
         // Through a frame object the walked address stands alone: its base would tie it where the object is past the
         // walk's block (a cross-block read costs nothing), and the paths would cover the object apart.
@@ -4602,7 +4711,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.rule = folded.compare_immediate ? TIER1_RULE_COMPARE_IMMEDIATE : TIER1_RULE_COMPARE;
             folded.source_width = 0;
             folded.intrinsic_cost = 3;
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_comparison(forest, node, &candidates, folded);
         }
     }
     else if ((op == IR_NEG || op == IR_NOT) && integer)
@@ -4818,7 +4927,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 .scale = constant_index ? 0 : (uint8_t)tier1_select_log2(operand.scale),
             };
             start.index = start.index != BUSTER_IR_NONE ? tier1_select_index(forest, node, b, operand.scale, &start.displacement, &start.folds) : start.index;
-            const Tier1SelectAddress address = tier1_select_address(forest, node, start);
+            const Tier1SelectAddress address = tier1_select_address(forest, node, start, false);
             base.rule = TIER1_RULE_ADDRESS;
             base.values[0] = address.base;
             base.values[1] = address.index;
@@ -4897,7 +5006,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.width = (uint8_t)tier1_select_width(function->type[a]);
         base.condition = (uint8_t)c;
         base.intrinsic_cost = 3;
-        tier1_select_add_candidate(forest, node, &candidates, base);
+        tier1_select_add_comparison(forest, node, &candidates, base);
         uint64_t immediate = 0;
         if (tier1_select_constant(function, b, &immediate) && tier1_select_immediate_fits(base.width, immediate))
         {
@@ -4906,7 +5015,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.immediate = immediate;
             base.compare_immediate = true;
             tier1_select_fold(forest, node, b, &base);
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            tier1_select_add_comparison(forest, node, &candidates, base);
         }
     }
     else if (op == IR_SELECT && width != 0)
@@ -4980,7 +5089,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         if (tested != BUSTER_IR_NONE && tier1_select_comparison(forest, node, tested, negated, &folded))
         {
             folded.rule = TIER1_RULE_BRANCH_COMPARE;
-            tier1_select_add_candidate(forest, node, &candidates, folded);
+            tier1_select_add_comparison(forest, node, &candidates, folded);
         }
         else if (tested != BUSTER_IR_NONE && tier1_select_float_comparison(forest, node, tested, negated, &folded))
         {
@@ -5696,6 +5805,7 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
         .condition = pattern->condition,
         .scale = pattern->scale,
         .compare_immediate = pattern->compare_immediate,
+        .compare_memory = pattern->compare_memory,
         .sign_result = pattern->sign_result,
         .nops = pattern->nops,
     };
@@ -5730,6 +5840,10 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
         break;
     default:
         break;
+    }
+    if (pattern->compare_memory)
+    {
+        holes.memory = tier1_select_memory_holes(pattern, registers, 1);
     }
     return holes;
 }

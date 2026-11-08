@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Source-time C overload sets. Include after c_check_actions.c. Candidates are immutable declaration snapshots:
+// Source-time C overload sets. Include after c_check_actions.c and c_check_builtin_library.c. Candidates are immutable declaration snapshots:
 // previous is an earlier dense index in the same lexical scope, and every use retains its own head. Redeclarations
 // keep their canonical declaration/object, with inherited attributes, so later declarations never alter an earlier
 // call. The caller owns name lookup, linkage and publication. This module checks signatures and selects by the
@@ -30,6 +30,8 @@ struct CheckOverloadCandidate
     // Immutable parameter modes retained by the source adapter; no hidden arguments in the conservative ABI.
     const uint8_t* object_sizes;
     uint32_t object_size_count;
+    // A plain library fold's mark belongs to this ordinary declaration, never to an overloadable one.
+    uint32_t library_call;
 };
 
 typedef struct CheckOverloadContext CheckOverloadContext;
@@ -102,13 +104,22 @@ static CheckOverloadResult check_overload_result(CheckOverloadStatus status)
 
 static bool check_overload_candidate_valid(const TypeTable* table, const CheckOverloadCandidate* candidate)
 {
-    bool valid = type_is_valid(table, candidate->type) && check_action_kind(table, candidate->type) == BUSTER_TYPE_KIND_FUNCTION &&
+    const TypeId type = candidate->type;
+    const uint32_t flags = candidate->flags;
+    const uint32_t library = candidate->library_call;
+    const uint32_t fold = library & ~BUSTER_CHECK_LIBRARY_CALL;
+    bool valid = type_is_valid(table, type) && check_action_kind(table, type) == BUSTER_TYPE_KIND_FUNCTION &&
                  candidate->declaration != UINT32_MAX && candidate->canonical != UINT32_MAX &&
-                 (candidate->flags & ~(BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_UNAVAILABLE | BUSTER_CHECK_OVERLOAD_DEFINED)) == 0;
+                 (flags & ~(BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_UNAVAILABLE | BUSTER_CHECK_OVERLOAD_DEFINED)) == 0;
+    if (valid && library != 0)
+    {
+        valid = (library & BUSTER_CHECK_LIBRARY_CALL) != 0 && fold < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS &&
+                (flags & BUSTER_CHECK_OVERLOADABLE) == 0 && check_library_plain_prototype(table, type, fold);
+    }
     if (valid && candidate->object_sizes != NULL)
     {
         uint32_t count = 0;
-        type_parameters(table, type_strip_aligned(table, candidate->type), &count);
+        type_parameters(table, type_strip_aligned(table, type), &count);
         valid = count != 0 && count == candidate->object_size_count;
         for (uint32_t p = 0; valid && p < count; p += 1)
         {
@@ -766,6 +777,11 @@ static CheckOverloadResult check_overload_call(TypeTable* table, const CheckActi
                     {
                         argument_selected[i] = identities[i];
                     }
+                }
+                if (head != UINT32_MAX)
+                {
+                    // The selected declaration owns the fold permission, even when a newer overload shares its name.
+                    check_builtin_library_fold_plain(table, candidates[selected.candidate].library_call, &call, output);
                 }
             }
         }

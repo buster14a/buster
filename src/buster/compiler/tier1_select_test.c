@@ -749,7 +749,7 @@ static bool tier1_select_test_plans_equal(const Tier1SelectPlan* a, const Tier1S
         equal = p->immediate == q->immediate && memcmp(p->values, q->values, sizeof(p->values)) == 0 && p->displacement == q->displacement &&
                 p->stack_object == q->stack_object && p->rule == q->rule && p->operation == q->operation && p->width == q->width &&
                 p->source_width == q->source_width && p->storage_width == q->storage_width && p->condition == q->condition && p->scale == q->scale && p->fold_count == q->fold_count &&
-                p->intrinsic_cost == q->intrinsic_cost && p->compare_immediate == q->compare_immediate && p->sign_result == q->sign_result && p->nops == q->nops;
+                p->intrinsic_cost == q->intrinsic_cost && p->compare_immediate == q->compare_immediate && p->compare_memory == q->compare_memory && p->sign_result == q->sign_result && p->nops == q->nops;
         equal = equal && a->covered[node] == b->covered[node] && a->costs[node] == b->costs[node] && a->effective_use_offsets[node] == b->effective_use_offsets[node];
     }
     equal = equal && a->effective_use_offsets[count] == b->effective_use_offsets[count];
@@ -1280,10 +1280,12 @@ static void tier1_select_test_intrinsics(Tier1SelectTest* test)
 }
 
 #include "tier1_address_arithmetic_test.c"
+#include "tier1_address_coalesce_test.c"
 
 static void tier1_select_test_memory_plans(Tier1SelectTest* test)
 {
     tier1_select_test_address_arithmetic(test);
+    tier1_select_test_coalesced_addresses(test);
     Arena input = arena_reserve(1u << 20);
     Arena output = arena_reserve(1u << 20);
     Arena scratch = arena_reserve(1u << 20);
@@ -3661,7 +3663,8 @@ static void tier1_select_test_address_walk(Tier1SelectTest* test, uint32_t varia
 // A frame object's address in its users' memory operands: object 0 (8 bytes) and object 1 (200 bytes), each reached
 // directly (variant 0), through a 64-bit addition of 16 (1) or -8 after the typed stream's conversions (2), or of
 // 0x7fffffff (3, which folds) or 0x80000000 (4, past 32 bits, whose address keeps its lea). Variant 5 uses the address
-// twice, so both accesses share its lea, and variant 6 takes a slot aligned past a page (#1450), which the frame realigns.
+// twice: memory operands fold it independently, while address-valued consumers retain the shared lea (#1217).
+// Variant 6 takes a slot aligned past a page (#1450), which the frame realigns.
 // Variant 7 repeats variant 1 with the object in the entry block past the walk's block, as the producer's preheader
 // does. The
 // shape's access is a load returned (0), a store of the second parameter (1), or the pointer itself returned (2). A
@@ -3819,16 +3822,15 @@ static void tier1_select_test_stack_walk(Tier1SelectTest* test, uint32_t shape, 
         snprintf(where, sizeof(where), "a walk to a frame object is its users' memory operand, or the shared lea past its edges (shape=%u variant=%u width=%u)", shape, variant, width);
         const Tier1SelectPattern* pattern = &plans[0].patterns[root];
         const int32_t walked = variant == 1 || variant == 7 ? 16 : variant == 2 ? -8 : variant == 3 ? INT32_MAX : 0;
-        const uint8_t rule = shape == 0 ? (variant == 5 ? TIER1_RULE_LOAD : TIER1_RULE_LOAD_ADDRESS) : shape == 1 ? (variant == 5 ? TIER1_RULE_STORE : TIER1_RULE_STORE_ADDRESS)
-                                                                                                                               : (variant == 4 || variant == 5 ? TIER1_RULE_COPY : TIER1_RULE_ADDRESS);
-        const uint32_t folded = variant == 4 || variant == 5 ? 0 : 1;
+        const uint8_t rule = shape == 0 ? TIER1_RULE_LOAD_ADDRESS : shape == 1 ? TIER1_RULE_STORE_ADDRESS : (variant == 4 || variant == 5 ? TIER1_RULE_COPY : TIER1_RULE_ADDRESS);
+        const uint32_t folded = variant == 4 || (variant == 5 && shape == 2) ? 0 : 1;
         const uint32_t read = variant == 5 ? 2 : variant == 4 ? chain - 1 : chain;
         bool covered = true;
         for (uint32_t node = 2; node < root; node += 1)
         {
-            // Past 32 bits the access keeps the address's lea, folding only its conversions; used twice, both accesses
-            // share it; the entry block's branch is a terminator either way.
-            covered &= plans[0].covered[node] == (variant == 4 ? (node == 2 || node == chain ? 1 : 0) : variant == 5 ? 0 : variant == 7 && node == 3 ? 0 : 1);
+            // Past 32 bits the access keeps the address's lea, folding only its conversions; address-valued consumers
+            // still share one lea; the entry block's branch is a terminator either way.
+            covered &= plans[0].covered[node] == (variant == 4 ? (node == 2 || node == chain ? 1 : 0) : variant == 5 && shape == 2 ? 0 : variant == 7 && node == 3 ? 0 : 1);
         }
         const uint32_t first = plans[0].effective_use_offsets[root];
         const uint32_t uses = plans[0].effective_use_offsets[root + 1] - first;
@@ -5241,6 +5243,7 @@ static void tier1_select_test_walks(Tier1SelectTest* test)
     arena_release(&input);
 }
 
+#include "buster/compiler/tier1_compare_memory_test.c"
 #include "buster/compiler/tier1_select_burs_test.c"
 
 static int run_tier1_select_tests(int argc, char** argv)
@@ -5277,6 +5280,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             }
             tier1_select_test_patterns(&test);
             tier1_select_test_memory(&test);
+            tier1_select_test_compare_memory(&test);
             tier1_select_test_branches(&test);
             tier1_select_test_plans(&test);
             tier1_select_test_intrinsics(&test);

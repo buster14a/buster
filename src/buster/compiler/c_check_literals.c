@@ -512,8 +512,9 @@ static CheckValue check_literal_value(CheckLiteral literal)
 // Always inlined (#880), as profile-guided builds do; hot caller: check_literal_string_part, once per character.
 // `extended` (#1447) is the refused literal's cold decoding's alone (check_literal_strings_extended), which every hot
 // caller's constant false takes out: it reads what clang reads that the fast decoding refuses, a delimited escape
-// (\x{...} and \o{...}, numeric, and \u{...}, a universal character name's) and an unknown escape, whose character is
-// its value, as clang's, which warns of it (check_literal_unknown_escape).
+// (\x{...} and \o{...}, numeric, and \u{...}, a universal character name's), a named universal character name
+// (\N{NAME}, its name exactly Unicode's: unicode_name_strict) and an unknown escape, whose character is its value, as
+// clang's, which warns of it (check_literal_unknown_escape).
 static inline __attribute__((always_inline)) bool check_literal_character_unit_by(const uint8_t* bytes, uint32_t end, uint32_t* position, uint32_t* value, bool c23,
                                                                                 bool extended)
 {
@@ -573,6 +574,22 @@ static inline __attribute__((always_inline)) bool check_literal_character_unit_b
             i += valid ? 1 : 0;
             valid &= !name || (digits <= 0x10FFFFu && (digits < 0xD800 || digits > 0xDFFF) && (c23 || digits >= 0xA0 || digits == '$' || digits == '@' || digits == '`'));
             c = digits;
+        }
+        else if (extended && c == 'N')
+        {
+            // A name up to its brace (no line break: clang's ends there), one byte at least, and its character, as a
+            // universal character name's.
+            const uint32_t name = i + 1;
+            uint32_t close = name;
+            while (close < end && bytes[close] != '}' && bytes[close] != '\n' && bytes[close] != '\r')
+            {
+                close += 1;
+            }
+            uint32_t named = 0;
+            valid = i < end && bytes[i] == '{' && close < end && bytes[close] == '}' && close != name && unicode_name_strict(bytes + name, close - name, &named);
+            valid &= c23 || named >= 0xA0 || named == '$' || named == '@' || named == '`';
+            i = valid ? close + 1 : i;
+            c = named;
         }
         else if (c == 'x' || c == 'u' || c == 'U')
         {

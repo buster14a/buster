@@ -1488,9 +1488,13 @@ static bool check_graph_validate_lists(const CheckGraph* graph)
     for (uint32_t i = 0; result && i < graph->overload_candidate_count; i += 1)
     {
         const CheckOverloadCandidate* candidate = graph->overload_candidates + i;
+        const uint32_t flags = candidate->flags;
+        const uint32_t library = candidate->library_call;
         result = (candidate->previous == BUSTER_CHECK_NONE || candidate->previous < i) && candidate->declaration != BUSTER_CHECK_NONE &&
                  candidate->canonical != BUSTER_CHECK_NONE &&
-                 (candidate->flags & ~(BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_UNAVAILABLE | BUSTER_CHECK_OVERLOAD_DEFINED)) == 0;
+                 (flags & ~(BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_UNAVAILABLE | BUSTER_CHECK_OVERLOAD_DEFINED)) == 0 &&
+                 (library == 0 || ((library & BUSTER_CHECK_LIBRARY_CALL) != 0 && (library & ~BUSTER_CHECK_LIBRARY_CALL) < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS &&
+                                  (flags & BUSTER_CHECK_OVERLOADABLE) == 0));
     }
     result = result && (graph->tag_completions != 0 ? graph->source_positions != 0 : graph->tag_completion_count == 0);
     result = result && (graph->transparent_unions == NULL || graph->tag_completions != NULL);

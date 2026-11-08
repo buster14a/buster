@@ -25,7 +25,12 @@ patterns are:
 - 32/64-bit negation, complement, add, subtract, multiply, and/or/xor;
   immediate forms; shifts by a constant
   strictly below the operand width; multiplication by powers of two and by
-  3, 5 or 9; add/shift and three-operand addition through `lea`.
+  3, 5 or 9; add/shift and three-operand addition through `lea`. After
+  allocation, an unscaled base-plus-index sum with zero displacement uses
+  `add` when the destination is either input register (#1217), removing the
+  SIB byte. Flags are dead between IR nodes. Folded frame operands have their
+  final base and object offset before this decision; a nonzero displacement
+  or an `rsp` base keeps `lea`.
 - Explicit `IR_ADDRESS` base + index × scale + signed disp32, loads and stores,
   and folding those addresses into memory operands. Byte/word loads zero-extend
   into registers, while stores write exactly one/two bytes. An address whose
@@ -34,14 +39,17 @@ patterns are:
   register (its node's `mov`) as the index and the offset the displacement,
   which no user folds; one whose offset alone doesn't fit 32 bits is still
   refused. An
-  access's address is walked (`tier1_select_address`, #140) through the nodes
-  only its pattern uses, at most 8 of them: the `inttoptr` and `ptrtoint` the
+  access's address is walked (`tier1_select_address`, #140) through pure
+  address nodes in its block, at most 8 of them: the `inttoptr` and `ptrtoint` the
   typed stream's integers put around every address, addresses (one after
   another while the operand has room for their one index), constant indices
   and 64-bit additions of constants, which join the displacement while it fits
   32 bits. `s->z[2]` is then one `mov` from `[s + 24]` rather than three
-  conversions, two `lea`s and the constants' moves; a pointer that is a value
-  (a ptrtoint or an inttoptr of such a chain) is one `lea`. The index sheds the
+  conversions, two `lea`s and the constants' moves. Memory operands can each
+  fold a shared address chain (#1217); its producer remains when another
+  selected user still needs the address value. A pointer that is a value
+  (a ptrtoint or an inttoptr of a single-use chain) is one `lea`; address-valued
+  roots retain the single-use restriction. The index sheds the
   constants added to it (`tier1_select_index`): a 64-bit addition of a constant
   on either side, or a subtraction of one, joins the displacement scaled while
   it fits 32 bits, so that `p[i + 100]` of a 64-bit `i` is `[p + i * 4 + 400]`
@@ -58,7 +66,8 @@ patterns are:
   offset the `lea` takes. The object may live in the entry block past the
   walk's block: the producer materializes every slot address in the preheader,
   which dominates every use, and the address is pure with a function-global
-  offset. Longer cross-block chains stay unfolded. A displacement the object's
+  offset. Memory operands can fold this leaf even when it has several users;
+  an escaping address still materializes. Longer cross-block chains stay unfolded. A displacement the object's
   offset pushes past 32 bits refuses emission rather than truncating.
 - C's truth values (`tier1_select_truth`, #140): the lowering gives `a < b` as
   `zext (icmp lt a, b)`, which `if`, `!`, `&&` and `||` compare with zero again,
@@ -135,6 +144,36 @@ patterns are:
   no load folds past. Other atomic operations reach it as calls of the unit's leaves. A fence of a constant order is the IR's `fence` (`TIER1_RULE_FENCE`): `mfence` for a thread fence of `seq_cst`
   and no records for the others, a barrier no selection moves an access across. A volatile load remains a separate
   access; a store retains its original order and access width.
+- Integer comparisons can fold a single-use load into `cmp` under the same
+  access-order proof (#1218), including a materialized boolean, an extended
+  truth value and a fused conditional branch. Either operand may be a direct
+  32- or 64-bit load; a load originally on the left swaps the predicate when
+  the other register becomes the left operand. The latest legal load is
+  selected when both operands load, preserving their original access order.
+  A zero/sign extension of a byte, word or dword load can be removed when
+  comparing with an immediate that the same extension represents exactly.
+  The memory access keeps the source width, and a signed predicate on a
+  removed zero extension becomes unsigned. Arbitrary register comparisons
+  through an extension, truncations, shared values and observable accesses
+  remain unfolded. Immediate admission still uses the comparison width, so
+  some representable narrowed immediates, such as an I32 zero extension to
+  I64 compared with `0xffffffff`, remain conservative misses. Direct-load
+  productions include their savings in the BURS grammar; promoted-load
+  removal is a legality-dependent candidate refinement whose grammar cost
+  conservatively still includes the removed load/extension. Exact pricing
+  would need comparison-aware promotion classes.
+
+  The proof runs at the final consumer, so a branch or truth extension cannot
+  move an access past an operation after the original comparison. Both address
+  values remain effective uses. A boolean destination overlapping an address
+  register or the other operand is cleared with a flag-preserving move after
+  `cmp`. Frame addresses are resolved before pattern expansion, exposing the
+  actual base to this alias check and placing the displacement on `cmp`
+  rather than its following `setcc` or branch records. Guard-page predicate
+  tests, access-order fixtures and realigned frame-object execution cover
+  these cases in `test-tier1-select` and `test-tier1-emit`. This implements
+  compare-load folding; #1218's broader branch-layout, workload instruction
+  count and runtime acceptance remain separate.
 - The IR's `intrinsic` (#141): `mulhu` is `TIER1_RULE_MULTIPLY_HIGH` (one operand in `rax`, `mul` of the other, its
   `rdx` the result, saved around as a division's fixed registers are), and the x86 builtins' `pdep`, `pext`, `bzhi`
   and `bextr` of an `I32` or an `I64` are `TIER1_RULE_INTRINSIC`, their one VEX instruction of the width
@@ -612,7 +651,7 @@ operand, type, immediate, memory-order and single-use constraints.
 
 Both host paths cover the integer core by bottom-up rewriting (#1395)
 (`tier1_select_burs.c`, #141's design: Pelegrí-Llopart and Graham's BURS, as
-iburg and burg build it). Its grammar is a C table of 69 patterns, each
+iburg and burg build it). Its grammar is a C table of patterns, each
 a nonterminal's derivation from an operator and its children's nonterminals, or
 from another nonterminal, at the structural cost below; a pattern stands for one
 candidate kind of `tier1_select_candidates`, an inner one (an address's piece,
@@ -653,7 +692,7 @@ uses. The passes are:
    right operand is a constant, a load or a shift, whether a load folds into its
    single user past no barrier, whether an address's displacement fits 32 bits);
    and its visible children, those a pattern may fold (a tree child, a constant,
-   or a frame object's single address in the entry block), any other operand
+   or a frame object's address in its block or the entry block), any other operand
    being the register leaf's state. A frame object's address, and an address
    whose constant index or offset doesn't fit 32 bits, take the scalar rule;
 2. labels: each node's state, a table lookup on its operator and its children's
