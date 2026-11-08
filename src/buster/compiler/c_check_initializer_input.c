@@ -44,7 +44,8 @@ static uint32_t check_initializers_plan_index(const CheckInitializers* initializ
     return index;
 }
 
-static bool check_init_object_candidate(const CheckInput* input, const TypeTable* types, uint32_t token)
+// Always inlined, as it was before #1447 grew the type readers it inlines past clang's threshold.
+static inline __attribute__((always_inline)) bool check_init_object_candidate(const CheckInput* input, const TypeTable* types, uint32_t token)
 {
     const bool initialized = input->objects != NULL && input->objects[token] != 0 &&
                              check_sparse_get(input->initializer_begins, token) < check_sparse_get(input->initializer_ends, token) && type_is_valid(types, input->declared_types[token]);

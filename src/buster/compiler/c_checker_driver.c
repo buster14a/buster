@@ -28,6 +28,9 @@ static const char* check_driver_action_message(CheckDiagnostic diagnostic)
         case CHECK_DIAG_ARGUMENT_COUNT: result = "incorrect number of arguments"; break;
         case CHECK_DIAG_RESOURCE: result = "type checker ran out of memory"; break;
         case CHECK_DIAG_UNSUPPORTED: result = "expression is not yet supported by the type checker"; break;
+        case CHECK_DIAG_ADDRESS_SPACE: result = "conversion changes address space of pointer"; break;
+        case CHECK_DIAG_ADDRESS_SPACE_OVERLAP: result = "pointers to non-overlapping address spaces"; break;
+        case CHECK_DIAG_ADDRESS_SPACE_NESTED: result = "conversion changes address space of nested pointer"; break;
         case CHECK_DIAG_NONE: break;
     }
     return result;
@@ -154,6 +157,16 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_VECTOR_TOO_LARGE: result = "vector size too large"; break;
         case CHECK_INPUT_VECTOR_ZERO: result = "zero vector size"; break;
         case CHECK_INPUT_VECTOR_MULTIPLE: result = "vector size not an integral multiple of component size"; break;
+        case CHECK_INPUT_ADDRESS_SPACE_CONSTANT: result = "'address_space' attribute requires an integer constant"; break;
+        case CHECK_INPUT_ADDRESS_SPACE_NEGATIVE: result = "address space is negative"; break;
+        case CHECK_INPUT_ADDRESS_SPACE_TOO_HIGH: result = "address space is larger than the maximum supported (8388580)"; break;
+        case CHECK_INPUT_ADDRESS_SPACE_FUNCTION: result = "function type may not be qualified with an address space"; break;
+        case CHECK_INPUT_ADDRESS_SPACE_MULTIPLE: result = "multiple address spaces specified for type"; break;
+        case CHECK_INPUT_ADDRESS_SPACE_AUTOMATIC: result = "automatic variable qualified with an address space"; break;
+        case CHECK_INPUT_ADDRESS_SPACE_PARAMETER: result = "parameter may not be qualified with an address space"; break;
+        case CHECK_INPUT_ADDRESS_SPACE_FIELD: result = "field may not be qualified with an address space"; break;
+        case CHECK_INPUT_ADDRESS_SPACE_COMPOUND: result = "compound literal in function scope may not be qualified with an address space"; break;
+        case CHECK_INPUT_GC_MULTIPLE: result = "multiple garbage collection attributes specified for type"; break;
         case CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT: result = "attribute takes another count of arguments"; break;
         case CHECK_INPUT_ATTRIBUTE_EXCLUSION: result = "attributes are not compatible"; break;
         case CHECK_INPUT_ATTRIBUTE_ANNOTATE_STRING: result = "expected string literal as argument of 'annotate' attribute"; break;

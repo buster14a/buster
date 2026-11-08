@@ -811,6 +811,9 @@ struct CheckLowerWriter
     // Whether the program may have overloaded functions (CheckLowerShared.overloads): an operand tests its overload set and
     // its selected overload's address only then.
     bool overloads;
+    // Whether the program's type table has a type in a segment's address space (#1447, check_lower_segment_types), whose
+    // loads and stores the lowering refuses: an expression tests its node for one only then.
+    bool segments;
     // A function whose result is a 128-bit integer returns it from this frame object's 16 bytes (Tier0Function.result_size,
     // as a struct of two INTEGER eightbytes returns), BUSTER_CHECK_NONE for any other.
     uint32_t result_object;
@@ -1570,7 +1573,7 @@ static bool check_lower_copy_type_facts(const TypeTable* types, uint32_t count, 
                 const uint32_t index = nodes[depth - 1];
                 const uint8_t kind = types->types.kind[index];
                 const bool record = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
-                const bool base = type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ATOMIC;
+                const bool base = type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED || kind == BUSTER_TYPE_KIND_ATOMIC;
                 const uint32_t tag = record ? types->types.index[index] : 0;
                 const uint32_t children = record ? types->tags.member_count[tag] : base ? 1 : 0;
                 const uint32_t child_at = next[depth - 1];
@@ -11466,6 +11469,40 @@ static void check_lower_bit_cast(CheckLowerWriter* writer, uint32_t node)
     }
 }
 
+// Whether a type's address space, or its array's element's, is a segment's (#1447): clang's x86 target maps address
+// spaces 256, 257 and 258 to %gs, %fs and %ss (__seg_gs and __seg_fs), whose loads and stores need a segment override
+// that Tier 0's and Tier 1's memory operands don't carry. Any other space's code is the default one's, as clang's is.
+static bool check_lower_segment(const TypeTable* types, TypeId type)
+{
+    const uint32_t space = type_address_space(type_object_qualifiers(types, type));
+    return space >= BUSTER_TYPE_SPACE_TARGET + 256 && space <= BUSTER_TYPE_SPACE_TARGET + 258;
+}
+
+// Whether the table has a type in a segment's space (CheckLowerWriter.segments): a QUALIFIED type of one.
+static bool check_lower_segment_types(const TypeTable* types)
+{
+    bool result = false;
+    for (uint32_t index = 1; !result && index < types->types.count; index += 1)
+    {
+        result = types->types.kind[index] == BUSTER_TYPE_KIND_QUALIFIED && check_lower_segment(types, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT);
+    }
+    return result;
+}
+
+// A node that loads from or stores to a segment's space (check_lower_segment), which the lowering refuses by name: an
+// lvalue read (not an address taken, `&` or a member's or a subscript's base), or an assignment's, a compound
+// assignment's or an increment's or decrement's operand.
+static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t node, const CheckValue* value, bool address)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckOp op = graph->ops[node];
+    const uint32_t target = graph->operand0[node];
+    const bool store = (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) && target < program->stream->count;
+    return (!address && value->category == CHECK_LVALUE && check_lower_segment(program->types, value->type)) ||
+           (store && check_lower_segment(program->types, check_stream_type(program->stream, target)));
+}
+
 // Always inlined into the copies of the tasks' loop (check_lower_drain_body), each with its constant `bit_ints`
 // (CheckLowerWriter.bit_ints). `bit_int` is CheckLowerTask.bit_int.
 static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard, bool bit_ints,
@@ -11493,7 +11530,11 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
                           (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
     // An expression of a _BitInt goes to check_lower_bit_int_node first, out of line, which may push it again for what
     // follows (CheckLowerTask.bit_int).
-    if (bit_ints && (facts & BUSTER_CHECK_LOWER_TYPE_BIT_INT) != 0 && !bit_int)
+    if (__builtin_expect(writer->segments, 0) && check_lower_segment_access(writer, node, value, address))
+    {
+        check_lower_unsupported(writer, "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)");
+    }
+    else if (bit_ints && (facts & BUSTER_CHECK_LOWER_TYPE_BIT_INT) != 0 && !bit_int)
     {
         check_lower_bit_int_node(writer, node, address, initialized, discard);
     }
@@ -12297,8 +12338,9 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
                 // expansion): on the 9700X, sqlite3.c's lowering took 0.20 ms less without it (#1048, docs/c-lowering.md's
                 // "The leaf path and the runtimes' names"). The wrappers' and truth tests' path pays, and stays.
                 const bool value_node = writer->program->input->graph.ops[node] == CHECK_OP_VALUE;
-                const bool plain = !value_node && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && check_lower_plain(writer, node, (flags & 1) != 0);
-                const bool batched = !value_node && !plain && writer->fragments && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && !writer->track &&
+                // (A unit with a segment's space takes the expansion alone, which refuses its accesses: check_lower_segment_access.)
+                const bool plain = !value_node && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && !writer->segments && check_lower_plain(writer, node, (flags & 1) != 0);
+                const bool batched = !value_node && !plain && !writer->segments && writer->fragments && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && !writer->track &&
                                      writer->type_templates != NULL && (flags & 5) == 0 && check_lower_batch_expression(writer, node);
                 if (!batched)
                 {
@@ -13887,6 +13929,9 @@ struct CheckLowerShared
     // in a unit that has the overloadable attribute's sets (CheckInput.overload_heads, which every overload set's head comes
     // from), or whose stream records an overload's address or holds its values whole (a hand-built one).
     bool overloads;
+    // Whether the program's type table has a type in a segment's address space (#1447, check_lower_segment_types), whose
+    // loads and stores the lowering refuses: an expression tests its node for one only then.
+    bool segments;
     uint32_t* initializer_declarations;
     uint32_t* local_map;
     uint32_t* switch_locals;
@@ -14324,6 +14369,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         }
         valid = check_lower_copy_type_facts(types, shared->type_count, shared->type_facts, scratch, scalar);
         shared->bit_ints = memchr(types->types.kind, BUSTER_TYPE_KIND_BIT_INT, types->types.count) != NULL;
+        shared->segments = memchr(types->types.kind, BUSTER_TYPE_KIND_QUALIFIED, types->types.count) != NULL && check_lower_segment_types(types);
         shared->overloads = input == 0 || program->stream == NULL || input->overload_heads != NULL || program->stream->overload_address_count != 0 ||
                             program->stream->dense_values != NULL;
     }
@@ -14652,6 +14698,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .target = program->target,
         .bit_ints = shared->bit_ints,
         .overloads = shared->overloads,
+        .segments = shared->segments,
         .abi_table = &shared->table,
         .type_classes = shared->type_classes,
         .type_facts = shared->type_facts,
