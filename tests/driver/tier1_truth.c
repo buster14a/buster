@@ -22,6 +22,10 @@
 #if defined(BUSTER_TIER1_TRUTH_SUBJECT)
 
 // The signed long conversion deliberately reproduces zext i1 -> i32, sext i32 -> i64, compare with zero.
+// The observable arm keeps these branch-only probes as control flow under #1382's if-conversion. Its independent
+// count oracle also checks the taken edge; pure conditional values have their own cmov shape tests.
+volatile unsigned long truth_taken;
+
 #define BUSTER_TRUTH_DEFINE(name, type, comparison) \
     __attribute__((noinline)) unsigned long truth_branch_##name(type x, type y) \
     { \
@@ -29,6 +33,7 @@
         if ((long)(x comparison y) != 0) \
         { \
             result = (unsigned long)x + 7; \
+            truth_taken += 1; \
         } \
         return result; \
     } \
@@ -38,6 +43,7 @@
         if (0 == (long)(x comparison y)) \
         { \
             result = (unsigned long)x + 7; \
+            truth_taken += 1; \
         } \
         return result; \
     }
@@ -50,6 +56,7 @@ __attribute__((noinline)) unsigned long truth_nested(long x, long y)
     if ((long)((long)(x < y) == 0) != 0)
     {
         result = (unsigned long)x + 7;
+        truth_taken += 1;
     }
     return result;
 }
@@ -122,6 +129,7 @@ __attribute__((noinline)) unsigned long truth_float(double x, double y)
 BUSTER_TRUTH_CASES(BUSTER_TRUTH_DECLARE)
 #undef BUSTER_TRUTH_DECLARE
 unsigned long truth_nested(long x, long y);
+extern volatile unsigned long truth_taken;
 unsigned long truth_shared(long x, long y);
 unsigned long truth_trunc(long x, long y);
 unsigned long truth_nonzero(long x, long y);
@@ -164,13 +172,15 @@ int main(void)
             do \
             { \
                 const bool condition = (type)x comparison (type)y; \
+                const unsigned long taken = truth_taken; \
                 const unsigned long direct = truth_branch_##name((type)x, (type)y); \
                 const unsigned long inverse = truth_branch_not_##name((type)x, (type)y); \
-                valid = direct == (condition ? yes : no) && inverse == (condition ? no : yes) && valid; \
+                valid = direct == (condition ? yes : no) && inverse == (condition ? no : yes) && truth_taken == taken + 1 && valid; \
             } while (0);
             BUSTER_TRUTH_CASES(BUSTER_TRUTH_CHECK)
 #undef BUSTER_TRUTH_CHECK
-            valid = truth_nested(x, y) == (x >= y ? yes : no) && valid;
+            const unsigned long taken = truth_taken;
+            valid = truth_nested(x, y) == (x >= y ? yes : no) && truth_taken == taken + (unsigned long)(x >= y) && valid;
             const unsigned long shared = (unsigned long)(x < y) + (unsigned long)(x < y ? x : y);
             valid = truth_shared(x, y) == shared && valid;
             valid = truth_trunc(x, y) == 11 && valid;

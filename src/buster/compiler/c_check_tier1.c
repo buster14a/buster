@@ -16,6 +16,7 @@
 #include "ir_wide.c"
 #include "ir_vector_split.c"
 #include "ir_truth.c"
+#include "ir_if_convert.c"
 #include "tier1_schedule_ir.c"
 #include "c_check_tier1_inline.c"
 #include "c_check_tier1_schedule.c"
@@ -367,6 +368,17 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         // optimizer preparation builds uses, then let its DCE and final SSA verification consume the new operands.
         ir_truth_simplify(&wide.function, scalar);
     }
+    if (stage == CHECK_TIER1_COMPILED)
+    {
+        // #1382's bounded, total scalar arms become selects before any retained analysis is built. The result
+        // borrows immutable tables from the promoted/wide input; all stay live until the optimizer copies them.
+        IrIfConvertResult converted = { 0 };
+        const IrCheck check = ir_if_convert(&wide.function, &lane->steps[6], scratch, scalar, &converted);
+        outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+        outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
+        stage = outcome.stage;
+        wide.function = stage == CHECK_TIER1_COMPILED ? converted.function : wide.function;
+    }
     // --tier1-schedule=pre (#172): each block's instructions reordered on the same owned columns, before the optimizer's
     // final verification, which then covers the new order. No room for the pass's scratch is a resource failure.
     if (stage == CHECK_TIER1_COMPILED && lane->schedule == BUSTER_CHECK_TIER1_SCHEDULE_PRE)
@@ -392,6 +404,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED)
     {
         IrOptimizeOptions options = ir_optimize_options();
+        options.passes |= BUSTER_IR_OPTIMIZE_LAYOUT;
         options.scalar = scalar;
         const IrCheck check = ir_optimize_verified(&wide.function, &lane->steps[2], &lane->steps[3], scratch, options, &revision, &optimized, &analysis);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);

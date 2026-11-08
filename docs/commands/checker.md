@@ -78,8 +78,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers]` and `test-checker-asm`
-  check the driver and inline assembly against Clang (but for named UCNs,
-  which clang accepts and the driver refuses at their places, #452; with
+  check the driver and inline assembly against Clang (named UCNs too, #1447,
+  `check_test_driver_named_ucns`; with
   `--lazy-system-headers`, only the checks that pass the driver
   `-flazy-system-headers`, since the others run the same either way, and
   `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
@@ -125,6 +125,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes; and
   #1376's clears (`c_check_program_clear_test.c`): each path's shape (memset past 128 bytes, no loop, no clear before
   a whole object's copy, compound literals in place, a volatile object's stores) and native runs on a dirtied stack.
+  The same group covers #1549's hidden-result call initializers: copy and temporary elimination, nested and indirect
+  calls, alignment, volatile and self-reference fallbacks, assignments and reentry. `tests/interpreter/source.c`
+  also exercises direct, nested and indirect aggregate call initializers through the typed and Tier 1 source checks.
   `--program-vectors` selects the vector, x86 builtin and half-precision programs alone (`c_check_program_vector_test.c`,
   `c_check_program_x86_test.c`, `c_check_program_vector_builtins_test.c`, `c_check_program_fp16_test.c`,
   `c_check_program_half_test.c`), run against clang -O0's code where the host has their features.
@@ -133,6 +136,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   Required constant evaluation folds `_Float16` and `__bf16` arithmetic in the source format after each operation
   (#1497); runtime half-precision chains retain their target's excess-precision behavior. The constant-source and
   floating-action fixtures cover that distinction, ties, subnormals and negative zero.
+  `float`, `double` and `long double` folds give APFloat's NaNs, not the host's (#1473): an invalid operation
+  (`inf - inf`, `0 * inf`, `0 / 0`) folds to the positive quiet NaN, and an operation on a NaN keeps its first NaN
+  operand's sign and payload, quieted. The floating-action fixtures, the constant-source fixture "real invalid
+  constant arithmetic has Clang NaN signs" and `--program-float-constants`' "float-constants-invalid-arithmetic"
+  check them against Clang.
   `--program-library` selects the library builtins' tables, constant folds and programs alone
   (`c_check_program_library_test.c`).
   `--transitions` selects the memoized transitions' fixtures, classes, static words and table limits alone (`c_check_transitions_test.c`).
@@ -200,6 +208,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   Runtime `-Wshift-count-negative` and `-Wshift-count-overflow` warnings inspect an independently constant count
   even when the left operand is not constant (#1394). The ordinary shift uses the promoted left type's value width;
   compound shifts use the original lvalue's underlying integer type, including atomic operands, matching Clang.
+  Compound `_Bool` uses its storage width (eight bits on this target); ordinary Boolean shifts use the promoted
+  integer width, while `_BitInt` retains its value width in both forms.
   Ordinary unselected conditional arms, short-circuited logical operands and unreachable statements suppress these
   warnings. Unselected `_Generic` associations and `__builtin_choose_expr` arms instead retain Clang's queued count
   diagnostics: those detached expressions have no CFG block, even under an unreachable statement or with an ordinary
@@ -208,8 +218,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   Required-constant contexts such as `_Static_assert` and case values suppress their detached-arm count warnings too.
   File-scope C23 `constexpr` initializers also suppress those warnings; function-local `constexpr` initializers retain them.
   The count traversal preserves source order across selected and detached arms and neighboring expressions or
-  statements, and visits an omitted-middle conditional's shared condition once. Other warning families retain
-  their existing evaluated-expression rules. Retained runtime constant-fold warnings join the count traversal without being
+  statements, and visits an omitted-middle conditional's shared condition once. Overlapping statement-expression
+  roots share count-publication ownership; detached scan visits and ordinary tree ownership have separate bits,
+  so count deduplication cannot mark unrelated warning families as emitted. Other warning families retain
+  their existing evaluated-expression rules, including the older unused-value gap for multiple discarded statements
+  in an unselected statement expression. Retained runtime constant-fold warnings join the count traversal without being
   rendered or counted twice, preserving their order with new runtime warnings and discarded expressions;
   required-constant warnings and groups collected before a failed program keep their original publication.
   `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both

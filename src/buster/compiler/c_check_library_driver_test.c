@@ -701,6 +701,30 @@ static void check_test_library_runs(CheckTest* test, const char* clang, const ch
             "-ffreestanding",
         },
         {
+            "a plain declaration beside overloads folds",
+            "int ov(int) __attribute__((overloadable));int strcmp(const char*,const char*);int main(void){return strcmp(\"a\",\"c\")+2;}\n",
+            "-std=gnu17",
+            NULL,
+        },
+        {
+            "-fno-builtin keeps a plain declaration beside overloads a call",
+            "int ov(int) __attribute__((overloadable));int strcmp(const char*,const char*);int main(void){return strcmp(\"a\",\"c\")+2;}\n",
+            "-std=gnu17",
+            "-fno-builtin",
+        },
+        {
+            "-fno-builtin-strcmp keeps a plain declaration beside overloads a call",
+            "int ov(int) __attribute__((overloadable));int strcmp(const char*,const char*);int main(void){return strcmp(\"a\",\"c\")+2;}\n",
+            "-std=gnu17",
+            "-fno-builtin-strcmp",
+        },
+        {
+            "-ffreestanding keeps a plain declaration beside overloads a call",
+            "int ov(int) __attribute__((overloadable));int strcmp(const char*,const char*);int main(void){return strcmp(\"a\",\"c\")+2;}\n",
+            "-std=gnu17",
+            "-ffreestanding",
+        },
+        {
             "__builtin_strcmp folds whatever the options",
             "int main(void){return __builtin_strcmp(\"a\",\"c\")+2;}\n",
             "-std=gnu17",

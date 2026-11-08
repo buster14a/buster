@@ -724,7 +724,7 @@ static const BuiltinIntrinsicInfo* check_input_checks_library(CheckInputReader* 
 
 // modular_format's format (#1447, clang's checkAttributesAfterMerging: err_modular_format_attribute_no_format): a function's
 // declaration at `token` with a modular_format attribute and no format attribute, its own or one it inherited
-// (check_input_format_inherit), nor a printf-like or scanf-like library builtin's implicit one, is clang's error at its
+// (check_input_contract_inherit), nor a printf-like or scanf-like library builtin's implicit one, is clang's error at its
 // name.
 static void check_input_modular_format(CheckInputReader* reader, uint32_t token)
 {

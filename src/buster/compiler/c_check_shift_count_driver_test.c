@@ -63,6 +63,35 @@ static const CheckDriverDefaultWarningFixture check_driver_shift_count_fixtures[
         .warnings = 1,
     },
     {
+        .name = "Boolean shifts distinguish promoted ordinary width from compound storage width",
+        .source = "int a(_Bool x){return x<<31;}int b(_Bool x){return x>>32;}int c(_Bool x){return x<<32;}"
+                  "void d(_Bool x){x<<=0;x<<=1;x<<=7;x>>=0;x>>=1;x>>=7;}void e(_Bool x){x<<=8;x>>=8;}\n",
+        .warnings = 4,
+    },
+    {
+        .name = "Boolean dereferences atomic lvalues and bit-fields retain the compound byte boundary",
+        .source = "struct S{_Bool n:1;};void a(_Bool*p){*p<<=1;*p>>=7;}void b(_Bool*p){*p<<=8;*p>>=8;}"
+                  "void c(_Atomic(_Bool)*p){*p<<=1;*p>>=7;}void d(_Atomic(_Bool)*p){*p<<=8;*p>>=8;}"
+                  "void e(struct S*p){p->n<<=1;p->n>>=7;}void f(struct S*p){p->n<<=8;p->n>>=8;}\n",
+        .warnings = 6,
+    },
+    {
+        .name = "Boolean count width refinement does not change negative warnings in any shift form",
+        .source = "int a(_Bool x){return x<<-1;}int b(_Bool x){return x>>-1;}void c(_Bool x){x<<=-1;x>>=-1;}\n",
+        .warnings = 4,
+    },
+    {
+        .name = "non-Boolean compound storage and bit-precise value-width boundaries remain distinct",
+        .source = "void a(unsigned char x){x<<=7;x>>=7;x<<=8;x>>=8;}"
+                  "void b(unsigned short x){x<<=15;x>>=15;x<<=16;x>>=16;}"
+                  "unsigned _BitInt(1) c(unsigned _BitInt(1) x){return (x<<0)+(x>>0)+(x<<1)+(x>>1);}"
+                  "void d(unsigned _BitInt(1) x){x<<=0;x>>=0;x<<=1;x>>=1;}"
+                  "unsigned _BitInt(3) e(unsigned _BitInt(3) x){return (x<<2)+(x>>2)+(x<<3)+(x>>3);}"
+                  "void f(unsigned _BitInt(3) x){x<<=2;x>>=2;x<<=3;x>>=3;}\n",
+        .warnings = 12,
+        .c23 = true,
+    },
+    {
         .name = "compound bit-field counts use the declared integer type",
         .source = "struct S{unsigned long n:7;};void f(struct S*x){x->n<<=7;x->n>>=64;}\n",
         .warnings = 1,
@@ -203,6 +232,72 @@ static const CheckDriverDefaultWarningFixture check_driver_shift_count_fixtures[
         .name = "unselected choose arms retain queued shift-count diagnostics",
         .source = "int f(int x){return __builtin_choose_expr(1,x,x<<32);}\n",
         .warnings = 1,
+    },
+    {
+        .name = "unselected generic statement values publish each shift form exactly once",
+        .source = "int a(int x){return _Generic(x,int:0,default:({x<<32;}));}"
+                  "int b(int x){return _Generic(x,int:0,default:({x>>32;}));}"
+                  "int c(int x){return _Generic(x,int:0,default:({x<<=32;}));}"
+                  "int d(int x){return _Generic(x,int:0,default:({x>>=32;}));}\n",
+        .warnings = 4,
+    },
+    {
+        .name = "unselected choose statement values publish each shift form exactly once",
+        .source = "int a(int x){return __builtin_choose_expr(0,({x<<32;}),0);}"
+                  "int b(int x){return __builtin_choose_expr(0,({x>>32;}),0);}"
+                  "int c(int x){return __builtin_choose_expr(0,({x<<=32;}),0);}"
+                  "int d(int x){return __builtin_choose_expr(0,({x>>=32;}),0);}\n",
+        .warnings = 4,
+    },
+    {
+        .name = "detached statement initializers retain their single shift diagnostic",
+        .source = "int a(int x){return _Generic(x,int:0,default:({int y=x<<32;y;}));}"
+                  "int b(int x){return __builtin_choose_expr(0,({int y=x>>32;y;}),0);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "standalone and selected statement values retain one legitimate count diagnostic",
+        .source = "int a(int x){return ({x<<32;});}int b(int x){return ({int y=x>>32;y;});}"
+                  "int c(int x){return _Generic(x,int:({x<<32;}),default:0);}"
+                  "int d(int x){return __builtin_choose_expr(1,({x>>32;}),0);}\n",
+        .warnings = 4,
+    },
+    {
+        .name = "nested detached statement selections share count ownership without dropping warnings",
+        .source = "int a(int x){return _Generic(x,int:0,default:({__builtin_choose_expr(0,({x<<32;}),0);}));}"
+                  "int b(int x){return __builtin_choose_expr(0,({_Generic(x,int:0,default:({x>>32;}));}),0);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "detached negative statement counts publish once in both static selections",
+        .source = "int a(int x){return _Generic(x,int:0,default:({x<<-1;}));}"
+                  "int b(int x){return __builtin_choose_expr(0,({x>>-1;}),0);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "unreachable owners still publish their detached statement count once",
+        .source = "int a(int x){if(0)return _Generic(x,int:0,default:({x<<32;}));return 0;}"
+                  "int b(int x){if(0)return __builtin_choose_expr(0,({x>>32;}),0);return 0;}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "count ownership retains adjacent unused-value diagnostics and source order",
+        .source = "int f(int x){x<<32;(void)_Generic(x,int:0,default:({x<<32;}));x>>32;return 0;}\n",
+        .warnings = 5,
+    },
+    {
+        .name = "unevaluated and in-range detached statement values remain quiet",
+        .source = "int a(int x){return _Generic(x,int:0,default:({x<<31;}));}"
+                  "int b(int x){return __builtin_choose_expr(0,({x>>31;}),0);}"
+                  "unsigned long c(int x){return _Generic(x,int:0,default:sizeof(({x<<32;})));}"
+                  "unsigned long d(int x){return __builtin_choose_expr(0,sizeof(({x>>32;})),0);}\n",
+    },
+    {
+        .name = "distinct detached macro expansions retain one count group and note each",
+        .source = "#define BAD(x) ({(x)<<32;})\nint a(int x){return _Generic(x,int:0,default:BAD(x));}"
+                  "int b(int x){return __builtin_choose_expr(0,BAD(x),0);}\n",
+        .warnings = 2,
+        .notes = 2,
     },
     {
         .name = "a selected choose arm before an unselected arm keeps diagnostic order",

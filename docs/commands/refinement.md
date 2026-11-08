@@ -46,8 +46,9 @@ identifier must get the same id and every token the same leading-space bit, on:
 - growth after 1, 4, 15, 16, 31, 32, 63 or 64 new names, with preceding-batch
   repeats and long common-prefix names, then the same input again;
 - 30 boundary fixtures (splices between and inside tokens, with `\r\n`, blanks
-  and trigraphs; comments; UCNs; named UCNs, which stay as written, apart from
-  the `\u`, `\U` and UTF-8 spellings of their characters (#452); identifiers of
+  and trigraphs; comments; UCNs; named UCNs, the identifiers of the `\u`, `\U`
+  and UTF-8 spellings of their characters, by names, aliases and names made by
+  rule, read loosely where they start an identifier (#1447); identifiers of
   62 to 65 bytes), each at all 64 misalignments from a cache line;
 - identifiers of every length from 1 to 130 bytes with a line splice (four
   spellings, one a trigraph's) at every position inside, or a UCN at every

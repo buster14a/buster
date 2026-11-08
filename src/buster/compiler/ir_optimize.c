@@ -16,6 +16,8 @@
 #define BUSTER_IR_OPTIMIZE_SCCP 1u
 #define BUSTER_IR_OPTIMIZE_DCE 2u
 #define BUSTER_IR_OPTIMIZE_CFG 4u
+// Tier 1 alone requests physical block placement; the shared optimizer's default preserves block order.
+#define BUSTER_IR_OPTIMIZE_LAYOUT 8u
 #define BUSTER_IR_OPTIMIZE_AUTO 0u
 #define BUSTER_IR_OPTIMIZE_VECTOR 1u
 #define BUSTER_IR_OPTIMIZE_SCALAR 2u
@@ -42,6 +44,9 @@ struct IrOptimizeResult
     IrFunction function;
     uint64_t sccp_visits;
     uint64_t sccp_sweeps;
+    // The incoming values SCCP's phi transfers examined, executable or not: the work that grew as the square of a
+    // join's predecessors when each visit met them all (#1729).
+    uint64_t sccp_phi_incoming;
     uint64_t dce_visits;
     uint64_t dce_sweeps;
     uint64_t scratch_bytes;
@@ -81,6 +86,15 @@ struct IrOptimizeWork
     uint32_t head;
     uint32_t tail;
     uint32_t queued_count;
+    // SCCP's worklist moves a constant phi it dequeues to this queue, which it takes from only once the shared one is
+    // empty (#1729), so that the edges and values reaching a join in one wave share one visit of it. Reserved by the
+    // first such phi, null where it couldn't be (`phis_refused`): phis are then visited in turn. An instruction is in
+    // one of the two queues at most (`queued`).
+    uint32_t* phis;
+    bool phis_refused;
+    uint32_t phi_head;
+    uint32_t phi_tail;
+    uint32_t phi_count;
     IrOptimizeResult statistics;
 };
 
@@ -704,6 +718,51 @@ static uint32_t ir_optimize_dequeue(IrOptimizeWork* work)
     return instruction;
 }
 
+// Moves a constant phi dequeued from the shared queue to the phis' queue (IrOptimizeWork.phis), reserving it unzeroed
+// on the first move: only the entries written are read. False where it couldn't be reserved.
+static bool ir_optimize_defer_phi(IrOptimizeWork* work, uint32_t instruction)
+{
+    if (work->phis == NULL && !work->phis_refused)
+    {
+        work->phis = arena_push_array(work->scratch, work->function->instruction_count, sizeof(uint32_t), 64);
+        work->phis_refused = work->phis == NULL;
+    }
+    const bool deferred = work->phis != NULL;
+    if (deferred)
+    {
+        work->queued[instruction] = 1;
+        work->phis[work->phi_tail] = instruction;
+        work->phi_tail += 1;
+        if (work->phi_tail == work->function->instruction_count)
+        {
+            work->phi_tail = 0;
+        }
+        work->phi_count += 1;
+    }
+    return deferred;
+}
+
+static uint32_t ir_optimize_dequeue_sccp(IrOptimizeWork* work)
+{
+    uint32_t instruction;
+    if (work->queued_count != 0)
+    {
+        instruction = ir_optimize_dequeue(work);
+    }
+    else
+    {
+        instruction = work->phis[work->phi_head];
+        work->phi_head += 1;
+        if (work->phi_head == work->function->instruction_count)
+        {
+            work->phi_head = 0;
+        }
+        work->phi_count -= 1;
+        work->queued[instruction] = 0;
+    }
+    return instruction;
+}
+
 static void ir_optimize_enqueue_users(IrOptimizeWork* work, uint32_t value)
 {
     for (uint32_t use = work->uses.offsets[value]; use < work->uses.offsets[(uint64_t)value + 1]; use += 1)
@@ -757,7 +816,8 @@ static const uint8_t ir_optimize_transfer_kinds[64] = {
     [IR_FNEG] = 5,
 };
 
-static uint8_t ir_optimize_transfer(const IrOptimizeWork* work, uint32_t i, IrConstant* value)
+// `examined` counts a phi's incoming values looked at (IrOptimizeResult.sccp_phi_incoming).
+static uint8_t ir_optimize_transfer(const IrOptimizeWork* work, uint32_t i, IrConstant* value, uint64_t* examined)
 {
     const IrFunction* f = work->function;
     const uint32_t op = f->op[i];
@@ -778,7 +838,9 @@ static uint8_t ir_optimize_transfer(const IrOptimizeWork* work, uint32_t i, IrCo
     else if (kind == 3)
     {
         result = IROPT_UNKNOWN;
-        for (uint32_t incoming = 0; incoming < b; incoming += 1)
+        // Overdefined meets anything to overdefined: the rest of the incoming values can't change the result.
+        uint32_t incoming = 0;
+        for (; incoming < b && result != IROPT_OVERDEFINED; incoming += 1)
         {
             const uint32_t predecessor = f->extra[a + incoming * 2];
             const uint32_t source = f->extra[a + incoming * 2 + 1];
@@ -788,6 +850,7 @@ static uint8_t ir_optimize_transfer(const IrOptimizeWork* work, uint32_t i, IrCo
                 result = ir_optimize_meet(result, *value, work->states[source], work->values[source], value);
             }
         }
+        *examined += incoming;
     }
     else if (kind == 4)
     {
@@ -974,15 +1037,20 @@ static __attribute__((aligned(64))) bool ir_optimize_visit(IrOptimizeWork* work,
     {
         const IrFunction* f = work->function;
         const uint32_t op = f->op[i];
-        if (ir_vector_type(f->type[i]) || op == IR_VCMP || (op == IR_BITCAST && ir_vector_type(f->type[f->a[i]])))
+        // The lattice only falls, so no transfer can change an overdefined value: its visits skip it. A join's phi is
+        // queued again by each incoming edge and value, and would otherwise meet all of them on every visit (#1729).
+        if (work->states[i] != IROPT_OVERDEFINED)
         {
-            changed = ir_optimize_simd_visit(work, i, queue);
-        }
-        else
-        {
-            IrConstant value = { 0 };
-            const uint8_t state = ir_optimize_transfer(work, i, &value);
-            changed = ir_optimize_publish(work, i, state, value, queue);
+            if (ir_vector_type(f->type[i]) || op == IR_VCMP || (op == IR_BITCAST && ir_vector_type(f->type[f->a[i]])))
+            {
+                changed = ir_optimize_simd_visit(work, i, queue);
+            }
+            else
+            {
+                IrConstant value = { 0 };
+                const uint8_t state = ir_optimize_transfer(work, i, &value, &work->statistics.sccp_phi_incoming);
+                changed = ir_optimize_publish(work, i, state, value, queue);
+            }
         }
         if (ir_terminator_table[work->function->op[i]] != 0)
         {
@@ -1018,9 +1086,16 @@ static __attribute__((aligned(64))) void ir_optimize_sccp_worklist(IrOptimizeWor
     bool pending = true;
     while (pending)
     {
-        while (work->queued_count != 0)
+        while (work->queued_count != 0 || work->phi_count != 0)
         {
-            ir_optimize_visit(work, ir_optimize_dequeue(work), true);
+            const uint32_t i = ir_optimize_dequeue_sccp(work);
+            // A constant phi queued again, by a new edge into its block or a changed incoming value, waits until nothing
+            // else is queued, so that the edges and values reaching a join in one wave share one visit (#1729).
+            const bool defer = work->queued_count != 0 && work->states[i] == IROPT_CONSTANT && work->function->op[i] == IR_PHI;
+            if (!defer || !ir_optimize_defer_phi(work, i))
+            {
+                ir_optimize_visit(work, i, true);
+            }
         }
         pending = ir_optimize_settle_unknown(work, true);
     }
@@ -1119,6 +1194,8 @@ static uint32_t ir_optimize_single_successor(const IrOptimizeWork* work, uint32_
     }
     return target;
 }
+
+#include "ir_optimize_layout.c"
 
 // 1 is an unconditional effect; 2 is a potential fault or floating-environment effect, discharged only by
 // a successful constant transfer. Loads remain roots even when nonvolatile: there is no dereferenceability proof. 3 is a
@@ -1438,6 +1515,13 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
     {
         error = IR_ERROR_MEMORY;
     }
+    uint32_t* order = NULL;
+    uint32_t order_count = f->block_count;
+    if (error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_LAYOUT) != 0)
+    {
+        order = ir_allocate(scratch, f->block_count, sizeof(uint32_t), &ok);
+        error = ok ? ir_optimize_layout_order(work, threads, scratch, BUSTER_SCALAR_PATH(options.scalar), order, &order_count) : IR_ERROR_MEMORY;
+    }
     IrSizes sizes = {
         .constant_count = f->constant_count,
         .vector_constant_count = f->vector_constant_count,
@@ -1454,8 +1538,9 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
     {
         values[i] = BUSTER_IR_NONE;
     }
-    for (uint32_t block = 0; error == IR_OK && block < f->block_count; block += 1)
+    for (uint32_t position = 0; error == IR_OK && position < order_count; position += 1)
     {
+        const uint32_t block = order != NULL ? order[position] : position;
         if (work->blocks[block] != 0 && threads[block] == block)
         {
             blocks[block] = sizes.block_count++;
@@ -1567,8 +1652,9 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
         uint32_t vector_constants = f->vector_constant_count;
         uint32_t calls = 0;
         uint32_t instructions = 0;
-        for (uint32_t block = 0; block < f->block_count; block += 1)
+        for (uint32_t position = 0; position < order_count; position += 1)
         {
+            const uint32_t block = order != NULL ? order[position] : position;
             if (blocks[block] != BUSTER_IR_NONE)
             {
                 candidate.block_offsets[blocks[block]] = instructions;
@@ -1765,7 +1851,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize(const IrFunction* functi
     // faster at every size (#786).
     const bool verify_scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR || (options.path == BUSTER_IR_OPTIMIZE_AUTO && options.scalar);
     (void)verify_scalar;
-    if (output != scratch && options.path <= BUSTER_IR_OPTIMIZE_SCALAR && (options.passes & ~(BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG)) == 0)
+    if (output != scratch && options.path <= BUSTER_IR_OPTIMIZE_SCALAR && (options.passes & ~(BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_LAYOUT)) == 0)
     {
         options.scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR ||
                          (options.path == BUSTER_IR_OPTIMIZE_AUTO && (options.scalar || ir_optimize_auto_scalar(function)));

@@ -41,6 +41,47 @@ lowers other than its warm-up, and a run that measures no file fail the command
 the 9700X's lock with `taskset -c 2`. [The lowering guide](../../docs/c-lowering.md) records the
 contract, the comparisons' results and the completed `main.c` measurement.
 
+## Jump-table address reuse (#1217)
+
+Each switch dispatch emits one `GLOBAL_ADDRESS` followed by `DUP`. The indexed
+signed-offset load and target addition therefore share the same table value in
+both the typed stream and its IR lowering; value numbering need not rediscover
+that equality. `CheckLowerTable.address` records the one provisional-symbol
+entry that final lowering patches. Table entries, labels, bounds checks and
+relative fixups keep their existing format.
+
+The producer also publishes `Tier0Function.table_addresses`, one typed entry
+index per table in dispatch order. Both Tier 0 validators require strictly
+increasing indices before their matching jumps, naming `GLOBAL_ADDRESS` of
+class U64 and a nonzero, representable direct symbol. GOT and TLS accesses are
+refused. A null column preserves ordinary entry lowering. Tier 0's emission
+does not move these entries; `ir_lower` emits the listed symbol addresses and
+their U64 conversions in its genuine entry preheader, then reuses those values
+at the original entries. Source backedges, including those to source entry
+zero, cannot reexecute the preheader. This uses the existing count/fill replay
+and a monotone cursor, with no per-entry map or general loop-motion pass.
+
+`test-checker` checks one correctly patched table-address entry in every
+jump-table fixture, including nested tables and signed/unsigned bounds, and
+its matching metadata. `test-ir-lowering` checks optional metadata, two tables,
+a mixed computed goto and table, an unreachable table before a live one,
+source-entry-zero backedges, SSA dominance and transactional refusal of
+malformed address metadata through both validator and lowering paths.
+`test-checker-driver`'s Tier 1 labels fixture executes two switches with holes,
+defaults and nonzero signed/unsigned lower bounds against Clang and Tier 0.
+Both selector paths, with rematerialization enabled and disabled, must emit one
+relocated address per table in that fixture. A separate low-pressure loop in
+the same source must decode to adjacent `movsxd [base + index*4]`, `add base`
+and `jmp` records, with the loaded offset, addition destination and jump target
+in the same register. Its single relocated table base must precede the decoded
+backedge target.
+
+Hoisting lengthens table-base live ranges and computes the bases even when a
+switch is not reached. Allocation can spill or rematerialize a base under
+pressure; the small loop's three-record check does not establish the same shape
+in SQLite or Lua. Whole-corpus instruction counts and runtime acceptance still
+require the 9700X measurements. General LICM remains disabled.
+
 ## Node templates (#1048)
 
 `./build/compiler measure-lowering-templates [--top N] [--keys N] [--abstracts N]

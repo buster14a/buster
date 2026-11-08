@@ -5700,26 +5700,23 @@ static void check_test_driver_lazy(CheckTest* test, const char* clang, const cha
     unlink(header);
 }
 
-// Named universal character names (\N{...}), which clang reads as its extension in C and buster refuses alike in an
-// identifier, in #if's character constants and in the checker's literals (#452): each source clang accepts must be
-// rejected, first at the named UCN's place (its backslash, or its literal's start in #if), by both paths and by the
-// default C route when `executable` is given, without writing an object. The checker places a literal's error by its
-// own rules (an initializer's at its '='), so for a literal only the line is fixed (column 0). Each names a character
-// outside the basic set, which C17 doesn't let a UCN name even in a literal.
+// Named universal character names (\N{...}, #1447), which clang reads as its extension in C: in an identifier, in #if's
+// character constants and in the checker's literals, each source clang accepts must be accepted by both paths and by
+// the default C route when `executable` is given, writing an object. Each names a character outside the basic set, which
+// C17 doesn't let a UCN name even in a literal.
 static void check_test_driver_named_ucns(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
 {
     static const struct
     {
         const char* name;
         const char* source;
-        uint32_t line;
-        uint32_t column;
     } fixtures[] = {
-        { "a named UCN in an identifier", "int \\N{LATIN SMALL LETTER E WITH ACUTE} = 1;\nint f(void) { return \xC3\xA9 + \\u00e9; }\n", 1, 5 },
-        { "a named UCN in a later identifier", "int \xC3\xA9 = 1;\nint f(void)\n{\n    return \\N{LATIN SMALL LETTER E WITH ACUTE};\n}\n", 4, 12 },
-        { "a named UCN in #if's character constant", "#if L'\\N{LATIN SMALL LETTER E WITH ACUTE}' == 0xE9\nint e;\n#endif\n", 1, 5 },
-        { "a named UCN in a string literal", "const char *s = \"\\N{LATIN SMALL LETTER E WITH ACUTE}\";\n", 1, 0 },
-        { "a named UCN in a character constant", "int c = L'\\N{LATIN SMALL LETTER E WITH ACUTE}';\n", 1, 0 },
+        { "a named UCN in an identifier", "int \\N{LATIN SMALL LETTER E WITH ACUTE} = 1;\nint f(void) { return \xC3\xA9 + \\u00e9; }\n" },
+        { "a named UCN in a later identifier", "int \xC3\xA9 = 1;\nint f(void)\n{\n    return \\N{LATIN SMALL LETTER E WITH ACUTE};\n}\n" },
+        { "a named UCN in #if's character constant", "#if L'\\N{LATIN SMALL LETTER E WITH ACUTE}' == 0xE9\nint e;\n#endif\n" },
+        { "a named UCN in a string literal", "const char *s = \"\\N{LATIN SMALL LETTER E WITH ACUTE}\";\n" },
+        { "a named UCN in a character constant", "int c = L'\\N{LATIN SMALL LETTER E WITH ACUTE}';\n" },
+        { "a named UCN in a static assertion's message", "_Static_assert(1, \"\\N{SNOWMAN}\");\n" },
     };
     const char* clang_arguments[] = { "-std=gnu17", "-w" };
     const uint32_t routes = executable != NULL ? 4 : 2;
@@ -5741,11 +5738,10 @@ static void check_test_driver_named_ucns(CheckTest* test, const char* clang, con
             CheckCorpusOracle checked = { 0 };
             uint32_t warnings = 0;
             const bool ready = check_test_driver_run(route >= 2 ? executable : NULL, source, object, (route & 1) != 0, false, false, lazy, &checked, &warnings);
-            snprintf(description, sizeof(description), "%s, %s %s: error at %u:%u, wanted at %u:%u", fixtures[i].name, route >= 2 ? "default CLI" : "direct",
-                     (route & 1) != 0 ? "scalar" : "vector", checked.line, checked.column, fixtures[i].line, fixtures[i].column);
-            check_test_expect(test, ready && checked.rejected && checked.line == fixtures[i].line &&
-                                    (fixtures[i].column == 0 || checked.column == fixtures[i].column), description);
-            check_test_expect(test, access(object, F_OK) != 0, "a refused named UCN writes no object");
+            snprintf(description, sizeof(description), "%s, %s %s: accepted (error at %u:%u)", fixtures[i].name, route >= 2 ? "default CLI" : "direct",
+                     (route & 1) != 0 ? "scalar" : "vector", checked.line, checked.column);
+            check_test_expect(test, ready && !checked.rejected, description);
+            check_test_expect(test, access(object, F_OK) == 0, "an accepted named UCN writes an object");
         }
         unlink(object);
         unlink(source);
@@ -7106,6 +7102,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 #include "c_check_convention_driver_test.c"
 #include "c_check_interrupt_driver_test.c"
 #include "c_check_tier1_driver_test.c"
+#include "c_check_tier1_if_convert_test.c"
 #include "c_check_string_pool_driver_test.c"
 #include "c_check_frame_pointer_driver_test.c"
 #include "c_check_stack_clash_driver_test.c"
@@ -7529,6 +7526,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 }
 #include "c_check_initializer_warning_test.c"
 #include "c_check_warning_driver_test.c"
+#include "c_check_logical_unused_driver_test.c"
 #include "c_check_format_bitint_driver_test.c"
 #include "c_check_shift_count_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
@@ -8319,6 +8317,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_default_warnings(&test, clang, executable, directory);
+            check_test_driver_logical_unused(&test, clang, executable, directory);
             check_test_driver_format_bitints(&test, clang, executable, directory);
             check_test_driver_shift_counts(&test, clang, executable, directory);
         }
@@ -8570,6 +8569,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_tier1_reproducible(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_tier1_rematerialization(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
@@ -8583,6 +8586,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_tier1_divide(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_if_convert(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

@@ -236,8 +236,18 @@ static bool check_input_asm_text(CheckInputReader* reader, uint32_t* cursor, uin
     }
     if (valid)
     {
-        const CheckStringLiteral literal = check_literal_strings(parts, after - begin, parser->language.standard >= 2023, reader->arena);
+        CheckStringLiteral literal = check_literal_strings(parts, after - begin, parser->language.standard >= 2023, reader->arena);
         reader->output->resource |= literal.resource;
+        if (!literal.valid && !literal.resource)
+        {
+            // An evaluated string literal's escapes the fast decoding refuses that clang takes (#1447), and the refusal
+            // of one it refuses too, which the driver words as clang does (check_driver_literal_escapes).
+            literal = check_input_strings_extended(reader, begin, parts, after - begin);
+            if (!literal.valid && !literal.resource)
+            {
+                check_input_report(reader, begin, CHECK_INPUT_LITERAL);
+            }
+        }
         valid = literal.valid && literal.element_type == BUSTER_TYPE_CHAR && literal.byte_count != 0 && literal.byte_count <= UINT32_MAX;
         if (valid)
         {
@@ -490,6 +500,8 @@ static void check_input_asm_prepare(CheckInputReader* reader, uint32_t keyword)
 {
     CheckInput* input = reader->output;
     const Parser* parser = reader->parser;
+    // (A string literal's own refusal, check_input_asm_text's, stands for the statement's.)
+    const uint32_t reports = input->report_count;
     uint32_t opening = keyword + 1;
     while (opening < parser->tokens.count && parser->tokens.kinds[opening] != PARSE_KIND_L_PAREN)
     {
@@ -684,7 +696,7 @@ static void check_input_asm_prepare(CheckInputReader* reader, uint32_t keyword)
             }
         }
     }
-    if (!valid)
+    if (!valid && input->report_count == reports)
     {
         check_input_report(reader, failed, CHECK_INPUT_DECLARATION);
     }
