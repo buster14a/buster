@@ -1986,6 +1986,24 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         }
         if (lowered)
         {
+            if (strcmp(name, "library-folds-beside-overloads") == 0 || strcmp(name, "library-folds-selected-ordinary") == 0)
+            {
+                const uint32_t expected = strcmp(name, "library-folds-selected-ordinary") == 0 ? 1 : 0;
+                for (uint32_t p = 0; p < 2; p += 1)
+                {
+                    uint32_t calls = 0;
+                    for (uint32_t b = 0; b < lower[p].count; b += 1)
+                    {
+                        const Tier0Function* function = lower[p].functions + b;
+                        for (uint32_t e = 0; e < function->count; e += 1)
+                        {
+                            const uint32_t kind = function->kinds[e];
+                            calls += kind == BUSTER_TYPED_CALL || kind == BUSTER_TYPED_TAIL_CALL;
+                        }
+                    }
+                    check_test_expect(test, calls == expected, "ordinary library folds leave only the true overload's call on both paths");
+                }
+            }
             if (strcmp(name, "bits-classic-boundary-values") == 0 || strcmp(name, "bits-generic-boundary-values") == 0)
             {
                 // The classic and generic/C23 bit builtins' rows (#1374/#1652): each count's form the target's, on both paths.
@@ -4093,6 +4111,14 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "unsigned long mask=((unsigned long)&x&31)|((unsigned long)page&4095)|((unsigned long)&s&63)|((unsigned long)&d&15)|((unsigned long)&e&31);"
             "x+=7;d*=3;return x+page[0]+page[99]+s.a+(int)s.b+(int)d+(int)e+(int)mask*1000;}",
             "objects-aligned-past-16", clang);
+        // Escapes clang takes that the checker's fast decoding refuses (#1447, check_literal_strings_extended): delimited ones
+        // (\x{...}, \o{...}, \u{...}), unknown ones (their character) and GNU's \E, in strings of each width and in
+        // character constants, their values against clang's build.
+        check_test_program_source(test,
+            "int tested(int n){const char*s=\"\\x{41}\\o{102}\\u{e9}\\q\\E\\(\\%\";const unsigned short*u=u\"\\x{1234}\\u{1F600}\";const int*w=L\"\\o{7777777}\\Q\";"
+            "int c='\\x{43}'+'\\o{104}'*3+'\\E'*5+'\\z'*7;unsigned long h=0;for(int i=0;s[i];i++)h=h*31+(unsigned char)s[i];"
+            "for(int i=0;u[i];i++)h=h*37+u[i];for(int i=0;w[i];i++)h=h*41+(unsigned)w[i];return (int)(h%1000003)+c+n;}",
+            "extended-escapes", clang);
         // x86's force_align_arg_pointer (#1447, Tier0Function.realign_stack): a function entered with rsp 8 bytes off a call's
         // alignment (an inline asm call that aligns rsp below the red zone, then moves it by 8) realigns its frame, so that
         // an object aligned to 16 is; with a call of its own and with a variable-length array (a realigned frame with a

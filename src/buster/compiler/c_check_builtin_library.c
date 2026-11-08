@@ -266,8 +266,9 @@ static bool check_library_plain_prototype(const TypeTable* types, TypeId declare
     return result && prototype[position] == 0;
 }
 
-// A CALL node's member (CheckGraph.members) with this bit set and the low bits an index of cbuiltin_library_plain_folds
-// marks a call of the unit's declaration of a plain library builtin that folds (c_builtin_library.c, the reader's
+// A CALL node's member (CheckGraph.members), or an ordinary overload candidate's library_call, with this bit set and
+// the low bits an index of cbuiltin_library_plain_folds marks a call of the unit's declaration of a plain library
+// builtin that folds (c_builtin_library.c, the reader's
 // check_input_library_call). A K&R call's member, its designator's token plus one, never is: its declaration has no prototype.
 #define BUSTER_CHECK_LIBRARY_CALL 0x80000000u
 

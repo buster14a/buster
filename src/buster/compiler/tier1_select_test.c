@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Selector tests: the table cover against scalar maximal munch, exact effective-use handoff, target/form validation,
+// Selector tests: identical scalar/vector table covers, independent maximal munch, exact effective-use handoff,
+// target/form validation,
 // and native execution against independent C arithmetic. Emitted functions execute in a child, so a bad instruction
 // or address is a test failure. No arbitrary external IR or machine code is executed.
 
@@ -735,12 +736,12 @@ static uint64_t tier1_select_test_interpret(const IrFunction* function, uint64_t
     return result;
 }
 
-// Whether two plans of one function by one path are the same, field by field: what tier1_select_plan_verified gives a
-// verified function against tier1_select_plan's (#141). Their arenas' bytes may differ by alignment where they start.
+// Whether two plans of one function are the same, field by field, excluding the host kernel choice. Their arenas'
+// bytes may differ by alignment where they start. Both costed paths must publish the same cover and effective uses.
 static bool tier1_select_test_plans_equal(const Tier1SelectPlan* a, const Tier1SelectPlan* b)
 {
     const uint32_t count = a->function->instruction_count;
-    bool equal = a->function == b->function && a->vector == b->vector && a->estimated_cost == b->estimated_cost && a->effective_use_count == b->effective_use_count;
+    bool equal = a->function == b->function && a->function_verified == b->function_verified && a->estimated_cost == b->estimated_cost && a->effective_use_count == b->effective_use_count;
     for (uint32_t node = 0; equal && node < count; node += 1)
     {
         const Tier1SelectPattern* p = &a->patterns[node];
@@ -766,12 +767,33 @@ static bool tier1_select_test_plan_again(const IrFunction* function, const IrDom
     uint32_t node = BUSTER_IR_NONE;
     const Tier1SelectError error = verify ? tier1_select_plan(function, dominance, output, scratch, plan->vector, &again, &node) :
                                             tier1_select_plan_verified(function, dominance, output, scratch, plan->vector, &again, &node);
-    const bool equal = error == TIER1_SELECT_OK && scratch->length == scratch_mark && tier1_select_test_plans_equal(plan, &again);
+    const bool equal = error == TIER1_SELECT_OK && scratch->length == scratch_mark && plan->vector == again.vector && tier1_select_test_plans_equal(plan, &again);
     arena_pop_to(output, mark);
     return equal;
 }
 
-// The scalar path's costs column (Tier1SelectPlan.costs) against its definition, worked out here from the function alone:
+// The opposite host path's plan of the same verified function. This exercises independent scalar classification,
+// labeling and rule extraction, with the same costed grammar; no plan or pattern is copied from the first path.
+static bool tier1_select_test_plan_twin(const IrFunction* function, const IrDominance* dominance, const Tier1SelectPlan* plan, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    Tier1SelectPlan twin;
+    uint32_t node = BUSTER_IR_NONE;
+    const Tier1SelectError error = tier1_select_plan_verified(function, dominance, output, scratch, !plan->vector, &twin, &node);
+    const bool equal = error == TIER1_SELECT_OK && scratch->length == scratch_mark && tier1_select_test_plans_equal(plan, &twin);
+    arena_pop_to(output, mark);
+    return equal;
+}
+
+// Maximal munch is an independent reference selection algorithm, not the scalar production path. It shares candidate
+// legality but chooses by coverage and its own switch's priorities, without classifying or reading the BURS tables.
+static Tier1SelectError tier1_select_test_plan_munch(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, Tier1SelectPlan* plan, uint32_t* node)
+{
+    return tier1_select_plan_checked(function, dominance, output, scratch, false, true, false, plan, node);
+}
+
+// The reference cover's costs column (Tier1SelectPlan.costs) against its definition, worked out here from the function alone:
 // each node the code computes costs its pattern's intrinsic cost and the costs of its distinct values that are tree
 // children (a single use, in its block, before it). Returns how many computed nodes' costs differ, or UINT64_MAX without
 // memory.
@@ -822,22 +844,28 @@ static void tier1_select_test_plan_execute(Tier1SelectTest* test, const IrFuncti
     const uint64_t mark = output->length;
     Tier1SelectPlan vector;
     Tier1SelectPlan scalar;
+    Tier1SelectPlan reference;
     uint32_t node;
     const Tier1SelectError ve = tier1_select_plan(function, 0, output, scratch, true, &vector, &node);
     const Tier1SelectError se = tier1_select_plan(function, 0, output, scratch, false, &scalar, &node);
-    tier1_select_test_expect(test, ve == TIER1_SELECT_OK && se == TIER1_SELECT_OK, "real IR produces both selection covers");
-    if (ve == TIER1_SELECT_OK && se == TIER1_SELECT_OK)
+    const Tier1SelectError re = tier1_select_test_plan_munch(function, 0, output, scratch, &reference, &node);
+    tier1_select_test_expect(test, ve == TIER1_SELECT_OK && se == TIER1_SELECT_OK && re == TIER1_SELECT_OK, "real IR produces both costed covers and the independent reference");
+    if (ve == TIER1_SELECT_OK && se == TIER1_SELECT_OK && re == TIER1_SELECT_OK)
     {
         tier1_select_test_expect(test, tier1_select_test_plan_again(function, 0, &vector, false, output, scratch) && tier1_select_test_plan_again(function, 0, &scalar, false, output, scratch),
                                  "a verified function's plan without verification is the same, by both paths");
-        tier1_select_test_expect(test, vector.estimated_cost <= scalar.estimated_cost, "bottom-up cover never costs more than maximal munch, in the grammar's cost");
-        tier1_select_test_expect(test, tier1_select_test_plan_costs(&scalar, scratch) == 0, "each computed node's cost is its pattern's subtree cost, by the scalar path");
-        const Tier1SelectPlan* plans[] = {&vector, &scalar};
+        tier1_select_test_expect(test, tier1_select_test_plans_equal(&vector, &scalar), "both host paths publish identical patterns, costs, coverage and effective uses");
+        tier1_select_test_expect(test, vector.estimated_cost <= reference.estimated_cost, "bottom-up cover never costs more than maximal munch, in the grammar's cost");
+        tier1_select_test_expect(test, tier1_select_test_plan_costs(&reference, scratch) == 0, "the independent reference's costs are its patterns' subtree costs");
+        const Tier1SelectPlan* plans[] = {&vector, &scalar, &reference};
+        Tier1SelectCode codes[3] = {0};
+        bool emitted[3] = {false};
         uint64_t random = UINT64_C(0x7a87b0c525ee96fb);
-        for (uint32_t path = 0; path < 2; path += 1)
+        for (uint32_t path = 0; path < BUSTER_ARRAY_LENGTH(plans); path += 1)
         {
-            Tier1SelectCode code;
-            const Tier1SelectError error = tier1_select_emit(plans[path], registers, test->allowed, output, &code, &node);
+            const Tier1SelectError error = tier1_select_emit(plans[path], registers, test->allowed, output, &codes[path], &node);
+            const Tier1SelectCode code = codes[path];
+            emitted[path] = error == TIER1_SELECT_OK;
             tier1_select_test_expect(test, error == TIER1_SELECT_OK, "real plan emits allocated records");
             if (error == TIER1_SELECT_OK)
             {
@@ -856,10 +884,19 @@ static void tier1_select_test_plan_execute(Tier1SelectTest* test, const IrFuncti
                     const uint64_t c = tier1_select_test_random(&random);
                     const uint64_t wanted = tier1_select_test_interpret(function, a, b, c);
                     const uint64_t actual = tier1_select_test_call(test, a, b, c);
-                    tier1_select_test_expect(test, actual == wanted, "both selected functions execute like original IR");
+                    tier1_select_test_expect(test, actual == wanted, "costed covers and independent maximal munch execute like original IR");
                 }
             }
         }
+        const Tier1SelectCode* v = &codes[0];
+        const Tier1SelectCode* s = &codes[1];
+        const uint32_t count = function->instruction_count;
+        const bool same = emitted[0] && emitted[1] && v->count == s->count && v->branch_count == s->branch_count && v->unknown_costs == s->unknown_costs &&
+                          memcmp(v->records, s->records, (uint64_t)v->count * sizeof(X86Instruction)) == 0 &&
+                          memcmp(v->cost_ids, s->cost_ids, v->count) == 0 && memcmp(v->node_first, s->node_first, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0 &&
+                          (v->branch_count == 0 || (memcmp(v->branches, s->branches, (uint64_t)v->branch_count * sizeof(uint32_t)) == 0 &&
+                                                    memcmp(v->targets, s->targets, (uint64_t)v->branch_count * sizeof(uint32_t)) == 0));
+        tier1_select_test_expect(test, same, "both host paths emit identical records, cost metadata and branch maps");
     }
     arena_pop_to(output, mark);
 }
@@ -3985,8 +4022,8 @@ static uint32_t tier1_select_test_reciprocal_walk(Tier1SelectTest* test, uint8_t
 }
 
 // Two divisions of a and b by one constant `divisor` at `width`, whose constant, used twice, folds into neither as a tree
-// child: both paths must still choose the constant divisor's rule over div and idiv, as the costed cover does
-// (tier1_select_munch), for a power of two's rules and a reciprocal alike.
+// child: both costed paths and the independent maximal-munch reference must still choose the constant divisor's rule
+// over div and idiv, for a power of two's rules and a reciprocal alike.
 static void tier1_select_test_shared_divisor(Tier1SelectTest* test, uint8_t op, uint32_t width, uint64_t divisor, uint8_t rule, Arena* input, Arena* output, Arena* scratch)
 {
     const uint8_t type = width == 4 ? IR_I32 : IR_I64;
@@ -4014,19 +4051,23 @@ static void tier1_select_test_shared_divisor(Tier1SelectTest* test, uint8_t op, 
         tier1_select_test_node(&function, 4, op, type, 1, 2, BUSTER_IR_NONE);
         tier1_select_test_node(&function, 5, IR_ADD, type, 3, 4, BUSTER_IR_NONE);
         tier1_select_test_node(&function, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        Tier1SelectPlan plans[2];
+        Tier1SelectPlan plans[3];
         bool planned = true;
-        for (uint32_t path = 0; path < 2; path += 1)
+        for (uint32_t path = 0; path < BUSTER_ARRAY_LENGTH(plans); path += 1)
         {
             uint32_t failed = 0;
-            planned &= tier1_select_plan(&function, 0, output, scratch, path == 0, &plans[path], &failed) == TIER1_SELECT_OK;
+            const Tier1SelectError error = path == 2 ? tier1_select_test_plan_munch(&function, 0, output, scratch, &plans[path], &failed) :
+                                                      tier1_select_plan(&function, 0, output, scratch, path == 0, &plans[path], &failed);
+            planned &= error == TIER1_SELECT_OK;
         }
         tier1_select_test_expect(test, planned, "shared divisor fixture selects");
         for (uint32_t node = 3; planned && node <= 4; node += 1)
         {
-            tier1_select_test_expect(test, plans[0].patterns[node].rule == rule && plans[1].patterns[node].rule == rule && plans[0].patterns[node].values[1] == BUSTER_IR_NONE &&
-                                               plans[1].patterns[node].values[1] == BUSTER_IR_NONE,
-                                     "both paths choose a shared constant divisor's rule over div and idiv");
+            for (uint32_t path = 0; path < BUSTER_ARRAY_LENGTH(plans); path += 1)
+            {
+                tier1_select_test_expect(test, plans[path].patterns[node].rule == rule && plans[path].patterns[node].values[1] == BUSTER_IR_NONE,
+                                         "costed paths and the reference choose a shared constant divisor's rule over div and idiv");
+            }
         }
     }
     arena_pop_to(output, 0);

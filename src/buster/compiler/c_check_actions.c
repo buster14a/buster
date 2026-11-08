@@ -1435,6 +1435,19 @@ static uint32_t check_action_fold_integer(CheckIntegerFold fold, CheckValue* val
     return check_action_fold_integer_result(fold, value, answer, fault);
 }
 
+// A folded operation's NaN as clang's APFloat makes it, in every floating format (#1473): the first NaN operand's sign
+// and payload, quieted, or for an invalid operation on non-NaNs (inf + -inf, 0 * inf, 0 / 0, inf / inf) the positive
+// canonical NaN. The host's SSE and x87 give their negative indefinite NaN instead, and may take either NaN operand.
+static long double check_action_fold_nan(const CheckValue* a, const CheckValue* b)
+{
+    long double result = isnan(a->floating) ? a->floating : isnan(b->floating) ? b->floating : __builtin_nanl("");
+    uint64_t significand = 0;
+    memcpy(&significand, &result, sizeof(significand));
+    significand |= UINT64_C(1) << 62;
+    memcpy(&result, &significand, sizeof(significand));
+    return result;
+}
+
 static void check_action_fold_floating(CheckOp op, const CheckValue* a, const CheckValue* b, CheckValue* value, uint32_t node, bool constant_evaluated)
 {
     long double number = 0;
@@ -1491,16 +1504,6 @@ static void check_action_fold_floating(CheckOp op, const CheckValue* a, const Ch
         // Only required constant evaluation rounds each arithmetic node to its half format. Runtime chains keep
         // their excess precision. x87's precision and exponent range suffice for both formats' finite operations.
         BUSTER_CHECK_REAL_OPERATION(long double);
-        if (!integer && isnan(number))
-        {
-            // APFloat keeps the first NaN operand's sign/payload, quieted; an invalid operation on non-NaNs makes
-            // a positive canonical NaN. x87 can choose another operand or make its negative indefinite NaN.
-            number = isnan(a->floating) ? a->floating : isnan(b->floating) ? b->floating : __builtin_nanl("");
-            uint64_t significand = 0;
-            memcpy(&significand, &number, sizeof(significand));
-            significand |= UINT64_C(1) << 62;
-            memcpy(&number, &significand, sizeof(significand));
-        }
         number = integer ? number : check_action_round_float(a->type, number);
     }
     else
@@ -1508,6 +1511,10 @@ static void check_action_fold_floating(CheckOp op, const CheckValue* a, const Ch
         supported = false;
     }
 #undef BUSTER_CHECK_REAL_OPERATION
+    if (supported && !sign && !integer && isnan(number))
+    {
+        number = check_action_fold_nan(a, b);
+    }
     if (!supported)
     {
         check_action_set_fault(value, CHECK_FAULT_UNSUPPORTED_CONSTANT, node);

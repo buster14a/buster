@@ -1830,6 +1830,50 @@ decoders' refusal; so does a valid delimited `\u{…}`, which the decoders
 don't read either. Like the checker's other errors, the
 first one ends the unit's semantic diagnostics after its declaration.
 
+### Evaluated literals' escapes (#1447)
+
+The checker's literal decoding (`check_literal_strings_by`,
+`check_literal_character`, and the string blocks' vector path) refuses what it
+doesn't read. Clang takes some of that in an evaluated literal: delimited
+escapes (`\x{…}`, `\o{…}`, `\u{…}`), GNU's `\E` (27, as `\e`), and an unknown
+escape, whose character is its value, with -Wunknown-escape-sequence's warning
+at its backslash (`\(`, `\{`, `\[` and `\%` without one, as clang words those
+only under -pedantic). On a refused literal's cold path alone, the reader
+decodes it again with them (`check_literal_strings_extended`,
+`check_literal_character_by`'s `extended`, which the hot callers' constant
+false compiles out) and, where that takes it, gives each unknown escape's
+warning (`check_input_unknown_escapes`, `CHECK_WARNING_EVENT_UNKNOWN_ESCAPE`,
+published at its offset in the token).
+
+A literal the extended decoding refuses too is worded by the driver as clang's
+(`check_driver_literal_escapes`): its escapes' diagnostics in source order
+through its concatenated tokens (`check_literal_evaluated_escapes`, the
+unevaluated literals' printer `check_driver_escape`), a numeric escape's range
+by the literal's code unit (a byte, a `u` literal's 16 bits, none for `U` and
+`L`), the universal character names' and the delimited escapes' errors as
+above; a character constant's character past its type ("character too large
+for enclosing character literal type"), or several characters in a wide or
+Unicode one ("wide character literals may not contain multiple characters",
+"Unicode character literals ..."). A named universal character name (`\N{…}`)
+is still the checker's own refusal. A string literal's own refusal stands for
+its declaration's (`check_input_initializer_prepare_slow`) and its asm
+statement's, so neither adds "invalid or unsupported declaration". An asm
+statement's strings and an asm label's, which clang reads as evaluated
+literals, decode the same way: the label through `check_input_attribute_string`'s
+`evaluated`. A static assertion's message stays the unevaluated literals'
+(`check_driver_escapes`). After a unit's parse error, the driver's scan of the
+unparsed rest (`check_driver_unparsed_strings`) words the evaluated literals'
+errors too. After a checker error, the first ends the unit's semantic
+diagnostics as the others do, so clang's later literal errors there are still
+missing (semantic error recovery).
+
+An ordinary character constant of more than one character
+(`CheckLiteral.characters`) has clang's warnings at it
+(`check_input_multichar`): -Wmultichar's "multi-character character constant",
+for exactly four characters -Wfour-char-constants' (ignored by default), and
+past four "character constant too long for its type" too, its value the last
+four.
+
 ### Large integer literal tables (#658)
 
 `c_check_literal_table_input.c` recognizes file-scope integer arrays with at least

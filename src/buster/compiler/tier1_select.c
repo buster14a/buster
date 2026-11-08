@@ -2268,14 +2268,14 @@ struct Tier1SelectPlan
     uint32_t* effective_use_offsets;
     uint32_t* effective_use_values;
     uint32_t effective_use_count;
-    // The scalar path's subtree costs: each node's pattern's intrinsic cost and its distinct tree children's costs
-    // (tier1_select_pattern_cost), its candidates made children first. Nothing reads them after the plan: munch ranks by
-    // rule and folds, and estimated_cost sums the intrinsic costs. The vector path makes most patterns before their tree
-    // children's (the walk back), so its column counts a tree child's cost only where the child's pattern was made first,
-    // and a covered node's is 0.
+    // Candidate construction's working costs (tier1_select_pattern_cost). Both production paths build most patterns
+    // before their tree children's (the walk back), so a tree child's cost is included only where its pattern was made
+    // first; a covered node's unbuilt pattern has cost 0. The BURS tables choose the cover independently of this column,
+    // and estimated_cost sums the selected patterns' intrinsic costs. The tests' maximal-munch reference builds children
+    // first, so its column contains complete subtree costs.
     // Working the subtree costs out again children first took selection on the frozen sqlite3.c from 222.9 core cycles
     // per IR instruction to 241.3 (the 9700X, #1117's review), for a column nothing reads; a consumer that needs them on
-    // the vector path works them out so.
+    // either production path works them out so.
     uint32_t* costs;
     uint64_t estimated_cost;
     uint64_t arena_bytes;
@@ -3868,10 +3868,10 @@ static inline __attribute__((always_inline)) bool tier1_select_memory(const Tier
     return address.folds != 0;
 }
 
-// Inlined at each of its two calls, the scalar path's batch (tier1_select_cover_munch) and the bottom-up path's pattern
+// Inlined at each of its two calls, the test reference's batch (tier1_select_cover_munch) and the bottom-up path's pattern
 // (tier1_select_burs_pattern), and so are its helpers (tier1_select_add_candidate, tier1_select_memory,
 // tier1_select_load_folds), whose inlining clang decided by their callers. With a second caller, clang outlined it, its
-// 356 bytes returned through memory, and inlined fewer of its helpers: the scalar path's selection took 304 core cycles
+// 356 bytes returned through memory, and inlined fewer of its helpers: the former scalar maximal-munch path took 304 core cycles
 // per IR instruction on the frozen sqlite3.c and 841 instructions, against 274 and 747 before the second caller and 276
 // and 752 inlined by force, in tier1_select_cover_munch (benchmark-tier1-select-source, the 9700X). One copy out of line
 // for both calls took 300 and 815.
@@ -5098,8 +5098,8 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     return candidates;
 }
 
-// The scalar oracle is maximal munch: most covered nodes first. A switch fixes ties independently of the vector
-// minimum-cost selection. Both share legality, not the choice of cheapest cover. Both prefer a power-of-two
+// Maximal munch: most covered nodes first. A switch fixes ties independently of minimum-cost selection. This is both
+// paths' fallback outside the BURS grammar and the tests' independent reference cover. Both prefer a power-of-two
 // multiply's shift to its three-operand immediate IMUL (#1217's latency penalty). A
 // division by a register ranks below every rule for a constant divisor, which covers its constant even where the
 // constant has other uses (and so doesn't count among the folds), as the costed cover always prefers them.
@@ -5186,9 +5186,9 @@ static __attribute__((noinline)) bool tier1_select_burs_pattern(const Tier1Selec
     return valid;
 }
 
-// The scalar path's cover, and a host's without the vector path: each node's candidates, a depth level at a time, 16 nodes
-// a batch, and maximal munch's choice (tier1_select_munch). Returns the first node in the levels' order without a
-// candidate as the error's. A function of its own (#141): inside the plan, where the bottom-up path's columns are live
+// The tests' independent maximal-munch cover: each node's candidates, a depth level at a time, 16 nodes a batch, and
+// tier1_select_munch's choice. Neither production path uses this cover. Returns the first node in the levels' order
+// without a candidate as the error's. A function of its own (#141): inside the plan, where the bottom-up path's columns are live
 // across it, its inlined candidates spilled, 37 more instructions per IR instruction on the frozen sqlite3.c.
 static __attribute__((noinline)) Tier1SelectError tier1_select_cover_munch(const Tier1SelectForest* forest, const uint32_t* level_offsets, const uint32_t* level_nodes, uint32_t maximum_depth,
                                                                            Tier1SelectPlan* plan, uint32_t* failed_node)
@@ -5282,7 +5282,9 @@ static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1
     return pending_count;
 }
 
-static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, bool verify, Tier1SelectPlan* result, uint32_t* error_node)
+// `costed` is true for both public entry points. Tests may set it false for the independent maximal-munch reference;
+// `vector` changes only kernel implementations, never the cover's cost model or tie-breaking.
+static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, bool verify, bool costed, Tier1SelectPlan* result, uint32_t* error_node)
 {
     (void)vector;
 
@@ -5484,19 +5486,20 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         .known_bits = known_bits,
         .vectors = error == TIER1_SELECT_OK && ir_function_has_vectors_path(function, vector),
     };
-    // The vector path's cover is the bottom-up rewrite's (tier1_select_burs.c): each node's class and visible children,
-    // its state a depth level at a time, and its rule. The patterns of the nodes whose operators the grammar doesn't cover
-    // are munch's, made here in the levels' order, as the scalar path makes every node's, so that a node either path
-    // refuses is refused at the same place; the others' are made as the code needs them, in the walk below.
-    // A host without the vector path (BUSTER_VECTOR_PATH) takes the scalar path's munch alone.
-    const bool burs = error == TIER1_SELECT_OK && BUSTER_VECTOR_PATH(vector);
+    // Both host paths use the bottom-up rewrite's cover (tier1_select_burs.c): each node's class and visible children,
+    // its state, and its rule. The independent scalar kernels visit nodes one at a time; the vector kernels label depth
+    // levels in batches. Both read the same grammar's costs and tie-breaks. Nodes outside that grammar take munch's,
+    // made in the levels' order on either path so that unsupported nodes are refused at the same place. Other patterns
+    // are made as the code needs them, in the walk below. Only the tests' reference disables the costed cover.
+    const bool burs = error == TIER1_SELECT_OK && costed;
     uint32_t* classes = 0;
     uint32_t* rules = 0;
     uint8_t* built = 0;
-#if BUSTER_HOST_VECTOR
     uint32_t* kids = 0;
     uint32_t* states = 0;
+#if BUSTER_HOST_VECTOR
     uint32_t* words = 0;
+#endif
     if (burs)
     {
         bool ok = tier1_select_initialize();
@@ -5506,14 +5509,27 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         states = ir_allocate(scratch, count, 4, &ok);
         rules = ir_allocate(scratch, count, 4, &ok);
         built = ir_allocate(scratch, count, 1, &ok);
-        words = ir_allocate(scratch, count, 4, &ok);
+#if BUSTER_HOST_VECTOR
+        words = BUSTER_VECTOR_PATH(vector) ? ir_allocate(scratch, count, 4, &ok) : 0;
+#endif
         error = ok || error != TIER1_SELECT_OK ? error : TIER1_SELECT_ERROR_MEMORY;
     }
     if (burs && error == TIER1_SELECT_OK)
     {
-        tier1_burs_classify_vector(&forest, users, words, classes, kids);
-        tier1_burs_label_vector(maximum_depth, level_offsets, level_nodes, count, classes, kids, states);
-        tier1_burs_rules_vector(count, classes, states, rules);
+#if BUSTER_HOST_VECTOR
+        if (vector)
+        {
+            tier1_burs_classify_vector(&forest, users, words, classes, kids);
+            tier1_burs_label_vector(maximum_depth, level_offsets, level_nodes, count, classes, kids, states);
+            tier1_burs_rules_vector(count, classes, states, rules);
+        }
+        else
+#endif
+        {
+            tier1_burs_classify_scalar(&forest, users, classes, kids);
+            tier1_burs_label_scalar(count, classes, kids, states);
+            tier1_burs_rules_scalar(count, classes, states, rules);
+        }
         const Tier1SelectPattern none = {
             .values = {BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE},
             .stack_object = BUSTER_IR_NONE,
@@ -5523,7 +5539,6 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             plan.patterns[node] = none;
         }
     }
-#endif
     for (uint32_t position = 0; burs && error == TIER1_SELECT_OK && position < count; position += 1)
     {
         const uint32_t node = level_nodes[position];
@@ -5650,7 +5665,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
 // first, which refuses what the plan can't read.
 static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, Tier1SelectPlan* result, uint32_t* error_node)
 {
-    return tier1_select_plan_checked(function, dominance, output, scratch, vector, true, result, error_node);
+    return tier1_select_plan_checked(function, dominance, output, scratch, vector, true, true, result, error_node);
 }
 
 // The plan of a function its caller has verified with `dominance`, as ir_optimize verifies its result: the same plan as
@@ -5658,7 +5673,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
 // cycles (#141). Unverified IR here may be read outside its columns.
 static Tier1SelectError tier1_select_plan_verified(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, Tier1SelectPlan* result, uint32_t* error_node)
 {
-    return tier1_select_plan_checked(function, dominance, output, scratch, vector, false, result, error_node);
+    return tier1_select_plan_checked(function, dominance, output, scratch, vector, false, true, result, error_node);
 }
 
 static X86Instruction tier1_select_memory_holes(const Tier1SelectPattern* pattern, const uint8_t* registers, uint32_t first)
