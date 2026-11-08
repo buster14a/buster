@@ -177,11 +177,13 @@ typedef uint32_t TypeId;
 #define BUSTER_TYPE_KIND_VECTOR 12
 #define BUSTER_TYPE_KIND_EXT_VECTOR 13
 #define BUSTER_TYPE_KIND_ATOMIC 14
+#define BUSTER_TYPE_KIND_STRUCT 15
+#define BUSTER_TYPE_KIND_UNION 16
+#define BUSTER_TYPE_KIND_ENUM 17
+// The wrappers, the last kinds, so that one compare finds either (BUSTER_TYPE_KIND_WRAPPERS, #1447): the readers look
+// through them, their base being the type with their qualifiers.
 // A typedef's aligned attribute: its base type with another alignment, higher or lower (clang's __m128i_u).
-#define BUSTER_TYPE_KIND_ALIGNED 15
-#define BUSTER_TYPE_KIND_STRUCT 16
-#define BUSTER_TYPE_KIND_UNION 17
-#define BUSTER_TYPE_KIND_ENUM 18
+#define BUSTER_TYPE_KIND_ALIGNED 18
 // clang's extended qualifiers (#1447): its base type, unqualified, with an address space and a garbage collection
 // qualifier (extent, a word of BUSTER_TYPE_SPACE_* and BUSTER_TYPE_GC_*), part of the type's identity as const is. Its size,
 // alignment, code and completeness are its base's, and the readers look through it as through ALIGNED
@@ -189,8 +191,9 @@ typedef uint32_t TypeId;
 // clang's canonical types have them) or a function; an ALIGNED type's base may be QUALIFIED.
 #define BUSTER_TYPE_KIND_QUALIFIED 19
 #define BUSTER_TYPE_KIND_COUNT 20
-// The kinds that the readers look through: their base is the type, with their qualifiers.
-#define BUSTER_TYPE_WRAPPER_KINDS ((1u << BUSTER_TYPE_KIND_ALIGNED) | (1u << BUSTER_TYPE_KIND_QUALIFIED))
+// The first of the kinds that the readers look through, every kind from it a wrapper.
+#define BUSTER_TYPE_KIND_WRAPPERS BUSTER_TYPE_KIND_ALIGNED
+_Static_assert(BUSTER_TYPE_KIND_QUALIFIED == BUSTER_TYPE_KIND_ALIGNED + 1 && BUSTER_TYPE_KIND_COUNT == BUSTER_TYPE_KIND_QUALIFIED + 1, "the wrappers are the last kinds");
 
 // A QUALIFIED type's word. The address space is clang's LangAS as C on x86-64 has it: 0 the default, then OpenCL's
 // (opencl_global to opencl_global_host, which C takes as attributes), then a target's `address_space(N)` as
@@ -1406,7 +1409,7 @@ static __attribute__((noinline)) uint32_t type_unwrapped_index(const TypeTable* 
 static uint32_t type_resolved_index(const TypeTable* table, TypeId type)
 {
     uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
-    if (__builtin_expect((BUSTER_TYPE_WRAPPER_KINDS >> table->types.kind[index] & 1) != 0, 0))
+    if (__builtin_expect(table->types.kind[index] >= BUSTER_TYPE_KIND_WRAPPERS, 0))
     {
         index = type_unwrapped_index(table, index);
     }
@@ -1449,7 +1452,7 @@ static uint8_t type_arithmetic_code(const TypeTable* table, TypeId type)
 static TypeId type_strip_aligned(const TypeTable* table, TypeId type)
 {
     TypeId result = type;
-    if (__builtin_expect((BUSTER_TYPE_WRAPPER_KINDS >> type_kind(table, type) & 1) != 0, 0))
+    if (__builtin_expect(type_kind(table, type) >= BUSTER_TYPE_KIND_WRAPPERS, 0))
     {
         result = (TypeId)type_unwrapped_index(table, type >> BUSTER_TYPE_INDEX_SHIFT) << BUSTER_TYPE_INDEX_SHIFT | type_qualifiers(type);
     }
@@ -1466,14 +1469,21 @@ static TypeId type_strip_alignment(const TypeTable* table, TypeId type)
     return result;
 }
 
-static uint32_t type_extended_qualifiers(const TypeTable* table, TypeId type)
+// A wrapper's word, out of line: the compare before it is the readers' whole cost (#1447).
+static __attribute__((noinline)) uint32_t type_wrapper_qualifiers(const TypeTable* table, uint32_t index)
+{
+    uint32_t at = index;
+    at = table->types.kind[at] == BUSTER_TYPE_KIND_ALIGNED ? table->types.base[at] >> BUSTER_TYPE_INDEX_SHIFT : at;
+    return table->types.kind[at] == BUSTER_TYPE_KIND_QUALIFIED ? (uint32_t)table->types.extent[at] : 0;
+}
+
+// Inlined everywhere, as type_strip_aligned (#1447): one compare where the type is no wrapper.
+static inline __attribute__((always_inline)) uint32_t type_extended_qualifiers(const TypeTable* table, TypeId type)
 {
     uint32_t result = 0;
-    if (__builtin_expect((BUSTER_TYPE_WRAPPER_KINDS >> type_kind(table, type) & 1) != 0, 0))
+    if (__builtin_expect(type_kind(table, type) >= BUSTER_TYPE_KIND_WRAPPERS, 0))
     {
-        uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
-        index = table->types.kind[index] == BUSTER_TYPE_KIND_ALIGNED ? table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT : index;
-        result = table->types.kind[index] == BUSTER_TYPE_KIND_QUALIFIED ? (uint32_t)table->types.extent[index] : 0;
+        result = type_wrapper_qualifiers(table, type >> BUSTER_TYPE_INDEX_SHIFT);
     }
     return result;
 }
@@ -1496,7 +1506,7 @@ static bool type_kind_is_array(uint8_t kind)
     return kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY;
 }
 
-static uint32_t type_object_qualifiers(const TypeTable* table, TypeId type)
+static __attribute__((noinline)) uint32_t type_object_qualifiers_slow(const TypeTable* table, TypeId type)
 {
     TypeId current = type;
     TypeId stripped = type_strip_aligned(table, current);
@@ -1506,6 +1516,13 @@ static uint32_t type_object_qualifiers(const TypeTable* table, TypeId type)
         stripped = type_strip_aligned(table, current);
     }
     return type_extended_qualifiers(table, current);
+}
+
+// Inlined everywhere (#1447): a type that is no wrapper or array has none, which a load and two compares say.
+static inline __attribute__((always_inline)) uint32_t type_object_qualifiers(const TypeTable* table, TypeId type)
+{
+    const uint8_t kind = type_kind(table, type);
+    return __builtin_expect(kind >= BUSTER_TYPE_KIND_WRAPPERS || type_kind_is_array(kind), 0) ? type_object_qualifiers_slow(table, type) : 0;
 }
 
 // Whether the x86-64 psABI aligns a variable of `type` to at least 16 bytes (§3.1.2, clang's large arrays in

@@ -5717,6 +5717,17 @@ static bool check_input_objc_takes(const TypeTable* types, uint32_t kind, TypeId
 // step_types where `rebuild`, the last the new whole type. Whether it can: no function's level outside `at`, and the
 // outermost level's type the whole type (no attribute after the declarator changed it). Iterative, its levels at most
 // check_input_attribute_objc's 64.
+// clang's BuildCompoundLiteralExpr (#1447): a function's compound literal with an address space, its error at its `(`.
+static __attribute__((noinline)) bool check_input_compound_space(CheckInputReader* reader, uint32_t open, TypeId type)
+{
+    const bool result = type_address_space(type_object_qualifiers(reader->types, type)) != 0;
+    if (result)
+    {
+        check_input_report(reader, open, CHECK_INPUT_ADDRESS_SPACE_COMPOUND);
+    }
+    return result;
+}
+
 static bool check_input_objc_requalify(TypeTable* types, TypeId* step_types, const uint8_t* step_kinds, uint32_t at, uint32_t steps, TypeId whole, bool rebuild)
 {
     bool result = at < steps && (rebuild || step_types[steps - 1] == whole);
@@ -5963,7 +5974,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 }
             }
             frame->group_noderef = frame->group && check_input_noderef_new_attributes(frame->attributes, 0);
-            frame->leading_attributes = frame->group && frame->attributes != NULL ? check_input_spaces_claim(frame->attributes, 0) : 0;
+            frame->leading_attributes = frame->group && frame->attributes != NULL && frame->attributes->count != 0 ? check_input_spaces_claim(frame->attributes, 0) : 0;
             while (i < frame->end && parser->tokens.kinds[i] == PARSE_KIND_STAR)
             {
                 const uint32_t token = i;
@@ -5991,7 +6002,8 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                         break;
                     }
                 }
-                const uint32_t space_end = frame->attributes != NULL ? check_input_spaces_claim(frame->attributes, attribute_first) : 0;
+                const uint32_t space_end = frame->attributes != NULL && frame->attributes->count > attribute_first ?
+                                           check_input_spaces_claim(frame->attributes, attribute_first) : attribute_first;
                 parts[part_count] = (CheckDeclaratorPart)
                 {
                     .next = frame->pointers,
@@ -10237,10 +10249,9 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                     const uint32_t body = close + 1;
                     const uint32_t body_end = body < parser->tokens.count ? parser->tree.parents[body] : parser->tokens.count;
                     const uint8_t type_kind_value = type_kind(reader->types, type);
-                    if (reader->function_result != 0 && type_address_space(type_object_qualifiers(reader->types, type)) != 0)
+                    if (reader->function_result != 0 && __builtin_expect(type_object_qualifiers(reader->types, type) != 0, 0) &&
+                        check_input_compound_space(reader, i, type))
                     {
-                        // clang's BuildCompoundLiteralExpr (#1447): a function's compound literal with an address space.
-                        check_input_report(reader, i, CHECK_INPUT_ADDRESS_SPACE_COMPOUND);
                     }
                     else if (body_end < parser->tokens.count && parser->tree.roles[body] == PARSE_ROLE_OPEN_COMPOUND_BODY &&
                              type_kind_value != BUSTER_TYPE_KIND_FUNCTION && type_kind_value != BUSTER_TYPE_KIND_VOID)

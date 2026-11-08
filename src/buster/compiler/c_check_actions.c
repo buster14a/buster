@@ -1200,6 +1200,39 @@ static bool check_action_nested_qualifiers(const TypeTable* table, TypeId left, 
     return answer == TYPE_ANSWER_YES;
 }
 
+// check_action_assignable_mode's pointees of other extended qualifiers (#1447), as clang's compatiblyIncludes takes them:
+// an address space the target's doesn't include is an error (REFUSED, diagnosed but where `strict`); a garbage
+// collection qualifier may be added or dropped, but changed only with the qualifiers' warning, which a void pointee's
+// conversion doesn't give. Pointees of one type but those qualifiers are ACCEPTED (clang compares them without them);
+// any other conversion goes on as the qualifiers' (SAME).
+#define CHECK_EXTENDED_SAME 0u
+#define CHECK_EXTENDED_REFUSED 1u
+#define CHECK_EXTENDED_ACCEPTED 2u
+static __attribute__((noinline)) uint32_t check_action_extended_pointees(const TypeTable* table, TypeId to, TypeId from, uint32_t to_word, uint32_t from_word,
+                                                                         bool strict, const CheckAction* action, CheckActionResult* result, uint32_t* warning)
+{
+    const bool to_void = check_action_kind(table, to) == BUSTER_TYPE_KIND_VOID;
+    const bool from_void = check_action_kind(table, from) == BUSTER_TYPE_KIND_VOID;
+    const uint32_t to_gc = to_word & BUSTER_TYPE_GC_MASK;
+    const uint32_t from_gc = from_word & BUSTER_TYPE_GC_MASK;
+    uint32_t verdict = CHECK_EXTENDED_SAME;
+    *warning |= to_gc != 0 && from_gc != 0 && to_gc != from_gc && !to_void && !from_void ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
+    if (!type_space_includes(type_address_space(to_word), type_address_space(from_word)))
+    {
+        verdict = CHECK_EXTENDED_REFUSED;
+        if (!strict)
+        {
+            check_action_diagnose(result, CHECK_DIAG_ADDRESS_SPACE, UINT32_MAX);
+        }
+    }
+    else if (!to_void && !from_void &&
+             check_action_compatible_at(table, type_unqualified(type_strip_aligned(table, to)), type_unqualified(type_strip_aligned(table, from)), action, result))
+    {
+        verdict = CHECK_EXTENDED_ACCEPTED;
+    }
+    return verdict;
+}
+
 // Pointer assignment as clang's checkPointerTypesForAssignment decides it in every language mode: the pointees'
 // qualifiers may only be added, but losing one only warns, and so do pointees that differ only in signedness and
 // pointers to pointers whose levels' qualifiers differ. void * converts to and from any object pointer, and to and
@@ -1238,26 +1271,17 @@ static inline __attribute__((always_inline)) bool check_action_assignable_mode(c
         const bool function = tk == BUSTER_TYPE_KIND_FUNCTION || fk == BUSTER_TYPE_KIND_FUNCTION;
         uint32_t warning = (type_qualifiers(from) & ~type_qualifiers(to)) == 0 ? 0 : CHECK_WARNING_DISCARDED_QUALIFIERS;
         bool extension = false;
-        // The pointees' extended qualifiers (#1447), an array's its element's, as clang's compatiblyIncludes takes them: an
-        // address space the target's doesn't include is an error; a garbage collection qualifier may be added or dropped,
-        // but changed only with the qualifiers' warning, which a void pointee's conversion doesn't give.
+        // The pointees' extended qualifiers (#1447), an array's its element's: where they differ, out of line
+        // (check_action_extended_pointees).
         const uint32_t to_word = type_object_qualifiers(table, to);
         const uint32_t from_word = type_object_qualifiers(table, from);
-        const bool spaces = __builtin_expect(to_word != from_word, 0) && !type_space_includes(type_address_space(to_word), type_address_space(from_word));
-        const bool gc = __builtin_expect(to_word != from_word, 0) && (to_word & BUSTER_TYPE_GC_MASK) != 0 && (from_word & BUSTER_TYPE_GC_MASK) != 0 &&
-                        (to_word & BUSTER_TYPE_GC_MASK) != (from_word & BUSTER_TYPE_GC_MASK);
-        warning |= gc && tk != BUSTER_TYPE_KIND_VOID && fk != BUSTER_TYPE_KIND_VOID ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
-        if (spaces)
+        const uint32_t extended = __builtin_expect(to_word != from_word, 0) ?
+                                  check_action_extended_pointees(table, to, from, to_word, from_word, strict, action, result, &warning) : CHECK_EXTENDED_SAME;
+        if (extended == CHECK_EXTENDED_REFUSED)
         {
-            if (!strict)
-            {
-                check_action_diagnose(result, CHECK_DIAG_ADDRESS_SPACE, UINT32_MAX);
-            }
         }
-        else if (__builtin_expect(to_word != from_word, 0) && check_action_kind(table, to) != BUSTER_TYPE_KIND_VOID && fk != BUSTER_TYPE_KIND_VOID &&
-                 check_action_compatible_at(table, type_unqualified(type_strip_aligned(table, to)), type_unqualified(type_strip_aligned(table, from)), action, result))
+        else if (extended == CHECK_EXTENDED_ACCEPTED)
         {
-            // Pointees of one type but their extended qualifiers, which clang compares without them.
             accepted = true;
         }
         else if (tk == BUSTER_TYPE_KIND_VOID || fk == BUSTER_TYPE_KIND_VOID)
