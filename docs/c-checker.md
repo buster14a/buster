@@ -1735,7 +1735,7 @@ sees what follows it. Masks of plain bytes, simple escapes, `\x` with one or
 two digits and octal escapes of one to three digits leave each unit's value in
 its first byte; `vpcompressb` packs them and a masked store writes their count.
 The blocks leave to the scalar step, stopping before it, a universal character
-name or `\N{}`, `\x` with no digit or more than two, an octal escape past 255,
+name (`\N{}`'s too), `\x` with no digit or more than two, an octal escape past 255,
 a quote, line break or NUL, and the unit holding the first byte UTF-8
 validation (Keiser and Lemire's, run only on a block with a byte past 127)
 rejects. A block takes at most 60 bytes unless it is the part's last, so every
@@ -1786,8 +1786,16 @@ The universal character names valid there are those clang's
   cannot be specified by a universal character name".
 - **Delimited `\u{…}`:** the delimited escapes' errors, and an overflow is
   "hex escape sequence out of range".
-- **Named `\N{…}`:** only its braces are checked ("expected '{' after '\N'
-  escape sequence", incomplete, empty).
+- **Named `\N{…}`** (#1447): its braces ("expected '{' after '\N' escape
+  sequence", incomplete, empty; a line break ends its name too), then its name,
+  exactly Unicode's (`unicode_name_strict`), else "'x' is not a valid Unicode
+  character name" at the name with clang's notes (`unicode_name_diagnose`: the
+  first byte no name has, "character x cannot appear in a Unicode character
+  name"; then where the name is one loosely, that names are sensitive to case
+  and whitespace; else, where every byte may be a name's, "did you mean NAME
+  (C)?" for the nearest names by the edit distance of their letters and digits,
+  while each is at most 3 farther than the one before), then its character as
+  a numeric one's.
 
 Such an error drops the construct as the others do, with no unevaluated error.
 
@@ -1822,12 +1830,9 @@ Not clang's yet: the encoding prefix's -Winvalid-unevaluated-string warning
 (a prefixed argument stays "expected string literal"), -pedantic's warnings of
 the non-standard escapes, the "expanded from macro" note of a literal that is
 a macro's argument, and what follows `\x` without digits, which clang alone
-keeps (its attribute still applies). A named universal character name's name:
-clang decodes `\N{…}` by Unicode's names, and checks a name against them
-("'x' is not a valid Unicode character name" with its notes), while the
-compiler takes no named escape anywhere, so a well-formed one stays the
-decoders' refusal; so does a valid delimited `\u{…}`, which the decoders
-don't read either. Like the checker's other errors, the
+keeps (its attribute still applies). A static assertion's message of an escape
+the fast decoding refuses (a named or a delimited one, #1447) is read as clang
+reads it (`check_literal_strings_extended`). Like the checker's other errors, the
 first one ends the unit's semantic diagnostics after its declaration.
 
 ### Evaluated literals' escapes (#1447)
@@ -1854,8 +1859,12 @@ by the literal's code unit (a byte, a `u` literal's 16 bits, none for `U` and
 above; a character constant's character past its type ("character too large
 for enclosing character literal type"), or several characters in a wide or
 Unicode one ("wide character literals may not contain multiple characters",
-"Unicode character literals ..."). A named universal character name (`\N{…}`)
-is still the checker's own refusal. A string literal's own refusal stands for
+"Unicode character literals ..."), and an ordinary one's characters, counted
+whatever their errors (`check_driver_character_count`), more than one's
+-Wmultichar warning after its errors (four characters' -Wfour-char-constants).
+A named universal character name (`\N{…}`, #1447) is its character, by
+Unicode's names (the extended decoding's `unicode_name_strict`), with the errors
+above. A string literal's own refusal stands for
 its declaration's (`check_input_initializer_prepare_slow`) and its asm
 statement's, so neither adds "invalid or unsupported declaration". An asm
 statement's strings and an asm label's, which clang reads as evaluated
@@ -3822,10 +3831,13 @@ The test command fails if the oracle cannot run. It covers:
   static assertions in a C23 source fixture, by both paths and against clang,
   and at run time in a program against clang -O0's
   (`bit-precise-constants`); and a 129-bit one refused by name.
-- Named UCNs (`\N{...}`), which clang reads as its extension in C, are refused
-  alike in identifiers and `#if`'s character constants (the preprocessor's
-  errors) and in literals (`invalid or unsupported literal`), at their places
-  (#452; `test-checker-driver`'s `check_test_driver_named_ucns`).
+- Named UCNs (`\N{...}`, #1447), which clang reads as its extension in C, in
+  identifiers, `#if`'s character constants, literals and a static assertion's
+  message, accepted by both paths and the default route, writing an object
+  (`test-checker-driver`'s `check_test_driver_named_ucns`); their errors and
+  notes, whole lines against clang's (`check_test_driver_unevaluated_strings`);
+  and their values at run time against clang's build
+  (`named-universal-character-names`).
 - `#pragma clang section` and `#pragma clang optimize` (#619;
   `test-checker-driver`'s `check_test_driver_section_pragmas` and
   `check_test_driver_optimize_pragmas`, on all four routes): each line's

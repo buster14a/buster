@@ -807,6 +807,26 @@ static void check_driver_escape(const Parser* parser, Preprocessor* pp, const Ch
         case CHECK_ESCAPE_DIAGNOSTIC_UCN_CONTROL:
             pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "universal character name refers to a control character");
             break;
+        case CHECK_ESCAPE_DIAGNOSTIC_UCN_NAME:
+        {
+            // The name, from past its "\\N{" to its '}' (which check_literal_unevaluated_ucn found before a line break).
+            const uint8_t* bytes = (const uint8_t*)spelling.pointer;
+            const uint32_t name = offset + 3;
+            uint32_t close = name;
+            while (close < spelling.length && bytes[close] != '}')
+            {
+                close += 1;
+            }
+            UnicodeNameDiagnosis unicode;
+            unicode_name_diagnose(bytes + name, close - name, true, &unicode);
+            PPOffsetNote notes[BUSTER_UNICODE_NAME_NOTES];
+            for (uint32_t n = 0; n < unicode.note_count; n += 1)
+            {
+                notes[n] = (PPOffsetNote){ name + unicode.notes[n].offset, unicode.notes[n].message };
+            }
+            pp_diagnose_output_offset_notes(pp, PP_SEVERITY_ERROR, source, name, publication, notes, unicode.note_count, "%s", unicode.error);
+            break;
+        }
         case CHECK_ESCAPE_DIAGNOSTIC_UCN_BASIC:
             pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "character '%c' cannot be specified by a universal character name",
                                          character);
@@ -1077,11 +1097,59 @@ static uint8_t check_driver_character_refusal(const uint8_t* bytes, uint32_t len
     return result != 0 ? result : characters > 1 && wide ? 2 : characters > 1 && unicode ? 3 : 0;
 }
 
+// The characters of the character constant `bytes` as clang's CharLiteralParser counts them (#1447), its errors or not:
+// each escape sequence and universal character name one (as far as clang reads it: check_literal_evaluated_escape),
+// and each run between them its UTF-8 characters, or where it isn't well-formed UTF-8 its bytes (an ordinary
+// constant's, which alone this counts for).
+static uint32_t check_driver_character_count(const uint8_t* bytes, uint32_t length, bool c23)
+{
+    uint32_t at = 0;
+    while (at < length && bytes[at] != '\'')
+    {
+        at += 1;
+    }
+    at += 1;
+    const uint32_t end = length > at && bytes[length - 1] == '\'' ? length - 1 : length;
+    uint32_t count = 0;
+    uint32_t ignored = 0;
+    bool had_error = false;
+    while (at < end)
+    {
+        if (bytes[at] == '\\')
+        {
+            at = check_literal_evaluated_escape(bytes, at, end, c23, UINT32_MAX, NULL, &ignored, &had_error);
+            count += 1;
+        }
+        else
+        {
+            uint32_t run = at;
+            while (run < end && bytes[run] != '\\')
+            {
+                run += 1;
+            }
+            uint32_t characters = 0;
+            bool decoded = true;
+            for (uint32_t k = at; decoded && k < run;)
+            {
+                uint32_t code_point = 0;
+                const uint32_t size = unicode_utf8_sequence(bytes + k, run - k, &code_point);
+                decoded = size != 0;
+                characters += 1;
+                k += size;
+            }
+            count += decoded ? characters : run - at;
+            at = run;
+        }
+    }
+    return count;
+}
+
 // A string literal or a character constant the checker refused (#1447), worded and placed as clang does: its escape
 // sequences' diagnostics (check_literal_evaluated_escapes, check_driver_escape), from the token at `token` on through the
 // string literals adjacent to it, its warnings among them; or a character constant's refusal at the constant
-// (check_driver_character_refusal). False where clang has no error for it (a named universal
-// character, which the checker doesn't decode), which leaves the checker's own message.
+// (check_driver_character_refusal); then, as clang counts an ordinary constant's characters whatever their errors
+// (check_driver_character_count), more than one's -Wmultichar warning, or for four -Wfour-char-constants'. False where
+// clang has no error for it, which leaves the checker's own message.
 static bool check_driver_literal_escapes(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t publication, Arena* scratch)
 {
     const bool c23 = pp->options.language.standard >= 2023;
@@ -1127,6 +1195,26 @@ static bool check_driver_literal_escapes(const Parser* parser, Preprocessor* pp,
                               refusal == 1 ? "character too large for enclosing character literal type" :
                               refusal == 2 ? "wide character literals may not contain multiple characters" :
                                              "Unicode character literals may not contain multiple characters");
+    }
+    if (errors && character && !pp->fatal)
+    {
+        const uint64_t mark = scratch->length;
+        const String8 spelling = check_warning_string_spelling(parser, pp, token, scratch);
+        const bool ordinary = spelling.length != 0 && spelling.pointer[0] == '\'';
+        const uint32_t characters = ordinary ? check_driver_character_count((const uint8_t*)spelling.pointer, (uint32_t)spelling.length, c23) : 0;
+        arena_pop_to(scratch, mark);
+        if (characters > 1)
+        {
+            const bool four = characters == 4;
+            const CheckWarningSeverity severity = check_common_severity(pp, parser, input, token, four ? CHECK_WARNING_ID_FOUR_CHAR_CONSTANTS : CHECK_WARNING_ID_MULTICHAR, four);
+            const bool error = severity == CHECK_WARNING_ERROR;
+            const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL : error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+            if (severity != CHECK_WARNING_IGNORE)
+            {
+                pp_diagnose_output_at(pp, disposition, parser->tokens.sources[token], publication, "multi-character character constant [%s-W%s]", error ? "-Werror," : "",
+                                      four ? "four-char-constants" : "multichar");
+            }
+        }
     }
     return errors;
 }

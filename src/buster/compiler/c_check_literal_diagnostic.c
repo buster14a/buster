@@ -411,6 +411,9 @@ typedef enum CheckEscapeDiagnosticKind
     CHECK_ESCAPE_DIAGNOSTIC_UCN_INVALID,
     CHECK_ESCAPE_DIAGNOSTIC_UCN_CONTROL,
     CHECK_ESCAPE_DIAGNOSTIC_UCN_BASIC,
+    // A named universal character name's name that isn't Unicode's (#1447): "'NAME' is not a valid Unicode character
+    // name" at the name, three bytes past the backslash, with clang's notes (unicode_name_diagnose).
+    CHECK_ESCAPE_DIAGNOSTIC_UCN_NAME,
     // "invalid escape sequence 'S' in an unevaluated string literal", S the escape's `length` bytes.
     CHECK_ESCAPE_DIAGNOSTIC_UNEVALUATED,
 } CheckEscapeDiagnosticKind;
@@ -441,8 +444,9 @@ static void check_literal_escape_append(CheckEscapeDiagnostic* output, uint32_t*
 
 // A universal character name at the backslash at `escape` (before `end`), \u, \U or \N, as clang's ProcessUCNEscape
 // checks it in any string literal (an unevaluated one's too): a numeric one's digits (four of \u, eight of \U, or \u{...}'s
-// delimited ones) and its value, a named one's braces. A named one's name is the decoders' (which take none). Its
-// diagnostics appended at the backslash, `*failed` set by any. Returns the offset past what clang reads of it.
+// delimited ones), a named one's braces and name (Unicode's exactly, #1447: unicode_name_strict; it ends at a line break
+// too), and then its value. Its diagnostics appended at the backslash, `*failed` set by any. Returns the offset past
+// what clang reads of it.
 static uint32_t check_literal_unevaluated_ucn(const uint8_t* bytes, uint32_t escape, uint32_t end, bool c23, CheckEscapeDiagnostic* output, uint32_t* count, bool* failed)
 {
     const uint8_t letter = bytes[escape + 1];
@@ -454,13 +458,18 @@ static uint32_t check_literal_unevaluated_ucn(const uint8_t* bytes, uint32_t esc
     {
         const bool braced = at < end && bytes[at] == '{';
         uint32_t close = braced ? at + 1 : at;
-        while (braced && close < end && bytes[close] != '}')
+        while (braced && close < end && bytes[close] != '}' && bytes[close] != '\n' && bytes[close] != '\r')
         {
             close += 1;
         }
+        uint32_t value = 0;
+        const bool shaped = braced && close != end && close != at + 1;
+        const bool named = shaped && unicode_name_strict(bytes + at + 1, close - at - 1, &value);
+        const bool basic = value < 0xA0 && value != 0x24 && value != 0x40 && value != 0x60;
         kind = !braced ? CHECK_ESCAPE_DIAGNOSTIC_OPEN_BRACE : close == end ? CHECK_ESCAPE_DIAGNOSTIC_UCN_INCOMPLETE :
-               close == at + 1 ? CHECK_ESCAPE_DIAGNOSTIC_EMPTY : CHECK_ESCAPE_DIAGNOSTIC_NONE;
-        character = letter;
+               close == at + 1 ? CHECK_ESCAPE_DIAGNOSTIC_EMPTY : !named ? CHECK_ESCAPE_DIAGNOSTIC_UCN_NAME :
+               !c23 && basic ? (value >= 0x20 && value < 0x7F ? CHECK_ESCAPE_DIAGNOSTIC_UCN_BASIC : CHECK_ESCAPE_DIAGNOSTIC_UCN_CONTROL) : CHECK_ESCAPE_DIAGNOSTIC_NONE;
+        character = kind == CHECK_ESCAPE_DIAGNOSTIC_UCN_BASIC ? (uint8_t)value : letter;
         at = braced && close < end ? close + 1 : braced ? close : at;
     }
     else
