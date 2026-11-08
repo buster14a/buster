@@ -246,7 +246,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   driver stashes both (`CheckCommonShiftWarnings`) rather than reporting them, the common walk reports each at its
   shift and drops one it proves unevaluated (after a return, a `goto` or an endless loop, in a constant condition's
   other branch), so that a dropped `-Werror` one neither counts nor rejects the unit, and whatever no walk reached is
-  reported at the end (a unit with errors runs none). `-Wshift-overflow` is no runtime warning, and stays.
+  reported at the end (a unit with errors runs none). `-Wshift-overflow` is no runtime warning, and stays. Two
+  unevaluated places still warn, as clang's do: an unselected `_Generic` or `__builtin_choose_expr` arm, which has no CFG
+  block, and a reachable statement's condition that folds to a constant, whose range the program drops: its statement,
+  by its keyword and its first kept root past the condition, is reached in the evaluation with no range dropped.
   `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both
   shift directions, narrow promotions, 128-bit and bit-precise widths, compound assignments, side effects, macros
   and warning policy. The shared default-warning harness covers syntax checking and object publication through

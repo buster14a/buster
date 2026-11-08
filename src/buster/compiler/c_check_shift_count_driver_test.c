@@ -523,6 +523,24 @@ static const CheckDriverDefaultWarningFixture check_driver_shift_count_fixtures[
         .errors = 1,
     },
     {
+        // Review on #1778: clang has no CFG block for an unselected static-selection arm, and its Sema evaluates a reachable
+        // statement's folded condition, whose range our program drops.
+        .name = "unselected static-selection arms keep their folded negative shifts",
+        .source = "int f(long x){int y=_Generic(x,int:0,long:-1<<2);y+=__builtin_choose_expr(1,0,-1<<3);"
+                  "if(x)y=_Generic(x,int:x<<40,long:1);return y;}\nvoid g(long x){(void)_Generic(x,int:0,long:-1<<4);"
+                  "(void)__builtin_choose_expr(0,-1<<5,0);}\n",
+        .warnings = 4,
+    },
+    {
+        .name = "a reachable statement's folded condition keeps its shifts' warnings and an unreached one drops them",
+        .source = "#define SW (1<<44)\nint a(int x){if((1<<40)!=0)x=1;if(1&&((1<<41)!=0))x=2;if(x)x=5;else if((-1<<2)<0)x=6;"
+                  "else if((1<<46)!=0)x=7;if(x){if((1<<47)!=0)x=8;}switch(SW){default:x=10;}if((0<<48)!=0)x=11;return x;}\n"
+                  "int b(int x){return x;if((1<<40)!=0)x=1;if((-1<<2)<0)x=6;switch(SW){default:x=10;}if((0<<48)!=0)x=11;else x=12;return x;}\n"
+                  "int c(int x){if(x)return 1;else return 2;if((1<<49)!=0)x=1;}\nint d(int x){if((1<<50)!=0)return 1;return x;}\n",
+        .warnings = 7,
+        .notes = 1,
+    },
+    {
         .name = "a unit with an error keeps its folded shifts' runtime warnings",
         .source = "int f(int x){x=-1<<2;x=1<<40;x=undeclared;return x;x=-1<<3;}\n",
         .warnings = 3,

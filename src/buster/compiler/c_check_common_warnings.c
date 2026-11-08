@@ -818,19 +818,90 @@ static bool check_common_shift_replay(Preprocessor* pp, CheckCommonShiftWarnings
     return result;
 }
 
-// The stashed warnings the walk never reached whose shift it proved unevaluated, dropped: clang's runtime shift
-// diagnostics drop themselves in code no path reaches — after a return, a goto or a loop that never ends, in a constant
-// condition's other branch. Only a complete walk (`evaluated` known, no fatal diagnostic) proves a node unevaluated.
-static void check_common_shift_unreached(Preprocessor* pp, CheckCommonShiftWarnings* shifts, const CheckInput* input, const uint8_t* evaluated)
+static uint8_t* check_common_unselected(const CheckGraph* graph, const Parser* parser, Arena* scratch);
+static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
+                                       const CheckProgram* program, const uint32_t* parents, Arena* scratch);
+
+// The node of the statement condition `token` is in, its closing parenthesis's (CHECK_OP_CONDITION, a switch's
+// CHECK_OP_POSITIVE), or BUSTER_CHECK_NONE: the parse tree's climb from it to that parenthesis, short of a statement's or a
+// block's end.
+static uint32_t check_common_condition_root(const Parser* parser, const CheckInput* input, uint32_t token)
 {
+    const uint32_t count = parser->tokens.count;
+    uint32_t result = BUSTER_CHECK_NONE;
+    bool climbing = true;
+    for (uint32_t at = token, steps = 0; climbing && at < count && steps < count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[at];
+        const bool condition = role == PARSE_ROLE_CLOSE_CONDITION && at < input->token_count;
+        result = condition ? input->token_nodes[at] : result;
+        climbing = !condition && role != PARSE_ROLE_TERMINATOR && role != PARSE_ROLE_OPEN_BLOCK && role != PARSE_ROLE_CLOSE_BLOCK &&
+                   role != PARSE_ROLE_OPEN_BODY && role != PARSE_ROLE_CLOSE_BODY && parser->tree.parents[at] != at;
+        at = parser->tree.parents[at];
+    }
+    return result;
+}
+
+// Whether the statement whose condition's root is `condition` is reached, by `reached`, the evaluation with no range dropped.
+// A statement the program drops whole, its keyword too (a constant condition's other branch, an `else if` past a true one),
+// is not. Another's folded condition has no program entry of its own, so its statement's first kept root past it stands for
+// it: its arm's (whose nodes come between the condition's operand and its root) or the next statement's, either reached
+// where the statement is. A statement with neither is taken as reached.
+static bool check_common_condition_reached(const Parser* parser, const CheckGraph* graph, const CheckProgram* program, const uint32_t* parents,
+                                           const uint8_t* reached, uint32_t condition)
+{
+    const uint32_t close = graph->tokens[condition];
+    const uint32_t open = check_common_opener(parser, close);
+    const bool kept = program == NULL || program->dropped_range_count == 0 || open == BUSTER_CHECK_NONE || open == 0 ||
+                      !check_program_token_dropped(program, open - 1);
+    const uint32_t operand = graph->operand0[condition];
+    uint32_t found = BUSTER_CHECK_NONE;
+    for (uint32_t node = operand < condition ? operand + 1 : condition; kept && found == BUSTER_CHECK_NONE && node < graph->count; node += 1)
+    {
+        found = node != condition && parents[node] == BUSTER_CHECK_NONE && graph->tokens[node] > close &&
+                (program == NULL || program->dropped_range_count == 0 || !check_program_token_dropped(program, graph->tokens[node])) ? node : BUSTER_CHECK_NONE;
+    }
+    return kept && (found >= graph->count || reached[found] != 0);
+}
+
+// The stashed warnings the walk never reached whose shift it proved unevaluated, dropped: clang's runtime shift
+// diagnostics drop themselves in code no path reaches — after a return, a goto or an endless loop, in a constant
+// condition's other branch. Only a complete walk (`evaluated` known, no fatal diagnostic) proves a node unevaluated. Two
+// unevaluated places still warn, as clang's Sema builds them where its CFG has them (review on #1778): an unselected
+// _Generic association or __builtin_choose_expr arm (check_common_unselected), which has no CFG block, and a reachable
+// statement's condition that folds to a constant, whose range the program drops (check_control_drop) though its condition's
+// own root stays evaluated. Their marks are made only where a warning would otherwise drop.
+static void check_common_shift_unreached(const Parser* parser, Preprocessor* pp, CheckCommonShiftWarnings* shifts, const CheckInput* input,
+                                         const CheckStream* stream, const TypeTable* types, const CheckProgram* program, const uint32_t* parents,
+                                         const uint8_t* evaluated, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint8_t* unselected = NULL;
+    const uint8_t* reached = NULL;
+    bool marked = false;
     for (uint32_t i = 0; shifts != NULL && evaluated != NULL && !pp->fatal && i < shifts->count; i += 1)
     {
         const uint32_t token = shifts->records[i].token;
         const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
-        if (node < input->graph.count && evaluated[node] == 0)
+        const uint32_t condition = node < graph->count && evaluated[node] == 0 ? check_common_condition_root(parser, input, token) : BUSTER_CHECK_NONE;
+        bool drop = node < graph->count && evaluated[node] == 0;
+        if (drop && !marked)
         {
-            shifts->records[i].message = NULL;
+            // The evaluation with no range dropped: the unreachable code's alone.
+            CheckProgram whole = program != NULL ? *program : (CheckProgram){ 0 };
+            whole.dropped_range_count = 0;
+            unselected = check_common_unselected(graph, parser, scratch);
+            reached = check_common_evaluated(graph, stream, types, parser, program != NULL ? &whole : NULL, parents, scratch);
+            marked = true;
         }
+        drop &= reached != NULL && !(condition < graph->count && check_common_condition_reached(parser, graph, program, parents, reached, condition));
+        uint32_t root = node;
+        for (uint32_t steps = 0; drop && parents[root] < graph->count && steps < graph->count; steps += 1)
+        {
+            root = parents[root];
+        }
+        drop &= unselected != NULL && unselected[node] == 0 && unselected[root] == 0;
+        shifts->records[i].message = drop ? NULL : shifts->records[i].message;
     }
 }
 
@@ -4041,7 +4112,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                 check_common_emit_run(&emission);
             }
         }
-        check_common_shift_unreached(pp, shifts, input, evaluated);
+        check_common_shift_unreached(parser, pp, shifts, input, stream, types, program, parents, evaluated, scratch);
     }
     check_common_shift_finish(pp, shifts);
 }
