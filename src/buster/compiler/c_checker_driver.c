@@ -2080,6 +2080,74 @@ static const char* check_driver_pointer_conversion_message(const Parser* parser,
     return result;
 }
 
+// A folded left shift's -Wshift-negative-value and -Wshift-overflow as clang's DiagnoseBadShiftValues words them: a
+// negative left operand's undefined shift, or the significant bits the nonnegative result needs, ResultBits =
+// significant bits of the left operand (its bit length and a sign bit) plus the count, printed as an unsigned
+// hexadecimal of that width, against the bits of the left operand's (promoted) type, its typedef spelled as written.
+// A shift whose node or operands the stream doesn't hold keeps the generic text.
+static const char* check_driver_shift_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                              const TypeTable* types, CheckWarningSpelling* spell, uint32_t token, uint32_t warning, Arena* scratch)
+{
+    const char* result = check_diagnostic_message(warning);
+    const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+    const CheckGraph* graph = stream != NULL ? stream->graph : NULL;
+    const bool shift = types != NULL && graph != NULL && node < stream->count && graph->ops[node] == CHECK_OP_SHIFT_LEFT &&
+                       graph->operand0[node] < stream->count && graph->operand1[node] < stream->count;
+    if (warning == CHECK_WARNING_SHIFT_NEGATIVE_VALUE)
+    {
+        result = "shifting a negative signed value is undefined";
+    }
+    else if (shift)
+    {
+        const uint32_t left = graph->operand0[node];
+        const uint32_t right = graph->operand1[node];
+        const TypeId type = check_stream_type(stream, node);
+        uint32_t width = 0;
+        bool is_signed = false;
+        uint32_t count_width = 0;
+        bool count_signed = false;
+        if (check_action_integer_type(types, type, &width, &is_signed) && width != 0 && width <= 128 &&
+            check_action_integer_type(types, check_stream_type(stream, right), &count_width, &count_signed) &&
+            check_stream_constant_kind(stream, left) == CHECK_CONSTANT_INTEGER && check_stream_constant_kind(stream, right) == CHECK_CONSTANT_INTEGER)
+        {
+            const unsigned __int128 value = check_stream_value(stream, left).integer & check_action_mask(width);
+            const uint32_t count = (uint32_t)(check_stream_value(stream, right).integer & 0xffu);
+            const uint32_t length = value == 0 ? 0 : (uint64_t)(value >> 64) != 0 ? 128u - (uint32_t)__builtin_clzll((uint64_t)(value >> 64)) :
+                                                                                   64u - (uint32_t)__builtin_clzll((uint64_t)value);
+            // The hexadecimal digits of value << count: those of value << (count % 4), three 64-bit limbs wide, then
+            // count / 4 zeros.
+            const uint32_t nibble = count % 4u;
+            uint64_t limbs[3] = { (uint64_t)value, (uint64_t)(value >> 64), 0 };
+            limbs[2] = nibble != 0 ? limbs[1] >> (64u - nibble) : 0;
+            limbs[1] = nibble != 0 ? limbs[1] << nibble | limbs[0] >> (64u - nibble) : limbs[1];
+            limbs[0] = limbs[0] << nibble;
+            char digits[64 + 1];
+            uint32_t used = 0;
+            bool leading = true;
+            for (uint32_t i = 48; i != 0; i -= 1)
+            {
+                const uint32_t digit = (uint32_t)(limbs[(i - 1) / 16] >> (((i - 1) % 16) * 4)) & 0xfu;
+                leading = leading && digit == 0 && i != 1;
+                if (!leading)
+                {
+                    digits[used] = "0123456789ABCDEF"[digit];
+                    used += 1;
+                }
+            }
+            digits[used] = 0;
+            const uint32_t spelling = check_stream_type(stream, left) == type ? check_input_operand_type_spelling(input, parser, left) : 0;
+            const String8 name = check_driver_warning_type(parser, pp, input, types, spell, scratch, type, spelling);
+            if (name.length != 0)
+            {
+                result = check_warning_text(scratch, "signed shift result (0x%s%.*s) requires %u bits to represent, but %.*s only has %u bits", digits,
+                                            (int)(count / 4u), "00000000000000000000000000000000000000000000000000000000000000000000",
+                                            length + count + 1u, (int)name.length, name.pointer, width);
+            }
+        }
+    }
+    return result;
+}
+
 // A legacy warning's command-line and source policy: the same sparse group mapping the event warnings use, so
 // -Wno-NAME, -Werror=NAME and -Wno-everything reach the dense warning bits too.
 static CheckWarningSeverity check_driver_legacy_severity(Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t warning, bool default_ignored)
@@ -2910,15 +2978,18 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         {
             warnings[warning_count] = UINT64_MAX;
         }
-        // Runtime constant-count groups will join the common arithmetic walk's new count diagnostics (#1394).
-        // Keep their original records queued until that walk is ready, so a failed program retains every group.
-        // Only units with count warnings allocate this sparse handoff, with room for both bits at each token.
+        // Runtime constant-count groups will join the common arithmetic walk's new count diagnostics (#1394), and so will
+        // a folded shift's negative left operand, clang's runtime -Wshift-negative-value too, which the walk drops where the
+        // shift is unevaluated (check_common_shift_unreached). Keep their original records queued until that walk is ready,
+        // so a failed program retains every group. Only units with these warnings allocate this sparse handoff, with room
+        // for each bit at each token.
         if (shifts != NULL && pp->options.collect_diagnostics)
         {
             uint64_t capacity = 0;
             for (uint32_t i = 0; i < warning_count; i += 1)
             {
-                const uint32_t flags = (uint32_t)(warnings[i] >> 16) & (CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW);
+                const uint32_t flags = (uint32_t)(warnings[i] >> 16) &
+                                       (CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW | CHECK_WARNING_SHIFT_NEGATIVE_VALUE);
                 capacity += (uint32_t)__builtin_popcount(flags);
             }
             shifts->records = capacity != 0 && capacity <= UINT32_MAX ? arena_push_array(&pp->arena, capacity, sizeof(CheckCommonShiftWarning),
@@ -3028,23 +3099,40 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         uint32_t located = token;
                         const char* message = warning_flag == CHECK_WARNING_POINTER_SIGN || warning_flag == CHECK_WARNING_DISCARDED_QUALIFIERS ?
                                               check_driver_pointer_conversion_message(parser, pp, input, stream, types, &spell, token, warning_flag, &located, scratch) :
+                                              (warning_flag & (CHECK_WARNING_SHIFT_NEGATIVE_VALUE | CHECK_WARNING_SHIFT_OVERFLOW)) != 0 ?
+                                              check_driver_shift_message(parser, pp, input, stream, types, &spell, token, warning_flag, scratch) :
                                               check_diagnostic_message(warning_flag);
-                        PPDiagnosticRecord* previous = pp->diagnostic_last;
-                        pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[located], publication, phase, "%s%s", message, suffix);
                         const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
-                        if (shifts != NULL && shifts->records != NULL && phase == PP_DIAGNOSTIC_DEFERRED &&
-                            (warning_flag & (CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW)) != 0 &&
-                            node < input->graph.count && check_common_shift_op(input->graph.ops[node]) &&
-                            pp->diagnostic_last != previous)
+                        const bool stashed = shifts != NULL && shifts->records != NULL && phase == PP_DIAGNOSTIC_DEFERRED &&
+                                             (warning_flag & (CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW |
+                                                              CHECK_WARNING_SHIFT_NEGATIVE_VALUE)) != 0 &&
+                                             node < input->graph.count && check_common_shift_op(input->graph.ops[node]);
+                        if (stashed)
                         {
-                            if (shifts->count < shifts->capacity)
+                            // The common walk reports it (CheckCommonShiftWarnings), or drops it where unevaluated.
+                            const char* text = check_warning_text(scratch, "%s%s", message, suffix);
+                            const uint64_t length = text != NULL ? strlen(text) : 0;
+                            char* owned = text != NULL && shifts->count < shifts->capacity ? arena_push(&pp->arena, length + 1u, 1) : NULL;
+                            if (owned != NULL)
                             {
-                                shifts->records[shifts->count++] = (CheckCommonShiftWarning){ token, pp->diagnostic_last };
+                                memcpy(owned, text, length + 1u);
+                                shifts->records[shifts->count++] = (CheckCommonShiftWarning){
+                                    .token = token,
+                                    .source = parser->tokens.sources[located],
+                                    .publication = publication,
+                                    .severity = (uint8_t)pp_severity,
+                                    .phase = (uint8_t)phase,
+                                    .message = owned,
+                                };
                             }
                             else
                             {
                                 shifts_ready = false;
                             }
+                        }
+                        else
+                        {
+                            pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[located], publication, phase, "%s%s", message, suffix);
                         }
                     }
                 }
@@ -6590,6 +6678,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                                          scratch);
                         }
                     }
+                    // The folded shifts' stashed runtime warnings no common walk reported or dropped (a unit with errors runs
+                    // none).
+                    check_common_shift_finish(pp, &shift_warnings);
                     result = pp->errors != 0 ? 1 : result;
                     check_clock_mark(stage_clock, CHECK_STAGE_CHECK_PROGRAM);
                     // The backend reads the program, not the preprocessor's output: only its diagnostics do, which ask for it

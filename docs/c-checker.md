@@ -3873,20 +3873,48 @@ diagnosis cutoffs skip recovered reports. As in clang, a unit with any error
 publishes no unit-end warning: no unused file-scope object's and no unused
 function's (`check_driver_rejected_warnings`).
 
-A body that recovers an error goes to source order, as one with a report does.
-So does a top level, before its bodies are dealt to lanes. Error-free units
-take none of this: their recovered lists stay empty, and the driver copies
-their warning events only on an error.
+Deferred bodies (#1447's lanes item) carry their recovered reports through the
+lanes: a unit whose only errors are recovered keeps its deferred, multi-lane
+schedule. A lane starts each body with an empty list of its own, and the body's
+result keeps it. Each cut keeps the top level's count at the body's opening.
+The merge (`check_deferred_recovered`) rebuilds the unit's list in the order
+source order's reader finds them, by those counts:
+
+- the top level's reports before each body's opening;
+- then the body's;
+- and the top level's after the last body.
+
+Each report's TypeIds take the merged table's (`check_deferred_report`): the
+type it names, and the two whose `value` holds one, a redeclaration's prior type
+and an attribute expression's second operand's type. Every other `value` is a
+token, a count or a pair of tokens, and tokens, declarations and names are the
+unit's already. `check_input_recovered_publish` then appends them
+as source order's does.
+
+One recovered note isn't merged: an object's type conflict notes the entity's
+latest earlier declaration, even a block-scope one in another body. The deferred
+top level hasn't read the bodies it skipped, and a lane hasn't read the other
+bodies. So the scan back from the declaration sends the unit to source order
+when it reaches another body's closing brace before its match. A body with a report it doesn't recover still goes to
+source order, as does a top level with one. Error-free units take none of this:
+their recovered lists stay empty, and the driver copies their warning events
+only on an error.
 
 `test-checker-driver --semantic-recovery-only`
 (`c_check_semantic_recovery_driver_test.c`) compares the whole output and
 status with clang 23:
 
-- by the vector path, the scalar one and deferred bodies on two lanes;
+- by the vector path, the scalar one, and deferred bodies on one, two and
+  three lanes;
 - under gnu17 and gnu23;
 - with no option, `-Wall`, `-ferror-limit=2` and `-w`.
 
-It also checks that `-c` of each fixture is refused with no object written.
+It also checks that `-c` of each fixture is refused with no object written. The
+deferred readings are `-c`'s, on one, two and three lanes: `-fsyntax-only`
+starts no lanes, so a deferred `-fsyntax-only` reading is source order's. The
+driver reads `--scalar`'s in source order; `test-checker-deferred` compares the
+deferred reader with both paths, and its merge with its scalar twins, on its
+recovered fixtures too.
 The fixtures cover each pass above, shared records, two errors in one list,
 missing names and a control error after a recovered error, block declarations,
 exclusions, `_Alignas`, a dropped `format`, and enumerators.
@@ -4047,24 +4075,67 @@ its scopes' unused variables and the unit-end warnings are left out
 (`check_driver_rejected_warnings`). `c_check_statement_recovery_driver_test.c`
 compares fixtures of graph, control, asm and reader errors with clang.
 
+Type attributes' errors don't stop the reader either (`check_input_attribute_type`).
+What clang 23 does with each is followed:
+
+- **`vector_size` and `neon_vector_type`.** An error of the element type or
+  the size leaves the type as it was (`HandleVectorSizeAttr`,
+  `HandleNeonVectorTypeAttr`): `int v __attribute__((vector_size(3)))` is an
+  `int`. The vector errors join `check_input_attribute_recoverable`'s list.
+- **`mode`.** An unknown or unsupported mode, a vector mode of an enum and a
+  complex mode of a vector leave the type as it was. A mode of the other kind
+  (`int` with `SF`), or a base of no integer or floating type (a struct, a
+  pointer), is clang's error too, but `AddModeAttr` still installs the mode's
+  type: `float v __attribute__((mode(SI)))` is an `unsigned int`
+  (`check_input_attribute_mode`'s `installed`). Clang installs a type even in
+  an enum (`double` as its integer type), which the type table doesn't hold,
+  so an enum's mode error recovers only where clang installs nothing. The enum
+  is then as without the mode.
+
+In each case the declaration stays valid and the attribute is ignored, as in
+phase 1.
+
+Clang's handlers run for each declarator, so an error shared by several is
+given for each. The subject checks already repeat theirs. Two errors are given
+before them, once per list, and are now repeated
+(`CheckInputAttributeRepeat`):
+
+- an `aligned` or `_Alignas` value's error, which the reader recovers and drops
+  the record for;
+- a specifiers' `mode` error, which the specifiers' type gives.
+
+The list keeps a copy of each report. Its copies share it, since each
+declarator merges the common list with its own. The first declarator that takes
+the list keeps the original. Each later one gives the copy again, completing
+with its own waiting errors (`check_input_attribute_repeats`). Error-free
+lists have no repeats.
+
+`c_check_type_attribute_recovery_driver_test.c` compares its fixtures as above.
+These differences remain:
+
+- An enum's mode of the other kind (`enum __attribute__((mode(SF))) E`) still
+  stops the reader.
+- An enum's vector mode after its body gives its deprecation warning twice (on
+  main too).
+- A shared `_Alignas` on a function declarator gives the value's error, where
+  clang gives its subject's ("only applies to variables and fields"). So does
+  an `_Alignas` of a typedef.
+- `_Alignas`'s non-constant and too-large values still give the generic error
+  and stop the reader.
+
 The later phases are left:
 
 - **Invalid declarations.** Not covered by phase 2:
   - an invalid initializer the reader reports;
-  - a type attribute's error (`vector_size`, `mode`);
   - C23's incompatible tag redefinitions (above).
 
   These still stop the reader.
 - **Errors outside the bodies, and a body's own warnings.** A rejected unit's
-  bodies that hold no error get their common warnings (below), but a unit
+  bodies that hold no error get their common warnings (above), but a unit
   with an error outside every body (a file-scope initializer's, a
   declaration's) still gets none. The warnings clang gives within a body that
   holds an error (its `-Wparentheses` before or after an expression's error)
   are still left out.
-- **Lanes.** Bodies don't carry their recovered reports; they fall back to
-  source order instead.
-- **Shared `_Alignas`.** An `_Alignas` shared by several declarators gives its
-  error once, where clang gives it for each.
 
 ### What the lowering costs (#531)
 

@@ -342,7 +342,15 @@ static bool check_input_enum_complete(CheckInputReader* reader, CheckTagFrame* f
     // A mode after its body (#147): clang's ActOnEnumBody applies the enum's attributes before it takes a type, and takes
     // the mode's (check_input_enum_mode).
     const CheckInputAttribute* late_mode = !moded && reader->enum_fixed[tag] == BUSTER_CHECK_ENUM_NONE ? check_input_enum_mode(frame->attributes, frame->close) : NULL;
-    const TypeId late_moded = late_mode != NULL ? check_input_attribute_mode(reader, frame->attributes, late_mode, frame->type) : 0;
+    // An error after which clang installs no type, an unknown or unsupported mode's, leaves the enum as one with no mode
+    // (#1447); one that still installs a type of no integer stops the reader.
+    const CheckInputAttributeRecovery late_recovery = late_mode != NULL ? check_input_attribute_recovery(reader, frame->attributes, (CheckInputAttribute*)late_mode) :
+                                                      (CheckInputAttributeRecovery){ 0 };
+    TypeId late_installed = 0;
+    const TypeId late_moded = late_mode != NULL ? check_input_attribute_mode(reader, frame->attributes, late_mode, frame->type, &late_installed) : 0;
+    const bool late_dropped = late_mode != NULL && late_moded == 0 && late_installed == frame->type &&
+                              check_input_attribute_recover(reader, frame->attributes, &late_recovery, 0, false, false);
+    late_mode = late_dropped ? NULL : late_mode;
     valid &= late_mode == NULL || late_moded != 0;
     if (reader->enum_fixed[tag] != BUSTER_CHECK_ENUM_NONE && !moded)
     {
