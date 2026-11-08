@@ -3032,6 +3032,12 @@ static bool check_input_attribute_only(const Parser* parser, uint32_t first, uin
             break;
         }
     }
+    // A file-scope one's `__extension__`s after them (#1447), which clang's ParseExternalDeclaration reads past to the
+    // `;`; not an attribute after one, a declaration specifier there.
+    while (attribute && token < end && parser->tokens.kinds[token] == PARSE_KIND_EXTENSION)
+    {
+        token += 1;
+    }
     return attribute && token == end;
 }
 
@@ -7770,6 +7776,36 @@ static void check_input_standalone_specifiers(CheckInputReader* reader, uint32_t
 
 // Read a declaration's specifiers and its declarators, using parser group boundaries and subtree ends to pass
 // over each initializer. Identifier uses within them are resolved later at their own source positions.
+// Whether `first` starts `__extension__`s before a static assertion (#1447), which clang takes at file scope and in a block:
+// the parser's markers of its statement, no declaration's specifiers.
+static bool check_input_extension_assertion(const Parser* parser, uint32_t first)
+{
+    uint32_t token = first;
+    while (token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_EXTENSION)
+    {
+        token += 1;
+    }
+    return token > first && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_STATIC_ASSERT;
+}
+
+// Whether the file-scope declaration from `first` to its `;` at `end` is GNU attribute lists and then `__extension__`s
+// alone, which clang's ParseExternalDeclaration reads as an extra `;` after them (#1447), with no warning by default.
+static bool check_input_extra_semi(const CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    uint32_t token = first;
+    while (token < end && parser->tokens.kinds[token] == PARSE_KIND_ATTRIBUTE && check_input_attribute_starts(parser, token, end))
+    {
+        token = check_input_skip_attributes(parser, token, end);
+    }
+    const uint32_t extensions = token;
+    while (token < end && parser->tokens.kinds[token] == PARSE_KIND_EXTENSION)
+    {
+        token += 1;
+    }
+    return reader->function_body == BUSTER_CHECK_NONE && token == end && token > extensions;
+}
+
 static void check_input_declaration(CheckInputReader* reader, uint32_t first)
 {
     const Parser* parser = reader->parser;
@@ -7898,7 +7934,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 check_input_warning(reader, CHECK_WARNING_ID_MISSING_DECLARATIONS, CHECK_WARNING_EVENT_TYPEDEF_NAMELESS, specifiers,
                                     CHECK_WARNING_COMPLETE_AFTER_DELIMITER, i);
             }
-            else if (!tag)
+            else if (!tag && !check_input_extra_semi(reader, first, i))
             {
                 check_input_warning(reader, CHECK_WARNING_ID_MISSING_DECLARATIONS, CHECK_WARNING_EVENT_EMPTY_DECLARATION, specifiers,
                                     CHECK_WARNING_COMPLETE_AFTER_DELIMITER, i);
@@ -9640,9 +9676,14 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             {
                 check_input_local_labels(reader, i);
             }
-            else
+            else if (!check_input_extension_assertion(parser, declaration_first))
             {
                 check_input_declaration(reader, declaration_first);
+            }
+            else
+            {
+                // The markers carry nothing to their statement, as a declaration's specifiers carry nothing.
+                reader->ignored[i] = true;
             }
         }
         if (__builtin_expect((role == PARSE_ROLE_OPEN_BLOCK) | (role == PARSE_ROLE_OPEN_BODY) | (role == PARSE_ROLE_OPEN_FOR) | (role == PARSE_ROLE_OPEN_CONDITION), 0) &&
