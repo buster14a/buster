@@ -172,9 +172,9 @@ static bool pp_test_source_feature_matrix(void)
 // the catalog's and the library lists' gates against clang's table. The plain names are pinned to the reference release
 // (BUSTER_CLANG_REFERENCE_VERSION): when the clang found isn't it (pp_test_clang_version), a plain library name whose
 // __has_builtin answer differs is skipped only if the found release's table is known to classify it differently
-// (cbuiltin_library_table_differs: clang 23.1.5 drops 23.1.4's strlcat and strlcpy), and the skip is reported with the
-// names; a difference no named release explains still fails, since the probe can't tell an unlisted release's table
-// from a buster bug.
+// (cbuiltin_library_table_differs: Debian's and Ubuntu's packages drop strlcat and strlcpy), and the skip is reported
+// with the names; a difference no named build explains still fails, since the probe can't tell an unlisted build's
+// table from a buster bug.
 static bool pp_test_builtin_targets(const char* directory)
 {
     static const char* const configurations[] = {
@@ -374,8 +374,8 @@ static bool pp_test_builtin_targets(const char* directory)
     return result;
 }
 
-// The non-reference release path under a fake clang (#1131): a wrapper script reports 23.1.5 and answers strlcat's
-// and strlcpy's __has_builtin as that release's table does (none, which -fno-builtin-NAME gives), so the whole
+// The non-reference build path under a fake clang (#1131): a wrapper script reports an Ubuntu build and answers
+// strlcat's and strlcpy's __has_builtin as Debian's patched table does (none, which -fno-builtin-NAME gives), so the whole
 // builtin-targets run under it must pass while skipping only those two names — every other answer still compares. It
 // reaches the configured clang through a path with a space and the shell's metacharacters (clang_release_wrapper).
 // CI's clang is the reference, whose own run skips nothing and can't reach this path.
@@ -384,16 +384,16 @@ static bool pp_test_builtin_release(const char* directory)
     char wrapper[4200];
     char trampoline[4200];
     char folder[4200];
-    bool result = clang_release_wrapper(directory, pp_test_clang_path, "23.1.5", "-fno-builtin-strlcat -fno-builtin-strlcpy", wrapper, sizeof(wrapper), trampoline,
-                                        sizeof(trampoline), folder, sizeof(folder));
+    bool result = clang_release_wrapper(directory, pp_test_clang_path, "Ubuntu clang version 23.1.6 (fake)", "-fno-builtin-strlcat -fno-builtin-strlcpy",
+                                        wrapper, sizeof(wrapper), trampoline, sizeof(trampoline), folder, sizeof(folder));
     char version[64] = "";
     const char* const saved_path = pp_test_clang_path;
     char saved_version[sizeof(pp_test_clang_version)];
     memcpy(saved_version, pp_test_clang_version, sizeof(saved_version));
     pp_test_clang_path = wrapper;
-    // A fake 23.1.5 isn't the reference: the report must say so with both releases, and the run it enables takes
-    // that release's known differences.
-    result &= !clang_reference_report(wrapper, version, sizeof(version)) && strcmp(version, "23.1.5") == 0;
+    // A fake Ubuntu build isn't the reference: the report must say so with both builds, and the run it enables takes
+    // that build's known differences.
+    result &= !clang_reference_report(wrapper, version, sizeof(version)) && strcmp(version, "Ubuntu 23.1.6") == 0;
     snprintf(pp_test_clang_version, sizeof(pp_test_clang_version), "%s", version);
     result = result && pp_test_builtin_targets(directory);
     pp_test_clang_path = saved_path;
@@ -401,6 +401,6 @@ static bool pp_test_builtin_release(const char* directory)
     unlink(wrapper);
     unlink(trampoline);
     rmdir(folder);
-    printf("builtin targets under a fake clang 23.1.5: %s\n", result ? "pass" : "FAIL");
+    printf("builtin targets under a fake Ubuntu clang 23.1.6: %s\n", result ? "pass" : "FAIL");
     return result;
 }

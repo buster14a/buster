@@ -58,10 +58,11 @@
 #define BUSTER_PP_TEST_MAX_OUTPUT (1ull << 32)
 
 // The Clang release the library-builtin table is pinned to (c_builtin_library.c's BUSTER_CLANG_REFERENCE_VERSION), read
-// from `clang --version` by test-preprocessor --clang and test-checker-driver: a different release's table makes some
-// plain names' __has_builtin answers and implicit-declaration diagnostics differ, which those tests report as a version
-// difference and skip where the answer depends on the release, rather than as a buster bug. Clang 23.1.4 has strlcat
-// and strlcpy as GNU library builtins; 23.1.5 does not.
+// from `clang --version` by test-preprocessor --clang and test-checker-driver: a clang that isn't an official build of
+// that release can answer some plain names' __has_builtin and implicit-declaration diagnostics differently, which those
+// tests report as a difference and skip where the answer is known to depend on the build, rather than as a buster bug.
+// Every upstream 23.x release has strlcat and strlcpy as GNU library builtins; Debian's and Ubuntu's clang packages
+// (apt.llvm.org's too) remove them with debian/patches/23-strlcpy_strlcat_warning_removed.diff, whatever the release.
 typedef struct ClangReferenceVersion ClangReferenceVersion;
 struct ClangReferenceVersion
 {
@@ -70,8 +71,9 @@ struct ClangReferenceVersion
     char version[64];
 };
 
-// The release `clang --version`'s first line names ("clang version 23.1.4", or a distribution's "Ubuntu clang version
-// 23.1.5 (1ubuntu1)") and whether it is the pinned reference release's.
+// The build `clang --version`'s first line names and whether it is an official build of the pinned reference release:
+// its version ("clang version 23.1.4"), after the vendor word a distribution's build puts first ("Ubuntu clang version
+// 23.1.6 (++20261103...)" is "Ubuntu 23.1.6"), since a vendor's build may patch clang's tables whatever its release.
 static ClangReferenceVersion clang_reference_parse(const char* text)
 {
     static const char prefix[] = "clang version ";
@@ -79,19 +81,29 @@ static ClangReferenceVersion clang_reference_parse(const char* text)
     const char* found = text != NULL ? strstr(text, prefix) : NULL;
     if (found != NULL)
     {
+        // The vendor: the line's text before "clang version ", without its trailing blanks.
+        const char* line = found;
+        while (line > text && line[-1] != '\n')
+        {
+            line -= 1;
+        }
+        size_t vendor = (size_t)(found - line);
+        while (vendor != 0 && (line[vendor - 1] == ' ' || line[vendor - 1] == '\t'))
+        {
+            vendor -= 1;
+        }
         found += sizeof(prefix) - 1;
         size_t length = strcspn(found, " \t\r\n(");
-        length = length < sizeof(result.version) ? length : sizeof(result.version) - 1;
-        memcpy(result.version, found, length);
-        result.version[length] = 0;
-        result.named = length != 0;
+        const int written = snprintf(result.version, sizeof(result.version), "%.*s%s%.*s", (int)vendor, line, vendor != 0 ? " " : "", (int)length, found);
+        result.named = length != 0 && written > 0 && (size_t)written < sizeof(result.version);
+        result.version[result.named ? (size_t)written : 0] = 0;
         result.matches = result.named && strcmp(result.version, BUSTER_CLANG_REFERENCE_VERSION) == 0;
     }
     return result;
 }
 
 // Whether `text` names the reference release, into `version`, and the message that names both releases when it doesn't
-// ("expected clang 23.1.4, found 23.1.5").
+// ("expected clang 23.1.4, found Ubuntu 23.1.6").
 static bool clang_reference_compare(const char* text, char* version, size_t version_capacity, char* message, size_t message_capacity)
 {
     const ClangReferenceVersion parsed = clang_reference_parse(text);
@@ -188,8 +200,9 @@ static bool clang_reference_report(const char* clang_path, char* version, size_t
 }
 
 // A shell script at `path` that runs `clang` with `options` (NULL for none) and its own arguments, and that answers
-// --version as `release` (NULL to forward it too). `clang` goes in single quotes, each of its own quotes as '\'', so a
-// path with spaces or the shell's metacharacters reaches exec as one word. False where it isn't written.
+// --version with `release` as its first line (NULL to forward it too). `clang` goes in single quotes, each of its own
+// quotes as '\'', so a path with spaces or the shell's metacharacters reaches exec as one word. False where it isn't
+// written.
 static bool clang_wrapper_write(const char* path, const char* clang, const char* release, const char* options)
 {
     char script[8192];
@@ -197,7 +210,7 @@ static bool clang_wrapper_write(const char* path, const char* clang, const char*
     if (release != NULL && length > 0 && (size_t)length < sizeof(script))
     {
         length += snprintf(script + length, sizeof(script) - (size_t)length,
-                           "for argument in \"$@\"; do if [ \"$argument\" = \"--version\" ]; then printf 'clang version %s\\n'; exit 0; fi; done\n", release);
+                           "for argument in \"$@\"; do if [ \"$argument\" = \"--version\" ]; then printf '%s\\n'; exit 0; fi; done\n", release);
     }
     if (length > 0 && (size_t)length < sizeof(script))
     {
@@ -221,16 +234,16 @@ static bool clang_wrapper_write(const char* path, const char* clang, const char*
     return result;
 }
 
-// The fake release's wrapper for the non-reference fixtures (#1131), `wrapper` in `directory`: it reports `release`
-// and passes `options`, and reaches `clang` through a forwarding script in a directory whose name has a space, quotes
-// and the shell's $, ; and *, so that the reference CI's runs check that an awkward configured clang path still reaches
-// exec as one word. `trampoline` and `folder` are the files to remove; false where they aren't written.
+// The fake build's wrapper for the non-reference fixtures (#1131), `wrapper` in `directory`: its --version prints
+// `release`, a whole first line, and it passes `options`, and reaches `clang` through a forwarding script in a
+// directory whose name has a space, quotes and the shell's $, ; and *, so that the reference CI's runs check that an
+// awkward configured clang path still reaches exec as one word. `trampoline` and `folder` are the files to remove; false where they aren't written.
 static bool clang_release_wrapper(const char* directory, const char* clang, const char* release, const char* options, char* wrapper, size_t wrapper_capacity,
                                   char* trampoline, size_t trampoline_capacity, char* folder, size_t folder_capacity)
 {
     const int folder_length = snprintf(folder, folder_capacity, "%s/fake clang 'q' $x;*", directory);
     const int trampoline_length = snprintf(trampoline, trampoline_capacity, "%s/clang", folder);
-    const int wrapper_length = snprintf(wrapper, wrapper_capacity, "%s/clang-%s", directory, release);
+    const int wrapper_length = snprintf(wrapper, wrapper_capacity, "%s/clang-release", directory);
     bool result = folder_length > 0 && (size_t)folder_length < folder_capacity && trampoline_length > 0 && (size_t)trampoline_length < trampoline_capacity &&
                   wrapper_length > 0 && (size_t)wrapper_length < wrapper_capacity;
     result = result && (mkdir(folder, 0700) == 0 || errno == EEXIST) && clang_wrapper_write(trampoline, clang, NULL, NULL) &&
@@ -251,8 +264,13 @@ static bool pp_test_clang_reference(void)
     } cases[] = {
         { "clang version 23.1.4\nTarget: x86_64-pc-linux-gnu\n", true, true, "23.1.4" },
         { "clang version 23.1.4 (https://github.com/llvm/llvm-project.git llvmorg-23.1.4)\n", true, true, "23.1.4" },
-        { "Ubuntu clang version 23.1.5 (1ubuntu1)\nTarget: x86_64-pc-linux-gnu\n", true, false, "23.1.5" },
-        { "Apple clang version 15.0.0 (clang-1500.3.9.4)\n", true, false, "15.0.0" },
+        { "Ubuntu clang version 23.1.6 (++20261103094202+2875c6073a7e-1~exp1~20261103214217.95)\nTarget: x86_64-pc-linux-gnu\n", true, false,
+          "Ubuntu 23.1.6" },
+        // A distribution's build of the reference release isn't its official build: Debian's patches its table.
+        { "Ubuntu clang version 23.1.4 (1ubuntu1)\n", true, false, "Ubuntu 23.1.4" },
+        { "Debian clang version 23.1.4 (1)\n", true, false, "Debian 23.1.4" },
+        { "Apple clang version 15.0.0 (clang-1500.3.9.4)\n", true, false, "Apple 15.0.0" },
+        { "warning: a driver note\nclang version 23.1.4\n", true, true, "23.1.4" },
         { "clang version 23.1.40\n", true, false, "23.1.40" },
         { "not a compiler\n", false, false, "unavailable" },
     };
