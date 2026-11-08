@@ -255,6 +255,9 @@ typedef enum CheckInputMessage
     // service routine, at its callee (check_input_interrupt_calls).
     CHECK_INPUT_INTERRUPT_HANDLER,
     CHECK_INPUT_INTERRUPT_CALLED,
+    // A function's redeclaration with another explicit calling convention (#1447, check_input_report_redeclaration): the
+    // new and the first declaration's conventions in the detail's low bytes, and in its bit 16 whether the first's is explicit.
+    CHECK_INPUT_CONVENTION_CHANGE,
     // diagnose_if's and enable_if's (#1447, c_check_condition.c): an error diagnose_if's condition gives, its message at the
     // call's `)` (or at the use of a function whose condition no argument decides), its note "from 'diagnose_if' attribute
     // on 'f':" at the attribute (`note_token`), the message's first string token plus one in `detail` and the function's
@@ -406,6 +409,7 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_UNEVALUATED_ESCAPE] = "invalid escape sequence in an unevaluated string literal",
     [CHECK_INPUT_INTERRUPT_HANDLER] = "x86-64 'interrupt' attribute only applies to functions that have a 'void' return type",
     [CHECK_INPUT_INTERRUPT_CALLED] = "interrupt service routine cannot be called directly",
+    [CHECK_INPUT_CONVENTION_CHANGE] = "function declared here was previously declared with another calling convention",
     [CHECK_INPUT_DIAGNOSE_IF_ERROR] = "diagnose_if attribute error",
     [CHECK_INPUT_ENABLE_IF_CALL] = "no matching function for call",
     [CHECK_INPUT_ENABLE_IF_ADDRESS] = "cannot take address of function because it has one or more non-tautological enable_if conditions",
@@ -1690,6 +1694,11 @@ struct CheckInputReader
     uint32_t prototype_depth;
     uint8_t specifier_abi_origin;
     uint8_t declarator_abi_origin;
+    // check_input_declarator_conventions's record of the declarator check_input_declarator_end ended (#1447).
+    const uint32_t* declarator_swift_places;
+    const uint32_t* declarator_swift_tokens;
+    uint32_t declarator_swift_count;
+    uint32_t declarator_no_prototype;
     uint8_t constant_abi_origin;
     const CheckNoderefType* specifier_noderef;
     const CheckNoderefType* declarator_noderef;
@@ -2454,6 +2463,42 @@ static void check_input_report_subject(CheckInputReader* reader, uint32_t token,
     if (reader->output->report_count != count)
     {
         reader->output->reports[count].subject = subject + 1;
+    }
+}
+
+// A redeclaration's error at `token` (check_input_report_subject's), but for a function whose explicit calling convention
+// differs from its previous declaration's (#1447): clang's MergeFunctionDecl checks conventions before types, with
+// "function declared 'A' here was previously declared 'B'" (or "without calling convention", where its first declaration
+// has none explicit) and its note at that first declaration (CHECK_INPUT_CONVENTION_CHANGE). no_caller_saved_registers,
+// clang's function type bit beside its convention (TYPE_FUNCTION_ABI_NO_CALLER_SAVED), keeps the type's error.
+static uint32_t check_input_abi_call(TypeFunctionABI abi);
+
+static void check_input_report_redeclaration(CheckInputReader* reader, uint32_t token, CheckInputMessage message, uint32_t previous)
+{
+    const TypeTable* types = reader->types;
+    const uint32_t first = reader->objects[previous] != 0 && reader->objects[previous] - 1 < reader->parser->tokens.count ? reader->objects[previous] - 1 : previous;
+    const TypeFunctionABI now = type_function_abi_kind(types, reader->declared_types[token]);
+    const TypeFunctionABI before = type_function_abi_kind(types, reader->declared_types[previous]);
+    const bool explicit_now = reader->output->explicit_abis != NULL && reader->output->explicit_abis[token] != 0;
+    const bool explicit_first = reader->output->explicit_abis != NULL && reader->output->explicit_abis[first] != 0;
+    const bool changed = message == CHECK_INPUT_CONFLICTING_TYPES && explicit_now && now != before && now != TYPE_FUNCTION_ABI_INVALID &&
+                         before != TYPE_FUNCTION_ABI_INVALID && now != TYPE_FUNCTION_ABI_NO_CALLER_SAVED && before != TYPE_FUNCTION_ABI_NO_CALLER_SAVED;
+    if (changed)
+    {
+        const uint32_t count = reader->output->report_count;
+        check_input_report(reader, token, CHECK_INPUT_CONVENTION_CHANGE);
+        if (reader->output->report_count != count)
+        {
+            CheckInputReport* report = reader->output->reports + count;
+            report->subject = previous + 1;
+            report->detail = check_input_abi_call(now) | check_input_abi_call(before) << 8 | (explicit_first ? 1u << 16 : 0);
+            report->note_token = first;
+            report->note_kind = CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
+        }
+    }
+    else
+    {
+        check_input_report_subject(reader, token, message, previous);
     }
 }
 
@@ -5292,6 +5337,8 @@ struct CheckDeclaratorPart
     // A function's first parameter's lifetimebound attribute (#147), its first token plus one, or 0.
     uint32_t lifetimebound;
     bool object_size;
+    // A function's: whether a parameter has a Swift ABI (#1447, CheckDeclaratorParameter.abi).
+    bool parameter_abis;
     // The type once this part applies, the declarator's type built so far (check_input_attribute_type_warnings).
     TypeId type;
 };
@@ -5305,6 +5352,11 @@ struct CheckDeclaratorParameter
     uint32_t object_size_token;
     uint8_t object_size;
     bool const_pointer;
+    // Its Swift ABI (TypeParameterABI, #1447) and that attribute's first token; where clang places a parameter's errors: its
+    // name, or where an unnamed one's would be.
+    uint8_t abi;
+    uint32_t abi_token;
+    uint32_t place;
     const CheckNoderefType* noderef;
 };
 
@@ -6257,15 +6309,37 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                         const uint64_t parameter_mark = reader->scratch->length;
                         TypeId* parameter_types = arena_push_array(reader->scratch, (uint64_t)part->parameter_count + 1, sizeof(TypeId), 4);
                         reader->output->resource |= parameter_types == 0;
+                        uint8_t* parameter_abis = part->parameter_abis ? arena_push_array(reader->scratch, (uint64_t)part->parameter_count + 1, 1, 1) : NULL;
+                        reader->output->resource |= part->parameter_abis && parameter_abis == NULL;
                         uint32_t count = 0;
                         CheckNoderefParameter* annotated = NULL;
                         CheckNoderefParameter* annotated_last = NULL;
                         for (uint32_t parameter = part->parameter_first; parameter_types != 0 && parameter != BUSTER_CHECK_NONE; parameter = parameters[parameter].next)
                         {
                             check_input_noderef_parameter_add(reader, &annotated, &annotated_last, parameters[parameter].noderef, count);
+                            if (parameter_abis != NULL)
+                            {
+                                parameter_abis[count] = parameters[parameter].abi;
+                            }
                             parameter_types[count++] = parameters[parameter].type;
                         }
-                        type = valid && parameter_types != 0 ? check_input_type_result(reader, type_function(reader->types, type, parameter_types, count, part->flags)) : 0;
+                        // A parameter's Swift ABI is checked against the declaration's own function's convention once it is
+                        // final (check_input_declarator_end); another function's, a pointer's or a parameter's, is refused by
+                        // name: its convention can come from attributes clang places otherwise (#1447).
+                        if (part->parameter_abis && (frame->parameter || p != first))
+                        {
+                            for (uint32_t parameter = part->parameter_first; parameter != BUSTER_CHECK_NONE; parameter = parameters[parameter].next)
+                            {
+                                if (parameters[parameter].abi != TYPE_PARAMETER_ABI_ORDINARY && valid)
+                                {
+                                    check_input_report(reader, parameters[parameter].abi_token, CHECK_INPUT_UNSUPPORTED);
+                                    valid = false;
+                                }
+                            }
+                        }
+                        type = valid && parameter_types != 0 && (!part->parameter_abis || parameter_abis != NULL) ?
+                               check_input_type_result(reader, type_function_full(reader->types, type, parameter_types, count, part->flags, TYPE_FUNCTION_ABI_SYSV,
+                                                                                  parameter_abis)) : 0;
                         noderef = check_input_noderef_make(reader, noderef, annotated, false);
                         arena_pop_to(reader->scratch, parameter_mark);
                     }
@@ -6365,8 +6439,27 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 }
                             }
                             function->object_size |= object_size != 0;
+                            // Its Swift ABI (check_input_swift_parameter), printed as declared where its type is refused.
+                            CheckInputAttributes* const abi_lists[] = { frame->common_attributes, frame->attributes };
+                            const TypeId declared = type_qualify(reader->types, type_kind_is_array(kind) ? adjusted : type,
+                                                                 type_kind_is_array(kind) ? frame->array_qualifiers : qualifiers);
+                            const uint32_t place = frame->name != BUSTER_CHECK_NONE ? frame->name : frame->missing_name;
+                            uint8_t abi = TYPE_PARAMETER_ABI_ORDINARY;
+                            uint32_t abi_token = BUSTER_CHECK_NONE;
+                            const bool abi_lists_present = (frame->common_attributes != NULL && frame->common_attributes->count != 0) ||
+                                                           (frame->attributes != NULL && frame->attributes->count != 0);
+                            if (abi_lists_present)
+                            {
+                                const uint32_t spelling = type_kind_is_array(kind) || type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? 0 :
+                                                          check_input_typedef_spelling(reader->output, parser, place);
+                                valid &= check_input_swift_parameter(reader, abi_lists, BUSTER_ARRAY_LENGTH(abi_lists), adjusted, declared, spelling, &abi, &abi_token);
+                            }
+                            function->parameter_abis |= abi != TYPE_PARAMETER_ABI_ORDINARY;
                             parameters[parameter_count] = (CheckDeclaratorParameter)
                             {
+                                .abi = abi,
+                                .abi_token = abi_token,
+                                .place = place,
                                 .type = adjusted,
                                 .next = BUSTER_CHECK_NONE,
                                 .missing_name = frame->name == BUSTER_CHECK_NONE ? frame->missing_name : BUSTER_CHECK_NONE,
@@ -6512,6 +6605,38 @@ static bool check_input_capture_names(CheckInputReader* reader, const CheckDecla
     return unknown == BUSTER_CHECK_NONE;
 }
 
+// The checks of a declaration's function type that wait for its final convention (#1447), which its specifiers' attributes
+// can give after its declarator (check_input_declarator_abi): its own parameters' Swift ABIs (check_input_swift_parameters,
+// from check_input_declarator_end's record), and for a declaration (not a definition) of a function without a prototype of a
+// convention that takes no variadic call, clang's err_cconv_knr at its name. clang gives that one after merging a
+// prototyped redeclaration, which an earlier visible declaration of the name may be: then nothing here; nor for a typedef. Whether there was
+// no error.
+static bool check_input_declarator_conventions(CheckInputReader* reader, TypeId type, bool is_typedef)
+{
+    const TypeId function = type != 0 ? type_strip_aligned(reader->types, type) : 0;
+    const bool is_function = function != 0 && type_kind(reader->types, function) == BUSTER_TYPE_KIND_FUNCTION;
+    bool valid = !is_function || reader->declarator_swift_count == 0 ||
+                 check_input_swift_parameters(reader, function, reader->declarator_swift_places, reader->declarator_swift_tokens, reader->declarator_swift_count);
+    const uint32_t name = reader->declarator_no_prototype;
+    const TypeFunctionABI convention = is_function ? type_function_abi_kind(reader->types, function) : TYPE_FUNCTION_ABI_SYSV;
+    const bool unvariadic = convention == TYPE_FUNCTION_ABI_VECTOR || convention == TYPE_FUNCTION_ABI_REG || convention == TYPE_FUNCTION_ABI_SWIFT ||
+                            convention == TYPE_FUNCTION_ABI_SWIFT_ASYNC;
+    if (valid && unvariadic && !is_typedef && name != BUSTER_CHECK_NONE && (reader->types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0 &&
+        c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, reader->parser->tokens.names[name]) == 0)
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_report_argument(reader, name, CHECK_INPUT_ATTRIBUTE_ARGUMENT, CHECK_ARGUMENT_NO_PROTOTYPE_CONVENTION | check_input_abi_call(convention) << 8);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].attribute = name;
+        }
+        valid = false;
+    }
+    reader->declarator_swift_count = 0;
+    reader->declarator_no_prototype = BUSTER_CHECK_NONE;
+    return valid;
+}
+
 // The run's type, 0 when it failed, and as a complete run, where it ended (`cursor`), its name and a definition's
 // parameters (`names`), its attributes, the tags and enumeration constants its parameter list declared and its ABI's
 // origin (reader->declarator_attributes, reader->declarator_declarations and reader->declarator_abi_origin). A run
@@ -6573,6 +6698,28 @@ static inline __attribute__((always_inline)) TypeId check_input_declarator_end(C
             reader->declarator_attributes = attributes;
         }
     }
+    // What check_input_declarator_conventions checks once the declaration's convention is final (#1447): the declared
+    // function's own parameters' Swift ABIs, their places and attributes kept in the reader's arena, and a declaration's
+    // name where its function has no prototype.
+    reader->declarator_swift_count = 0;
+    reader->declarator_no_prototype = BUSTER_CHECK_NONE;
+    if (complete && own != NULL && own->parameter_abis)
+    {
+        uint32_t* places = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)own->parameter_count + 1);
+        uint32_t* tokens = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)own->parameter_count + 1);
+        reader->output->resource |= places == NULL || tokens == NULL;
+        uint32_t index = 0;
+        for (uint32_t p = own->parameter_first; tokens != NULL && places != NULL && p != BUSTER_CHECK_NONE; p = run->parameters[p].next)
+        {
+            places[index] = run->parameters[p].place;
+            tokens[index++] = run->parameters[p].abi_token;
+        }
+        reader->declarator_swift_places = places;
+        reader->declarator_swift_tokens = tokens;
+        reader->declarator_swift_count = tokens != NULL && places != NULL ? index : 0;
+    }
+    const bool definition_next = run->cursor < reader->parser->tokens.count && reader->parser->tokens.kinds[run->cursor] == PARSE_KIND_L_BRACE;
+    reader->declarator_no_prototype = complete && own != NULL && run->name != BUSTER_CHECK_NONE && !definition_next && !own->identifier_list ? run->name : BUSTER_CHECK_NONE;
     const TypeId result = complete && captured && object_sizes ? run->result : 0;
     if (complete && run->function_part != BUSTER_CHECK_NONE && reader->pp->options.language.standard < 2023 &&
         run->cursor < reader->parser->tokens.count && reader->parser->tokens.kinds[run->cursor] == PARSE_KIND_L_BRACE)
@@ -7224,6 +7371,8 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
         reader->declarator_function_list = BUSTER_CHECK_NONE;
         reader->declarator_declarations = BUSTER_CHECK_NONE;
         reader->declarator_abi_origin = 0;
+        reader->declarator_swift_count = 0;
+        reader->declarator_no_prototype = BUSTER_CHECK_NONE;
         reader->declarator_noderef = NULL;
         reader->declarator_identifier_list = false;
     }
@@ -8132,6 +8281,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         const CheckNoderefType* noderef = reader->declarator_noderef;
         // (The specifiers' function-type attributes have had their warnings with the declarator's, check_input_declarator_step.)
         type = check_input_declarator_abi(reader, attributes, type, &abi_origin, false);
+        valid &= check_input_declarator_conventions(reader, type, is_typedef);
         if (is_typedef && type != 0 && attributes != 0 && attributes->alignment_log2 != 0)
         {
             type = check_input_type_result(reader, type_aligned(reader->types, type, attributes->alignment_log2 - 1));
@@ -8656,6 +8806,12 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     }
                     check_sparse_set(reader->output->sparse_pool, reader->output->initializer_begins, name, i + 1);
                     check_sparse_set(reader->output->sparse_pool, reader->output->initializer_ends, name, end);
+                    if (valid && constexpr_decl && file)
+                    {
+                        // Clang declines runtime diagnostics for a file-scope constexpr initializer, including
+                        // detached selection arms. Local constexpr initializers keep their runtime diagnostics.
+                        check_input_warning_suppress(reader, i + 1, end, CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW);
+                    }
                     i = valid ? direct_initializer ? direct_close + 1 : end : i;
                 }
                 // A declarator that ends before the first setting or section attribute is no section event (a section
@@ -11680,6 +11836,9 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
         {
             const uint32_t separator = check_constant_punctuation(parser, token + 2, close, PARSE_KIND_COMMA);
             memset(reader->constant_contexts + token + 2, 1, separator - token - 2);
+            // Clang parses this whole condition as constant-evaluated, including static-selection arms that the
+            // evaluated graph does not retain as operands. Their runtime shift-count diagnostics are not queued.
+            check_input_warning_suppress(reader, token + 2, separator, CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW);
             if (separator < close)
             {
                 // A message contributes no expression value. Mark its span once instead of walking the parser
@@ -11702,6 +11861,7 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
         if (close > token && close < count)
         {
             memset(reader->constant_contexts + token + 1, 1, close - token - 1);
+            check_input_warning_suppress(reader, token + 1, close, CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW);
         }
     }
 }

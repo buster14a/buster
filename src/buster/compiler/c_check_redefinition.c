@@ -70,9 +70,11 @@ static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t 
             note_kind = defined ? CHECK_INPUT_NOTE_PREVIOUS_DEFINITION : CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
         }
     }
+    // (A function's other explicit calling convention reports CHECK_INPUT_CONVENTION_CHANGE instead, with its own detail
+    // and note: check_input_report_redeclaration.)
     const uint32_t before = input->report_count;
-    check_input_report_subject(reader, token, message, previous);
-    if (input->report_count > before && !input->resource && detail != CHECK_REDECLARATION_GENERIC)
+    check_input_report_redeclaration(reader, token, message, previous);
+    if (input->report_count > before && !input->resource && detail != CHECK_REDECLARATION_GENERIC && input->reports[before].message == message)
     {
         CheckInputReport* report = input->reports + before;
         report->detail = detail;

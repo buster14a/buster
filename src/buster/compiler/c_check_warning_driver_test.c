@@ -15,6 +15,7 @@ struct CheckDriverDefaultWarningFixture
     uint32_t notes;
     bool c23;
     bool compare_warning_text;
+    bool syntax_only;
 };
 
 static const char check_driver_format_plain_source[] =
@@ -1463,7 +1464,7 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
         check_test_expect(test, written, "original default-warning fixture is written");
         for (uint32_t policy = 0; written && policy < BUSTER_ARRAY_LENGTH(policies); policy += 1)
         {
-            for (uint32_t mode = 0; mode < 2; mode += 1)
+            for (uint32_t mode = 0; mode < (fixture->syntax_only ? 1u : 2u); mode += 1)
             {
                 char* arguments[20] = { (char*)clang, fixture->c23 ? "-std=c23" : "-std=gnu17", "-fno-caret-diagnostics", "-fno-color-diagnostics",
                                         mode == 0 ? "-fsyntax-only" : "-c", source, "-o", objects[2] };
@@ -1487,8 +1488,16 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
                 const bool oracle_ready = (oracle == 0 || oracle == 1) && expected != NULL;
                 char description[256];
                 snprintf(description, sizeof(description), "%s policy=%u mode=%u: independent Clang oracle", fixture->name, policy, mode);
-                check_test_expect(test, oracle_ready && (policy != 0 || (oracle == (fixture->errors != 0) && counts.warnings == fixture->warnings &&
-                                       counts.errors == fixture->errors && counts.notes == fixture->notes)), description);
+                const bool oracle_matches = oracle_ready && (policy != 0 || (oracle == (fixture->errors != 0) && counts.warnings == fixture->warnings &&
+                                             counts.errors == fixture->errors && counts.notes == fixture->notes));
+                if (policy == 0 && !oracle_matches)
+                {
+                    fprintf(stderr, "warning fixture oracle mismatch: %s mode=%u\nexpected status=%d warnings=%u errors=%u notes=%u; "
+                                    "actual status=%d warnings=%u errors=%u notes=%u\n%s\n",
+                            fixture->name, mode, fixture->errors != 0, fixture->warnings, fixture->errors, fixture->notes,
+                            oracle, counts.warnings, counts.errors, counts.notes, expected != NULL ? expected : "(no diagnostic output)");
+                }
+                check_test_expect(test, oracle_matches, description);
                 for (uint32_t lane = 0; oracle_ready && lane < BUSTER_ARRAY_LENGTH(lanes); lane += 1)
                 {
                     for (uint32_t scalar = 0; scalar < 2; scalar += 1)

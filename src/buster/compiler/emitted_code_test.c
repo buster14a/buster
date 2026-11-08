@@ -523,14 +523,18 @@ static void emitted_test_tier0_preserving(EmittedTest* test)
     const struct
     {
         uint16_t general;
-        uint8_t vectors;
+        uint32_t vectors;
         uint8_t bytes;
         uint8_t masks;
     } conventions[] = {
         { most, 0, 0, 0 },
-        { most, 16, 16, 0 },
-        { most, 16, 32, 0 },
-        { (uint16_t)(most | 1u << X86_REGISTER_R11), 32, 64, 8 },
+        { most, 0xffffu, 16, 0 },
+        { most, 0xffffu, 32, 0 },
+        { (uint16_t)(most | 1u << X86_REGISTER_R11), 0xffffffffu, 64, 8 },
+        // intel_ocl_bicc's (#1447): xmm8 to xmm15, ymm8 to ymm15, and with AVX-512 rsi, zmm16 to zmm31 and the masks.
+        { 0, 0xff00u, 16, 0 },
+        { 0, 0xff00u, 32, 0 },
+        { (uint16_t)(1u << X86_REGISTER_RSI), 0xffff0000u, 64, 8 },
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(conventions); c += 1)
     {
@@ -620,10 +624,10 @@ static void emitted_test_tier0_interrupt(EmittedTest* test)
                                       1u << X86_REGISTER_R8 | 1u << X86_REGISTER_R9 | 1u << X86_REGISTER_R10 | 1u << X86_REGISTER_R11);
     const struct
     {
-        uint8_t vectors;
+        uint32_t vectors;
         uint8_t bytes;
         uint8_t masks;
-    } sets[] = { { 32, 64, 8 }, { 16, 32, 0 } };
+    } sets[] = { { 0xffffffffu, 64, 8 }, { 0xffffu, 32, 0 } };
     for (uint32_t kind = BUSTER_TIER0_INTERRUPT_HANDLER; kind <= BUSTER_TIER0_INTERRUPT_ERROR_CODE; kind += 1)
     {
         for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(sets); c += 1)

@@ -620,15 +620,16 @@ struct Tier0Function
     // and preserve_all's (and no_caller_saved_registers', as clang's x86 handlers keep them), but those its result returns
     // in, which the caller reads (tier0_preserved_general, tier0_preserved_vectors). `preserve_general` has a bit per
     // general register of Tier 0's register set among the caller-saved ones (BUSTER_TIER0_GENERAL_CALLER_SAVED), each
-    // pushed after the callee-saved ones and popped before them. `preserve_vectors` keeps vector registers 0 to it less 1
-    // (0, 16 or 32), `preserve_vector_bytes` of each (16, 32 or 64: an XMM's, a YMM's or a ZMM's, which the function's
-    // instruction set must have), and `preserve_mask_bytes` the mask registers k0 to k7 (0, 2 for AVX-512F's kmovw or 8
+    // pushed after the callee-saved ones and popped before them. `preserve_vectors` keeps the vector registers of its bits
+    // (a bit per register: xmm0 to xmm15 or zmm0 to zmm31 for those, and intel_ocl_bicc's xmm8 to xmm15 or zmm16 to zmm31),
+    // `preserve_vector_bytes` of each (16, 32 or 64: an XMM's, a YMM's or a ZMM's, which the function's instruction set
+    // must have; 64 for any of 16 to 31), and `preserve_mask_bytes` the mask registers k0 to k7 (0, 2 for AVX-512F's kmovw or 8
     // for AVX-512BW's kmovq): each stored into the frame's preserve block, which the prologue reserves right below the
     // pushes, and loaded back before the epilogue's release (tier0_emit_preserve). Such a frame has a frame pointer
     // (tier0_kept_pointer), so that the pushes past rbp's are no transitions of the unwind tables, and no eh_return, tail
     // call or __builtin_setjmp, whose teardowns and frames know nothing of these (tier0_frame_input_valid).
     uint16_t preserve_general;
-    uint8_t preserve_vectors;
+    uint32_t preserve_vectors;
     uint8_t preserve_vector_bytes;
     uint8_t preserve_mask_bytes;
     // An x86 interrupt service routine (#147, clang's `interrupt`, LLVM's x86_intrcc): BUSTER_TIER0_INTERRUPT_HANDLER, or
@@ -975,7 +976,7 @@ static const uint8_t tier0_callee_saved[BUSTER_TIER0_CALLEE_SAVED] = {
 #define BUSTER_TIER0_RESULT_REGISTERS (1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX | 3u << BUSTER_TIER0_XMM(0))
 
 // A preserving frame's metadata (Tier0Function.preserve_general and the rest): caller-saved general registers, whole vector
-// registers of a width their count allows (32 of them only as ZMM's), the mask registers' widths, and none of the frames
+// registers of a width their numbers allow (16 to 31 only as ZMM's), the mask registers' widths, and none of the frames
 // whose teardowns and saves don't know them: eh_return's, tail calls', __builtin_setjmp's.
 static bool tier0_preserve_valid(const Tier0Function* function)
 {
@@ -983,7 +984,8 @@ static bool tier0_preserve_valid(const Tier0Function* function)
     const uint32_t bytes = function->preserve_vector_bytes;
     const uint32_t masks = function->preserve_mask_bytes;
     const bool preserving = function->preserve_general != 0 || vectors != 0 || masks != 0;
-    const bool widths = (vectors == 0 && bytes == 0) || (vectors == 16 && (bytes == 16 || bytes == 32 || bytes == 64)) || (vectors == 32 && bytes == 64);
+    const bool widths = (vectors == 0 && bytes == 0) || (vectors != 0 && (vectors >> 16) == 0 && (bytes == 16 || bytes == 32 || bytes == 64)) ||
+                        ((vectors >> 16) != 0 && bytes == 64);
     // An interrupt service routine (Tier0Function.interrupt) keeps registers, returns nothing, and takes its frame's
     // address, and the error code where it has one, at their System V locations, in rdi and rsi, without variadic ones.
     const uint32_t interrupt = function->interrupt;
@@ -1210,9 +1212,8 @@ static uint32_t tier0_preserved_general(const Tier0Function* function)
 // (0 to 31): all but its result's.
 static uint32_t tier0_preserved_vectors(const Tier0Function* function)
 {
-    const uint32_t count = function->preserve_vectors;
-    const uint32_t all = count == 32 ? UINT32_MAX : (1u << count) - 1;
-    return count != 0 ? all & ~(tier0_result_set(function) >> BUSTER_TIER0_XMM(0)) : 0;
+    const uint32_t vectors = function->preserve_vectors;
+    return vectors != 0 ? vectors & ~(tier0_result_set(function) >> BUSTER_TIER0_XMM(0)) : 0;
 }
 
 // The bytes of a preserving frame's block below its pushes (#147, tier0_emit_preserve): `vector_bytes` for each of
