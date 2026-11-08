@@ -70,28 +70,32 @@ enum
     CHECK_WARNING_ID_NSOBJECT_ATTRIBUTE = 78,
     CHECK_WARNING_ID_INDEPENDENT_CLASS = 79,
     CHECK_WARNING_ID_ASSUME = 80,
-    CHECK_WARNING_ID_WEAK_UNDECLARED = 81,
-    CHECK_WARNING_ID_REDEFINE_EXTNAME = 82,
-    CHECK_WARNING_ID_THREAD_SAFETY_ATTRIBUTES = 83,
-    CHECK_WARNING_ID_NODEREF = 84,
-    CHECK_WARNING_ID_EXCESSIVE_REGSAVE = 85,
-    CHECK_WARNING_ID_TCB_ENFORCEMENT = 86,
-    CHECK_WARNING_ID_INVALID_VERSION_AVAILABILITY = 87,
+    CHECK_WARNING_ID_DUPLICATE_DECLSPEC = 81,
+    CHECK_WARNING_ID_INVALID_NORETURN = 82,
+    CHECK_WARNING_ID_PRIVATE_EXTERN = 83,
+    CHECK_WARNING_ID_LITERAL_CONVERSION = 84,
+    CHECK_WARNING_ID_WEAK_UNDECLARED = 85,
+    CHECK_WARNING_ID_REDEFINE_EXTNAME = 86,
+    CHECK_WARNING_ID_THREAD_SAFETY_ATTRIBUTES = 87,
+    CHECK_WARNING_ID_NODEREF = 88,
+    CHECK_WARNING_ID_EXCESSIVE_REGSAVE = 89,
+    CHECK_WARNING_ID_TCB_ENFORCEMENT = 90,
+    CHECK_WARNING_ID_INVALID_VERSION_AVAILABILITY = 91,
     // An unknown escape sequence in an unevaluated string literal, before its error (#147): the driver's alone, no event's.
-    CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE = 88,
-    CHECK_WARNING_ID_VOID_PTR_DEREFERENCE = 89,
+    CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE = 92,
+    CHECK_WARNING_ID_VOID_PTR_DEREFERENCE = 93,
     // An ordinary character constant of more than one character (#1447): two or three, or past four, -Wmultichar's; four,
     // -Wfour-char-constants' (ignored by default); past four, clang's warning of no option too.
-    CHECK_WARNING_ID_MULTICHAR = 90,
-    CHECK_WARNING_ID_FOUR_CHAR_CONSTANTS = 91,
-    CHECK_WARNING_ID_CHARACTER_TOO_LONG = 92,
-    CHECK_WARNING_ID_NULL_DEREFERENCE = 93,
+    CHECK_WARNING_ID_MULTICHAR = 94,
+    CHECK_WARNING_ID_FOUR_CHAR_CONSTANTS = 95,
+    CHECK_WARNING_ID_CHARACTER_TOO_LONG = 96,
+    CHECK_WARNING_ID_NULL_DEREFERENCE = 97,
     // A warning diagnose_if's condition gives (#1447, c_check_condition.c): -Wuser-defined-warnings.
-    CHECK_WARNING_ID_USER_DEFINED_WARNINGS = 94,
+    CHECK_WARNING_ID_USER_DEFINED_WARNINGS = 98,
     // clang's -Wfunction-multiversion (#1447, c_check_cpu_dispatch.c): a cpu_specific or cpu_dispatch CPU list with two
     // names of one mangling, and a cpu_dispatch function's body.
-    CHECK_WARNING_ID_FUNCTION_MULTIVERSION = 95,
-    CHECK_WARNING_ID_UNUSED_RESULT = 96,
+    CHECK_WARNING_ID_FUNCTION_MULTIVERSION = 99,
+    CHECK_WARNING_ID_UNUSED_RESULT = 100,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -259,6 +263,12 @@ typedef enum CheckWarningEventKind
     // member's name in the payload's name, the attribute's message's string token in its token (or none); its note,
     // CHECK_WARNING_NOTE_UNAVAILABLE_HERE, at the member's name.
     CHECK_WARNING_EVENT_UNAVAILABLE_USE,
+    // Repeated declaration specifiers: payload.name is Clang's canonical keyword spelling.
+    CHECK_WARNING_EVENT_DUPLICATE_DECLSPEC,
+    // A return written in a noreturn function, including unreachable returns; payload.name names the function.
+    CHECK_WARNING_EVENT_NORETURN_RETURN,
+    CHECK_WARNING_EVENT_NORETURN_FALLS,
+    CHECK_WARNING_EVENT_PRIVATE_EXTERN,
     CHECK_WARNING_EVENT_THREAD_CAPABILITY,
     CHECK_WARNING_EVENT_THREAD_ARGUMENT,
     CHECK_WARNING_EVENT_THREAD_METHOD,
@@ -340,6 +350,7 @@ typedef enum CheckWarningNoteKind
     // Why malloc_span's function returns no span-like structure (check_input_span_reason's data).
     CHECK_WARNING_NOTE_SPAN_REASON,
     CHECK_WARNING_NOTE_UNAVAILABLE_HERE,
+    CHECK_WARNING_NOTE_PRIVATE_EXTERN,
     CHECK_WARNING_NOTE_NODEREF_DECLARATION,
     // An invalid availability version's canonical one (payload.data indexing CheckInput.availability_texts), and the
     // previous attribute of a redeclaration's availability (#1447).

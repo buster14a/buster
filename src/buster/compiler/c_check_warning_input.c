@@ -164,9 +164,46 @@ struct CheckInputWarningInterval
     uint32_t end;
 };
 
+// Deferred constant-context lanes own disjoint token spans, but share the warning count and index. Only mutate
+// token-local columns during their round; the caller reconstructs the count and invalidates the index after joining.
+static void check_input_warning_parallel(CheckInputReader* reader, uint32_t first, uint32_t end, uint8_t clear, uint8_t suppress)
+{
+    uint8_t* warnings = reader->output->constant_warnings;
+    uint8_t* ignored = reader->output->constant_warning_ignored;
+    uint8_t* suppressed = reader->warning_suppressed;
+    const uint8_t* contexts = reader->constant_contexts;
+    const uint8_t keep = (uint8_t)~clear;
+    for (uint32_t token = first; token < end; token += 1)
+    {
+        if (contexts == NULL || (contexts[token] & BUSTER_CHECK_CONSTANT_BOUND_CONTEXT) == 0)
+        {
+            if (warnings != NULL)
+            {
+                warnings[token] &= keep;
+            }
+            if (ignored != NULL)
+            {
+                ignored[token] &= keep;
+            }
+            if (suppressed != NULL)
+            {
+                check_input_rare_claim(reader, suppressed + token);
+                suppressed[token] |= suppress;
+            }
+        }
+    }
+}
+
 static void check_input_warning_range(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t clear, uint32_t suppress)
 {
-    if (first < end && end <= reader->parser->tokens.count)
+    if (reader->parallel_warning_ranges)
+    {
+        if (first < end && end <= reader->parser->tokens.count)
+        {
+            check_input_warning_parallel(reader, first, end, (uint8_t)clear, (uint8_t)suppress);
+        }
+    }
+    else if (first < end && end <= reader->parser->tokens.count)
     {
         if (!reader->warning_index_ready && end - first >= BUSTER_CHECK_WARNING_BLOCK)
         {
