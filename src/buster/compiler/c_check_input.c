@@ -2487,6 +2487,66 @@ static void check_input_report_subject(CheckInputReader* reader, uint32_t token,
 // clang's function type bit beside its convention (TYPE_FUNCTION_ABI_NO_CALLER_SAVED), keeps the type's error.
 static uint32_t check_input_abi_call(TypeFunctionABI abi);
 
+// How clang words a redeclaration's error at `token` against `previous` (#1447's semantic recovery, phase 2), in a
+// CHECK_INPUT_REDECLARATION or CHECK_INPUT_CONFLICTING_TYPES report's `detail` (the driver's
+// check_driver_redeclaration_report), with its note at `previous`: "previous definition is here" where `previous` defines
+// its entity (a tentative definition does) or is a typedef or another kind of entity, else "previous declaration is here".
+// 0 keeps the report's generic wording (a thread-local mismatch's, a predefined name's).
+typedef enum CheckInputRedeclarationWording
+{
+    CHECK_REDECLARATION_GENERIC,
+    // "redefinition of 'X' as different kind of symbol"
+    CHECK_REDECLARATION_KIND,
+    // "typedef redefinition with different types ('N' vs 'O')"
+    CHECK_REDECLARATION_TYPEDEF,
+    // "conflicting types for 'X'"
+    CHECK_REDECLARATION_CONFLICTING,
+    // "static declaration of 'X' follows non-static declaration" and its converse
+    CHECK_REDECLARATION_LINKAGE,
+    // "redefinition of 'X' with a different type: 'N' vs 'O'", or "redeclaration of …" where `token` doesn't define
+    CHECK_REDECLARATION_TYPE,
+    // "redefinition of 'X'"
+    CHECK_REDECLARATION_SAME,
+} CheckInputRedeclarationWording;
+
+// The bit of CheckInputReport.detail that says a redeclaration's new declaration defines its entity, and the one that says
+// the note is "previous definition is here".
+#define BUSTER_CHECK_REDECLARATION_DEFINES 0x100u
+#define BUSTER_CHECK_REDECLARATION_NOTE_DEFINITION 0x200u
+
+static void check_input_redeclaration_wording(CheckInputReader* reader, CheckInputReport* report, uint32_t token, uint32_t previous)
+{
+    const uint8_t* bits = reader->declaration_bits;
+    const uint8_t kind = reader->declaration_kinds[token];
+    const uint8_t prior_kind = reader->declaration_kinds[previous];
+    const uint32_t linkage = check_input_linkage(bits, token);
+    const uint32_t prior_linkage = check_input_linkage(bits, previous);
+    // An object of no linkage (a block's, not extern) is its own definition.
+    const bool defines = check_input_bit(bits, token, BUSTER_CHECK_BITS_DEFINED) || check_input_bit(bits, token, BUSTER_CHECK_BITS_TENTATIVE) ||
+                         (kind == C_BINDING_OBJECT && linkage == 0);
+    const bool prior_defines = check_input_bit(bits, previous, BUSTER_CHECK_BITS_DEFINED) || check_input_bit(bits, previous, BUSTER_CHECK_BITS_TENTATIVE) ||
+                               (prior_kind == C_BINDING_OBJECT && prior_linkage == 0);
+    const bool thread_local = check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) !=
+                              check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL);
+    const TypeAnswer compatible = kind == prior_kind ? type_compatible(reader->types, reader->declared_types[previous], reader->declared_types[token]) : TYPE_ANSWER_NO;
+    reader->output->resource |= compatible == TYPE_ANSWER_FULL;
+    const CheckInputRedeclarationWording wording =
+        kind != prior_kind                                                  ? CHECK_REDECLARATION_KIND :
+        report->message == CHECK_INPUT_CONFLICTING_TYPES                    ? CHECK_REDECLARATION_CONFLICTING :
+        linkage != 0 && prior_linkage != 0 && linkage != prior_linkage      ? CHECK_REDECLARATION_LINKAGE :
+        kind == C_BINDING_TYPEDEF                                           ? CHECK_REDECLARATION_TYPEDEF :
+        kind != C_BINDING_OBJECT || thread_local                            ? CHECK_REDECLARATION_GENERIC :
+        compatible != TYPE_ANSWER_YES                                       ? CHECK_REDECLARATION_TYPE :
+                                                                              CHECK_REDECLARATION_SAME;
+    const bool note_definition = prior_defines || kind != prior_kind || kind == C_BINDING_TYPEDEF;
+    if (wording != CHECK_REDECLARATION_GENERIC)
+    {
+        report->detail = (uint32_t)wording | (defines ? BUSTER_CHECK_REDECLARATION_DEFINES : 0u) | (note_definition ? BUSTER_CHECK_REDECLARATION_NOTE_DEFINITION : 0u);
+        report->note_token = previous;
+        report->note_kind = note_definition ? CHECK_INPUT_NOTE_PREVIOUS_DEFINITION : CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
+    }
+}
+
 static void check_input_report_redeclaration(CheckInputReader* reader, uint32_t token, CheckInputMessage message, uint32_t previous)
 {
     const TypeTable* types = reader->types;
@@ -2512,7 +2572,12 @@ static void check_input_report_redeclaration(CheckInputReader* reader, uint32_t 
     }
     else
     {
+        const uint32_t count = reader->output->report_count;
         check_input_report_subject(reader, token, message, previous);
+        if (reader->output->report_count != count)
+        {
+            check_input_redeclaration_wording(reader, reader->output->reports + count, token, previous);
+        }
     }
 }
 
@@ -9019,6 +9084,8 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
         }
     }
+    // Whether the declaration conflicts with the visible one and is left out (below).
+    bool dropped = false;
     if (!overload && !versions && old != 0 && (reader->bindings.depth[old - 1] == reader->scope_count || linked_visible))
     {
         const uint32_t previous = reader->bindings.declaration[old - 1];
@@ -9039,7 +9106,12 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         {
             const CheckInputMessage message = kind == C_BINDING_FUNCTION && reader->declaration_kinds[previous] == kind && compatible == TYPE_ANSWER_NO && !library_redeclaration ?
                                               CHECK_INPUT_CONFLICTING_TYPES : CHECK_INPUT_REDECLARATION;
+            const uint32_t before = reader->output->report_count;
             check_input_report_redeclaration(reader, token, message, previous);
+            // clang marks the redeclaration invalid and leaves it out of its name's lookup, which finds the visible
+            // declaration still (#1447's semantic recovery, phase 2): the report moves past, and the declaration isn't
+            // bound or linked.
+            dropped = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
         }
         else
         {
@@ -9072,7 +9144,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
         }
     }
-    if (!overload && !versions && check_input_linkage(reader->declaration_bits, token) != 0 && reader->output->report_count == 0)
+    if (!dropped && !overload && !versions && check_input_linkage(reader->declaration_bits, token) != 0 && reader->output->report_count == 0)
     {
         // Lexical scope restoration does not create a new externally linked entity. Keep its compatibility and
         // object identity for the translation unit, while only a visible declaration contributes to the source
@@ -9236,7 +9308,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     // Lazy library declarations have file scope. Their lexical cache can be restored and rebuilt, but a local
     // object declared after the first call is allowed to shadow them, unlike an ordinary block-scope implicit int.
     const uint32_t depth = reader->output->function_flags != NULL && (reader->output->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0 ? 0 : reader->scope_count;
-    if (c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, name, kind, token, point, depth) == 0)
+    if (!dropped && c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, name, kind, token, point, depth) == 0)
     {
         reader->output->resource = true;
     }
