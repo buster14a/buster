@@ -204,7 +204,7 @@ static void check_debug_tier1_values_bindings(CheckDebugTestTally* tally)
     uint8_t safe[BUSTER_ARRAY_LENGTH(records)] = { 0, 1, 1, 1, 1, 1, 1, 1, 0, 0 };
     for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(records); r += 1)
     {
-        origins[r] = tier1_origin(r == 0 || r == 8 ? TIER1_ORIGIN_FRAME : TIER1_ORIGIN_NODE, 0);
+        origins[r] = tier1_origin(r == 0 || r == 8 ? TIER1_ORIGIN_FRAME : TIER1_ORIGIN_NODE, r == 8 ? 1 : 0);
         entries[r] = 1;
     }
     uint32_t physical[] = { 0, 0 };

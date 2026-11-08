@@ -524,11 +524,12 @@ static uint64_t check_tier1_debug_constant_ranges(const CheckTier1DebugConstants
 // The fixed prologue's actual instructions must establish the base that the frame layout describes. A probe's loop
 // is deliberately not reconstructed here: an unsupported prologue retains source lines but publishes no frame homes.
 // RSP's distance is known until realignment; R15 must then explicitly capture that aligned RSP for a dynamic frame.
-static bool check_tier1_debug_frame_base(const Tier1EmitResult* emitted)
+static bool check_tier1_debug_frame_base(const Tier1EmitResult* emitted, const uint32_t* record_order)
 {
     const Tier1Frame* frame = &emitted->frame;
     const X86Instruction* const records = emitted->code.records;
     const uint32_t body = emitted->body_record;
+    const uint32_t count = emitted->code.count;
     const uint32_t base = frame->base_register;
     const uint32_t expected_pushes = frame->saved_registers | (frame->frame_pointer ? 1u << X86_REGISTER_RBP : 0);
     const int64_t expected_stack = -(int64_t)frame->stack_adjust_bytes - 8 * (int64_t)__builtin_popcount(expected_pushes);
@@ -537,48 +538,55 @@ static bool check_tier1_debug_frame_base(const Tier1EmitResult* emitted)
     bool pointer = false;
     bool aligned = false;
     bool captured = false;
-    bool valid = body <= emitted->code.count && base < 16;
+    bool valid = body <= count && base < 16 && (count == 0 || (records != NULL && emitted->origins != NULL));
     for (uint32_t r = 0; valid && r < body; r += 1)
     {
-        const X86Instruction record = records[r];
+        const uint32_t old = record_order != NULL ? record_order[r] : r;
+        valid = old < count;
+        if (!valid)
+        {
+            break;
+        }
+        const X86Instruction record = records[old];
         const bool plain = record.mode == BUSTER_X86_REGISTER_DIRECT && record.index == 0 && record.vvvv == 0 && record.decorations == 0 && record.displacement == 0;
         uint64_t read = 0;
         uint64_t written = 0;
         x86_instruction_effects_scalar(&record, &read, &written);
+        valid = x86_effects_control(x86_effects(record.form)) == BUSTER_X86_CONTROL_NONE;
         const bool push = plain && record.form == X86_FORM_PUSH_R64 && record.rm < 16 && record.immediate == 0;
         const bool move = plain && record.immediate == 0 && (record.form == X86_FORM_MOV_R64_RM64 || record.form == X86_FORM_MOV_RM64_R64);
         const uint32_t from = record.form == X86_FORM_MOV_R64_RM64 ? record.rm : record.reg;
         const uint32_t to = record.form == X86_FORM_MOV_R64_RM64 ? record.reg : record.rm;
         const bool subtract = plain && record.rm == X86_REGISTER_RSP && (record.form == X86_FORM_SUB_RM64_IMM8 || record.form == X86_FORM_SUB_RM64_IMM32);
         const bool align = plain && record.rm == X86_REGISTER_RSP && (record.form == X86_FORM_AND_RM64_IMM8 || record.form == X86_FORM_AND_RM64_IMM32);
-        if (push)
+        if (valid && push)
         {
             valid = !aligned && record.rm != X86_REGISTER_RSP && (pushed & (1u << record.rm)) == 0;
             pushed |= 1u << record.rm;
             stack -= 8;
         }
-        else if (move && from == X86_REGISTER_RSP && to == X86_REGISTER_RBP)
+        else if (valid && move && from == X86_REGISTER_RSP && to == X86_REGISTER_RBP)
         {
             valid = frame->frame_pointer && !pointer && !aligned && stack == -8;
             pointer = valid;
         }
-        else if (subtract)
+        else if (valid && subtract)
         {
             const int64_t amount = (int64_t)record.immediate;
             valid = !aligned && amount > 0 && amount <= INT32_MAX;
             stack -= valid ? amount : 0;
         }
-        else if (align)
+        else if (valid && align)
         {
             valid = frame->realigned && pointer && !aligned && stack == expected_stack && (int64_t)record.immediate == -(int64_t)frame->alignment;
             aligned = valid;
         }
-        else if (move && from == X86_REGISTER_RSP && to == BUSTER_TIER1_FRAME_REALIGN_BASE)
+        else if (valid && move && from == X86_REGISTER_RSP && to == BUSTER_TIER1_FRAME_REALIGN_BASE)
         {
             valid = base == BUSTER_TIER1_FRAME_REALIGN_BASE && aligned && !captured;
             captured = valid;
         }
-        else
+        else if (valid)
         {
             const uint64_t bases = BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RSP) | BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RBP) | BUSTER_X86_RESOURCE_GPR(base);
             valid = (written & bases) == 0;
@@ -587,18 +595,30 @@ static bool check_tier1_debug_frame_base(const Tier1EmitResult* emitted)
     valid = valid && pushed == expected_pushes && stack == expected_stack && pointer == frame->frame_pointer && aligned == frame->realigned;
     valid = valid && (base == X86_REGISTER_RSP || (base == X86_REGISTER_RBP && pointer && !aligned) ||
                       (base == BUSTER_TIER1_FRAME_REALIGN_BASE && pointer && aligned && captured));
-    for (uint32_t r = body; valid && r < emitted->code.count; r += 1)
+    // A producer tag alone cannot excuse a body base write. In final record order, every record after such a write
+    // must be an exact FRAME(1) teardown record with no control transfer, followed immediately by an actual RET.
+    // The RET may have a source origin (the CFG emitter's), since return PCs independently have no frame homes.
+    // Walking backward proves every terminal suffix once; no alleged epilogue can resume source instructions.
+    bool terminal = false;
+    for (uint32_t at = count; valid && at > body;)
     {
-        const uint32_t kind = emitted->origins[r] >> BUSTER_TIER1_ORIGIN_SHIFT;
-        const X86Instruction record = records[r];
+        const uint32_t r = --at;
+        const uint32_t old = record_order != NULL ? record_order[r] : r;
+        valid = old < count;
+        if (!valid)
+        {
+            break;
+        }
+        const X86Instruction record = records[old];
         const uint32_t control = x86_effects_control(x86_effects(record.form));
         uint64_t read = 0;
         uint64_t written = 0;
         x86_instruction_effects_scalar(&record, &read, &written);
-        const bool frame_record = kind == TIER1_ORIGIN_FRAME || control == BUSTER_X86_CONTROL_RETURN;
+        const bool returns = tier1_cert_emitted_exactly(record, (X86Instruction){ .form = X86_FORM_RET });
+        terminal = returns || (terminal && emitted->origins[old] == tier1_origin(TIER1_ORIGIN_FRAME, 1) && control == BUSTER_X86_CONTROL_NONE);
         // A call's architectural push is reflected in the callee's frame; the caller's resumed RSP is unchanged.
         const bool call_stack = base == X86_REGISTER_RSP && control == BUSTER_X86_CONTROL_CALL;
-        valid = frame_record || call_stack || (written & BUSTER_X86_RESOURCE_GPR(base)) == 0;
+        valid = terminal || call_stack || (written & BUSTER_X86_RESOURCE_GPR(base)) == 0;
     }
     return valid;
 }
@@ -744,7 +764,7 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
         }
         first = end;
     }
-    const bool framed = valid && emitted->general && slots != 0 && frame->count != 0 && frame->slot != NULL && frame->offset != NULL && check_tier1_debug_frame_base(emitted);
+    const bool framed = valid && emitted->general && slots != 0 && frame->count != 0 && frame->slot != NULL && frame->offset != NULL && check_tier1_debug_frame_base(emitted, record_order);
     uint32_t* uses = valid && framed ? ir_allocate(scratch, (uint64_t)frame->slot_count + 1, 4, &valid) : NULL;
     uint32_t* local_slots = valid ? ir_allocate(scratch, (uint64_t)locals + 1, 4, &valid) : NULL;
     Tier0Home* homes = valid ? ir_allocate(scratch, (uint64_t)locals + 1, sizeof(Tier0Home), &valid) : NULL;

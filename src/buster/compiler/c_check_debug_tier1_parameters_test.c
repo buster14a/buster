@@ -6,6 +6,124 @@
 
 #include "c_check_debug_tier1_bindings_test.c"
 
+// A frame label cannot make an arbitrary base write harmless. Only a contiguous terminal teardown can change
+// the established base without invalidating later homes, and that property must hold in the final record order.
+static void check_debug_tier1_values_frames(CheckDebugTestTally* tally)
+{
+    X86Instruction records[] = {
+        { .form = X86_FORM_PUSH_R64, .mode = BUSTER_X86_REGISTER_DIRECT, .rm = X86_REGISTER_RBX },
+        { .form = X86_FORM_SUB_RM64_IMM8, .mode = BUSTER_X86_REGISTER_DIRECT, .rm = X86_REGISTER_RSP, .immediate = 32 },
+        { .form = X86_FORM_MOV_R64_RM64, .mode = BUSTER_X86_REGISTER_DIRECT, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDI },
+        { .form = X86_FORM_NOP },
+        { .form = X86_FORM_ADD_RM64_IMM8, .mode = BUSTER_X86_REGISTER_DIRECT, .rm = X86_REGISTER_RSP, .immediate = 32 },
+        { .form = X86_FORM_POP_R64, .mode = BUSTER_X86_REGISTER_DIRECT, .rm = X86_REGISTER_RBX },
+        { .form = X86_FORM_RET },
+    };
+    uint32_t origins[] = {
+        tier1_origin(TIER1_ORIGIN_FRAME, 0), tier1_origin(TIER1_ORIGIN_FRAME, 0),
+        tier1_origin(TIER1_ORIGIN_NODE, 0), tier1_origin(TIER1_ORIGIN_NODE, 0),
+        tier1_origin(TIER1_ORIGIN_FRAME, 1), tier1_origin(TIER1_ORIGIN_FRAME, 1), tier1_origin(TIER1_ORIGIN_NODE, 1),
+    };
+    Tier1EmitResult emitted = {
+        .code = { .records = records, .count = BUSTER_ARRAY_LENGTH(records) }, .origins = origins, .body_record = 2,
+        .frame = { .base_register = X86_REGISTER_RSP, .stack_adjust_bytes = 32, .saved_registers = 1u << X86_REGISTER_RBX },
+    };
+    check_debug_test_expect(tally, check_tier1_debug_frame_base(&emitted, NULL),
+                            "a complete contiguous teardown preserves the preceding body frame proof", "FRAME1 add/pop followed by a NODE return");
+    origins[6] = tier1_origin(TIER1_ORIGIN_FRAME, 1);
+    check_debug_test_expect(tally, check_tier1_debug_frame_base(&emitted, NULL),
+                            "a complete contiguous teardown accepts the straight emitter's return origin", "FRAME1 add/pop/return");
+    origins[6] = tier1_origin(TIER1_ORIGIN_NODE, 1);
+
+    const X86Instruction body = records[2];
+    records[2] = records[4];
+    for (uint32_t kind = 0; kind < 2; kind += 1)
+    {
+        origins[2] = tier1_origin(TIER1_ORIGIN_FRAME, kind);
+        check_debug_test_expect(tally, !check_tier1_debug_frame_base(&emitted, NULL),
+                                "a frame-tagged body base write cannot justify homes at a later source instruction",
+                                kind == 0 ? "FRAME0 body write before source NOP" : "FRAME1 body write before source NOP");
+    }
+    records[2] = body;
+    origins[2] = tier1_origin(TIER1_ORIGIN_NODE, 0);
+    origins[4] = tier1_origin(TIER1_ORIGIN_FRAME, 0);
+    check_debug_test_expect(tally, !check_tier1_debug_frame_base(&emitted, NULL),
+                            "only the explicit teardown origin can change a live frame base", "a terminal FRAME0 add is still not an epilogue");
+    origins[4] = tier1_origin(TIER1_ORIGIN_FRAME, 1);
+
+    const X86Instruction pop = records[5];
+    uint32_t branch[] = { 5 };
+    uint32_t target[] = { 2 };
+    emitted.code.branches = branch;
+    emitted.code.targets = target;
+    emitted.code.branch_count = 1;
+    records[5] = (X86Instruction){ .form = X86_FORM_JMP_REL32 };
+    check_debug_test_expect(tally, !check_tier1_debug_frame_base(&emitted, NULL),
+                            "a teardown cannot escape to source code after changing the base", "FRAME1 jump back to the source body before return");
+    emitted.code.branch_count = 0;
+    records[5] = (X86Instruction){ .form = X86_FORM_CALL_REL32 };
+    check_debug_test_expect(tally, !check_tier1_debug_frame_base(&emitted, NULL),
+                            "a frame-tagged call does not establish a terminal teardown", "FRAME1 call between base restoration and return");
+    records[5] = pop;
+    records[6] = (X86Instruction){ .form = X86_FORM_NOP };
+    origins[6] = tier1_origin(TIER1_ORIGIN_FRAME, 1);
+    check_debug_test_expect(tally, !check_tier1_debug_frame_base(&emitted, NULL),
+                            "an unterminated frame run cannot justify a changed base", "FRAME1 add/pop/NOP without an actual return");
+    records[6] = (X86Instruction){ .form = X86_FORM_RET };
+    origins[6] = tier1_origin(TIER1_ORIGIN_NODE, 1);
+
+    // Keep every expected push and stack adjustment in the linear prefix, but add a path that skips them.
+    // Stack arithmetic alone would accept this sequence despite the body's unestablished base on that edge.
+    const X86Instruction push = records[0];
+    const X86Instruction subtract = records[1];
+    records[0] = (X86Instruction){ .form = X86_FORM_JE_REL32 };
+    records[1] = push;
+    records[2] = subtract;
+    origins[2] = tier1_origin(TIER1_ORIGIN_FRAME, 0);
+    emitted.body_record = 3;
+    branch[0] = 0;
+    target[0] = 3;
+    emitted.code.branch_count = 1;
+    check_debug_test_expect(tally, !check_tier1_debug_frame_base(&emitted, NULL),
+                            "linear prefix accounting cannot certify a path that skips frame setup", "a prologue branch bypasses the actual push and stack adjustment");
+    records[0] = push;
+    records[1] = subtract;
+    records[2] = body;
+    origins[2] = tier1_origin(TIER1_ORIGIN_NODE, 0);
+    emitted.body_record = 2;
+    emitted.code.branch_count = 0;
+
+    const uint32_t scheduled[] = { 0, 1, 3, 2, 4, 5, 6, 7 };
+    check_debug_test_expect(tally, check_tier1_debug_frame_base(&emitted, scheduled),
+                            "ordinary body scheduling retains a complete frame proof", "the body permutation leaves setup and contiguous teardown intact");
+    const uint32_t moved[] = { 0, 1, 2, 4, 3, 5, 6, 7 };
+    check_debug_test_expect(tally, !check_tier1_debug_frame_base(&emitted, moved),
+                            "the frame proof follows the scheduler's final order", "a previously terminal add moves ahead of an ordinary source instruction");
+    const uint32_t invalid[] = { 0, 1, 2, 3, 4, 5, 7, 7 };
+    check_debug_test_expect(tally, !check_tier1_debug_frame_base(&emitted, invalid),
+                            "an out-of-bounds final record cannot establish a frame proof", "the return permutation index equals record count");
+
+    // Two machine return blocks each have their own terminal run; a later block in linear layout is not a
+    // continuation after an earlier RET. The branch reaches the second body with the original base intact.
+    X86Instruction multiple[11];
+    uint32_t multiple_origins[11];
+    memcpy(multiple, records, sizeof(records));
+    memcpy(multiple_origins, origins, sizeof(origins));
+    multiple[3] = (X86Instruction){ .form = X86_FORM_JE_REL32 };
+    multiple[7] = body;
+    memcpy(multiple + 8, records + 4, 3 * sizeof(X86Instruction));
+    multiple_origins[7] = tier1_origin(TIER1_ORIGIN_NODE, 2);
+    memcpy(multiple_origins + 8, origins + 4, 3 * sizeof(uint32_t));
+    branch[0] = 3;
+    target[0] = 7;
+    emitted.code.records = multiple;
+    emitted.code.count = BUSTER_ARRAY_LENGTH(multiple);
+    emitted.code.branch_count = 1;
+    emitted.origins = multiple_origins;
+    check_debug_test_expect(tally, check_tier1_debug_frame_base(&emitted, NULL),
+                            "each return block may contain a separate contiguous teardown", "two actual terminal runs separated by another source block");
+}
+
 // The code certificate has its own full-emission mutation fixtures. These small, already-certified record streams
 // isolate the additional source-object lifetime proof: byte-complete initialization, final record order, overwrites
 // and source gaps. The expected PC intervals are written explicitly, independently of the clipping implementation.
@@ -390,6 +508,7 @@ static void check_debug_tier1_values_parameters(CheckDebugTestTally* tally)
     const uint8_t dead_values[] = { X86_REGISTER_RDI, UINT8_MAX, UINT8_MAX, X86_REGISTER_RDI, X86_REGISTER_RDI };
     code = (Tier1SelectCode){ .records = dead, .count = BUSTER_ARRAY_LENGTH(dead), .branches = dead_branches, .targets = dead_targets, .branch_count = 1 };
     check_debug_tier1_values_parameter_case(tally, &function, values, code, NULL, dead_values, "unreachable instructions never inherit the function entry's carrier seed");
+    check_debug_tier1_values_frames(tally);
     check_debug_tier1_values_objects(tally);
     check_debug_tier1_values_bindings(tally);
 }

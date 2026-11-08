@@ -155,7 +155,10 @@ Optimization can still remove a statement or move its instructions.
 
 - A whole retained source object uses its actual frame row and displacement.
   The producer checks the instructions establishing the frame base and rejects
-  a body write that invalidates it. This covers fixed objects in red-zone,
+  a body write that invalidates it. The check uses final scheduled order;
+  teardown writes are exempt only in a contiguous epilogue ending in an
+  actual return, where no frame home is advertised. A branching prologue
+  remains unsupported by this bounded proof. This covers fixed objects in red-zone,
   frame-pointer and realigned frames when their base stays stable. A split
   object cannot acquire a whole-object home by choosing one surviving piece.
   A row shared with another object or compiler temporary needs an additional

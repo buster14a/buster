@@ -163,11 +163,11 @@ static uint32_t check_tier1_debug_value_home(const CheckTier1DebugValues* proof,
 // Compiler rows are addressed by exact physical byte offsets. Different logical rows sharing those bytes are one
 // carrier. Only their first eight bytes can hold these scalars. A row shared with an addressable object loses its
 // cached value at an unknown pointer write or a call, since either may change the object's bytes through an alias.
-static bool check_tier1_debug_value_homes(const Tier1EmitResult* emitted, Arena* scratch, CheckTier1DebugValues* proof)
+static bool check_tier1_debug_value_homes(const Tier1EmitResult* emitted, const uint32_t* record_order, Arena* scratch, CheckTier1DebugValues* proof)
 {
     const Tier1Frame* frame = &emitted->frame;
     const uint32_t count = frame->slot_count;
-    const bool framed = frame->count != 0 && frame->slot != NULL && frame->offset != NULL && check_tier1_debug_frame_base(emitted);
+    const bool framed = frame->count != 0 && frame->slot != NULL && frame->offset != NULL && check_tier1_debug_frame_base(emitted, record_order);
     bool valid = !framed || count <= INT32_MAX - 32u;
     const uint32_t rows = framed ? emitted->general ? tier1_emit_cfg_object_row(emitted, 0) : frame->count : 0;
     proof->home_count = framed ? count : 0;
@@ -546,7 +546,7 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
             }
         }
     }
-    valid = valid && check_tier1_debug_value_homes(emitted, scratch, &proof);
+    valid = valid && check_tier1_debug_value_homes(emitted, record_order, scratch, &proof);
     valid = valid && (uint64_t)bindings + regions < UINT32_MAX - proof.carrier_count && regions <= UINT32_MAX / 2;
     proof.transfers = valid ? ir_allocate(scratch, (uint64_t)count + 1, sizeof(CheckTier1DebugValueTransfer), &valid) : NULL;
     uint32_t* places = valid ? ir_allocate(scratch, (uint64_t)count + 1, 4, &valid) : NULL;
