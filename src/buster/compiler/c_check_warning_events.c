@@ -105,6 +105,10 @@ enum
     // under it, both under -Wconstant-conversion and on by default.
     CHECK_WARNING_ID_BITFIELD_CONSTANT_CONVERSION = 103,
     CHECK_WARNING_ID_SINGLE_BIT_BITFIELD_CONSTANT_CONVERSION = 104,
+    // A for loop's condition variables its loop never changes, and its variable both its header and its body's last
+    // statement increment or decrement (#1447, clang's CheckForLoopConditionalStatement and CheckForRedundantIteration):
+    // -Wfor-loop-analysis, off by default, under -Wloop-analysis and -Wmost and so -Wall.
+    CHECK_WARNING_ID_FOR_LOOP_ANALYSIS = 105,
     CHECK_WARNING_ID_COUNT,
 };
 

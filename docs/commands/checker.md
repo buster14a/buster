@@ -280,6 +280,16 @@ unused-warning fixtures also check exact scope-completion tokens.
   value's first token in member order, before that initializer's conversions, which it keeps, even in an unevaluated
   operand. `c_check_bitfield_driver_test.c` compares both with complete pinned-Clang output at each policy, both paths
   and with `-c`.
+  `-Wfor-loop-analysis` (#1447, clang's CheckForLoopConditionalStatement and CheckForRedundantIteration,
+  `check_common_for_loops`) is off by default, under `-Wloop-analysis` and `-Wmost` and so `-Wall`; a unit where nothing
+  enables it skips the scan. A simple condition's variables (operators, casts, literals and local, non-volatile
+  variables, `check_common_loop_extract`) that neither the condition, the increment nor the body may change (an
+  assignment's target, an increment's operand, an address, a member's object or an array's decay, outside sizeof and
+  alignof), in a loop with no return, break or goto, warn at their first use; a variable's `++` or `--` alone as both
+  the increment and the body block's last statement, with no continue of the loop, warns at the body's with a note at
+  the header's. Both are published past the statement's last token, after its body's own warnings.
+  `c_check_for_loop_driver_test.c` compares them with complete pinned-Clang output at each policy, both paths and with
+  `-c`.
   `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both
   shift directions, narrow promotions, 128-bit and bit-precise widths, compound assignments, side effects, macros
   and warning policy. The shared default-warning harness covers syntax checking and object publication through

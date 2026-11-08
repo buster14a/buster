@@ -8551,6 +8551,286 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
     }
 }
 
+// Whether `node`'s evaluation is clang's EvaluatedExprVisitor's: not under a sizeof or an alignof, whose operand it skips.
+static bool check_common_loop_evaluated(const CheckGraph* graph, const uint32_t* parents, uint32_t node)
+{
+    bool result = true;
+    for (uint32_t at = node, steps = 0; result && at < graph->count && steps < graph->count; steps += 1)
+    {
+        result = graph->ops[at] != CHECK_OP_SIZEOF && graph->ops[at] != CHECK_OP_ALIGNOF;
+        at = parents[at];
+    }
+    return result;
+}
+
+// Whether `token` is inside the statement `close`, a for's closing parenthesis, holds: its parse-tree climb reaches it.
+static bool check_common_loop_within(const Parser* parser, uint32_t token, uint32_t close)
+{
+    uint32_t at = token;
+    for (uint32_t steps = 0; at < parser->tokens.count && at != close && steps < parser->tokens.count && parser->tree.parents[at] != at; steps += 1)
+    {
+        at = parser->tree.parents[at];
+    }
+    return at == close;
+}
+
+// Whether the object `declaration` is clang's local, non-volatile variable (not hasGlobalStorage): a block's or a
+// parameter's, neither static nor thread-local, of a type `type` that isn't volatile.
+static bool check_common_loop_local(const Parser* parser, const CheckInput* input, uint32_t declaration, TypeId type)
+{
+    return check_common_sparse_get(input->declaration_bodies, declaration) < parser->tokens.count &&
+           !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) &&
+           !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) && (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) == 0;
+}
+
+#define BUSTER_CHECK_LOOP_DECLS 16u
+#define BUSTER_CHECK_LOOP_STACK 128u
+
+// clang's DeclExtractor over a for loop's condition, `first` its first node: whether it is simple (a tree of operators,
+// casts, literals and variables), and its variables in their first uses' order in `decls`, their count in `*count` (one
+// past BUSTER_CHECK_LOOP_DECLS gives up), and the first use's token in `*at`.
+static bool check_common_loop_extract(const Parser* parser, const CheckInput* input, const CheckStream* stream, uint32_t first, uint32_t* decls,
+                                      uint32_t* count, uint32_t* at)
+{
+    const CheckGraph* graph = &input->graph;
+    uint32_t stack[BUSTER_CHECK_LOOP_STACK];
+    uint32_t depth = 0;
+    stack[depth++] = first;
+    bool simple = true;
+    *count = 0;
+    *at = BUSTER_CHECK_NONE;
+    while (simple && depth != 0)
+    {
+        const uint32_t node = stack[--depth];
+        const CheckOp op = graph->ops[node];
+        const uint32_t token = graph->tokens[node];
+        uint32_t operands[3] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+        if (op == CHECK_OP_VALUE)
+        {
+            const uint8_t kind = token < parser->tokens.count ? parser->tokens.kinds[token] : PARSE_KIND_END;
+            const uint32_t declaration = kind == PARSE_KIND_IDENTIFIER && token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
+            const bool variable = declaration < input->token_count && input->declaration_kinds[declaration] == C_BINDING_OBJECT;
+            simple = variable || kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER;
+            bool seen = false;
+            for (uint32_t i = 0; variable && i < *count; i += 1)
+            {
+                seen |= decls[i] == declaration;
+            }
+            if (variable && !seen)
+            {
+                simple = *count < BUSTER_CHECK_LOOP_DECLS;
+                decls[*count < BUSTER_CHECK_LOOP_DECLS ? *count : 0] = *count < BUSTER_CHECK_LOOP_DECLS ? declaration : decls[0];
+                *count += *count < BUSTER_CHECK_LOOP_DECLS;
+                // A volatile or global variable leaves the whole condition unanalysed, as clang returns.
+                simple &= check_common_loop_local(parser, input, declaration, check_stream_type(stream, node));
+            }
+            *at = variable && *at == BUSTER_CHECK_NONE ? token : *at;
+        }
+        else if ((op >= CHECK_OP_ADD && op <= CHECK_OP_LOGICAL_OR) || op == CHECK_OP_ASSIGN || op == CHECK_OP_COMMA ||
+                 (op >= CHECK_OP_ADD_ASSIGN && op <= CHECK_OP_BIT_XOR_ASSIGN))
+        {
+            operands[0] = graph->operand1[node];
+            operands[1] = graph->operand0[node];
+        }
+        else if (op == CHECK_OP_CONDITIONAL)
+        {
+            operands[0] = graph->operand2[node];
+            operands[1] = graph->operand1[node];
+            operands[2] = graph->operand0[node];
+        }
+        else if ((op >= CHECK_OP_POSITIVE && op <= CHECK_OP_BIT_NOT) || op == CHECK_OP_ADDRESS || op == CHECK_OP_CAST || op == CHECK_OP_CONVERT ||
+                 op == CHECK_OP_CONDITION || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT))
+        {
+            operands[0] = graph->operand0[node];
+        }
+        else
+        {
+            // A sizeof or an alignof is simple and its operand unvisited; a dereference, a subscript, a member, a call or
+            // anything else isn't.
+            simple = op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF;
+        }
+        for (uint32_t i = 0; simple && i < 3; i += 1)
+        {
+            if (operands[i] < graph->count)
+            {
+                simple = depth < BUSTER_CHECK_LOOP_STACK;
+                stack[depth < BUSTER_CHECK_LOOP_STACK ? depth : 0] = operands[i];
+                depth += depth < BUSTER_CHECK_LOOP_STACK;
+            }
+        }
+    }
+    return simple;
+}
+
+// Whether the use of a loop's variable at `token` may change it, clang's DeclMatcher: any but a read of its value (an
+// assignment's target, an increment's operand, an address, a member's object or an array's decay). An unevaluated use
+// is none.
+static bool check_common_loop_changes(const CheckInput* input, const CheckStream* stream, const TypeTable* types, const uint32_t* parents, uint32_t token)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t node = token < input->token_count && input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+    bool result = false;
+    if (node < graph->count && check_common_loop_evaluated(graph, parents, node))
+    {
+        const uint32_t parent = parents[node];
+        const CheckOp op = parent < graph->count ? graph->ops[parent] : CHECK_OP_COUNT;
+        const bool target = parent < graph->count && graph->operand0[parent] == node;
+        result = type_kind_is_array(check_action_kind(types, check_stream_type(stream, node))) || op == CHECK_OP_ADDRESS ||
+                 (target && (op == CHECK_OP_ASSIGN || op == CHECK_OP_MEMBER || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT) ||
+                             (op >= CHECK_OP_ADD_ASSIGN && op <= CHECK_OP_BIT_XOR_ASSIGN)));
+    }
+    return result;
+}
+
+// An increment or decrement of a variable named alone, clang's ProcessIterationStmt, as the tokens `first` and `first +
+// 1`: its declaration, or BUSTER_CHECK_NONE, and whether it increments.
+static uint32_t check_common_loop_step(const Parser* parser, const CheckInput* input, uint32_t first, bool* increment)
+{
+    const uint8_t a = parser->tokens.kinds[first];
+    const uint8_t b = parser->tokens.kinds[first + 1];
+    const bool prefix = (a == PARSE_KIND_PLUSPLUS || a == PARSE_KIND_MINUSMINUS) && b == PARSE_KIND_IDENTIFIER;
+    const bool postfix = a == PARSE_KIND_IDENTIFIER && (b == PARSE_KIND_PLUSPLUS || b == PARSE_KIND_MINUSMINUS);
+    const uint32_t name = prefix ? first + 1 : first;
+    *increment = (prefix ? a : b) == PARSE_KIND_PLUSPLUS;
+    return (prefix || postfix) && name < input->token_count ? input->declarations[name] : BUSTER_CHECK_NONE;
+}
+
+// clang's -Wfor-loop-analysis (#1447, SemaStmt.cpp's CheckForLoopConditionalStatement and CheckForRedundantIteration),
+// warned as each for statement is built, after its body's own warnings (published past its last token, as the parser's
+// lookahead is):
+//   - a simple condition's variables (check_common_loop_extract), local and not volatile, that neither the condition, the
+//     increment nor the body may change (check_common_loop_changes), where none of them returns, breaks or goes to;
+//   - the increment's ++ or -- of a variable named alone, repeated as the body block's last statement, with no continue
+//     of this loop in the body, at the body's, with a note at the increment's.
+// Off by default: a unit where nothing enables it skips the scan of its for statements.
+static __attribute__((noinline)) void check_common_for_loops(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                   const uint32_t* parents, Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    static const uint8_t roles[] = { PARSE_ROLE_CLOSE_FOR };
+    CheckCommonScan scan = { 0 };
+    const bool enabled = parents != NULL && check_common_enabled(pp, input, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true);
+    for (uint32_t close = enabled ? check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector) : count;
+         close < count && !pp->fatal; close = check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector))
+    {
+        if (parser->tree.roles[close] != PARSE_ROLE_CLOSE_FOR)
+        {
+            continue;
+        }
+        const uint32_t open = check_common_opener(parser, close);
+        uint32_t semis[2] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+        for (uint32_t at = open < close ? open + 1 : close; at < close; at += 1)
+        {
+            const bool separator = parser->tokens.kinds[at] == PARSE_KIND_SEMI && parser->tree.parents[at] == close;
+            semis[1] = separator && semis[0] != BUSTER_CHECK_NONE ? at : semis[1];
+            semis[0] = separator && semis[0] == BUSTER_CHECK_NONE ? at : semis[0];
+        }
+        // The statement's end: its body's last token.
+        uint32_t end = close;
+        while (end + 1 < count && check_common_loop_within(parser, end + 1, close))
+        {
+            end += 1;
+        }
+        if (semis[1] == BUSTER_CHECK_NONE || open >= close)
+        {
+            continue;
+        }
+        // The condition, clang's Second, by its first node's root (a truth test's operand).
+        uint32_t root = BUSTER_CHECK_NONE;
+        for (uint32_t at = semis[0] + 1; at < semis[1] && root == BUSTER_CHECK_NONE; at += 1)
+        {
+            root = at < input->token_count && input->token_nodes != NULL ? input->token_nodes[at] : BUSTER_CHECK_NONE;
+        }
+        for (uint32_t steps = 0; root < input->graph.count && parents[root] < input->graph.count && steps < input->graph.count; steps += 1)
+        {
+            root = parents[root];
+        }
+        root = root < input->graph.count && input->graph.ops[root] == CHECK_OP_CONDITION ? input->graph.operand0[root] : root;
+        uint32_t decls[BUSTER_CHECK_LOOP_DECLS];
+        uint32_t used = 0;
+        uint32_t at = BUSTER_CHECK_NONE;
+        if (root < input->graph.count && check_common_loop_extract(parser, input, stream, root, decls, &used, &at) && used != 0)
+        {
+            bool found = false;
+            for (uint32_t token = semis[0] + 1; !found && token <= end; token += 1)
+            {
+                const uint8_t kind = parser->tokens.kinds[token];
+                const uint32_t declaration = kind == PARSE_KIND_IDENTIFIER && token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
+                bool listed = false;
+                for (uint32_t i = 0; declaration != BUSTER_CHECK_NONE && i < used; i += 1)
+                {
+                    listed |= decls[i] == declaration;
+                }
+                found = kind == PARSE_KIND_RETURN || kind == PARSE_KIND_BREAK || kind == PARSE_KIND_GOTO ||
+                        (listed && check_common_loop_changes(input, stream, types, parents, token));
+            }
+            if (!found)
+            {
+                String8 names[4];
+                for (uint32_t i = 0; i < used && i < 4; i += 1)
+                {
+                    const uint32_t name = parser->tokens.names[decls[i]];
+                    names[i] = (String8){ .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) };
+                }
+                const char* message =
+                    used == 1 ? check_warning_text(scratch, "variable '%.*s' used in loop condition not modified in loop body",
+                                                   (int)names[0].length, names[0].pointer) :
+                    used == 2 ? check_warning_text(scratch, "variables '%.*s' and '%.*s' used in loop condition not modified in loop body",
+                                                   (int)names[0].length, names[0].pointer, (int)names[1].length, names[1].pointer) :
+                    used == 3 ? check_warning_text(scratch, "variables '%.*s', '%.*s', and '%.*s' used in loop condition not modified in loop body",
+                                                   (int)names[0].length, names[0].pointer, (int)names[1].length, names[1].pointer,
+                                                   (int)names[2].length, names[2].pointer) :
+                    used == 4 ? check_warning_text(scratch, "variables '%.*s', '%.*s', '%.*s', and '%.*s' used in loop condition not modified in loop body",
+                                                   (int)names[0].length, names[0].pointer, (int)names[1].length, names[1].pointer,
+                                                   (int)names[2].length, names[2].pointer, (int)names[3].length, names[3].pointer) :
+                    "variables used in loop condition not modified in loop body";
+                check_common_report_at(parser, pp, input, at, end + 1, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true, message, NULL, 0, scratch);
+            }
+        }
+        // The increment and the body block's last statement, each exactly a variable's ++ or --.
+        const uint32_t block = close + 1 < count && parser->tree.roles[close + 1] == PARSE_ROLE_OPEN_BLOCK ? parser->tree.parents[close + 1] : BUSTER_CHECK_NONE;
+        bool header_increment = false;
+        bool body_increment = false;
+        const uint32_t header = semis[1] + 3 == close ? check_common_loop_step(parser, input, semis[1] + 1, &header_increment) : BUSTER_CHECK_NONE;
+        const uint32_t before = block < count && block >= close + 5 ? block - 4 : BUSTER_CHECK_NONE;
+        const bool alone = before < count && parser->tokens.kinds[block - 1] == PARSE_KIND_SEMI && parser->tree.parents[block - 1] == block &&
+                           (before == close + 1 || (parser->tokens.kinds[before] == PARSE_KIND_SEMI && parser->tree.roles[before] == PARSE_ROLE_TERMINATOR) ||
+                            parser->tree.roles[before] == PARSE_ROLE_CLOSE_BLOCK);
+        const uint32_t last = header != BUSTER_CHECK_NONE && alone && block == end ? check_common_loop_step(parser, input, block - 3, &body_increment) :
+                              BUSTER_CHECK_NONE;
+        if (last != BUSTER_CHECK_NONE && last == header && body_increment == header_increment)
+        {
+            // A continue of this loop, not of a loop inside it, skips the body's step.
+            bool continued = false;
+            for (uint32_t token = close + 2; !continued && token < block; token += 1)
+            {
+                bool own = parser->tokens.kinds[token] == PARSE_KIND_CONTINUE;
+                for (uint32_t up = parser->tree.parents[token], steps = 0; own && up < count && up != close && steps < count; steps += 1)
+                {
+                    const uint8_t role = parser->tree.roles[up];
+                    const uint32_t opener = role == PARSE_ROLE_CLOSE_CONDITION ? check_common_opener(parser, up) : BUSTER_CHECK_NONE;
+                    own = role != PARSE_ROLE_CLOSE_FOR && role != PARSE_ROLE_DO &&
+                          !(opener != BUSTER_CHECK_NONE && opener != 0 && parser->tokens.kinds[opener - 1] == PARSE_KIND_WHILE);
+                    up = parser->tree.parents[up];
+                }
+                continued = own;
+            }
+            if (!continued)
+            {
+                const uint32_t body_name = parser->tokens.kinds[block - 3] == PARSE_KIND_IDENTIFIER ? block - 3 : block - 2;
+                const uint32_t header_name = parser->tokens.kinds[semis[1] + 1] == PARSE_KIND_IDENTIFIER ? semis[1] + 1 : semis[1] + 2;
+                const uint32_t name = parser->tokens.names[body_name];
+                const char* word = body_increment ? "incremented" : "decremented";
+                const char* message = check_warning_text(scratch, "variable '%.*s' is %s both in the loop header and in the loop body",
+                                                         (int)intern_length(pp->table, name), intern_bytes(pp->table, name), word);
+                const CheckCommonNote note = { header_name, check_warning_text(scratch, "%s here", word) };
+                check_common_report_at(parser, pp, input, body_name, end + 1, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true, message, &note, 1, scratch);
+            }
+        }
+    }
+}
+
 // `flushed`: the tokens of the bodies clang ends after the unit's first error (check_common_flush), or null in a unit
 // without one.
 static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
@@ -8586,6 +8866,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
         check_common_exhausted(pp);
     }
     check_common_graph_warnings(parser, pp, input, stream, types, &spell, &facts, program, shifts, scratch);
+    check_common_for_loops(parser, pp, input, stream, types, facts.parents, scratch);
     check_common_return_stack(parser, pp, input, stream, types, scratch);
     if (enabled.uninitialized)
     {
