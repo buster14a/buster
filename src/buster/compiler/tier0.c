@@ -5411,26 +5411,40 @@ static void tier0_extend(Tier0Writer* writer, uint32_t class, uint32_t reg)
     }
 }
 
-// `size` bytes copied from [from + from_displacement] to [to + to_displacement], the ranges the same or apart: from 16
-// bytes, a load and a store with movups per 16 through XMM register `xmm`, the last 16 ending at the end; below, one or
-// two of a general register's 8, 4, 2 or 1 bytes through `general`, the second ending at the end. Overlapping pieces copy
-// what they would apart. A COPY's records, and a call's aggregates' (tier0_emit_call).
+// A copy of at most this many bytes moves 8 bytes at a time, as Tier 1 does: a small aggregate is often built by 8-byte
+// stores, and a 16-byte load spanning two of them can't forward (#1375). Larger copies keep 16-byte moves.
+#define BUSTER_TIER0_COPY_NARROW_BYTES 32
+
+// The widest piece a copy of `size` bytes uses: 8 for a small aggregate, 16 for a larger one.
+static uint32_t tier0_copy_width(uint32_t size)
+{
+    return size <= BUSTER_TIER0_COPY_NARROW_BYTES ? 8 : 16;
+}
+
+// `size` bytes copied from [from + from_displacement] to [to + to_displacement], the ranges the same or apart: a load
+// and a store per piece through `general`'s 8 bytes or XMM register `xmm`'s 16, the last piece ending at the end; below
+// 8, one or two of a general register's 4, 2 or 1 bytes. Overlapping pieces copy what they would apart. A COPY's
+// records, and a call's aggregates' (tier0_emit_call).
 static void tier0_copy(Tier0Writer* writer, uint8_t to, int32_t to_displacement, uint8_t from, int32_t from_displacement, uint32_t size, uint8_t general, uint8_t xmm)
 {
-    if (size >= 16)
+    const uint32_t width = tier0_copy_width(size);
+    if (size >= width)
     {
-        for (uint32_t offset = 0; offset < size; offset += 16)
+        for (uint32_t offset = 0; offset < size; offset += width)
         {
-            const int32_t at = (int32_t)(offset + 16 <= size ? offset : size - 16);
-            tier0_put(writer, tier0_instruction(X86_FORM_MOVUPS_X_XM, xmm, from, BUSTER_X86_MEMORY_BASE, from_displacement + at, 0));
-            tier0_put(writer, tier0_instruction(X86_FORM_MOVUPS_XM_X, xmm, to, BUSTER_X86_MEMORY_BASE, to_displacement + at, 0));
+            const int32_t at = (int32_t)(offset + width <= size ? offset : size - width);
+            const uint32_t load = width == 16 ? X86_FORM_MOVUPS_X_XM : X86_FORM_MOV_R64_RM64;
+            const uint32_t store = width == 16 ? X86_FORM_MOVUPS_XM_X : X86_FORM_MOV_RM64_R64;
+            const uint8_t reg = width == 16 ? xmm : general;
+            tier0_put(writer, tier0_instruction(load, reg, from, BUSTER_X86_MEMORY_BASE, from_displacement + at, 0));
+            tier0_put(writer, tier0_instruction(store, reg, to, BUSTER_X86_MEMORY_BASE, to_displacement + at, 0));
         }
     }
     else
     {
-        const uint32_t piece = size >= 8 ? 8 : size >= 4 ? 4 : size >= 2 ? 2 : 1;
-        const uint32_t load = piece == 8 ? X86_FORM_MOV_R64_RM64 : piece == 4 ? X86_FORM_MOV_R32_RM32 : piece == 2 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOVZX_R32_RM8;
-        const uint32_t store = piece == 8 ? X86_FORM_MOV_RM64_R64 : piece == 4 ? X86_FORM_MOV_RM32_R32 : piece == 2 ? X86_FORM_MOV_RM16_R16 : X86_FORM_MOV_RM8_R8;
+        const uint32_t piece = size >= 4 ? 4 : size >= 2 ? 2 : 1;
+        const uint32_t load = piece == 4 ? X86_FORM_MOV_R32_RM32 : piece == 2 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOVZX_R32_RM8;
+        const uint32_t store = piece == 4 ? X86_FORM_MOV_RM32_R32 : piece == 2 ? X86_FORM_MOV_RM16_R16 : X86_FORM_MOV_RM8_R8;
         tier0_put(writer, tier0_instruction(load, general, from, BUSTER_X86_MEMORY_BASE, from_displacement, 0));
         tier0_put(writer, tier0_instruction(store, general, to, BUSTER_X86_MEMORY_BASE, to_displacement, 0));
         if (size > piece)
@@ -5441,12 +5455,12 @@ static void tier0_copy(Tier0Writer* writer, uint8_t to, int32_t to_displacement,
     }
 }
 
-// How many records tier0_copy writes for `size` bytes (at least 1): a load and a store per 16 bytes or part of them;
-// below 16, per piece, one or two.
+// How many records tier0_copy writes for `size` bytes (at least 1): a load and a store per piece; below 8, one or two.
 static uint32_t tier0_copy_records(uint32_t size)
 {
-    const uint32_t piece = size >= 8 ? 8 : size >= 4 ? 4 : size >= 2 ? 2 : 1;
-    return size >= 16 ? 2 * ((size + 15) / 16) : size > piece ? 4 : 2;
+    const uint32_t width = tier0_copy_width(size);
+    const uint32_t piece = size >= 4 ? 4 : size >= 2 ? 2 : 1;
+    return size >= width ? 2 * ((size + width - 1) / width) : size > piece ? 4 : 2;
 }
 
 // The red zone temporary `t`'s place below rsp (BUSTER_TIER0_TEMPORARIES), or an interrupt service routine's in its frame,
@@ -5519,11 +5533,11 @@ struct Tier0Tops
 };
 
 // What a function's aggregate arguments (argument_sizes) need at their calls besides the moves, both selections' touches,
-// the stacks' tops past `tops`: at a call, its integer stack's first free register, the general scratch of a copy
-// below 16 bytes (a SPLIT argument's stack part, an aggregate on the stack, a TEMPORARY part's bytes), and its floating
-// stack's, the XMM scratch of a copy from 16 bytes. A pass of its own, which the selections make over a function with
-// argument_sizes alone, after their loops over the entries, which then carry nothing for it (every call is deferred, and
-// an unsupported entry fails the compile whatever the depths).
+// the stacks' tops past `tops`: at a call, its integer stack's first free register, the general scratch of a copy of at
+// most BUSTER_TIER0_COPY_NARROW_BYTES bytes (a SPLIT argument's stack part, an aggregate on the stack, a TEMPORARY
+// part's bytes), and its floating stack's, the XMM scratch of a larger copy. A pass of its own, which the selections
+// make over a function with argument_sizes alone, after their loops over the entries, which then carry nothing for it
+// (every call is deferred, and an unsupported entry fails the compile whatever the depths).
 static Tier0Tops tier0_select_scratch(const Tier0Function* function, const Tier0Entries* entries, Tier0Tops tops)
 {
     for (uint32_t i = 0; i < function->count; i += 1)
@@ -5544,8 +5558,8 @@ static Tier0Tops tier0_select_scratch(const Tier0Function* function, const Tier0
                 {
                     general |= parts[k].reg == BUSTER_TIER0_PART_STACK || parts[k].load == BUSTER_TIER0_PART_TEMPORARY;
                 }
-                general |= size != 0 && size < 16 && tier0_aggregate_whole(location);
-                xmm |= size >= 16 && tier0_aggregate_whole(location);
+                general |= size != 0 && size <= BUSTER_TIER0_COPY_NARROW_BYTES && tier0_aggregate_whole(location);
+                xmm |= size > BUSTER_TIER0_COPY_NARROW_BYTES && tier0_aggregate_whole(location);
             }
         }
         const int32_t depth = entries->depths[i];
@@ -6671,8 +6685,8 @@ static void tier0_emit_copy(const Tier0Function* function, const Tier0Entries* e
 {
     const uint32_t size = (uint32_t)function->values[i];
     const uint32_t depth = entries->depths[i];
-    tier0_copy(writer, tier0_integer_depths[depth - 2], 0, tier0_integer_depths[depth - 1], 0, size, size < 16 ? tier0_integer_depths[depth] : 0,
-               entries->floating_depths[i]);
+    tier0_copy(writer, tier0_integer_depths[depth - 2], 0, tier0_integer_depths[depth - 1], 0, size,
+               size <= BUSTER_TIER0_COPY_NARROW_BYTES ? tier0_integer_depths[depth] : 0, entries->floating_depths[i]);
 }
 
 // ALLOCA's records, and STACK_SAVE's, STACK_RESTORE's and FRAME_ADDRESS's (tier0_emit_stack's). A probed ALLOCA's (#177)
@@ -9739,8 +9753,9 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
                 }
                 else if (function->kinds[i] == BUSTER_TYPED_COPY)
                 {
-                    // A copy's scratch, its stacks' first free register: an XMM one from 16 bytes, a general one below.
-                    const bool wide = function->values[i] >= 16;
+                    // A copy's scratch, its stacks' first free register: an XMM one above BUSTER_TIER0_COPY_NARROW_BYTES,
+                    // a general one below.
+                    const bool wide = function->values[i] > BUSTER_TIER0_COPY_NARROW_BYTES;
                     integer_top = !wide && depth > integer_top ? depth : integer_top;
                     floating_top = wide && floating > floating_top ? floating : floating_top;
                 }
@@ -9919,8 +9934,8 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
     }
     else if (kind == BUSTER_TYPED_COPY)
     {
-        // Its two addresses, and its scratch at the depth (an XMM register's from 16 bytes).
-        const bool wide = function->values[i] >= 16;
+        // Its two addresses, and its scratch at the depth (an XMM register's above BUSTER_TIER0_COPY_NARROW_BYTES).
+        const bool wide = function->values[i] > BUSTER_TIER0_COPY_NARROW_BYTES;
         uses[0] = true;
         window[0] = 2;
         touch[0] = wide ? (int32_t)before[0] - 1 : (int32_t)before[0];
@@ -13156,7 +13171,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
             }
             else if (function->kinds[i] == BUSTER_TYPED_COPY)
             {
-                const bool wide = function->values[i] >= 16;
+                const bool wide = function->values[i] > BUSTER_TIER0_COPY_NARROW_BYTES;
                 deferred_integer_top = !wide && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
                 deferred_floating_top = wide && entry_floating > deferred_floating_top ? entry_floating : deferred_floating_top;
             }

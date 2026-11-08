@@ -3252,10 +3252,17 @@ What the lowering covers past scalars (#145's programs):
   folds it to a constant zero of its type where its operand has no effect
   (`check_lower_quad_constant` writes a folded constant's bits), and after the
   operand where it has (`check_lower_aggregate_zero`).
-  The checker folds no `__float128` constant (`check_action_float_supported`):
-  a static one with an initializer is refused as not constant, and the `q`
-  suffix's literals as invalid. An increment or a decrement (#147) is
-  `__addtf3`'s or `__subtf3`'s of a constant 1.0, as clang -O0's is
+  The checker folds a `__float128` constant where its value survives the long
+  double storage exactly: a `q`/`Q` literal whose binary128 rounding is exact
+  in long double (the literal reader's rule), and an integer or narrower
+  floating constant whose conversion is exact. A static one with such an
+  initializer is written as 16 binary128 bytes; a value that would round
+  through long double, such as `0.1Q` or a 128-bit integer with more than 64
+  significant bits, is still refused as not constant. Narrower-format NaNs
+  converted to `__float128` are also refused as constants: the current compact
+  representation cannot preserve their widened payloads. An increment or a
+  decrement (#147) is `__addtf3`'s or `__subtf3`'s of a constant 1.0, as clang
+  -O0's is
   (`check_lower_quad_update_emit`, a postfix one's value a copy of the object
   before it). `test-checker`'s `float128` program, against clang -O0's build of
   it, has each of them, clean under clang's UBSan on every input.
