@@ -496,6 +496,19 @@ static bool check_init_changed_integer(const CheckInitWalker* walker, const Chec
     bool source_signed = false;
     bool target_signed = false;
     bool result = false;
+    // A bit-field's constant (#1447, check_common_bitfield_truncates): one outside -2^(w-1) to 2^(w-1) - 1, which a w-bit
+    // bit-field of either signedness holds, a superset of the values it truncates.
+    bool bit_field = false;
+    if (constant && part->bit_width != 0 && part->bit_width < 128 &&
+        check_action_integer_type(walker->types, check_stream_type(stream, part->node), &source_width, &source_signed) && source_width != 0)
+    {
+        const unsigned __int128 mask = check_action_mask(source_width);
+        const unsigned __int128 bits = source.integer & mask;
+        const bool negative = source_signed && ((bits >> (source_width - 1)) & 1) != 0;
+        const unsigned __int128 magnitude = negative ? (~bits & mask) + 1 : bits;
+        const unsigned __int128 half = (unsigned __int128)1 << (part->bit_width - 1);
+        bit_field = negative ? magnitude > half : magnitude >= half;
+    }
     if ((branching || (constant && source.integer > 127)) &&
         check_action_integer_type(walker->types, part->conversion.type, &target_width, &target_signed))
     {
@@ -524,7 +537,7 @@ static bool check_init_changed_integer(const CheckInitWalker* walker, const Chec
         const TypeId bare = type_unqualified(type_strip_aligned(walker->types, part->conversion.type));
         result = type_kind(walker->types, bare) == BUSTER_TYPE_KIND_BIT_INT;
     }
-    return result;
+    return result || bit_field;
 }
 
 static void check_init_append(CheckInitWalker* walker, const CheckInitPart* part)
