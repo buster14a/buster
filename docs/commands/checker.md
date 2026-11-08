@@ -293,6 +293,14 @@ unused-warning fixtures also check exact scope-completion tokens.
   reader's expressions (an array bound in a type name, an enumerator's value) aren't scanned.
   `c_check_enum_arithmetic_driver_test.c` compares them with complete pinned-Clang output at each policy, both paths and
   with `-c`.
+  An implicit conversion from one named enumeration to another, an enumerator taken as its enumeration, is clang's
+  `-Wimplicit-enum-enum-cast` (#1447, CheckImplicitConversion's last case, `check_common_enum_cast`), on by default under
+  `-Wenum-conversion`: an initializer's, an assignment's, a prototype's argument's, a return's and a brace initializer's
+  value's, carried to both arms of a conditional (no runtime pruning) and to a root comma's result, warned at each leaf
+  as the full expression completes, in unreachable code too. Its candidates are the conversion walk's
+  (`check_common_enum_cast_candidate`: an enumeration's target, from a source that may be one), and a brace initializer's
+  plan is read for it where a value part's target is an enumeration (`CheckInitializer.enum_values`).
+  `c_check_enum_cast_driver_test.c` compares it with complete pinned-Clang output at each policy, both paths and with `-c`.
   `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both
   shift directions, narrow promotions, 128-bit and bit-precise widths, compound assignments, side effects, macros
   and warning policy. The shared default-warning harness covers syntax checking and object publication through

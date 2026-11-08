@@ -61,7 +61,7 @@ static bool check_warning_option(uint32_t id, String8 option)
     matches |= constant_conversion && (check_diagnostic_option(option, "-Wconversion") || check_diagnostic_option(option, "-Wnon-gcc"));
     // -Wenum-conversion's three are -Wconversion's, and so -Wnon-gcc's (#1447).
     const bool enum_conversion = id == CHECK_WARNING_ID_ENUM_ENUM_CONVERSION || id == CHECK_WARNING_ID_ENUM_COMPARE_CONDITIONAL ||
-                                 id == CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION;
+                                 id == CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION || id == CHECK_WARNING_ID_IMPLICIT_ENUM_ENUM_CAST;
     matches |= enum_conversion && (check_diagnostic_option(option, "-Wconversion") || check_diagnostic_option(option, "-Wnon-gcc"));
     return matches;
 }

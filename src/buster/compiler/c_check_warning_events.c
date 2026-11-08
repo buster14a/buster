@@ -114,6 +114,9 @@ enum
     CHECK_WARNING_ID_ENUM_COMPARE_CONDITIONAL = 107,
     CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION = 108,
     CHECK_WARNING_ID_ANON_ENUM_ENUM_CONVERSION = 109,
+    // An implicit conversion from one named enumeration to another (#1447, the end of clang's CheckImplicitConversion), an
+    // enumerator taken as its enumeration: -Wimplicit-enum-enum-cast, on by default, under -Wenum-conversion.
+    CHECK_WARNING_ID_IMPLICIT_ENUM_ENUM_CAST = 110,
     CHECK_WARNING_ID_COUNT,
 };
 

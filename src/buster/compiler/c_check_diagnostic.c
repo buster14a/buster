@@ -146,6 +146,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wenum-compare-conditional", "-Wenum-conversion", "conditional expression between different enumeration types" },
     { "-Wenum-float-conversion", "-Wenum-conversion", "arithmetic between enumeration type and floating-point type" },
     { "-Wanon-enum-enum-conversion", NULL, "arithmetic between different enumeration types" },
+    { "-Wimplicit-enum-enum-cast", "-Wenum-conversion", "implicit conversion from enumeration type to different enumeration type" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
