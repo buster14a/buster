@@ -10,6 +10,7 @@ fail() { printf 'hosted-tools fixture: %s\n' "$*" >&2; exit 1; }
 mkdir -p "$work/tools" "$work/bin" "$work/upstream"
 cp "$root/tools/ci/hosted-release.sh" "$work/tools/"
 head -n 1 "$root/tools/ci/hosted-tools.lock" > "$work/tools/hosted-tools.lock"
+printf 'mirror ghcr.io/fixture/inputs unpublished\n' >> "$work/tools/hosted-tools.lock"
 for name in llvm llvm-license cmake ninja mold wild; do
     printf 'fixture:%s\n' "$name" > "$work/upstream/$name"
     digest=$(sha256sum "$work/upstream/$name" | cut -c 1-64)
@@ -17,15 +18,74 @@ for name in llvm llvm-license cmake ninja mold wild; do
 done
 cat > "$work/bin/curl" <<'CURL'
 #!/usr/bin/env bash
+# Upstream files by name, plus a tiny in-memory OCI registry for ghcr.io.
 set -euo pipefail
 printf '%q ' "$@" >> "$FIXTURE/curl-arguments"
 printf '\n' >> "$FIXTURE/curl-arguments"
-output=''
+output=/dev/null url='' method=GET upload='' data='' headers=/dev/null write='' head=no
 while [ $# -gt 0 ]; do
-    case "$1" in --output) output=$2; shift ;; https://*) url=$1 ;; esac
+    case "$1" in
+        --output) output=$2; shift ;;
+        --write-out) write=$2; shift ;;
+        -X) method=$2; shift ;;
+        -T) upload=$2; shift ;;
+        --data-binary) data=${2#@}; shift ;;
+        -D) headers=$2; shift ;;
+        --head) head=yes ;;
+        https://*) url=$1 ;;
+        -*) case "$1" in -H|--config|--retry|--retry-max-time|--connect-timeout|--max-time|--speed-time|--speed-limit|--proto|--proto-redir) shift ;; esac ;;
+    esac
     shift
 done
-printf '%s\n' "$url" >> "$FIXTURE/requests"
+printf '%s %s\n' "$method" "$url" >> "$FIXTURE/requests"
+status()
+{
+    if [ "$write" = '%{http_code}' ]; then printf '%s' "$1"; fi
+    if [ "$1" = 000 ]; then exit 7; fi
+    if [ "$1" -ge 400 ]; then exit 22; fi
+    exit 0
+}
+case "$url" in
+    https://ghcr.io/*)
+        case "${MIRROR:-up}" in down) status 000 ;; denied) status 403 ;; esac
+        path=${url#https://ghcr.io}
+        registry=$FIXTURE/registry
+        mkdir -p "$registry/blobs" "$registry/manifests" "$registry/uploads" "$registry/tags"
+        case "$path" in
+            /token*) printf '{"token":"fixture-token"}' > "$output"; status 200 ;;
+            /v2/*/manifests/sha256:*)
+                digest=${path##*sha256:}
+                [ -f "$registry/manifests/$digest" ] || status 404
+                cp "$registry/manifests/$digest" "$output"; status 200 ;;
+            /v2/*/manifests/*)
+                [ "$method" = PUT ] || status 405
+                digest=$(sha256sum "$data" | cut -c 1-64)
+                cp "$data" "$registry/manifests/$digest"
+                printf '%s\n' "$digest" > "$registry/tags/${path##*/}"; status 201 ;;
+            /v2/*/blobs/uploads/)
+                [ "$method" = POST ] || status 405
+                id=upload-$(ls "$registry/uploads" | wc -l)
+                : > "$registry/uploads/$id"
+                printf 'Location: /v2/fixture/inputs/blobs/uploads/%s\r\n' "$id" > "$headers"; status 202 ;;
+            /v2/*/blobs/uploads/*)
+                id=${path##*/}
+                id=${id%%\?*}
+                [ -f "$registry/uploads/$id" ] || status 404
+                if [ "$method" = PATCH ]; then
+                    cat "$upload" >> "$registry/uploads/$id"
+                    printf 'Location: /v2/fixture/inputs/blobs/uploads/%s\r\n' "$id" > "$headers"; status 202
+                fi
+                digest=${url##*digest=sha256:}
+                [ "$(sha256sum "$registry/uploads/$id" | cut -c 1-64)" = "$digest" ] || status 400
+                mv "$registry/uploads/$id" "$registry/blobs/$digest"; status 201 ;;
+            /v2/*/blobs/sha256:*)
+                digest=${path##*sha256:}
+                [ -f "$registry/blobs/$digest" ] || status 404
+                [ "$head" = yes ] || cp "$registry/blobs/$digest" "$output"
+                status 200 ;;
+        esac
+        status 404 ;;
+esac
 [ "${FAIL_DOWNLOAD:-}" != yes ] || exit 35
 cp "$FIXTURE/upstream/${url##*/}" "$output"
 CURL
@@ -84,6 +144,79 @@ bash "$release" verify "$work/handoff"
 BUSTER_HOSTED_RELEASES="$work/handoff" bash "$release" get llvm "$work/output"
 cmp "$work/output" "$work/consumer"
 printf 'hosted-tools: cold/warm, corruption, offline consumers, handoff, schema and atomic failure fixtures passed\n'
+# GHCR mirror: trusted publication, then digest-pinned anonymous consumption.
+: > "$work/requests"
+if bash "$release" publish "$work/handoff"; then fail 'publication ran without the trusted token'; fi
+pin=$(BUSTER_MIRROR_PUSH_TOKEN=fixture-push-secret GITHUB_ACTOR=fixture bash "$release" publish "$work/handoff")
+[[ "$pin" =~ ^mirror\ ghcr\.io/fixture/inputs\ sha256:[0-9a-f]{64}$ ]] || fail "unexpected pin: $pin"
+[ "$(grep -c '^PATCH ' "$work/requests")" = 7 ] || fail 'publication did not upload the six inputs and config once'
+: > "$work/requests"
+BUSTER_MIRROR_PUSH_TOKEN=fixture-push-secret GITHUB_ACTOR=fixture bash "$release" publish "$work/handoff" > /dev/null
+! grep -q '^PATCH ' "$work/requests" || fail 'republication uploaded present blobs again'
+! grep -q 'fixture-push-secret\|fixture-token' "$work/curl-arguments" || fail 'a credential reached a command line'
+cp "$work/tools/hosted-tools.lock" "$work/unpublished.lock"
+sed -i "s|^mirror .*|$pin|" "$work/tools/hosted-tools.lock"
+[ "$(BUSTER_MIRROR_PUSH_TOKEN=fixture-push-secret GITHUB_ACTOR=fixture bash "$release" publish "$work/handoff" 2> /dev/null)" = "$pin" ] || fail 'promoting the pin changed the publication'
+mv "$work/upstream" "$work/upstream.hidden"
+: > "$work/requests"
+bash "$release" prepare "$work/mirrored" 2> "$work/log"
+grep -q 'component=llvm source=mirror verified=true' "$work/log" || fail 'mirror was not used'
+! grep -q 'fixture.invalid\|/manifests/inputs-' "$work/requests" || fail 'consumer used upstream or a mutable tag'
+[ "$(grep -c '/blobs/sha256:' "$work/requests")" = 6 ] || fail 'mirror acquisition is not once per component'
+bash "$release" verify "$work/mirrored"
+rm -rf "$work/mirrored"
+# Integrity failures are fatal and never fall back.
+mv "$work/upstream.hidden" "$work/upstream"
+cp "$work/handoff/llvm" "$work/upstream/llvm"
+llvm_digest=$(bash "$release" digest llvm)
+cp "$work/registry/blobs/$llvm_digest" "$work/blob.saved"
+printf 'tampered\n' > "$work/registry/blobs/$llvm_digest"
+: > "$work/requests"
+if bash "$release" prepare "$work/mirrored" 2> "$work/log"; then fail 'tampered mirror blob was accepted'; fi
+grep -q 'mirror integrity failure for llvm' "$work/log" || fail 'tampered blob was not reported as integrity failure'
+! grep -q fixture.invalid "$work/requests" || fail 'integrity failure fell back to upstream'
+[ ! -e "$work/mirrored" ] || fail 'tampered preparation was published'
+cp "$work/blob.saved" "$work/registry/blobs/$llvm_digest"
+manifest=$(sed -n 's/^mirror .* sha256://p' "$work/tools/hosted-tools.lock")
+cp "$work/registry/manifests/$manifest" "$work/manifest.saved"
+sed -i 's/"llvm"/"LLVM"/' "$work/registry/manifests/$manifest"
+if bash "$release" prepare "$work/mirrored" 2> "$work/log"; then fail 'altered manifest was accepted'; fi
+grep -q 'manifest does not match the pinned digest' "$work/log" || fail 'altered manifest was not reported'
+cp "$work/manifest.saved" "$work/registry/manifests/$manifest"
+# A pinned manifest that omits a component is an inventory failure.
+sed 's/,{[^{}]*sha256:'"$(bash "$release" digest wild)"'[^{}]*{[^{}]*}}//' "$work/manifest.saved" > "$work/short"
+short=$(sha256sum "$work/short" | cut -c 1-64)
+cp "$work/short" "$work/registry/manifests/$short"
+sed -i "s|^mirror .*|mirror ghcr.io/fixture/inputs sha256:$short|" "$work/tools/hosted-tools.lock"
+if bash "$release" prepare "$work/mirrored" 2> "$work/log"; then fail 'incomplete manifest was accepted'; fi
+grep -q 'pinned manifest does not list wild' "$work/log" || fail 'incomplete manifest was not reported'
+# Availability failures fall back to upstream with distinct reasons.
+sed -i "s|^mirror .*|mirror ghcr.io/fixture/inputs sha256:$(printf absent | sha256sum | cut -c 1-64)|" "$work/tools/hosted-tools.lock"
+bash "$release" prepare "$work/mirrored" 2> "$work/log" || { cat "$work/log" >&2; fail 'missing publication did not fall back'; }
+grep -q 'reason=missing stage=manifest' "$work/log" || fail 'missing publication was not reported'
+rm -rf "$work/mirrored"
+sed -i "s|^mirror .*|$pin|" "$work/tools/hosted-tools.lock"
+for mode in denied down; do
+    MIRROR=$mode bash "$release" prepare "$work/mirrored" 2> "$work/log"
+    expected=$([ $mode = denied ] && echo denied || echo transport)
+    grep -q "source=mirror unavailable reason=$expected stage=token" "$work/log" || fail "$mode mirror was not reported"
+    grep -q 'component=llvm version=1.2.3 source=upstream' "$work/log" || fail "$mode mirror did not fall back"
+    bash "$release" verify "$work/mirrored"
+    rm -rf "$work/mirrored"
+done
+BUSTER_HOSTED_MIRROR=off bash "$release" prepare "$work/mirrored" 2> "$work/log"
+grep -q 'reason=disabled' "$work/log" || fail 'disabled mirror was not reported'
+rm -rf "$work/mirrored"
+# With neither source, preparation fails and publishes nothing.
+if MIRROR=down FAIL_DOWNLOAD=yes bash "$release" prepare "$work/mirrored" 2> "$work/log"; then fail 'preparation succeeded without sources'; fi
+[ ! -e "$work/mirrored" ] || fail 'failed preparation was published'
+# The standalone path (build-pgo, the 9700X) also reads the mirror first.
+mv "$work/upstream" "$work/upstream.hidden"
+bash "$release" get cmake "$work/standalone"
+cmp "$work/standalone" "$work/handoff/cmake"
+mv "$work/upstream.hidden" "$work/upstream"
+cp "$work/unpublished.lock" "$work/tools/hosted-tools.lock"
+printf 'hosted-tools: mirror publication, pinned consumption, integrity, inventory, outage and fallback fixtures passed\n'
 # Exercise the real extraction recipe and relocation with tiny synthetic releases.
 # These stubs check installer mechanics, not the behavior of the official tools.
 cp "$root/tools/ci/setup-build-tools.sh" "$root/tools/ci/install-hosted-tools.sh" "$work/tools/"
@@ -126,8 +259,9 @@ printf '#!/bin/sh\necho "Wild version 0.10.0"\n' > "$work/wild/wild"
 chmod +x "$work/wild/wild"
 tar -czf "$work/upstream/wild" -C "$work/wild" wild
 head -n 1 "$root/tools/ci/hosted-tools.lock" > "$work/tools/hosted-tools.lock"
+printf 'mirror ghcr.io/fixture/inputs unpublished\n' >> "$work/tools/hosted-tools.lock"
 while read -r name version digest url extra; do
-    [[ -z "$name" || "$name" = \#* ]] && continue
+    [[ -z "$name" || "$name" = \#* || "$name" = mirror ]] && continue
     digest=$(sha256sum "$work/upstream/$name" | cut -c 1-64)
     printf '%s %s %s https://fixture.invalid/%s\n' "$name" "$version" "$digest" "$name" >> "$work/tools/hosted-tools.lock"
 done < "$root/tools/ci/hosted-tools.lock"

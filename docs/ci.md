@@ -721,4 +721,4 @@ matching executable, and on those runs must pass before hardware qualification c
 
 ## Hosted toolchain delivery
 
-See [the hosted toolchain guide](hosted-toolchain.md) for verified preparation, cache/handoff recovery and offline shard installation.
+See [the hosted toolchain guide](hosted-toolchain.md) for verified preparation, the digest-pinned GHCR mirror and its promotion, cache/handoff recovery and offline shard installation.
