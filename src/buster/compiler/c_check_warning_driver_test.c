@@ -1562,6 +1562,42 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .source = "void g(int n) {\n    char vv[n][n];\n    (void)sizeof(({ 3; vv[0]; }));\n    (void)sizeof(({ 4; vv; }));\n}\n",
     },
     {
+        // -Wsign-compare's operands keep their declared typedef's spelling (#1100): a parameter's typedef, a cast's,
+        // and sizeof's `__size_t`, each with clang's (aka) of what the sugar hides; the same sugar survives the
+        // operands' shared-type arithmetic.
+        .name = "sign-compare operands keep their typedef spelling",
+        .source = "typedef int wchar_t;\ntypedef unsigned long size_t;\ntypedef int myint;\ntypedef signed char tiny;\n"
+                  "int s1(wchar_t wc) { return wc < 0xffU; }\n"
+                  "int s2(int n) { int a[4]; return n >= sizeof a / sizeof a[0]; }\n"
+                  "int s3(int n, size_t m) { return n < m; }\n"
+                  "int s4(myint n, unsigned u) { return n < u; }\n"
+                  "int s5(int n, size_t m) { return n < m + 1; }\n"
+                  "int s6(int n, size_t m) { return n < 1 + m; }\n"
+                  "int s7(int n, size_t m) { return n < (m >> 1); }\n"
+                  "int s8(int n, size_t m, unsigned long u) { return n < m + u; }\n"
+                  "int s9(int n) { return n < (size_t)1; }\n"
+                  "int s10(tiny x, tiny y, unsigned u) { return x + y < u; }\n",
+        .options = { "-Wsign-compare" },
+        .warnings = 10,
+    },
+    {
+        // A format argument keeps its declared typedef's spelling (#1100), with the (aka) of what it hides.
+        .name = "format arguments keep their typedef spelling",
+        .source = "typedef unsigned long size_t;\ntypedef long ptrdiff_t;\ntypedef int wchar_t;\ntypedef int myint;\n"
+                  "int printf(const char*,...);\n"
+                  "void f(size_t m, ptrdiff_t d, wchar_t *w, myint n) { printf(\"%u\", m); printf(\"%u\", d); printf(\"%d\", w); printf(\"%lu\", -n); printf(\"%lu\", +n); printf(\"%lu\", ~n); }\n",
+        .options = { "-Wformat" },
+        .warnings = 6,
+    },
+    {
+        // A fixed-parameter conversion must not transfer the source cast's typedef to the converted pointer.
+        .name = "format fixed conversion does not borrow source typedef",
+        .source = "typedef _BitInt(32) T;\nvoid f(const char*, _BitInt(32)*) __attribute__((format(printf,1,2)));\n"
+                  "void g(void) { f(\"%d\", (T)0); }\n",
+        .options = { "-Wformat", "-Wno-gcc-compat", "-Wno-non-literal-null-conversion" },
+        .warnings = 1,
+    },
+    {
         // A for clause's value in parentheses is the clause's (#1447): clang's IgnoreParens finds the discarded comma,
         // its operand of no effect and its literal 0 idiom through them, in the init and the increment; the condition's
         // value is read.
