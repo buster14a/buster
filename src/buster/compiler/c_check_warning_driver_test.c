@@ -655,6 +655,84 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 10,
     },
     {
+        // A dereference of a null pointer constant (#1447, -Wnull-dereference): read or assigned (a compound assignment's
+        // too, a cast to void's operand too), through casts (a void pointer's, a constant expression's), with clang's note;
+        // not its address, a member of it, its increment, a volatile one, a pointer variable's, a subscript, sizeof's
+        // operand, nor unreachable code.
+        .name = "null pointer dereferences",
+        .source = "struct S { int a; };\nint g(int);\nint f(int n) {\n"
+                  "  *(int *)0 = 1; *(int *)0 += 2; int x = *(int *)0; g(*(int *)0); int k = n ? *(int *)0 : 1;\n"
+                  "  int c = *(const int *)(0); int l = *(int *)(1 - 1); int t = *(char *)(void *)0L;\n"
+                  "  int m = (*(struct S *)0).a; int *q = &*(int *)0; (*(int *)0)++; *(volatile int *)0 = 3;\n"
+                  "  int *p = 0; *p = 4; int y = ((int *)0)[0]; int s = sizeof(*(int *)0); ((struct S *)0)->a = 2;\n"
+                  "  if (0) { int z = *(int *)0; (void)z; }\n"
+                  "  (void)*(int *)0;\n"
+                  "  return x + k + c + l + t + m + y + s + (q != 0);\n  *(int *)0 = 9;\n}\n",
+        .warnings = 9,
+        .notes = 9,
+    },
+    {
+        // A nullptr_t operand is a null pointer constant too (#1447, C23): `nullptr` and a nullptr_t variable through casts,
+        // not a volatile target.
+        .name = "null pointer dereferences of nullptr",
+        .source = "typedef typeof(nullptr) np;\nint g(np n) {\n"
+                  "  int a = *(int *)n; int b = *(int *)(nullptr); int c = *(volatile int *)nullptr; int d = *(int *)(void *)nullptr;\n"
+                  "  *(int *)nullptr = 1;\n"
+                  "  return a + b + c + d;\n}\n",
+        .c23 = true,
+        .warnings = 4,
+        .notes = 4,
+    },
+    {
+        // Unreachable initializers (#1447): after a return, in a constant false branch and in a `while (0)`'s body,
+        // clang's runtime behavior's warnings (array bounds, division by zero, null dereference) stay silent.
+        .name = "runtime warnings skip unreachable initializers",
+        .source = "int a[2];\nint f(int n) {\n"
+                  "  if (0) { int d = a[5]; int e = n / 0; int z = *(int *)0; (void)d; (void)e; (void)z; }\n"
+                  "  while (0) { int d = a[5]; int e = n / 0; int z = *(int *)0; (void)d; (void)e; (void)z; }\n"
+                  "  return n;\n"
+                  "  { int d = a[5]; int e = n / 0; int z = *(int *)0; (void)d; (void)e; (void)z; }\n}\n",
+    },
+    {
+        // An unreachable initializer's barriers outlive its body's scratch (#1447): the next body's marks and queue
+        // must not reuse them, which made a later body's initialized variables "uninitialized when used here".
+        .name = "unreachable initializer barriers outlive their body",
+        .source = "int f(int n) {\n  return n;\n  int dead = n;\n  return dead;\n}\n"
+                  "int g(int n) {\n  int a = n + 1;\n  if (n > 1) n = a;\n  int b = n + 2;\n  if (n > 2) n = b;\n"
+                  "  int c = n + 3;\n  if (n > 3) n = c;\n  int d = n + 4;\n  if (n > 4) n = d;\n  return n;\n}\n",
+        .options = { "-Wall" },
+    },
+    {
+        // A logical operator one operand decides though the other isn't known (#1447, clang's CFG tryEvaluateBool):
+        // `x && 0` and `x || 1`, through `!` and casts, prune the arm they leave out for the runtime warnings and for
+        // -Wreturn-type alike; `x && (x || 1)` and `x && 1` decide nothing.
+        .name = "short-circuit conditions one operand decides",
+        .source = "int a[2];\nint f(int n) {\n"
+                  "  if (n && 0) { n = n / 0; }\n"
+                  "  if (!(n || 1)) { n = a[5]; }\n"
+                  "  if ((long)(n || 1)) { n += 1; } else { n = n % 0; }\n"
+                  "  while (n && 0) { n = *(int *)0; }\n"
+                  "  if (n && (n || 1)) { n = n / 0; }\n"
+                  "  return n;\n}\n"
+                  "int g(int n) {\n  if (n || 1) return 1;\n}\n"
+                  "int h(int n) {\n  while (n || 1) { if (n) return 2; }\n}\n"
+                  "int k(int n) {\n  if (n && 1) return 1;\n}\n",
+        .warnings = 2,
+    },
+    {
+        // The same conditions prune a conditional's arm and a logical operator's right operand (#1447, clang's CFG builder
+        // in VisitConditionalOperator and VisitLogicalOperator): `n && 1` and `n || 0` decide nothing.
+        .name = "short-circuit operands one operand decides",
+        .source = "int a[2];\nint f(int n) {\n"
+                  "  int r = (n && 0) ? n / 0 : (n || 1) ? 1 : *(int *)0;\n"
+                  "  r += ((n && 0) && n % 0) + ((n || 1) || a[5]) + (!(n || 1) ? a[5] : 0) + ((long)(n && 0) ? *(int *)0 : 1);\n"
+                  "  r += (n && 1) ? n / 0 : 0;\n"
+                  "  r += (n || 0) || *(int *)0;\n"
+                  "  return r;\n}\n",
+        .warnings = 2,
+        .notes = 1,
+    },
+    {
         // Clang decides by the context its parser is in (#147): an unselected _Generic association or choose_expr operand in
         // an alignof's operand is unevaluated with it, as are a _Generic's controlling expression and a statement
         // expression in sizeof's; an array declarator's bound, in a sizeof's type name too, is evaluated; and a sizeof of a
