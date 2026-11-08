@@ -3854,14 +3854,16 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
             {
                 const uint32_t flags = stream->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1u : 0u].flags;
                 const bool assignment = (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0;
+                uint32_t bit_width = 0;
+                __int128 original = 0;
+                __int128 truncated = 0;
+                // Or a constant a bit-field's assignment truncates (#1447, check_common_bitfield_assignment), which only an
+                // assignment of an integer constant reads.
                 conversion = assignment && (constant != CHECK_CONSTANT_INTEGER || arms ||
-                                            check_common_constant_changes(types, stream, source, check_stream_type(stream, node)));
+                                            check_common_constant_changes(types, stream, source, check_stream_type(stream, node)) ||
+                                            (op == CHECK_OP_ASSIGN &&
+                                             check_common_bitfield_assignment(graph, stream, types, node, &bit_width, &original, &truncated)));
             }
-            uint32_t bit_width = 0;
-            __int128 original = 0;
-            __int128 truncated = 0;
-            // A constant a bit-field's assignment truncates (#1447, check_common_bitfield_assignment).
-            conversion = conversion || check_common_bitfield_assignment(graph, stream, types, node, &bit_width, &original, &truncated);
             if (!conversion && check_common_bool_candidate(graph, source))
             {
                 // A `<<` converted to _Bool, constant or not (#1447, check_common_int_in_bool).
