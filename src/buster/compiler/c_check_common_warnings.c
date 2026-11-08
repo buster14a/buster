@@ -603,7 +603,13 @@ static uint32_t check_common_parent(const Parser* parser, uint32_t token)
 static bool check_common_discarded_place(const Parser* parser, uint32_t token)
 {
     const uint32_t count = parser->tokens.count;
-    const uint32_t parent = check_common_parent(parser, token);
+    // A parenthesized for clause's value (`for ((i, j); ...)`) is the clause's, as clang's IgnoreParens finds it.
+    uint32_t parent = check_common_parent(parser, token);
+    for (uint32_t steps = 0; parent < count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_GROUP && steps < count; steps += 1)
+    {
+        token = parent;
+        parent = check_common_parent(parser, parent);
+    }
     const uint8_t parent_role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
     const uint32_t grandparent = parent < count ? check_common_parent(parser, parent) : BUSTER_CHECK_NONE;
     const bool for_init = parent_role == PARSE_ROLE_TERMINATOR && grandparent < count &&

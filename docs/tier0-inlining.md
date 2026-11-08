@@ -1,8 +1,11 @@
 # Tier 0 inlining of always_inline functions (#1398): design
 
-Status: design only. Nothing here is implemented yet; the issue's claim and this
-document's revisions are on [#1398](https://github.com/buster14a/buster/issues/1398).
-The names of existing code below are main's at `8a29955f`.
+Status: plan steps 1 and 2 are implemented, with argument and result forwarding
+(step 4) in the form "Implementation" describes; dropping callees (step 3) and
+more callee shapes (step 5) are not. The issue's claims and this document's
+revisions are on [#1398](https://github.com/buster14a/buster/issues/1398). The
+names of existing code below are main's at `8a29955f`. The command and its
+files are in [the Tier 0 guide](commands/tier0.md#inlining-always_inline-functions-1398).
 
 ## The problem
 
@@ -565,3 +568,129 @@ The record goes to buster-performance, as AGENTS.md asks.
 - **One schedule or two.** #1282's schedule holds every part's stream until the
   code epoch. If that shows in `main.c`'s peak resident set, a callee-only
   lowering round is the alternative (see "Where it runs in the emission").
+
+## Implementation
+
+`tier0_inline.c` is the splice and `c_check_tier0_inline.c` its use in the
+emission, as above, with these differences, each found while building it.
+
+**Each argument is bound right after its own evaluation**, not all at the call.
+Tier 0 reads an entry's last operand's class from the entry before it
+(`tier0.c`, "The kinds"), so `SET_LOCAL p1` right after `SET_LOCAL p2` reads
+p2's class for p1's operand: `_mm_slli_epi32(__m128i, int)`'s two bindings would
+be refused. A binding goes before the next argument's first entry, which
+`tier0_inline_starts` finds by scanning back from that argument's root, counting
+the values each entry needs (`tier0_shapes`' effects, a `DUP`'s as one popped and
+two pushed). It stops where they are all found and the entry before pushes a
+value; an entry that pushes none (a branch, a jump, a store) belongs to the
+argument's arms or statements. The last argument's binding goes at the call, and
+an argument binding's operand is its own root.
+
+**Locals per level, not per caller.** With early bindings, `f(a, f(b, c))`'s outer
+copy binds `a` before the inner copy runs, so the two can't share `f`'s locals. A
+site inside another site's arguments of the same callee, after that one's first
+binding, takes the next level's copy of the callee's locals
+(`Tier0InlineSite.level`, from a stack of the sites' binding regions, which nest
+or are apart). A site past `BUSTER_TIER0_INLINE_LEVELS` (8) levels stays a call.
+Each level's copy is appended once per caller.
+
+**A vector-sized aggregate binds as a vector.** An argument or result object of
+4, 8, 16, 32 or 64 bytes that the stream's vector transport has is bound by
+`LOAD` and `SET_LOCAL` of class `VECTOR`, not `COPY`. `COPY` moves 16 bytes at a
+time, and the vector's next read takes 32 or 64 at once, which a store buffer
+doesn't forward from two stores. Bound by `COPY`, #1398's kernels ran 3 to 30
+times slower inlined than called.
+
+**Forwarding, two ways.**
+- *Arguments*, at the splice: a callee whose first entries are `LOCAL 0` to
+  `LOCAL n - 1`, its parameters' only references, reached by no branch
+  (`tier0_inline_forwards`), every wrapper's shape, leaves those reads out where
+  each argument is a value of its read's class or a vector-sized aggregate. The
+  arguments then stay on the stacks as the `CALL` took them, a vector's bytes
+  loaded where its address was. No binding remains for such a site.
+- *Objects*, after the splice (`tier0_inline_forward`): a local is forwarded
+  where every reference to it is in one of two shapes, `SET_LOCAL x, LOCAL x`
+  (a value stored and read back) and `SET_LOCAL x, LOCAL_ADDRESS x, LOAD` of
+  x's bytes (a vector stored and loaded back through its address), whose
+  entries but the first no branch or label reaches. Its contents are then only
+  read right after they are written, so both shapes become nothing and the value
+  stays on the stack. This takes out the callee's result object, the call's
+  result object and the caller's argument temporaries without a per-local remap.
+  With `-g`'s source rows only the callees' copies of locals are forwarded, not
+  the caller's own, which the debugger shows.
+
+With both, `k_adds`' spliced stream is `LOCAL d, LOCAL a, LOAD, LOCAL b, LOAD,
+X86, STORE`, the 45 entries of the plain splice cut to 9.
+
+**The vector path and the twin.** Sites come from a `vpcmpeqb` of 64 kinds at a
+time. The starts are an exclusive prefix sum of the growth, 16 lanes in
+registers, and the positions with insertions a compress of the nonzero heads.
+The caller's segments are copied 64 kinds and classes and 8 values at a time,
+and the callees' bodies rebased by a `vpermb` of their kinds to meanings, a
+`vpermq` of the bases and an add. The branches' targets in a segment are
+remapped lane by lane, not by `vpgatherqq` (Zen 5's gathers cost more than the
+few scalar loads). The plan between them is per site, not per entry: the
+arguments' starts, the levels and the insertions. The forwarding pass is one
+scan and a histogram of the locals, shared by both paths. Neither has been
+measured on the 9700X yet. `test-tier0-inline` compares the two paths on every
+body of a unit, and the driver fixture compares their objects.
+
+**Callees that call callees** are expanded in each lane's cache
+(`CheckTier0InlineLane`), and which ones expand is a property of the unit's
+graph of callees alone, never of the order a lane meets them in. A depth bound
+counted from whichever root a lane's search met first, as "Callees that call
+callees" above has it, cached a cut expansion that the lane's later bodies took,
+and the lanes take bodies in an order their timing decides. #1770's review found
+it: a chain of 20 wrappers made several different objects by `--lanes 4`. Each
+lane now finds the graph's strongly connected components by an iterative Tarjan
+search (`check_tier0_inline_prepare`). A callee in a cycle isn't inlined, and its
+own calls of the cycle stay calls, whichever member a lane met first. That is
+fewer inlined calls than clang's, which unrolls a cycle once. Every other callee
+is settled after the callees it calls. Its height is one more than the highest
+of those that expand, and one past `BUSTER_CHECK_TIER0_INLINE_DEPTH` (16) isn't
+inlined (its own calls are). A callee also needs a target its caller's includes,
+and a body with a planned naked function isn't one. `test-checker-driver`'s
+lanes fixture builds such a graph by 4 lanes, three times, and by 1 lane, and
+compares the objects.
+
+**Callees aren't dropped yet** (plan step 3): each callee's code stays in the
+object, which on `main.c` makes it 12% larger (34.5 MB against 30.7 MB). Clang
+-O0 emits none of them.
+
+### First measurements
+
+These were taken on the session's 4-core cloud host (AVX-512, `-march=znver5`
+kernels, clang 23.1.6), not the 9700X, the best of 7 runs on one CPU: 4,000
+repetitions of #1398's kernels over 4,096 elements, in ms.
+
+| kernel | Tier 0, inlined | Tier 0, `--tier0-no-inline` | clang -O0 |
+| --- | ---: | ---: | ---: |
+| `_mm256_add_ps` sum | 12.9 | 34.2 | 8.0 |
+| `_mm256_adds_epu8` | 0.9 | 5.5 | 1.0 |
+| `_mm512_cmpeq_epi32_mask` count | 1.7 | 4.0 | 1.1 |
+| `_mm256_fmadd_ps` | 13.9 | 36.9 | 8.8 |
+
+The sum and the multiply-add carry their accumulator from one iteration to the
+next. That value still goes through its variable's frame slot and Tier 0's
+per-depth vector slot each iteration, which only keeping vector values in
+registers (#780) removes. `main.c`'s `-c` took 6.4 s inlined against 6.1 s with
+`--tier0-no-inline` on that host, while another build was running.
+
+The self-host qualification (`tools/ci/selfhost.c`) passes with inlining: 43
+units, 14 smoke commands, the probes' byte comparisons. Its stage-2 compiler,
+built with inlining and with `--tier0-no-inline` (the qualification's flags
+plus the option), then ran the issue's benchmarks on one CPU of the same host,
+in ms (medians, or the 1-lane run of `benchmark-files`):
+
+| benchmark | self-built, inlined | self-built, `--tier0-no-inline` | clang -O3's build |
+| --- | ---: | ---: | ---: |
+| `benchmark-lexer src`, `c_tokenize` | 662 | 2,253 | 17 |
+| `benchmark-lexer src`, `c_tokenize_scalar` | 426 | 437 | 118 |
+| `benchmark-refinement src`, `refine_tokens_fused` | 623 | 3,772 | |
+| `benchmark-refinement src`, `c_tokenize+refine` | 1,140 | 4,203 | |
+| `benchmark-files` on `main.c`, 1 lane | 1,392 | 4,921 | 94 |
+
+The scalar lexer, which calls no intrinsics, doesn't move: the control. The
+qualification's stage-2 smoke took 114 s inlined against 220 s without, and its
+`test-lexer` 45 s against 111 s (the latter beside other work). The 9700X's
+numbers, under the lock, are still to be taken, as above.

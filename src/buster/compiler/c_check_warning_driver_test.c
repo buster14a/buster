@@ -1597,6 +1597,19 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .options = { "-Wformat", "-Wno-gcc-compat", "-Wno-non-literal-null-conversion" },
         .warnings = 1,
     },
+    {
+        // A for clause's value in parentheses is the clause's (#1447): clang's IgnoreParens finds the discarded comma,
+        // its operand of no effect and its literal 0 idiom through them, in the init and the increment; the condition's
+        // value is read.
+        .name = "parenthesized comma for clauses discard their values",
+        .source = "int g(int);\nvoid f(int n, int *p) {\n    int i = 0, j = 0;\n    for ((i, j); i < n; ++i) {}\n"
+                  "    for (; ; (i++, j)) { break; }\n    for (((i, j)); ; ) { break; }\n    for ((j, i++); ; ((i, 2))) { break; }\n"
+                  "    for (; (i, j); ) { break; }\n    for ((i == 1, j == 2); ; (i < 2)) { break; }\n"
+                  "    for ((i == 1); ; ((i < 2))) { break; }\n    for ((g(1), j); ; (j, (void)0)) { break; }\n"
+                  "    for ((i, 0); ; (j, 0)) { break; }\n    for ((void)(i, j); ; ) { break; }\n    for ((p[0], (j)); ; ) { break; }\n}\n",
+        .warnings = 14,
+        .notes = 1,
+    },
 };
 
 static void check_test_driver_warning_fixtures(CheckTest* test, const char* clang, const char* executable, const char* directory,
