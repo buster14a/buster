@@ -40,9 +40,10 @@ struct CheckDriverPart
 
 static CheckDriverPart check_driver_part = { .index = 0, .count = 1 };
 
-// Whether the clang this run compares with is the pinned reference release (BUSTER_CLANG_REFERENCE_VERSION), from
-// run_checker_driver_tests, and the release it named: the library builtin comparisons that depend on its table then
-// skip only the names that release is known to classify differently, and report them as a version difference.
+// Whether the clang this run compares with is the pinned reference release's official build
+// (BUSTER_CLANG_REFERENCE_VERSION), from run_checker_driver_tests, and the build it named ("23.1.4", "Ubuntu 23.1.6"):
+// the library builtin comparisons that depend on its table then skip only the names that build is known to classify
+// differently, and report them as a build difference.
 static bool check_driver_clang_reference = true;
 static char check_driver_clang_version[64] = "";
 
@@ -7720,8 +7721,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = sign_compare_only || cpu_dispatch_only;
     check_test_expect(&test, options, "driver test options are recognized");
-    // The library-builtin table is pinned to BUSTER_CLANG_REFERENCE_VERSION: a different clang release is reported with
-    // both versions, and the library comparisons then skip only the names that depend on its table (#1131).
+    // The library-builtin table is pinned to BUSTER_CLANG_REFERENCE_VERSION's official build: a different clang build is
+    // reported with both, and the library comparisons then skip only the names that depend on its table (#1131).
     check_driver_clang_reference = clang_reference_report(clang, check_driver_clang_version, sizeof(check_driver_clang_version));
     check_test_expect(&test, pp_test_clang_reference(), "clang reference: version comparison and mismatch reporting");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).

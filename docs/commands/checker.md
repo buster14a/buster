@@ -85,12 +85,13 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
   `CheckDriverPart`; `--cpu-dispatch-only` runs the `cpu_specific` and
   `cpu_dispatch` section alone, #1447). Its library-builtin comparisons are pinned to Clang
-  23.1.4, CI's reference: it compares `clang --version` with the release,
-  prints `expected clang 23.1.4, found …` when another release is found, and
-  skips only the plain names that release's table is known to classify
-  differently (the named list `cbuiltin_library_table_differences`: 23.1.5's
-  `strlcat` and `strlcpy`), still comparing every other name and every
-  version-independent check, and reruns them under a fake clang 23.1.5 so the
+  23.1.4's official build, CI's reference: it compares `clang --version` with
+  it, prints `expected clang 23.1.4, found …` when another build is found, and
+  skips only the plain names that build's vendor is known to classify
+  differently (the named list `cbuiltin_library_table_differences`: Debian's
+  and Ubuntu's packages drop `strlcat` and `strlcpy`), still comparing every
+  other name and every version-independent check, and reruns them under a fake
+  Ubuntu clang 23.1.6 so the
   skip path is exercised under the reference too; the fake reaches `--clang`'s
   executable through a path with a space, quotes and `$;*`
   (`clang_release_wrapper`), so an awkward `--clang` path stays one word. `test-checker-corpus`
