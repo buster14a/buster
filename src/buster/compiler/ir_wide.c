@@ -689,6 +689,7 @@ static void ir_wide_pass(IrWideWork* work)
         }
         for (uint32_t i = f->block_offsets[block]; work->error == IR_OK && i < f->block_offsets[block + 1]; i += 1)
         {
+            const uint64_t first = work->instruction;
             bool supported = true;
             if (f->type[i] == IR_I128)
             {
@@ -711,6 +712,13 @@ static void ir_wide_pass(IrWideWork* work)
             {
                 work->error = IR_ERROR_LIMIT;
                 work->error_instruction = i;
+            }
+            if (work->error == IR_OK && work->output != NULL && work->output->debug != NULL)
+            {
+                for (uint64_t node = first; node < work->instruction; node += 1)
+                {
+                    work->output->debug->origins[node] = f->debug->origins[i];
+                }
             }
         }
     }
@@ -804,8 +812,16 @@ static IrCheck ir_wide_split_path(const IrFunction* function, Arena* output, Are
             };
             check.error = ir_create(output, &sizes, &split);
         }
+        if (check.error == IR_OK && !ir_debug_create(output, &split, function->debug))
+        {
+            check.error = IR_ERROR_MEMORY;
+        }
         if (check.error == IR_OK)
         {
+            if (split.debug != NULL && function->slot_count != 0)
+            {
+                memcpy(split.debug->locals, function->debug->locals, (uint64_t)function->slot_count * sizeof(uint32_t));
+            }
             split.result_type = function->result_type;
             split.symbol_count = function->symbol_count;
             split.parameter_passed = function->parameter_passed;
@@ -866,6 +882,23 @@ static IrCheck ir_wide_split_path(const IrFunction* function, Arena* output, Are
             work.output = &split;
             ir_wide_pass(&work);
             check = ir_check(work.instruction == instructions ? work.error : IR_ERROR_STRUCTURE, work.error_instruction, 0);
+            for (uint32_t k = 0; check.error == IR_OK && split.debug != NULL && k < split.debug->binding_count; k += 1)
+            {
+                IrDebugBinding* binding = split.debug->bindings + k;
+                binding->anchor = binding->anchor != BUSTER_IR_NONE ? ir_wide_low(&work, binding->anchor) : BUSTER_IR_NONE;
+                if (binding->kind == IR_DEBUG_BIND_VALUE)
+                {
+                    binding->value = ir_wide_low(&work, binding->value);
+                }
+            }
+            for (uint32_t k = 0; check.error == IR_OK && split.debug != NULL && k < split.debug->region_count; k += 1)
+            {
+                IrDebugRegion* region = split.debug->regions + k;
+                if (region->kind == IR_DEBUG_BIND_VALUE)
+                {
+                    region->value = ir_wide_low(&work, region->value);
+                }
+            }
         }
         if (check.error == IR_OK)
         {

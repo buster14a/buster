@@ -31,7 +31,7 @@
 // call are saved around it, which its runs' instructions count). Then every build's output must be the first's (the
 // primitives' checksums; speedtest1's --verify hash), before --compiles rounds (5) of every (source, build) pair's -c
 // compile, then --warmups (1) and --runs rounds (11) of every (program, build) pair's run, each round in an order that
-// rotates by round (profile_ab_tree's), as whole processes where the caller pins this one (taskset): wall time, user
+// is a Williams design's (profile_ab_tree's), as whole processes where the caller pins this one (taskset): wall time, user
 // cycles and instructions each (profile_time_one), as measure-tier1-programs times them. Every compile and run must exit
 // with status 0 and be counted (but with --uncounted, for a host without the counters). It prints a tab-separated line
 // per compile and per run (`helpers-measure-compile` and `helpers-measure-run`), each pair's medians, and the tables:

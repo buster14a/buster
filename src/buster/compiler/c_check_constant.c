@@ -311,7 +311,8 @@ static void check_input_warning_suppress(CheckInputReader* reader, uint32_t firs
     check_input_warning_range(reader, first, end, warnings, warnings);
 }
 
-static bool check_constant_warning_unevaluated(const TypeTable* types, const CheckAction* action, uint32_t operand, uint32_t count)
+// Always inlined, as it was before #1447 grew the type readers it inlines past clang's threshold.
+static inline __attribute__((always_inline)) bool check_constant_warning_unevaluated(const TypeTable* types, const CheckAction* action, uint32_t operand, uint32_t count)
 {
     const TypeId type = action->type != 0 ? action->type : action->operands[0].type;
     bool skip = action->op == CHECK_OP_ALIGNOF || (action->op == CHECK_OP_SIZEOF && !check_action_runtime_size(types, type));

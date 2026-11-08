@@ -73,9 +73,19 @@ struct CheckInitializer
     uint32_t count;
     CheckInitStatus status;
     uint32_t failed_token;
-    TypeId failed_type; // The record named by CHECK_INIT_MEMBER; zero for other failures.
+    TypeId failed_type; // The record named by CHECK_INIT_MEMBER, or a failed conversion's target (failed_source's); else zero.
+    // A failed conversion's source node plus one (check_init_fail_conversion), or zero: the driver words its error as clang's
+    // initialization's (#147).
+    uint32_t failed_source;
     uint32_t warning_count;
     uint32_t warning_token;
+    // A value part whose source is floating (#147): the only plans whose literal conversions the common warnings read
+    // (check_common_initializer_roots), so that they never visit the others' parts.
+    bool floating_values;
+    // A value part whose integer constant its integer target holds as neither a signed nor an unsigned value, or whose
+    // conditional or comma may carry one (#1447, check_init_changed_integer): the other plans the common warnings read, for
+    // their constant conversions.
+    bool changed_integers;
 };
 
 static __attribute__((unused)) bool check_initializer_run(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
@@ -274,6 +284,18 @@ static void check_init_fail(CheckInitWalker* walker, CheckInitStatus status, uin
     }
 }
 
+// A subobject's conversion that failed (#147): CHECK_INIT_INVALID at `token` (or its resource failure), its target `type` and
+// its source `node` kept where it is the first failure and an incompatible conversion, for clang's words of it.
+static void check_init_fail_conversion(CheckInitWalker* walker, CheckDiagnostic diagnostic, uint32_t token, TypeId type, uint32_t node)
+{
+    if (walker->result->status == CHECK_INIT_OK && diagnostic == CHECK_DIAG_INCOMPATIBLE)
+    {
+        walker->result->failed_type = type;
+        walker->result->failed_source = node + 1;
+    }
+    check_init_fail(walker, diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
+}
+
 static void check_init_semantic_warning(CheckInitWalker* walker, const CheckWarningEvent* event, const CheckWarningNote* notes, uint32_t count)
 {
     if (!walker->semantic_suppressed && walker->warnings != NULL && walker->warnings->sink != NULL && walker->warnings->sink->events != NULL &&
@@ -456,6 +478,57 @@ static CheckContext check_init_context(const CheckInitWalker* walker, uint32_t n
     return context;
 }
 
+// Whether a value part may change its integer constant's value in its conversion (#1447, -Wconstant-conversion): a
+// constant outside the range a narrower integer target holds, a superset of the common warnings' test
+// (check_common_conversion_changes), a conditional or a comma, whose arms carry the conversion, or a `<<` converted to _Bool.
+static bool check_init_changed_integer(const CheckInitWalker* walker, const CheckInitPart* part)
+{
+    const CheckStream* stream = walker->stream;
+    const bool value = part->kind == CHECK_INIT_VALUE && stream != NULL && part->node < stream->count;
+    const CheckOp op = value && walker->graph != NULL && part->node < walker->graph->count ? walker->graph->ops[part->node] : CHECK_OP_COUNT;
+    // A conditional's or a comma's arms carry the conversion; a `<<` converted to _Bool is DiagnoseIntInBoolContext's (#1447),
+    // and to another integer its constant value's, as any constant's.
+    const bool branching = op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA;
+    const bool shift = op == CHECK_OP_SHIFT_LEFT;
+    // Most parts are no integer constant, or one below 128, which every integer target but a narrower _BitInt holds: their
+    // tests come first, so that only the rest read the target's type.
+    const bool constant = value && !branching && check_stream_constant_kind(stream, part->node) == CHECK_CONSTANT_INTEGER;
+    const CheckValue source = constant ? check_stream_value(stream, part->node) : (CheckValue){ 0 };
+    uint32_t source_width = 0;
+    uint32_t target_width = 0;
+    bool source_signed = false;
+    bool target_signed = false;
+    bool result = false;
+    if ((branching || shift || (constant && source.integer > 127)) &&
+        check_action_integer_type(walker->types, part->conversion.type, &target_width, &target_signed))
+    {
+        const bool boolean = type_unqualified(type_strip_aligned(walker->types, part->conversion.type)) == BUSTER_TYPE_BOOL;
+        if (branching || boolean)
+        {
+            result = branching || shift;
+        }
+        else if (constant && check_action_integer_type(walker->types, check_stream_type(stream, part->node), &source_width, &source_signed) &&
+                 target_width < source_width && target_width < 128)
+        {
+            const unsigned __int128 mask = check_action_mask(source_width);
+            const unsigned __int128 bits = source.integer & mask;
+            const bool negative = source_signed && source_width != 0 && ((bits >> (source_width - 1)) & 1) != 0;
+            const unsigned __int128 magnitude = negative ? (~bits & mask) + 1 : bits;
+            // Negative values down to -2^(w-1) fit either target; others up to 2^(w-1) - 1 a signed one and up to 2^w - 1 an
+            // unsigned one. Only an outside value may change.
+            const unsigned __int128 half = (unsigned __int128)1 << (target_width - 1);
+            result = negative ? magnitude > half : magnitude > (target_signed ? half - 1 : check_action_mask(target_width));
+        }
+    }
+    else if (constant && source.integer <= 127 && part->conversion.type != 0)
+    {
+        // A small value: only a _BitInt narrower than 8 bits may change it.
+        const TypeId bare = type_unqualified(type_strip_aligned(walker->types, part->conversion.type));
+        result = type_kind(walker->types, bare) == BUSTER_TYPE_KIND_BIT_INT;
+    }
+    return result;
+}
+
 static void check_init_append(CheckInitWalker* walker, const CheckInitPart* part)
 {
     if (!walker->infer && walker->result->status == CHECK_INIT_OK)
@@ -473,6 +546,9 @@ static void check_init_append(CheckInitWalker* walker, const CheckInitPart* part
             }
             *slot = *part;
             walker->result->count += 1;
+            walker->result->floating_values |= part->kind == CHECK_INIT_VALUE && walker->stream != NULL && part->node < walker->stream->count &&
+                                               check_action_kind(walker->types, check_stream_type(walker->stream, part->node)) == BUSTER_TYPE_KIND_FLOATING;
+            walker->result->changed_integers |= check_init_changed_integer(walker, part);
         }
     }
 }
@@ -1958,7 +2034,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
         check_action_scalar(walker->types, &action, &converted);
         if (converted.diagnostic != CHECK_DIAG_NONE)
         {
-            check_init_fail(walker, converted.diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
+            check_init_fail_conversion(walker, converted.diagnostic, token, element, source_node);
         }
         else if (walker->static_storage && !check_value_evaluated_constant(&converted.value))
         {
@@ -1998,7 +2074,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
         check_action_scalar(walker->types, &action, &converted);
         if (converted.diagnostic != CHECK_DIAG_NONE)
         {
-            check_init_fail(walker, converted.diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
+            check_init_fail_conversion(walker, converted.diagnostic, token, destination, node);
         }
         else if (walker->static_storage)
         {
@@ -2325,7 +2401,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
             }
             if (converted.diagnostic != CHECK_DIAG_NONE)
             {
-                check_init_fail(walker, converted.diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
+                check_init_fail_conversion(walker, converted.diagnostic, token, destination, node);
             }
             else if (walker->static_storage && !walker->defer_constants &&
                      !check_value_static_initializer(&converted.value, selected->width != 0))
@@ -2357,6 +2433,9 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                         }
                     }
                 }
+                CheckConversion conversion = converted.conversions[0];
+                conversion.flags |= type_kind(walker->types, type_strip_aligned(walker->types, destination)) == BUSTER_TYPE_KIND_ATOMIC ?
+                                    BUSTER_CHECK_CONVERT_ATOMIC : 0;
                 const CheckInitPart part = {
                     .kind = CHECK_INIT_VALUE,
                     .type = selected->type,
@@ -2366,7 +2445,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                     .bit_offset = selected->offset,
                     .bit_width = selected->width,
                     .value = converted.value,
-                    .conversion = converted.conversions[0],
+                    .conversion = conversion,
                 };
                 check_init_append(walker, &part);
             }

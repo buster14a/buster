@@ -1593,6 +1593,10 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
     {
         error = ir_create(output, &sizes, &candidate);
     }
+    if (error == IR_OK && !ir_debug_create(output, &candidate, f->debug))
+    {
+        error = IR_ERROR_MEMORY;
+    }
     if (error == IR_OK)
     {
         candidate.result_type = f->result_type;
@@ -1790,6 +1794,45 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
             }
         }
         candidate.block_offsets[candidate.block_count] = candidate.instruction_count;
+        ir_debug_remap(f, &candidate, values, NULL, blocks);
+        if (candidate.debug != NULL)
+        {
+            for (uint32_t k = 0; k < candidate.debug->binding_count; k += 1)
+            {
+                const IrDebugBinding original = f->debug->bindings[k];
+                IrDebugBinding* binding = candidate.debug->bindings + k;
+                if (original.kind == IR_DEBUG_BIND_VALUE && work->states[original.value] == IROPT_CONSTANT &&
+                    f->type[original.value] == original.type && original.bytes != 0 && original.bytes <= 8)
+                {
+                    const uint64_t literal = work->values[original.value].low;
+                    binding->literal = original.bytes == 8 ? literal : literal & ((UINT64_C(1) << (original.bytes * 8)) - 1);
+                    binding->value = BUSTER_IR_NONE;
+                    binding->kind = IR_DEBUG_BIND_CONSTANT;
+                }
+            }
+            for (uint32_t k = 0; k < candidate.debug->region_count; k += 1)
+            {
+                const IrDebugRegion original = f->debug->regions[k];
+                IrDebugRegion* region = candidate.debug->regions + k;
+                if (region->block != BUSTER_IR_NONE && original.kind == IR_DEBUG_BIND_VALUE && work->states[original.value] == IROPT_CONSTANT &&
+                    f->type[original.value] == original.type && original.bytes != 0 && original.bytes <= 8)
+                {
+                    const uint64_t literal = work->values[original.value].low;
+                    region->literal = original.bytes == 8 ? literal : literal & ((UINT64_C(1) << (original.bytes * 8)) - 1);
+                    region->value = BUSTER_IR_NONE;
+                    region->kind = IR_DEBUG_BIND_CONSTANT;
+                }
+            }
+            // SCCP can retain a floating operation's effects immediately before its folded constant. Both records
+            // originate in that operation; neither new node is inferred from a neighboring instruction's source.
+            for (uint32_t i = 0; i < f->instruction_count; i += 1)
+            {
+                if (values[i] != BUSTER_IR_NONE && work->states[i] == IROPT_CONSTANT && ir_optimize_simd_effect(f, i))
+                {
+                    candidate.debug->origins[values[i] - 1] = f->debug->origins[i];
+                }
+            }
+        }
         work->statistics.removed_instructions = f->instruction_count > candidate.instruction_count ? f->instruction_count - candidate.instruction_count : 0;
         work->statistics.removed_blocks = f->block_count - candidate.block_count;
         *result = candidate;

@@ -230,9 +230,9 @@ static __attribute__((unused)) uint32_t cbuiltin_library_libgcc(const char* name
 }
 
 // The Clang release the plain library builtins are pinned to (#1131): 23.1.4, CI's reference, whose rows are 23.1.1's
-// too and whose GNU library builtins include strlcat and strlcpy. Clang 23.1.5's table drops them, so the oracle tests
-// compare `clang --version` with this release, report both versions when they differ, and skip only the plain names a
-// named release's table is known to classify differently (cbuiltin_library_table_differences).
+// too and whose GNU library builtins include strlcat and strlcpy, as every upstream 23.x release's do. The oracle tests
+// compare `clang --version` with this release's official build, report both when they differ, and skip only the plain
+// names a named build's table is known to classify differently (cbuiltin_library_table_differences).
 #define BUSTER_CLANG_REFERENCE_VERSION "23.1.4"
 
 // The language modes of a plain library builtin's row (c_builtin_library_plain.inc's second column): every C mode's
@@ -298,29 +298,36 @@ static __attribute__((unused)) const CBuiltinLibraryPlain* cbuiltin_library_plai
     return result;
 }
 
-// The plain names a named non-reference release's library-builtin table is known to classify differently from the
-// reference's: clang 23.1.5 drops 23.1.4's strlcat and strlcpy GNU rows. The oracle tests skip a mismatched answer
-// only when the found release is a row's version and the name that row's: a difference they can't attribute to a
-// known release's table stays a failure, since the same probe can't tell an unlisted release's table from a buster
-// bug.
+// The plain names a vendor's clang build is known to classify differently from the reference's official build, by the
+// vendor word its `clang --version` puts before "clang version" (clang_reference_parse's "Ubuntu 23.1.6"): Debian's and
+// Ubuntu's packages, apt.llvm.org's included, comment strlcpy's and strlcat's rows out of Builtins.td with
+// debian/patches/23-strlcpy_strlcat_warning_removed.diff (carried since LLVM 3.4), in every release; upstream's
+// llvmorg-23.1.4 and llvmorg-23.1.5 tags and release/23.x keep them. The oracle tests skip a mismatched answer only when
+// the found build is a row's vendor's and the name that row's: a difference they can't attribute to a known build's
+// table stays a failure, since the same probe can't tell an unlisted build's table from a buster bug.
 static const struct
 {
-    const char* version;
+    const char* vendor;
     const char* name;
 } cbuiltin_library_table_differences[] = {
-    { "23.1.5", "strlcat" },
-    { "23.1.5", "strlcpy" },
+    { "Debian", "strlcat" },
+    { "Debian", "strlcpy" },
+    { "Ubuntu", "strlcat" },
+    { "Ubuntu", "strlcpy" },
 };
 
-// Whether `version`'s library-builtin table is known to classify `name` differently from the reference release's.
-static __attribute__((unused)) bool cbuiltin_library_table_differs(const char* version, const char* name, uint32_t length)
+// Whether the build `found` names (clang_reference_parse's: a vendor word, a space, then the release, or the release
+// alone for an upstream build) has a library-builtin table known to classify `name` differently from the reference's.
+static __attribute__((unused)) bool cbuiltin_library_table_differs(const char* found, const char* name, uint32_t length)
 {
     bool result = false;
-    for (uint32_t i = 0; version != NULL && !result && i < sizeof(cbuiltin_library_table_differences) / sizeof(cbuiltin_library_table_differences[0]); i += 1)
+    const char* space = found != NULL ? strchr(found, ' ') : NULL;
+    const size_t vendor = space != NULL ? (size_t)(space - found) : 0;
+    for (uint32_t i = 0; vendor != 0 && !result && i < sizeof(cbuiltin_library_table_differences) / sizeof(cbuiltin_library_table_differences[0]); i += 1)
     {
         const size_t spelling = strlen(cbuiltin_library_table_differences[i].name);
-        result = strcmp(version, cbuiltin_library_table_differences[i].version) == 0 && spelling == length &&
-                 memcmp(name, cbuiltin_library_table_differences[i].name, length) == 0;
+        result = strlen(cbuiltin_library_table_differences[i].vendor) == vendor && memcmp(found, cbuiltin_library_table_differences[i].vendor, vendor) == 0 &&
+                 spelling == length && memcmp(name, cbuiltin_library_table_differences[i].name, length) == 0;
     }
     return result;
 }

@@ -33,6 +33,9 @@ struct CheckTier1ScheduleCode
     // Further boundaries nothing moves across: the source events'.
     const uint32_t* anchors;
     uint32_t anchor_count;
+    // Optional output for source/debug metadata: new record index -> old record index, plus the terminal boundary.
+    // The caller supplies count + 1 entries. This adds no cuts and changes none of the scheduler's decisions.
+    uint32_t* record_order;
 };
 
 typedef struct CheckTier1ScheduleResult CheckTier1ScheduleResult;
@@ -93,6 +96,10 @@ static CheckTier1ScheduleResult check_tier1_schedule_code(Arena* scratch, const 
         {
             places[i] = i;
         }
+        for (uint32_t i = 0; code->record_order != NULL && i <= count; i += 1)
+        {
+            code->record_order[i] = i;
+        }
         uint32_t start = 0;
         for (uint32_t end = 1; end <= count; end += 1)
         {
@@ -116,6 +123,10 @@ static CheckTier1ScheduleResult check_tier1_schedule_code(Arena* scratch, const 
                     for (uint32_t position = 0; position < input.count; position += 1)
                     {
                         code->records[start + position] = block[order[position]];
+                        if (code->record_order != NULL)
+                        {
+                            code->record_order[start + position] = start + order[position];
+                        }
                         if (places != 0)
                         {
                             places[start + order[position]] = start + position;

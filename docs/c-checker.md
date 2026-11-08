@@ -69,6 +69,15 @@ directives carry bounded syntax diagnostics, and an unmatched pop rejects the
 unit. Unknown visibility names warn and leave the stack unchanged. Ordinary
 units allocate no visibility history or object column.
 
+`__private_extern__` declarations use extern linkage and hidden ELF visibility.
+Uninitialized variable declarations warn under `-Wprivate-extern` with the suggested
+`visibility("hidden")` attribute as an attached note; initialized variables
+and functions retain hidden visibility without that warning. The
+warning group, `-Werror`, source pragmas and suppression apply to the note
+with its primary. Later declarations preserve the linked entity's visibility.
+The visibility driver fixtures compare the resulting defined and undefined
+symbols against Clang's ELF output.
+
 Before C23, a direct call of an undeclared identifier creates the compatibility
 declaration `extern int name()` in that block's source scope (#623). Repeated
 calls in the same scope share it; later prototypes use the ordinary linked
@@ -123,17 +132,20 @@ borrows the prior declaration's diagnostic fact, not its closed-block type.
 `-fno-builtin` and exact `-fno-builtin-NAME` options disable this treatment
 for plain library names, but do not disable explicit `__builtin_` spellings.
 `-fbuiltin` reverses the global disabling option; freestanding mode separately
-disables library builtins, matching the pinned Clang 23.1.4 oracle. That
-release's table has `strlcat` and `strlcpy` as GNU library builtins, in GNU
-C89's warning and GNU C99's and later modes' error alike; 23.1.5's table drops
-them, so the oracle compares `clang --version` with 23.1.4, prints both
-releases when they differ, and skips only the plain names the found release is
-known to classify differently (the named list `cbuiltin_library_table_differences`:
-23.1.5's `strlcat` and `strlcpy`), a difference no named release explains still
-failing. Calls of `strlcat` and `strlcpy` are plain calls in every mode, by
-both paths: neither is one of the plain names buster folds. A recognized
-library declaration can still be formed in C23 when its diagnostic is
-suppressed; an unknown C23 name cannot acquire the removed `int ()` fallback.
+disables library builtins, matching the pinned Clang 23.1.4 oracle. Its
+official build's table has `strlcat` and `strlcpy` as GNU library builtins, in
+GNU C89's warning and GNU C99's and later modes' error alike, as every upstream
+23.x release's does; Debian's and Ubuntu's clang packages (apt.llvm.org's too)
+drop them with `debian/patches/23-strlcpy_strlcat_warning_removed.diff`, so the
+oracle compares `clang --version` with 23.1.4's official build, prints both
+builds when they differ (`found Ubuntu 23.1.6`), and skips only the plain names
+the found build's vendor is known to classify differently (the named list
+`cbuiltin_library_table_differences`: Debian's and Ubuntu's `strlcat` and
+`strlcpy`), a difference no named build explains still failing. Calls of
+`strlcat` and `strlcpy` are plain calls in every mode, by both paths: neither
+is one of the plain names buster folds. A recognized library declaration can
+still be formed in C23 when its diagnostic is suppressed; an unknown C23 name
+cannot acquire the removed `int ()` fallback.
 
 `test-checker-driver --executable PATH` compares the original #804 fixtures
 against external Clang through syntax-only checking, object publication and
@@ -2279,11 +2291,14 @@ What the lowering covers past scalars (#145's programs):
   also checks emitted unreachable statement tails, which retain the existing
   implicit-return safeguard. A second walk selects constant conditions for
   `-Wreturn-type`, with command-line and pragma severity, `-w` and system-header
-  suppression. Return warnings currently cover aggregate bodies without
-  statement-expression regions, assembly, reachable call or semantic-query
-  expressions, or nonconstant enum selectors. Calls, queries and enum switches
-  retain conservative handling until their noreturn, context-sensitive constant
-  and exhaustive-enumerator facts are available to the control graph. Constant
+  suppression. Return warnings cover aggregate and scalar bodies; hosted
+  `main` keeps its implicit zero return. Known ordinary direct calls can return,
+  and declared `noreturn` calls and terminating builtins end their source
+  paths through unconditional cast, conversion and condition wrappers.
+  A terminating path beside a fall-off path selects Clang's "in all control
+  paths" wording. Statement-expression regions, assembly, indirect calls,
+  conditionally evaluated terminal calls, semantic queries and nonconstant
+  enum selectors retain conservative handling. Constant
   switch dispatch follows converted side-effect-free source selector
   values and signed case ranges only in the warning walk; the Tier 0 walk
   retains every dispatch edge. Source/native tests cover register and hidden
@@ -3087,7 +3102,7 @@ What the lowering covers past scalars (#145's programs):
     attribute requires an identifier" at the attribute; two names of one
     mangling character (`atom, bonnell`, or two of none) are
     -Wfunction-multiversion's "CPU list contains duplicate entries; attribute
-    ignored" (warning ID 95). Each drops the attribute.
+    ignored" (warning ID 99). Each drops the attribute.
   - *Declarations.* A declaration with either attribute is a version
     (`cpu_specific`) or its function's dispatcher (`cpu_dispatch`). One of the
     same kind and CPU list (the names in order) redeclares that version, whose
@@ -3712,6 +3727,15 @@ errors can be reported even when a later declaration or parser error prevents
 full checking. Recovery only supplies diagnostic fragments; the original
 rejection remains final and cannot emit an object.
 
+Ordinary declaration conflicts retain their reason and previous source location
+(`c_check_redefinition.c`). The driver names a redefined variable, function or
+parameter; prints both types for a variable whose type changes; and distinguishes
+conflicting function types from a static declaration after an external one.
+The accompanying note identifies the previous declaration or definition.
+The binding rules and rejection boundary are unchanged. Fourteen original
+sources compare complete Clang diagnostics in scalar/vector paths and with one
+or three body lanes (`c_check_redefinition_driver_test.c`).
+
 The source driver caps its published errors as Clang 23 does (#669): nineteen
 ordinary errors by default, followed, only if another error occurs, by the fatal
 `too many errors emitted` diagnostic. Explicit `-ferror-limit=N` permits N
@@ -3791,6 +3815,151 @@ views with skipped bodies do not enable this new binding recovery. A successful
 deferred merge has the same complete unit as source order and uses the same cuts.
 All these views remain
 diagnostic-only and preserve the original source rejection.
+
+#### Semantic error recovery (#1447)
+
+Translation-unit-wide recovery after semantic errors comes in phases. The plan
+is [on #1447](https://github.com/buster14a/buster/issues/1447#issuecomment-6719193112).
+Phase 1 covers the errors that clang's `handleDeclAttribute` gives and then
+drops the attribute for, leaving its declaration valid:
+
+- an argument's value, count, string or parameter index;
+- the attribute's subject;
+- a mutual exclusion;
+- an alignment specifier's argument.
+
+Such an error doesn't stop the reader. `check_input_recover_reports` moves its
+report from `CheckInput.reports` to `recovered_reports`, so the ~50 places that
+test `report_count == 0` act as for a valid declaration. The attribute is
+dropped where the error is found:
+
+- **An item's reading:** an argument that must be a string
+  (`check_input_attributes`). The item is skipped to the list's next comma.
+- **Its arguments' values:** `check_input_read_attributes`. The record leaves
+  the list.
+- **Its subject:** `check_input_attribute_subjects`. The record is ignored for
+  this declarator. A shared record is checked again for the next one, which
+  gives clang's repeated error.
+- **Its function type and its place on a definition:**
+  `check_input_attribute_function` and `check_input_attribute_definition`. The
+  record is ignored for good, which also leaves the calls' checks without it
+  (a dropped `format`'s). These passes don't read the mark, so they give the
+  error again for each declarator.
+
+A parser error from an item's reading keeps its place. Sema's errors complete
+at their declarator's last token (`CheckInputReader.recovered_pending`): after
+the parser's errors in the declarator, before a missing `;`'s at the next
+token, which is clang's order.
+
+Once the reader has run, `check_input_recovered_publish` appends the recovered
+reports to `reports`, each marked `recovered`. The unit is rejected. If they are
+its only reports, it is `CheckInput.recovered_valid`: it was checked as a valid
+unit is. The driver then gives it a valid unit's diagnostic path, as it does for
+a unit whose only errors are its preprocessor's:
+
+- the initializers' and assembly's own runs;
+- `check_program`;
+- the common warnings, such as `-Wparentheses`.
+
+Its `result` still fails, and `-c` emits nothing. The asm and control
+diagnosis cutoffs skip recovered reports. As in clang, a unit with any error
+publishes no unit-end warning: no unused file-scope object's and no unused
+function's (`check_driver_rejected_warnings`).
+
+A body that recovers an error goes to source order, as one with a report does.
+So does a top level, before its bodies are dealt to lanes. Error-free units
+take none of this: their recovered lists stay empty, and the driver copies
+their warning events only on an error.
+
+`test-checker-driver --semantic-recovery-only`
+(`c_check_semantic_recovery_driver_test.c`) compares the whole output and
+status with clang 23:
+
+- by the vector path, the scalar one and deferred bodies on two lanes;
+- under gnu17 and gnu23;
+- with no option, `-Wall`, `-ferror-limit=2` and `-w`.
+
+It also checks that `-c` of each fixture is refused with no object written.
+The fixtures cover each pass above, shared records, two errors in one list,
+missing names and a control error after a recovered error, block declarations,
+exclusions, `_Alignas`, a dropped `format`, and enumerators.
+
+Phase 2 covers redeclarations that conflict with a declaration of the same
+name: the visible one in `check_input_bind`'s first test, or its entity's
+linked one in the second (`int k = 1; int k = 2;`). Clang marks such a
+redeclaration invalid and leaves it out of its name's lookup. So the checker
+recovers its report and leaves the declaration unbound and unlinked: later
+uses find the earlier declaration (after `int a; float a;`, `&a` is an
+`int *`), and the unit goes on as in phase 1. A loader variable's
+redefinition keeps its note and still stops the reader.
+
+These errors take clang's wording and notes through
+`check_input_redeclaration_report` (`c_check_redefinition.c`, from
+`bde006626`). Phase 2 adds two variants to it, both with the note "previous
+definition is here", where the error used to read "conflicting declaration":
+
+- `CHECK_REDECLARATION_TYPEDEF`: "typedef redefinition with different types
+  ('N' vs 'O')";
+- `CHECK_REDECLARATION_KIND`: "redefinition of 'X' as different kind of
+  symbol".
+
+`check_driver_rejected_warnings` follows clang's `ActOnPopScope`: a scope in
+which an error occurred gives no unused-variable warning, nested scopes'
+errors included. Its extent runs from the scope's `{` to its `}`, or, for a
+function body, from the definition's start, since clang's
+`ActOnStartOfFunctionDef` handles the definition's declarator inside the
+body's scope. Unused parameters are still warned. A per-token prefix count of
+the unit's error reports answers each scope's question in constant time, and
+only a unit with errors builds it.
+
+Phase 3 covers statements after an error:
+
+- **Control errors.** A `break` or `continue` outside its loop is clang's
+  invalid statement: the reader recovers its report, so a second one is
+  reported too, and the unit takes the valid path above. `check_program`
+  writes no control entry for it.
+- **Flushed bodies.** Clang's `AnalysisBasedWarnings::IssueWarnings` runs at a
+  body's end. Once the unit has an error by then, it builds no CFG: the body
+  gets no analysis warning (`-Wreturn-type`, `-Wuninitialized`), and every
+  runtime-behavior warning it queued is given, reachable or not.
+  `check_driver_flushed_bodies` marks those bodies' tokens, by the first error's
+  publication position (`check_driver_first_error`, `-Wreturn-type`'s too).
+  In them `check_common_flush` evaluates every node but `sizeof`'s and
+  `_Alignof`'s operands: unreachable statements, a constant or decided
+  condition's other arm, short circuits and a static selection's other arms.
+  It is one pass after both paths' evaluation, so the twins stay identical.
+  A body before the error, and file scope, keep their reachability.
+- **Graph errors.** An expression's error no longer cuts the asm and control
+  diagnosis (`check_asms_diagnose`, `check_program_diagnose`) of statements
+  that don't read it; `complete` declines those that do. Clang checks each asm
+  operand even when another one of its statement is in error.
+
+Error-free units take none of this: the flushed marks need an error, the
+uninitialized pass reads them only when there are some, and the diagnose
+paths run only on a rejected unit. `c_check_statement_recovery_driver_test.c`,
+in the same section, compares its fixtures as above. The asm and control
+errors after a graph's error are compared by place and severity alone: those
+diagnose paths give one generic message, not clang's wording.
+
+The later phases are left:
+
+- **Invalid declarations.** Not covered by phase 2:
+  - a tag's redefinition (`struct S { … }` twice);
+  - an invalid initializer the reader reports;
+  - a type attribute's error (`vector_size`, `mode`).
+
+  These still stop the reader.
+- **Units with a graph's or a reader's error.** These, other than a recovered
+  one, still don't reach `check_program`. They get none of its diagnostics:
+  the common warnings, their runtime warnings included. The asm and control
+  diagnose paths give only the unit's first error, in generic words, and a
+  duplicate case has no "previous case" note on either path.
+- **Lanes.** Bodies don't carry their recovered reports; they fall back to
+  source order instead.
+- **Shared `_Alignas`.** An `_Alignas` shared by several declarators gives its
+  error once, where clang gives it for each.
+- **Unused `extern` locals.** A block's unused `extern` declaration gets no
+  warning, where clang gives one (on main too).
 
 ### What the lowering costs (#531)
 
@@ -4156,8 +4325,9 @@ unless `--keep` or a failure.
 
 `c_check_common_warnings.c`, included by the driver, reports the expression
 warnings that need the completed graph or the parser's operator tree:
-`-Wdivision-by-zero`, `-Wnull-dereference`, `-Wconstant-conversion`, `-Warray-bounds`,
-`-Wsign-compare`, `-Wunused-comparison`, `-Wunused-value`,
+`-Wdivision-by-zero`, `-Wnull-dereference`, `-Wconstant-conversion`,
+`-Wliteral-conversion`, `-Warray-bounds`, `-Wsign-compare`,
+`-Wunused-comparison`, `-Wunused-value`,
 `-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
 bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
 `-Wreturn-stack-address`, `-Wformat`/`-Wformat-security`, `-Wswitch`,
@@ -4345,7 +4515,8 @@ and check that file-spelled candidates and suppressed warnings do not replay his
 not an unused-but-set statement write. The `-Wswitch` definition is the one its
 selector's tag type names, so a fixed underlying type and a shadowing tag in
 another scope resolve correctly. The return-flow walk runs for non-aggregate
-functions only where `-Wreturn-type` is enabled, and for them takes only the
+functions only where `-Wreturn-type` is enabled, or for a `noreturn` function's
+independent `-Winvalid-noreturn` fall-off warning, and for them takes only the
 warning's walk: the first walk is an aggregate return's alone, whose lowering
 reads its result (#1340). The walk's per-node facts, whether an expression
 guaranteedly stops or may not return (`check_program_return_facts`), come from
@@ -4355,14 +4526,81 @@ facts, a byte each, and computes only a source's (found 16 operators at a time)
 or a node's with an operand that has facts; the scalar path, its twin and
 oracle, computes every node's (`test-checker` compares the two on every program
 fixture). The `analyzer_noreturn` scan takes the attributes column's tokens,
-and each callee name's answer from clang's builtin table is looked up once.
+and each callee name's answer from clang's builtin table is looked up once. Explicit returns in a `noreturn` function warn at the return token even in dead source; reachable fall-off warns at the closing brace. Repeated qualifiers, storage classes and function specifiers carry `-Wduplicate-decl-specifier` at the repeated token, including pointer and parameter qualifiers. These warnings use the common command-line and source pragma policy.
+
+Literal floating-to-integer conversions warn for the supported initializer, assignment, return and call-argument paths, including conditional arms and top-level comma values. Literal conversion warnings do not descend through a comma inside a conditional arm, or through a nested comma or conditional inside a comma's value. A floating literal a truth context converts to `_Bool` warns as clang's CheckBoolLikeConversion gives it ("changes value from 1.5 to true"): the operands of `!`, `&&` and `||`, a statement's or a conditional's condition and a static assertion's, never a conditional's arms, a comma's result or `sizeof`'s operand (`check_common_truth_operands`).
+
+A literal conversion is reported at once, as clang's `Sema::Diag` reports
+`DiagnoseFloatingImpCast` and `CheckBoolLikeConversion`, not with the runtime
+warnings `DiagRuntimeBehavior` defers to the function's end (constant
+conversions, shift counts, division by zero): it is published where its full
+expression completes (`check_common_full_expression_end`: the end of its
+root, or of the declarator's initialization on the way, and a brace
+initializer's end for all its parts), so every literal conversion of a body
+precedes that body's deferred warnings. One full expression's conversions
+share that boundary and keep the walk's order (a call's last argument first).
+The phase after the lexer's at that boundary puts them before the next
+statement's own diagnostics. At file scope a declarator's constant conversion
+is published at the same boundary in the later phase, after its literal ones,
+as clang delays it to the declaration's end. Where these warnings may report
+(unreachable code and short-circuited operands, but not `sizeof`'s operand) is
+unchanged.
+
+The value warnings follow the target's type as clang's `CheckImplicitConversion`
+does (`check_common_conversion_target`). `-Wliteral-conversion` takes a builtin
+target alone, so never an enumeration, while `-Wconstant-conversion` takes an
+enumeration by its integer type's range (`enum Small : signed char e = 300;`).
+An `_Atomic` destination takes neither. Its conversion is to the atomic's value
+type, which the lowering needs, so the action marks it
+`BUSTER_CHECK_CONVERT_ATOMIC` wherever it strips `_Atomic`: assignments,
+initializations, brace elements, returns and prototype arguments.
+
+A brace initializer's integer constants warn of their constant conversions too
+(#1447), in the reverse initializer order clang's `AnalyzeImplicitConversions`
+work list gives them. A plan whose part may change its constant
+(`CheckInitializer.changed_integers`, a superset made as its parts append) is
+the only one whose parts the walk reads for them. Clang's `DiagRuntimeBehavior`
+queues them where the full expression completes, after the runtime warnings its
+values queued as they were built, so a plan's constant conversions
+(`check_common_initializer_integers`) follow the roots of its values, inside a
+function at the body's end and never in unreachable code. A constant that fills
+a signed target's width exactly (`128` to `signed char`, clang's
+`isSameWidthConstantConversion`) is clang's `Diag` instead, reported at once
+with the literal conversions (`check_common_same_width`), scalar or listed, and
+never into a character element of a brace list, which clang takes for an array
+initialization. At file scope clang queues a declarator's runtime warnings to
+its end: its shift counts (`check_driver_file_initializer_end`) and constant
+conversions publish there in `PP_DIAGNOSTIC_RUNTIME`, after its literal
+conversions. Still separate: `-Wbitfield-constant-conversion`'s truncation into
+a bit-field, and a same-width conversion in unreachable code, which clang still
+reports.
+
+Clang's `DiagnoseIntInBoolContext` follows every conversion to `_Bool` (#1447,
+`check_common_int_in_bool`): the operands of `!`, `&&` and `||` and the
+conditions of statements and conditionals (`CheckBoolLikeConversion`, the
+operand itself and never a conditional's arms), and an initializer's,
+assignment's, return's or argument's conversion, whose conditional arms and
+comma result carry it. Its implicit conversions passed, a `<<` of a literal 0,
+or of two literals, always evaluates to one truth, which clang's evaluation
+gives (a count past the width shifts by the width less one, a negative one
+shifts right); any other signed `<<` is `-Wint-in-bool-context`'s, in `-Wmost`
+and so `-Wall`. A conditional whose two arms are integer literals of its own
+type, not both 0 or 1, and both nonzero always evaluates to true, at its
+condition's first token. A literal is clang's `IntegerLiteral`: a number, under
+at most a unary minus, with no parentheses. The always-forms are
+`-Wtautological-constant-compare`'s, on by default, under
+`-Wtautological-compare` and `-Wmost`. Clang's `Diag` reports them at once, as
+a literal conversion, in unreachable code and short-circuited operands too, and
+a brace initializer's in its reverse order; the walks' candidates test the
+operand's operator before any type.
 
 The graph's passes share their facts, `check_common_facts`, which give each
 node its parent, whether another node uses its value, whether it is evaluated,
 and its reach: a bit each for whether its subtree holds a node whose own
-warning may fire, a division by a constant zero, or a comparison (#1340). A
-node's own bit counts only where its tests can
-warn (`check_common_own_candidate`): a constant whose value an initialization's,
+warning may fire, a division by a constant zero or a shift by a constant count
+(#1394), a detached static-selection arm's shift, a comparison, or an implicit
+conversion of a literal (#1340, #1453). A node's own bit counts only where its
+tests can warn (`check_common_candidate_bits`): a constant whose value an initialization's,
 an assignment's, a conversion's or a call's argument's conversion changes (the
 types alone rule out a widening conversion, before the value's row is read), a
 self-assignment's names, a constant index outside its array, a source comma.
@@ -5936,8 +6174,11 @@ change, it refused such a declaration by name.
   tree, so a label's name is the token before its colon there
   (`check_input_label_name`). The parser reports clang's errors for C23
   attributes after GNU ones and before a block's `}`. Specifiers of
-  attributes alone have no type: an implicit int's error at the declarator's
-  name, but a member's "type name requires a specifier or qualifier" after
+  attributes alone have no type: an implicit int's error at an unbound
+  declarator's name. In a block, an already-declared ordinary name after GNU
+  attributes is instead "expected identifier or '('" there, since clang
+  annotates the name as an expression before attempting the declaration.
+  A member has "type name requires a specifier or qualifier" after
   C23 ones, which clang's specifiers don't hold (GNU ones count as
   specifiers there).
 - **A name after a block item's GNU attributes.** Clang's statement reader
@@ -6175,10 +6416,10 @@ clang does (`check_input_attribute_subjects`, `c_check_attribute.c`).
     generically (the next section's "Attributes without a rule") is refused by
     name before its subject is checked. The remaining handler and ABI
     boundaries are listed there; `selectany` has its own rule.
-  - The checker stops at a declaration's first error. So a later
-    declaration's warnings, which clang gives too, are missing after an error
-    row's error (`int e __attribute__((error("x")));`), as after any other
-    error.
+  - An error row's error (`int e __attribute__((error("x")));`) drops the
+    attribute and the checker goes on, as clang does ("Semantic error
+    recovery", #1447). An error it doesn't recover from still stops the unit's
+    later diagnostics.
 - **Tests.** `test-checker` checks the table's order and lookups
   (`c_check_attribute_test.c`): the counts, a row of each kind, `_Clang`'s
   scope, and an attribute whose handler checks itself. It also checks
@@ -6253,7 +6494,9 @@ arguments against the function. The checker now gives these as clang does.
 - **GCC's positions.** On a function's definition, each GNU attribute after
   the declarator that GCC knows gets clang's parser warning "GCC does not
   allow 'X' attribute in this position on a function definition"
-  (`-Wgcc-compat`, `check_input_attribute_gcc_position`), at its name.
+  (`-Wgcc-compat`, `check_input_attribute_gcc_position`), at its name. The
+  warning precedes a type attribute's argument error (`regparm`, `pcs`),
+  even when argument processing prevents the declarator from completing.
 - **nonnull's indices.** As `handleNonNullAttr` checks them
   (`check_input_attribute_function`):
   - an index of no parameter is the error "'nonnull' attribute parameter N is
@@ -6932,7 +7175,12 @@ arguments against the function. The checker now gives these as clang does.
   warning where they meet a function, which ignores them, and "only applies to
   function types" off one; `pcs`'s argument is checked first where it meets a
   function or a tag ("'pcs' attribute takes one argument", "invalid PCS
-  type"). The GPU kernels' (`amdgpu_kernel`, `device_kernel`,
+  type"). An identifier there (`pcs(x)`) is "'pcs' attribute requires a
+  string" at it, then clang's handler goes on with its text: `aapcs`'s
+  unsupported convention warning (and on a tag the one of no function), any
+  other's "invalid PCS type" at the attribute (`check_input_attribute_pcs`,
+  CheckInputAttribute.deferred); on another type the attribute's warning alone,
+  as clang's type processing never reads the argument. The GPU kernels' (`amdgpu_kernel`, `device_kernel`,
   `nvptx_kernel`) are a function declaration's: the same warning on one, and
   "'X' attribute only applies to functions" (an error) on any other
   declaration. A convention on a tag's declaration, or GNU's `noreturn`, is
@@ -6995,8 +7243,9 @@ arguments against the function. The checker now gives these as clang does.
   (`check_input_expression_location`, from the parse tree's root of it): a
   binary operator's at the operator, a member access at the member's name, a
   postfix operator's at it, a subscript's at its base's, any other at its
-  first token. The checker stops at a declaration's first attribute error,
-  where clang goes on to the next declaration's.
+  first token. An attribute's error drops the attribute, and the checker goes on to
+  the declaration's other attributes and the next declarations, as clang does
+  ("Semantic error recovery", #1447).
 
   `selectany` is accepted on external data. Its definitions have weak binding
   and publish the existing `LinkGroups` representation: one COMDAT group per
@@ -7338,9 +7587,9 @@ arguments against the function. The checker now gives these as clang does.
   minimum alignment of N for type 'T'", the greatest of all the declaration's
   alignments (GNU aligned's too) against its declarator's type, not its
   specifiers' (`check_input_alignas_underaligned`). Two declarators of one
-  `_Alignas` are clang's error twice, here once: the checker stops at a
-  declaration's first attribute error (as for `aligned(n)` on two
-  declarations).
+  `_Alignas` are clang's error twice, here once: its argument's error is
+  found once, where the specifiers are read ("Semantic error recovery",
+  #1447).
 - **Mutual exclusions** (`check_input_attribute_excluding`). After an
   attribute's subject check, one that an attribute already on the declaration
   excludes is clang's error "'cold' and 'hot' attributes are not compatible",
@@ -7442,11 +7691,9 @@ arguments against the function. The checker now gives these as clang does.
     missing-semicolon and malformed K&R-tail repairs above preserve their
     original parse errors and notes; they do not make every parser or semantic
     failure resumable (`docs/c-parser.md`).
-  - `-Winvalid-noreturn` isn't made (nor `-Wreturn-type` but for a function
-    returning an aggregate). A calling convention's wrong count is clang's
-    error where the convention meets a function, after a definition's
-    `-Wgcc-compat` warning, and on another subject its warning alone
-    (`CheckInputAttribute.convention_count`).
+  - A calling convention's wrong count is clang's error where the convention
+    meets a function, after a definition's `-Wgcc-compat` warning, and on
+    another subject its warning alone (`CheckInputAttribute.convention_count`).
   - A calling convention's redeclaration and assignment messages, the same for
     `no_caller_saved_registers`:
     - a function declared with an explicit convention other than its earlier
@@ -7481,14 +7728,11 @@ arguments against the function. The checker now gives these as clang does.
       interrupt's first and then `_Alignas`';
     - a unit with a direct call's error stops before its later checks (asm
       operands, initializers' warnings), whose diagnostics clang gives too.
-  - After a missing `;`'s recovery, as everywhere, a declaration's checker
-    error ends what is published (`int x _Alignas(3) int y _Alignas(4);`
-    stops at "requested alignment is not a power of 2", where clang goes on
-    to the second declaration's errors); a unit's later parse errors are
-    printed.
-  - `-Wduplicate-decl-specifier` (`inline inline;`) isn't made (its address
-    spaces' warning is, #1447), and
-    `__private_extern__` is refused by name, with or without a declarator.
+  - After a missing `;`'s recovery, an error the checker recovers from
+    (`int x _Alignas(3) int y _Alignas(4);`'s "requested alignment is not a
+    power of 2") goes on to the later declarations, as clang does ("Semantic
+    error recovery", #1447). Another checker error still ends what is
+    published; a unit's later parse errors are printed.
   - The checks-only attributes (#1447): through a macro, `objc_ownership`'s
     warning on a pointer is at the attribute with the macro's notes, where
     clang puts it at the macro's immediate expansion, and clang names either
@@ -7683,6 +7927,42 @@ conditional operator's two function operands; this gives one for each.
   an object's value read, or an address converted to an integer narrower
   than a pointer (`check_init_converted_nonconstant`); an absolute address
   (`(int *)5`) stays a constant.
+- **A failed assignment conversion** (`check_driver_conversion_error`,
+  `check_driver_conversion_words`), as clang's `DiagnoseAssignmentResult` words it:
+  - its kind (`check_driver_conversion_kind`): an integer to a pointer and a
+    pointer, array or function to an integer ("incompatible integer to pointer
+    conversion", "incompatible pointer to integer conversion",
+    `[-Wint-conversion]`), two pointers ("incompatible pointer types",
+    `[-Wincompatible-pointer-types]`; two pointers to functions, "incompatible
+    function pointer types"), or any other ("… incompatible type …", of no
+    flag);
+  - its action: "initializing T with an expression of type S" at the
+    declarator, "assigning to T from S" at the `=`, "returning S from a function
+    with result type T" at the returned expression (T spelled with the
+    function's result typedef), "passing S to parameter of type T" at the
+    argument with "passing argument to parameter 'x' here" (or "… parameter
+    here") at the parameter's name, or where it has none where the
+    declarator reader puts its missing name, for a pointer parameter
+    (`check_driver_parameter_source`), and the end of its declarator for
+    another (`check_driver_parameter_place`). Both read the declaration's
+    tokens when a note is given; no prototype keeps them;
+  - the types as written: an array's and a function's unconverted, a qualified
+    lvalue's qualified, with their typedefs;
+  - clang's fix-it words (`check_driver_conversion_hint`,
+    `tryToFixConversion` with C's `compareTypesSimple`): "; dereference with *"
+    where the pointee converts (not of a null pointer constant), "; remove &" of
+    an `&x`, "; take the address with &" where an lvalue's address converts (not
+    a pointer's to a void pointer), "; remove *" of a `*p`.
+
+  An initializer's subobject is worded so from the initializers' walk
+  (`CheckInitializer.failed_source`), at its value; a record's or an array's
+  whole initializer of no braces whose value is no record of the type, at the
+  declarator: the record's initialization from the value, or "array
+  initializer must be an initializer list" (or "… or string literal", "… or
+  wide string literal", by the element type). A static object's braced
+  subobject whose converted value is then no constant gets clang's second
+  error, "initializer element is not a compile-time constant", at it too
+  (`check_init_value_nonconstant`).
 - **Indirection through a pointer to void** (`-Wvoid-ptr-dereference`, clang's
   `CheckIndirectionOperand`): "ISO C does not allow indirection on operand of
   type 'void *'" at the `*`, of the operand's type as written (its typedef
@@ -7716,7 +7996,7 @@ conditional operator's two function operands; this gives one for each.
   assignment (a compound one's too) reads it: not under `&`, `.` or an
   increment, nor through a pointer variable, `->` or a subscript. As clang's
   `DiagRuntimeBehavior`, reachable and evaluated code alone, at the body's end
-  with the division warnings (the division scan's, `check_common_div_own`).
+  with the division warnings (the arithmetic scan's, `check_common_arithmetic_own`).
 - **Unreachable code, as clang's CFG prunes it** (#1447). The runtime
   warnings (division by zero, array bounds, null dereference) skip an
   initializer after a `return` or in a dead branch, as they already skipped
@@ -7749,8 +8029,6 @@ conditional operator's two function operands; this gives one for each.
     prints without its typedef's name, and so does a member's type
     (`x.f++` of a member `uu f` prints `'struct u'` where clang's is
     `'uu' (aka 'struct u')`): a record's members keep no declaration.
-  - A braced scalar initializer's failed conversion (`static long x = { p };`)
-    is still "invalid initializer", with no non-constant error.
   - An assignment to a member that is const itself is "read-only variable is
     not assignable", where clang names the member with its note: a record's
     members keep no declaration. A typedef'd array's variable prints its
@@ -7759,12 +8037,6 @@ conditional operator's two function operands; this gives one for each.
   - A typedef inside another typedef (`typedef VP *VPP`) loses its inner name
     in the void dereference's operand type (`**b`'s `'void *'` for clang's
     `'VP'`).
-  - Conversion errors other than an initializer's pointer and integer ones are
-    "incompatible operand or conversion types": an assignment's, a return's, an
-    argument's, an integer converted to a pointer and a record or floating
-    value converted to a scalar it can't be. Clang's fix-it suffixes ("; dereference
-    with *", "; take the address with &", "; remove *", "; remove &") are
-    missing everywhere.
 
 ## Ignorable and unsupported pragmas
 

@@ -50,6 +50,9 @@ static bool check_warning_option(uint32_t id, String8 option)
     const bool unused = id == CHECK_WARNING_ID_UNUSED_VALUE || id == CHECK_WARNING_ID_UNUSED_COMPARISON || id == CHECK_WARNING_ID_UNUSED_RESULT;
     matches |= unused && (check_diagnostic_option(option, "-Wunused") || check_diagnostic_option(option, "-Wmost") || check_diagnostic_option(option, "-Wall"));
     matches |= wextra && (check_diagnostic_option(option, "-Wextra") || check_diagnostic_option(option, "-W"));
+    // -Wint-in-bool-context and -Wtautological-compare (with -Wtautological-constant-compare under it) are -Wmost's (#1447).
+    const bool most = id == CHECK_WARNING_ID_INT_IN_BOOL_CONTEXT || id == CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE;
+    matches |= most && (check_diagnostic_option(option, "-Wmost") || check_diagnostic_option(option, "-Wall"));
     return matches;
 }
 

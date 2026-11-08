@@ -117,6 +117,10 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-WNSObject-attribute", NULL, "'NSObject' attribute may be put on a typedef only; attribute is ignored" },
     { "-WIndependentClass-attribute", NULL, "'objc_independent_class' attribute may be put on a typedef only; attribute is ignored" },
     { "-Wassume", NULL, "assumption is ignored because it contains (potential) side-effects" },
+    { "-Wduplicate-decl-specifier", NULL, "duplicate declaration specifier" },
+    { "-Winvalid-noreturn", NULL, "function declared 'noreturn' should not return" },
+    { "-Wprivate-extern", NULL, "use of __private_extern__ on a declaration may not produce external symbol private to the linkage unit and is deprecated" },
+    { "-Wliteral-conversion", "-Wconversion", "implicit conversion of a floating literal changes value" },
     { NULL, NULL, "weak identifier never declared" },
     { "-Wpragmas", NULL, "#pragma redefine_extname is applicable to external C declarations only" },
     { "-Wthread-safety-attributes", "-Wthread-safety", "invalid thread-safety attribute" },
@@ -133,7 +137,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wuser-defined-warnings", NULL, "user-defined warning" },
     { "-Wfunction-multiversion", NULL, "CPU list contains duplicate entries; attribute ignored" },
     { "-Wunused-result", "-Wunused-value", "ignoring return value of function declared with 'warn_unused_result' attribute" },
-    { "-Wduplicate-decl-specifier", NULL, "multiple identical address spaces specified for type" },
+    { "-Wint-in-bool-context", NULL, "converting the result of '<<' to a boolean; did you mean to compare with '0'?" },
+    { "-Wtautological-constant-compare", "-Wtautological-compare", "converting the result of '?:' with integer constants to a boolean always evaluates to 'true'" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

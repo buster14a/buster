@@ -2988,7 +2988,7 @@ static uint64_t tier1_emit_cfg_x87_node_records(const Tier1SelectPlan* plan, uin
     return records;
 }
 
-static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool vector, bool certify, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
+static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool vector, bool certify, bool sources, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
 {
     const IrFunction* function = plan->function;
     const Tier1CfgInput* input = &emitted->cfg_input;
@@ -3048,7 +3048,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     emitted->frame_events = ok ? ir_allocate(output, BUSTER_TIER1_FRAME_EMIT_EVENTS * ((uint64_t)returns + 1), sizeof(EmissionFrameEvent), &ok) : 0;
     emitted->frame_event_count = 0;
     // The certificate of the code (#939) reads each record's origin, and each block's and stub's first record.
-    emitted->origins = ok && certify ? ir_allocate(output, capacity + 1, 4, &ok) : 0;
+    emitted->origins = ok && (certify || sources) ? ir_allocate(output, capacity + 1, 4, &ok) : 0;
     emitted->origin_values = ok && certify ? ir_allocate(output, capacity + 1, 4, &ok) : 0;
     emitted->block_records = ok && certify ? ir_allocate(output, (uint64_t)blocks + 1, 4, &ok) : 0;
     emitted->stub_records = ok && certify ? ir_allocate(output, (uint64_t)input->edge_count + 1, 4, &ok) : 0;
@@ -3082,9 +3082,12 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         buffer.origins = emitted->origins;
         buffer.origin_values = emitted->origin_values;
         buffer.origin_base = base;
-        if (certify)
+        if (certify || sources)
         {
             memset(emitted->origins, 0, (capacity + 1) * 4);
+        }
+        if (certify)
+        {
             memset(stub_first, 0xff, ((uint64_t)input->edge_count + 1) * 4);
         }
         view.spill_ids = spill_ids;
@@ -3846,7 +3849,7 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     }
     if (error == TIER1_EMIT_OK)
     {
-        error = tier1_emit_cfg_records(plan, allowed_forms, BUSTER_VECTOR_PATH(options->vector), options->certify, output, scratch, emitted, error_node);
+        error = tier1_emit_cfg_records(plan, allowed_forms, BUSTER_VECTOR_PATH(options->vector), options->certify || options->sources, options->sources, output, scratch, emitted, error_node);
     }
     return error;
 }

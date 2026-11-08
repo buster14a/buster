@@ -5,7 +5,7 @@
 // receives the non-null function created successfully by ir_create. Keep all operation and CFG logic shared here.
 // This file is included twice intentionally; the two macros are private to the including module.
 
-#if !defined(BUSTER_IR_TYPED_EMIT_NAME) || !defined(BUSTER_IR_TYPED_EMIT_COUNT)
+#if !defined(BUSTER_IR_TYPED_EMIT_NAME) || !defined(BUSTER_IR_TYPED_EMIT_COUNT) || !defined(BUSTER_IR_TYPED_EMIT_SOURCES)
 #error "include through ir_lower.c with a count/fill instantiation"
 #endif
 
@@ -181,6 +181,9 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
         bool terminated = false;
         for (uint32_t i = first; i < end; i += 1)
         {
+#if BUSTER_IR_TYPED_EMIT_SOURCES
+            const uint32_t source_first = (uint32_t)sink.sizes.instruction_count;
+#endif
             const uint8_t kind = input->kinds[i];
             const uint8_t class = ir_typed_stack_class(input, i);
             const IrType type = (IrType)types[i];
@@ -475,6 +478,12 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 break;
             }
             }
+#if BUSTER_IR_TYPED_EMIT_SOURCES
+            for (uint32_t node = source_first; node < sink.sizes.instruction_count; node += 1)
+            {
+                output->debug->origins[node] = i;
+            }
+#endif
         }
         if (!terminated)
         {

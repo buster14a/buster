@@ -4709,7 +4709,8 @@ static TypeId type_promote_bit_field(const TypeTable* table, TypeId type, uint32
 }
 
 // clang's DefaultArgumentPromotion: the unary conversions, and float and __fp16 to double (not _Float16 or __bf16).
-static TypeId type_default_argument_promote(const TypeTable* table, TypeId type)
+// Always inlined, as it was before #1447 grew the type readers it inlines past clang's threshold.
+static inline __attribute__((always_inline)) TypeId type_default_argument_promote(const TypeTable* table, TypeId type)
 {
     const TypeId operand = type_conversion_operand(table, type);
     TypeId result = type_promote(table, operand);

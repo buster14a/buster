@@ -141,6 +141,9 @@ struct CheckProgramOptions
     // Give non-aggregate functions the return-flow walk that -Wreturn-type needs. A warning-suppressed command leaves
     // it out, so its checking cost stays where it was before the warning existed.
     bool return_warnings;
+    // A void function can also fall off despite its noreturn declaration. Its warning group is independent of
+    // -Wreturn-type, so turning the latter off must not remove this analysis.
+    bool noreturn_warnings;
     // Also references in the operands of &&, || and ?: that a constant condition never evaluates, which no emission
     // needs: test-checker-corpus --symbols' model of the references clang -O0's code has (#129). An if whose condition
     // is a constant leaves its dead arm out whatever this says (CheckProgram.dropped_ranges).
@@ -2068,8 +2071,10 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
                     check_program_fail(writer->program, CHECK_PROGRAM_INVALID, jump);
                 }
             }
-            else
+            else if ((kind != PARSE_KIND_BREAK && kind != PARSE_KIND_CONTINUE) || !input->recovered_valid)
             {
+                // (A `break` or `continue` outside its loop, whose error the reader recovered from, #1447's semantic
+                // recovery, phase 3, is clang's invalid statement, which does nothing: its unit is never emitted.)
                 check_program_fail(writer->program, CHECK_PROGRAM_UNSUPPORTED, jump);
             }
         }
@@ -2505,23 +2510,27 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
 // task scratch for a bounded CFG worklist; each control enters once. The first walk retains both conditional edges,
 // as Tier 0 validates them, and removes dead transfers without renumbering labels. The second selects constant
 // conditions for the source warning. Statement-expression regions keep the lowering's existing stack tracking.
-static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, const uint8_t* return_facts, bool return_warnings)
+static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, const uint8_t* return_facts, bool return_warnings,
+                                      bool noreturn_warnings)
 {
     CheckProgram* program = writer->program;
     const TypeId result = type_conversion_operand(program->types, type_return(program->types, program->input->declared_types[body->declaration]));
     const uint32_t kind = type_kind(program->types, result);
     const bool aggregate = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_COMPLEX;
+    const bool noreturn = program->input->function_flags != NULL &&
+                          (program->input->function_flags[body->declaration] & CHECK_INPUT_FUNCTION_NORETURN) != 0;
     // main returns 0 without a return statement, so it has no -Wreturn-type fall-off warning.
-    const bool scalar = return_warnings && result != 0 && kind != BUSTER_TYPE_KIND_VOID && kind != BUSTER_TYPE_KIND_FUNCTION && !aggregate && !body->is_main;
-    if (program->status == CHECK_PROGRAM_OK && (aggregate || scalar) && body->count != 0 && body->count == body->entry_count)
+    const bool scalar = return_warnings && result != 0 && kind != BUSTER_TYPE_KIND_VOID && kind != BUSTER_TYPE_KIND_FUNCTION && !aggregate && !body->is_main && !noreturn;
+    if (program->status == CHECK_PROGRAM_OK && (aggregate || scalar || (noreturn_warnings && noreturn)) && body->count != 0 && body->count == body->entry_count)
     {
         CheckControl* entries = writer->entries + body->first;
         uint8_t* seen = (uint8_t*)writer->tasks;
         uint32_t* queue = writer->labels;
         const CheckGraph* graph = &program->input->graph;
         // The first walk is the aggregate return's alone: a scalar return's lowering reads neither its falls nor its
-        // entries' kinds, so that a scalar body takes the warning's walk only.
-        for (uint32_t pass = aggregate ? 0u : 1u; pass < (return_warnings ? 2u : 1u); pass += 1)
+        // entries' kinds, so that a scalar body takes the warning's walk only. The second walk is the warnings': -Wreturn-type's,
+        // and -Winvalid-noreturn's, which -Wno-return-type keeps.
+        for (uint32_t pass = aggregate ? 0u : 1u; pass < (return_warnings || (noreturn_warnings && noreturn) ? 2u : 1u); pass += 1)
         {
             bool warning_safe = true;
             memset(seen, 0, body->count);
@@ -2619,10 +2628,13 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                     }
                     // A guaranteed nonreturning expression ends only this CFG edge. Unknown contracts retain the
                     // previous conservative warning policy; an unrelated proven stop never hides another fall-off.
+                    // A path that ends so doesn't fall off: with another that does, clang's warning says "in all control
+                    // paths", as after a return.
                     if ((fact & BUSTER_CHECK_RETURN_STOPS) != 0)
                     {
                         targets[0] = BUSTER_CHECK_NONE;
                         next = false;
+                        returns = true;
                     }
                     else
                     {
@@ -2652,10 +2664,16 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                         entries[i].kind = CHECK_CONTROL_END;
                     }
                 }
+                // The warning walk only removes edges by folding conditions or recognizing terminal calls.
+                // If the conservative first walk cannot fall through, it cannot produce a fall-off warning.
+                if (!falls)
+                {
+                    break;
+                }
             }
             else
             {
-                body->return_warning = falls && warning_safe ? returns ? 2 : 1 : 0;
+                body->return_warning = falls && warning_safe ? noreturn ? (noreturn_warnings ? 3 : 0) : returns ? 2 : 1 : 0;
             }
         }
     }
@@ -3802,7 +3820,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     const uint32_t node_count = input->graph.count;
     CheckProgramTargetEvents target_events = { .scratch = scratch, .room = true };
     bool valid = output != scratch && count == parser->tokens.count && count < (UINT32_MAX - 16) / 8 &&
-                 stream->status == CHECK_STATUS_OK && stream->count == node_count && stream->report_count == 0 && !input->resource && input->report_count == 0 &&
+                 stream->status == CHECK_STATUS_OK && stream->count == node_count && stream->report_count == 0 && !input->resource &&
+                 // A unit whose only reports are recovered ones (#1447) is checked as a valid one; it is never emitted.
+                 (input->report_count == 0 || input->recovered_valid) &&
                  !input->visibility_error;
     valid = valid && (options.initializers == 0 || (options.initializers->status == CHECK_INIT_OK && options.initializers->token_count == count)) &&
             (input->asm_count == 0 || (options.asms != 0 && options.asms->status == CHECK_ASM_OK)) &&
@@ -4169,7 +4189,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             const uint32_t name = parser->tokens.names[declaration];
             body->is_main = intern_length(options.identifiers, name) == 4 && memcmp(intern_bytes(options.identifiers, name), "main", 4) == 0;
         }
-        check_program_return_flow(&writer, body, return_facts, options.return_warnings);
+        check_program_return_flow(&writer, body, return_facts, options.return_warnings, options.noreturn_warnings);
         body->reference_count = check_program_references(program, entries + start, body->entry_count, program->body_count, seen, nodes, stack, reference_items, needed);
         if (body->reference_count > UINT32_MAX - reference_count)
         {
@@ -4336,6 +4356,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 #include "c_check_debug.c"
 #include "c_check_clock.c"
 #include "c_check_program_emit.c"
+#include "c_check_tier0_inline.c"
 
 #endif
 

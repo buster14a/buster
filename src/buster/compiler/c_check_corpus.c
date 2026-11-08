@@ -2143,11 +2143,18 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     for (uint32_t report = 0; equal && report < left->report_count; report += 1)
     {
         equal = left->reports[report].token == right->reports[report].token && left->reports[report].message == right->reports[report].message &&
-                left->reports[report].pragma == right->reports[report].pragma;
+                left->reports[report].pragma == right->reports[report].pragma && left->reports[report].subject == right->reports[report].subject;
+        if (equal && (left->reports[report].message == CHECK_INPUT_REDECLARATION || left->reports[report].message == CHECK_INPUT_CONFLICTING_TYPES))
+        {
+            const CheckInputReport* left_report = left->reports + report;
+            const CheckInputReport* right_report = right->reports + report;
+            equal = left_report->detail == right_report->detail && left_report->note_token == right_report->note_token &&
+                    left_report->note_kind == right_report->note_kind && left_report->type == right_report->type &&
+                    left_report->value == right_report->value && left_report->type_spelling == right_report->type_spelling;
+        }
         if (equal && left->reports[report].message == CHECK_INPUT_FP_EVAL_USE)
         {
-            equal = left->reports[report].subject == right->reports[report].subject && left->reports[report].detail == right->reports[report].detail &&
-                    left->reports[report].value == right->reports[report].value;
+            equal = left->reports[report].detail == right->reports[report].detail && left->reports[report].value == right->reports[report].value;
         }
     }
     for (uint32_t token = 0; equal && !a->resource && trees && left->declarations != 0 && right->declarations != 0 && token < left_parser->tokens.count; token += 1)
@@ -2165,7 +2172,8 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                 check_sparse_get(left->string_ids, token) == check_sparse_get(right->string_ids, token) &&
                 check_sparse_get(left->body_declarations, token) == check_sparse_get(right->body_declarations, token) &&
                 check_sparse_get(left->declaration_bodies, token) == check_sparse_get(right->declaration_bodies, token) && check_sparse_get(left->parameters, token) == check_sparse_get(right->parameters, token) &&
-                check_sparse_get(left->parameter_next, token) == check_sparse_get(right->parameter_next, token) && check_sparse_get(left->control_owners, token) == check_sparse_get(right->control_owners, token) &&
+                check_sparse_get(left->parameter_next, token) == check_sparse_get(right->parameter_next, token) &&
+                check_sparse_get(left->control_owners, token) == check_sparse_get(right->control_owners, token) &&
                 check_sparse_get(left->label_targets, token) == check_sparse_get(right->label_targets, token) && check_sparse_get(left->case_ranges, token) == check_sparse_get(right->case_ranges, token) &&
                 left->expression_regions[token] == right->expression_regions[token] && check_input_asm_id(left, token) == check_input_asm_id(right, token) &&
                 left->constant_warnings[token] == right->constant_warnings[token] &&
@@ -2416,7 +2424,8 @@ static bool check_corpus_deferred_columns(const CheckInput* x, const CheckInput*
                  check_sparse_get(x->initializer_nodes, token) != check_sparse_get(y->initializer_nodes, token) ? "initializer_nodes" :
                  check_sparse_get(x->initializer_begins, token) != check_sparse_get(y->initializer_begins, token) ? "initializer_begins" : check_sparse_get(x->initializer_ends, token) != check_sparse_get(y->initializer_ends, token) ? "initializer_ends" :
                  check_sparse_get(x->body_declarations, token) != check_sparse_get(y->body_declarations, token) ? "body_declarations" : check_sparse_get(x->parameters, token) != check_sparse_get(y->parameters, token) ? "parameters" :
-                 check_sparse_get(x->parameter_next, token) != check_sparse_get(y->parameter_next, token) ? "parameter_next" : check_sparse_get(x->control_owners, token) != check_sparse_get(y->control_owners, token) ? "control_owners" :
+                 check_sparse_get(x->parameter_next, token) != check_sparse_get(y->parameter_next, token) ? "parameter_next" :
+                 check_sparse_get(x->control_owners, token) != check_sparse_get(y->control_owners, token) ? "control_owners" :
                  check_sparse_get(x->label_targets, token) != check_sparse_get(y->label_targets, token) ? "label_targets" : check_sparse_get(x->case_ranges, token) != check_sparse_get(y->case_ranges, token) ? "case_ranges" :
                  x->expression_regions[token] != y->expression_regions[token] ? "expression_regions" : check_input_asm_id(x, token) != check_input_asm_id(y, token) ? "asm_ids" :
                  x->constant_warnings[token] != y->constant_warnings[token] ? "constant_warnings" :

@@ -3041,7 +3041,7 @@ static void check_test_program_return_marks(CheckTest* test)
             CheckControl entries[] = { { .kind = CHECK_CONTROL_EVALUATE, .node = 0 }, { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE } };
             CheckControlWriter writer = { .program = &program, .entries = entries, .tasks = tasks, .labels = labels, .capacity = capacity };
             CheckProgramBody body = { .count = BUSTER_ARRAY_LENGTH(entries), .entry_count = BUSTER_ARRAY_LENGTH(entries) };
-            check_program_return_flow(&writer, &body, facts, true);
+            check_program_return_flow(&writer, &body, facts, true, true);
             bool same = body.return_flow && body.falls && body.return_warning == (contract == 0 ? 1 : 0);
             for (uint32_t node = 0; same && node <= NODES; node += 1)
             {

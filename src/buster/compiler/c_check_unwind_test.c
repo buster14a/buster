@@ -1056,12 +1056,17 @@ static bool check_unwind_test_tier1_field(const char* text, const char* name, ui
     return found;
 }
 
-// The line of the fixture's declaration of `name` (1-based): where "name(" starts a function's declaration.
-static uint32_t check_unwind_test_tier1_line(const char* name)
+// The fixture's 1-based line of an occurrence of `statement` inside function `name`, independent of emitted rows.
+static uint32_t check_unwind_test_tier1_line(const char* name, const char* statement, uint32_t occurrence)
 {
     char pattern[64];
     snprintf(pattern, sizeof(pattern), " %s(", name);
     const char* found = strstr(check_unwind_test_tier1_text, pattern);
+    for (uint32_t k = 0; found != NULL && k <= occurrence; k += 1)
+    {
+        found = strstr(found, statement);
+        found = found != NULL && k < occurrence ? found + strlen(statement) : found;
+    }
     uint32_t line = found != 0 ? 1 : 0;
     for (const char* c = check_unwind_test_tier1_text; found != 0 && c < found; c += 1)
     {
@@ -1070,51 +1075,62 @@ static uint32_t check_unwind_test_tier1_line(const char* name)
     return line;
 }
 
-// gdb at depth in `program` (the Tier 1 fixture with -g), each of the 16 times it runs: depth at its declaration's line,
-// its caller at a Tier 1 caller's declaration's line or at main's line of its call. `tag` names the script's files.
+// GDB at depth in `program` (the Tier 1 fixture with -g), each of the 16 times it runs: depth at its first statement,
+// its caller at the source call's line, including the two different exits and each repeated loop call. Earlier Tier 1
+// output had only declaration rows; exact source origins must now describe the actual instructions. `tag` names files.
 static void check_unwind_test_tier1_lines(CheckDebugTestTally* tally, const char* program, const char* directory, const char* tag, Arena* arena)
 {
     char commands[PATH_MAX + 48];
     char report[PATH_MAX + 48];
     snprintf(commands, sizeof(commands), "%s/%s.gdb", directory, tag);
     snprintf(report, sizeof(report), "%s/%s.gdb.out", directory, tag);
-    const char script[] = "set pagination off\nset confirm off\nset debuginfod enabled off\nbreak depth\ncommands\nsilent\nprintf \"TIER1_STOP\\n\"\nbt 2\n"
+    const char script[] = "set pagination off\nset confirm off\nset width 0\nset debuginfod enabled off\nbreak depth\ncommands\nsilent\nprintf \"TIER1_STOP\\n\"\nbt 2\n"
                           "continue\nend\nrun\n";
     const bool scripted = foreign_test_write(commands, script, sizeof(script) - 1);
     char* gdb[] = { (char*)"gdb", (char*)"-nx", (char*)"-batch", (char*)"-x", commands, (char*)program, 0 };
     const bool ran = scripted && object_test_run(gdb, report, "/dev/null") == 0;
     const String8 text = ran ? foreign_test_read(arena, report) : (String8){ 0 };
-    static const char* const callers[] = { "kept", "crowded", "six", "early", "spin", "aligned", "aligned_spin", "aligned_early", "main" };
+    static const struct
+    {
+        const char* name;
+        uint32_t occurrence;
+    } expected[] = {
+        { "main", 0 },
+        { "kept", 0 },
+        { "crowded", 0 },
+        { "six", 0 },
+        { "six", 0 },
+        { "early", 1 },
+        { "early", 0 },
+        { "spin", 0 },
+        { "spin", 0 },
+        { "spin", 0 },
+        { "aligned", 0 },
+        { "aligned_spin", 0 },
+        { "aligned_spin", 0 },
+        { "aligned_spin", 0 },
+        { "aligned_early", 1 },
+        { "aligned_early", 0 },
+    };
     char depth_location[32];
-    snprintf(depth_location, sizeof(depth_location), "dbg_tier1.c:%u", check_unwind_test_tier1_line("depth"));
+    snprintf(depth_location, sizeof(depth_location), "dbg_tier1.c:%u", check_unwind_test_tier1_line("depth", "backtrace(", 0));
     uint32_t stops = 0;
     uint32_t tier1_callers = 0;
     bool placed = text.pointer != 0;
     for (const char* cursor = text.pointer; placed && cursor != 0 && (cursor = strstr(cursor, "TIER1_STOP\n")) != 0; cursor += 1)
     {
-        placed = debug_test_frame(cursor, "#0 ", "depth", depth_location);
-        const char* caller = strstr(cursor, "#1 ");
-        const char* end = caller != 0 ? strchr(caller, '\n') : 0;
-        bool known = false;
-        for (uint32_t k = 0; placed && caller != 0 && end != 0 && k < BUSTER_ARRAY_LENGTH(callers); k += 1)
+        placed = stops < BUSTER_ARRAY_LENGTH(expected) && debug_test_frame(cursor, "#0 ", "depth", depth_location);
+        if (placed)
         {
-            char name[32];
-            snprintf(name, sizeof(name), " %s (", callers[k]);
-            const char* named = strstr(caller, name);
-            if (named != 0 && named < end)
-            {
-                char location[32];
-                snprintf(location, sizeof(location), "dbg_tier1.c:%u", check_unwind_test_tier1_line(callers[k]));
-                known = k + 1 == BUSTER_ARRAY_LENGTH(callers) ? strstr(caller, "dbg_tier1.c:") != 0 && strstr(caller, "dbg_tier1.c:") < end :
-                                                                 debug_test_frame(caller, "#1 ", callers[k], location);
-                tier1_callers += k + 1 != BUSTER_ARRAY_LENGTH(callers) && known ? 1 : 0;
-            }
+            char location[32];
+            snprintf(location, sizeof(location), "dbg_tier1.c:%u", check_unwind_test_tier1_line(expected[stops].name, "depth()", expected[stops].occurrence));
+            placed = debug_test_frame(cursor, "#1 ", expected[stops].name, location);
+            tier1_callers += stops != 0 && placed;
         }
-        placed = placed && known;
         stops += 1;
     }
     check_debug_test_expect(tally, placed && stops == 16 && tier1_callers == 15,
-                            "gdb places depth and each Tier 1 caller at its declaration's line, main at its call's, each of depth's 16 runs", report);
+                            "gdb places depth at its first statement and every caller at its exact source call, in all 16 runs", report);
     if (!(placed && stops == 16) && text.pointer != 0)
     {
         printf("%.3000s\n", text.pointer);
