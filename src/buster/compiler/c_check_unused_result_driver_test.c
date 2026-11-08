@@ -347,6 +347,48 @@ static const CheckDriverDefaultWarningFixture check_driver_unused_result_fixture
         .warnings = 4,
     },
     {
+        // Logical operators among conditionals and commas (#1390): a logical operator's value warns where both operands
+        // do, at the operator, and a conditional's where both arms' do; a call whose result warns makes its logical operand
+        // warn (a tag's contract, a g row's const), a plain one, an enum's, an e row's or a pointer's doesn't; a statement
+        // expression's final value; a volatile object's read accepts the discard everywhere.
+        .name = "ignored results among logical operators",
+        .source = "__attribute__((warn_unused_result)) int w(int);\n"
+                  "__attribute__((const)) int c(int);\n"
+                  "int e(int);\n"
+                  "enum E { A, B };\n"
+                  "enum E g(void);\n"
+                  "enum __attribute__((warn_unused_result)) F { C };\n"
+                  "enum F h(void);\n"
+                  "double sin(double);\n"
+                  "double rint(double);\n"
+                  "int (*fp)(int);\n"
+                  "void f(int n, int a, int b, int x, double d, volatile int *p) {\n"
+                  "  n ? (a && w(n)) : (b || w(n)); n ? (a && e(n)) : (b || w(n)); (x && 0), w(n); (x && w(n)), 0; x, (a && b);\n"
+                  "  (a && b), x; a && (n ? w(n) : w(n)); a && (n ? w(n) : e(n)); a || (x, (b && c(n))); (a && b) || (n ? a : b);\n"
+                  "  a && ({ e(n); }); n ? ({ 1; }) : ({ 2; }); ({ e(n); 3; }), x;\n"
+                  "  a && g(); a && h(); a && sin(d); a && rint(d); a && fp(1);\n"
+                  "  *p; a ? *p : *p; *p, a; a, *p; a && *p;\n"
+                  "}\n",
+        .warnings = 19,
+    },
+    {
+        // A statement expression's value is its final expression's, and one that ends without an expression is quiet; a
+        // void dereference is no cast to void.
+        .name = "unused values of statement expressions",
+        .source = "void *p;\n"
+                  "int e(int);\n"
+                  "void f(int n, int a) {\n"
+                  "  n ? ({ int z = 1; (void)z; }) : ({ int y = 2; (void)y; });\n"
+                  "  n ? ({ e(n); }) : ({ 3; });\n"
+                  "  n ? ({ (void)0; }) : ({ (void)1; });\n"
+                  "  ({ int q = 1; (void)q; }), a;\n"
+                  "  a, ({ int q = 1; (void)q; });\n"
+                  "  n ? ({ *p; }) : ({ *p; });\n"
+                  "}\n",
+        .options = { "-Wno-void-ptr-dereference" },
+        .warnings = 3,
+    },
+    {
         .name = "ignored results of library functions without builtins",
         .source = "int abs(int);\n"
                   "double rint(double);\n"

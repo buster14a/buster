@@ -7106,6 +7106,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 #include "c_check_convention_driver_test.c"
 #include "c_check_interrupt_driver_test.c"
 #include "c_check_tier1_driver_test.c"
+#include "c_check_tier1_if_convert_test.c"
 #include "c_check_string_pool_driver_test.c"
 #include "c_check_frame_pointer_driver_test.c"
 #include "c_check_stack_clash_driver_test.c"
@@ -7529,6 +7530,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 }
 #include "c_check_initializer_warning_test.c"
 #include "c_check_warning_driver_test.c"
+#include "c_check_logical_unused_driver_test.c"
 #include "c_check_unused_result_driver_test.c"
 #include "c_check_format_bitint_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
@@ -8319,6 +8321,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_default_warnings(&test, clang, executable, directory);
+            check_test_driver_logical_unused(&test, clang, executable, directory);
             check_test_driver_format_bitints(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
@@ -8573,6 +8576,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_tier1_reproducible(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_tier1_rematerialization(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
@@ -8586,6 +8593,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_tier1_divide(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_if_convert(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

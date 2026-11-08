@@ -269,9 +269,129 @@ static void tier1_select_test_added_address(Tier1SelectTest* test)
     arena_release(&input);
 }
 
+// A typed pointer chain and a scaled address, shared by a store and a load. The first store keeps either an integer,
+// the final pointer, its shared addition, its shared inttoptr, or its shared ptrtoint as an escaping value. Only memory
+// operands may unfold shared nodes; the escaping node remains computed and its value is checked independently.
+static void tier1_select_test_shared_address(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(8u << 20);
+    Arena scratch = arena_reserve(8u << 20);
+    static const uint32_t escaped[] = {2, 7, 5, 6, 3};
+    for (uint32_t scale = 1; scale <= 8; scale *= 2)
+    {
+        for (uint32_t escape = 0; escape < BUSTER_ARRAY_LENGTH(escaped); escape += 1)
+        {
+            for (uint32_t observable = 0; observable < 2; observable += 1)
+            {
+                const IrSizes sizes =
+                {
+                    .instruction_count = 12,
+                    .block_count = 1,
+                    .constant_count = 1,
+                    .address_count = 1,
+                    .parameter_count = 3,
+                };
+                IrFunction function;
+                const IrError created = ir_create(&input, &sizes, &function);
+                tier1_select_test_expect(test, created == IR_OK, "create shared address fixture");
+                if (created == IR_OK)
+                {
+                    function.result_type = IR_I64;
+                    function.block_offsets[1] = 12;
+                    function.parameter_types[0] = IR_PTR;
+                    function.parameter_types[1] = IR_I64;
+                    function.parameter_types[2] = IR_I64;
+                    function.constants[0].low = 8;
+                    function.addresses[0] = (IrAddress){ .scale = scale };
+                    tier1_select_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 2, IR_PARAM, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 3, IR_PTRTOINT, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 4, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 5, IR_ADD, IR_I64, 3, 4, BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 6, IR_INTTOPTR, IR_PTR, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 7, IR_ADDRESS, IR_PTR, 6, 1, 0);
+                    tier1_select_test_node(&function, 8, IR_STORE, IR_VOID, 0, escaped[escape], BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 9, IR_STORE, IR_VOID, 7, 2, BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 10, IR_LOAD, IR_I64, 7, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 11, IR_RET, IR_VOID, 10, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    function.flags[9] = observable != 0 ? BUSTER_IR_VOLATILE : 0;
+                    function.flags[10] = observable != 0 ? BUSTER_IR_VOLATILE : 0;
+                    const uint8_t registers[12] =
+                    {
+                        X86_REGISTER_RDI,
+                        X86_REGISTER_RSI,
+                        X86_REGISTER_RDX,
+                        X86_REGISTER_R8,
+                        X86_REGISTER_R9,
+                        X86_REGISTER_R10,
+                        X86_REGISTER_RAX,
+                        X86_REGISTER_R8,
+                        X86_REGISTER_RAX,
+                        X86_REGISTER_RAX,
+                        X86_REGISTER_RAX,
+                        X86_REGISTER_RAX,
+                    };
+                    for (uint32_t path = 0; path < 2; path += 1)
+                    {
+                        Tier1SelectPlan plan;
+                        uint32_t node = BUSTER_IR_NONE;
+                        const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, path == 0, &plan, &node);
+                        tier1_select_test_expect(test, error == TIER1_SELECT_OK, "shared address selects on both paths");
+                        if (error == TIER1_SELECT_OK)
+                        {
+                            tier1_select_test_expect(test, (plan.covered[7] != 0) == (escape != 1) && !plan.covered[escaped[escape]],
+                                                     "an address needed by an escaping use remains computed while memory-only shared nodes disappear");
+                            for (uint32_t access = 9; access <= 10; access += 1)
+                            {
+                                const Tier1SelectPattern* pattern = &plan.patterns[access];
+                                const uint32_t first = plan.effective_use_offsets[access];
+                                const uint32_t uses = plan.effective_use_offsets[access + 1] - first;
+                                tier1_select_test_expect(test, pattern->rule == (access == 9 ? TIER1_RULE_STORE_ADDRESS : TIER1_RULE_LOAD_ADDRESS) &&
+                                                                 pattern->values[0] == 0 && pattern->values[1] == 1 && pattern->scale == tier1_select_log2(scale) && pattern->displacement == 8 &&
+                                                                 uses == (access == 9 ? 3u : 2u) && plan.effective_use_values[first] == 0 && plan.effective_use_values[first + 1] == 1 &&
+                                                                 (access != 9 || plan.effective_use_values[first + 2] == 2),
+                                                         "each shared memory address publishes the original base, index and stored value as effective uses");
+                            }
+                            Tier1SelectCode code;
+                            const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &node);
+                            tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "shared address fixture emits");
+                            if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
+                            {
+                                for (uint32_t index = 0; index < 4; index += 1)
+                                {
+                                    uint8_t memory[64];
+                                    uint8_t wanted[64];
+                                    memset(memory, 0xa5, sizeof(memory));
+                                    memcpy(wanted, memory, sizeof(memory));
+                                    const uint64_t value = UINT64_C(0xfedcba9876543210) >> index;
+                                    const uint32_t offset = 8 + index * scale;
+                                    const uint64_t escaped_value = escape == 0 ? value : (uintptr_t)(memory + (escape == 1 ? offset : escape == 4 ? 0 : 8));
+                                    memcpy(wanted, &escaped_value, 8);
+                                    memcpy(wanted + offset, &value, 8);
+                                    const uint64_t actual = tier1_select_test_call(test, (uintptr_t)memory, index, value);
+                                    tier1_select_test_expect(test, actual == value && memcmp(memory, wanted, sizeof(memory)) == 0,
+                                                             "shared address folding preserves native memory, escaping pointers and volatile access order");
+                                }
+                            }
+                        }
+                        arena_pop_to(&output, 0);
+                    }
+                }
+                arena_pop_to(&input, 0);
+            }
+        }
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
 static void tier1_select_test_address_arithmetic(Tier1SelectTest* test)
 {
     tier1_select_test_power_multiplication(test);
     tier1_select_test_signed_loads(test);
     tier1_select_test_added_address(test);
+    tier1_select_test_shared_address(test);
 }

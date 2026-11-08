@@ -16,6 +16,8 @@
 #define BUSTER_IR_OPTIMIZE_SCCP 1u
 #define BUSTER_IR_OPTIMIZE_DCE 2u
 #define BUSTER_IR_OPTIMIZE_CFG 4u
+// Tier 1 alone requests physical block placement; the shared optimizer's default preserves block order.
+#define BUSTER_IR_OPTIMIZE_LAYOUT 8u
 #define BUSTER_IR_OPTIMIZE_AUTO 0u
 #define BUSTER_IR_OPTIMIZE_VECTOR 1u
 #define BUSTER_IR_OPTIMIZE_SCALAR 2u
@@ -1120,6 +1122,8 @@ static uint32_t ir_optimize_single_successor(const IrOptimizeWork* work, uint32_
     return target;
 }
 
+#include "ir_optimize_layout.c"
+
 // 1 is an unconditional effect; 2 is a potential fault or floating-environment effect, discharged only by
 // a successful constant transfer. Loads remain roots even when nonvolatile: there is no dereferenceability proof. 3 is a
 // vector comparison (#141's element types). SIMD floating arithmetic and comparisons are roots whatever SCCP learns:
@@ -1438,6 +1442,13 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
     {
         error = IR_ERROR_MEMORY;
     }
+    uint32_t* order = NULL;
+    uint32_t order_count = f->block_count;
+    if (error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_LAYOUT) != 0)
+    {
+        order = ir_allocate(scratch, f->block_count, sizeof(uint32_t), &ok);
+        error = ok ? ir_optimize_layout_order(work, threads, scratch, BUSTER_SCALAR_PATH(options.scalar), order, &order_count) : IR_ERROR_MEMORY;
+    }
     IrSizes sizes = {
         .constant_count = f->constant_count,
         .vector_constant_count = f->vector_constant_count,
@@ -1454,8 +1465,9 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
     {
         values[i] = BUSTER_IR_NONE;
     }
-    for (uint32_t block = 0; error == IR_OK && block < f->block_count; block += 1)
+    for (uint32_t position = 0; error == IR_OK && position < order_count; position += 1)
     {
+        const uint32_t block = order != NULL ? order[position] : position;
         if (work->blocks[block] != 0 && threads[block] == block)
         {
             blocks[block] = sizes.block_count++;
@@ -1567,8 +1579,9 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
         uint32_t vector_constants = f->vector_constant_count;
         uint32_t calls = 0;
         uint32_t instructions = 0;
-        for (uint32_t block = 0; block < f->block_count; block += 1)
+        for (uint32_t position = 0; position < order_count; position += 1)
         {
+            const uint32_t block = order != NULL ? order[position] : position;
             if (blocks[block] != BUSTER_IR_NONE)
             {
                 candidate.block_offsets[blocks[block]] = instructions;
@@ -1765,7 +1778,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize(const IrFunction* functi
     // faster at every size (#786).
     const bool verify_scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR || (options.path == BUSTER_IR_OPTIMIZE_AUTO && options.scalar);
     (void)verify_scalar;
-    if (output != scratch && options.path <= BUSTER_IR_OPTIMIZE_SCALAR && (options.passes & ~(BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG)) == 0)
+    if (output != scratch && options.path <= BUSTER_IR_OPTIMIZE_SCALAR && (options.passes & ~(BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_LAYOUT)) == 0)
     {
         options.scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR ||
                          (options.path == BUSTER_IR_OPTIMIZE_AUTO && (options.scalar || ir_optimize_auto_scalar(function)));

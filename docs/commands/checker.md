@@ -125,6 +125,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes; and
   #1376's clears (`c_check_program_clear_test.c`): each path's shape (memset past 128 bytes, no loop, no clear before
   a whole object's copy, compound literals in place, a volatile object's stores) and native runs on a dirtied stack.
+  The same group covers #1549's hidden-result call initializers: copy and temporary elimination, nested and indirect
+  calls, alignment, volatile and self-reference fallbacks, assignments and reentry. `tests/interpreter/source.c`
+  also exercises direct, nested and indirect aggregate call initializers through the typed and Tier 1 source checks.
   `--program-vectors` selects the vector, x86 builtin and half-precision programs alone (`c_check_program_vector_test.c`,
   `c_check_program_x86_test.c`, `c_check_program_vector_builtins_test.c`, `c_check_program_fp16_test.c`,
   `c_check_program_half_test.c`), run against clang -O0's code where the host has their features.
@@ -133,6 +136,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   Required constant evaluation folds `_Float16` and `__bf16` arithmetic in the source format after each operation
   (#1497); runtime half-precision chains retain their target's excess-precision behavior. The constant-source and
   floating-action fixtures cover that distinction, ties, subnormals and negative zero.
+  `float`, `double` and `long double` folds give APFloat's NaNs, not the host's (#1473): an invalid operation
+  (`inf - inf`, `0 * inf`, `0 / 0`) folds to the positive quiet NaN, and an operation on a NaN keeps its first NaN
+  operand's sign and payload, quieted. The floating-action fixtures, the constant-source fixture "real invalid
+  constant arithmetic has Clang NaN signs" and `--program-float-constants`' "float-constants-invalid-arithmetic"
+  check them against Clang.
   `--program-library` selects the library builtins' tables, constant folds and programs alone
   (`c_check_program_library_test.c`).
   `--transitions` selects the memoized transitions' fixtures, classes, static words and table limits alone (`c_check_transitions_test.c`).
@@ -202,7 +210,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   output at each warning policy, both paths and one or three lanes: their spellings and messages, macros, types,
   redeclarations, comma, conditional and for clauses, builtins and `-Wno-unused`'s groups; nested commas,
   conditionals and selections (clang's `isUnusedResultAWarning`, `check_common_unused_of`), calls through pointers,
-  unreachable code and keyword builtins' values.
+  unreachable code, keyword builtins' values and logical operators among them.
   `c_check_return_flow.c` supplies source return-warning facts for checked graphs. Ordinary direct calls no longer
   suppress a function's `-Wreturn-type` warning; a proven direct `noreturn` call or terminating builtin ends only its
   own warning-flow edge. Short circuit, conditional and unevaluated operands retain their execution rules, and

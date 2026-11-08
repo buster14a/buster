@@ -138,10 +138,24 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             ir_typed_emit(&sink, IR_STORE, IR_VOID, p, value, BUSTER_IR_NONE, ir_typed_alignment(class));
         }
     }
+    // Only the producer's validated direct table addresses (#1217), each as one pointer and its stack's U64 value.
+    // The ids are consecutive in both counting and filling, so no per-entry map or general motion pass is needed.
+    // This genuine preheader is never a source backedge target, including when source entry zero starts a loop.
+    const uint32_t* const table_addresses = input->table_addresses;
+    const uint32_t hoisted_tables = table_addresses != 0 ? input->table_count : 0;
+    const uint32_t table_first = (uint32_t)sink.sizes.instruction_count;
+    for (uint32_t t = 0; t < hoisted_tables; t += 1)
+    {
+        const uint32_t symbol = (uint32_t)input->values[table_addresses[t]];
+        const uint32_t address = ir_typed_emit(&sink, IR_SYMBOL_ADDR, IR_PTR, symbol, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        ir_typed_emit(&sink, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    }
     ir_typed_emit(&sink, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
 
     // The next jump table, whose jump (Tier0Function.table_jumps, in entry order) is a br_indirect of its own (#785).
     uint32_t table = 0;
+    // The next hoisted address, also in entry order. Skip any entry the plan leaves out, as for lifetime events below.
+    uint32_t table_address = 0;
     // The next lifetime event (Tier0Function.lifetime_entries, in entry order, #177), a marker of its local's slot before
     // its entry's instructions; an event of an entry the plan's blocks leave out (unreachable code) is dropped.
     uint32_t lifetime = 0;
@@ -218,8 +232,20 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             case BUSTER_TYPED_GLOBAL:
             case BUSTER_TYPED_GLOBAL_ADDRESS:
             {
-                const uint32_t address = ir_typed_emit(&sink, IR_SYMBOL_ADDR, IR_PTR, (uint32_t)value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-                stack[depth] = ir_typed_emit(&sink, kind == BUSTER_TYPED_GLOBAL ? IR_LOAD : IR_PTRTOINT, type, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                while (table_address < hoisted_tables && table_addresses[table_address] < i)
+                {
+                    table_address += 1;
+                }
+                if (table_address < hoisted_tables && table_addresses[table_address] == i)
+                {
+                    stack[depth] = table_first + 2 * table_address + 1;
+                    table_address += 1;
+                }
+                else
+                {
+                    const uint32_t address = ir_typed_emit(&sink, IR_SYMBOL_ADDR, IR_PTR, (uint32_t)value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                    stack[depth] = ir_typed_emit(&sink, kind == BUSTER_TYPED_GLOBAL ? IR_LOAD : IR_PTRTOINT, type, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                }
                 classes[depth] = class;
                 depth += 1;
                 break;
