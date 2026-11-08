@@ -1,0 +1,53 @@
+name: Issue 1114 hosted validation
+
+on:
+  push:
+    branches: [agent/1114-hosted-validation]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-1114-development-validation
+  cancel-in-progress: true
+
+env:
+  SOURCE_REF: ad2bfa8e2c70232efb5243139c36c779ec3500b3
+  BUSTER_HOST_ARCH: x86-64
+  BUSTER_DEBUG_INFO: '0'
+  BUSTER_LINKER: lld
+
+jobs:
+  debugger:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - name: Install official compiler and debugger tools
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build Debug configuration
+        id: build
+        run: ./build.sh --config Debug
+      - name: IR and mapping regressions
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          timeout 180s ./build/compiler test-ssa-ir
+          timeout 180s ./build/compiler test-ir
+          timeout 180s ./build/compiler test-ir-optimize
+          timeout 180s ./build/compiler test-tier1-schedule
+      - name: Debugger value and output regressions
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: timeout 600s ./build/compiler test-check-debug --cross-check --keep
+      - name: Retain failure fixtures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-1114-debug-${{ github.run_number }}
+          path: |
+            /tmp/buster-check-debug-*/**
+            build/cmake/**/.ninja_log
+          retention-days: 7
+          if-no-files-found: ignore
