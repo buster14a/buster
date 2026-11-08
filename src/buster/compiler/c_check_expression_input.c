@@ -565,6 +565,10 @@ static void check_input_identifier_entry(const CheckInputReader* reader, uint32_
     const uint32_t declaration = type != 0 ? input->declarations[token] : 0;
     const bool acted = input->kr_parameter_count == 0 && (type == 0 || (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) == 0);
     const bool enumeration = type != 0 && reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
+    if (type != 0)
+    {
+        check_input_note_enum(reader, enumeration, type);
+    }
     const uint64_t category = enumeration ? CHECK_RVALUE : type != 0 && type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE;
     const uint64_t flags = (enumeration ? BUSTER_CHECK_ICE : 0) |
                            (type != 0 && check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) |
@@ -638,6 +642,12 @@ static uint32_t check_input_expression_identifiers(const CheckInputReader* reade
                                         _mm512_mask_testn_epi32_mask(typed, bits, _mm512_set1_epi32(BUSTER_CHECK_BITS_THREAD_LOCAL));
         const __mmask16 in_register = _mm512_mask_test_epi32_mask(typed, bits, _mm512_set1_epi32(BUSTER_CHECK_BITS_REGISTER));
         registers |= in_register;
+        // An enumerator or an enumeration's variable marks the unit (check_input_note_enum, its twin).
+        if ((enumeration | _mm512_mask_cmpeq_epi32_mask(typed, type_kinds, _mm512_set1_epi32(BUSTER_TYPE_KIND_ENUM)) |
+             _mm512_mask_cmpeq_epi32_mask(typed, type_kinds, _mm512_set1_epi32(BUSTER_TYPE_KIND_ALIGNED))) != 0)
+        {
+            reader->output->enum_operands = true;
+        }
         const __mmask16 has_object = _mm512_mask_test_epi32_mask(typed, objects, objects);
         const __mmask16 nonnull = has_object & ~enumeration;
         const __m512i flags = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi32(enumeration, _mm512_set1_epi32(BUSTER_CHECK_ICE)),

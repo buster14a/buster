@@ -790,6 +790,9 @@ struct CheckInput
     // Each enum tag definition's type and brace range, so a selector finds its own tag rather than a name search.
     CheckInputEnumDefinition* enum_definitions;
     uint32_t enum_definition_count;
+    // Whether an expression names an enumerator or a variable of an enumeration type (#1447): only then may an
+    // operator's operands mix enumerations (check_common_enum_arithmetic).
+    bool enum_operands;
     uint8_t* function_flags;
     // The unit's FILE, jmp_buf, sigjmp_buf and ucontext_t (their typedefs' types) where an implicit declaration of a library
     // builtin took one (#148, check_input_implicit_function), which its diagnostic spells (CBuiltinLibraryNamed).
@@ -5089,6 +5092,17 @@ static bool check_input_address_is_weak(const CheckInputReader* reader, uint32_t
 
 // BUSTER_CHECK_NONNULL_ADDRESS for a declaration's address, or 0 when the address may be null or is not an object.
 // An enumerator is an integer. A weak attribute or pragma at or before `use` can resolve to a null pointer.
+// An identifier leaf that names an enumerator or a variable of an enumeration type marks the unit (CheckInput.enum_operands);
+// an aligned typedef's variable, whose own kind hides its type's, marks it too.
+static void check_input_note_enum(const CheckInputReader* reader, bool enumeration, TypeId type)
+{
+    const uint8_t kind = type_kind(reader->types, type);
+    if (enumeration || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_ALIGNED)
+    {
+        reader->output->enum_operands = true;
+    }
+}
+
 // A use `token` of `declaration`'s flags for its register storage: BUSTER_CHECK_REGISTER, and BUSTER_CHECK_REGISTER_NAME where
 // the name stands unparenthesized, whose array decay clang rejects (#1447).
 static uint32_t check_input_register_flags(const CheckInputReader* reader, uint32_t declaration, uint32_t token)
@@ -11207,6 +11221,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 const TypeId type = check_input_expression_type(reader, token);
                 const uint32_t declaration = reader->output->declarations[token];
                 const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
+                check_input_note_enum(reader, enumeration, type);
                 const CheckConstexprValue* constant = (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0 ?
                     check_input_constexpr_find(reader, declaration) : 0;
                 if (constant != 0)

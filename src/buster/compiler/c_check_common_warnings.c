@@ -3225,7 +3225,9 @@ static bool check_common_floating_kind(const TypeTable* types, TypeId type)
 // Clang's checkEnumArithmeticConversions (#1447): the usual arithmetic conversions of an operator whose operands are
 // enumerations of different types, or an enumeration and a floating type, warned as the operator is built, at it. The
 // operands are as written, an enumerator as its enumeration (check_common_enum_coerced). A compound assignment warns only
-// for an enumeration converted to its floating target. A unit that defines no enumeration has nothing to warn of.
+// for an enumeration converted to its floating target. Only a unit whose expressions name an enumerator or an
+// enumeration's variable (CheckInput.enum_operands) is scanned: an enumeration operand that is only a member, a call's
+// result or a cast's is not looked for without one.
 static void check_common_enum_arithmetic(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
                                          CheckWarningSpelling* spell, Arena* scratch)
 {
@@ -3242,7 +3244,7 @@ static void check_common_enum_arithmetic(const Parser* parser, Preprocessor* pp,
                                          "compound assignment of" };
     const CheckCommonOps set = check_common_ops(ops, BUSTER_ARRAY_LENGTH(ops));
     CheckCommonScan scan = { 0 };
-    for (uint32_t node = input->enum_definition_count != 0 ? check_common_next_op(graph, &set, &scan, vector) : graph->count; node < graph->count && !pp->fatal;
+    for (uint32_t node = input->enum_operands ? check_common_next_op(graph, &set, &scan, vector) : graph->count; node < graph->count && !pp->fatal;
          node = check_common_next_op(graph, &set, &scan, vector))
     {
         const CheckOp op = graph->ops[node];

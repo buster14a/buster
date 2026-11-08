@@ -2794,6 +2794,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             if (valid)
             {
                 const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
+                check_input_note_enum(reader, enumeration, type);
                 // A constexpr object's value is the constant its initializer's finish read (#793): an integer or a
                 // floating constant, or a null pointer, as an lvalue whose object is still the declaration's.
                 const CheckConstexprValue* constant = (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0 ?
@@ -3578,6 +3579,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
             if (valid)
             {
                 const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
+                check_input_note_enum(reader, enumeration, type);
                 ranges[value_count] = (CheckConstantRange){ .first = token, .end = token + 1, .overload_token = token + 1,
                                                          .noderef = check_input_noderef_at(reader->output, declaration) };
                 values[value_count++] = (CheckValue)
