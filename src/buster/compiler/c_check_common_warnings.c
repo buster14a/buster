@@ -1931,23 +1931,27 @@ static bool check_common_call_prototype(const CheckCommonEmission* emission, uin
 static TypeId check_common_enum_coerced(const CheckInput* input, const CheckStream* stream, uint32_t node);
 static uint32_t check_common_full_expression_end(const Parser* parser, const CheckGraph* graph, const uint32_t* parents, uint32_t node);
 
-// Whether `source`'s implicit conversion to `target` may change its enumeration (#1447, -Wimplicit-enum-enum-cast): the
-// target's own kind an enumeration's (or an aligned typedef's, which hides it), and the source one that may be an
-// enumeration, a named constant leaf (an enumerator), or arms that carry the conversion to theirs.
-static bool check_common_enum_cast_candidate(const Parser* parser, const CheckGraph* graph, const CheckStream* stream, const TypeTable* types,
-                                             uint32_t source, TypeId target)
+// Whether `source`, converted to an enumeration's target, may be an enumeration: its own kind an enumeration's (or an aligned
+// typedef's, which hides it), a named constant leaf (an enumerator), or arms that carry the conversion to theirs. Rare:
+// out of line, so that the hot candidate tests keep their code.
+static __attribute__((noinline)) bool check_common_enum_cast_source(const Parser* parser, const CheckGraph* graph, const CheckStream* stream,
+                                                                    const TypeTable* types, uint32_t source)
 {
-    // (The target's kind first: an enumeration's is rare, and the source is read only for one.)
+    const uint8_t source_kind = type_kind(types, check_stream_type(stream, source));
+    return source_kind == BUSTER_TYPE_KIND_ENUM || source_kind == BUSTER_TYPE_KIND_ALIGNED || check_common_conversion_arms(graph, source) ||
+           (graph->ops[source] == CHECK_OP_VALUE && (check_stream_flags(stream, source) & BUSTER_CHECK_ICE) != 0 &&
+            graph->tokens[source] < parser->tokens.count && parser->tokens.kinds[graph->tokens[source]] == PARSE_KIND_IDENTIFIER);
+}
+
+// Whether `source`'s implicit conversion to `target` may change its enumeration (#1447, -Wimplicit-enum-enum-cast): the
+// target's own kind an enumeration's (or an aligned typedef's, which hides it), tested first as it rarely is, and the
+// source one that may be an enumeration (check_common_enum_cast_source).
+static inline bool check_common_enum_cast_candidate(const Parser* parser, const CheckGraph* graph, const CheckStream* stream, const TypeTable* types,
+                                                    uint32_t source, TypeId target)
+{
     const uint8_t target_kind = type_kind(types, target);
-    bool result = false;
-    if (__builtin_expect(target_kind == BUSTER_TYPE_KIND_ENUM || target_kind == BUSTER_TYPE_KIND_ALIGNED, 0) && source < graph->count)
-    {
-        const uint8_t source_kind = type_kind(types, check_stream_type(stream, source));
-        result = source_kind == BUSTER_TYPE_KIND_ENUM || source_kind == BUSTER_TYPE_KIND_ALIGNED || check_common_conversion_arms(graph, source) ||
-                 (graph->ops[source] == CHECK_OP_VALUE && (check_stream_flags(stream, source) & BUSTER_CHECK_ICE) != 0 &&
-                  graph->tokens[source] < parser->tokens.count && parser->tokens.kinds[graph->tokens[source]] == PARSE_KIND_IDENTIFIER);
-    }
-    return result;
+    return __builtin_expect(target_kind == BUSTER_TYPE_KIND_ENUM || target_kind == BUSTER_TYPE_KIND_ALIGNED, 0) && source < graph->count &&
+           check_common_enum_cast_source(parser, graph, stream, types, source);
 }
 
 // Clang's conversion between different enumerations (#1447, CheckImplicitConversion's last case): `source`'s implicit
