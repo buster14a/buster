@@ -3237,8 +3237,11 @@ static void check_common_int_in_bool(const Parser* parser, Preprocessor* pp, con
 // its implicit conversions passed. The walks' candidates test it before any type.
 static bool check_common_bool_candidate(const CheckGraph* graph, uint32_t node)
 {
-    const uint32_t expression = node < graph->count ? check_common_bool_expression(graph, node) : BUSTER_CHECK_NONE;
-    return expression < graph->count && (graph->ops[expression] == CHECK_OP_SHIFT_LEFT || graph->ops[expression] == CHECK_OP_CONDITIONAL);
+    // (The operator alone answers for nearly every node; only an implicit conversion is passed.)
+    const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const uint32_t expression = op == CHECK_OP_CONVERT ? check_common_bool_expression(graph, node) : node;
+    const CheckOp inner = op == CHECK_OP_CONVERT && expression < graph->count ? graph->ops[expression] : op;
+    return inner == CHECK_OP_SHIFT_LEFT || inner == CHECK_OP_CONDITIONAL;
 }
 
 // Whether `target` is _Bool, the conversion DiagnoseIntInBoolContext follows.

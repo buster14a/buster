@@ -484,32 +484,32 @@ static CheckContext check_init_context(const CheckInitWalker* walker, uint32_t n
 static bool check_init_changed_integer(const CheckInitWalker* walker, const CheckInitPart* part)
 {
     const CheckStream* stream = walker->stream;
+    const bool value = part->kind == CHECK_INIT_VALUE && stream != NULL && part->node < stream->count;
+    const CheckOp op = value && walker->graph != NULL && part->node < walker->graph->count ? walker->graph->ops[part->node] : CHECK_OP_COUNT;
+    const bool branching = op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA || op == CHECK_OP_SHIFT_LEFT;
+    // Most parts are no integer constant, or one below 128, which every integer target but a narrower _BitInt holds: their
+    // tests come first, so that only the rest read the target's type.
+    const bool constant = value && !branching && check_stream_constant_kind(stream, part->node) == CHECK_CONSTANT_INTEGER;
+    const CheckValue source = constant ? check_stream_value(stream, part->node) : (CheckValue){ 0 };
     uint32_t source_width = 0;
     uint32_t target_width = 0;
     bool source_signed = false;
     bool target_signed = false;
     bool result = false;
-    if (part->kind == CHECK_INIT_VALUE && stream != NULL && part->node < stream->count &&
+    if ((branching || (constant && source.integer > 127)) &&
         check_action_integer_type(walker->types, part->conversion.type, &target_width, &target_signed))
     {
-        const CheckOp op = walker->graph != NULL && part->node < walker->graph->count ? walker->graph->ops[part->node] : CHECK_OP_COUNT;
         const bool boolean = type_unqualified(type_strip_aligned(walker->types, part->conversion.type)) == BUSTER_TYPE_BOOL;
-        if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA || (boolean && op == CHECK_OP_SHIFT_LEFT))
+        if (branching)
         {
             // Arms carry the conversion; a `<<` converted to _Bool is DiagnoseIntInBoolContext's (#1447).
-            result = true;
+            result = op != CHECK_OP_SHIFT_LEFT || boolean;
         }
-        else if (boolean)
-        {
-            result = false;
-        }
-        else if (check_stream_constant_kind(stream, part->node) == CHECK_CONSTANT_INTEGER &&
-                 check_action_integer_type(walker->types, check_stream_type(stream, part->node), &source_width, &source_signed) &&
+        else if (!boolean && check_action_integer_type(walker->types, check_stream_type(stream, part->node), &source_width, &source_signed) &&
                  target_width < source_width && target_width < 128)
         {
-            const CheckValue value = check_stream_value(stream, part->node);
             const unsigned __int128 mask = check_action_mask(source_width);
-            const unsigned __int128 bits = value.integer & mask;
+            const unsigned __int128 bits = source.integer & mask;
             const bool negative = source_signed && source_width != 0 && ((bits >> (source_width - 1)) & 1) != 0;
             const unsigned __int128 magnitude = negative ? (~bits & mask) + 1 : bits;
             // Negative values down to -2^(w-1) fit either target; others up to 2^(w-1) - 1 a signed one and up to 2^w - 1 an
@@ -517,6 +517,12 @@ static bool check_init_changed_integer(const CheckInitWalker* walker, const Chec
             const unsigned __int128 half = (unsigned __int128)1 << (target_width - 1);
             result = negative ? magnitude > half : magnitude > (target_signed ? half - 1 : check_action_mask(target_width));
         }
+    }
+    else if (constant && source.integer <= 127 && part->conversion.type != 0)
+    {
+        // A small value: only a _BitInt narrower than 8 bits may change it.
+        const TypeId bare = type_unqualified(type_strip_aligned(walker->types, part->conversion.type));
+        result = type_kind(walker->types, bare) == BUSTER_TYPE_KIND_BIT_INT;
     }
     return result;
 }
