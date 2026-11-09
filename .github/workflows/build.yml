@@ -12,6 +12,7 @@ on:
       - CMakePresets.json
       - 'cmake/**'
       - tools/ci/build_regression.c
+      - 'tools/ci/build_ownership*.h'
       - tools/ci/setup-build-tools.sh
       - tools/ci/setup-hosted.sh
       - tools/ci/hosted-release.sh
@@ -27,6 +28,7 @@ on:
       - CMakePresets.json
       - 'cmake/**'
       - tools/ci/build_regression.c
+      - 'tools/ci/build_ownership*.h'
       - tools/ci/setup-build-tools.sh
       - tools/ci/setup-hosted.sh
       - tools/ci/hosted-release.sh
