@@ -150,6 +150,27 @@ static const CheckDriverDefaultWarningFixture check_driver_for_loop_fixtures[] =
         .notes = 1,
     },
     {
+        // Second review on #1811: the unevaluated-argument builtins' operands in the body and the increment, and loops nested
+        // in a statement expression that leads a condition.
+        .name = "unvisited builtins' operands after the condition, and loops in a condition's statement expression",
+        .source = "void f1(int n) { int i = 0; for (; i < n; ) { (void)__builtin_constant_p(i = 6); } }\n"
+                  "void f2(int n) { int i = 0; for (; i < n; ) { (void)__builtin_object_size(&i, 0); } }\n"
+                  "void f5(int n) { int i = 0; for (; i < n; ) { (void)__builtin_dynamic_object_size(&i, 0); } }\n"
+                  "void f6(int n) { int i = 0; for (; i < n; ) { (void)__builtin_classify_type(i = 6); } }\n"
+                  "void f7(int n) { int i = 0; for (; i < n; __builtin_constant_p(i = 6)) { } }\n"
+                  "void f8(int n) { int i = 0; for (; i < n; ) { (void)__builtin_constant_p(0 ? 0 : (i = 6)); } }\n"
+                  "void g(int n) {\n"
+                  "    int i = 0;\n"
+                  "    for (; ({ for (int x = 0; x < 2; ) { } 1; }); ) { }\n"
+                  "    for (; ({ do { } while (i < 2); 1; }); ) { }\n"
+                  "    for (; ({ int y = 0; for (; y < n; ) { } 1; }) && i < n; ) { }\n"
+                  "    for (; i < ({ for (int z = 0; z < 2; ) { } 1; }); ) { }\n"
+                  "    for (; (struct { int a; }){ i }.a < n; ) { }\n"
+                  "}\n",
+        .options = { "-Wfor-loop-analysis" },
+        .warnings = 10,
+    },
+    {
         .name = "-Werror=for-loop-analysis and a pragma",
         .source = check_driver_for_loop_order_source,
         .options = { "-Werror=for-loop-analysis", "-Wall" },

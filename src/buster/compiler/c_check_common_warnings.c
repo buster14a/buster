@@ -8552,13 +8552,24 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
     }
 }
 
-// Whether `node`'s evaluation is clang's EvaluatedExprVisitor's: not under a sizeof or an alignof, whose operand it skips.
+// Whether a builtin node is one clang's EvaluatedExprVisitor leaves unvisited, a leaf of a simple condition: an
+// unevaluated-argument builtin's call (constant_p, object_size, dynamic_object_size, classify_type).
+static bool check_common_loop_unevaluated_builtin(const CheckGraph* graph, uint32_t node)
+{
+    const CheckOp op = graph->ops[node];
+    const uint32_t id = graph->members != NULL ? graph->members[node] : 0;
+    return (op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_UNARY) &&
+           (id == CBUILTIN_CONSTANT_P || id == CBUILTIN_OBJECT_SIZE || id == CBUILTIN_DYNAMIC_OBJECT_SIZE || id == CBUILTIN_CLASSIFY_TYPE);
+}
+
+// Whether `node`'s evaluation is clang's EvaluatedExprVisitor's: not under a sizeof, an alignof or an unevaluated-argument
+// builtin's call, whose operands it skips.
 static bool check_common_loop_evaluated(const CheckGraph* graph, const uint32_t* parents, uint32_t node)
 {
     bool result = true;
     for (uint32_t at = node, steps = 0; result && at < graph->count && steps < graph->count; steps += 1)
     {
-        result = graph->ops[at] != CHECK_OP_SIZEOF && graph->ops[at] != CHECK_OP_ALIGNOF;
+        result = graph->ops[at] != CHECK_OP_SIZEOF && graph->ops[at] != CHECK_OP_ALIGNOF && !check_common_loop_unevaluated_builtin(graph, at);
         at = parents[at];
     }
     return result;
@@ -8582,16 +8593,6 @@ static bool check_common_loop_local(const Parser* parser, const CheckInput* inpu
     return check_common_sparse_get(input->declaration_bodies, declaration) < parser->tokens.count &&
            !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) &&
            !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) && (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) == 0;
-}
-
-// Whether a builtin node is one clang's EvaluatedExprVisitor leaves unvisited, a leaf of a simple condition: an
-// unevaluated-argument builtin's call (constant_p, object_size, dynamic_object_size, classify_type).
-static bool check_common_loop_unevaluated_builtin(const CheckGraph* graph, uint32_t node)
-{
-    const CheckOp op = graph->ops[node];
-    const uint32_t id = graph->members != NULL ? graph->members[node] : 0;
-    return (op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_UNARY) &&
-           (id == CBUILTIN_CONSTANT_P || id == CBUILTIN_OBJECT_SIZE || id == CBUILTIN_DYNAMIC_OBJECT_SIZE || id == CBUILTIN_CLASSIFY_TYPE);
 }
 
 // clang's DeclExtractor over a for loop's condition, `first` its first node: whether it is simple (a tree of operators,
@@ -8774,9 +8775,15 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
         uint32_t root = BUSTER_CHECK_NONE;
         const bool conditional = semis[0] + 1 < semis[1] &&
                                  check_common_severity(pp, parser, input, semis[0] + 1, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true) != CHECK_WARNING_IGNORE;
+        // (A token inside braces is a statement expression's or a compound literal's: a loop nested there has a test of its
+        // own.)
+        uint32_t braces = 0;
         for (uint32_t at = semis[0] + 1; conditional && at < semis[1] && root >= input->graph.count; at += 1)
         {
-            uint32_t up = at < input->token_count && input->token_nodes != NULL ? input->token_nodes[at] : BUSTER_CHECK_NONE;
+            const uint8_t kind = parser->tokens.kinds[at];
+            braces -= kind == PARSE_KIND_R_BRACE && braces != 0;
+            uint32_t up = braces == 0 && at < input->token_count && input->token_nodes != NULL ? input->token_nodes[at] : BUSTER_CHECK_NONE;
+            braces += kind == PARSE_KIND_L_BRACE;
             for (uint32_t steps = 0; up < input->graph.count && parents[up] < input->graph.count && steps < input->graph.count; steps += 1)
             {
                 up = parents[up];
