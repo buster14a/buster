@@ -7769,6 +7769,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     }
                     valid &= (check_input_overload_flags(attributes) & BUSTER_CHECK_OVERLOADABLE) == 0;
                     uint32_t width = BUSTER_TYPE_NOT_BIT_FIELD;
+                    bool widthless = false;
                     if (i < frame->close && parser->tokens.kinds[i] == PARSE_KIND_COLON)
                     {
                         const uint32_t colon = i++;
@@ -7796,6 +7797,9 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         const bool named = reader->constant_missing != missing;
                         valid &= named || (read && bits >= 0 && bits <= UINT32_MAX);
                         width = named ? BUSTER_TYPE_NOT_BIT_FIELD : (uint32_t)bits;
+                        // An unnamed one stays a member, unnamed, of its whole type, as clang's field (`long : zzz` aligns
+                        // the record to 8), and declares something.
+                        widthless = named;
                         const uint32_t before = attributes != 0 ? attributes->count : 0;
                         valid = valid && (!attributed || check_input_read_attributes(reader, &i, frame->close, &attributes));
                         // Their function types' attributes, which meet the member's type (#147).
@@ -7818,14 +7822,14 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     // _Alignas's errors, each member's (#1447): a bit-field's place, else its values'. A member that declares
                     // nothing (no name, bit-field or anonymous record) has none, as clang declares no field for it.
                     const uint8_t member_kind = type != 0 ? type_kind(reader->types, type_strip_aligned(reader->types, type)) : BUSTER_TYPE_KIND_NONE;
-                    const bool declares = name != BUSTER_CHECK_NONE || width != BUSTER_TYPE_NOT_BIT_FIELD || member_kind == BUSTER_TYPE_KIND_STRUCT ||
+                    const bool declares = name != BUSTER_CHECK_NONE || width != BUSTER_TYPE_NOT_BIT_FIELD || widthless || member_kind == BUSTER_TYPE_KIND_STRUCT ||
                                           member_kind == BUSTER_TYPE_KIND_UNION;
                     const uint32_t alignas_place = width != BUSTER_TYPE_NOT_BIT_FIELD ? 3u : CHECK_ALIGNAS_OBJECT;
                     valid = valid && (attributes == 0 || !attributes->has_alignas || !declares ||
                                       check_input_alignas_declarator(reader, attributes, NULL, alignas_place));
                     valid = valid && (alignas_place != CHECK_ALIGNAS_OBJECT || !declares || check_input_alignas_underaligned(reader, attributes, type, name));
                     // A member's subjects as clang's attributes name them (#147): a bit-field or not, function-like by its type.
-                    if (valid && (name != BUSTER_CHECK_NONE || width != BUSTER_TYPE_NOT_BIT_FIELD))
+                    if (valid && (name != BUSTER_CHECK_NONE || width != BUSTER_TYPE_NOT_BIT_FIELD || widthless))
                     {
                         const uint32_t subjects = BUSTER_CHECK_SUBJECT_FIELD |
                                                   (width != BUSTER_TYPE_NOT_BIT_FIELD ? BUSTER_CHECK_SUBJECT_BIT_FIELD : BUSTER_CHECK_SUBJECT_NON_BIT_FIELD) |
@@ -7842,7 +7846,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         valid = false;
                     }
                     bool tag_only = false;
-                    if (valid && name == BUSTER_CHECK_NONE && width == BUSTER_TYPE_NOT_BIT_FIELD)
+                    if (valid && name == BUSTER_CHECK_NONE && width == BUSTER_TYPE_NOT_BIT_FIELD && !widthless)
                     {
                         // A member of no declarator is an anonymous structure or union, an enum's enumerators, or
                         // declares its tag or nothing, which clang takes with a warning (-Wmissing-declarations), and

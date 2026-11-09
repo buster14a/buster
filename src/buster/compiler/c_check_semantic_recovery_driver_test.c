@@ -564,6 +564,21 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // Three thousand names and fifty-three typos, written out where the fixture is (check_test_typo_stress): each
         // search reads the visible names once (c_check_typo.c).
         "/* typo stress */\n",
+        // An undeclared name in an enumerator's value or a bit-field's width (#1447, check_constant_name): clang's error at
+        // each name, with its typo's correction, which the value takes. With none, the enumerator takes the value it would
+        // have had without one (B, D, S), and the member isn't a bit-field: an unnamed one stays an unnamed member of its
+        // whole type (T's and U's `long`). The unit's later declarations and warnings stay; at block scope too.
+        "enum { WIDTH = 3, ALPHA = 1, BETA = ALPA + 1 };\nenum E { Z = 4, A = zzz, B, C = yyy + www, D = sizeof(xxx) };\n"
+        "enum F : unsigned char { R = vvv, S };\nstruct S { int b : uuu; int c; unsigned d : WIDTHX; unsigned : ttt; };\n"
+        "struct T { char a; long : sss; char b; } t = { 1, 2 };\n"
+        "struct U { struct { long : rrr; int x; }; char y; } u = { { 1 }, 2 };\n"
+        "_Static_assert(B == 6 && D == 8 && S == 1 && BETA == 2, \"\");\n"
+        "_Static_assert(sizeof(struct S) == 16 && sizeof(struct T) == 24 && _Alignof(struct T) == 8 && sizeof(struct U) == 24, \"\");\n"
+        "int f(int n) { int unused; if (n = 2) return B; return C; }\n",
+        "enum { LIMIT = 8 };\nint f(int n)\n{\n    enum { A = zzz, B, C = LIMT + 1 };\n"
+        "    struct L { int b : yyy; int c; unsigned d : LIMTI; unsigned : xxx; } l = { 1, 2, 3 };\n"
+        "    if (n = 2) return B + C + l.c;\n    return sizeof(struct L);\n}\n"
+        "int g(int n) { int unused; if (n = 2) return 1; return 0; }\n",
         // Declarator errors in clang's words (#1447), each still ending the unit's checking: a function returning an array
         // or a function, a negative bound (named, and a type name's), an array of functions (by a typedef's name, with its
         // aka) or of an incomplete element (with the tag's forward declaration's note), and a variable of type void or of
