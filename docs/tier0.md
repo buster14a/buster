@@ -625,12 +625,18 @@ at the target's forms, by both of the checker's paths:
   qwords, `pshufd`, `shufps` of halves, pairs or three elements and one of dwords, unpacks, `pshuflw` and `pshufhw` of
   words, and with SSSE3 `pshufb` of each vector by one constant (its top bits flipped for the second), ORed; with AVX
   a lane's insertion and extraction, and with AVX2 broadcasts, each lane's unpacks and `vpermd` with `vpblendd`.
+  `__builtin_convertvector`'s integer extensions without SSE4.1 and truncations without AVX-512 are sequences too
+  (`check_vector_baseline_resize`, #1834): an extension unpacks the low elements with zeros, or with themselves and
+  shifts them right arithmetically (a qword's high dword is `psrad` by 31 of a copy); a truncation takes a qword's low dword
+  (`pshufd`, or of 32 bytes `vextractf128` and `shufps`), makes each element's kept bits its whole value by shifts and
+  packs them with saturation (`packssdw`, `packsswb`, `packuswb`), 32 bytes as their two halves. Conversions between 8-
+  or 16-bit integers and floats or doubles go through dwords by them.
 - What has no form at the target is refused by name: shuffles of bytes and words without SSSE3, their 32-byte ones
-  without AVX-512, minimum and maximum of elements SSE2 hasn't (and of qwords), absolute values without SSSE3, the
-  integers' extensions without SSE4.1 and truncations, and the scalars' IEEE maxima and minima (`maximum`, `minimum`
-  and their `_num` forms) without AVX, which need more records than a row has. A scalar's fused multiply-add without
-  FMA is the C library's `fmaf` or `fma`, its `ldexp` `ldexpf` or `ldexp` (of the exponent's low 32 bits), and its
-  roundings (ceil, floor, trunc, rint, nearbyint, roundeven and round) without SSE4.1 its `ceilf` ... `round`, as
+  without AVX-512, minimum and maximum of elements SSE2 hasn't (and of qwords), absolute values without SSSE3,
+  conversions of vectors wider than the target's registers, and the scalars' IEEE maxima and minima (`maximum`,
+  `minimum` and their `_num` forms) without AVX, which need more records than a row has. A scalar's fused multiply-add
+  without FMA is the C library's `fmaf` or `fma`, its `ldexp` `ldexpf` or `ldexp` (of the exponent's low 32 bits), and
+  its roundings (ceil, floor, trunc, rint, nearbyint, roundeven and round) without SSE4.1 its `ceilf` ... `round`, as
   clang's code calls them; with SSE4.1, `roundss` and `roundsd` (round's of the value plus the largest value below 0.5
   of its sign). copysign, canonicalize, maxnum and minnum are SSE's sequences, and with AVX the IEEE maxima and minima
   `vmaxss` or `vminss`, their sign bit fixed by x's and the NaNs' operands blended in (`vblendvps`,

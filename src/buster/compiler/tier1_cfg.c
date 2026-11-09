@@ -36,8 +36,12 @@
 //    successor (after its last instruction: a jump there must read no allocated value), at the successor's start when
 //    it has one predecessor, and otherwise on the split edge.
 // 5. Each split, a position inside a block where pieces of values' ranges meet, moves each of those values from its
-//    location just before the position to its new piece's, resolved as an edge's moves are (a value's slot is its
-//    own, so none goes slot to slot). They run at the position after its stores and before its reloads.
+//    location just before the position to its new piece's, resolved as an edge's moves are (a value keeps one slot,
+//    so none goes slot to slot). They run at the position after its stores and before its reloads.
+//
+// With slot_widths, a phi web's spilled values share a slot where no two of them are live at once
+// (tier1_cfg_share_slots, #1216), after the allocation and before the moves: an edge then moves nothing for an
+// operand already in its phi's slot.
 //
 // Location ids: class * 32 + register for registers, BUSTER_TIER1_CFG_SPILL + the value's spill id for its slot, and
 // BUSTER_TIER1_CFG_SPILL + spill_count + class for the class's temporary slot, which temp_slots marks where a move
@@ -79,6 +83,8 @@
 #define BUSTER_TIER1_CFG_BLOCK_INTERVALS (1u << 22)
 // Below this many intervals a binary search is at most three steps, so a partial column spends its budget on wider values.
 #define BUSTER_TIER1_CFG_LOOKUP_WIDE 8u
+// At most this many values share one slot (tier1_cfg_share_slots): each merge checks every pair of the two slots' values.
+#define BUSTER_TIER1_CFG_SLOT_WEB 32u
 
 typedef enum Tier1CfgPlacement
 {
@@ -123,6 +129,9 @@ struct Tier1CfgInput
     // doubles' phis, #141): it is placed as an edge with moves, at its predecessor's end, its successor's start or a
     // split's, though it has none of the allocation's.
     const uint8_t* edge_copies;
+    // Optional, per value: its slot's width. A phi and an operand of its class and width then share a slot where
+    // neither is live at the other's definition (tier1_cfg_share_slots, #1216); without it each value has its own.
+    const uint8_t* slot_widths;
     uint32_t block_count;
     uint32_t edge_count;
     uint32_t value_count;
@@ -476,22 +485,22 @@ static bool tier1_cfg_entry_location_oracle(const Tier1CfgAllocation* result, ui
 // Last spill end at each fragment, by value and layout position. The prefix includes earlier pieces of the
 // value's range, so a reload after a fixed-register split keeps the proof. Zero means no spill. This is a linear
 // pass over spilled values and their fragments; edge queries must not rescan fragments for each successor of a
-// dispatch block. A queried unchanged value has a spill destination, so its value is in spill_values. Register-only
-// values need no prefix. Column pointers stay local under -fno-strict-aliasing.
+// dispatch block. A queried unchanged value has a spill destination, so it has a spill id, which values sharing a slot
+// (tier1_cfg_share_slots) each have. Register-only values need no prefix. Column pointers stay local under
+// -fno-strict-aliasing.
 static void tier1_cfg_spill_prefix(const Tier1CfgAllocation* result, uint32_t* spill_ends)
 {
-    const uint32_t spills = result->allocation.spill_count;
-    const uint32_t* spill_values = result->allocation.spill_values;
+    const uint32_t values = result->intervals.value_count;
+    const uint32_t* spill_ids = result->allocation.spill_ids;
     const uint32_t* value_offsets = result->value_interval_offsets;
     const uint32_t* fragment_offsets = result->allocation.fragment_offsets;
     const uint32_t* ends = result->allocation.ends;
     const uint8_t* kinds = result->allocation.kinds;
-    for (uint32_t s = 0; s < spills; s += 1)
+    for (uint32_t v = 0; v < values; v += 1)
     {
-        const uint32_t v = spill_values[s];
         uint32_t end = 0;
-        const uint32_t first = fragment_offsets[value_offsets[v]];
-        const uint32_t last = fragment_offsets[value_offsets[v + 1]];
+        const uint32_t first = spill_ids[v] != UINT32_MAX ? fragment_offsets[value_offsets[v]] : 0;
+        const uint32_t last = spill_ids[v] != UINT32_MAX ? fragment_offsets[value_offsets[v + 1]] : 0;
         for (uint32_t f = first; f < last; f += 1)
         {
             end = kinds[f] == BUSTER_TIER1_ALLOCATE_SPILL ? ends[f] : end;
@@ -737,6 +746,7 @@ struct Tier1CfgPieces
     uint8_t* classes;
     uint8_t* remat;
     uint32_t* hints;
+    uint32_t* hint_intervals;
     uint32_t* split_positions;
     uint32_t* split_values;
     uint64_t count;
@@ -744,9 +754,9 @@ struct Tier1CfgPieces
     bool fill;
 };
 
-// A new interval of value v over [start, end), hinted to `hint`'s register; a split where it continues v's range in
-// its block.
-static void tier1_cfg_piece(Tier1CfgPieces* pieces, const Tier1CfgInput* input, uint32_t v, uint32_t start, uint32_t end, uint32_t hint, bool split)
+// A new interval of value v over [start, end), hinted to `hint`'s register, or first to the one interval `earlier`
+// started in; a split where it continues v's range in its block.
+static void tier1_cfg_piece(Tier1CfgPieces* pieces, const Tier1CfgInput* input, uint32_t v, uint32_t start, uint32_t end, uint32_t hint, uint32_t earlier, bool split)
 {
     if (pieces->fill)
     {
@@ -759,6 +769,7 @@ static void tier1_cfg_piece(Tier1CfgPieces* pieces, const Tier1CfgInput* input, 
         pieces->classes[i] = input->classes[v];
         pieces->remat[i] = input->rematerializable != 0 ? input->rematerializable[v] : 0;
         pieces->hints[i] = hint;
+        pieces->hint_intervals[i] = earlier;
         if (split)
         {
             pieces->split_positions[pieces->splits] = start;
@@ -861,6 +872,93 @@ static void tier1_cfg_install_lookup(const Tier1CfgInput* input, Arena* output, 
         }
     }
     arena_pop_to(scratch, scratch_mark);
+}
+
+static uint32_t tier1_cfg_slot_root(uint32_t* roots, uint32_t slot)
+{
+    while (roots[slot] != slot)
+    {
+        roots[slot] = roots[roots[slot]];
+        slot = roots[slot];
+    }
+    return slot;
+}
+
+// Phi webs' slots (#1216): with slot_widths, a phi and each operand of its class and width, both spilled somewhere, take
+// one slot where no value already sharing either one's is live at another's definition, up to
+// BUSTER_TIER1_CFG_SLOT_WEB values a slot. In SSA two values' ranges overlap exactly where one is live at the other's
+// definition, so those pairs are a shared slot's whole interference. A phi's slot is written by its edges' moves, which
+// read its operands in the same parallel move; a value live out of the predecessor and not into the phi's block is dead
+// along that edge, whose moves then run on it alone. A dispatch loop's values that rest in memory then keep one slot
+// around the loop, where each edge copied them from one value's slot to the next's. Slots are renumbered in order, each
+// keeping its first value in spill_values. False where scratch is short.
+static bool tier1_cfg_share_slots(const Tier1CfgInput* input, Tier1CfgAllocation* result, Arena* scratch)
+{
+    Tier1Allocation* allocation = &result->allocation;
+    const uint32_t spills = allocation->spill_count;
+    uint32_t* ids = allocation->spill_ids;
+    const uint64_t mark = scratch->length;
+    uint32_t* roots = arena_push_array(scratch, (uint64_t)spills + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* sizes = arena_push_array(scratch, (uint64_t)spills + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* heads = arena_push_array(scratch, (uint64_t)spills + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* tails = arena_push_array(scratch, (uint64_t)spills + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    // Each value's next in its slot's list.
+    uint32_t* nexts = arena_push_array(scratch, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    const bool ready = roots != 0 && sizes != 0 && heads != 0 && tails != 0 && nexts != 0;
+    for (uint32_t s = 0; ready && s < spills; s += 1)
+    {
+        const uint32_t v = allocation->spill_values[s];
+        roots[s] = s;
+        sizes[s] = 1;
+        heads[s] = v;
+        tails[s] = v;
+        nexts[v] = BUSTER_TIER1_CFG_NONE;
+    }
+    for (uint32_t k = 0; ready && k < input->phi_count; k += 1)
+    {
+        const uint32_t phi = input->phi_values[k];
+        for (uint32_t o = input->phi_operand_offsets[k]; ids[phi] != UINT32_MAX && o < input->phi_operand_offsets[k + 1]; o += 1)
+        {
+            const uint32_t operand = input->phi_operands[o];
+            const bool paired = operand != BUSTER_TIER1_CFG_NONE && ids[operand] != UINT32_MAX && input->classes[operand] == input->classes[phi] && input->slot_widths[operand] == input->slot_widths[phi];
+            const uint32_t into = paired ? tier1_cfg_slot_root(roots, ids[phi]) : 0;
+            const uint32_t from = paired ? tier1_cfg_slot_root(roots, ids[operand]) : 0;
+            bool apart = paired && into != from && sizes[into] + sizes[from] <= BUSTER_TIER1_CFG_SLOT_WEB;
+            for (uint32_t m = apart ? heads[into] : BUSTER_TIER1_CFG_NONE; apart && m != BUSTER_TIER1_CFG_NONE; m = nexts[m])
+            {
+                for (uint32_t n = heads[from]; apart && n != BUSTER_TIER1_CFG_NONE; n = nexts[n])
+                {
+                    apart = tier1_cfg_interval_at(result, m, input->definitions[n]) == BUSTER_TIER1_CFG_NONE && tier1_cfg_interval_at(result, n, input->definitions[m]) == BUSTER_TIER1_CFG_NONE;
+                }
+            }
+            if (apart)
+            {
+                roots[from] = into;
+                sizes[into] += sizes[from];
+                nexts[tails[into]] = heads[from];
+                tails[into] = tails[from];
+            }
+        }
+    }
+    // A root's new id in \`sizes\`, which it no longer needs: earlier roots take lower ids, so each write lands at or
+    // before the slot being read.
+    uint32_t count = 0;
+    for (uint32_t s = 0; ready && s < spills; s += 1)
+    {
+        if (roots[s] == s)
+        {
+            allocation->spill_values[count] = allocation->spill_values[s];
+            sizes[s] = count;
+            count += 1;
+        }
+    }
+    for (uint32_t v = 0; ready && v < input->value_count; v += 1)
+    {
+        ids[v] = ids[v] != UINT32_MAX ? sizes[tier1_cfg_slot_root(roots, ids[v])] : UINT32_MAX;
+    }
+    allocation->spill_count = ready ? count : spills;
+    arena_pop_to(scratch, mark);
+    return ready;
 }
 
 // Locations at block boundaries, in the order each block's live-in and live-out bits are walked. The edge pass reads
@@ -1117,8 +1215,10 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                 phi_hints[input->phi_values[k]] = hint;
             }
         }
-        // And a value a phi takes along a back edge (defined after it, in its loop), hinted to the phi, which has its
-        // register by then: where the operand takes it, the back edge moves nothing for it.
+        // And a value a phi takes along an edge, hinted to the phi where nothing else hints it: along a back edge, the
+        // phi has its register by then, from its definition, or (a loop's header laid out after its body, as a
+        // dispatch loop's join is) from its ranges in the body's blocks before. Where the operand takes it, the edge
+        // moves nothing for it; where the phi has no register yet, the hint is none.
         for (uint32_t b = 0; ready && b < blocks; b += 1)
         {
             for (uint32_t k = input->phi_offsets[b]; k < input->phi_offsets[b + 1]; k += 1)
@@ -1129,7 +1229,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                     const uint32_t operand = input->phi_operands[o];
                     if (operand != BUSTER_TIER1_CFG_NONE)
                     {
-                        phi_hints[operand] = phi_hints[operand] == BUSTER_TIER1_CFG_NONE && input->definitions[operand] > input->definitions[phi] ? phi : phi_hints[operand];
+                        phi_hints[operand] = phi_hints[operand] == BUSTER_TIER1_CFG_NONE ? phi : phi_hints[operand];
                     }
                 }
             }
@@ -1221,6 +1321,36 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
             }
             merges[b] = merge;
             entering[b] = count;
+        }
+        // Each block's first successor in layout; and, for a block no earlier block reaches (a dispatch loop's handler,
+        // its join laid out after them), the first of its predecessors' successors, a sibling whose entry it takes.
+        // The join, in turn, takes for its phis their places at its first successor's entry, which comes before it.
+        uint32_t* firsts = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+        uint32_t* siblings = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+        // Per block, the interval the value being built has at its entry, where entry_stamps says it is that value's.
+        uint32_t* entry_pieces = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+        uint32_t* entry_stamps = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+        ready = ready && firsts != 0 && siblings != 0 && entry_pieces != 0 && entry_stamps != 0;
+        for (uint32_t b = 0; ready && b < blocks; b += 1)
+        {
+            uint32_t first = BUSTER_TIER1_CFG_NONE;
+            for (uint32_t s = input->successor_offsets[b]; s < input->successor_offsets[b + 1]; s += 1)
+            {
+                first = input->successors[s] < first ? input->successors[s] : first;
+            }
+            firsts[b] = first;
+        }
+        for (uint32_t b = 0; ready && b < blocks; b += 1)
+        {
+            bool reached = false;
+            uint32_t sibling = BUSTER_TIER1_CFG_NONE;
+            for (uint32_t p = input->predecessor_offsets[b]; p < input->predecessor_offsets[b + 1]; p += 1)
+            {
+                const uint32_t predecessor = input->predecessors[p];
+                reached |= predecessor < b;
+                sibling = firsts[predecessor] < b && firsts[predecessor] < sibling ? firsts[predecessor] : sibling;
+            }
+            siblings[b] = reached ? BUSTER_TIER1_CFG_NONE : sibling;
         }
         // Each value's blocks, ascending: its definition's and those it is live into. Counted per value, with the values
         // each block defines, then filled block by block.
@@ -1356,11 +1486,16 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                 pieces.classes = ready ? arena_push(output, interval_count + 1, 1) : 0;
                 pieces.remat = ready ? arena_push(output, interval_count + 1, 1) : 0;
                 pieces.hints = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+                pieces.hint_intervals = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 use_offsets = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 pieces.split_positions = ready ? arena_push_array(scratch, split_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 pieces.split_values = ready ? arena_push_array(scratch, split_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-                ready = ready && pieces.starts != 0 && pieces.ends != 0 && pieces.values != 0 && pieces.allowed != 0 && pieces.classes != 0 && pieces.remat != 0 && pieces.hints != 0 && use_offsets != 0 && pieces.split_positions != 0 && pieces.split_values != 0;
+                ready = ready && pieces.starts != 0 && pieces.ends != 0 && pieces.values != 0 && pieces.allowed != 0 && pieces.classes != 0 && pieces.remat != 0 && pieces.hints != 0 && pieces.hint_intervals != 0 && use_offsets != 0 && pieces.split_positions != 0 && pieces.split_values != 0;
                 pieces.fill = ready;
+            }
+            if (ready)
+            {
+                memset(entry_stamps, 0, (uint64_t)blocks * sizeof(uint32_t));
             }
             for (uint32_t v = 0; ready && v < values; v += 1)
             {
@@ -1417,6 +1552,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                                 // A merged block continues the value's range from its layout predecessor, its previous
                                 // block. A range the value enters a block with keeps, where it can, the register it had
                                 // before; a phi takes its operand's; a piece after a split, the value's last.
+                                const bool entry = piece == 0 && from == input->block_starts[b];
                                 if (piece == 0 && !defined_here && merges[b] && pieces.count > first)
                                 {
                                     if (pieces.fill)
@@ -1426,7 +1562,15 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                                 }
                                 else
                                 {
-                                    tier1_cfg_piece(&pieces, input, v, from, to, piece == 0 && defined_here ? phi_hints[v] : v, piece != 0);
+                                    const uint32_t model = !entry ? BUSTER_TIER1_CFG_NONE : !defined_here ? siblings[b] : firsts[b] < b ? firsts[b] : BUSTER_TIER1_CFG_NONE;
+                                    const bool modeled = model != BUSTER_TIER1_CFG_NONE && entry_stamps[model] == v + 1 && (!pieces.fill || pieces.starts[entry_pieces[model]] < from);
+                                    const uint32_t earlier = modeled ? entry_pieces[model] : BUSTER_TIER1_CFG_NONE;
+                                    tier1_cfg_piece(&pieces, input, v, from, to, piece == 0 && defined_here ? phi_hints[v] : v, earlier, piece != 0);
+                                }
+                                if (entry)
+                                {
+                                    entry_stamps[b] = v + 1;
+                                    entry_pieces[b] = (uint32_t)pieces.count - 1;
                                 }
                                 piece += 1;
                             }
@@ -1466,6 +1610,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                     .allowed_registers = pieces.allowed,
                     .classes = pieces.classes,
                     .hint_values = pieces.hints,
+                    .hint_intervals = pieces.hint_intervals,
                     .rematerializable = input->rematerializable != 0 ? pieces.remat : 0,
                     .use_offsets = use_offsets,
                     .use_positions = input->use_positions,
@@ -1491,6 +1636,8 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
             if (ready)
             {
                 tier1_cfg_install_lookup(input, output, scratch, &candidate);
+                ready = input->slot_widths == 0 || candidate.allocation.spill_count < 2 || tier1_cfg_share_slots(input, &candidate, scratch);
+                error = ready ? error : TIER1_CFG_CAPACITY;
             }
         }
         // Splits by position, counted then filled: the values whose ranges are cut there, and the distinct positions.
@@ -1878,7 +2025,8 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
                 const uint32_t defined = input->definition_registers != 0 ? input->definition_registers[v] : 0;
                 const bool defines = allocation->starts[f] <= input->definitions[v] && input->definitions[v] < allocation->ends[f];
                 valid = valid && ((defined == 0 || !defines || (reg && ((defined >> allocation->registers[f]) & 1) != 0)) || tier1_cfg_fail(check, "a definition outside its registers", 0, v, position));
-                valid = valid && ((allocation->kinds[f] != BUSTER_TIER1_ALLOCATE_SPILL || (allocation->spill_count != 0 && allocation->spill_ids[v] < allocation->spill_count && allocation->spill_values[allocation->spill_ids[v]] == v)) || tier1_cfg_fail(check, "a spill without a slot", 0, v, position));
+                // A slot of the value's class: values of one class may share it (tier1_cfg_share_slots).
+                valid = valid && ((allocation->kinds[f] != BUSTER_TIER1_ALLOCATE_SPILL || (allocation->spill_count != 0 && allocation->spill_ids[v] < allocation->spill_count && input->classes[allocation->spill_values[allocation->spill_ids[v]]] == input->classes[v])) || tier1_cfg_fail(check, "a spill without a slot", 0, v, position));
                 valid = valid && ((allocation->kinds[f] != BUSTER_TIER1_ALLOCATE_REMATERIALIZE || (input->rematerializable != 0 && input->rematerializable[v] != 0)) || tier1_cfg_fail(check, "a rematerialization of a value without a recipe", 0, v, position));
                 position = allocation->ends[f];
             }
@@ -2228,6 +2376,7 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
                         if (step == 0 && current == BUSTER_TIER1_ALLOCATE_SPILL)
                         {
                             valid = (previous == BUSTER_TIER1_ALLOCATE_REGISTER && tier1_cfg_state_get(&state, class * 32 + allocation->registers[f - 1]) == v) || tier1_cfg_fail(check, "a store of a register that doesn't hold its value", b, v, q);
+                            valid = valid && (!tier1_cfg_clobbers(result, &state, slot, v, q) || tier1_cfg_fail(check, "a store over another live value", b, v, q));
                             tier1_cfg_state_set(&state, slot, v);
                         }
                         else if (step == 1 && current == BUSTER_TIER1_ALLOCATE_REGISTER)
