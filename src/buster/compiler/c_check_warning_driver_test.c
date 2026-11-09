@@ -1829,6 +1829,14 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
                   "# 4 \"odr_main.c\" 2\n_Static_assert(sizeof(struct S) == 5, \"first\");\nstruct S s;\n",
         .c23 = true,
     },
+    {
+        // A C23 parameter list's compatible redefinition of its own record (#1869) declares the first's type: the body
+        // reads both parameters and a pointer to it as one type, compiled on every path.
+        .name = "C23 parameter list redefines its record compatibly",
+        .source = "int g(struct T { int x; } a, struct T { int x; } b, struct T *c) { return a.x + b.x + c->x; }\n"
+                  "int n(struct W { int a; } *p, int (*q)(struct W { int a; } *r)) { return p->a + (q != 0); }\n",
+        .c23 = true,
+    },
 };
 
 static void check_test_driver_warning_fixtures(CheckTest* test, const char* clang, const char* executable, const char* directory,
