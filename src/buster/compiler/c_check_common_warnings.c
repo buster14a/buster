@@ -70,6 +70,8 @@ static CheckWarningSeverity check_common_severity(Preprocessor* pp, const Parser
     {
         severity = CHECK_WARNING_IGNORE;
     }
+    // None inside a direct call's full expression, of an interrupt service routine (#1447, check_driver_interrupt_kept).
+    severity = input->interrupt_range_count != 0 && !check_driver_interrupt_kept(input, token) ? CHECK_WARNING_IGNORE : severity;
     return severity;
 }
 
@@ -2051,23 +2053,38 @@ static uint32_t check_common_enum_cast_location(const Parser* parser, const Chec
     return operator || binary || role == PARSE_ROLE_POSTFIX ? token : role == PARSE_ROLE_MEMBER_OPERATOR && token + 1 < parser->tokens.count ? token + 1 : first;
 }
 
+// The target's typedef as written (clang's sugar) for the conversion node `conversion` (BUSTER_CHECK_NONE for none): an
+// assignment's left operand's, an initializer's declaration's (its `=` reads the specifiers back) or a return's
+// function's. Only a warning reads it: the function's search is a scan of the unit's bodies.
+static uint32_t check_common_enum_cast_spelling(const Parser* parser, const CheckInput* input, const CheckStream* stream, uint32_t conversion)
+{
+    const CheckGraph* graph = &input->graph;
+    const CheckOp op = conversion < graph->count ? graph->ops[conversion] : CHECK_OP_COUNT;
+    const uint32_t token = conversion < graph->count ? graph->tokens[conversion] : BUSTER_CHECK_NONE;
+    const bool returned = op == CHECK_OP_CONVERT && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_RETURN;
+    const uint32_t function = returned ? check_semantic_function(parser, input, token) : BUSTER_CHECK_NONE;
+    return op == CHECK_OP_ASSIGN ? check_common_operand_spelling(parser, input, graph, stream, graph->operand0[conversion]) :
+           op == CHECK_OP_INITIALIZE ? check_input_typedef_spelling(input, parser, token) :
+           function < input->token_count ? check_input_typedef_spelling(input, parser, function) : 0;
+}
+
 // Clang's conversion between different enumerations (#1447, CheckImplicitConversion's last case): `source`'s implicit
 // conversion to `target`, carried to a conditional's arms (its true arm's first, the unselected one's too: no runtime
 // pruning) and to a root comma's result, warns at each leaf whose type, an enumerator's taken as its enumeration
 // (check_common_enum_coerced), is a named enumeration other than the target's named one. It is a plain Diag, published
 // as the full expression completes.
 static __attribute__((noinline)) void check_common_enum_cast(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
-                                   CheckWarningSpelling* spell, uint32_t source, TypeId target, uint32_t target_spelling, const uint32_t* parents,
+                                   CheckWarningSpelling* spell, uint32_t source, TypeId target, uint32_t conversion, const uint32_t* parents,
                                    uint32_t at_once, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
     const TypeId target_enum = type_unqualified(type_strip_aligned(types, target));
     const bool target_named = type_kind(types, target_enum) == BUSTER_TYPE_KIND_ENUM;
-    const String8 target_name = target_named ? check_driver_warning_type(parser, pp, input, types, spell, scratch, target, target_spelling) : (String8){ 0 };
-    const String8 target_plain = target_named ? check_driver_warning_type(parser, pp, input, types, spell, scratch, target_enum, 0) : (String8){ 0 };
+    // (The target's names, rendered at its first leaf that converts another enumeration: most leaves are its own.)
+    bool rendered = false;
+    String8 target_name = { 0 };
     uint32_t work[16];
-    uint32_t count = target_named && target_name.length != 0 && memmem(target_plain.pointer, target_plain.length, "(unnamed", 8) == NULL &&
-                     source < graph->count ? 1u : 0u;
+    uint32_t count = target_named && source < graph->count ? 1u : 0u;
     const uint32_t root = check_common_enum_cast_unselected(graph, source);
     count = root < graph->count ? count : 0;
     work[0] = root;
@@ -2087,8 +2104,18 @@ static __attribute__((noinline)) void check_common_enum_cast(const Parser* parse
         const uint32_t leaf = op == CHECK_OP_COMMA && node == root ? check_common_enum_cast_unselected(graph, graph->operand1[node]) : node;
         const TypeId coerced = leaf < graph->count ? check_common_enum_coerced(input, stream, leaf) : 0;
         const TypeId leaf_enum = coerced != 0 ? type_unqualified(type_strip_aligned(types, coerced)) : 0;
-        if (leaf_enum != 0 && type_kind(types, leaf_enum) == BUSTER_TYPE_KIND_ENUM && leaf_enum != target_enum &&
-            check_common_enum_cast_reached(stream, types, leaf, target_enum))
+        const bool converts = leaf_enum != 0 && type_kind(types, leaf_enum) == BUSTER_TYPE_KIND_ENUM && leaf_enum != target_enum &&
+                              check_common_enum_cast_reached(stream, types, leaf, target_enum);
+        if (converts && !rendered)
+        {
+            rendered = true;
+            const uint32_t target_spelling = check_common_enum_cast_spelling(parser, input, stream, conversion);
+            target_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, target, target_spelling);
+            const String8 target_plain = check_driver_warning_type(parser, pp, input, types, spell, scratch, target_enum, 0);
+            // (An unnamed target warns of nothing.)
+            target_name = memmem(target_plain.pointer, target_plain.length, "(unnamed", 8) == NULL ? target_name : (String8){ 0 };
+        }
+        if (converts && target_name.length != 0)
         {
             const bool enumerator = coerced != check_stream_type(stream, leaf);
             const uint32_t spelling = enumerator ? 0 : check_common_operand_spelling(parser, input, graph, stream, leaf);
@@ -2131,7 +2158,7 @@ static void check_common_call_argument(CheckCommonEmission* emission, uint32_t i
             (conversion.flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
             check_common_enum_cast_candidate(emission->input->enum_names, emission->parser, graph, stream, emission->types, argument, conversion.type))
         {
-            check_common_enum_cast(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, argument, conversion.type, 0,
+            check_common_enum_cast(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, argument, conversion.type, BUSTER_CHECK_NONE,
                                    emission->parents, emission->at_once, emission->scratch);
         }
         if (argument < graph->count && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && !check_common_query_suppressed(graph, argument) &&
@@ -2197,16 +2224,8 @@ static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t 
         if (source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
             check_common_enum_cast_candidate(emission->input->enum_names, emission->parser, graph, stream, emission->types, source, check_stream_type(stream, node)))
         {
-            // The target's typedef as written (clang's sugar): an assignment's left operand's, an initializer's declaration's
-            // (its `=` reads the specifiers back) or a return's function's.
-            const uint32_t token = graph->tokens[node];
-            const bool returned = op == CHECK_OP_CONVERT && token < emission->parser->tokens.count && emission->parser->tokens.kinds[token] == PARSE_KIND_RETURN;
-            const uint32_t function = returned ? check_semantic_function(emission->parser, emission->input, token) : BUSTER_CHECK_NONE;
-            const uint32_t spelling = op == CHECK_OP_ASSIGN ? check_common_operand_spelling(emission->parser, emission->input, graph, stream, graph->operand0[node]) :
-                                      op == CHECK_OP_INITIALIZE ? check_input_typedef_spelling(emission->input, emission->parser, token) :
-                                      function < emission->input->token_count ? check_input_typedef_spelling(emission->input, emission->parser, function) : 0;
             check_common_enum_cast(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, source,
-                                   check_stream_type(stream, node), spelling, emission->parents, emission->at_once, emission->scratch);
+                                   check_stream_type(stream, node), node, emission->parents, emission->at_once, emission->scratch);
         }
         if (!bitfield && source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
             check_common_conversion_source(check_stream_constant_kind(stream, source), arms) &&
@@ -3439,7 +3458,21 @@ static TypeId check_common_enum_coerced(const CheckInput* input, const CheckStre
                                  input->declarations[token] : BUSTER_CHECK_NONE;
     if (declaration < input->token_count && input->declaration_kinds[declaration] == C_BINDING_ENUMERATOR)
     {
-        for (uint32_t i = 0; i < input->enum_definition_count; i += 1)
+        // The definitions are in their braces' order: the last that opens before the declaration holds it, but for one
+        // nested in an enumerator's value (`sizeof(enum I { x })`), where every definition is searched.
+        uint32_t low = 0;
+        uint32_t high = input->enum_definition_count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            const bool before = input->enum_definitions[middle].open < declaration;
+            low = before ? middle + 1 : low;
+            high = before ? high : middle;
+        }
+        const CheckInputEnumDefinition* nearest = low != 0 ? input->enum_definitions + low - 1 : NULL;
+        const bool held = nearest != NULL && declaration < nearest->close;
+        result = held && token > nearest->close ? nearest->type : result;
+        for (uint32_t i = 0; !held && i < input->enum_definition_count; i += 1)
         {
             const CheckInputEnumDefinition* definition = input->enum_definitions + i;
             result = definition->open < declaration && declaration < definition->close && token > definition->close ? definition->type : result;
@@ -4977,7 +5010,7 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
             const bool atomic = (part->conversion.flags & BUSTER_CHECK_CONVERT_ATOMIC) != 0;
             if (!atomic && check_common_enum_cast_candidate(input->enum_names, parser, graph, stream, emission->types, root, part->conversion.type))
             {
-                check_common_enum_cast(parser, pp, input, stream, emission->types, emission->spell, root, part->conversion.type, 0, emission->parents,
+                check_common_enum_cast(parser, pp, input, stream, emission->types, emission->spell, root, part->conversion.type, BUSTER_CHECK_NONE, emission->parents,
                                        emission->at_once, emission->scratch);
             }
             if (!atomic && !check_common_query_suppressed(graph, root) && check_common_initializer_literal(parser, input, stream, emission->types, part))

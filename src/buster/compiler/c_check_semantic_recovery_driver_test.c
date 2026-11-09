@@ -187,6 +187,26 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int visible_plain;\n"
         "void declare_visible_plain(void) { extern int visible_plain; (void)visible_plain; }\n_Thread_local int visible_plain;\n"
         "int *use_block_tls(void) { return &block_tls; }\nint *use_block_plain(void) { return &block_plain; }\n",
+        // A TLS-only mismatch keeps the declaration in the chain (#1786): the next declaration is compared with it, its
+        // storage its own, and a type conflict notes it. Both directions, tentative and extern declarations.
+        "_Thread_local int kept_tls;\nint kept_tls;\nint kept_tls;\n"
+        "_Thread_local int kept_type;\nint kept_type;\nfloat kept_type;\n"
+        "int kept_plain;\n_Thread_local int kept_plain;\nfloat kept_plain;\n"
+        "extern _Thread_local int kept_extern;\nextern int kept_extern;\nextern float kept_extern;\n"
+        "extern int kept_back;\nextern _Thread_local int kept_back;\nextern _Thread_local int kept_back;\nextern int kept_back;\n"
+        "int use_kept(void) { return kept_tls + kept_type + kept_plain + kept_extern + kept_back; }\n",
+        // Its redefinition's error follows the TLS one, noted at the first definition; a later declaration of the chain
+        // sees the kept one, and a definition after it is the redefinition alone.
+        "_Thread_local int defined_tls = 1;\nint defined_tls = 2;\n"
+        "int defined_plain = 1;\n_Thread_local int defined_plain = 2;\n"
+        "_Thread_local int defined_later = 1;\nint defined_later;\nint defined_later;\nint defined_later = 3;\n"
+        "int defined_extern = 1;\nextern _Thread_local int defined_extern;\nextern _Thread_local int defined_extern;\n",
+        // Block externs: within one block, across blocks, and a file-scope declaration after another block's.
+        "void block_chain(void) { extern _Thread_local int chained; extern int chained; extern float chained; }\n"
+        "void block_first(void) { extern _Thread_local int across; }\n"
+        "void block_second(void) { extern int across; extern float across; }\n"
+        "void block_file(void) { extern _Thread_local int filed; }\nint filed;\nint filed;\nfloat filed;\n"
+        "int use_filed(void) { return filed; }\n",
         // Every declaration's failed initializer, not only the first's (#1447, phase 2): arrays, records and pointers, at
         // file and block scope, a static object's braced conversion, and an error of the walk's between them.
         "struct P { int x; int y; };\nint a[2] = 5;\nstruct P p = { .z = 1 };\nvoid f(void)\n{\n    int b[2] = 6;\n    struct P q = 3;\n"
@@ -444,6 +464,16 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "struct X { int a; } __attribute__((packed));\n"
         "struct X { int a; } __attribute__((packed));\n"
         "int x = undeclared;\n",
+        // A C23 parameter list's redefinition of its own record (#1869) is compared as any scope's: incompatible ones in a
+        // prototype, a block's prototype and a union, a compatible one declaring the first's type, and a nested
+        // prototype's definition, which is a new scope's and no redefinition.
+        "/* gnu23 only */\n"
+        "int f(struct S { int x; } a, struct S { int y; } b);\n"
+        "int g(struct T { int x; } a, struct T { int x; } b, struct T *c) { return a.x + b.x + c->x; }\n"
+        "int h(union U { int i; } a, union U { int i; float f; } b);\n"
+        "void k(void) { int m(struct V { int a; } *p, struct V { long a; } *q); }\n"
+        "int n(struct W { int a; } *p, int (*q)(struct W { int a; } *r));\n"
+        "int bad = undeclared;\n",
         // Clang's C23 comparison of members' types (review on #1813): any two named records are compatible, a typedef's
         // unnamed one too, and the unnamed records written in the members are compared member by member, through
         // pointers, arrays, atomics and functions, after the definition's own members.
@@ -520,6 +550,38 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum A { X = 5 };\nenum B { Y = 3, X, Z };\n_Static_assert(Z == 0, \"z\");\n"
         "enum C : long { P };\nenum D : char { Q = 7, P, R };\n_Static_assert(R == 0 && sizeof(R) == 1, \"r\");\n"
         "enum E { M = -1 };\nenum F { M };\n_Static_assert(sizeof(enum F) == 4 && (enum F)-1 > 0, \"u\");\nint x = undeclared;\n",
+        // Specifiers that don't combine, which clang's DeclSpec drops, the declaration staying valid (#1447): a second type,
+        // width or sign is dropped at its error; a sign or a width the type doesn't take drops the sign, or the type
+        // (`long float` is a long). The declarations' types show in later conversions, and the bodies' warnings follow.
+        "long long long a1;\nint float a2;\nfloat int a3;\nunsigned float a4;\nlong float a5;\nshort double a6;\nlong _Bool a7;\n"
+        "signed unsigned a8;\nchar int a9;\nlong long double a10;\ndouble float a11;\n"
+        "int use(void) { char *p = &a1; p = &a2; p = &a3; p = &a4; p = &a5; p = &a6; p = &a7; p = &a8; p = &a10; p = &a11; return a9; }\n"
+        "static int g(int a) { int unused; if (a = 1) return 2; return 3; }\n"
+        "int h(void) { int z; return z; }\n",
+        // The same in a body, a parameter, a cast, sizeof's type name and a member, and a repeated specifier's warning.
+        "int f(long long long p, int float q) { short long z = 1; return (int)(unsigned signed)p + q + z; }\n"
+        "int g(void) { int unused; char int c = 1; if (c = 2) return 1; return sizeof(long float); }\n"
+        "struct T { long long long m; int float n; } t;\nlong double long ld;\n_Complex _Complex double cd;\n"
+        "static int h(void) { int u; return 0; }\n",
+        // A _Complex the type doesn't take, dropped at the list's end, before and after the type, and the declarations after
+        // it checked; a _BitInt named as clang names it in a combination's error (review on #1820).
+        "_Complex _Bool cb;\nint float y;\n_Bool _Complex cb2;\nint float z;\n_BitInt(8) int b;\n",
+        // A _Complex after a type of no keyword, and in the operand readers' type names: a typeof's, an _Atomic's and an
+        // enum's base (re-review on #1820), each dropped as clang drops it, the unit checked after it.
+        "typeof(_Bool) _Complex x1;\nint a1 = undeclI;\n_BitInt(8) _Complex x2;\n_Atomic(int) _Complex x3;\nstruct SI;\nstruct SI _Complex x4;\n"
+        "enum EI;\nenum EI _Complex x5;\ntypeof(_Complex _Bool) x6;\n_Atomic(_Complex _Bool) x7;\nenum EU : _Complex _Bool { EA9 };\n"
+        "_Static_assert(sizeof(x6) == 1 && sizeof(enum EU) == 1, \"b\");\nint a2 = undeclJ;\n",
+        // A repeated _Complex, whose warning clang gives before the list's end's error; every _Complex is dropped.
+        "_Complex _Complex _Bool y1;\nint float y2;\n_Complex _Bool _Complex y3;\nint float y4;\n_BitInt(8) _Complex z;\n"
+        "int plain = undeclared_var;\nstruct S;\n_Complex _Complex struct S y5;\nint float y6;\nenum E5 : _Complex _Bool { A5 };\n",
+        // The operand readers in a body, a cast, sizeof, a parameter and a member, and a list's end's errors after its
+        // repeated specifiers' warnings. (No error that stops the reader: after a parameter's recovered error, one drops
+        // the later bodies' warnings, #1835.)
+        "int f(typeof(_Complex _Bool) p, _Atomic(int float) q) { typeof(_Complex _Bool) a = 1; _Atomic(long float) b = 2;\n"
+        "  return (int)(typeof(int float))a + sizeof(typeof(unsigned float)) + p + q + b; }\n"
+        "struct T { typeof(long float) m; _Atomic(_Complex _Bool) n; } t;\nenum E1 : long float { A1 };\nenum E3 : int char { A3 };\n"
+        "const _Complex const _Bool c1;\nvolatile long volatile float c2;\n_Complex long _Bool c3;\n"
+        "typeof(typeof(_Complex _Bool) _Complex) c4;\nstatic int g(void) { int u; return 0; }\n",
         // An extern declaration of type void, which clang takes (#1447): its address, sizeof, a discarded use and a cast to
         // void are quiet, a block's extern too; reading its value is the error. A dereference's or subscript's of a void
         // pointer still warns, and a void value in a comma's, conditional's or selection's operand is quiet.
@@ -564,6 +626,21 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // Three thousand names and fifty-three typos, written out where the fixture is (check_test_typo_stress): each
         // search reads the visible names once (c_check_typo.c).
         "/* typo stress */\n",
+        // An undeclared name in an enumerator's value or a bit-field's width (#1447, check_constant_name): clang's error at
+        // each name, with its typo's correction, which the value takes. With none, the enumerator takes the value it would
+        // have had without one (B, D, S), and the member isn't a bit-field: an unnamed one stays an unnamed member of its
+        // whole type (T's and U's `long`). The unit's later declarations and warnings stay; at block scope too.
+        "enum { WIDTH = 3, ALPHA = 1, BETA = ALPA + 1 };\nenum E { Z = 4, A = zzz, B, C = yyy + www, D = sizeof(xxx) };\n"
+        "enum F : unsigned char { R = vvv, S };\nstruct S { int b : uuu; int c; unsigned d : WIDTHX; unsigned : ttt; };\n"
+        "struct T { char a; long : sss; char b; } t = { 1, 2 };\n"
+        "struct U { struct { long : rrr; int x; }; char y; } u = { { 1 }, 2 };\n"
+        "_Static_assert(B == 6 && D == 8 && S == 1 && BETA == 2, \"\");\n"
+        "_Static_assert(sizeof(struct S) == 16 && sizeof(struct T) == 24 && _Alignof(struct T) == 8 && sizeof(struct U) == 24, \"\");\n"
+        "int f(int n) { int unused; if (n = 2) return B; return C; }\n",
+        "enum { LIMIT = 8 };\nint f(int n)\n{\n    enum { A = zzz, B, C = LIMT + 1 };\n"
+        "    struct L { int b : yyy; int c; unsigned d : LIMTI; unsigned : xxx; } l = { 1, 2, 3 };\n"
+        "    if (n = 2) return B + C + l.c;\n    return sizeof(struct L);\n}\n"
+        "int g(int n) { int unused; if (n = 2) return 1; return 0; }\n",
         // Declarator errors in clang's words (#1447), each still ending the unit's checking: a function returning an array
         // or a function, a negative bound (named, and a type name's), an array of functions (by a typedef's name, with its
         // aka) or of an incomplete element (with the tag's forward declaration's note), and a variable of type void or of
