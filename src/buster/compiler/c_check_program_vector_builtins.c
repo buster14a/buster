@@ -1548,6 +1548,8 @@ static const char* check_vector_baseline_scalar_row(const X86Target* target, CBu
     }
     else
     {
+        // check_vector_floating_scalar_row's AVX-512F row's twin, record by record (VPTERNLOGD's 224 and 248 as VPOR and
+        // VPAND, its k1 blends as VBLENDVPS): a change to either's NaN handling changes both.
         const bool number = builtin == CBUILTIN_ELEMENTWISE_MAXIMUMNUM || builtin == CBUILTIN_ELEMENTWISE_MINIMUMNUM;
         const uint32_t blend = d ? X86_FORM_VBLENDVPD_X_X_XM128_X : X86_FORM_VBLENDVPS_X_X_XM128_X;
         check_vector_constant(row, constants, maximum ? sign - 1 : sign, d ? 8 : 4, class, 0);
