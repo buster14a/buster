@@ -86,6 +86,9 @@ struct CheckInitializer
     // conditional or comma may carry one (#1447, check_init_changed_integer): the other plans the common warnings read, for
     // their constant conversions.
     bool changed_integers;
+    // A value part whose target is an enumeration (#1447): the plans the common warnings read for a conversion between
+    // enumerations (check_common_enum_cast).
+    bool enum_values;
 };
 
 static __attribute__((unused)) bool check_initializer_run(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
@@ -630,6 +633,8 @@ static void check_init_append(CheckInitWalker* walker, const CheckInitPart* part
             walker->result->floating_values |= part->kind == CHECK_INIT_VALUE && walker->stream != NULL && part->node < walker->stream->count &&
                                                check_action_kind(walker->types, check_stream_type(walker->stream, part->node)) == BUSTER_TYPE_KIND_FLOATING;
             walker->result->changed_integers |= check_init_changed_integer(walker, part);
+            const uint8_t target_kind = part->kind == CHECK_INIT_VALUE ? type_kind(walker->types, part->conversion.type) : BUSTER_TYPE_KIND_VOID;
+            walker->result->enum_values |= target_kind == BUSTER_TYPE_KIND_ENUM || target_kind == BUSTER_TYPE_KIND_ALIGNED;
         }
     }
 }

@@ -289,7 +289,9 @@ rather than caller-saved ones that every call saves and restores around itself
 (`tier1_emit_cfg_callee`: from the first allocation's intervals, each value whose
 interval covers a call is allocated again with the callee-saved registers alone,
 every other with the caller-saved ones; the first allocation stands where the
-second fails). On speedtest1 that halved the saves around calls (41,464 to 20,710
+second fails). A phi and its operands are one web there (#1216): where any of
+them crosses a call, all take the callee-saved registers, so that a loop's back
+edge can keep the phi's register rather than move between the two sets. On speedtest1 that halved the saves around calls (41,464 to 20,710
 records) and the spills' stores and reloads (15,028 to 7,550). A constant, a
 symbol's address or a frame object's address, or a copy of one, is recomputed
 where the allocator takes it out of a register, rather than stored and reloaded
@@ -366,6 +368,10 @@ but its naked one. The scalar ones, BMI2's
 instruction of selection's `TIER1_RULE_INTRINSIC`, and so are the C bit builtins'
 rows (#1374: `tzcnt`, `bsf`, `lzcnt`, `bsr`, `popcnt` and `bswap`) and the signed
 overflow builtins' (#1385: `saddo`, `ssubo` and `smulo`, the operation and `seto`).
+The masked moves' selects of the x86 builtins (every masked operation's merge)
+are the IR's `vselect` and their undefined vectors its zero vector (#1840, [the
+SIMD IR guide](ir-simd.md)'s "Selects and undefined vectors"), which Tier 1
+selects as `vpblendm` and `vpxor`.
 The x86 builtins' casts between vector widths, lane inserts and masked lane
 extracts are the IR's `extract`, `widen` and `insert` intrinsics (#1840, [the
 SIMD IR guide](ir-simd.md)'s "Width changes"), each one EVEX instruction of
@@ -607,6 +613,15 @@ None of the existing passes that `--tier1` doesn't run measures as a gain:
 - SROA: [the scalar-replacement guide](ir-scalar-replacement.md)'s "In `--tier1`".
 - The inliner: [the inlining guide](ir-inlining.md)'s "Reach in `--tier1`".
 
+Two further directions are not pursued now, by the owner's decision on #1447
+([comment 6736401463](https://github.com/buster14a/buster/issues/1447#issuecomment-6736401463),
+item 4, closing #1450's last open items):
+- profile-guided code placement: blocks keep the static fall-through order of
+  `ir_optimize_layout.c` ([the command guide](commands/tier1.md)'s "Block
+  placement and critical-edge fall-through");
+- shrink-wrapping, which #1625 measured as a bound of about 1% of speedtest1's
+  executed ops ([the frame guide](tier1-frame.md)'s "Shrink-wrapping").
+
 What did pay is a slot per depth and type for the typed stream's values that
 cross blocks ([the IR guide](ir.md)'s adapter): 1.2% of speedtest1's
 instructions and 1.3% of Lua's. On instructions, `--tier1` is now below clang
@@ -629,6 +644,14 @@ on Lua, before #1117 put `sqlite3VdbeExec` and `luaV_execute` into Tier 1 and
 before the depth slots above. The 9700X job runs the measurement on its daily
 and dispatched runs, and on pull requests that change Tier 1's input or
 pipeline.
+
+#1216 keeps dispatch loops' loop-carried values in registers and their phi
+webs in one slot ([the allocation guide](tier1-allocation.md)). From its merge
+base `6a021550e`, the tagged edge spills, reloads and moves fell from 469 M to
+226 M on speedtest1 and from 1,013 M to 477 M on Lua (51.9% and 52.9%). On the
+9700X, user cycles fell from 974 M to 928 M and from 1,322 M to 1,219 M
+(100 ln(head / base) of -4.91 and -8.25), head faster at every layout
+([the record](https://github.com/buster14a/buster-performance/tree/c8cc523034dd4035161800a4d0940e287a8975dc/docs/measurements/tier1-loop-carried-1216-2026-11-09)).
 
 ## Current integration boundary
 
