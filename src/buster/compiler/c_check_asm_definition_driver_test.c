@@ -190,6 +190,17 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
           "__asm__(\".pushsection custom_table,\\\"a\\\"\\n.globl custom_entry\\ncustom_entry: .long 3\\n.popsection\");\n"
           "extern const int custom_entry;\n"
           "int main(void) { printf(\"%d %s %s %d\\n\", order, names[0], names[1], custom_entry); order = 5; return 0; }\n" },
+        // File-scope CFI (#1848): a function of its own frame, which C calls and which calls C back, whose unwind entry
+        // lets glibc's backtrace walk through it to main.
+        { "file-scope assembly's CFI", "inner main",
+          "#include <execinfo.h>\n"
+          "#include <stdio.h>\n"
+          "int trampoline(int);\n"
+          "int inner(int n) { void* frames[16]; return n + backtrace(frames, 16); }\n"
+          "__asm__(\".text\\n.globl trampoline\\n.type trampoline,@function\\ntrampoline:\\n.cfi_startproc\\n\\tpushq %rbx\\n"
+          "\\t.cfi_def_cfa_offset 16\\n\\t.cfi_offset %rbx, -16\\n\\tmovl %edi, %ebx\\n\\tcall inner\\n\\taddl %ebx, %eax\\n\\tpopq %rbx\\n"
+          "\\t.cfi_def_cfa_offset 8\\n\\tret\\n.cfi_endproc\\n.size trampoline, .-trampoline\");\n"
+          "int main(void) { printf(\"%d\\n\", trampoline(100)); return 0; }\n" },
     };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
     {

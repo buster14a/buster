@@ -529,8 +529,8 @@ does, each rule checked against clang's answers on probes of it:
   `asm` first (`check_program_asm_plan_file`), each in its section in `-c`'s
   object; its labels and references join the unit's symbols as a template's do
   (#1848), and its sections are any the assembler makes (notes, init and fini
-  arrays, merged strings, custom flags). Refused by name: a template the
-  assembler doesn't take, CFI, and section groups.
+  arrays, merged strings, custom flags, CFI's frames). Refused by name: a
+  template the assembler doesn't take, and section groups.
 - **`#pragma clang optimize`** (`c_check_optimize_input.c`), whose `off` and
   `on` `main.c` puts around the checker unit's own tests (#681): one
   identifier, `on` or `off`, read as clang's `PragmaOptimizeHandler` reads it,
