@@ -1744,15 +1744,17 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 8,
     },
     {
-        // Files that line markers enter (#1954): each diagnostic in one, the preprocessor's and the checker's, prints clang's
-        // "In file included from" chain of the markers' lines when it differs from the last one's, nested, after a flag 2
-        // returns, and for a system header's (silent here) and a user file's entered from the same presumed line.
+        // Files that line markers enter (#1954): each diagnostic in one prints clang's "In file included from" chain of the
+        // markers' lines when it differs from the last one's, nested, after a flag 2 returns, and for a system header's
+        // (silent here) and a user file's entered from the same presumed line; the main file's, the preprocessor's error
+        // after them, none.
         .name = "include stacks of files line markers enter",
         .source = "# 1 \"lm_main.c\"\n# 1 \"outer.h\" 1\n# 1 \"inner.h\" 1\nint f(void) { return 1 << 40; }\n"
-                  "int f2(void) { return 1 << 41; }\n# 2 \"outer.h\" 2\n#warning in outer\nint g(void) { return 1 << 33; }\n"
+                  "int f2(void) { return 1 << 41; }\n# 2 \"outer.h\" 2\nint g(void) { return 1 << 33; }\n"
                   "# 3 \"lm_main.c\" 2\nint h(void) { return 1 << 34; }\n# 1 \"again.h\" 1 3 4\nint k(void) { return 1 << 35; }\n"
-                  "# 4 \"lm_main.c\" 2\n# 1 \"user.h\" 1\nint m(void) { return 1 << 36; }\n",
-        .warnings = 6,
+                  "# 4 \"lm_main.c\" 2\n# 1 \"user.h\" 1\nint m(void) { return 1 << 36; }\n# 5 \"lm_main.c\" 2\n#error done\n",
+        .warnings = 5,
+        .errors = 1,
     },
     {
         // A tag a prototype's list declares first (#1447, clang's ActOnTag): -Wvisibility at its name (an unnamed enum's
