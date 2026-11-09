@@ -112,17 +112,23 @@
 
 // The external tools the cross-checks spawn, probed once per command (#1129), and their tests, for the test-tool command.
 // Every test file after this point sees its types and functions.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) || BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) || BUSTER_IN_UNIT(BUSTER_UNIT_X86) || BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) || BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/test_tool.c"
+#endif
 
 // The lexer benchmark is a separate translation unit, linked into the compiler executable.
 int run_c_lexer_benchmark(int argc, char** argv);
 
 // The lexer tests, for the test-lexer command.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
 #include "buster/compiler/c_lexer_test.c"
+#endif
 
 // The x86-64 encoder and its tests, for the test-x86-encoder command. Its benchmark is another translation unit.
 #include "buster/compiler/x86_64_encoder.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) || BUSTER_IN_UNIT(BUSTER_UNIT_X86) || BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) || BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) || BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/x86_64_encoder_test.c"
+#endif
 #include "buster/compiler/x86_zen5.c"
 #include "buster/compiler/x86_64_disassembler.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_X86)
@@ -135,7 +141,9 @@ int run_x86_encoder_benchmark(int argc, char** argv);
 // The lane base layer (groups of threads, and the arenas they allocate from) and its tests, for the test-lanes command.
 // Its benchmark is another translation unit.
 #include "buster/compiler/lane.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) || BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
 #include "buster/compiler/lane_test.c"
+#endif
 int run_lane_benchmark(int argc, char** argv);
 
 #include "buster/compiler/diagnostic.c"
@@ -202,8 +210,8 @@ int run_tier1_allocate_benchmark(int argc, char** argv);
 #endif
 
 // External randomized C compiler comparison and its independent process/accounting fixtures.
-#include "buster/compiler/differential.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+#include "buster/compiler/differential.c"
 #include "buster/compiler/differential_test.c"
 #endif
 
@@ -279,15 +287,21 @@ int run_parser_benchmark(int argc, char** argv);
 // programs generated in it, and their tests, for the test-link command.
 #include "buster/compiler/link.c"
 #include "buster/compiler/link_program.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) || BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
 #include "buster/compiler/link_test.c"
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) || BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
 #include "buster/compiler/link_order_test.c"
+#endif
 
 // The object writer (ET_REL objects from the link representation, for -c) and its tests, for the test-object-writer
 // command. Its benchmark is another translation unit.
 #include "buster/compiler/object_writer.c"
 #include "buster/compiler/object_writer_test.c"
 #include "buster/compiler/debug.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/debug_test.c"
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/debug_benchmark.c"
 #endif
@@ -297,36 +311,52 @@ int run_object_writer_benchmark(int argc, char** argv);
 // the C runtime's files, found and imported with them, and their tests, for the test-import command.
 #include "buster/compiler/import.c"
 #include "buster/compiler/runtime.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) || BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
 #include "buster/compiler/import_test.c"
+#endif
 int run_import_benchmark(int argc, char** argv);
 
 // Binding: the C runtime joined to a program's link and each name bound, and its tests, for the test-bind command. Its
 // benchmark is another translation unit.
 #include "buster/compiler/bind.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) || BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
 #include "buster/compiler/bind_test.c"
+#endif
 int run_bind_benchmark(int argc, char** argv);
 
 // The direct path's executables (layout, patching, the build ID and the output file) and their tests, for the
 // test-executable command. Its benchmark is another translation unit.
 #include "buster/compiler/executable.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) || BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) || BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/executable_test.c"
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/debug_executable_test.c"
+#endif
 // The object writer's DWARF checks (ObjectOptions.debug), which test-object-writer runs: they need debug.c's units and
 // the executable tests' ELF reading.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK)
 #include "buster/compiler/object_debug_test.c"
+#endif
 int run_executable_benchmark(int argc, char** argv);
 
 // A dynamic PIE's inputs from the runtime and binding, and the dynamic PIE's tests, for the test-dynamic command.
 #include "buster/compiler/dynamic.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) || BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/dynamic_test.c"
+#endif
 
 // The static executables' tests with the C runtime, for the test-static command.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) || BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
 #include "buster/compiler/static_test.c"
+#endif
 
 // The runtime snapshot (the imported runtime kept in the cache directory) and its tests, for the test-snapshot command.
 // Its benchmark is another translation unit.
 #include "buster/compiler/snapshot.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/snapshot_test.c"
+#endif
 int run_snapshot_benchmark(int argc, char** argv);
 
 // Foreign inputs (other compilers' objects, archives, shared libraries and scripts: opened, parsed and resolved, with
@@ -367,7 +397,9 @@ int run_floors_input_tests(void);
 // generate, and its tests, for the test-branch-sizing command. Its benchmark is another translation unit.
 #include "buster/compiler/branch_sizing.c"
 #include "buster/compiler/branch_sizing_generate.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) || BUSTER_IN_UNIT(BUSTER_UNIT_X86)
 #include "buster/compiler/branch_sizing_test.c"
+#endif
 int run_branch_sizing_benchmark(int argc, char** argv);
 
 // What the x86 forms a code generator emits mean (their effects, the immediate's contract, the operand-resolved effects
@@ -393,8 +425,12 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 #include "buster/compiler/x86_semantics_test.c"
 // The Zen 5 model's harness and tests (#181), whose fixtures come from the form table and the effects tables, and
 // which run only the forms the host's target allows.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_X86)
 #include "buster/compiler/x86_zen5_measure.c"
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_X86)
 #include "buster/compiler/x86_zen5_test.c"
+#endif
 int run_x86_semantics_benchmark(int argc, char** argv);
 // The compiler's code of the headers' x86 intrinsics against clang -O0's, for the test-x86-intrinsics command: the objects
 // decoded by the disassembler and followed by the effects above.
@@ -415,12 +451,16 @@ int run_tier1_schedule_benchmark(int argc, char** argv);
 #include "buster/compiler/c_builtin_intrinsic_types.c"
 #include "buster/compiler/c_builtin_intrinsic_features.c"
 #include "buster/compiler/c_builtin_intrinsic_catalog.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) || BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_types_test.c"
+#endif
 int run_type_benchmark(int argc, char** argv);
 
 // Immutable source-position histories retain declaration visibility for deferred body consumers.
 #include "buster/compiler/c_environment.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_environment_test.c"
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
 #include "buster/compiler/c_environment_benchmark.c"
 #endif
@@ -445,7 +485,9 @@ __asm__(".section .text.buster_checker,\"ax\",@progbits\n\t.p2align 12\n\t.skip 
 #pragma clang section text = ""
 
 #include "buster/compiler/c_builtin.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS)
 #include "buster/compiler/c_builtin_test.c"
+#endif
 #pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_check_actions.c"
 #pragma clang section text = ""
@@ -483,7 +525,9 @@ int run_builtin_benchmark(int argc, char** argv);
 // The System V calling convention (each type's classes, and each call's argument locations) and its tests, for the
 // test-calling-convention command. Its benchmark is another translation unit.
 #include "buster/compiler/calling_convention.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/calling_convention_test.c"
+#endif
 int run_calling_convention_benchmark(int argc, char** argv);
 
 // The tier-neutral source and frame events and their resolution against a final layout (#1056), which the frame
@@ -511,7 +555,9 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 // The tier-neutral emitted function (#1056): Tier 0's adapter, the frame events' resolution and their verifier.
 #include "buster/compiler/emitted_code.c"
 #include "buster/compiler/tier0_generate.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier0_test.c"
+#endif
 #include "buster/compiler/c_builtin_lower.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/c_builtin_lower_test.c"
@@ -730,7 +776,12 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_benchmark.c"
 #include "buster/compiler/ir_lower_benchmark.c"
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/ir_source_test.c"
+#else
+// Keep the production pass at its first include position without the source-test preparation interface.
+#include "buster/compiler/ir_dataflow.c"
+#endif
 #include "buster/compiler/tier1_cfg_ir.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_cfg_source_test.c"
@@ -756,7 +807,12 @@ int run_backend_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_inline_test.c"
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_test.c"
+#else
+// The production pass was first included by the test root here. Keep that position without its fixture dependency.
+#include "buster/compiler/ir_if_convert.c"
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_benchmark.c"
 #endif
@@ -774,7 +830,11 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_optimize_inline_simd_test.c"
 #endif
 // #175's first #139 pass tests in the IR's text form: hand-written before/after pairs under tests/ir/optimize.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_text_test.c"
+#else
+#include "buster/compiler/ir_optimize_verified.c"
+#endif
 // #866's GVN variants on real source's lowered IR are part of #131's IR benchmark, which needs GVN's definitions.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_source_benchmark.c"
@@ -784,7 +844,9 @@ int run_backend_benchmark(int argc, char** argv);
 
 // Selected effective uses feed liveness, allocation and the bounded native function consumer.
 #include "buster/compiler/tier1_select.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/tier1_select_test.c"
+#endif
 #include "buster/compiler/tier1_liveness.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_liveness_test.c"
@@ -812,7 +874,9 @@ int run_backend_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_pipeline_benchmark.c"
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/tier1_select_source_benchmark.c"
+#endif
 // #939: the certificate of the CFG consumer's code on real C, decoded from its records, beside the emission it certifies:
 // the checker's unit's command, as its corpus's preparation's home.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
@@ -904,7 +968,9 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 
 // The c-testsuite harness (#145), for the test-c-testsuite command: each program compiled and linked by this
 // executable, run and compared with its expected output.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/c_testsuite.c"
+#endif
 
 // #134's test-ssa-source: every function of real and generated C promoted by both of ssa_ir.c's paths with the SSA
 // verifier's checks, and each program with a main run by the IR's interpreter in its three forms (all locals in memory,
@@ -968,7 +1034,6 @@ static __attribute__((unused)) void main_checker_test_interfaces(void)
     (void)&check_source_report;
     (void)&tier1_certificate_emitted;
     (void)&tier1_certificate_emitted_check;
-    (void)&tier1_select_source_corpus_file;
     (void)&c_body_bindings_span;
     (void)&c_body_bindings_spans;
     (void)&c_body_bindings_resolve;
@@ -987,13 +1052,23 @@ static __attribute__((unused)) void main_checker_test_interfaces(void)
 }
 #endif
 
+#if !BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && !BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+// Source preparation's real calls belong to BACKEND and CHECKER. Keep only semantic references to its production
+// dependencies in other units, with no emitted code; both consumers retain normal unused-function diagnostics.
+static __attribute__((unused)) void main_ir_source_interfaces(void)
+{
+    (void)&check_program_access;
+    (void)&check_request_describe_text;
+    (void)&check_source_prepare;
+    (void)&check_source_release;
+}
+#endif
+
 #if !BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
 // The frontend fixtures supply these shared helpers' callers. Retain their semantic references in the other units
 // without parsing the fixtures or emitting code; the frontend still checks the real calls with unused warnings on.
 static __attribute__((unused)) void main_frontend_test_interfaces(void)
 {
-    (void)&test_process_finish;
-    (void)&test_process_test;
     (void)&pp_test_read_output;
     (void)&parse_kernels_reserve;
     (void)&parse_twins;
@@ -1001,6 +1076,11 @@ static __attribute__((unused)) void main_frontend_test_interfaces(void)
     (void)&parse_test_status_bytes;
     (void)&parse_test_lowest_descriptor;
     (void)&parse_test_read_capture;
+    (void)&parse_test_clang;
+    (void)&parse_test_write;
+    (void)&c_environment_lookup;
+    (void)&c_environment_types_scalar;
+    (void)&c_environment_types;
 }
 #endif
 
@@ -1015,11 +1095,11 @@ static __attribute__((unused)) void main_backend_test_interfaces(void)
     (void)&dominators_export_read;
     (void)&tier0_tables_open;
     (void)&tier0_tables_close;
-    (void)&tier0_test_same_code;
     (void)&ir_lower_typed_path;
     (void)&tier1_cfg_from_ir;
     (void)&ir_reduce_oracle;
     (void)&tier1_select_emit;
+    (void)&tier1_select_plan;
     (void)&stream_program_generate;
     (void)&stream_write;
     (void)&stream_write_link;
@@ -1046,6 +1126,10 @@ static __attribute__((unused)) void main_driver_test_interfaces(void)
     (void)&oracle_test_fresh_builtin;
     (void)&oracle_test_fresh_begin;
     (void)&oracle_test_fresh_end;
+    (void)&oracle_cache_disable;
+    (void)&oracle_epoch_begin;
+    (void)&oracle_epoch_end;
+    (void)&oracle_epoch_file;
 }
 #endif
 
@@ -1053,10 +1137,26 @@ static __attribute__((unused)) void main_x86_test_interfaces(void)
 {
     (void)&x86_decode_classify_scalar;
     (void)&x86_target_forms_scalar;
-#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
-    (void)&run_x86_intrinsic_tests;
-#endif
+    (void)&branch_sizing_generate;
+    (void)&branch_sizing_chain;
+    (void)&x86_zen5_case_find;
+    (void)&x86_zen5_missing;
 }
+
+#if !BUSTER_IN_UNIT(BUSTER_UNIT_TYPES)
+static __attribute__((unused)) void main_type_test_interfaces(void)
+{
+    (void)&cbuiltin_lookup_scalar;
+    (void)&cbuiltin_lookup;
+}
+#endif
+
+#if !BUSTER_IN_UNIT(BUSTER_UNIT_LINK)
+static __attribute__((unused)) void main_link_test_interfaces(void)
+{
+    (void)&debug_write;
+}
+#endif
 
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 static __attribute__((unused)) void main_benchmark_test_interfaces(void)
@@ -1113,10 +1213,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_assembler_command(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-x86-semantics") == 0)
     {
         result = run_x86_semantics_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-x86-semantics") == 0)
     {
         result = run_x86_semantics_benchmark(argc - 1, argv + 1);
@@ -1193,20 +1295,24 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_parser_bindings_benchmark(argc - 2, argv + 2);
     }
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-lexer") == 0)
     {
         result = run_c_lexer_tests(argv[0], argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-lexer") == 0)
     {
         result = run_c_lexer_benchmark(argc - 1, argv + 1);
     }
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_X86)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "test-x86-encoder") == 0)
     {
         result = run_x86_encoder_tests(argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-x86-target") == 0)
     {
@@ -1217,18 +1323,24 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_x86_target_selection_tests() ? 0 : 1;
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_X86)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "test-x86-zen5") == 0)
     {
         result = run_x86_zen5_tests();
     }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_X86)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "benchmark-x86-zen5") == 0)
     {
         result = run_x86_zen5_benchmark(argc - 2, argv + 2);
     }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_X86)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "measure-x86-zen5") == 0)
     {
         result = run_x86_zen5_measure(argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_X86)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "test-mask-spills") == 0)
     {
@@ -1265,10 +1377,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_x86_disassembler_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-lanes") == 0)
     {
         result = run_lane_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-lanes") == 0)
     {
         result = run_lane_benchmark(argc - 1, argv + 1);
@@ -1341,18 +1455,24 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_refinement_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "test-link") == 0)
     {
         result = run_link_tests(argc - 2, argv + 2);
     }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "test-object-writer") == 0)
     {
         result = run_object_writer_tests(argc - 2, argv + 2);
     }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "test-debug") == 0)
     {
         result = run_debug_tests(argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_LINK)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "benchmark-debug") == 0)
     {
@@ -1363,42 +1483,54 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_object_writer_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "test-import") == 0)
     {
         result = run_import_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-import") == 0)
     {
         result = run_import_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "test-bind") == 0)
     {
         result = run_bind_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-bind") == 0)
     {
         result = run_bind_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "test-executable") == 0)
     {
         result = run_executable_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-executable") == 0)
     {
         result = run_executable_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) && argc >= 2 && strcmp(argv[1], "test-dynamic") == 0)
     {
         result = run_dynamic_tests(argc - 2, argv + 2);
     }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) && argc >= 2 && strcmp(argv[1], "test-static") == 0)
     {
         result = run_static_tests(argc - 2, argv + 2);
     }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "test-snapshot") == 0)
     {
         result = run_snapshot_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-snapshot") == 0)
     {
         result = run_snapshot_benchmark(argc - 1, argv + 1);
@@ -1461,10 +1593,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_floors_input_tests();
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_X86)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "test-branch-sizing") == 0)
     {
         result = run_branch_sizing_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-branch-sizing") == 0)
     {
         result = run_branch_sizing_benchmark(argc - 1, argv + 1);
@@ -1651,10 +1785,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_builtin_math_helper_tests(argc - 2, argv + 2);
     }
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-environments") == 0)
     {
         result = run_c_environment_tests(argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-environments") == 0)
     {
@@ -1718,10 +1854,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_tier1_certificate_benchmark(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-select-source") == 0)
     {
         result = run_tier1_select_source_benchmark(argc - 2, argv + 2);
     }
+#endif
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-code-certificate") == 0)
@@ -1775,22 +1913,28 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_checker_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_TYPES)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-types") == 0)
     {
         result = run_type_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-types") == 0)
     {
         result = run_type_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_TYPES)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-calling-convention") == 0)
     {
         result = run_calling_convention_tests(argc - 2, argv + 2);
     }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_TYPES)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-builtins") == 0)
     {
         result = run_builtin_tests(argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-atomic-rmw") == 0)
     {
@@ -1805,10 +1949,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_calling_convention_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-differential") == 0)
     {
         result = run_differential_command(argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-differential-harness") == 0)
     {
@@ -1832,10 +1978,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_tier1_frame_benchmark(argc - 1, argv + 1);
     }
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier0") == 0)
     {
         result = run_tier0_tests(argc - 2, argv + 2);
     }
+#endif
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-builtin-lowering") == 0)
@@ -1996,10 +2144,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_ir_sroa_tests(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-select") == 0)
     {
         result = run_tier1_select_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-liveness") == 0)
     {
         result = run_tier1_liveness_tests(argc - 2, argv + 2);
@@ -2119,20 +2269,24 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_parallel_tests(argc - 2, argv + 2);
     }
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-tool") == 0)
     {
         result = test_tool_command(argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-oracle-cache") == 0)
     {
         result = run_oracle_cache_tests(argc - 2, argv + 2);
     }
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-c-testsuite") == 0)
     {
         result = run_c_testsuite_tests(argc - 2, argv + 2);
     }
+#endif
     else
     {
         *found = false;
