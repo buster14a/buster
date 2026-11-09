@@ -75,7 +75,8 @@ static void check_input_constant_warning_clear(CheckInputReader* reader, uint32_
 }
 
 // A non-ICE fold's warning. A declarator's array bound (`declarator`) or a GNU object read's is clang's
-// "variable length array folded to constant array" at `location`, its declarator's name, whatever folded it.
+// "variable length array folded to constant array" at `location`, its declarator's name, whatever folded it, once
+// for the declarator however many of its bounds fold.
 static void check_input_constant_fold_warning(CheckInputReader* reader, uint32_t first, uint32_t end, const CheckValue* value, bool ignored, uint32_t location,
                                               bool declarator)
 {
@@ -94,7 +95,7 @@ static void check_input_constant_fold_warning(CheckInputReader* reader, uint32_t
                 .completion = end,
                 .payload = { .token = BUSTER_CHECK_NONE },
             };
-            check_input_warning_event(reader, &event, NULL, 0);
+            check_input_warning_once(reader, &event);
         }
         else
         {
