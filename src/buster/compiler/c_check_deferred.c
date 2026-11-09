@@ -1527,7 +1527,8 @@ static CheckInputReport check_deferred_report(const CheckInputReport* report, co
 {
     CheckInputReport result = *report;
     const bool redeclaration = result.message == CHECK_INPUT_REDECLARATION || result.message == CHECK_INPUT_CONFLICTING_TYPES;
-    const bool binary = result.message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (result.detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_BINARY;
+    const bool binary = (result.message == CHECK_INPUT_ATTRIBUTE_ARGUMENT || result.message == CHECK_INPUT_CONSTANT_EXPRESSION) &&
+                        (result.detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_BINARY;
     const bool typed = (redeclaration && result.detail != CHECK_REDECLARATION_GENERIC) || binary || result.message == CHECK_INPUT_ARRAY_LITERAL_MISMATCH || result.message == CHECK_INPUT_TAG_INCOMPATIBLE;
     result.type = check_deferred_type(part, result.type);
     result.value = typed ? check_deferred_type(part, (TypeId)result.value) : result.value;

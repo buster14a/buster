@@ -3853,9 +3853,26 @@ take clang's words and places:
   table's), at its bound: "array is too large (2'305'843'009'213'693'952
   elements)", the count with clang's digit separators
   (`CHECK_INPUT_ARRAY_TOO_LARGE`).
+- **A constant that fails** in a bound, a `typeof` operand, an enumerator's
+  value, a bit-field's width, a `_BitInt` width or a designator, at the
+  failing token, in the words an attribute argument's failure takes
+  (`CHECK_INPUT_CONSTANT_EXPRESSION`, `check_input_constant_failure_report`,
+  both from `check_constant_failure_error`'s reading of the evidence,
+  `CheckConstantFailure`): "no member named 'b' in 'struct S'" at the
+  member's name, "member reference type 'int' is not a pointer" there too,
+  "member reference base type 'int' is not a structure or union" at the
+  operator, "arithmetic on a pointer to an incomplete type 'struct T'" and
+  "invalid application of 'sizeof' to an incomplete type 'struct T'" with
+  the tag's note, a call's "too many arguments" (at the first extra
+  argument) or "too few", with the function's note, and "invalid operands to
+  binary expression". Other failures keep the generic error. A bound's
+  failure before its first undeclared name is reported with it, in source
+  order.
 
-Each still ends the unit's checking as before. The semantic-recovery fixtures
-compare each with clang.
+Each still ends the unit's checking as before: its later declarations' errors
+are lost (`struct S{int a;} s; typeof(s.b) x; enum E { A = sizeof(s.b) };`
+gives one of clang's two). The semantic-recovery fixtures compare each with
+clang.
 
 #### Extern objects of type void (#1447)
 
