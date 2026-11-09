@@ -642,6 +642,8 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // declarator's name (C23's own words, and a C23 parameter's name a type's), a member's or a type name's at the end
         // of the list.
         "int a[zzz + yyy];\n",
+        // A bound whose undeclared name isn't its first token: the name's error alone (review on #1885).
+        "int a[1 + zzz];\n",
         "typedef int T[zzz];\n",
         "int f(void) { return sizeof(typeof(zzz)); }\n",
         "_BitInt(zzz) const *volatile p, q;\n",
