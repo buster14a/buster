@@ -118,9 +118,12 @@ enum
     // statement increment or decrement (#1447, clang's CheckForLoopConditionalStatement and CheckForRedundantIteration):
     // -Wfor-loop-analysis, off by default, under -Wloop-analysis and -Wmost and so -Wall.
     CHECK_WARNING_ID_FOR_LOOP_ANALYSIS = 110,
+    // An implicit conversion from one named enumeration to another (#1447, the end of clang's CheckImplicitConversion), an
+    // enumerator taken as its enumeration: -Wimplicit-enum-enum-cast, on by default, under -Wenum-conversion.
+    CHECK_WARNING_ID_IMPLICIT_ENUM_ENUM_CAST = 111,
     // A target_clones attribute that mixes a string of several versions with other strings (#1838, clang's
-    // SemaX86::checkTargetClonesAttr): -Wtarget-clones-mixed-specifiers, on by default and in no group.
-    CHECK_WARNING_ID_TARGET_CLONES_MIXED_SPECIFIERS = 111,
+    // SemaX86::checkTargetClonesAttr): -Wtarget-clones-mixed-specifiers, on by default, under -Wfunction-multiversion.
+    CHECK_WARNING_ID_TARGET_CLONES_MIXED_SPECIFIERS = 112,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -366,20 +369,18 @@ typedef enum CheckWarningEventKind
     // data their typedef spellings (0 for none). check_common_enum_arithmetic reports it as the graph's operators.
     CHECK_WARNING_EVENT_ENUM_MIX,
     // target_clones' versions (#1838, c_check_target_versions.c), each at its string literal's quote plus its offset in
-    // the trimmed string (payload.data, BUSTER_CHECK_TARGET_CLONES_FIELD's fields: the version's bytes in the string's
-    // decoded text, its offset, and whether it is a CPU's): -Wignored-attributes' unsupported one, -Wfunction-multiversion's
-    // duplicate one, and -Wtarget-clones-mixed-specifiers' at the first string.
+    // the trimmed string (BUSTER_CHECK_TARGET_CLONES_CPU's payload): -Wignored-attributes' unsupported one,
+    // -Wfunction-multiversion's duplicate one, and -Wtarget-clones-mixed-specifiers' at the first string.
     CHECK_WARNING_EVENT_TARGET_CLONES_UNSUPPORTED,
     CHECK_WARNING_EVENT_TARGET_CLONES_DUPLICATE,
     CHECK_WARNING_EVENT_TARGET_CLONES_MIXED,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
-// CHECK_WARNING_EVENT_TARGET_CLONES_*'s data (#1838): a version's bytes [start, start + length) in its string's decoded
-// text (bits 0 to 9 and 10 to 19) and its place, its offset from the trimmed text's start (bits 20 to 29), each below
-// BUSTER_CHECK_TARGET_CLONES_FIELD, and whether an unsupported one is a CPU's.
-#define BUSTER_CHECK_TARGET_CLONES_FIELD 1024u
-#define BUSTER_CHECK_TARGET_CLONES_CPU (1u << 30)
+// CHECK_WARNING_EVENT_TARGET_CLONES_*'s payload (#1838): `name` the version's first byte in its string's decoded text (it
+// ends at the next comma, trimmed), and `data` its place's offset from the trimmed text's start, with
+// BUSTER_CHECK_TARGET_CLONES_CPU where an unsupported one is a CPU's.
+#define BUSTER_CHECK_TARGET_CLONES_CPU (1u << 31)
 
 // CHECK_WARNING_EVENT_TRANSPARENT_UNION's case, in its data's low byte (its bits above it), and its note's.
 #define BUSTER_CHECK_TRANSPARENT_INCOMPLETE 1u

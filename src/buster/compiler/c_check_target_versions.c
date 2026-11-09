@@ -72,12 +72,13 @@ static void check_target_version_trim(String8 text, uint32_t* first, uint32_t* l
     }
 }
 
-// A warning of `kind` (and `id`) at the string literal `token`, its data as above. A string too long for the data's
-// fields keeps its warning out.
+// A warning of `kind` (and `id`) at the string literal `token`: the version's first byte in the string's decoded text
+// (`start`), its place's offset from the trimmed text's start, and whether an unsupported one is a CPU's
+// (CHECK_WARNING_EVENT_TARGET_CLONES_*'s payload).
 static void check_input_target_clones_warning(CheckInputReader* reader, const CheckInputAttribute* attribute, uint32_t id, uint32_t kind, uint32_t token,
-                                              uint32_t start, uint32_t length, uint32_t offset, bool cpu)
+                                              uint32_t start, uint32_t offset, bool cpu)
 {
-    if (start < BUSTER_CHECK_TARGET_CLONES_FIELD && length < BUSTER_CHECK_TARGET_CLONES_FIELD && offset < BUSTER_CHECK_TARGET_CLONES_FIELD)
+    if (offset < BUSTER_CHECK_TARGET_CLONES_CPU)
     {
         const CheckWarningEvent event =
         {
@@ -87,7 +88,7 @@ static void check_input_target_clones_warning(CheckInputReader* reader, const Ch
             .source = BUSTER_CHECK_WARNING_NO_SOURCE,
             .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
             .completion = attribute->argument_first,
-            .payload = { .name = attribute->name, .token = token, .data = start | length << 10 | offset << 20 | (cpu ? BUSTER_CHECK_TARGET_CLONES_CPU : 0) },
+            .payload = { .name = start, .token = token, .data = offset | (cpu ? BUSTER_CHECK_TARGET_CLONES_CPU : 0) },
         };
         check_input_warning_event(reader, &event, NULL, 0);
     }
@@ -99,8 +100,8 @@ static void check_input_target_clones_warning(CheckInputReader* reader, const Ch
 static bool check_input_target_clones(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute)
 {
     const uint64_t mark = reader->scratch->length;
-    // The versions seen, as bytes of the strings' decoded texts (Params in clang).
-    const uint32_t capacity = 64;
+    // The versions seen, as bytes of the strings' decoded texts (Params in clang), in scratch, which grows them by doubling.
+    uint32_t capacity = 64;
     String8* seen = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, String8, capacity);
     reader->output->resource |= seen == NULL;
     uint32_t seen_count = 0;
@@ -119,8 +120,9 @@ static bool check_input_target_clones(CheckInputReader* reader, CheckInputAttrib
         check_target_version_trim(text, &param_first, &param_last);
         if (decoded && (param_first == param_last || text.pointer[param_last - 1] == ','))
         {
-            check_input_target_clones_warning(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_TARGET_CLONES_UNSUPPORTED, first, 0, 0, 0,
-                                              false);
+            // An empty version: where the trimmed text ends, after its comma (or its start where it is empty).
+            check_input_target_clones_warning(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_TARGET_CLONES_UNSUPPORTED, first,
+                                              param_last, 0, false);
             unsupported = true;
         }
         for (uint32_t cursor = param_first; decoded && !unsupported && cursor < param_last;)
@@ -141,13 +143,13 @@ static bool check_input_target_clones(CheckInputReader* reader, CheckInputAttrib
             if (arch && predefines_cpu_index_of(item.pointer + 5, (uint32_t)item.length - 5) < 0)
             {
                 check_input_target_clones_warning(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_TARGET_CLONES_UNSUPPORTED, first,
-                                                  item_first + 5, item_last - item_first - 5, offset, true);
+                                                  item_first + 5, offset, true);
                 unsupported = true;
             }
             else if (!arch && !is_default && check_target_version_feature(item) < 0)
             {
                 check_input_target_clones_warning(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_TARGET_CLONES_UNSUPPORTED, first,
-                                                  item_first, item_last - item_first, offset, false);
+                                                  item_first, offset, false);
                 unsupported = true;
             }
             has_default |= is_default;
@@ -159,9 +161,21 @@ static bool check_input_target_clones(CheckInputReader* reader, CheckInputAttrib
             if (repeated)
             {
                 check_input_target_clones_warning(reader, attribute, CHECK_WARNING_ID_FUNCTION_MULTIVERSION, CHECK_WARNING_EVENT_TARGET_CLONES_DUPLICATE, first,
-                                                  item_first, item_last - item_first, offset, false);
+                                                  item_first, offset, false);
             }
-            if (!unsupported && seen_count < capacity)
+            if (!unsupported && seen_count == capacity)
+            {
+                String8* grown = capacity <= UINT32_MAX / 2 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, String8, (uint64_t)capacity * 2) : NULL;
+                reader->output->resource |= grown == NULL;
+                unsupported = grown == NULL;
+                if (grown != NULL)
+                {
+                    memcpy(grown, seen, (uint64_t)seen_count * sizeof(String8));
+                    seen = grown;
+                    capacity *= 2;
+                }
+            }
+            if (!unsupported)
             {
                 seen[seen_count++] = item;
             }
@@ -173,7 +187,7 @@ static bool check_input_target_clones(CheckInputReader* reader, CheckInputAttrib
         uint32_t first = 0;
         uint32_t end = 0;
         (void)check_input_attribute_argument(attribute, 0, &first, &end);
-        check_input_target_clones_warning(reader, attribute, CHECK_WARNING_ID_TARGET_CLONES_MIXED_SPECIFIERS, CHECK_WARNING_EVENT_TARGET_CLONES_MIXED, first, 0, 0, 0,
+        check_input_target_clones_warning(reader, attribute, CHECK_WARNING_ID_TARGET_CLONES_MIXED_SPECIFIERS, CHECK_WARNING_EVENT_TARGET_CLONES_MIXED, first, 0, 0,
                                           false);
     }
     if (decoded && !unsupported && !has_default)
