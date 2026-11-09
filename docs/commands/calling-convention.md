@@ -35,8 +35,11 @@ its compiled runs) checks
   `nullptr_t` members, `i128` storage, which LLVM never splits, whatever the
   high eightbyte under an INTEGER low one and refused under another, runs of
   bit-fields that are an `i128` and that aren't, unions whose storage member a
-  zero-length array of a larger record decides (each of the walk's rules alone
-  among them), and the narrow low parts clang widens into a general register;
+  zero-length array of a larger record or of a record with a flexible array
+  member and a size decides (each of the walk's rules alone among them), the
+  narrow low parts clang widens into a general register and the unions stored
+  as a `__float128` whose `fp128` low part it widens, and the records SSE,
+  SSEUP of 17 to 63 bytes it passes as `<size / 8 x double>`, refused;
   and the `_Atomic` types whose LLVM types decide: of types of no size, which
   LLVM makes larger (to 32 KB, and refused past the alignment the module
   keeps), as the records ending in one, with their slots, the records it lays
@@ -162,9 +165,7 @@ a type in registers that holds an array of elements of no size, on which clang
 23 crashes now and then, one with an SSE low eightbyte and bit-fields in an
 INTEGER high one, whose access units the module doesn't work out yet, an
 aligned typedef of an `_Atomic` vector of bools, whose atomic loads crash it,
-a record SSE, SSEUP of a size other than 16, 32 or 64 bytes and one SSE, SSE
-that holds a `__float128`, which the module doesn't model yet either, and a
-union of a vector LLVM packs into fewer bits than its bytes, whose copies lose
+and a union of a vector LLVM packs into fewer bits than its bytes, whose copies lose
 the other members' bits; an argument clang would pass as an `i0` becomes a
 long (its passes crash on them now and then), as does an unnamed one clang's
 `va_arg` reads elsewhere than its call puts it; bytes clang doesn't pass

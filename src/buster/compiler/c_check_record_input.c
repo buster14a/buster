@@ -53,6 +53,15 @@ static bool check_input_record_names_grow(CheckInputReader* reader, uint32_t** i
     return valid;
 }
 
+// Whether an unnamed member of type `type`, not a bit-field, is an anonymous struct or union, whose names are the record's.
+// Another is the unnamed field a bit-field becomes whose width was an undeclared name (#1447, check_constant_name), as
+// clang's, which names nothing.
+static bool check_input_record_names_nested(const CheckInputReader* reader, TypeId type)
+{
+    const uint8_t kind = type_kind(reader->types, type_strip_aligned(reader->types, type));
+    return kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+}
+
 static bool check_input_record_names(CheckInputReader* reader, const TypeMember* members, uint32_t count, uint32_t bound, uint32_t* failed_member)
 {
     typedef struct CheckRecordNameFrame CheckRecordNameFrame;
@@ -119,11 +128,10 @@ static bool check_input_record_names(CheckInputReader* reader, const TypeMember*
                         names += 1;
                     }
                 }
-                else if (!bit_field)
+                else if (!bit_field && check_input_record_names_nested(reader, type))
                 {
                     const TypeId record = type_strip_aligned(reader->types, type);
-                    const uint8_t kind = type_kind(reader->types, record);
-                    valid = (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && type_is_complete(reader->types, record) && depth <= bound;
+                    valid = type_is_complete(reader->types, record) && depth <= bound;
                     if (valid && depth == stack_capacity)
                     {
                         // Old generations remain scratch-owned until this validation ends; geometric growth bounds

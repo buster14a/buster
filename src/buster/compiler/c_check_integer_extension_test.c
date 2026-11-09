@@ -232,6 +232,14 @@ static void check_test_integer_source_warnings(CheckTest* test, const char* clan
                 all |= stream.warnings[node];
                 visible |= stream.warnings[node] & ~stream.warning_ignored[node];
             }
+            // A declarator's folded bound is a warning event (check_input_constant_fold_warning), not a token's bit.
+            for (uint32_t i = 0; ready && i < input.warning_events.count; i += 1)
+            {
+                const CheckWarningEvent* event = input.warning_events.events + i;
+                const bool fold = event->kind == CHECK_WARNING_EVENT_GNU_ARRAY_FOLD || event->kind == CHECK_WARNING_EVENT_GNU_ICE_FOLD;
+                all |= fold ? CHECK_WARNING_GNU_CONSTANT : 0;
+                visible |= fold && (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) == 0 ? CHECK_WARNING_GNU_CONSTANT : 0;
+            }
             char description[512];
             snprintf(description, sizeof(description), "source warning facts fixture %u path %u: ready=%u all=%02x/%02x default=%02x/%02x %.300s",
                      fixture, path, ready, all, oracle_warnings[1], visible, oracle_warnings[0], source);

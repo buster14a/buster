@@ -793,6 +793,12 @@ struct CheckLowerWriter
     Tier0Operation* operations;
     uint32_t operation_count;
     uint32_t operation_capacity;
+    // The function's asm bodies (#1839, Tier0Function.asm_bodies), each with its call row (`asm_body_calls`), of which
+    // check_lower_finish makes Tier0Function.call_asm, and the room for them (CheckProgramAsms.body_capacity).
+    Tier0AsmBody* asm_bodies;
+    uint32_t* asm_body_calls;
+    uint32_t asm_body_count;
+    uint32_t asm_body_capacity;
     // The function's vector constants (Tier0Function.vector_constants), 64 bytes each and each one's bytes: a shuffle's
     // index vector (check_lower_vector_builtin) or a vector of zeros, each distinct constant once, and the room for them.
     uint64_t* vector_constants;
@@ -7615,8 +7621,8 @@ static void check_lower_bit_update(CheckLowerWriter* writer, uint32_t node, bool
 static void check_lower_initializer(CheckLowerWriter* writer, CheckControl control);
 static void check_lower_control(CheckLowerWriter* writer, uint32_t index);
 
-// An integer type's descriptor for the builtins' recipes: its width (a 128-bit one's BUSTER_CBUILTIN_LOWER_WIDE) and
-// whether it is signed.
+// An integer type's descriptor for the builtins' recipes: its width (a 128-bit one's BUSTER_CBUILTIN_LOWER_WIDE; a _BitInt
+// of 65 to 127 bits, whose value is two limbs as a 128-bit one's, its width, #1447) and whether it is signed.
 static uint32_t check_lower_builtin_type(const TypeTable* types, TypeId type)
 {
     uint32_t width = 0;
@@ -7632,15 +7638,6 @@ static uint32_t check_lower_align_type(const TypeTable* types, TypeId type)
 {
     const uint32_t result = type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_POINTER ? 64 : check_lower_builtin_type(types, type);
     return result;
-}
-
-// Whether an overflow builtin's operand or destination is a _BitInt of 65 to 127 bits, which its recipes don't take: they
-// take a 128-bit one whole (BUSTER_CBUILTIN_LOWER_WIDE) and narrower ones of up to 64 bits.
-static bool check_lower_builtin_between(const TypeTable* types, TypeId type)
-{
-    uint32_t width = 0;
-    bool sign = false;
-    return check_action_integer_type(types, type, &width, &sign) && width > 64 && width < 128;
 }
 
 // One primitive shared by the classic bit builtins and the generic/C23 recipes: CLZ, CTZ, POPCOUNT or BSWAP64 chooses
@@ -7791,11 +7788,6 @@ static void check_lower_builtin_prepare(CheckLowerWriter* writer, uint32_t node)
         else if (stream->effects[selected].unsupported != 0 || stream->effects[selected].evaluated_operands != 7)
         {
             check_lower_unsupported(writer, "this overflow builtin");
-        }
-        else if (check_lower_builtin_between(program->types, conversions->operands[0].type) ||
-                 check_lower_builtin_between(program->types, conversions->operands[1].type) || check_lower_builtin_between(program->types, conversions->store.type))
-        {
-            check_lower_unsupported(writer, "overflow builtins of _BitInt of 65 to 127 bits");
         }
         else
         {
@@ -8042,6 +8034,12 @@ static void check_lower_varargs_prepare(CheckLowerWriter* writer, uint32_t node)
     else if (argument && check_lower_passed(writer, requested) != NULL)
     {
         check_lower_unsupported(writer, check_lower_passed(writer, requested));
+    }
+    else if (argument && !microsoft && (writer->abi_table->pass[type_index(requested)] & BUSTER_ABI_PASS_UNSUPPORTED) != 0)
+    {
+        // What the module doesn't place as clang does, which a call refuses too: a record SSE, SSEUP of a size no vector
+        // register has, whose va_arg clang reads from the save area as <size / 8 x double>, is one.
+        check_lower_unsupported(writer, "va_arg of this type (its calling convention)");
     }
     else
     {
@@ -10012,9 +10010,23 @@ static __attribute__((noinline)) void check_lower_vector_operation(CheckLowerWri
         const TypeId vector = stream->conversions[node].operands[0].type;
         const bool shift = op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT;
         const bool scalar_count = shift && check_lower_vector_bytes(types, check_stream_type(stream, b)) == 0;
+        const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
         check_lower_vector_half_chain(writer, vector, op, a, b);
-        check_lower_vector_row(writer, op, vector, 0);
-        check_lower_vector_operand(writer, node, 1, scalar_count ? vector : stream->conversions[node].operands[1].type);
+        if (scalar_count && (writer->target.features & evex) != evex)
+        {
+            // Without AVX-512, a scalar count's shift is by the count itself, as clang's code shifts by a splat (#1834):
+            // its row's integer operand, the count converted to unsigned int.
+            const TypeId count = check_stream_type(stream, b);
+            check_lower_vector_row(writer, op == CHECK_OP_SHIFT_LEFT ? BUSTER_CHECK_VECTOR_SHIFT_LEFT_BY : BUSTER_CHECK_VECTOR_SHIFT_RIGHT_BY, vector,
+                                   BUSTER_TYPED_CLASS_U32);
+            check_lower_convert(writer, count, BUSTER_TYPE_UINT);
+            check_lower_operand(writer, node, 1, false, count);
+        }
+        else
+        {
+            check_lower_vector_row(writer, op, vector, 0);
+            check_lower_vector_operand(writer, node, 1, scalar_count ? vector : stream->conversions[node].operands[1].type);
+        }
         check_lower_vector_operand(writer, node, 0, vector);
     }
 }
@@ -11535,18 +11547,40 @@ static bool check_lower_segment_types(const TypeTable* types)
     return result;
 }
 
+// The type whose space an atomic builtin's object is in: its pointer argument's pointee (the first argument's own type,
+// before its conversion), which a generic builtin's object type (__atomic_test_and_set's, __atomic_clear's) doesn't
+// carry; 0 where the first argument isn't a pointer or an array.
+static TypeId check_lower_atomic_pointee(const CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const TypeTable* types = program->types;
+    const uint32_t first = graph->argument_offsets[node];
+    const TypeId pointer = graph->argument_counts[node] != 0 ? type_strip_aligned(types, check_stream_type(program->stream, graph->argument_nodes[first])) : 0;
+    const uint8_t kind = pointer != 0 ? type_kind(types, pointer) : BUSTER_TYPE_KIND_VOID;
+    return kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? type_element(types, pointer) : 0;
+}
+
 // A node that loads from or stores to a segment's space (check_lower_segment), which the lowering refuses by name: an
 // lvalue read (not an address taken, `&` or a member's or a subscript's base), or an assignment's, a compound
-// assignment's or an increment's or decrement's operand.
+// assignment's or an increment's or decrement's operand; a vector's element, read or written, whose type has lost its
+// vector's space; and an atomic builtin's object, which its pointer argument reaches (its object type's space, or its
+// pointer's pointee's: check_lower_atomic_pointee).
 static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t node, const CheckValue* value, bool address)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
     const CheckOp op = graph->ops[node];
     const uint32_t target = graph->operand0[node];
-    const bool store = (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) && target < program->stream->count;
+    const bool store = (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) && target < stream->count;
+    const bool element = op == CHECK_OP_SUBSCRIPT && (value->flags & BUSTER_CHECK_VECTOR_ELEMENT) != 0 && target < stream->count;
+    const uint32_t atomic = op == CHECK_OP_BUILTIN_ATOMIC ? check_program_builtin_index(stream->atomics, stream->atomic_count, sizeof(CheckBuiltinAtomicEffect), node)
+                                                          : BUSTER_CHECK_NONE;
     return (!address && value->category == CHECK_LVALUE && check_lower_segment(program->types, value->type)) ||
-           (store && check_lower_segment(program->types, check_stream_type(program->stream, target)));
+           ((store || element) && check_lower_segment(program->types, check_stream_type(stream, target))) ||
+           (atomic != BUSTER_CHECK_NONE && (check_lower_segment(program->types, stream->atomics[atomic].object_type) ||
+                                             check_lower_segment(program->types, check_lower_atomic_pointee(writer, node))));
 }
 
 // Always inlined into the copies of the tasks' loop (check_lower_drain_body), each with its constant `bit_ints`
@@ -13327,6 +13361,21 @@ static void check_lower_asm_slot(CheckLowerWriter* writer, uint32_t object, uint
     check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
 }
 
+// Whether an asm statement has an output in a segment's space (check_lower_segment, #1447) that isn't a memory one: its
+// value is stored through the output's address, which the lowering's stores don't carry the segment of yet. A memory
+// operand's address is the template's, as clang's is: it drops the space there.
+static bool check_lower_asm_segment(const CheckLowerWriter* writer, const CheckInputAsm* statement, const CheckProgramAsm* plan)
+{
+    bool result = false;
+    for (uint32_t k = 0; !result && k < statement->output_count; k += 1)
+    {
+        const uint32_t node = statement->operands[k].node;
+        result = plan->places[k].kind != BUSTER_CHECK_ASM_MEMORY && node < writer->program->stream->count &&
+                 check_lower_segment(writer->program->types, check_stream_type(writer->program->stream, node));
+    }
+    return result;
+}
+
 // An asm statement (CHECK_CONTROL_ASM), as check_program_asm_plan planned it, in clang's order: each output's address,
 // with a `+` operand's value loaded through it, then each input's value (a memory input's address). With a helper,
 // they go into its operand block, a frame object, whose address the helper's call takes; a template of no
@@ -13353,6 +13402,10 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
     else if (count > BUSTER_CHECK_ASM_OPERANDS)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (__builtin_expect(writer->segments, 0) && check_lower_asm_segment(writer, statement, plan))
+    {
+        check_lower_unsupported(writer, "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one");
     }
     else if (plan->row != 0)
     {
@@ -13396,14 +13449,14 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             }
         }
     }
-    else if (plan->helper != BUSTER_CHECK_NONE)
+    else if (plan->helper != BUSTER_CHECK_NONE || plan->inlined)
     {
-        const CheckProgramHelper* helper = writer->output->helpers.items + plan->helper;
+        const CheckProgramHelper* helper = plan->inlined ? 0 : writer->output->helpers.items + plan->helper;
         const uint32_t object = plan->block != 0 ? check_lower_object(writer, plan->block, 3) : BUSTER_CHECK_NONE;
         const TypeId argument = BUSTER_TYPE_ULONG;
         // An asm goto's helper returns its exit (0 for the fall-through, a label's index plus one), which a temporary keeps
         // for a branch to each label after the call: the tasks are pushed last first.
-        const bool jumps = helper->result_type == BUSTER_TYPE_INT && statement->is_goto;
+        const bool jumps = helper != 0 && helper->result_type == BUSTER_TYPE_INT && statement->is_goto;
         const uint32_t exit = jumps && writer->output->status == CHECK_PROGRAM_OK ? check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32) : BUSTER_CHECK_NONE;
         for (uint32_t l = statement->label_count; jumps && l-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
@@ -13418,9 +13471,37 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, exit);
         }
         const TypeId result = jumps ? BUSTER_TYPE_INT : BUSTER_TYPE_VOID;
-        const uint32_t call = writer->output->status == CHECK_PROGRAM_OK ? check_lower_native_call(writer, helper->symbol, result, &argument, plan->block != 0 ? 1 : 0) : 0;
+        uint32_t call = 0;
+        if (writer->output->status == CHECK_PROGRAM_OK && plan->inlined)
+        {
+            // Placed in its caller as an asm body (#1839): a call row of no arguments whose callee is the body, which
+            // reads the block in its frame place.
+            call = check_lower_native_call(writer, BUSTER_TIER0_CALL_ASM_TARGET, BUSTER_TYPE_VOID, NULL, 0);
+            if (writer->asm_body_count >= writer->asm_body_capacity)
+            {
+                check_lower_resource(writer, "lowering asm body storage");
+            }
+            else if (call != BUSTER_CHECK_NONE)
+            {
+                writer->asm_bodies[writer->asm_body_count] = (Tier0AsmBody){
+                    .records = plan->inline_records,
+                    .count = plan->inline_count,
+                    .block = plan->block != 0 ? object : BUSTER_TIER0_ASM_NO_BLOCK,
+                    .touched = plan->inline_touched,
+                    .branches = plan->inline_branches,
+                    .targets = plan->inline_targets,
+                    .branch_count = plan->inline_branch_count,
+                };
+                writer->asm_body_calls[writer->asm_body_count] = call;
+                writer->asm_body_count += 1;
+            }
+        }
+        else if (writer->output->status == CHECK_PROGRAM_OK)
+        {
+            call = check_lower_native_call(writer, helper->symbol, result, &argument, plan->block != 0 ? 1 : 0);
+        }
         check_lower_instruction(writer, BUSTER_TYPED_CALL, jumps ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_VOID, call);
-        if (plan->block != 0)
+        if (plan->block != 0 && !plan->inlined)
         {
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
         }
@@ -14801,6 +14882,9 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     // function resets the row count and copies its rows to output before the next body reuses this lane's table.
     writer->operation_capacity = shared->operation_capacity;
     BUSTER_CHECK_LOWER_COLUMN(operations, Tier0Operation, shared->operation_capacity);
+    writer->asm_body_capacity = shared->lowered->asms.body_capacity;
+    BUSTER_CHECK_LOWER_COLUMN(asm_bodies, Tier0AsmBody, (uint64_t)shared->lowered->asms.body_capacity + 1);
+    BUSTER_CHECK_LOWER_COLUMN(asm_body_calls, uint32_t, (uint64_t)shared->lowered->asms.body_capacity + 1);
     writer->vector_constant_capacity = BUSTER_CHECK_LOWER_VECTOR_CONSTANTS;
     BUSTER_CHECK_LOWER_COLUMN(vector_constants, uint64_t, 8 * (uint64_t)BUSTER_CHECK_LOWER_VECTOR_CONSTANTS);
     BUSTER_CHECK_LOWER_COLUMN(vector_constant_bytes, uint8_t, BUSTER_CHECK_LOWER_VECTOR_CONSTANTS);
@@ -14964,6 +15048,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->vectors = false;
         writer->masks = false;
         writer->operation_count = 0;
+        writer->asm_body_count = 0;
         writer->vector_constant_count = 0;
         writer->result_object = BUSTER_CHECK_NONE;
         writer->kept_local = BUSTER_CHECK_NONE;
@@ -14991,12 +15076,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         {
             // GNU's function multiversioning: a version's symbol and the resolver's ifunc that calls reach.
             check_lower_unsupported(writer, "functions of several target versions (target_clones, or target attributes of other strings)");
-        }
-        else if (check_program_interrupt(program, b) && writer->variadic)
-        {
-            // x86's interrupt service routine (#147, CheckProgram.object_interrupt) is Tier 0's frame (Tier0Function.interrupt),
-            // which takes no variadic arguments: the processor pushes none.
-            check_lower_unsupported(writer, "variadic interrupt service routines");
         }
         else if (convention != NULL)
         {
@@ -15179,8 +15258,11 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 abi_assign_scalar(table, signature, named, &own);
             }
             arena_pop_to(scratch, mark);
-            writer->gp_offset = BUSTER_ABI_SLOT_BYTES * own.integer_registers;
-            writer->fp_offset = BUSTER_ABI_SAVE_AREA_VECTOR_OFFSET + BUSTER_ABI_SAVE_AREA_VECTOR_SLOT_BYTES * own.vector_registers;
+            // A variadic interrupt service routine's named parameters (#1447, LLVM's CC_X86_64_Intr) take no register: its
+            // list starts at the interrupted code's rdi and xmm0, which its frame keeps (Tier0Function.incoming_variadic, set below).
+            const bool interrupt = check_program_interrupt(program, b);
+            writer->gp_offset = interrupt ? 0 : BUSTER_ABI_SLOT_BYTES * own.integer_registers;
+            writer->fp_offset = BUSTER_ABI_SAVE_AREA_VECTOR_OFFSET + (interrupt ? 0 : BUSTER_ABI_SAVE_AREA_VECTOR_SLOT_BYTES * own.vector_registers);
         }
         if (check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0)
         {
@@ -15505,6 +15587,26 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         }
         BUSTER_CHECK_LOWER_COPY(operations, operations, Tier0Operation, writer->operation_count);
         function->operation_count = writer->operation_count;
+        // The asm bodies (#1839), and the call rows' column of them: each body's call its index plus one, any other 0.
+        BUSTER_CHECK_LOWER_COPY(asm_bodies, asm_bodies, Tier0AsmBody, writer->asm_body_count);
+        function->asm_body_count = writer->asm_body_count;
+        if (status->status == CHECK_PROGRAM_OK && writer->asm_body_count != 0)
+        {
+            uint32_t* call_asm = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)writer->call_count + 1);
+            if (call_asm != 0)
+            {
+                memset(call_asm, 0, ((uint64_t)writer->call_count + 1) * sizeof(uint32_t));
+                for (uint32_t k = 0; k < writer->asm_body_count; k += 1)
+                {
+                    call_asm[writer->asm_body_calls[k]] = k + 1;
+                }
+                function->call_asm = call_asm;
+            }
+            else
+            {
+                status->status = CHECK_PROGRAM_RESOURCE;
+            }
+        }
         BUSTER_CHECK_LOWER_COPY(vector_constants, vector_constants, uint64_t, 8 * (uint64_t)writer->vector_constant_count);
         BUSTER_CHECK_LOWER_COPY(vector_constant_bytes, vector_constant_bytes, uint8_t, writer->vector_constant_count);
         function->vector_constant_count = writer->vector_constant_count;
@@ -15641,6 +15743,26 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             function->calls = calls + signature_index + 1;
             function->argument_locations = locations + first + declared;
             function->incoming_variadic = shared->incoming[b] ? calls + signature_index : 0;
+            if (shared->incoming[b] && function->interrupt != 0)
+            {
+                // A variadic interrupt service routine's incoming frame (#1447, LLVM's x86_intrcc): its named parameters, the
+                // processor's frame and error code, take no register, so its list's registers are the interrupted code's,
+                // from rdi and xmm0, which its frame keeps; and its overflow area is 40 bytes past where it was entered, 32
+                // past the incoming area (Tier0Frame.incoming), as LLVM's CC_X86_64_Intr leaves its stack size.
+                AbiCall* own = BUSTER_ARENA_PUSH_ARRAY(output, AbiCall, 1);
+                if (own == 0)
+                {
+                    status->status = CHECK_PROGRAM_RESOURCE;
+                }
+                else
+                {
+                    *own = calls[signature_index];
+                    own->integer_registers = 0;
+                    own->vector_registers = 0;
+                    own->stack_bytes = 4 * BUSTER_ABI_SLOT_BYTES;
+                    function->incoming_variadic = own;
+                }
+            }
             if (function->parameter_count != declared)
             {
                 // The hidden pointer, parameter 0, in rdi before the declared parameters' locations.

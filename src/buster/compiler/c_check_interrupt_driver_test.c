@@ -9,10 +9,12 @@
 // declared by a typedef's name, one returning a pointer to an array or a function), its subjects' warning, its arguments
 // (expressions it never counts), its places in C23's syntax, redeclarations (inheriting it, and its two warnings after a
 // definition, the implicit used's of no place), its implicit used (-Wunused-function), K&R definitions, and calls: the
-// direct call of an interrupt service routine (through parentheses, selections, __extension__ and an address-of, and in
-// sizeof), and -Wexcessive-regsave in interrupt service routines and no_caller_saved_registers functions, with its notes
-// (a builtin's at its first use), its order among nested calls, and its options and pragmas. Then a definition's -c,
-// which the lowering refuses by name until the backend compiles its frame (check_program_interrupt).
+// direct call of an interrupt service routine (through parentheses, selections, __extension__ and an address-of, in
+// sizeof, and in the operands the reader's evaluator alone reads: a typeof's, a constant array bound's), and
+// -Wexcessive-regsave in interrupt service routines and no_caller_saved_registers functions, with its notes (a builtin's
+// at its first use), its order among nested calls, and its options and pragmas; the unit's later diagnostics after a
+// handler's or a direct call's error. Then a definition's -c, which Tier 0's handler frame compiles
+// (check_program_interrupt), a variadic one's too.
 
 // Keeps `text`'s diagnostic lines, as check_test_diagnostic_lines does, and those of no place ("error: ...").
 static bool check_test_interrupt_lines(const char* text, char* lines, size_t capacity)
@@ -97,6 +99,17 @@ static void check_test_driver_interrupts(CheckTest* test, const char* clang, con
         { "__attribute__((interrupt)) void f(void *p, unsigned _BitInt(64) e);\n", NULL, { NULL } },
         { "enum E : unsigned long { A }; __attribute__((interrupt)) void f(void *p, enum E e);\n", NULL, { NULL } },
         { "typedef unsigned long u64; __attribute__((interrupt)) void f(void *const p, const u64 e);\n", NULL, { NULL } },
+        // Its error drops it and leaves the declaration valid, as clang's handler returns (#1447): the declaration's later
+        // attributes' errors, in their order, each declarator's, and the unit's later diagnostics.
+        { "__attribute__((interrupt)) _Alignas(8) int f(void *p);\n", NULL, { NULL } },
+        { "_Alignas(8) __attribute__((interrupt)) int f(void *p);\n", NULL, { NULL } },
+        { "__attribute__((interrupt)) _Alignas(8) void f(int p);\n", NULL, { NULL } },
+        { "_Alignas(8) int f(void *p) __attribute__((interrupt));\n", NULL, { NULL } },
+        { "__attribute__((interrupt)) _Alignas(8) void f(void *p);\n", NULL, { NULL } },
+        { "__attribute__((interrupt)) int f(void *p), g(int);\n", NULL, { NULL } },
+        { "__attribute__((interrupt)) int f(void *p); char c = 1000;\n", NULL, { NULL } },
+        { "__attribute__((interrupt, aligned(3))) int f(void *p);\n", NULL, { NULL } },
+        { "__attribute__((interrupt)) int f(void *p); void g(void) { f(0); }\n", NULL, { NULL } },
         // Each declarator of shared specifiers; functions declared by a typedef's name, their parameters at it.
         { "__attribute__((interrupt)) void f(void *p), g(int);\n", NULL, { NULL } },
         { "typedef void F(int); __attribute__((interrupt)) F f;\n", NULL, { NULL } },
@@ -184,6 +197,33 @@ static void check_test_driver_interrupts(CheckTest* test, const char* clang, con
         { "__attribute__((interrupt)) void f(void *p); void f(void *p); void g(void) { f(0); }\n", NULL, { NULL } },
         { "void f(void *p); void g(void) { f(0); } __attribute__((interrupt)) void f(void *p);\n", NULL, { NULL } },
         { "__attribute__((interrupt)) void f(void *p); void g(void *p) { __builtin_call_with_static_chain(f(0), p); }\n", NULL, { NULL } },
+        // The calls the reader's evaluator alone reads (#1447): a typeof's and a constant array bound's, at file scope and in
+        // a routine's body; but not a function declarator's own parameter list.
+        { "__attribute__((interrupt)) void h(void *f); typeof(h(0)) *x;\n", NULL, { NULL } },
+        { "__attribute__((interrupt)) void h(void *f); int a[sizeof(h(0))];\n", NULL, { NULL } },
+        { "__attribute__((interrupt)) void h(void *f); int a[sizeof((h)(0)) + sizeof((&h)(0))];\n", NULL, { NULL } },
+        { "__attribute__((interrupt)) void h(void *f); struct S { int m[sizeof(h(0))]; };\n", NULL, { NULL } },
+        { "int g(void); __attribute__((interrupt)) void k(void *f) { typeof(g()) y = 0; int b[sizeof(g())]; (void)y; (void)b; }\n", NULL, { NULL } },
+        { "__attribute__((interrupt)) void h(void *f); __attribute__((interrupt)) void k(void *f) { int c[sizeof(h(0))]; (void)c; }\n", NULL, { NULL } },
+        { "int (*fp)(void); __attribute__((interrupt)) void k(void *f) { typeof(fp()) y = 0; (void)y; }\n", NULL, { NULL } },
+        { "__attribute__((no_caller_saved_registers)) int g(void); __attribute__((interrupt)) void k(void *f) { typeof(g()) y = 0; (void)y; }\n", NULL,
+          { NULL } },
+        { "int g(void); void k(void *f) { typeof(g()) y = 0; int b[sizeof(g())]; (void)y; (void)b; }\n", NULL, { NULL } },
+        { "__attribute__((interrupt)) void h(void *f); int (*q(int (*)(void *)))(void); void (*r(void))(void *);\n", NULL, { NULL } },
+        // A direct call's error leaves the unit's later checks to run, as clang's invalid call does (#1447).
+        { "__attribute__((interrupt)) void f(void *p); void g(void) { f(0); } char c = 1000;\n", NULL, { NULL } },
+        { "__attribute__((interrupt)) void f(void *p); void g(void) { f(0); } struct S { int a; } s = { 1, 2 };\n", NULL, { NULL } },
+        { "__attribute__((interrupt)) void f(void *p); void g(void) { f(0); } void k(void) { int x = 1; x = x; }\n", NULL, { "-Wall", NULL } },
+        // Only the call's full expression loses its diagnostics: not another declarator's initializer, nor the call's
+        // other list elements or arguments (#1930's review).
+        { "__attribute__((interrupt)) void h(void *); void f(void) { int a = (h(0), 1), b = 1 / 0; (void)a; (void)b; }\n", "-std=gnu17", { "-Wall", NULL } },
+        { "__attribute__((interrupt)) void h(void *); void f(void) { int b = 1 / 0, a = (h(0), 1); (void)a; (void)b; }\n", "-std=gnu17", { "-Wall", NULL } },
+        { "__attribute__((interrupt)) void h(void *); void f(void) { int a = (h(0), 1), b = (1, 2); (void)a; (void)b; }\n", NULL, { "-Wall", NULL } },
+        { "__attribute__((interrupt)) void h(void *); void f(void) { int a[2] = { (h(0), 1), 1 / 0 }; (void)a; }\n", NULL, { "-Wall", NULL } },
+        { "__attribute__((interrupt)) void h(void *); void f(void) { char c = (h(0), 1000), d = 1000; (void)c; (void)d; }\n", NULL, { "-Wall", NULL } },
+        { "__attribute__((interrupt)) void h(void *); int g(int, int); void f(void) { g((h(0), 1), 1 / 0); }\n", NULL, { "-Wall", NULL } },
+        { "__attribute__((interrupt)) void h(void *); void f(void) { unsigned u = 0; int i = 0; (void)(u < (h(0), i)); _Generic(h(0), default: 0); }\n", NULL,
+          { "-Wall", NULL } },
         // A call around one's error is clang's invalid expression, of no -Wexcessive-regsave warning of its own.
         { "__attribute__((interrupt)) void h(void *p) { (void)__builtin_call_with_static_chain(h(p), p); }\n", NULL, { NULL } },
         { "__attribute__((interrupt)) void f(void *p); int g(int); __attribute__((interrupt)) void h(void *p) { g((f(p), 1)); g(2); }\n", NULL, { NULL } },
@@ -311,13 +351,15 @@ static void check_test_driver_interrupts(CheckTest* test, const char* clang, con
     free(expected_lines);
     free(actual_lines);
     // A definition's code: Tier 0's frame (Tier0Function.interrupt, which check_test_driver_interrupt_handlers runs), as clang
-    // compiles it; but a variadic one, which Tier 0's frame takes none of, refused by name.
+    // compiles it, a variadic one's too (#1447).
     static const char* const definitions[] = {
         "__attribute__((interrupt)) void f(void *p) { (void)p; }\n",
         "__attribute__((interrupt)) static void f(void *p, unsigned long e) { (void)p; (void)e; }\n",
         "__attribute__((interrupt)) void f(void *p); void f(void *p) { (void)p; }\n",
         "__attribute__((no_caller_saved_registers)) void g(void); __attribute__((interrupt)) void f(void *p) { (void)p; g(); }\n",
         "__attribute__((interrupt)) void f(void *p, ...) { (void)p; }\n",
+        "__attribute__((interrupt)) void f(void *p, unsigned long e, ...) { __builtin_va_list ap; __builtin_va_start(ap, e); (void)__builtin_va_arg(ap, double); "
+        "__builtin_va_end(ap); }\n",
     };
     char object[PATH_MAX];
     snprintf(object, sizeof(object), "%s/interrupt.o", directory);
@@ -325,20 +367,19 @@ static void check_test_driver_interrupts(CheckTest* test, const char* clang, con
     {
         const bool made = parse_test_write(source, definitions[d], strlen(definitions[d]));
         char* text = NULL;
-        char* reference[] = { (char*)clang, "-std=gnu17", "-O0", "-c", source, "-o", object, NULL };
+        // (-w: a variadic routine's va_start and va_end are -Wexcessive-regsave's calls, which the units above compare.)
+        char* reference[] = { (char*)clang, "-std=gnu17", "-w", "-O0", "-c", source, "-o", object, NULL };
         const int oracle = made ? check_test_driver_spawn(reference, &text) : -1;
         free(text);
         for (uint32_t p = 0; made && p < 2; p += 1)
         {
             text = NULL;
-            char* arguments[] = { (char*)executable, "-std=gnu17", "-c", source, "-o", object, p == 1 ? "--scalar" : NULL, NULL };
+            char* arguments[] = { (char*)executable, "-std=gnu17", "-w", "-c", source, "-o", object, p == 1 ? "--scalar" : NULL, NULL };
             const int status = check_test_driver_spawn(arguments, &text);
             char description[1024];
-            const bool variadic = d + 1 == BUSTER_ARRAY_LENGTH(definitions);
-            snprintf(description, sizeof(description), "interrupt definition %u by the %s path %s as clang compiles it (status %d, clang %d: %s)", d,
-                     p == 1 ? "scalar" : "vector", variadic ? "is refused by name" : "compiles", status, oracle, text != NULL ? text : "");
-            check_test_expect(test, oracle == 0 && (variadic ? status == 1 && text != NULL && strstr(text, "unsupported: variadic interrupt service routines") != NULL :
-                                                               status == 0 && text != NULL && text[0] == 0), description);
+            snprintf(description, sizeof(description), "interrupt definition %u by the %s path compiles as clang compiles it (status %d, clang %d: %s)", d,
+                     p == 1 ? "scalar" : "vector", status, oracle, text != NULL ? text : "");
+            check_test_expect(test, oracle == 0 && status == 0 && text != NULL && text[0] == 0, description);
             free(text);
         }
     }
