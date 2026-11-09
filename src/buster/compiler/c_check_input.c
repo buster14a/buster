@@ -10616,7 +10616,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                          linkage != 0 && old_linkage != 0 && linkage != old_linkage, 0))
     {
         const uint32_t before = reader->output->report_count;
-        check_input_redeclaration_report(reader, token, old_declaration, TYPE_ANSWER_YES, true, false, CHECK_INPUT_REDECLARATION);
+        check_input_redeclaration_report(reader, token, old_declaration, TYPE_ANSWER_YES, true, false, true, CHECK_INPUT_REDECLARATION);
         if (reader->output->report_count == before + 1 && check_input_recover_reports(reader, before))
         {
             check_input_invalid_declare(reader, token);
