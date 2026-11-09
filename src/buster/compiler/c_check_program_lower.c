@@ -6321,7 +6321,7 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
 // A direct atomic load or store (#1059, check_program_direct_access's `marker`): the pointer's operand, for a store the
 // value's, converted to the object's value type, then the typed stream's LOAD or SET with the marker. The backend
 // implements a seq_cst SET with memory xchg, so its producer adds no separate fence. The tasks run in reverse.
-static void check_lower_atomic_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint32_t marker)
+static void check_lower_atomic_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint64_t marker)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
@@ -6352,7 +6352,7 @@ static void check_lower_atomic_direct(CheckLowerWriter* writer, uint32_t node, c
 // result is whether the old byte was set (its conversion from unsigned char to the node's bool). Narrow classes negate,
 // add and subtract as C's promotions do, in int, and convert back. The result converted to the node's type; its constant
 // order evaluated for nothing, as a direct fence's. The tasks run in reverse.
-static void check_lower_atomic_rmw_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint32_t value)
+static void check_lower_atomic_rmw_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint64_t value)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
@@ -6411,7 +6411,7 @@ static void check_lower_atomic_rmw_direct(CheckLowerWriter* writer, uint32_t nod
 // old value stored where the pointer points where it isn't, as the leaf stores it, a store a successful exchange makes
 // nowhere. A narrow class's values are compared as I32, the class Tier 0 compares. The result converted to the node's
 // type; GNU's weak flag and the constant orders evaluated for nothing, as a direct fence's. The tasks run in reverse.
-static void check_lower_atomic_cas_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint32_t order)
+static void check_lower_atomic_cas_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint64_t order)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
@@ -6505,7 +6505,7 @@ static void check_lower_atomic_cas_direct(CheckLowerWriter* writer, uint32_t nod
 // that result is the old value (compared in I32 for a narrow class, the class Tier 0 compares), and otherwise the old
 // value is that result and the loop runs again. The result, the old value or the new one, converted to the node's type;
 // the constant order evaluated for nothing, as a direct fence's. The tasks run in reverse.
-static void check_lower_atomic_fetch_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint32_t order)
+static void check_lower_atomic_fetch_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint64_t order)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
@@ -6585,7 +6585,7 @@ static void check_lower_atomic_fetch_direct(CheckLowerWriter* writer, uint32_t n
     check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, old);
     check_lower_mark(writer, loop);
     check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, old);
-    check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, BUSTER_TYPED_ACCESS_ATOMIC);
+    check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, BUSTER_TYPED_ACCESS_ATOMIC | (order & BUSTER_TYPED_ACCESS_SEGMENT));
     check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
     check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, operand);
     check_lower_convert(writer, checked, object);
@@ -11545,6 +11545,13 @@ static TypeId check_lower_atomic_pointee(const CheckLowerWriter* writer, uint32_
     return kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? type_element(types, pointer) : 0;
 }
 
+// The type whose space an atomic builtin's object is in: its object type where that has a segment's space, and otherwise
+// its pointer argument's pointee (check_lower_atomic_pointee).
+static TypeId check_lower_atomic_space(const CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect)
+{
+    return check_lower_segment(writer->program->types, effect->object_type) ? effect->object_type : check_lower_atomic_pointee(writer, node);
+}
+
 // A node that loads from or stores to a segment's space (check_lower_segment), which the lowering refuses by name: an
 // lvalue read (not an address taken, `&` or a member's or a subscript's base), or an assignment's, a compound
 // assignment's or an increment's or decrement's operand; a vector's element, read or written, whose type has lost its
@@ -11559,8 +11566,16 @@ static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t 
     const uint32_t target = graph->operand0[node];
     const bool store = (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) && target < stream->count;
     const bool element = op == CHECK_OP_SUBSCRIPT && (value->flags & BUSTER_CHECK_VECTOR_ELEMENT) != 0 && target < stream->count;
+    // An atomic builtin's object takes the override where a direct plan (#1059) takes the builtin, without a helper:
+    // its LOAD or SET, ATOMIC_RMW, ATOMIC_CAS, or a fetch's loop of a LOAD and ATOMIC_CAS.
+    const uint32_t helper = op == CHECK_OP_BUILTIN_ATOMIC ? check_program_builtin_index(writer->output->helpers.uses, writer->output->helpers.use_count, sizeof(CheckProgramHelperUse), node)
+                                                          : BUSTER_CHECK_NONE;
     const uint32_t atomic = op == CHECK_OP_BUILTIN_ATOMIC ? check_program_builtin_index(stream->atomics, stream->atomic_count, sizeof(CheckBuiltinAtomicEffect), node)
                                                           : BUSTER_CHECK_NONE;
+    const CheckBuiltinAtomicEffect* effect = atomic != BUSTER_CHECK_NONE ? stream->atomics + atomic : NULL;
+    const bool direct = effect != NULL && helper == BUSTER_CHECK_NONE && check_program_direct_fence(program, node, effect) == UINT32_MAX &&
+                        (check_program_direct_access(program, node, effect) != UINT32_MAX || check_program_direct_rmw(program, node, effect) != UINT32_MAX ||
+                         check_program_direct_cas(program, node, effect) != UINT32_MAX || check_program_direct_fetch(program, node, effect) != UINT32_MAX);
     // An array's lvalue isn't read: its value is its address, which a subscript or a member's own access reads through.
     const TypeTable* types = program->types;
     const bool read = !address && value->category == CHECK_LVALUE && check_lower_segment(types, value->type) &&
@@ -11573,8 +11588,8 @@ static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t 
     const bool reader = op == CHECK_OP_DEREFERENCE || member || (op == CHECK_OP_SUBSCRIPT && !element) || op == CHECK_OP_VALUE;
     const bool carried = read ? reader && check_lower_segment_carried(writer, value->type) : written && check_lower_segment_carried(writer, check_stream_type(stream, target));
     return ((read || written) && !carried) || (element && check_lower_segment(program->types, check_stream_type(stream, target))) ||
-           (atomic != BUSTER_CHECK_NONE && (check_lower_segment(types, stream->atomics[atomic].object_type) ||
-                                             check_lower_segment(types, check_lower_atomic_pointee(writer, node))));
+           (effect != NULL && check_lower_segment(types, check_lower_atomic_space(writer, node, effect)) &&
+            !(direct && check_lower_segment_override(types, check_lower_atomic_space(writer, node, effect)) != 0));
 }
 
 // Always inlined into the copies of the tasks' loop (check_lower_drain_body), each with its constant `bit_ints`
@@ -11802,25 +11817,31 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         const uint32_t fetch = atomic != BUSTER_CHECK_NONE && fence == UINT32_MAX && access == UINT32_MAX && rmw == UINT32_MAX && cas == UINT32_MAX
                                    ? check_program_direct_fetch(program, node, stream->atomics + atomic)
                                    : UINT32_MAX;
+        // A direct one's object in %fs or %gs (#1447) takes the segment's override on its LOAD, SET, ATOMIC_RMW or
+        // ATOMIC_CAS (check_lower_access's); check_lower_segment_access refuses one of another plan.
+        const uint64_t segment = __builtin_expect(writer->segments, 0) && atomic != BUSTER_CHECK_NONE
+                                     ? check_lower_segment_override(types, check_lower_atomic_space(writer, node, stream->atomics + atomic))
+                                     : 0;
+        writer->segment_entries = writer->segment_entries || segment != 0;
         if (fence != UINT32_MAX)
         {
             check_lower_instruction(writer, BUSTER_TYPED_FENCE, BUSTER_TYPED_CLASS_VOID, fence);
         }
         else if (access != UINT32_MAX)
         {
-            check_lower_atomic_direct(writer, node, stream->atomics + atomic, access);
+            check_lower_atomic_direct(writer, node, stream->atomics + atomic, access | segment);
         }
         else if (rmw != UINT32_MAX)
         {
-            check_lower_atomic_rmw_direct(writer, node, stream->atomics + atomic, rmw);
+            check_lower_atomic_rmw_direct(writer, node, stream->atomics + atomic, rmw | segment);
         }
         else if (cas != UINT32_MAX)
         {
-            check_lower_atomic_cas_direct(writer, node, stream->atomics + atomic, cas);
+            check_lower_atomic_cas_direct(writer, node, stream->atomics + atomic, cas | segment);
         }
         else if (fetch != UINT32_MAX)
         {
-            check_lower_atomic_fetch_direct(writer, node, stream->atomics + atomic, fetch);
+            check_lower_atomic_fetch_direct(writer, node, stream->atomics + atomic, fetch | segment);
         }
         else if (id == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE || id == CBUILTIN_ATOMIC_IS_LOCK_FREE)
         {

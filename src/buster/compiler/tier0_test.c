@@ -4007,7 +4007,7 @@ static void tier0_test_operands(Tier0TestTally* tally)
 // none. Validation refuses an override on another kind and the segment 3. Then they run in a child, %fs's base the
 // thread's and %gs's set by arch_prctl, on addresses that hold the data only through the segment (the data's address
 // less the base), so that an access without its override faults.
-#define BUSTER_TIER0_TEST_SEGMENT_SHAPES 8
+#define BUSTER_TIER0_TEST_SEGMENT_SHAPES 10
 #define BUSTER_TIER0_TEST_SEGMENT_CASES 128
 
 typedef struct Tier0TestSegmentCase Tier0TestSegmentCase;
@@ -4025,7 +4025,9 @@ struct Tier0TestSegmentCase
 
 // The stream of a case: 0 LOAD, 1 LOAD at [p + 8], 2 LOAD at [p + i * bytes], 3 STORE of v (returning it), 4 SET at
 // [p + i * bytes] of a constant (v for a floating value), 5 a seq_cst SET of v, 6 a copy from the segment (to q's plain
-// address), 7 a copy to it (from q's). Locals: p (U64), then i (I64) and v, or q (U64) for the copies.
+// address), 7 a copy to it (from q's), 8 an ATOMIC_RMW adding v (lock xadd, its old value returned), 9 an ATOMIC_CAS of
+// v for 0x5a through p's local (lock cmpxchg, its old value returned). Locals: p (U64), then i (I64) and v, or q (U64) for
+// the copies.
 static uint32_t tier0_test_segment_stream(const Tier0TestSegmentCase* c, bool marked, uint8_t* kinds, uint8_t* classes, uint64_t* values)
 {
     const uint8_t class = c->class;
@@ -4038,7 +4040,7 @@ static uint32_t tier0_test_segment_stream(const Tier0TestSegmentCase* c, bool ma
     classes[n] = (c_); \
     values[n] = (v_); \
     n += 1
-    if (c->shape <= 5)
+    if (c->shape <= 5 || c->shape == 8)
     {
         BUSTER_TIER0_TEST_SEGMENT_ADD(BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
     }
@@ -4076,6 +4078,19 @@ static uint32_t tier0_test_segment_stream(const Tier0TestSegmentCase* c, bool ma
         BUSTER_TIER0_TEST_SEGMENT_ADD(BUSTER_TYPED_SET, class, mark | (c->shape == 5 ? BUSTER_TYPED_ACCESS_ATOMIC | BUSTER_TYPED_FENCE_SEQ_CST : 0));
         BUSTER_TIER0_TEST_SEGMENT_ADD(BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
     }
+    else if (c->shape == 8)
+    {
+        BUSTER_TIER0_TEST_SEGMENT_ADD(BUSTER_TYPED_LOCAL, class, 2);
+        BUSTER_TIER0_TEST_SEGMENT_ADD(BUSTER_TYPED_ATOMIC_RMW, class, mark | BUSTER_TYPED_RMW_ADD | BUSTER_TYPED_FENCE_SEQ_CST);
+        BUSTER_TIER0_TEST_SEGMENT_ADD(BUSTER_TYPED_RETURN, class, 0);
+    }
+    else if (c->shape == 9)
+    {
+        BUSTER_TIER0_TEST_SEGMENT_ADD(BUSTER_TYPED_LOCAL, class, 2);
+        BUSTER_TIER0_TEST_SEGMENT_ADD(BUSTER_TYPED_CONST, class, 0x5a);
+        BUSTER_TIER0_TEST_SEGMENT_ADD(BUSTER_TYPED_ATOMIC_CAS, class, mark | BUSTER_TYPED_FENCE_SEQ_CST);
+        BUSTER_TIER0_TEST_SEGMENT_ADD(BUSTER_TYPED_RETURN, class, 0);
+    }
     else
     {
         // A copy: the destination's address, then the source's, its LOAD and the STORE; the segment's on one side.
@@ -4101,7 +4116,7 @@ static uint32_t tier0_test_segment_cases(Tier0TestSegmentCase* cases)
         for (uint8_t shape = 0; shape < BUSTER_TIER0_TEST_SEGMENT_SHAPES; shape += 1)
         {
             const bool floating = class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64;
-            if (!(shape == 5 && floating))
+            if (!((shape == 5 || shape >= 8) && floating))
             {
                 cases[n] = (Tier0TestSegmentCase){ .class = class, .shape = shape, .segment = (uint8_t)(1 + n % 2), .bytes = tier0_class_bytes(class) };
                 n += 1;
@@ -4115,7 +4130,7 @@ static uint32_t tier0_test_segment_cases(Tier0TestSegmentCase* cases)
     };
     for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(memory); m += 1)
     {
-        for (uint8_t shape = 6; shape < BUSTER_TIER0_TEST_SEGMENT_SHAPES; shape += 1)
+        for (uint8_t shape = 6; shape <= 7; shape += 1)
         {
             const uint8_t class = memory[m][0];
             cases[n] = (Tier0TestSegmentCase){ .class = class, .shape = shape, .segment = (uint8_t)(1 + n % 2), .width = memory[m][1], .transport = memory[m][2],
@@ -4162,7 +4177,7 @@ static void tier0_test_segments(Tier0TestTally* tally)
     {
         const Tier0TestSegmentCase* c = cases + k;
         const bool floating = c->class == BUSTER_TYPED_CLASS_F32 || c->class == BUSTER_TYPED_CLASS_F64;
-        const bool copy = c->shape >= 6;
+        const bool copy = c->shape == 6 || c->shape == 7;
         uint8_t kinds[16];
         uint8_t classes[16];
         uint64_t values[16];
@@ -4176,7 +4191,7 @@ static void tier0_test_segments(Tier0TestTally* tally)
             { .registers = { BUSTER_ABI_RSI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
             { .registers = { floating ? BUSTER_ABI_REGISTER_VECTOR : BUSTER_ABI_RDX, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
         };
-        const bool returns = c->shape <= 3;
+        const bool returns = c->shape <= 3 || c->shape >= 8;
         Tier0Function function;
         memset(&function, 0, sizeof(function));
         function.kinds = kinds;
@@ -4249,12 +4264,13 @@ static void tier0_test_segments(Tier0TestTally* tally)
             const uint64_t p = (uint64_t)(uintptr_t)data - base;
             const uint64_t q = (uint64_t)(uintptr_t)other;
             const uint64_t i = 2;
-            const uint64_t v = 0x1122334455667788ull;
             const double vd = 2.5;
             const float vf = -1.25f;
             void* entry = region + (uint64_t)k * BUSTER_TIER0_TEST_PAGE;
             uint64_t result = 0;
-            if (c->shape >= 6)
+            // A compare-exchange's expected value is the object's, so that it succeeds.
+            const uint64_t v = c->shape == 9 ? tier0_test_load(c->class, (uint64_t)(uintptr_t)data) : 0x1122334455667788ull;
+            if (c->shape == 6 || c->shape == 7)
             {
                 void (*f)(uint64_t, uint64_t) = 0;
                 memcpy(&f, &entry, sizeof(f));
@@ -4303,6 +4319,12 @@ static void tier0_test_segments(Tier0TestTally* tally)
             if (c->shape <= 2)
             {
                 good = good && result == tier0_test_load(c->class, (uint64_t)(uintptr_t)(expected + at));
+            }
+            else if (c->shape >= 8)
+            {
+                const uint64_t old = tier0_test_load(c->class, (uint64_t)(uintptr_t)expected);
+                good = good && result == old;
+                tier0_test_store(c->class, (uint64_t)(uintptr_t)expected, c->shape == 8 ? old + v : 0x5a);
             }
             else if (c->shape == 3 || c->shape == 5 || (c->shape == 4 && floating))
             {

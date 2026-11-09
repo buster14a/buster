@@ -1406,11 +1406,19 @@ a read by indirection, member (not a bit-field's), subscript (not a vector's
 element's) or name, and an assignment, compound assignment, increment or
 decrement, of an integer's, a floating value's (long double's too), a 128-bit
 integer's or a vector's class (not a transport vector), which one LOAD or STORE
-moves. An array's lvalue isn't read: its value is its address.
+moves. An array's lvalue isn't read: its value is its address. An atomic builtin's
+object in `%fs` or `%gs` takes it where a direct plan (#1059) takes the builtin:
+its LOAD or SET (a seq_cst store's `xchg`), `ATOMIC_RMW` (`lock xadd`, `xchg`),
+`ATOMIC_CAS` (`lock cmpxchg`) and a fetch's loop of a relaxed LOAD and
+`ATOMIC_CAS`. Its space is its object type's, or else its pointer argument's
+pointee's (`check_lower_atomic_space`: a generic builtin's object type, such as
+`__atomic_test_and_set`'s, doesn't carry it).
 
 The rest the lowering refuses by name, rather than compile it as a plain access:
 an aggregate's copy, a bit-field, a complex, half-precision or `_BitInt` value
-and an `_Atomic` object in those spaces, any access in `%ss`'s (258: no 64-bit
+and an `_Atomic` object in those spaces (read or written as an lvalue), an atomic
+builtin another plan takes (a generic one by pointer, `__atomic_clear`,
+`__sync_lock_release`, one of 16 bytes), any access in `%ss`'s (258: no 64-bit
 form of the encoder's has its `36` prefix); a vector's
 element read or written through a vector in one (the element's type has lost the
 space); and an atomic builtin's object in one, which its pointer argument reaches

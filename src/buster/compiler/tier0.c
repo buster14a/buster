@@ -310,9 +310,10 @@
 #define BUSTER_TYPED_FENCE_SIGNAL 0x08
 #define BUSTER_TYPED_FENCE_SEQ_CST 5
 #define BUSTER_TYPED_ACCESS_ATOMIC 0x10
-// A LOAD's, STORE's or SET's segment override (#1447), in its value's top two bits past what each class's value holds
-// (an atomic marker and its order, a vector's or a mask's bytes): FS (clang's address space 257, __seg_fs) or GS (256,
-// __seg_gs), numbered as the encoder's overrides are (form + segment * X86_FORM_COUNT is the form with the override). A
+// A LOAD's, STORE's, SET's, ATOMIC_RMW's or ATOMIC_CAS's segment override (#1447), in its value's top two bits past what
+// each one's value holds (an atomic marker and its order, a vector's or a mask's bytes, an operation, a CAS's local): FS
+// (clang's address space 257, __seg_fs) or GS (256, __seg_gs), numbered as the encoder's overrides are (form + segment *
+// X86_FORM_COUNT is the form with the override). A
 // function with one says so (Tier0Function.segments); no other kind takes it (another kind's value is its own whole: a
 // constant's top bits are its own), and 3 is none.
 #define BUSTER_TYPED_ACCESS_SEGMENT_SHIFT 62
@@ -595,8 +596,8 @@ struct Tier0Function
     uint32_t operation_count;
     bool vectors;
     bool masks;
-    // Whether a LOAD, STORE or SET has a segment override (#1447, BUSTER_TYPED_ACCESS_SEGMENT): a load or store in
-    // __seg_fs or __seg_gs. Validation and compilation strip the overrides out of line (tier0_segments_strip), so that
+    // Whether a LOAD, STORE, SET, ATOMIC_RMW or ATOMIC_CAS has a segment override (#1447, BUSTER_TYPED_ACCESS_SEGMENT): an
+    // access in __seg_fs or __seg_gs. Validation and compilation strip the overrides out of line (tier0_segments_strip), so that
     // their paths never see one, and the compilation adds each to its entry's records after (tier0_apply_segments).
     // ir_lower refuses such a function, which Tier 0 compiles.
     bool segments;
@@ -10730,12 +10731,14 @@ static uint32_t tier0_returns_twice_saves(const Tier0Function* function, const T
 // selection, the references' count, the homes and the frame (shared), measuring and positions (the vector path's
 // measuring sums them), the output, emission and the immediates' choice (x86_choose_forms or its twin).
 // The segment overrides (#1447) of a function that has them (Tier0Function.segments), one per entry (`segments`: 0, or
-// BUSTER_TYPED_SEGMENT_FS or _GS on a LOAD, STORE or SET), on its records once the forms are chosen: each memory operand
+// BUSTER_TYPED_SEGMENT_FS or _GS on a LOAD, STORE, SET, ATOMIC_RMW or ATOMIC_CAS), on its records once the forms are
+// chosen: each memory operand
 // of a marked entry's records (from its first to the next one's, Tier0Entries.positions) takes the override, but the
 // frame's own (based on rsp, the frame's base or the incoming arguments' base), RIP-relative ones and lea's. A marked
 // access's address is in a register: LOAD's, STORE's and SET's templates take it from their depths ([R1], [R2 + R1 *
 // 2^s], [R1 + K]), never from a home or a constant, and their deferred and deep forms (the memory classes', vectors' and
-// masks') read and write their values through the frame's slots, which the frame's registers base. A shared scalar pass,
+// masks') read and write their values through the frame's slots, which the frame's registers base; ATOMIC_RMW's xchg or
+// lock xadd takes it from its depth, and ATOMIC_CAS's lock cmpxchg from a register its local's home is read into. A shared scalar pass,
 // which the vector path runs too: such a function is rare, and only its marked entries' records are read.
 static void tier0_apply_segments(X86Instruction* records, const uint32_t* positions, uint32_t count, const uint8_t* segments, const Tier0Frame* frame)
 {
@@ -13711,7 +13714,8 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
 #endif
 
 // A function with segment overrides (#1447, Tier0Function.segments), out of line: its values without them, in a copy of
-// its values column (`values`), and each entry's override (`segments`), from a LOAD's, STORE's or SET's value. Another
+// its values column (`values`), and each entry's override (`segments`), from a LOAD's, STORE's, SET's, ATOMIC_RMW's or
+// ATOMIC_CAS's value. Another
 // kind's value is its own whole (a constant's top bits are its own). False where an override is 3, which no segment is.
 static bool tier0_segments_strip(const Tier0Function* function, uint64_t* values, uint8_t* segments)
 {
@@ -13721,7 +13725,8 @@ static bool tier0_segments_strip(const Tier0Function* function, uint64_t* values
         const uint8_t kind = function->kinds[i];
         const uint64_t value = function->values[i];
         const uint32_t segment = (uint32_t)(value >> BUSTER_TYPED_ACCESS_SEGMENT_SHIFT);
-        const bool access = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET;
+        const bool access = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_ATOMIC_RMW ||
+                            kind == BUSTER_TYPED_ATOMIC_CAS;
         valid = valid && (!access || segment != 3);
         values[i] = access ? value & ~BUSTER_TYPED_ACCESS_SEGMENT : value;
         segments[i] = access ? (uint8_t)segment : 0;
@@ -14900,7 +14905,7 @@ static __attribute__((noinline)) Tier0Check tier0_validate_segments(const Tier0F
     else if (!tier0_segments_strip(function, values, segments))
     {
         check.error = TIER0_ERROR_INVALID;
-        check.rule = "a LOAD's, STORE's or SET's segment override that isn't FS or GS";
+        check.rule = "an access's segment override that isn't FS or GS";
     }
     else
     {
