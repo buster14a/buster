@@ -28,8 +28,10 @@
 //     type (an IFUNC's among them), binding and visibility; each absolute one (SHN_ABS), a symbol of source ABSOLUTE
 //     with its value and without an atom; each undefined one, a symbol of source NONE without an atom; and each section
 //     symbol, an unnamed local at its atom's start, which relocations against the section refer to. FILE symbols, and
-//     locals defined in dropped sections, become none. Common and GNU_UNIQUE symbols, and absolute TLS symbols and
-//     IFUNCs, are unsupported.
+//     locals defined in dropped sections, become none. A global common one (SHN_COMMON, its value a power of two)
+//     becomes a BUSTER_LINK_SYMBOL_COMMON symbol of its own zero-filled atom, of its size and alignment, as the
+//     emission and the assembler make one (#1849); the exact path makes it, the vector path leaving such an object to
+//     it. GNU_UNIQUE symbols, other commons, and absolute TLS symbols and IFUNCs, are unsupported.
 //   - Relocations: each entry of an atom's .rela section becomes one of its fixups, of the kind its type names (the
 //     inverse of the object writer's object_relocation_types), with its target and addend, in offset order: sorted
 //     if the file's aren't. Other types are unsupported.
@@ -807,11 +809,20 @@ static ImportResult import_object_capacity(String8 bytes, LinkCapacity* capacity
             capacity->wide_addends += (uint32_t)count;
         }
     }
-    // At most a symbol and a name per entry of the symbol table, section symbols among them.
+    // At most a symbol and a name per entry of the symbol table, section symbols among them, and an atom of each common
+    // symbol's own (SHN_COMMON, #1849): a branch-free count of their section indices, 2 bytes of each 24-byte entry.
     if (result.error == IMPORT_ERROR_NONE)
     {
         capacity->names = symbols.count;
         capacity->symbols = symbols.count;
+        uint32_t commons = 0;
+        for (uint32_t index = 1; index < symbols.count; index += 1)
+        {
+            uint16_t section = 0;
+            memcpy(&section, symbols.entries.pointer + (uint64_t)index * sizeof(Elf64_Sym) + offsetof(Elf64_Sym, st_shndx), sizeof(section));
+            commons += section == SHN_COMMON ? 1 : 0;
+        }
+        capacity->atoms += commons;
     }
     return result;
 }
@@ -868,7 +879,7 @@ static ImportResult import_sections(Link* link, const ImportElf* elf, uint32_t u
 }
 
 // The symbol flags of an ELF symbol's type, binding and visibility, or false for a type or binding the representation
-// doesn't have (COMMON, GNU_UNIQUE).
+// doesn't have (COMMON, which import_object_symbols takes at SHN_COMMON alone, and GNU_UNIQUE).
 static bool import_symbol_flags(const Elf64_Sym* symbol, uint8_t* flags)
 {
     const uint32_t type = ELF64_ST_TYPE(symbol->st_info);
@@ -882,7 +893,7 @@ static bool import_symbol_flags(const Elf64_Sym* symbol, uint8_t* flags)
 
 // Imports the symbols: one for each that names a place in an atom, a value (SHN_ABS) or a reference, none for FILE
 // symbols and locals of dropped sections.
-static ImportResult import_object_symbols(Link* link, const ImportElf* elf, const ImportSymbols* symbols, uint8_t source, ImportObject* object)
+static ImportResult import_object_symbols(Link* link, const ImportElf* elf, const ImportSymbols* symbols, uint32_t unit, uint8_t source, ImportObject* object)
 {
     ImportResult result = { 0 };
     for (uint32_t index = 1; result.error == IMPORT_ERROR_NONE && index < symbols->count; index += 1)
@@ -895,11 +906,17 @@ static ImportResult import_object_symbols(Link* link, const ImportElf* elf, cons
         const bool indexed = import_symbol_section(symbols, index, &symbol, &section);
         const bool reserved = section >= SHN_LORESERVE && symbol.st_shndx != SHN_XINDEX;
         const bool absolute = reserved && section == SHN_ABS;
+        // A common symbol (SHN_COMMON, #1849): a global object's, its value its alignment, a power of two, as GNU as and
+        // LLVM write .comm's (an STT_COMMON one too, as ELF allows).
+        const bool common = reserved && section == SHN_COMMON;
+        const bool common_valid = common && binding == STB_GLOBAL && (type == STT_OBJECT || type == STT_NOTYPE || type == STT_COMMON) &&
+                                  symbol.st_value != 0 && (symbol.st_value & (symbol.st_value - 1)) == 0 &&
+                                  (uint32_t)__builtin_ctzll(symbol.st_value | 1) <= BUSTER_LINK_MAX_ALIGNMENT_LOG2;
         const AtomId atom = section != SHN_UNDEF && !reserved && section < elf->section_count ? object->section_atoms[section] : 0;
         String8 name = { 0 };
         uint8_t flags = 0;
         const bool named = symbol.st_name == 0 || import_string(symbols->names, symbol.st_name, &name);
-        const bool known = import_symbol_flags(&symbol, &flags);
+        const bool known = import_symbol_flags(&symbol, &flags) || common_valid;
         SymbolId added = 0;
         bool failed = false;
         if (!named || !indexed || (section != SHN_UNDEF && !reserved && section >= elf->section_count))
@@ -917,8 +934,8 @@ static ImportResult import_object_symbols(Link* link, const ImportElf* elf, cons
             added = link_add_symbol(link, 0, atom, 0, 0, (uint8_t)(BUSTER_LINK_SYMBOL_LOCAL | tls), source);
             failed = added == 0;
         }
-        else if (!known || (reserved && !absolute) || (absolute && !link_absolute_fits(0, flags)) || (section != SHN_UNDEF && !reserved && atom == 0) ||
-                 (section == SHN_UNDEF && binding == STB_LOCAL))
+        else if (!known || (reserved && !absolute && !common_valid) || (absolute && !link_absolute_fits(0, flags)) || (section != SHN_UNDEF && !reserved && atom == 0) ||
+                 (section == SHN_UNDEF && binding == STB_LOCAL) || (common_valid && name.length == 0))
         {
             result = import_fail(IMPORT_ERROR_UNSUPPORTED, offset);
             result.type = type;
@@ -930,6 +947,14 @@ static ImportResult import_object_symbols(Link* link, const ImportElf* elf, cons
             if (!failed && atom != 0)
             {
                 added = link_add_symbol(link, name_id, atom, symbol.st_value, symbol.st_size, flags, source);
+            }
+            else if (!failed && common_valid)
+            {
+                // The common's own zero-filled atom, BUSTER_LINK_SYMBOL_COMMON's, as the emission and the assembler make
+                // one: the object writer gives it back SHN_COMMON, and a link allocates it in .bss.
+                const AtomId own = link_add_atom(link, BUSTER_LINK_CLASS_BSS, (uint8_t)__builtin_ctzll(symbol.st_value), symbol.st_size, 0, unit);
+                const uint8_t common_flags = (uint8_t)((flags & ~BUSTER_LINK_SYMBOL_TYPE) | BUSTER_LINK_SYMBOL_COMMON);
+                added = own != 0 ? link_add_symbol(link, name_id, own, 0, symbol.st_size, common_flags, source) : 0;
             }
             else if (!failed && absolute)
             {
@@ -1221,7 +1246,7 @@ static ImportResult import_object_scalar(Link* link, String8 bytes, uint32_t uni
     }
     if (result.error == IMPORT_ERROR_NONE)
     {
-        result = import_object_symbols(link, &elf, &symbols, source, object);
+        result = import_object_symbols(link, &elf, &symbols, unit, source, object);
     }
     for (uint32_t index = 1; result.error == IMPORT_ERROR_NONE && index < elf.section_count; index += 1)
     {
@@ -1784,7 +1809,8 @@ static bool import_vector_symbols(Link* link, const ImportElf* elf, const Import
         const uint32_t ifunc_type = import_lanes_equal(type, STT_GNU_IFUNC);
         const uint32_t known = (import_lanes_equal(type, STT_NOTYPE) | import_lanes_equal(type, STT_OBJECT) | import_lanes_equal(type, STT_FUNC) | tls_type | ifunc_type) &
                                _mm512_cmple_epu64_mask(binding, _mm512_set1_epi64(STB_WEAK));
-        // An absolute symbol (SHN_ABS) is its value, and can't be a TLS variable or an IFUNC (link_absolute_fits).
+        // An absolute symbol (SHN_ABS) is its value, and can't be a TLS variable or an IFUNC (link_absolute_fits). A
+        // common one (SHN_COMMON) needs an atom of its own, which the exact path adds: it is unsupported here.
         const uint32_t absolute = reserved & import_lanes_equal(section, SHN_ABS);
         const uint32_t unsupported = ~known | (reserved & ~absolute) | (absolute & (tls_type | ifunc_type)) | (ordinary & ~has_atom) | (undefined & local);
         const uint32_t tls_atom = import_lanes_equal(class, BUSTER_LINK_CLASS_TDATA) | import_lanes_equal(class, BUSTER_LINK_CLASS_TBSS);
