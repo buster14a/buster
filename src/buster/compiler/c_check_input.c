@@ -293,6 +293,16 @@ typedef enum CheckInputMessage
     // A block's extern declaration with an initializer, at its name (#1447): clang's "declaration of block scope identifier
     // with linkage cannot have an initializer".
     CHECK_INPUT_BLOCK_EXTERN_INITIALIZER,
+    // clang's declarator errors (#1447, Sema's BuildArrayType and BuildFunctionType): a function's return type of array or
+    // function type in CheckInputReport.type, at its `(`, "function cannot return array type 'int[3]'"; an array bound's
+    // negative constant, at it, "'a' declared as an array with a negative size" (its name's token in `value`, or
+    // BUSTER_CHECK_NONE: "array size is negative"); and an element type at the array's `[`, in `type`: a function's,
+    // "'a' declared as array of functions of type 'int (void)'" (the name in `value`), and an incomplete one's, "array has
+    // incomplete element type 'struct S'", with a tag's forward declaration's note.
+    CHECK_INPUT_FUNCTION_RETURN,
+    CHECK_INPUT_ARRAY_NEGATIVE,
+    CHECK_INPUT_ARRAY_FUNCTIONS,
+    CHECK_INPUT_ARRAY_INCOMPLETE,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
@@ -2982,15 +2992,18 @@ struct CheckTagMember;
 static bool check_input_thread_names(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t parameters, const struct CheckTagFrame* frames,
                                      uint32_t depth, const struct CheckTagMember* members, uint32_t member_count);
 
-static void check_input_incomplete_variable(CheckInputReader* reader, uint32_t name, TypeId type)
+// A report at `token` naming `type` (#1447): spelled by the typedef name that `spelling`'s declaration's specifiers give it
+// (BUSTER_CHECK_NONE for none), with `value`, and an incomplete tag's forward declaration's note.
+static void check_input_report_typed(CheckInputReader* reader, uint32_t token, CheckInputMessage message, TypeId type, uint32_t spelling, uint64_t value)
 {
     const uint32_t before = reader->output->report_count;
-    check_input_report(reader, name, CHECK_INPUT_INCOMPLETE_OBJECT);
+    check_input_report(reader, token, message);
     if (reader->output->report_count > before)
     {
         CheckInputReport* report = reader->output->reports + before;
         report->type = type;
-        report->type_spelling = check_input_typedef_spelling(reader->output, reader->parser, name);
+        report->value = value;
+        report->type_spelling = spelling != BUSTER_CHECK_NONE ? check_input_typedef_spelling(reader->output, reader->parser, spelling) : 0;
         const TypeId plain = type_strip_aligned(reader->types, type);
         const uint8_t kind = type_kind(reader->types, plain);
         if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM)
@@ -3001,6 +3014,11 @@ static void check_input_incomplete_variable(CheckInputReader* reader, uint32_t n
             report->note_kind = CHECK_INPUT_NOTE_FORWARD_DECLARATION;
         }
     }
+}
+
+static void check_input_incomplete_variable(CheckInputReader* reader, uint32_t name, TypeId type)
+{
+    check_input_report_typed(reader, name, CHECK_INPUT_INCOMPLETE_OBJECT, type, name, 0);
 }
 
 // The first attribute of `kind` among a declaration's that isn't ignored, or NULL (#147).
@@ -6648,6 +6666,13 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                             valid = false;
                         }
                         abi_origin = 0;
+                        // An array or a function returned (#1447): clang's error at the function's `(`, naming the type.
+                        const uint8_t returned = type_kind(reader->types, type_strip_aligned(reader->types, type));
+                        if (valid && __builtin_expect(type_kind_is_array(returned) || returned == BUSTER_TYPE_KIND_FUNCTION, 0))
+                        {
+                            check_input_report_typed(reader, part->token, CHECK_INPUT_FUNCTION_RETURN, type, type == frame->base ? frame->name : BUSTER_CHECK_NONE, 0);
+                            valid = false;
+                        }
                         const bool bare = part->parameter_count == 0 && (part->flags & BUSTER_TYPE_FLAG_VARIADIC) != 0 && parser->language.standard < 2023;
                         const bool overloadable = run->overloadable || (check_input_overload_flags(frame->attributes) & BUSTER_CHECK_OVERLOADABLE) != 0;
                         valid &= !bare || (!frame->parameter && p == first && overloadable);
@@ -6690,7 +6715,16 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     }
                     else if (part->kind != BUSTER_TYPE_KIND_NONE)
                     {
-                        type = check_input_vla_type(reader, part->token, type, frame->name, frame->parameter_context, part->kind, part->extent);
+                        // An element of function or incomplete type (#1447): clang's errors at the array's `[`.
+                        const TypeId element = type_strip_aligned(reader->types, type);
+                        const bool functions = type_kind(reader->types, element) == BUSTER_TYPE_KIND_FUNCTION;
+                        if (__builtin_expect(functions || !type_is_complete(reader->types, element), 0))
+                        {
+                            check_input_report_typed(reader, part->token, functions ? CHECK_INPUT_ARRAY_FUNCTIONS : CHECK_INPUT_ARRAY_INCOMPLETE, type,
+                                                     type == frame->base ? frame->name : BUSTER_CHECK_NONE, frame->name);
+                            type = 0;
+                        }
+                        type = type != 0 ? check_input_vla_type(reader, part->token, type, frame->name, frame->parameter_context, part->kind, part->extent) : 0;
                         noderef = check_input_noderef_wrap(reader, noderef);
                     }
                     // Its chunk's address spaces, in their order (#1447).
@@ -8804,7 +8838,15 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             }
             const bool function = type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION;
             const bool file = reader->function_result == 0;
-            valid &= is_typedef || function || type_kind(reader->types, type) != BUSTER_TYPE_KIND_VOID;
+            // A variable of type void (#1447): clang's "variable has incomplete type 'void'" at its name, but an extern
+            // declaration's, which clang takes (and the checker doesn't yet).
+            const bool void_object = !is_typedef && !function && type_kind(reader->types, type) == BUSTER_TYPE_KIND_VOID;
+            if (__builtin_expect(valid && void_object && storage != C_NAME_EXTERN, 0))
+            {
+                reader->declared_types[name] = type;
+                check_input_incomplete_variable(reader, name, type);
+            }
+            valid &= !void_object;
             // A function specifier declares a function only: clang refuses inline elsewhere, and the _Noreturn keyword
             // on a typedef (of a function's type too) or an object, at the specifier.
             const uint32_t specifier = !valid ? BUSTER_CHECK_NONE : is_inline && !function ? check_input_inline_token(parser, first, name) :
@@ -8838,14 +8880,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             if (valid && !complete_object)
             {
                 reader->declared_types[name] = type;
-                if (check_input_attribute_of(attributes, CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL)
-                {
-                    check_input_incomplete_variable(reader, name, type);
-                }
-                else
-                {
-                    check_input_report(reader, name, CHECK_INPUT_INCOMPLETE_OBJECT);
-                }
+                // With the tag's forward declaration's note (#1447), as clang gives it.
+                check_input_incomplete_variable(reader, name, type);
             }
             valid &= complete_object;
             valid &= initialized || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || (function && kind == PARSE_KIND_L_BRACE);
@@ -12121,7 +12157,8 @@ static void check_input_complete_use(CheckInputReader* reader, uint32_t token)
         token < check_input_expression_limit(reader, token))
     {
         const uint32_t first = reader->output->report_count;
-        check_input_report(reader, token, CHECK_INPUT_INCOMPLETE_TENTATIVE);
+        // With the tag's forward declaration's note (#1447).
+        check_input_report_typed(reader, token, CHECK_INPUT_INCOMPLETE_TENTATIVE, reader->declared_types[token], token, 0);
         if (reader->output->report_count > first)
         {
             reader->output->reports[first].completion = reader->parser->tokens.count + 1u;
