@@ -14003,6 +14003,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 prepared = prepared && check_input_ignored_pragmas(&reader, handled);
                 prepared = prepared && check_input_symbol_syntax_warnings(&reader);
                 prepared = prepared && check_input_ms_warnings(&reader);
+                prepared = prepared && check_input_pack_align_warnings(&reader);
                 input->resource |= !prepared;
                 uint32_t pack = 0;
                 bool handler_error = false;
