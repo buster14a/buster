@@ -357,8 +357,7 @@ static void check_target_versions_bind(CheckInputReader* reader, uint32_t token,
 
 // A target string's parse, as clang's TargetInfo::parseTargetAttr gives it: its items between commas, trimmed, fpmath=
 // left out; arch= and tune= (a second of either is its duplicate), branch-protection=, and the features (no-X as -X).
-// Each piece is bytes of the string's text.
-#define BUSTER_CHECK_TARGET_VERSION_ITEMS 64
+// Each piece is bytes of the string's text; the features' arrays are in scratch, one entry for each item of the string.
 
 typedef struct CheckTargetVersionParse CheckTargetVersionParse;
 struct CheckTargetVersionParse
@@ -369,10 +368,11 @@ struct CheckTargetVersionParse
     // 0 for none, 1 a duplicate arch=, 2 a duplicate tune=.
     uint32_t duplicate;
     // Each feature's item, with whether it is negated (no-), in the string's order, then sorted.
-    String8 features[BUSTER_CHECK_TARGET_VERSION_ITEMS];
-    bool negated[BUSTER_CHECK_TARGET_VERSION_ITEMS];
+    String8* features;
+    bool* negated;
     uint32_t feature_count;
-    bool overflow;
+    // Whether scratch had room for the arrays (the output's resource flag set where it hadn't).
+    bool parsed;
 };
 
 static String8 check_target_version_slice(String8 text, uint32_t first, uint32_t last)
@@ -387,11 +387,21 @@ static bool check_target_version_prefix(String8 item, const char* prefix)
     return item.length >= length && memcmp(item.pointer, prefix, length) == 0;
 }
 
-static void check_target_versions_parse(String8 text, CheckTargetVersionParse* parse)
+// The caller pops scratch back past the arrays.
+static void check_target_versions_parse(CheckInputReader* reader, String8 text, CheckTargetVersionParse* parse)
 {
     *parse = (CheckTargetVersionParse){ 0 };
     const bool is_default = check_input_attribute_equal(text, "default");
-    for (uint32_t cursor = 0; !is_default && cursor <= text.length;)
+    uint64_t items = 1;
+    for (uint64_t i = 0; i < text.length; i += 1)
+    {
+        items += text.pointer[i] == ',';
+    }
+    parse->features = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, String8, items);
+    parse->negated = parse->features != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, bool, items) : NULL;
+    parse->parsed = parse->negated != NULL;
+    reader->output->resource |= !parse->parsed;
+    for (uint32_t cursor = 0; parse->parsed && !is_default && cursor <= text.length;)
     {
         uint32_t end = cursor;
         while (end < text.length && text.pointer[end] != ',')
@@ -420,7 +430,7 @@ static void check_target_versions_parse(String8 text, CheckTargetVersionParse* p
             parse->duplicate = slot->pointer != NULL ? (item.pointer[0] == 'a' ? 1u : 2u) : parse->duplicate;
             *slot = slot->pointer != NULL ? *slot : value;
         }
-        else if (parse->feature_count < BUSTER_CHECK_TARGET_VERSION_ITEMS)
+        else
         {
             const bool negated = check_target_version_prefix(item, "no-");
             // clang's "-" + the item after its first '-'.
@@ -432,10 +442,6 @@ static void check_target_versions_parse(String8 text, CheckTargetVersionParse* p
             parse->features[parse->feature_count] = negated ? (String8){ item.pointer + dash + 1, item.length - dash - 1 } : item;
             parse->negated[parse->feature_count] = negated;
             parse->feature_count += 1;
-        }
-        else
-        {
-            parse->overflow = true;
         }
     }
 }
@@ -458,12 +464,13 @@ static bool check_target_versions_text_equal(String8 a, String8 b)
 }
 
 // Whether two target strings parse the same (clang's ParsedTargetAttr ==, each one's features sorted).
-static bool check_target_versions_same(String8 a, String8 b)
+static bool check_target_versions_same(CheckInputReader* reader, String8 a, String8 b)
 {
+    const uint64_t mark = reader->scratch->length;
     CheckTargetVersionParse left;
     CheckTargetVersionParse right;
-    check_target_versions_parse(a, &left);
-    check_target_versions_parse(b, &right);
+    check_target_versions_parse(reader, a, &left);
+    check_target_versions_parse(reader, b, &right);
     CheckTargetVersionParse* parses[2] = { &left, &right };
     for (uint32_t p = 0; p < 2; p += 1)
     {
@@ -483,13 +490,14 @@ static bool check_target_versions_same(String8 a, String8 b)
             parse->negated[at] = negated;
         }
     }
-    bool same = !left.overflow && !right.overflow && left.duplicate == right.duplicate && left.feature_count == right.feature_count &&
+    bool same = left.parsed && right.parsed && left.duplicate == right.duplicate && left.feature_count == right.feature_count &&
                 check_target_versions_text_equal(left.cpu, right.cpu) && check_target_versions_text_equal(left.tune, right.tune) &&
                 check_target_versions_text_equal(left.branch, right.branch);
     for (uint32_t i = 0; same && i < left.feature_count; i += 1)
     {
         same = check_target_versions_compare(left.features[i], left.negated[i], right.features[i], right.negated[i]) == 0;
     }
+    arena_pop_to(reader->scratch, mark);
     return same;
 }
 
@@ -517,8 +525,9 @@ static bool check_target_versions_cpu_is(String8 name)
 // BUSTER_CHECK_NONE). Whether it was refused.
 static bool check_target_versions_value(CheckInputReader* reader, const CheckInputAttribute* target, uint32_t name, uint32_t caused)
 {
+    const uint64_t mark = reader->scratch->length;
     CheckTargetVersionParse parse;
-    check_target_versions_parse(target->text, &parse);
+    check_target_versions_parse(reader, target->text, &parse);
     CheckCpuDispatchError error = CHECK_CPU_DISPATCH_INVALID_OPTION;
     String8 item = { 0 };
     if (parse.cpu.length != 0 && !check_target_versions_cpu_is(parse.cpu))
@@ -544,6 +553,7 @@ static bool check_target_versions_value(CheckInputReader* reader, const CheckInp
             reader->output->multiversion_reports[before].value = start | (uint64_t)item.length << 32;
         }
     }
+    arena_pop_to(reader->scratch, mark);
     return error != CHECK_CPU_DISPATCH_INVALID_OPTION;
 }
 
@@ -764,7 +774,7 @@ static void check_target_versions_rules(CheckInputReader* reader, const CheckInp
         {
             valid = false;
         }
-        else if (previous_target != NULL && check_target_versions_same(previous_target->text, target->text))
+        else if (previous_target != NULL && check_target_versions_same(reader, previous_target->text, target->text))
         {
             check_input_cpu_dispatch_report(reader, name, CHECK_CPU_DISPATCH_TARGET_DUPLICATE, previous, CHECK_INPUT_NOTE_PREVIOUS_DECLARATION, BUSTER_CHECK_NONE);
             valid = false;
@@ -816,9 +826,17 @@ static void check_target_versions_rules(CheckInputReader* reader, const CheckInp
             check_input_cpu_dispatch_report(reader, name, CHECK_CPU_DISPATCH_MIXED, previous, CHECK_INPUT_NOTE_PREVIOUS_DECLARATION, BUSTER_CHECK_NONE);
             valid = false;
         }
-        // The earlier versions, most recent first: a redeclaration of one, or a duplicate of it.
-        uint32_t visited[64];
-        const uint32_t count = valid && kind != CHECK_TARGET_VERSION_NONE ? check_cpu_dispatch_previous(reader, handle, visited, BUSTER_ARRAY_LENGTH(visited)) : 0;
+        // The earlier versions, most recent first: a redeclaration of one, or a duplicate of it. Any number of them, in
+        // scratch, room for each binding of the name's chain.
+        const uint64_t mark = reader->scratch->length;
+        uint32_t chain = 0;
+        for (uint32_t h = handle; valid && kind != CHECK_TARGET_VERSION_NONE && h != 0; h = reader->bindings.previous[h - 1])
+        {
+            chain += 1;
+        }
+        uint32_t* visited = chain != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, chain) : NULL;
+        reader->output->resource |= chain != 0 && visited == NULL;
+        const uint32_t count = visited != NULL ? check_cpu_dispatch_previous(reader, handle, visited, chain) : 0;
         bool redeclaration = false;
         for (uint32_t v = 0; valid && !redeclaration && v < count; v += 1)
         {
@@ -827,7 +845,7 @@ static void check_target_versions_rules(CheckInputReader* reader, const CheckInp
             {
                 const CheckInputAttribute* current_target = check_target_versions_attribute(reader, handle, current, CHECK_ATTRIBUTE_TARGET);
                 redeclaration = current_target != NULL && check_target_versions_text_equal(current_target->text, target->text);
-                if (!redeclaration && current_target != NULL && check_target_versions_same(current_target->text, target->text))
+                if (!redeclaration && current_target != NULL && check_target_versions_same(reader, current_target->text, target->text))
                 {
                     check_input_cpu_dispatch_report(reader, name, CHECK_CPU_DISPATCH_TARGET_DUPLICATE, current, CHECK_INPUT_NOTE_PREVIOUS_DECLARATION, BUSTER_CHECK_NONE);
                     valid = false;
@@ -845,6 +863,7 @@ static void check_target_versions_rules(CheckInputReader* reader, const CheckInp
             }
             bind = redeclaration ? current : bind;
         }
+        arena_pop_to(reader->scratch, mark);
         if (!valid || redeclaration || kind == CHECK_TARGET_VERSION_NONE)
         {
         }

@@ -125,7 +125,7 @@ enum
     CHECK_WARNING_ID_VISIBILITY = 112,
     // A target_clones attribute that mixes a string of several versions with other strings (#1838, clang's
     // SemaX86::checkTargetClonesAttr): -Wtarget-clones-mixed-specifiers, on by default, under -Wfunction-multiversion.
-    CHECK_WARNING_ID_TARGET_CLONES_MIXED_SPECIFIERS = 113,
+    CHECK_WARNING_ID_TARGET_CLONES_MIXED_SPECIFIERS = 117,
     CHECK_WARNING_ID_COUNT,
 };
 

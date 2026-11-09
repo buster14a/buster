@@ -211,14 +211,18 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
         "-Werror=target-clones-mixed-specifiers",
         "-Wno-ignored-attributes",
     };
-    enum { LINES = 65536, LONG = 4096 };
+    enum { LINES = 65536, LONG = 8192 };
     // Long lists, built here: past 64 versions (a version first seen there and repeated), past an offset of 1024 bytes in
     // one string, and past 64 strings; then a declaration of 70 versions and its redeclaration, with the same versions and
-    // with its last one different.
-    enum { LONG_UNITS = 6 };
-    char* long_units[LONG_UNITS] = { malloc(LONG), malloc(LONG), malloc(LONG), malloc(LONG), malloc(LONG), malloc(LONG) };
-    const uint32_t long_versions[LONG_UNITS] = { 70, 140, 70, 140, 70, 70 };
-    static const char* const tails[LONG_UNITS][2] = {
+    // with its last one different. Then target strings past 64 items: a feature multiversioning doesn't support after 70 of
+    // them, and one the target attribute doesn't (its warning's piece past 256 bytes), two strings of
+    // 71 features the same once sorted, and 91 versions (each a pair of features) with the first one's redeclaration spelled
+    // in the other order.
+    enum { CLONES_UNITS = 6, LONG_UNITS = 10 };
+    char* long_units[LONG_UNITS] = { malloc(LONG), malloc(LONG), malloc(LONG), malloc(LONG), malloc(LONG),
+                                     malloc(LONG), malloc(LONG), malloc(LONG), malloc(LONG), malloc(LONG) };
+    const uint32_t long_versions[CLONES_UNITS] = { 70, 140, 70, 140, 70, 70 };
+    static const char* const tails[CLONES_UNITS][2] = {
         { "avx2,avx2\"", NULL },
         { "avx2,  avx2\"", NULL },
         { "\"sse4.2\", \"sse4.2\"", NULL },
@@ -228,7 +232,7 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
     };
     static const char* const ends[2] = { "))) int f(void) { return 1; }\n", "))) int f(void);\n" };
     bool built = true;
-    for (uint32_t l = 0; l < LONG_UNITS; l += 1)
+    for (uint32_t l = 0; l < CLONES_UNITS; l += 1)
     {
         int length = long_units[l] != NULL ? 0 : -1;
         const uint32_t copies = tails[l][1] != NULL ? 2 : 1;
@@ -243,6 +247,41 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
             {
                 length += snprintf(long_units[l] + length, LONG - (size_t)length, "%s%s", tails[l][copy], ends[copies - 1]);
             }
+        }
+        built = built && length > 0 && length < LONG;
+    }
+    static const char* const pair_features[] = { "sse", "sse2", "sse3", "ssse3", "sse4.1", "sse4.2", "avx", "avx2", "fma", "bmi", "bmi2", "popcnt", "aes", "pclmul" };
+    for (uint32_t l = CLONES_UNITS; l < LONG_UNITS; l += 1)
+    {
+        int length = long_units[l] != NULL ? snprintf(long_units[l], LONG, "__attribute__((target(\"default\"))) int f(void);\n") : -1;
+        // The first two units' one string and the third's two: their prefixes, 70 avx2s, and their suffixes.
+        static const char* const around[3][2][2] = {
+            { { "", ",adx" }, { NULL, NULL } },
+            { { "", ",foo" }, { NULL, NULL } },
+            { { "", ",sse4.2" }, { "sse4.2,", "" } },
+        };
+        for (uint32_t copy = 0; l < LONG_UNITS - 1 && length > 0 && length < LONG && copy < 2 && around[l - CLONES_UNITS][copy][0] != NULL; copy += 1)
+        {
+            length += snprintf(long_units[l] + length, LONG - (size_t)length, "__attribute__((target(\"%s", around[l - CLONES_UNITS][copy][0]);
+            for (uint32_t v = 0; length > 0 && length < LONG && v < 70; v += 1)
+            {
+                length += snprintf(long_units[l] + length, LONG - (size_t)length, v == 0 ? "avx2" : ",avx2");
+            }
+            if (length > 0 && length < LONG)
+            {
+                length += snprintf(long_units[l] + length, LONG - (size_t)length, "%s\"))) int f(void);\n", around[l - CLONES_UNITS][copy][1]);
+            }
+        }
+        for (uint32_t a = 0; l == LONG_UNITS - 1 && length > 0 && length < LONG && a < BUSTER_ARRAY_LENGTH(pair_features); a += 1)
+        {
+            for (uint32_t b = a + 1; length > 0 && length < LONG && b < BUSTER_ARRAY_LENGTH(pair_features); b += 1)
+            {
+                length += snprintf(long_units[l] + length, LONG - (size_t)length, "__attribute__((target(\"%s,%s\"))) int f(void);\n", pair_features[a], pair_features[b]);
+            }
+        }
+        if (l == LONG_UNITS - 1 && length > 0 && length < LONG)
+        {
+            length += snprintf(long_units[l] + length, LONG - (size_t)length, "__attribute__((target(\"%s,%s\"))) int f(void);\n", pair_features[1], pair_features[0]);
         }
         built = built && length > 0 && length < LONG;
     }
