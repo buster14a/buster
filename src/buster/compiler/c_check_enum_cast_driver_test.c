@@ -191,6 +191,29 @@ static const char check_driver_enum_cast_arm_order_source[] =
     "}\n"
     "enum E r(int c, enum F g, enum G h, signed char t) { return c ? (g = h) : (t = 313, g); }\n";
 
+// The same order for a conditional passed as an argument (review on #1967): a prototype's enumeration and constant
+// conversions, two arguments, nested arms, a known condition's pruned arm, a _Bool parameter and unreachable code; and a
+// _Generic's conditional arm, whose arms carry the conversion as a conditional's do.
+static const char check_driver_enum_cast_argument_order_source[] =
+    "enum E { A }; enum F { B }; enum G { C };\n"
+    "void take(enum E);\n"
+    "void take_char(signed char);\n"
+    "void take2(enum E, signed char);\n"
+    "void takeb(_Bool);\n"
+    "void f(int c, enum F g, enum G h, enum E e, signed char t) {\n"
+    "    take(c ? (g = h) : g);\n"
+    "    take_char(c ? (t = 300) : 400);\n"
+    "    take2(c ? g : (g = h), c ? (t = 301) : 302);\n"
+    "    take(c ? (c ? (g = h) : g) : (g = h, g));\n"
+    "    take_char(1 ? 303 : (t = 304));\n"
+    "    takeb(c ? (t = 307) : (t = 308));\n"
+    "    take2(c ? g : (c ? (g = h) : g), c ? (t = 309) : 310);\n"
+    "    e = _Generic(c, int: c ? (g = h) : g);\n"
+    "    take(_Generic(c, int: c ? (g = h) : g));\n"
+    "    take(_Generic(c, int: c ? g : g));\n"
+    "    if (0) take(c ? (g = h) : g);\n"
+    "}\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_enum_cast_fixtures[] =
 {
     {
@@ -268,6 +291,11 @@ static const CheckDriverDefaultWarningFixture check_driver_enum_cast_fixtures[] 
         .name = "conversions in a conditional's arms, in clang's order",
         .source = check_driver_enum_cast_arm_order_source,
         .warnings = 36,
+    },
+    {
+        .name = "conversions in a conditional argument's arms, in clang's order",
+        .source = check_driver_enum_cast_argument_order_source,
+        .warnings = 35,
     },
 };
 

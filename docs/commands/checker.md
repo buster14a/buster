@@ -323,8 +323,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   `-Wenum-conversion`: an initializer's, an assignment's, a prototype's argument's, a return's and a brace initializer's
   value's, carried to both arms of a conditional (no runtime pruning), through a selection to its selected arm and to a
   root comma's result, in clang's order (CheckConditionalOperand, #1895: the condition's conversions, then each arm's own
-  before the arm's, the true arm's first; `-Wconstant-conversion`'s in arms too, through the walk's
-  `BUSTER_CHECK_EMIT_ARM` frames), warned at each leaf's expression location (an operator's, a member's name, else its first token
+  before the arm's, the true arm's first; `-Wconstant-conversion`'s in arms too, an argument's included,
+  through the walk's `BUSTER_CHECK_EMIT_ARM` frames), warned at each leaf's expression location (an operator's, a member's name, else its first token
   inside its parentheses) as the full expression completes, in unreachable code too. Both enumerations need clang's name
   for linkage: a tag, or the unqualified typedef that declares an anonymous one. Clang's range tests come first
   (`check_common_enum_cast_reached`): a leaf whose likely range (a constant's significant or active bits, a bit-field's
