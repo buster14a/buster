@@ -10863,7 +10863,8 @@ static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node,
         // (#1834).
         check_lower_vector_calls(writer, node, builtin, arguments);
     }
-    else if (class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64)
+    else if ((class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64) &&
+             !(ldexp && type_size(types, exponent) <= 8 && (writer->target.features & BUSTER_X86_FEATURE(AVX512F)) == 0))
     {
         // An exponent wider than 64 bits (an __int128's, a _BitInt's) has no instruction's conversion.
         const uint64_t width = ldexp ? type_size(types, exponent) : 0;
@@ -10885,10 +10886,15 @@ static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node,
             writer->vectors = true;
         }
     }
-    else if (class == BUSTER_TYPED_CLASS_F80 && (builtin <= CBUILTIN_ELEMENTWISE_ROUND || builtin == CBUILTIN_ELEMENTWISE_MAXNUM || builtin == CBUILTIN_ELEMENTWISE_MINNUM ||
-                                                 (ldexp && type_size(types, exponent) == 4)))
+    else if ((class == BUSTER_TYPED_CLASS_F80 && (builtin <= CBUILTIN_ELEMENTWISE_ROUND || builtin == CBUILTIN_ELEMENTWISE_MAXNUM || builtin == CBUILTIN_ELEMENTWISE_MINNUM ||
+                                                  (ldexp && type_size(types, exponent) == 4))) ||
+             (ldexp && type_size(types, exponent) <= 8 && (writer->target.features & BUSTER_X86_FEATURE(AVX512F)) == 0))
     {
-        const CheckLowerRuntime runtime = builtin <= CBUILTIN_ELEMENTWISE_ROUND ? check_lower_libm_function(builtin, class) :
+        // A float's or double's ldexp without AVX-512F's VSCALEFSS is the C library's too, as clang's code calls it (#1834),
+        // of the exponent's low 32 bits as an int.
+        const CheckLowerRuntime runtime = class == BUSTER_TYPED_CLASS_F32 ? check_lower_library_runtime(CBUILTIN_LIBRARY_LDEXPF) :
+                                          class == BUSTER_TYPED_CLASS_F64 ? check_lower_library_runtime(CBUILTIN_LIBRARY_LDEXP) :
+                                          builtin <= CBUILTIN_ELEMENTWISE_ROUND ? check_lower_libm_function(builtin, class) :
                                           builtin == CBUILTIN_ELEMENTWISE_MAXNUM ? CHECK_LOWER_RUNTIME_FMAXL :
                                           builtin == CBUILTIN_ELEMENTWISE_MINNUM ? CHECK_LOWER_RUNTIME_FMINL :
                                                                                    CHECK_LOWER_RUNTIME_LDEXPL;
