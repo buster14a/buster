@@ -539,8 +539,6 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
           "unsupported: __builtin_os_log_format of data clang's code doesn't make (past 16 bytes, a _BitInt past 128 bits)" },
         { "void* f(void* b, _BitInt(200) w) { return __builtin_os_log_format(b, \"%d\", w); }\n",
           "unsupported: __builtin_os_log_format of data clang's code doesn't make (past 16 bytes, a _BitInt past 128 bits)" },
-        { "struct S { int a; };\nstruct T { int x; } g(const char*, ...);\nvoid f(struct S* s) { __builtin_dump_struct(s, g); }\n",
-          "unsupported: __builtin_dump_struct whose printer returns an aggregate, a 128-bit or a half-precision value" },
         { "int g(int, const char*, ...);\nstruct S { int a; };\nvoid f(struct S* s, int n) { __builtin_dump_struct(s, g, ({ n; })); }\n",
           "unsupported: __builtin_dump_struct whose printer or other arguments have a statement expression or more than 4096 nodes, which its calls evaluate again" },
         { "int f(void) { return __builtin_available(macos 0.0.0, *); }\n",
@@ -1100,7 +1098,9 @@ static void check_test_driver_halves(CheckTest* test, const char* clang, const c
 // with and without qualifiers written with them, a typedef named in one place of a function pointer's types and not in
 // another of the same type (its return or its parameter, fields and parameters alike), a typedef of a function pointer
 // or an array named where the same type is spelled out elsewhere in the declaration, unions, vectors, a packed record,
-// _Atomic, complex, __int128 and _BitInt fields, records of a function's body with its typedefs), through printf, a
+// _Atomic, complex, __int128 and _BitInt fields, records of a function's body with its typedefs, a record of 5000 fields,
+// whose 5003 lines a printer hashes, #1842), through printf, printers that return or take a struct, a 128-bit integer, a
+// _Float16 or a vector, or return a complex value or take a long double (#1842), a
 // variadic printer of its own that prints each format's operands (a pointer as its offset from a record's), a printer
 // through a pointer that a call returns, an unprototyped one, one that takes a double and one that counts its calls,
 // the rest of the arguments evaluated again for each call: by the direct path, by --scalar and by --tier1 with and
@@ -1238,6 +1238,33 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
                                   "struct Pointee { struct { int x; } *p; void (*fn)(struct { int w; } *); };\n"
                                   "struct Top2 { struct M { struct { int deep; } u; } m; struct { int x; } y; };\n"
                                   "static struct S s;\n"
+                                  "#define F1(a) int a##0, a##1, a##2, a##3, a##4, a##5, a##6, a##7, a##8, a##9;\n"
+                                  "#define F2(a) F1(a##0) F1(a##1) F1(a##2) F1(a##3) F1(a##4) F1(a##5) F1(a##6) F1(a##7) F1(a##8) F1(a##9)\n"
+                                  "#define F3(a) F2(a##0) F2(a##1) F2(a##2) F2(a##3) F2(a##4) F2(a##5) F2(a##6) F2(a##7) F2(a##8) F2(a##9)\n"
+                                  "static struct Big { F3(f0) F3(f1) F3(f2) F3(f3) F3(f4) } big;\n"
+                                  "static unsigned long big_hash = 14695981039346656037ul;\n"
+                                  "static int big_lines;\n"
+                                  "static int hashed(const char *format, ...)\n"
+                                  "{\n"
+                                  "    char line[256];\n"
+                                  "    va_list list;\n"
+                                  "    va_start(list, format);\n"
+                                  "    int length = vsnprintf(line, sizeof(line), format, list);\n"
+                                  "    va_end(list);\n"
+                                  "    for (int i = 0; i < length && i < (int)sizeof(line); i += 1) { big_hash = (big_hash ^ (unsigned char)line[i]) * 1099511628211ul; }\n"
+                                  "    big_lines += 1;\n"
+                                  "    return length;\n"
+                                  "}\n"
+                                  "struct Three { long a, b, c; };\n"
+                                  "struct Context { int tag; char pad[20]; };\n"
+                                  "typedef int Lanes __attribute__((vector_size(16)));\n"
+                                  "static struct Three by_value(const char *format, ...) { va_list list; va_start(list, format); vprintf(format, list); va_end(list); struct Three t = { 1, 2, 3 }; return t; }\n"
+                                  "static int with_context(struct Context c, const char *format, ...) { va_list list; va_start(list, format); printf(\"[%d]\", c.tag); vprintf(format, list); va_end(list); return 0; }\n"
+                                  "static __int128 with_wide(__int128 k, const char *format, ...) { va_list list; va_start(list, format); printf(\"<%d>\", (int)(k >> 64)); vprintf(format, list); va_end(list); return k; }\n"
+                                  "static _Float16 with_half(_Float16 h, const char *format, ...) { va_list list; va_start(list, format); printf(\"<%g>\", (double)h); vprintf(format, list); va_end(list); return h; }\n"
+                                  "static Lanes with_lanes(Lanes v, const char *format, ...) { va_list list; va_start(list, format); printf(\"<%d>\", v[3]); vprintf(format, list); va_end(list); return v; }\n"
+                                  "static _Complex double with_complex(const char *format, ...) { va_list list; va_start(list, format); vprintf(format, list); va_end(list); return __builtin_complex(1.0, 2.0); }\n"
+                                  "static int with_long_double(long double k, const char *format, ...) { va_list list; va_start(list, format); printf(\"<%Lg>\", k); vprintf(format, list); va_end(list); return 0; }\n"
                                   "static struct Packed packed = { 'z', -5, 99999, -77 };\n"
                                   "int main(int argc, char **argv)\n"
                                   "{\n"
@@ -1299,6 +1326,17 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
                                   "    struct Repeated repeated_fields = { 0 };\n"
                                   "    __builtin_dump_struct(&repeated_fields, printf);\n"
                                   "    repeated(0, 0);\n"
+                                  "    struct Context context = { 7 };\n"
+                                  "    __builtin_dump_struct(&s.p, by_value);\n"
+                                  "    __builtin_dump_struct(&s.p, with_context, context);\n"
+                                  "    __builtin_dump_struct(&s.p, with_wide, (__int128)n << 64);\n"
+                                  "    __builtin_dump_struct(&s.p, with_half, (_Float16)0.5f * (_Float16)n);\n"
+                                  "    __builtin_dump_struct(&s.p, with_lanes, (Lanes){ 1, 2, 3, n });\n"
+                                  "    __builtin_dump_struct(&s.p, with_complex);\n"
+                                  "    __builtin_dump_struct(&s.p, with_long_double, 2.5L * n);\n"
+                                  "    big.f0000 = 1; big.f2345 = -2; big.f4999 = n;\n"
+                                  "    __builtin_dump_struct(&big, hashed);\n"
+                                  "    printf(\"big=%lx lines=%d\\n\", big_hash, big_lines);\n"
                                   "    return 0;\n"
                                   "}\n";
     char source[256];

@@ -2278,11 +2278,17 @@ record dump, as `BuiltinDumpStruct` checks it.
   (`CheckLowerInitializers.dumps`), each string once. A field's value is
   read through the record's address (a bit-field's from its first byte) and
   promoted as a variadic argument; a vector passes as a call's does. A
-  call's result is discarded.
-- **Refusals.** A printer that returns an aggregate, a 128-bit or a
-  half-precision value, or takes such values, rest arguments with a
-  statement expression or more than 4096 nodes, and records of more than
-  4096 lines, 1 MiB of strings or 64 levels are refused by name.
+  call's result is discarded. A printer that returns or takes a struct, a
+  union, a long double, a 128-bit integer, a half-precision value or a
+  vector, or returns a complex value, passes and returns them as a call's do
+  (`check_lower_dump_argument`, a result in an object of the call's, #1842).
+- **Refusals.** A printer that takes a transparent union or an `_Atomic`
+  aggregate, a complex rest argument (the checker's "expression is not yet
+  supported"), rest arguments with a statement expression or more than 4096
+  nodes, and records of more than 1 GiB of strings or 64 levels are refused
+  by name. A record's lines and strings grow as they need (the strings are
+  found again through a hash table of their offsets), so a record of any
+  number of fields is dumped (#1842).
 
 `__builtin_available(spec, ...)` (0x4b4, #148) is clang's availability check,
 a keyword whose specs are no expressions: each a `*`, or a platform's name and

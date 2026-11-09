@@ -10,9 +10,10 @@
 // skipped and anonymous members' fields flattened (clang's IndirectFieldDecl), and the record's line ends "}\n". Each
 // call's strings are a pool of its own (CheckLowerInitializers.items), each string once.
 
-#define BUSTER_CHECK_DUMP_LINES 4096u
 #define BUSTER_CHECK_DUMP_DEPTH 64u
-#define BUSTER_CHECK_DUMP_IMAGE (1u << 20)
+// A call's strings' image, whose offsets the lines and operands keep in 32 bits, and its arrays' first room, which grows.
+#define BUSTER_CHECK_DUMP_IMAGE (1u << 30)
+#define BUSTER_CHECK_DUMP_ROOM 4096u
 // The nodes of the printer's and the rest of the arguments' trees, which each call evaluates again.
 #define BUSTER_CHECK_DUMP_SUBTREE 4096u
 
@@ -28,32 +29,99 @@ struct CheckLowerDumpBuilder
     uint32_t* closes;
     uint32_t options;
     bool c99;
+    // The image of the call's strings, each once: an open-addressed table of their offsets plus 1 (0 an empty slot), by
+    // their bytes' hash, of `string_room` slots, a power of 2 kept at least twice their count.
     uint8_t* image;
     uint32_t image_size;
+    uint32_t image_room;
     uint32_t* strings;
     uint32_t string_count;
+    uint32_t string_room;
     CheckLowerDumpLine* lines;
     uint32_t line_count;
+    uint32_t line_room;
     CheckLowerDumpOperand* operands;
     uint32_t operand_count;
+    uint32_t operand_room;
     const char* refusal;
 };
+
+// Room for `needed` elements of `size` bytes in `*array`, of `*room`: where it has less, a new array of the next power of
+// 2 that holds them, the `count` first copied. False where the arena is full or the room would pass 32 bits.
+static bool check_lower_dump_room(Arena* scratch, void** array, uint32_t* room, uint32_t count, uint64_t needed, uint64_t size)
+{
+    uint64_t grown = *room;
+    while (grown < needed)
+    {
+        grown *= 2;
+    }
+    void* moved = grown != *room && grown <= UINT32_MAX ? arena_push_array(scratch, grown, size, 8) : *array;
+    const bool valid = moved != NULL && grown <= UINT32_MAX;
+    if (valid && moved != *array)
+    {
+        memcpy(moved, *array, count * size);
+        *array = moved;
+        *room = (uint32_t)grown;
+    }
+    return valid;
+}
+
+// The FNV-1a hash of a string's bytes.
+static uint32_t check_lower_dump_hash(const uint8_t* bytes, uint64_t length)
+{
+    uint32_t hash = 2166136261u;
+    for (uint64_t i = 0; i < length; i += 1)
+    {
+        hash = (hash ^ bytes[i]) * 16777619u;
+    }
+    return hash;
+}
 
 // The string's offset in the image, its bytes added once, NUL-terminated.
 static uint32_t check_lower_dump_string(CheckLowerDumpBuilder* builder, const char* bytes, uint64_t length)
 {
     uint32_t result = UINT32_MAX;
-    for (uint32_t s = 0; result == UINT32_MAX && s < builder->string_count; s += 1)
+    // The table grows past half full, its strings placed again by their hashes.
+    if (builder->refusal == NULL && 2 * ((uint64_t)builder->string_count + 1) > builder->string_room)
     {
-        const uint32_t offset = builder->strings[s];
+        const uint32_t room = builder->string_room * 2;
+        uint32_t* table = room != 0 ? BUSTER_ARENA_PUSH_ARRAY(builder->scratch, uint32_t, room) : NULL;
+        builder->refusal = table == NULL ? "__builtin_dump_struct of a record whose strings this compiler's memory doesn't hold" : NULL;
+        for (uint32_t s = 0; table != NULL && s < room; s += 1)
+        {
+            table[s] = 0;
+        }
+        for (uint32_t s = 0; table != NULL && s < builder->string_room; s += 1)
+        {
+            const uint32_t offset = builder->strings[s];
+            const uint8_t* string = builder->image + (offset != 0 ? offset - 1 : 0);
+            uint32_t slot = offset != 0 ? check_lower_dump_hash(string, strlen((const char*)string)) & (room - 1) : 0;
+            while (offset != 0 && table[slot] != 0)
+            {
+                slot = (slot + 1) & (room - 1);
+            }
+            table[slot] = offset != 0 ? offset : table[slot];
+        }
+        builder->strings = table != NULL ? table : builder->strings;
+        builder->string_room = table != NULL ? room : builder->string_room;
+    }
+    uint32_t slot = builder->refusal == NULL ? check_lower_dump_hash((const uint8_t*)bytes, length) & (builder->string_room - 1) : 0;
+    while (builder->refusal == NULL && result == UINT32_MAX && builder->strings[slot] != 0)
+    {
+        const uint32_t offset = builder->strings[slot] - 1;
         const bool same = builder->image_size - offset > length && builder->image[offset + length] == 0 && memcmp(builder->image + offset, bytes, length) == 0;
         result = same ? offset : result;
+        slot = (slot + 1) & (builder->string_room - 1);
     }
     if (result == UINT32_MAX && builder->refusal == NULL)
     {
-        if (length >= BUSTER_CHECK_DUMP_IMAGE - builder->image_size || builder->string_count >= BUSTER_CHECK_DUMP_LINES * 6)
+        if (length >= BUSTER_CHECK_DUMP_IMAGE - builder->image_size)
         {
-            builder->refusal = "__builtin_dump_struct of a record whose lines take more than 1 MiB or 4096 lines";
+            builder->refusal = "__builtin_dump_struct of a record whose lines' strings take more than 1 GiB";
+        }
+        else if (!check_lower_dump_room(builder->scratch, (void**)&builder->image, &builder->image_room, builder->image_size, builder->image_size + length + 1, 1))
+        {
+            builder->refusal = "__builtin_dump_struct of a record whose strings this compiler's memory doesn't hold";
         }
         else
         {
@@ -61,7 +129,8 @@ static uint32_t check_lower_dump_string(CheckLowerDumpBuilder* builder, const ch
             memcpy(builder->image + result, bytes, length);
             builder->image[result + length] = 0;
             builder->image_size += (uint32_t)length + 1;
-            builder->strings[builder->string_count++] = result;
+            builder->strings[slot] = result + 1;
+            builder->string_count += 1;
         }
     }
     return result == UINT32_MAX ? 0 : result;
@@ -76,9 +145,12 @@ static uint32_t check_lower_dump_text(CheckLowerDumpBuilder* builder, const char
 static void check_lower_dump_line(CheckLowerDumpBuilder* builder, const char* format, const CheckLowerDumpOperand* operands, uint32_t count)
 {
     const uint32_t offset = check_lower_dump_text(builder, format);
-    if (builder->refusal == NULL && builder->line_count >= BUSTER_CHECK_DUMP_LINES)
+    if (builder->refusal == NULL &&
+        (!check_lower_dump_room(builder->scratch, (void**)&builder->lines, &builder->line_room, builder->line_count, (uint64_t)builder->line_count + 1, sizeof(*builder->lines)) ||
+         !check_lower_dump_room(builder->scratch, (void**)&builder->operands, &builder->operand_room, builder->operand_count, (uint64_t)builder->operand_count + count,
+                                sizeof(*builder->operands))))
     {
-        builder->refusal = "__builtin_dump_struct of a record whose lines take more than 1 MiB or 4096 lines";
+        builder->refusal = "__builtin_dump_struct of a record whose lines this compiler's memory doesn't hold";
     }
     if (builder->refusal == NULL)
     {
@@ -949,6 +1021,7 @@ static bool check_lower_dump_plan(CheckLowerInitializers* pools, CheckLowerDumpB
     bool valid = true;
     builder->image_size = 0;
     builder->string_count = 0;
+    memset(builder->strings, 0, (uint64_t)builder->string_room * sizeof(*builder->strings));
     builder->line_count = 0;
     builder->operand_count = 0;
     builder->refusal = NULL;
@@ -1045,10 +1118,14 @@ static bool check_lower_dump_prepare(CheckLowerInitializers* pools, const CheckP
         String8* anonymous = BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)types->tags.count + 1);
         builder.opens = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)types->tags.count + 1);
         builder.closes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)types->tags.count + 1);
-        builder.image = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, BUSTER_CHECK_DUMP_IMAGE);
-        builder.strings = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_CHECK_DUMP_LINES * 6);
-        builder.lines = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerDumpLine, BUSTER_CHECK_DUMP_LINES);
-        builder.operands = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerDumpOperand, BUSTER_CHECK_DUMP_LINES * 5);
+        builder.image_room = BUSTER_CHECK_DUMP_ROOM * 16;
+        builder.string_room = BUSTER_CHECK_DUMP_ROOM;
+        builder.line_room = BUSTER_CHECK_DUMP_ROOM;
+        builder.operand_room = BUSTER_CHECK_DUMP_ROOM * 4;
+        builder.image = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, builder.image_room);
+        builder.strings = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, builder.string_room);
+        builder.lines = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerDumpLine, builder.line_room);
+        builder.operands = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerDumpOperand, builder.operand_room);
         CheckLowerInitPool* items = BUSTER_ARENA_PUSH_ARRAY(output, CheckLowerInitPool, (uint64_t)pools->count + dumps);
         pools->dumps = BUSTER_ARENA_PUSH_ARRAY(output, CheckLowerDump, dumps);
         valid = bytes != NULL && lengths != NULL && anonymous != NULL && builder.opens != NULL && builder.closes != NULL && builder.image != NULL && builder.strings != NULL && builder.lines != NULL &&
