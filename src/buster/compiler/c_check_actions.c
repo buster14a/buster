@@ -282,6 +282,14 @@ typedef enum CheckDiagnostic
     CHECK_DIAG_ARGUMENT_COUNT,
     CHECK_DIAG_RESOURCE,
     CHECK_DIAG_UNSUPPORTED,
+    // A pointer converted to a pointer whose pointee's address space doesn't include its own's (#1447): clang's "changes
+    // address space of pointer", worded by the conversion (c_check_semantic_diagnostic.c).
+    CHECK_DIAG_ADDRESS_SPACE,
+    // A pointer subtraction's or a conditional's pointers to address spaces neither of which includes the other (#1447).
+    CHECK_DIAG_ADDRESS_SPACE_OVERLAP,
+    // A pointer to pointers whose levels' address spaces differ (#1447): clang's "changes address space of nested
+    // pointer", worded by the conversion (c_check_semantic_diagnostic.c).
+    CHECK_DIAG_ADDRESS_SPACE_NESTED,
 } CheckDiagnostic;
 
 #define BUSTER_CHECK_CONVERT_LVALUE 0x01u
@@ -501,7 +509,8 @@ static bool check_action_is_integer(const TypeTable* table, TypeId type)
     return kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT || kind == BUSTER_TYPE_KIND_ENUM;
 }
 
-static bool check_action_is_arithmetic(const TypeTable* table, TypeId type)
+// Always inlined, as it was before #1447 grew the type readers it inlines past clang's threshold.
+static inline __attribute__((always_inline)) bool check_action_is_arithmetic(const TypeTable* table, TypeId type)
 {
     const uint8_t kind = check_action_kind(table, type);
     return check_action_is_integer(table, type) || kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_COMPLEX;
@@ -513,11 +522,17 @@ static bool check_action_is_scalar(const TypeTable* table, TypeId type)
     return check_action_is_arithmetic(table, type) || kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_NULLPTR;
 }
 
+// The first diagnostic stays. One of an operand to be named (UINT32_MAX: a conversion's, whose callers know the
+// operand it converts) takes the next one's operand.
 static void check_action_diagnose(CheckActionResult* result, CheckDiagnostic diagnostic, uint32_t operand)
 {
     if (result->diagnostic == CHECK_DIAG_NONE)
     {
         result->diagnostic = diagnostic;
+        result->diagnostic_operand = operand;
+    }
+    else if (result->diagnostic_operand == UINT32_MAX)
+    {
         result->diagnostic_operand = operand;
     }
 }
@@ -1211,23 +1226,70 @@ static uint64_t check_action_sign_key(const TypeTable* table, TypeId type)
 }
 
 // clang's rule for pointers to pointers: pointees that reach one canonical type through as many pointer levels on
-// both sides differ only in their levels' qualifiers (char ** to const char **), which it warns about.
-static bool check_action_nested_qualifiers(const TypeTable* table, TypeId left, TypeId right, CheckActionResult* result)
+// both sides differ only in their levels' qualifiers (char ** to const char **), which it warns about — but an address
+// space the target's doesn't include at any level the walk reaches is clang's "changes address space of nested
+// pointer" error, whether or not the levels' types otherwise agree.
+static bool check_action_nested_qualifiers(const TypeTable* table, TypeId left, TypeId right, CheckActionResult* result, bool strict)
 {
     TypeId l = type_strip_aligned(table, left);
     TypeId r = type_strip_aligned(table, right);
     const bool nested = type_kind(table, l) == BUSTER_TYPE_KIND_POINTER && type_kind(table, r) == BUSTER_TYPE_KIND_POINTER;
+    bool space_conflict = false;
     while (type_kind(table, l) == BUSTER_TYPE_KIND_POINTER && type_kind(table, r) == BUSTER_TYPE_KIND_POINTER)
     {
-        l = type_strip_aligned(table, type_element(table, l));
-        r = type_strip_aligned(table, type_element(table, r));
+        const TypeId le = type_element(table, l);
+        const TypeId re = type_element(table, r);
+        space_conflict |= !type_space_includes(type_address_space(type_object_qualifiers(table, le)),
+                                               type_address_space(type_object_qualifiers(table, re)));
+        l = type_strip_aligned(table, le);
+        r = type_strip_aligned(table, re);
     }
     const TypeAnswer answer = nested ? type_same_canonical(table, type_unqualified(l), type_unqualified(r)) : TYPE_ANSWER_NO;
     if (answer == TYPE_ANSWER_FULL)
     {
         check_action_diagnose(result, CHECK_DIAG_RESOURCE, 0);
     }
-    return answer == TYPE_ANSWER_YES;
+    else if (space_conflict)
+    {
+        if (!strict)
+        {
+            check_action_diagnose(result, CHECK_DIAG_ADDRESS_SPACE_NESTED, UINT32_MAX);
+        }
+    }
+    return answer == TYPE_ANSWER_YES && !space_conflict;
+}
+
+// check_action_assignable_mode's pointees of other extended qualifiers (#1447), as clang's compatiblyIncludes takes them:
+// an address space the target's doesn't include is an error (REFUSED, diagnosed but where `strict`); a garbage
+// collection qualifier may be added or dropped, but changed only with the qualifiers' warning, which a void pointee's
+// conversion doesn't give. Pointees of one type but those qualifiers are ACCEPTED (clang compares them without them);
+// any other conversion goes on as the qualifiers' (SAME).
+#define CHECK_EXTENDED_SAME 0u
+#define CHECK_EXTENDED_REFUSED 1u
+#define CHECK_EXTENDED_ACCEPTED 2u
+static __attribute__((noinline)) uint32_t check_action_extended_pointees(const TypeTable* table, TypeId to, TypeId from, uint32_t to_word, uint32_t from_word,
+                                                                         bool strict, const CheckAction* action, CheckActionResult* result, uint32_t* warning)
+{
+    const bool to_void = check_action_kind(table, to) == BUSTER_TYPE_KIND_VOID;
+    const bool from_void = check_action_kind(table, from) == BUSTER_TYPE_KIND_VOID;
+    const uint32_t to_gc = to_word & BUSTER_TYPE_GC_MASK;
+    const uint32_t from_gc = from_word & BUSTER_TYPE_GC_MASK;
+    uint32_t verdict = CHECK_EXTENDED_SAME;
+    *warning |= to_gc != 0 && from_gc != 0 && to_gc != from_gc && !to_void && !from_void ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
+    if (!type_space_includes(type_address_space(to_word), type_address_space(from_word)))
+    {
+        verdict = CHECK_EXTENDED_REFUSED;
+        if (!strict)
+        {
+            check_action_diagnose(result, CHECK_DIAG_ADDRESS_SPACE, UINT32_MAX);
+        }
+    }
+    else if (!to_void && !from_void &&
+             check_action_compatible_at(table, type_unqualified(type_strip_aligned(table, to)), type_unqualified(type_strip_aligned(table, from)), action, result))
+    {
+        verdict = CHECK_EXTENDED_ACCEPTED;
+    }
+    return verdict;
 }
 
 // Pointer assignment as clang's checkPointerTypesForAssignment decides it in every language mode: the pointees'
@@ -1250,7 +1312,20 @@ static inline __attribute__((always_inline)) bool check_action_pointer_assignabl
     {
         *nested = false;
     }
-    if (tk == BUSTER_TYPE_KIND_VOID || fk == BUSTER_TYPE_KIND_VOID)
+    // The pointees' extended qualifiers (#1447), an array's its element's: where they differ, out of line
+    // (check_action_extended_pointees).
+    const uint32_t to_word = type_object_qualifiers(table, to);
+    const uint32_t from_word = type_object_qualifiers(table, from);
+    const uint32_t extended = __builtin_expect(to_word != from_word, 0) ?
+                              check_action_extended_pointees(table, to, from, to_word, from_word, strict, action, result, &warning) : CHECK_EXTENDED_SAME;
+    if (extended == CHECK_EXTENDED_REFUSED)
+    {
+    }
+    else if (extended == CHECK_EXTENDED_ACCEPTED)
+    {
+        accepted = true;
+    }
+    else if (tk == BUSTER_TYPE_KIND_VOID || fk == BUSTER_TYPE_KIND_VOID)
     {
         accepted = true;
         extension = function;
@@ -1266,7 +1341,7 @@ static inline __attribute__((always_inline)) bool check_action_pointer_assignabl
         // In C the signedness warning takes precedence over a compatible qualifier discard.
         warning = CHECK_WARNING_POINTER_SIGN;
     }
-    else if (result->diagnostic == CHECK_DIAG_NONE && check_action_nested_qualifiers(table, to, from, result))
+    else if (result->diagnostic == CHECK_DIAG_NONE && check_action_nested_qualifiers(table, to, from, result, strict))
     {
         accepted = true;
         warning = CHECK_WARNING_DISCARDED_QUALIFIERS;
@@ -1784,6 +1859,75 @@ static void check_action_logic(TypeTable* table, const CheckAction* action, Chec
     }
 }
 
+// check_action_pointer_common's pointers to types of extended qualifiers (#1447), as clang's
+// checkConditionalObjectPointersCompatibility and checkConditionalPointerCompatibility take them: one type is itself; a
+// void pointee takes the other's qualifiers, its address space too; pointees whose address spaces neither includes the
+// other's are a conditional's error (a comparison's 0, which its caller compares as clang's CheckCompareOperands does); else
+// the pointees' composite without their address spaces (in C, which clang doesn't put back), and for incompatible pointees
+// a pointer to void in the space that includes the other, with the mismatch's warning.
+static __attribute__((noinline)) TypeId check_action_pointer_common_extended(TypeTable* table, const CheckValue* left, const CheckValue* right, const CheckAction* action,
+                                                                              CheckActionResult* result)
+{
+    const bool conditional = action->op == CHECK_OP_CONDITIONAL;
+    const TypeId l = type_element(table, left->type);
+    const TypeId r = type_element(table, right->type);
+    const uint8_t lk = check_action_kind(table, l);
+    const uint8_t rk = check_action_kind(table, r);
+    const uint32_t lw = type_object_qualifiers(table, l);
+    const uint32_t rw = type_object_qualifiers(table, r);
+    const uint32_t ls = type_address_space(lw);
+    const uint32_t rs = type_address_space(rw);
+    const uint32_t qualifiers = type_qualifiers(l) | type_qualifiers(r);
+    TypeId pointee = 0;
+    TypeId common = 0;
+    if (type_unqualified(type_strip_alignment(table, left->type)) == type_unqualified(type_strip_alignment(table, right->type)))
+    {
+        common = left->type;
+    }
+    else if ((lk == BUSTER_TYPE_KIND_VOID && rk != BUSTER_TYPE_KIND_FUNCTION) || (rk == BUSTER_TYPE_KIND_VOID && lk != BUSTER_TYPE_KIND_FUNCTION))
+    {
+        // The void pointee with the other's qualifiers added.
+        const bool left_void = lk == BUSTER_TYPE_KIND_VOID;
+        pointee = type_extend(table, type_extend(table, BUSTER_TYPE_VOID, left_void ? lw : rw), left_void ? rw : lw);
+        pointee = pointee != 0 ? type_qualify(table, pointee, qualifiers) : 0;
+    }
+    else if (!type_space_includes(ls, rs) && !type_space_includes(rs, ls))
+    {
+        if (conditional)
+        {
+            check_action_diagnose(result, CHECK_DIAG_ADDRESS_SPACE_OVERLAP, 1);
+        }
+    }
+    else if (!conditional && ls != rs)
+    {
+        // (A comparison's pointers of two spaces compare as they are.)
+    }
+    else
+    {
+        const TypeId lb = type_unextend(table, type_unqualified(l), BUSTER_TYPE_SPACE_MASK);
+        const TypeId rb = type_unextend(table, type_unqualified(r), BUSTER_TYPE_SPACE_MASK);
+        if (lb != 0 && rb != 0 && check_action_compatible_at(table, lb, rb, action, result))
+        {
+            pointee = type_composite_at(table, lb, rb, action->context.transparent_unions, action->context.tag_completion_count, action->context.source_position);
+            pointee = pointee != 0 ? type_qualify(table, pointee, qualifiers) : 0;
+        }
+        else if (conditional && lb != 0 && rb != 0 && result->diagnostic == CHECK_DIAG_NONE)
+        {
+            pointee = type_extend(table, BUSTER_TYPE_VOID, type_space_includes(ls, rs) ? ls : rs);
+            result->warnings |= CHECK_WARNING_CONDITIONAL_POINTER_TYPES;
+        }
+    }
+    if (common == 0 && pointee != 0)
+    {
+        common = type_pointer(table, pointee);
+    }
+    if (common == 0 && pointee != 0 && result->diagnostic == CHECK_DIAG_NONE)
+    {
+        check_action_diagnose(result, CHECK_DIAG_RESOURCE, 0);
+    }
+    return common;
+}
+
 // The common type of two pointer operands (C 6.5.15p6): the other operand's for a null pointer constant, void with
 // both pointees' qualifiers for void and an object type, else the composite of compatible pointees with both
 // qualifiers. 0 for other pointees (void and a function among them), which each caller takes as clang does.
@@ -1799,6 +1943,11 @@ static TypeId check_action_pointer_common(TypeTable* table, const CheckValue* le
     else if (rp && check_action_null(table, left, action->context.extensions))
     {
         common = right->type;
+    }
+    else if (lp && rp && __builtin_expect((type_object_qualifiers(table, type_element(table, left->type)) |
+                                           type_object_qualifiers(table, type_element(table, right->type))) != 0, 0))
+    {
+        common = check_action_pointer_common_extended(table, left, right, action, result);
     }
     else if (lp && rp)
     {
@@ -1905,7 +2054,8 @@ static void check_action_conditional(TypeTable* table, const CheckAction* action
     }
 }
 
-static bool check_action_object_pointer(const TypeTable* table, TypeId pointer, const CheckAction* action, CheckActionResult* result)
+// Always inlined, as it was before #1447 grew the type readers it inlines past clang's threshold.
+static inline __attribute__((always_inline)) bool check_action_object_pointer(const TypeTable* table, TypeId pointer, const CheckAction* action, CheckActionResult* result)
 {
     bool valid = check_action_kind(table, pointer) == BUSTER_TYPE_KIND_POINTER;
     if (valid)
@@ -1989,7 +2139,20 @@ static void check_action_pointer_arithmetic(TypeTable* table, const CheckAction*
         const TypeId le = type_element(table, left.type);
         const TypeId re = type_element(table, right.type);
         const bool complete = check_action_object_pointer(table, left.type, action, result) && check_action_object_pointer(table, right.type, action, result);
-        if (!check_action_compatible_at(table, type_unqualified(le), type_unqualified(re), action, result))
+        // Pointers to address spaces neither of which includes the other's (#1447), then pointees compatible but for
+        // their qualifiers, extended ones too (clang's getUnqualifiedType).
+        const uint32_t lw = type_object_qualifiers(table, le);
+        const uint32_t rw = type_object_qualifiers(table, re);
+        const bool extended = __builtin_expect((lw | rw) != 0, 0);
+        const bool overlap = !extended || type_space_includes(type_address_space(lw), type_address_space(rw)) ||
+                             type_space_includes(type_address_space(rw), type_address_space(lw));
+        if (!overlap)
+        {
+            check_action_diagnose(result, CHECK_DIAG_ADDRESS_SPACE_OVERLAP, 1);
+        }
+        else if (!check_action_compatible_at(table, extended ? type_unextend(table, type_unqualified(le), BUSTER_TYPE_SPACE_MASK | BUSTER_TYPE_GC_MASK) : type_unqualified(le),
+                                             extended ? type_unextend(table, type_unqualified(re), BUSTER_TYPE_SPACE_MASK | BUSTER_TYPE_GC_MASK) : type_unqualified(re),
+                                             action, result))
         {
             check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, 1);
         }
@@ -2075,7 +2238,11 @@ static void check_action_pointer_compare(TypeTable* table, const CheckAction* ac
         const TypeId le = type_element(table, left.type);
         const TypeId re = type_element(table, right.type);
         const bool void_pointee = check_action_kind(table, le) == BUSTER_TYPE_KIND_VOID || check_action_kind(table, re) == BUSTER_TYPE_KIND_VOID;
-        if (!check_action_compatible_at(table, type_unqualified(le), type_unqualified(re), action, result) && !(equality && void_pointee))
+        // The pointees without their qualifiers, extended ones too (#1447: clang's getUnqualifiedType).
+        const bool extended = __builtin_expect((type_object_qualifiers(table, le) | type_object_qualifiers(table, re)) != 0, 0);
+        const TypeId lu = extended ? type_unextend(table, type_unqualified(le), BUSTER_TYPE_SPACE_MASK | BUSTER_TYPE_GC_MASK) : type_unqualified(le);
+        const TypeId ru = extended ? type_unextend(table, type_unqualified(re), BUSTER_TYPE_SPACE_MASK | BUSTER_TYPE_GC_MASK) : type_unqualified(re);
+        if (!check_action_compatible_at(table, lu, ru, action, result) && !(equality && void_pointee))
         {
             result->warnings |= CHECK_WARNING_DISTINCT_POINTER_COMPARE;
         }
@@ -2197,6 +2364,9 @@ static inline __attribute__((always_inline)) void check_action_member(TypeTable*
     const bool arrow = action->op == CHECK_OP_ARROW;
     CheckValue base = arrow ? check_action_operand(table, action, result, 0) : action->operands[0];
     TypeId record = type_strip_aligned(table, base.type);
+    // The record's address space, which its member's lvalue takes (#1447, clang's BuildFieldReferenceExpr: not its
+    // garbage collection qualifier, which members never pick up).
+    uint32_t space = arrow ? 0 : type_address_space(type_extended_qualifiers(table, base.type));
     if (arrow)
     {
         if (type_kind(table, record) != BUSTER_TYPE_KIND_POINTER)
@@ -2205,6 +2375,7 @@ static inline __attribute__((always_inline)) void check_action_member(TypeTable*
         }
         else
         {
+            space = type_address_space(type_extended_qualifiers(table, type_element(table, record)));
             record = type_strip_aligned(table, type_element(table, record));
         }
     }
@@ -2230,6 +2401,14 @@ static inline __attribute__((always_inline)) void check_action_member(TypeTable*
         {
             result->member_offset = offset;
             result->value.type = type_qualify(table, table->members.type[member], qualifiers);
+            if (__builtin_expect(space != 0, 0))
+            {
+                result->value.type = type_extend(table, result->value.type, space);
+                if (result->value.type == 0)
+                {
+                    check_action_diagnose(result, CHECK_DIAG_RESOURCE, 0);
+                }
+            }
             result->value.category = arrow || base.category == CHECK_LVALUE ? CHECK_LVALUE : CHECK_RVALUE;
             check_action_inherit(&result->value, &base);
             result->value.flags |= base.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_CONST_READ_RESTRICTED | BUSTER_CHECK_NONNULL_ADDRESS);
