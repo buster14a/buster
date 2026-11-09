@@ -7,6 +7,7 @@
 //   cc -std=c17 -O2 -Wall -Wextra -Werror -o build-regression tools/ci/build_regression.c && ./build-regression
 //   ./build-regression --flags-only  # Just the fresh-tree ignored-flag regressions; cleans the selected build tree.
 //   ./build-regression --compile-commands-only  # Small database dependency fixture; does not build the compiler.
+//   ./build-regression --driver-only  # Small build.sh helper fixtures; does not configure or build the compiler.
 //   ./build-regression --ownership-only [COMPILER]  # Check an existing build's fixture ownership; builds nothing.
 //
 // It removes every tree under build/cmake (clean --all) and checks that
@@ -14,6 +15,7 @@
 //   - every active test, benchmark and measurement C file has one unity owner, except exact shared-fixture debts;
 //   - each baseline CRT startup object relinks and post-links every affected executable, with no work when unchanged;
 //   - filtered compile commands are configuration-specific, reused until an input changes and rebuilt if missing;
+//   - driver helpers preserve version thresholds, description failures and publication without redundant copies;
 //   - fresh build.sh, direct CMake and preset trees ignore hostile CFLAGS/LDFLAGS before probing C, including cached
 //     global/configuration flags, in generated compile/link commands and real unit compiles;
 //   - a clean --all during a build waits for it, and then removes every tree and the published files;
@@ -34,6 +36,7 @@
 // source it edits.
 // `--crt-link-only` runs just the small CRT dependency fixture without building the compiler.
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -2161,15 +2164,230 @@ static void check_compile_commands(void)
     pass("compile commands select each configuration, reuse unchanged inputs, refresh changes and allow export off");
 }
 
+// Extract the real shell functions, as the locale check extracts now(), without executing build.sh's setup.
+static void driver_function(FILE* file, const Text* script, const char* name)
+{
+    char marker[128];
+    snprintf(marker, sizeof(marker), "\n%s()\n{\n", name);
+    const char* begin = strstr(script->data, marker);
+    const char* end = begin != 0 ? strstr(begin, "\n}\n") : 0;
+    if (end == 0 || fwrite(begin + 1, 1, (size_t)(end + 3 - begin - 1), file) != (size_t)(end + 3 - begin - 1))
+    {
+        fail("can't extract build.sh's %s", name);
+    }
+}
+
+// Real publication in disposable trees, with only cp/ln wrapped to count work and inject partial staging failures.
+// Final mtimes alone would miss a no-op that copied and then deleted the unchanged database on every invocation.
+static void check_driver(void)
+{
+    Text script = read_file("build.sh");
+    char directory[PATH_MAX];
+    snprintf(directory, sizeof(directory), "%s/driver", work);
+    if (mkdir(directory, 0755) != 0 || chdir(directory) != 0)
+    {
+        fail("can't make the driver fixture");
+    }
+    FILE* file = fopen("driver.sh", "w");
+    if (file == 0 || fputs("#!/usr/bin/env bash\nset -euo pipefail\nshopt -s inherit_errexit\n", file) == EOF)
+    {
+        fail("can't create the driver fixture script");
+    }
+    driver_function(file, &script, "version_at_least");
+    driver_function(file, &script, "describe");
+    driver_function(file, &script, "publish");
+    free(script.data);
+    if (fputs(
+        "root=$PWD\ntree=$root/tree\nconfig=Release\nbinary=$tree/$config/compiler\nsettings=()\nclang=clang\n"
+        "cp()\n{\n"
+        "    local source=\"${@: -2:1}\" output=\"${!#}\"\n"
+        "    printf '%s\\n' \"$source\" >> \"$root/copies\"\n"
+        "    if { [[ $failure == database* && $source == *.json ]]; } || { [[ $failure == compiler && $source == \"$binary\" ]]; }; then\n"
+        "        [ \"$failure\" = database ] || printf partial > \"$output\"\n"
+        "        return 23\n"
+        "    fi\n"
+        "    command cp \"$@\"\n}\n"
+        "ln()\n{\n"
+        "    [ \"$failure\" != fallback ] && [ \"$failure\" != compiler ] || return 23\n"
+        "    command ln \"$@\"\n}\n"
+        "case $1 in\n"
+        "    version) version_at_least \"$2\" \"$3\" ;;\n"
+        "    describe) cmake=$2; describe sanitizer-flags | tr '\\n' '\\0' ;;\n"
+        "    publish) failure=$2; publish ;;\n"
+        "esac\n", file) == EOF || fclose(file) != 0)
+    {
+        fail("can't finish the driver fixture script");
+    }
+    static const struct
+    {
+        const char* actual;
+        const char* minimum;
+        int status;
+    } versions[] = {
+        { "3.24.9", "3.25", 1 },
+        { "3.25", "3.25", 0 },
+        { "3.25.0-rc1", "3.25", 0 },
+        { "3.100.1", "3.25", 0 },
+        { "4.0.0", "3.25", 0 },
+        { "2.99.0", "3.25", 1 },
+        { "1.09.9", "1.10", 1 },
+        { "1.10.0", "1.10", 0 },
+        { "1.13.2\nadditional version output\n", "1.10", 0 },
+        { "1.9.9\n1.13.2\n", "1.10", 1 },
+        { "", "3.25", 1 },
+        { "invalid 4.4.3", "3.25", 1 },
+    };
+    for (uint32_t i = 0; i < sizeof(versions) / sizeof(versions[0]); i += 1)
+    {
+        char* argv[] = { "bash", "driver.sh", "version", (char*)versions[i].actual, (char*)versions[i].minimum, 0 };
+        if (run("version.log", 0, argv) != versions[i].status)
+        {
+            fail("version '%s' didn't honor minimum %s", versions[i].actual, versions[i].minimum);
+        }
+    }
+    write_file("cmake",
+        "#!/usr/bin/env bash\nset -eu\n"
+        "[ \"${BUSTER_DRIVER_STATUS:-0}\" = 0 ] || exit \"$BUSTER_DRIVER_STATUS\"\n"
+        "for argument in \"$@\"; do\n"
+        "    case $argument in -DBUSTER_PRINT_OUTPUT=*) output=${argument#*=} ;; esac\n"
+        "done\n"
+        "printf '%s' \"${BUSTER_DRIVER_DESCRIPTION-}\" > \"$output\"\n", 0755);
+    const char* const description[] = { "BUSTER_DRIVER_DESCRIPTION=first\nsecond\n", 0 };
+    const char* const empty[] = { "BUSTER_DRIVER_DESCRIPTION=", 0 };
+    const char* const failed[] = { "BUSTER_DRIVER_STATUS=23", 0 };
+    char* describe[] = { "bash", "driver.sh", "describe", "./cmake", 0 };
+    if (run("description.log", description, describe) != 0)
+    {
+        fail("the driver description failed");
+    }
+    Text output = read_file("description.log");
+    if (output.length != sizeof("first\0second") || memcmp(output.data, "first\0second", sizeof("first\0second")) != 0)
+    {
+        fail("the driver description lost its argument boundaries");
+    }
+    free(output.data);
+    if (run("description.log", empty, describe) != 0 || status_of("description.log").st_size != 0 ||
+        run("description.log", failed, describe) != 23 || status_of("description.log").st_size != 0)
+    {
+        fail("an empty or failed driver description changed status or output");
+    }
+    static const struct
+    {
+        const char* name;
+        const char* failure;
+        bool same_compiler;
+        bool same_database;
+        bool missing_published;
+        bool missing_cached;
+        uint32_t copies;
+        bool succeeds;
+    } publications[] = {
+        { "unchanged", "", true, true, false, false, 0, true },
+        { "new compiler, same database", "", false, true, false, false, 0, true },
+        { "changed database", "", false, false, false, false, 1, true },
+        { "missing published database", "", false, false, true, false, 1, true },
+        { "missing cached database", "", false, false, false, true, 1, false },
+        { "failed database copy", "database", false, false, false, false, 1, false },
+        { "partial database copy", "database-partial", false, false, false, false, 1, false },
+        { "hardlink fallback", "fallback", false, false, false, false, 2, true },
+        { "failed compiler staging", "compiler", false, false, false, false, 2, false },
+    };
+    for (uint32_t i = 0; i < sizeof(publications) / sizeof(publications[0]); i += 1)
+    {
+        char name[32];
+        snprintf(name, sizeof(name), "publication-%u", i);
+        if (mkdir(name, 0755) != 0 || chdir(name) != 0 || mkdir("build", 0755) != 0 || mkdir("tree", 0755) != 0 || mkdir("tree/Release", 0755) != 0)
+        {
+            fail("can't make a publication fixture");
+        }
+        const char* compiler = publications[i].same_compiler ? "old compiler\n" : "new compiler\n";
+        const char* commands = publications[i].same_database ? "old database\n" : "new database\n";
+        write_file("tree/Release/compiler", compiler, 0755);
+        if (publications[i].same_compiler)
+        {
+            if (link("tree/Release/compiler", "build/compiler") != 0)
+            {
+                fail("can't link the fixture compiler");
+            }
+        }
+        else
+        {
+            write_file("build/compiler", "old compiler\n", 0755);
+        }
+        if (!publications[i].missing_published)
+        {
+            write_file("build/compile_commands.json", "old database\n", 0644);
+        }
+        if (!publications[i].missing_cached)
+        {
+            write_file("tree/Release/compile_commands.json", commands, 0644);
+        }
+        write_file("expected.compiler", publications[i].succeeds ? compiler : "old compiler\n", 0644);
+        write_file("expected.commands", publications[i].succeeds ? commands : "old database\n", 0644);
+        write_file("copies", "", 0644);
+        const struct stat before_compiler = status_of("build/compiler");
+        const struct stat before_commands = publications[i].missing_published ? (struct stat){ 0 } : status_of("build/compile_commands.json");
+        char* argv[] = { "bash", "../driver.sh", "publish", (char*)publications[i].failure, 0 };
+        const int status = run("publication.log", 0, argv);
+        Text copied = read_file("copies");
+        uint32_t copies = 0;
+        for (size_t byte = 0; byte < copied.length; byte += 1)
+        {
+            copies += copied.data[byte] == '\n';
+        }
+        free(copied.data);
+        if ((status == 0) != publications[i].succeeds || copies != publications[i].copies ||
+            !same_bytes("build/compiler", "expected.compiler") || !same_bytes("build/compile_commands.json", "expected.commands") ||
+            ((!publications[i].succeeds || publications[i].same_compiler) && status_of("build/compiler").st_ino != before_compiler.st_ino) ||
+            ((!publications[i].succeeds || publications[i].same_database) &&
+             (status_of("build/compile_commands.json").st_ino != before_commands.st_ino || !same_time(status_of("build/compile_commands.json"), before_commands))))
+        {
+            fputs(read_file("publication.log").data, stderr);
+            fail("publication '%s': status %d, copies %u (expected %u), or published state changed", publications[i].name, status, copies, publications[i].copies);
+        }
+        if (publications[i].succeeds)
+        {
+            write_file("tree/Release/compile_commands.json", "later cached database\n", 0644);
+            if (!same_bytes("build/compile_commands.json", "expected.commands") || access("build/compiler", X_OK) != 0)
+            {
+                fail("publication '%s' aliased the cached database or lost executable permissions", publications[i].name);
+            }
+        }
+        DIR* published = opendir("build");
+        if (published == 0)
+        {
+            fail("can't inspect publication temporary files");
+        }
+        for (struct dirent* entry = readdir(published); entry != 0; entry = readdir(published))
+        {
+            if (strncmp(entry->d_name, ".compiler.", 10) == 0 || strncmp(entry->d_name, ".compile_commands.json.", 23) == 0)
+            {
+                fail("publication '%s' left temporary %s", publications[i].name, entry->d_name);
+            }
+        }
+        closedir(published);
+        if (chdir("..") != 0)
+        {
+            fail("can't leave the publication fixture");
+        }
+    }
+    if (chdir(root) != 0)
+    {
+        fail("can't return to %s", root);
+    }
+    pass("driver versions and descriptions retain their contracts; publication skips unchanged copies and preserves both outputs on staging failure");
+}
+
 int main(int argc, char** argv)
 {
     const bool flags_only = argc == 2 && strcmp(argv[1], "--flags-only") == 0;
     const bool crt_only = argc == 2 && strcmp(argv[1], "--crt-link-only") == 0;
     const bool commands_only = argc == 2 && strcmp(argv[1], "--compile-commands-only") == 0;
+    const bool driver_only = argc == 2 && strcmp(argv[1], "--driver-only") == 0;
     const bool ownership_only = (argc == 2 || argc == 3) && strcmp(argv[1], "--ownership-only") == 0;
-    if (argc != 1 && !flags_only && !crt_only && !commands_only && !ownership_only)
+    if (argc != 1 && !flags_only && !crt_only && !commands_only && !driver_only && !ownership_only)
     {
-        fail("usage: build-regression [--flags-only | --crt-link-only | --compile-commands-only | --ownership-only [COMPILER]]");
+        fail("usage: build-regression [--flags-only | --crt-link-only | --compile-commands-only | --driver-only | --ownership-only [COMPILER]]");
     }
     if (getcwd(root, sizeof(root)) == 0 || access("build.sh", X_OK) != 0)
     {
@@ -2187,19 +2405,23 @@ int main(int argc, char** argv)
     {
         check_standalone_preprocessing();
     }
+    if (argc == 1 || driver_only)
+    {
+        check_driver();
+    }
     if (ownership_only)
     {
         check_existing_ownership(argc == 3 ? argv[2] : 0);
     }
-    if (!ownership_only && !flags_only && !commands_only)
+    if (!ownership_only && !driver_only && !flags_only && !commands_only)
     {
         check_crt_link_dependencies();
     }
-    if (!ownership_only && !flags_only && !crt_only)
+    if (!ownership_only && !driver_only && !flags_only && !crt_only)
     {
         check_compile_commands();
     }
-    if (!ownership_only && !crt_only && !commands_only)
+    if (!ownership_only && !driver_only && !crt_only && !commands_only)
     {
         BUILD("clean");
         char* output[] = { "./build.sh", "print-output", 0 };
