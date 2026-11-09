@@ -439,6 +439,50 @@ static uint32_t check_driver_spelling_chain(const Parser* parser, const CheckInp
     return result;
 }
 
+// c_check_semantic_diagnostic.c's, included after this file.
+static const char* check_semantic_requirement(const Parser* parser, Preprocessor* pp, uint32_t first, uint32_t end, Arena* scratch);
+
+#define BUSTER_CHECK_DRIVER_VLA_BOUNDS 8
+
+// The size expressions of `type`'s variable array levels (#1447), through pointers, arrays and functions' results, as
+// clang prints them (`int (*)[n + 1]`): a VARIABLE_ARRAY's extent is its expression's first token plus one
+// (check_input_vla_bound), which ends at its `]`, spelled with expression spacing (check_semantic_requirement). At most
+// BUSTER_CHECK_DRIVER_VLA_BOUNDS; the rest print `[]`. Returns how many it wrote.
+static uint32_t check_driver_vla_bounds(const Parser* parser, Preprocessor* pp, const TypeTable* types, TypeId type, uint64_t* ids, String8* texts,
+                                        Arena* scratch)
+{
+    uint32_t count = 0;
+    TypeId level = type;
+    for (uint32_t depth = 0; depth < 256 && level != 0 && type_is_valid(types, level); depth += 1)
+    {
+        const TypeId bare = type_unqualified(type_strip_aligned(types, level));
+        const uint8_t kind = type_kind(types, bare);
+        const uint64_t extent = kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY ? types->types.extent[type_index(bare)] : 0;
+        const uint32_t first = extent != 0 && extent - 1 < parser->tokens.count ? (uint32_t)(extent - 1) : BUSTER_CHECK_NONE;
+        uint32_t close = first;
+        uint32_t nesting = 0;
+        bool scanning = first != BUSTER_CHECK_NONE;
+        while (scanning && close < parser->tokens.count)
+        {
+            const uint8_t token = parser->tokens.kinds[close];
+            scanning = !(token == PARSE_KIND_R_SQUARE && nesting == 0);
+            nesting = token == PARSE_KIND_L_PAREN || token == PARSE_KIND_L_SQUARE || token == PARSE_KIND_L_BRACE ? nesting + 1 :
+                      (token == PARSE_KIND_R_PAREN || token == PARSE_KIND_R_SQUARE || token == PARSE_KIND_R_BRACE) && nesting != 0 ? nesting - 1 : nesting;
+            close += scanning ? 1 : 0;
+        }
+        const char* text = !scanning && first != BUSTER_CHECK_NONE && close > first && count < BUSTER_CHECK_DRIVER_VLA_BOUNDS ?
+                           check_semantic_requirement(parser, pp, first, close, scratch) : NULL;
+        if (text != NULL)
+        {
+            ids[count] = extent;
+            texts[count] = (String8){ .pointer = (char*)text, .length = strlen(text) };
+            count += 1;
+        }
+        level = kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind) ? types->types.base[type_index(bare)] : 0;
+    }
+    return count;
+}
+
 // A warning's type spelling (#992): `spelling` is the operand's typedef specifier's declaration, so the base's
 // specifier prints the typedef's name and clang's `(aka '...')` shows the type without that sugar; the sentinel
 // BUSTER_CHECK_NONE prints `__size_t` for a sizeof/alignof operand's own type. The anonymous map prints an
@@ -465,12 +509,17 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
         // The pass's columns live in `spell`, built on the pass's first rendered type below its marks (#992).
         else if (check_driver_spelling_ready(parser, pp, input, types, spell, scratch))
         {
+            uint64_t bound_ids[BUSTER_CHECK_DRIVER_VLA_BOUNDS];
+            String8 bound_texts[BUSTER_CHECK_DRIVER_VLA_BOUNDS];
             TypeNames names = {
                 .bytes = spell->bytes,
                 .lengths = spell->lengths,
                 .count = spell->count,
                 .anonymous = spell->anonymous,
                 .anonymous_count = spell->anonymous_count,
+                .bound_ids = bound_ids,
+                .bound_texts = bound_texts,
+                .bound_count = check_driver_vla_bounds(parser, pp, types, type, bound_ids, bound_texts, scratch),
             };
             TypeId alias_type = 0;
             String8 alias_name = { 0 };

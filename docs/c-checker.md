@@ -8577,6 +8577,8 @@ conditional operator's two function operands; this gives one for each.
   vector's own typedef at any level (`'pv' (aka 'v4si *')`), as
   `desugarForDiagnostic` stops there. A typedef'd array's element keeps its
   qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`).
+  A variable array prints its size expression as written, with expression
+  spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
 - **Differences left.**
   - An assignment to a member that is const itself is "read-only variable is
@@ -8584,6 +8586,10 @@ conditional operator's two function operands; this gives one for each.
   - A qualifier written again over a qualified typedef's array
     (`const CI twice[1]`) is dropped: clang prints
     `'const CI[1]' (aka 'const int[1]')`, this `'CI[1]'`.
+  - A cast inside a variable array's bound prints its type name as written
+    (`int[(unsigned)n]`), where clang prints the type's own spelling
+    (`'int[(unsigned int)n]'`). Only a type's first eight bounds print;
+    later ones print `[]`.
   - The input-side spelling helpers (`check_input_operand_type_spelling` and
     the others, `-Wsign-compare`'s operands among them) don't follow members:
     `x.n < i` prints `'unsigned long'` for clang's

@@ -721,6 +721,12 @@ struct TypeNames
     uint32_t anonymous_count;
     const TypePrintParen* parentheses;
     uint32_t parenthesis_count;
+    // Optional (#1447): a variable array's size expression as written, which the table doesn't keep: a VARIABLE_ARRAY
+    // level whose extent (the caller's id for its expression) is `bound_ids[i]` prints `[bound_texts[i]]`, as clang's
+    // `int[n]`; any other prints `[]`.
+    const uint64_t* bound_ids;
+    const String8* bound_texts;
+    uint32_t bound_count;
 };
 
 // The printer's options: BUSTER_TYPE_PRINT_C23 spells bool as C23 and clang in C23 mode do (bool, not _Bool), and
@@ -6477,7 +6483,19 @@ static void type_print_after_kind(TypePrinter* printer, TypeId type)
         }
         else
         {
-            type_print_text(printer, kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY && table->types.extent[index] == 0 ? "[*]" : "[]");
+            const uint64_t extent = table->types.extent[index];
+            const TypeNames* names = printer->names;
+            uint32_t bound = UINT32_MAX;
+            for (uint32_t i = 0; kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY && extent != 0 && names != 0 && bound == UINT32_MAX && i < names->bound_count; i += 1)
+            {
+                bound = names->bound_ids[i] == extent ? i : UINT32_MAX;
+            }
+            type_print_text(printer, kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY && extent == 0 ? "[*]" : bound != UINT32_MAX ? "[" : "[]");
+            if (bound != UINT32_MAX)
+            {
+                type_print_bytes(printer, names->bound_texts[bound].pointer, names->bound_texts[bound].length);
+                type_print_text(printer, "]");
+            }
         }
         type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base | printer->element_qualifiers, false, false, printer->step + 1);
     }
