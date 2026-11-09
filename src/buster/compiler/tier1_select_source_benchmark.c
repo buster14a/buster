@@ -19,7 +19,14 @@
 // The corpus's type and preparation also serve the checker's code-certificate benchmark. Keep those shared at their
 // original positions; only the backend unit reads this command's measurement and driver.
 
-#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+// This file is also preprocessed on its own by the clang comparison, outside a unity unit.
+#ifdef BUSTER_IN_UNIT
+#define BUSTER_TIER1_SELECT_SOURCE_BACKEND BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+#else
+#define BUSTER_TIER1_SELECT_SOURCE_BACKEND 1
+#endif
+
+#if BUSTER_TIER1_SELECT_SOURCE_BACKEND
 #define BUSTER_TIER1_SELECT_SOURCE_VECTOR 0
 #define BUSTER_TIER1_SELECT_SOURCE_SCALAR 1
 #define BUSTER_TIER1_SELECT_SOURCE_VARIANTS 2
@@ -48,7 +55,7 @@ struct Tier1SelectSourceCorpus
     Tier1BursCheck burs;
 };
 
-#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+#if BUSTER_TIER1_SELECT_SOURCE_BACKEND
 static Tier0BenchmarkReading tier1_select_source_run(uint32_t variant, const Tier1SelectSourceCorpus* corpus, Arena* output, Arena* scratch, Tier0BenchmarkCounters counters)
 {
     uint32_t failures = 0;
@@ -161,7 +168,7 @@ static bool tier1_select_source_corpus_file(Tier1SelectSourceCorpus* corpus, con
     return valid;
 }
 
-#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+#if BUSTER_TIER1_SELECT_SOURCE_BACKEND
 static bool tier1_select_source_measure(const Tier1SelectSourceCorpus* corpus, Arena* output, Arena* scratch, uint32_t only, uint64_t after_scalar)
 {
     const Tier0BenchmarkCounters counters = {
@@ -336,3 +343,5 @@ static __attribute__((unused)) int run_tier1_select_source_benchmark(int count, 
     return measured ? 0 : 1;
 }
 #endif
+
+#undef BUSTER_TIER1_SELECT_SOURCE_BACKEND
