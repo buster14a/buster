@@ -189,11 +189,13 @@ static bool sqlite_test_build(SqliteTest* t, uint32_t b)
 // that stopped it, prints no such line.
 #define BUSTER_SQLITE_TEST_SENTINEL "test-sqlite: the script's end"
 
-// A script's text: `path` read whole, which must be a regular file. Returns null if it isn't one or can't be read.
+// A script's text: `path` read whole, which must be a regular file. Returns null if it isn't one or can't be read. It
+// opens without blocking, before any alarm covers it: a FIFO without a writer would block a plain open forever, and is
+// refused by the descriptor's fstat instead (a regular file's reads ignore O_NONBLOCK).
 static char* sqlite_test_load(Arena* arena, const char* path, uint64_t* length)
 {
     char* text = NULL;
-    const int file = open(path, O_RDONLY | O_CLOEXEC);
+    const int file = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     struct stat status;
     if (file != -1 && fstat(file, &status) == 0 && S_ISREG(status.st_mode) && status.st_size >= 0)
     {

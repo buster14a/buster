@@ -63,7 +63,8 @@ unset CPATH C_INCLUDE_PATH
 # tests/sqlite's scripts must print clang's shell's output, byte for byte (docs/commands/c-testsuite.md). The harness's
 # own cases: the work directory is relative and the scripts' and tests' paths have blanks (the shells run in directories
 # of their own); a script that prints nothing passes (its run proves itself by a sentinel line, not its output); and a
-# dangling link, a directory or an unreadable file named as a script fails the command before any build.
+# dangling link, a directory, a FIFO without a writer (within a minute, not hung) or an unreadable file named as a script
+# fails the command before any build.
 unset CPATH C_INCLUDE_PATH
 directory=$(mktemp -d "build/test sqlite.XXXXXX")
 trap 'rm -rf "$directory"' EXIT
@@ -76,13 +77,16 @@ ln -s missing "$directory/bad scripts/dangling.sql"
 # A file it may not read, but for root, who may read any file.
 cp tests/sqlite/core.sql "$directory/bad scripts/unreadable.sql"
 chmod 000 "$directory/bad scripts/unreadable.sql"
-expected=3
-if [ "$(id -u)" = 0 ]; then expected=2; fi
-if "$BUSTER_COMPILER" test-sqlite --clang clang --sqlite "$BUSTER_CORPUS/sqlite" --tests "$directory/sqlite tests" --scripts "$directory/bad scripts" \
+# A FIFO without a writer, which a blocking open would wait on forever.
+mkfifo "$directory/bad scripts/hang.sql"
+expected=4
+if [ "$(id -u)" = 0 ]; then expected=3; fi
+if timeout 60 "$BUSTER_COMPILER" test-sqlite --clang clang --sqlite "$BUSTER_CORPUS/sqlite" --tests "$directory/sqlite tests" --scripts "$directory/bad scripts" \
     --directory "$directory" > "$directory/bad.txt" 2>&1; then exit 1; fi
 test "$(grep -c ': not a readable regular file (FAILED)$' "$directory/bad.txt")" -eq "$expected"
 grep -q 'bad scripts/dangling.sql: not a' "$directory/bad.txt"
 grep -q 'bad scripts/directory.sql: not a' "$directory/bad.txt"
+grep -q 'bad scripts/hang.sql: not a' "$directory/bad.txt"
 if grep -q "shell by\|shell: built" "$directory/bad.txt"; then exit 1; fi
 "$BUSTER_COMPILER" test-sqlite --clang clang --sqlite "$BUSTER_CORPUS/sqlite" --tests "$directory/sqlite tests" --scripts "$directory/sqlite scripts" \
     --directory "$directory" > "$directory/good.txt" 2>&1 || { cat "$directory/good.txt"; exit 1; }
