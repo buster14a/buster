@@ -625,9 +625,15 @@ at the target's forms, by both of the checker's paths:
   qwords, `pshufd`, `shufps` of halves, pairs or three elements and one of dwords, unpacks, `pshuflw` and `pshufhw` of
   words, and with SSSE3 `pshufb` of each vector by one constant (its top bits flipped for the second), ORed; with AVX
   a lane's insertion and extraction, and with AVX2 broadcasts, each lane's unpacks and `vpermd` with `vpblendd`.
+  `__builtin_convertvector`'s integer extensions without SSE4.1 and truncations without AVX-512 are sequences too
+  (`check_vector_baseline_resize`, #1834): an extension unpacks the low elements with zeros, or with themselves and
+  shifts them right arithmetically (a qword's high dword `psrad` by 31's); a truncation takes a qword's low dword
+  (`pshufd`, or of 32 bytes `vextractf128` and `shufps`), makes each element's kept bits its whole value by shifts and
+  packs them with saturation (`packssdw`, `packsswb`, `packuswb`), 32 bytes as their two halves. Conversions between 8-
+  or 16-bit integers and floats or doubles go through dwords by them.
 - What has no form at the target is refused by name: shuffles of bytes and words without SSSE3, their 32-byte ones
-  without AVX-512, minimum and maximum of elements SSE2 hasn't (and of qwords), absolute values without SSSE3, the
-  integers' extensions without SSE4.1 and truncations, and scalar fused multiply-adds without FMA. The sign masks and
+  without AVX-512, minimum and maximum of elements SSE2 hasn't (and of qwords), absolute values without SSSE3, conversions of
+  vectors wider than the target's registers, and scalar fused multiply-adds without FMA. The sign masks and
   the conversions to integers in a general register (`movmskps`, `cvt(t)ss2si` and the others), vector results in
   several registers and operators on vectors wider than the registers are #1193's.
 - `test-checker --program-vectors` runs `c_check_program_vector_test.c`'s baseline programs (the SSE2 survey's
@@ -1183,6 +1189,12 @@ rbp for the rare deeper expressions. The floating one is xmm0 to xmm15.
   the frame's save area and restores them; depths in callee-saved registers survive it by themselves.
 - **Deeper expressions:** past 15 integer or 16 floating values live at once, the values go to frame slots ("Deep
   values", below).
+- **Asm bodies (#1839):** a call row whose `Tier0Function.call_asm` names an asm body (`Tier0AsmBody`) has the body's
+  records in the call's place, with no call: an asm statement placed in its caller ([inline assembly](c-inline-assembly.md),
+  "Asm bodies"). It is a call in every other respect, its clobbers with the registers the body touches: below it, every
+  depth in a register is saved where the body touches a callee-saved one, no home is a register it touches, and the
+  prologue saves the callee-saved ones it touches. A record whose base is `BUSTER_TIER0_ASM_BLOCK` addresses the
+  statement's operand block, a frame object, which Tier 0 replaces with the block's home.
 
 **Homes.**
 
