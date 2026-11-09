@@ -1067,7 +1067,7 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "static double plus_last(double x, double y){__asm__(\"\" : \"+t\"(x) : \"t\"(y));return x;}"
         "static double tied_first(double x, double y){double r;__asm__(\"\" : \"=t\"(r) : \"0\"(x), \"t\"(y));return r;}"
         "static double tied_after(double x, double y){double r;__asm__(\"\" : \"=t\"(r) : \"t\"(y), \"0\"(x));return r;}"
-        "static double last_below(double x, double y, double z){double r;__asm__(\"fxch\" : \"=t\"(r) : \"t\"(x), \"u\"(y), \"u\"(z) : \"st(1)\");return r;}"
+        "static double last_below(double x, double y, double z){double r;__asm__(\"fxch\\n\\tfstp %%st(1)\" : \"=t\"(r) : \"t\"(x), \"u\"(y), \"u\"(z) : \"st(1)\");return r;}"
         "static long double both_out(long double x, long double y){long double r, s;__asm__(\"\" : \"=t\"(r), \"=t\"(s) : \"t\"(x), \"t\"(y));return r*10+s;}"
         "static long double first_matching(long double x, long double y){long double r, s;__asm__(\"\" : \"=t\"(r), \"=t\"(s) : \"1\"(y), \"0\"(x));return r*10+s;}"
         "static long double two_plus(long double x, long double y){__asm__(\"\" : \"+t\"(x), \"+t\"(y));return x*10+y;}"
