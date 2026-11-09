@@ -89,8 +89,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
   `CheckDriverPart`; `--cpu-dispatch-only` runs the `cpu_specific` and
   `cpu_dispatch` section alone, #1447; `--semantic-recovery-only` runs
-  `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c` and
-  `c_check_type_attribute_recovery_driver_test.c` alone, the whole output and status
+  `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
+  `c_check_type_attribute_recovery_driver_test.c` and
+  `c_check_structural_recovery_driver_test.c` alone, the whole output and status
   of semantic error recovery's fixtures against clang's on the vector, scalar
   and two-lane deferred paths, and `-c`'s refusal of each: `docs/c-checker.md`'s
   "Semantic error recovery", #1447). Its library-builtin comparisons are pinned to Clang
@@ -286,12 +287,17 @@ unused-warning fixtures also check exact scope-completion tokens.
   default; an arithmetic or bitwise operation's `-Wenum-enum-conversion`, a conditional's `-Wenum-compare-conditional`
   and a floating mix's `-Wenum-float-conversion` (a compound assignment's only from an enumeration to a floating target),
   the three under `-Wenum-conversion` and so `-Wconversion` and `-Wnon-gcc`; and an unnamed enumeration's
-  `-Wanon-enum-enum-conversion`. Only a unit where an enumerator or an enumeration's variable is named as such an
-  operator's operand (`CheckInput.enum_operands`, set where the identifiers' leaves are made, outside its own
-  enumeration's definition) is scanned, and an operator is tested only where an operand may be an enumeration. An
-  enumeration operand that is only a member, a call's result or a cast's isn't looked for without one, and the constant
-  reader's expressions (an array bound in a type name, an enumerator's value), and a `typeof` operand's, aren't
-  scanned. A comparison's operands are rvalues, as clang's DefaultLvalueConversion makes them: unqualified, a typedef
+  `-Wanon-enum-enum-conversion`. Only a unit where such an operator may mix enumerations is scanned: one where an
+  enumerator is named as its operand (`CheckInput.enum_operands`, set where the identifiers' leaves are made, outside
+  its own enumeration's definition), or where an arithmetic, comparison or conditional action had an operand of an
+  enumeration type in any form, a member, a call's result, a cast's, a subscript's or a dereference's as well as a
+  variable (`CHECK_WARNING_ENUM_OPERAND`, which `check_graph_store` moves to `CheckStream.enum_operands` and no warnings
+  column keeps); an operator is tested only where an operand may be an enumeration. The constant reader's operators,
+  which no graph node holds (an array bound in a declarator or a type name, a member's bound or bit-field width, an
+  enumerator's value, a `typeof` operand), leave a `CHECK_WARNING_EVENT_ENUM_MIX` where their operands, as clang
+  coerces them, are enumerations of different types or an enumeration and a floating type; the scan reports those that
+  no graph operator holds through the same rules (`check_common_enum_mix`), so a `_Static_assert`'s or an
+  initializer's is warned once. A comparison's operands are rvalues, as clang's DefaultLvalueConversion makes them: unqualified, a typedef
   that carries a qualifier itself spelled as its type; a GNU `a ?: b`'s omitted operand is its condition promoted, never
   an enumeration.
   `c_check_enum_arithmetic_driver_test.c` compares them with complete pinned-Clang output at each policy, both paths and

@@ -1120,6 +1120,9 @@ struct ParseDiagnostic
     // to the mandatory body brace. Its recovery view replaces [token, resume_end) with one semicolon; zero means
     // the ordinary insertion before token. This is diagnostic-only metadata, never acceptance of the input.
     uint32_t resume_end;
+    // A case's or default's missing `:` before a `;`, which clang's recovery reads as the label's empty statement
+    // (check_prefix_resume puts a `:` before the `;` and parses the view again).
+    bool resume_colon;
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1536,6 +1539,8 @@ struct ParseScalar
     bool error_resumed;
     bool error_resume_delete;
     uint32_t error_resume_end;
+    // Whether the error is a case's or default's missing `:` before a `;` (ParseDiagnostic.resume_colon).
+    bool error_resume_colon;
     // The diagnostics, in order.
     ParseDiagnostic* diagnostics;
     uint32_t diagnostic_count;
@@ -2512,6 +2517,11 @@ static void parse_scalar_unexpected(ParseScalar* parser, uint32_t i, const Parse
     else if (frame->role == PARSE_ROLE_OPEN_CASE)
     {
         const bool is_default = parser->kinds[frame->opener] == PARSE_KIND_DEFAULT;
+        // A `;` where the `:` is due is the label's empty statement to clang's recovery, which reads on past it.
+        if (parser->error_token == BUSTER_PARSE_NONE)
+        {
+            parser->error_resume_colon = kind == PARSE_KIND_SEMI;
+        }
         parse_scalar_error(parser, i, is_default ? PARSE_MESSAGE_EXPECTED_COLON_AFTER_DEFAULT : PARSE_MESSAGE_EXPECTED_COLON_AFTER_CASE, BUSTER_PARSE_AFTER_PREVIOUS);
     }
     else if (frame->role == PARSE_ROLE_OPEN_TERNARY)
@@ -5361,6 +5371,11 @@ static void parse_scalar_token(ParseScalar* parser, uint32_t i)
                     }
                     else
                     {
+                        // A `;` where the `:` is due is the label's empty statement to clang's recovery, which reads on past it.
+                        if (parser->error_token == BUSTER_PARSE_NONE)
+                        {
+                            parser->error_resume_colon = kind == PARSE_KIND_SEMI;
+                        }
                         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_COLON_AFTER_DEFAULT, BUSTER_PARSE_AFTER_PREVIOUS);
                     }
                     break;
@@ -5855,6 +5870,7 @@ static void parse_scalar_reset(ParseScalar* parser)
     parser->error_resumed = false;
     parser->error_resume_delete = false;
     parser->error_resume_end = 0;
+    parser->error_resume_colon = false;
 }
 
 // The first error of the current top-level declaration, stopped at token `stopped`: its diagnostic, then the rest of
@@ -5878,6 +5894,7 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
             .resumed = parser->error_resumed,
             .resume_delete = parser->error_resume_delete,
             .resume_end = parser->error_resume_end,
+            .resume_colon = parser->error_resume_colon,
         };
         parser->diagnostic_count += 1;
     }

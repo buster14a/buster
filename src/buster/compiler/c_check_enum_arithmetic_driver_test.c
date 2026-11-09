@@ -37,6 +37,57 @@ static const char check_driver_enum_mix_source[] =
                   "}\n"
                   "int h(enum E e, enum F f2) { return e <= f2 && e != C; }\n";
 
+// Operands of an enumeration type that are no named variable: members, calls, casts, subscripts, dereferences and
+// comma operators' (CheckStream.enum_operands).
+static const char check_driver_enum_forms_source[] =
+    "enum E1 { A1, B1 };\n"
+    "enum E2 { A2, B2 };\n"
+    "struct S { enum E1 a; enum E2 b; };\n"
+    "enum E1 f1(void);\n"
+    "enum E2 f2(void);\n"
+    "int g(struct S s, struct S* p, enum E1* q, enum E2 r[2], int i)\n"
+    "{\n"
+    "    int x = s.a + s.b;\n"
+    "    x += p->a == p->b;\n"
+    "    x += f1() | f2();\n"
+    "    x += (enum E1)i * (enum E2)i;\n"
+    "    x += *q - r[1];\n"
+    "    x += (i, *q) < (i, r[0]);\n"
+    "    return x + (i ? s.a : s.b);\n"
+    "}\n";
+
+// The constant reader's operators (CHECK_WARNING_EVENT_ENUM_MIX): array bounds of declarators, type names and members,
+// a bit-field's width, enumerators' values, and a _Static_assert's and an initializer's, which the graph holds too.
+static const char check_driver_enum_bounds_source[] =
+    "enum E1 { A1, B1 };\n"
+    "enum E2 { A2, B2 };\n"
+    "int arr[A1 + A2];\n"
+    "int s1 = sizeof(char[A1 | A2]);\n"
+    "typedef int T[A1 * A2 + 1];\n"
+    "enum C { X = A1 + A2, Y = B1 == B2, Z = (A1 < A2) };\n"
+    "int f(void) { int local[A1 - A2 + 2]; return sizeof(int[A1 ^ A2 + 1]) + sizeof local; }\n"
+    "_Static_assert(A1 + A2 == 0, \"\");\n"
+    "struct S { int m[A1 + B2 + 1]; int bf : A1 + B2 + 1; };\n"
+    "int c1 = A1 ? A1 : A2;\n"
+    "enum D { P = (int)(1.0 + A1) };\n";
+
+static const char check_driver_enum_constants_source[] =
+    "typedef enum E1 { A1, B1 } TE1;\n"
+    "typedef enum E2 { A2, B2 } TE2;\n"
+    "enum { U1, U2 };\n"
+    "enum C { X, Y = X + A1, Z = Y | A2, W = (TE1)1 + (TE2)1 };\n"
+    "int a1[(A1 < A2) + 1];\n"
+    "int a2[1 + (B1 ? A1 : A2)];\n"
+    "enum F { Q = (int)(A1 + 2.0f) };\n"
+    "int a4[U1 + A1 + 1];\n"
+    "int a5[sizeof(typeof(A1 + A2))];\n"
+    "_Alignas(4 << (A1 & A2)) int a6;\n"
+    "int g(int i) {\n"
+    "    switch (i) { case A1 + A2: return 1; }\n"
+    "    return sizeof(char[(enum E1)1 * (TE2)1]);\n"
+    "}\n"
+    "struct S { unsigned bf : (A1 != B2) + 1; };\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_enum_arithmetic_fixtures[] =
 {
     {
@@ -115,6 +166,60 @@ static const CheckDriverDefaultWarningFixture check_driver_enum_arithmetic_fixtu
                   "}\n",
         .options = { "-Wenum-conversion", "-Wanon-enum-enum-conversion" },
         .warnings = 12,
+    },
+    {
+        .name = "enumeration mixes of forms, by default",
+        .source = check_driver_enum_forms_source,
+        .warnings = 4,
+    },
+    {
+        .name = "enumeration mixes of forms under -Wenum-conversion",
+        .source = check_driver_enum_forms_source,
+        .options = { "-Wenum-conversion", "-Wanon-enum-enum-conversion" },
+        .warnings = 9,
+    },
+    {
+        .name = "enumeration mixes of forms under -w",
+        .source = check_driver_enum_forms_source,
+        .options = { "-w" },
+    },
+    {
+        .name = "enumeration mixes of bounds, by default",
+        .source = check_driver_enum_bounds_source,
+        .warnings = 2,
+    },
+    {
+        .name = "enumeration mixes of bounds under -Wenum-conversion",
+        .source = check_driver_enum_bounds_source,
+        .options = { "-Wenum-conversion", "-Wanon-enum-enum-conversion" },
+        .warnings = 12,
+    },
+    {
+        .name = "enumeration mixes of bounds under -w",
+        .source = check_driver_enum_bounds_source,
+        .options = { "-w" },
+    },
+    {
+        .name = "enumeration mixes of constants, by default",
+        .source = check_driver_enum_constants_source,
+        .warnings = 2,
+    },
+    {
+        .name = "enumeration mixes of constants under -Wenum-conversion",
+        .source = check_driver_enum_constants_source,
+        .options = { "-Wenum-conversion", "-Wanon-enum-enum-conversion" },
+        .warnings = 10,
+    },
+    {
+        .name = "enumeration mixes of constants under -w",
+        .source = check_driver_enum_constants_source,
+        .options = { "-w" },
+    },
+    {
+        .name = "-Werror=enum-compare in array bounds and bit-field widths",
+        .source = check_driver_enum_constants_source,
+        .options = { "-Werror=enum-compare" },
+        .errors = 2,
     },
     {
         .name = "pragmas map the enumeration warnings at their operators",
