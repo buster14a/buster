@@ -5173,10 +5173,15 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                 const uint32_t token = input->graph.tokens[node];
                 if (token < count)
                 {
-                    const uint32_t flags = stream->warnings[node];
+                    // A folded non-ICE expression's warning is at the expression's first token (check_driver_reports).
+                    const uint32_t folded = stream->warnings[node] & CHECK_WARNING_GNU_CONSTANT;
+                    const uint32_t flags = stream->warnings[node] & ~folded;
                     const uint32_t ignored = stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
+                    const uint32_t begin = folded != 0 ? check_common_subtree_start(parser, token) : token;
                     warnings[token].flags |= flags;
                     warnings[token].enabled |= flags & ~ignored;
+                    warnings[begin].flags |= folded;
+                    warnings[begin].enabled |= folded & ~ignored;
                 }
             }
             for (uint32_t i = 0; i < excess_count; i += 1)
@@ -7571,6 +7576,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_bitfield_driver_test.c"
 #include "c_check_register_driver_test.c"
 #include "c_check_enum_arithmetic_driver_test.c"
+#include "c_check_vla_fold_driver_test.c"
 #include "c_check_for_loop_driver_test.c"
 #include "c_check_enum_cast_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
@@ -8428,6 +8434,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_bitfields(&test, clang, executable, directory);
             check_test_driver_registers(&test, clang, executable, directory);
             check_test_driver_enum_arithmetic(&test, clang, executable, directory);
+            check_test_driver_vla_fold(&test, clang, executable, directory);
             check_test_driver_for_loops(&test, clang, executable, directory);
             check_test_driver_enum_casts(&test, clang, executable, directory);
         }
