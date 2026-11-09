@@ -16,6 +16,11 @@ struct CheckVectorBaseline
 
 #define BUSTER_CHECK_BASE_PACKED(context, name) ((context)->bytes > 16 ? X86_FORM_V##name##_Y_Y_YM256 : \
                                                 (context)->avx ? X86_FORM_V##name##_X_X_XM128 : X86_FORM_##name##_X_XM128)
+// A unary form by its 16-byte operands (`x`) and 32-byte ones (`y`). This and BUSTER_CHECK_BASE_PACKED stay defined past
+// this file, for c_check_program_vector_builtins.c's conversion rows, which c_check_program_lower.c includes after it and
+// which undefines them at its end.
+#define BUSTER_CHECK_BASE_UNARY(context, name, x, y) ((context)->bytes > 16 ? X86_FORM_V##name##_##y : \
+                                                     (context)->avx ? X86_FORM_V##name##_##x : X86_FORM_##name##_##x)
 
 static void check_vector_baseline_put(CheckVectorBaseline* context, X86Instruction record)
 {
@@ -67,15 +72,126 @@ static void check_vector_baseline_shuffle(CheckVectorBaseline* context, uint8_t 
     check_vector_baseline_put(context, record);
 }
 
-static void check_vector_baseline_shift(CheckVectorBaseline* context, uint8_t value, uint32_t element, uint8_t bits)
+// An immediate shift of `value`'s elements of `element` bytes by `bits`: left, logical right or arithmetic right (`kind`
+// 0, 1 or 2), at the context's width. SSE2 has no arithmetic shift of qwords.
+static void check_vector_baseline_shift_kind(CheckVectorBaseline* context, uint32_t kind, uint8_t value, uint32_t element, uint8_t bits)
 {
-    const bool wide = context->bytes > 16;
-    const uint32_t form = element == 2 ? (wide ? X86_FORM_VPSLLW_Y_Y_IMM8 : context->avx ? X86_FORM_VPSLLW_X_X_IMM8 : X86_FORM_PSLLW_X_IMM8) :
-                          element == 4 ? (wide ? X86_FORM_VPSLLD_Y_Y_IMM8 : context->avx ? X86_FORM_VPSLLD_X_X_IMM8 : X86_FORM_PSLLD_X_IMM8) :
-                                         (wide ? X86_FORM_VPSLLQ_Y_Y_IMM8 : context->avx ? X86_FORM_VPSLLQ_X_X_IMM8 : X86_FORM_PSLLQ_X_IMM8);
-    X86Instruction record = check_vector_lower_record(form, 0, context->avx ? value : 0, value);
+    // By kind, element (words, dwords, qwords) and form (legacy, VEX of 16 bytes, VEX of 32).
+    static const uint16_t forms[3][3][3] = {
+        {
+            { X86_FORM_PSLLW_X_IMM8, X86_FORM_VPSLLW_X_X_IMM8, X86_FORM_VPSLLW_Y_Y_IMM8 },
+            { X86_FORM_PSLLD_X_IMM8, X86_FORM_VPSLLD_X_X_IMM8, X86_FORM_VPSLLD_Y_Y_IMM8 },
+            { X86_FORM_PSLLQ_X_IMM8, X86_FORM_VPSLLQ_X_X_IMM8, X86_FORM_VPSLLQ_Y_Y_IMM8 },
+        },
+        {
+            { X86_FORM_PSRLW_X_IMM8, X86_FORM_VPSRLW_X_X_IMM8, X86_FORM_VPSRLW_Y_Y_IMM8 },
+            { X86_FORM_PSRLD_X_IMM8, X86_FORM_VPSRLD_X_X_IMM8, X86_FORM_VPSRLD_Y_Y_IMM8 },
+            { X86_FORM_PSRLQ_X_IMM8, X86_FORM_VPSRLQ_X_X_IMM8, X86_FORM_VPSRLQ_Y_Y_IMM8 },
+        },
+        {
+            { X86_FORM_PSRAW_X_IMM8, X86_FORM_VPSRAW_X_X_IMM8, X86_FORM_VPSRAW_Y_Y_IMM8 },
+            { X86_FORM_PSRAD_X_IMM8, X86_FORM_VPSRAD_X_X_IMM8, X86_FORM_VPSRAD_Y_Y_IMM8 },
+            { 0, 0, 0 },
+        },
+    };
+    const uint32_t size = element == 2 ? 0 : element == 4 ? 1 : 2;
+    const uint32_t width = context->bytes > 16 ? 2 : context->avx ? 1 : 0;
+    X86Instruction record = check_vector_lower_record(forms[kind][size][width], 0, context->avx ? value : 0, value);
     record.immediate = bits;
     check_vector_baseline_put(context, record);
+}
+
+static void check_vector_baseline_shift(CheckVectorBaseline* context, uint8_t value, uint32_t element, uint8_t bits)
+{
+    check_vector_baseline_shift_kind(context, 0, value, element, bits);
+}
+
+// VECTOR(0)'s high 16 bytes into VECTOR(1) (VEXTRACTF128), the rest of the context's records on 16 bytes.
+static void check_vector_baseline_high_half(CheckVectorBaseline* context)
+{
+    X86Instruction record = check_vector_lower_record(X86_FORM_VEXTRACTF128_XM128_Y_IMM8, BUSTER_TIER0_ROLE_VECTOR(0), 0, BUSTER_TIER0_ROLE_VECTOR(1));
+    record.immediate = 1;
+    check_vector_baseline_put(context, record);
+    context->bytes = 16;
+}
+
+// VECTOR(0)'s integers of `from` bytes to integers of `to` bytes in place, where the target hasn't AVX-512's VPMOV forms
+// (or, for an extension, SSE4.1's PMOVSX and PMOVZX), as LLVM's legalization lowers them; VECTOR(1) is its scratch and the
+// context's width the source's. An extension unpacks the low elements: with zeros by the source's signedness, or with
+// themselves, which leaves the element's bits at the top of a word or dword for an arithmetic shift right to extend, a
+// qword's high dword the low one's sign (PSRAD by 31). A truncation takes a qword's low dword (PSHUFD, or with a source
+// of 32 bytes SHUFPS of its halves), then makes each element's kept bits its whole value, sign-extended in a dword or
+// zero-extended in a word, so that the saturating packs keep them exactly (PACKSSDW, PACKSSWB, PACKUSWB), a source of 32
+// bytes packing its two halves. The elements past the result's in the register are unspecified.
+static void check_vector_baseline_resize(CheckVectorBaseline* context, uint32_t from, uint32_t to, bool is_signed)
+{
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    uint32_t size = from;
+    if (from < to && !is_signed)
+    {
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, XORPS), v1, v1, v1);
+        while (size < to)
+        {
+            const uint32_t form = size == 1 ? BUSTER_CHECK_BASE_PACKED(context, PUNPCKLBW) :
+                                  size == 2 ? BUSTER_CHECK_BASE_PACKED(context, PUNPCKLWD) : BUSTER_CHECK_BASE_PACKED(context, PUNPCKLDQ);
+            check_vector_baseline_binary(context, form, v0, v0, v1);
+            size *= 2;
+        }
+    }
+    else if (from < to)
+    {
+        const uint32_t top = to < 4 ? to : 4;
+        while (size < top)
+        {
+            const uint32_t form = size == 1 ? BUSTER_CHECK_BASE_PACKED(context, PUNPCKLBW) : BUSTER_CHECK_BASE_PACKED(context, PUNPCKLWD);
+            check_vector_baseline_binary(context, form, v0, v0, v0);
+            size *= 2;
+        }
+        if (top > from)
+        {
+            check_vector_baseline_shift_kind(context, 2, v0, top, (uint8_t)(8 * (top - from)));
+        }
+        if (to == 8)
+        {
+            check_vector_baseline_copy(context, v1, v0);
+            check_vector_baseline_shift_kind(context, 2, v1, 4, 31);
+            check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PUNPCKLDQ), v0, v0, v1);
+        }
+    }
+    else if (from > to)
+    {
+        if (from == 8 && context->bytes > 16)
+        {
+            check_vector_baseline_high_half(context);
+            X86Instruction record = check_vector_lower_record(X86_FORM_VSHUFPS_X_X_XM128_IMM8, v0, v0, v1);
+            record.immediate = 0x88;
+            check_vector_baseline_put(context, record);
+            size = 4;
+        }
+        else if (from == 8)
+        {
+            check_vector_baseline_shuffle(context, v0, v0, 0x88);
+            size = 4;
+        }
+        if (size > to)
+        {
+            const uint8_t bits = (uint8_t)(8 * (size - to));
+            check_vector_baseline_shift_kind(context, 0, v0, size, bits);
+            check_vector_baseline_shift_kind(context, size == 2 ? 1 : 2, v0, size, bits);
+            const bool halves = context->bytes > 16;
+            if (halves)
+            {
+                check_vector_baseline_high_half(context);
+            }
+            const uint32_t pack = size == 2 ? BUSTER_CHECK_BASE_PACKED(context, PACKUSWB) : BUSTER_CHECK_BASE_PACKED(context, PACKSSDW);
+            check_vector_baseline_binary(context, pack, v0, v0, halves ? v1 : v0);
+            if (size == 4 && to == 1)
+            {
+                check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PACKSSWB), v0, v0, v0);
+            }
+        }
+    }
 }
 
 static void check_vector_baseline_ones(CheckVectorBaseline* context, uint8_t value)
@@ -214,6 +330,82 @@ static void check_vector_baseline_compare(CheckVectorBaseline* context, CheckVec
     }
 }
 
+// A shift of VECTOR(0)'s integers of `element` bytes by the count in INTEGER(1), a U32 (#1834), as clang's code shifts by a
+// splat count without AVX-512: the count into VECTOR(1) (MOVD, zeros above it), then PSLL, PSRL or PSRA of words, dwords
+// and qwords by it. SSE has no arithmetic shift of qwords: it is the logical one, xor the sign bit shifted alike, less
+// that (PCMPEQD and PSLLQ by 63 make the sign bit). Nor has it shifts of bytes: left and logical right ones shift words,
+// their bytes masked by 0xFF shifted alike (PCMPEQD, PSRLW by 8 and by the count, PACKUSWB) before a left shift or after
+// a right one; an arithmetic right one unpacks each half's bytes into words' high bytes (PUNPCKHBW and PUNPCKLBW), shifts
+// them by the count and by 8 (PSRAW) and packs them back (PACKSSWB), a word's low byte any (VECTOR(2)'s).
+static void check_vector_baseline_shift_by(CheckVectorBaseline* context, bool left, CheckVectorElement element)
+{
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint8_t v2 = BUSTER_TIER0_ROLE_VECTOR(2);
+    const bool wide = context->bytes > 16;
+    // By kind (left, logical right, arithmetic right) and element (words, dwords, qwords): legacy, VEX of 16 and of 32 bytes.
+    static const uint16_t forms[3][3][3] = {
+        {
+            { X86_FORM_PSLLW_X_XM128, X86_FORM_VPSLLW_X_X_XM128, X86_FORM_VPSLLW_Y_Y_XM128 },
+            { X86_FORM_PSLLD_X_XM128, X86_FORM_VPSLLD_X_X_XM128, X86_FORM_VPSLLD_Y_Y_XM128 },
+            { X86_FORM_PSLLQ_X_XM128, X86_FORM_VPSLLQ_X_X_XM128, X86_FORM_VPSLLQ_Y_Y_XM128 },
+        },
+        {
+            { X86_FORM_PSRLW_X_XM128, X86_FORM_VPSRLW_X_X_XM128, X86_FORM_VPSRLW_Y_Y_XM128 },
+            { X86_FORM_PSRLD_X_XM128, X86_FORM_VPSRLD_X_X_XM128, X86_FORM_VPSRLD_Y_Y_XM128 },
+            { X86_FORM_PSRLQ_X_XM128, X86_FORM_VPSRLQ_X_X_XM128, X86_FORM_VPSRLQ_Y_Y_XM128 },
+        },
+        {
+            { X86_FORM_PSRAW_X_XM128, X86_FORM_VPSRAW_X_X_XM128, X86_FORM_VPSRAW_Y_Y_XM128 },
+            { X86_FORM_PSRAD_X_XM128, X86_FORM_VPSRAD_X_X_XM128, X86_FORM_VPSRAD_Y_Y_XM128 },
+            { 0, 0, 0 },
+        },
+    };
+    const uint32_t width = wide ? 2 : context->avx ? 1 : 0;
+    const uint32_t kind = left ? 0 : element.is_signed ? 2 : 1;
+    const uint32_t move = context->avx ? X86_FORM_VMOVD_X_RM32 : X86_FORM_MOVD_X_RM32;
+    check_vector_baseline_put(context, check_vector_lower_record(move, v1, 0, BUSTER_TIER0_ROLE_INTEGER(1)));
+    if (element.bytes == 1 && kind == 2)
+    {
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PUNPCKHBW), v2, v2, v0);
+        check_vector_baseline_binary(context, forms[2][0][width], v2, v2, v1);
+        check_vector_baseline_shift_kind(context, 2, v2, 2, 8);
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PUNPCKLBW), v0, v0, v0);
+        check_vector_baseline_binary(context, forms[2][0][width], v0, v0, v1);
+        check_vector_baseline_shift_kind(context, 2, v0, 2, 8);
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PACKSSWB), v0, v0, v2);
+    }
+    else if (element.bytes == 1)
+    {
+        check_vector_baseline_ones(context, v2);
+        check_vector_baseline_shift_kind(context, 1, v2, 2, 8);
+        check_vector_baseline_binary(context, forms[1][0][width], v2, v2, v1);
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PACKUSWB), v2, v2, v2);
+        if (left)
+        {
+            check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PAND), v0, v0, v2);
+        }
+        check_vector_baseline_binary(context, forms[kind][0][width], v0, v0, v1);
+        if (!left)
+        {
+            check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PAND), v0, v0, v2);
+        }
+    }
+    else if (element.bytes == 8 && kind == 2)
+    {
+        check_vector_baseline_binary(context, forms[1][2][width], v0, v0, v1);
+        check_vector_baseline_ones(context, v2);
+        check_vector_baseline_shift_kind(context, 0, v2, 8, 63);
+        check_vector_baseline_binary(context, forms[1][2][width], v2, v2, v1);
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PXOR), v0, v0, v2);
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PSUBQ), v0, v0, v2);
+    }
+    else
+    {
+        check_vector_baseline_binary(context, forms[kind][element.bytes == 2 ? 0 : element.bytes == 4 ? 1 : 2][width], v0, v0, v1);
+    }
+}
+
 // An operator's row on `bytes` bytes of `element`s: a vector's own, or a piece of a wider one's that the target's
 // registers hold (check_lower_vector_split, #1193), or of a transport vector's (check_lower_transport_rows, #137). Every
 // row here is elementwise, a piece's elements its own.
@@ -244,6 +436,13 @@ static const char* check_vector_lower_baseline_element(const X86Target* target, 
     else if (element.bytes == 0 || (element.floating && element.bytes < 4))
     {
         reason = "vector operations on this element type without AVX-512";
+    }
+    else if (op == BUSTER_CHECK_VECTOR_SHIFT_LEFT_BY || op == BUSTER_CHECK_VECTOR_SHIFT_RIGHT_BY)
+    {
+        row->operand_classes[1] = scalar_class;
+        row->operand_bytes[1] = 0;
+        context.valid = !element.floating && scalar_class == BUSTER_TYPED_CLASS_U32;
+        check_vector_baseline_shift_by(&context, op == BUSTER_CHECK_VECTOR_SHIFT_LEFT_BY, element);
     }
     else if (op == BUSTER_CHECK_VECTOR_SPLAT || (op == CHECK_OP_NEGATIVE && element.floating))
     {
@@ -312,7 +511,8 @@ static const char* check_vector_lower_baseline_element(const X86Target* target, 
     if (reason == NULL && !context.valid)
     {
         reason = op == CHECK_OP_MULTIPLY ? "vector multiplication unavailable at this target" :
-                 op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT ? "vector shifts unavailable at this target" :
+                 op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT || op == BUSTER_CHECK_VECTOR_SHIFT_LEFT_BY || op == BUSTER_CHECK_VECTOR_SHIFT_RIGHT_BY ?
+                     "vector shifts unavailable at this target" :
                  op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER ? "vector division of integers" :
                  compare ? "vector comparison unavailable at this target" : "vector operator unavailable at this target";
     }
@@ -780,4 +980,4 @@ static const char* check_vector_baseline_shuffle_row(const X86Target* target, ui
 #undef BUSTER_CHECK_BASE_UNDEFINED
 #undef BUSTER_CHECK_BASE_LANES
 
-#undef BUSTER_CHECK_BASE_PACKED
+// BUSTER_CHECK_BASE_PACKED and BUSTER_CHECK_BASE_UNARY are the conversions' too (c_check_program_vector_builtins.c).
