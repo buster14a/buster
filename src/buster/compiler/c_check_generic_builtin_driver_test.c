@@ -306,3 +306,93 @@ static void check_test_driver_counted_by(CheckTest* test, const char* clang, con
     free(expected_lines);
     free(actual_lines);
 }
+
+// Declarations of builtins' names with external linkage (#1843, check_input_builtin_declaration), by the driver against
+// clang, by both paths of -fsyntax-only: the whole output, line for line, with the exit status, a unit each. A definition
+// of a header builtin's or a catalog builtin's name is clang's "definition of builtin function", C99's inline one too; a
+// declaration of another type is clang's "conflicting types" with its note of the builtin's type, and any of a
+// custom-checked builtin clang's "cannot redeclare builtin function"; and a static
+// definition, a compatible declaration (with no prototype, a const parameter or a typedef's type) and a library
+// builtin's definition are the program's. Then a program of __builtin_bswap32 and __builtin_clz declared, at file scope
+// and at block scope, which stay the builtins (an integer constant expression's too), and of a static definition of a
+// builtin's name, which is the program's, run by clang and by both paths, by Tier 0 and by Tier 1.
+static void check_test_driver_builtin_declarations(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const units[] = {
+        "void _mm_pause(void) {}\n",
+        "void _mm_pause(void);\nvoid _mm_pause(void) {}\nint g(void) { _mm_pause(); return 0; }\n",
+        "extern void _mm_sfence(void) {}\n",
+        "inline void _mm_pause(void) {}\n",
+        "unsigned int _mm_getcsr(void) { return 0; }\n",
+        "unsigned __builtin_bswap32(unsigned x) { return x; }\n",
+        "int __builtin_clz(unsigned x) { return 0; }\n",
+        "void __builtin_ia32_pause(void) {}\n",
+        "int __builtin_bswap32(int);\n",
+        "unsigned short __builtin_bswap32(unsigned);\n",
+        "void _mm_lfence(int);\n",
+        "int g(void) { long __builtin_clz(unsigned); return 0; }\n",
+        "static void _mm_pause(void) {}\nstatic unsigned __builtin_bswap32(unsigned x) { return x + 1; }\nint g(void) { _mm_pause(); return (int)__builtin_bswap32(1); }\n",
+        "unsigned __builtin_bswap32();\ntypedef unsigned U;\nU __builtin_bswap32(const U);\nint __builtin_clz(unsigned) __attribute__((const));\n"
+        "void _mm_pause(void);\nint abs(int x) { return x < 0 ? -x : x; }\n",
+        "int g(void) { int __builtin_clz = 3; return __builtin_clz; }\n",
+        // Custom-checked builtins (#1918's review): any declaration is clang's "cannot redeclare builtin function".
+        "int __builtin_add_overflow(int);\n",
+        "_Bool __builtin_add_overflow();\n",
+        "int __builtin_add_overflow(int x) { return x; }\n",
+        "int __builtin_constant_p(int);\n",
+        "void* __builtin_launder(void*);\n",
+        "int __builtin_isnan(double);\n",
+        "int __sync_fetch_and_add(int*, int);\n",
+        "int g(void) { int __builtin_classify_type(); return 0; }\n",
+        "unsigned long __builtin_object_size(const void*, int);\nint __builtin_expect(long, long);\n",
+    };
+    enum { LINES = 8192 };
+    char* expected_lines = malloc(LINES);
+    char* actual_lines = malloc(LINES);
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/builtin-declarations.c", directory);
+    for (uint32_t unit = 0; expected_lines != NULL && actual_lines != NULL && unit < BUSTER_ARRAY_LENGTH(units); unit += 1)
+    {
+        const bool made = parse_test_write(source, units[unit], strlen(units[unit]));
+        char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", source, NULL, NULL };
+        char* expected = NULL;
+        const int oracle = made ? check_test_driver_spawn(arguments, &expected) : -1;
+        const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
+        char description[4096];
+        snprintf(description, sizeof(description), "builtin declarations %u: clang's lines read", unit);
+        check_test_expect(test, made && lines, description);
+        for (uint32_t scalar = 0; lines && scalar < 2; scalar += 1)
+        {
+            arguments[0] = (char*)executable;
+            arguments[5] = scalar != 0 ? "--scalar" : NULL;
+            char* actual = NULL;
+            const int status = check_test_driver_spawn(arguments, &actual);
+            const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
+            snprintf(description, sizeof(description), "builtin declarations %u, %s: status %d (clang %d), lines\n%s(clang\n%s)", unit,
+                     scalar != 0 ? "scalar" : "vector", status, oracle, actual_lines, expected_lines);
+            check_test_expect(test, same && (status != 0) == (oracle != 0), description);
+            free(actual);
+        }
+        free(expected);
+        unlink(source);
+    }
+    free(expected_lines);
+    free(actual_lines);
+    static const char program[] =
+        "int printf(const char*, ...);\n"
+        "unsigned __builtin_bswap32(unsigned);\n"
+        "int __builtin_clz(unsigned);\n"
+        "static unsigned long long __builtin_bswap64(unsigned long long x) { return x + 1; }\n"
+        "enum { E = __builtin_clz(1u) + __builtin_bswap32(0x01000000u) };\n"
+        "static unsigned f(unsigned x) { return __builtin_bswap32(x) ^ (unsigned)__builtin_clz(x | 1u); }\n"
+        "static int g(unsigned x) { int __builtin_ctz(unsigned); unsigned __builtin_bswap32(unsigned); return __builtin_ctz(x | 0x80000000u) + (int)(__builtin_bswap32(x) & 0xff); }\n"
+        "int main(void) {\n"
+        "    volatile unsigned v = 0x12345678u;\n"
+        "    printf(\"%u %u %d %llu %d\\n\", f(v), f(v >> 9), g(v), __builtin_bswap64(v), (int)E);\n"
+        "    return 0;\n"
+        "}\n";
+    check_test_library_run(test, clang, executable, directory, "builtins under their declarations", program, "-std=gnu17", NULL);
+    check_test_library_own_option = "--tier1";
+    check_test_library_run(test, clang, executable, directory, "builtins under their declarations by Tier 1", program, "-std=gnu17", NULL);
+    check_test_library_own_option = NULL;
+}
